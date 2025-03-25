@@ -43,13 +43,13 @@ bitflags! {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy, Eq)]
 pub enum Remapped {
     Identity,
     Remapped(u64),
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug, Eq)]
 pub struct Access {
     pub start: u64,
     pub size: u64,
@@ -93,6 +93,12 @@ pub struct MemoryRegion {
 pub enum CapaError {
     InvalidAccess,
     ChildNotFound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewRegion {
+    pub access: Access,
+    pub remap: Remapped,
 }
 
 impl<T> Capability<T>
@@ -207,8 +213,54 @@ impl Capability<MemoryRegion> {
         });
     }
 
-    pub fn to_map() -> Vec<(Access, Status)> {
-        todo!("Implement")
+    pub fn view(&self) -> Vec<ViewRegion> {
+        let mut views = Vec::new();
+        // This is the range we consider.
+        let mut start = self.data.access.start;
+
+        // Constants.
+        let base = self.data.access.start;
+
+        // Children are sorted.
+        for c in &self.children {
+            let c_borrow = c.borrow();
+            // We do not care
+            if c_borrow.data.kind == RegionKind::Alias {
+                continue;
+            }
+            // It is a carve, the segment loses access.
+            if start < c_borrow.data.access.start {
+                let r = match self.data.remapped {
+                    Remapped::Identity => Remapped::Identity,
+                    Remapped::Remapped(x) => Remapped::Remapped(x + (start - base)),
+                };
+                views.push(ViewRegion {
+                    access: Access {
+                        start,
+                        size: (c_borrow.data.access.start - start),
+                        rights: self.data.access.rights,
+                    },
+                    remap: r,
+                });
+                start = c_borrow.data.access.end();
+            }
+        }
+        if start < self.data.access.end() {
+            let r = match self.data.remapped {
+                Remapped::Identity => Remapped::Identity,
+                Remapped::Remapped(x) => Remapped::Remapped(x + (start - base)),
+            };
+            views.push(ViewRegion {
+                access: Access {
+                    start,
+                    size: self.data.access.end() - start,
+                    rights: self.data.access.rights,
+                },
+                remap: r,
+            });
+        }
+
+        views
     }
 
     pub fn contained(&self, access: &Access) -> bool {

@@ -140,3 +140,112 @@ fn test_display_with_remap() {
     let expected_output = "Aliased 0x2000 0x3000 with RWX mapped Remapped(0x1000)";
     assert_eq!(display_output, expected_output);
 }
+
+// ——————————————————— Testing the display of ViewRegions ——————————————————— //
+
+fn assert_view_display_eq(view: &[ViewRegion], expected: &[&str]) {
+    let rendered: Vec<String> = view.iter().map(|v| v.to_string()).collect();
+    assert_eq!(rendered.len(), expected.len(), "Length mismatch");
+
+    for (i, (actual, expect)) in rendered.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            actual, expect,
+            "Mismatch at index {}: got `{}`, expected `{}`",
+            i, actual, expect
+        );
+    }
+}
+
+#[test]
+fn test_display_viewregion_identity() {
+    let base_access = Access::new(0x0, 0x10000, Rights::READ | Rights::WRITE);
+    let region = MemoryRegion {
+        kind: RegionKind::Carve,
+        status: Status::Exclusive,
+        access: base_access,
+        attributes: Attributes::NONE,
+        remapped: Remapped::Identity,
+    };
+
+    let mut cap = Capability::new(region);
+
+    // Carve out a region in the middle
+    let carved = Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE);
+    cap.carve(&carved).unwrap();
+
+    let views = cap.view();
+
+    let expected = vec![
+        "0x0 0x1000 with RW_ mapped Identity",
+        "0x2000 0x10000 with RW_ mapped Identity",
+    ];
+
+    assert_view_display_eq(&views, &expected);
+}
+
+#[test]
+fn test_display_viewregion_remapped() {
+    let base_access = Access::new(0x0, 0x10000, Rights::READ | Rights::WRITE | Rights::EXECUTE);
+    let region = MemoryRegion {
+        kind: RegionKind::Carve,
+        status: Status::Exclusive,
+        access: base_access,
+        attributes: Attributes::NONE,
+        remapped: Remapped::Remapped(0x4000),
+    };
+
+    let mut cap = Capability::new(region);
+
+    // Carve out a region at the start
+    let carved = Access::new(
+        0x2000,
+        0x2000,
+        Rights::READ | Rights::WRITE | Rights::EXECUTE,
+    );
+    cap.carve(&carved).unwrap();
+
+    let views = cap.view();
+
+    let expected = vec![
+        "0x0 0x2000 with RWX mapped Remapped(0x4000)",
+        "0x4000 0x10000 with RWX mapped Remapped(0x8000)",
+    ];
+
+    assert_view_display_eq(&views, &expected);
+}
+
+#[test]
+fn test_display_viewregion_no_carves() {
+    let base_access = Access::new(0x0, 0x10000, Rights::WRITE);
+    let region = MemoryRegion {
+        kind: RegionKind::Carve,
+        status: Status::Exclusive,
+        access: base_access,
+        attributes: Attributes::NONE,
+        remapped: Remapped::Identity,
+    };
+
+    let cap = Capability::new(region);
+
+    let views = cap.view();
+
+    let expected = vec!["0x0 0x10000 with _W_ mapped Identity"];
+
+    assert_view_display_eq(&views, &expected);
+}
+
+#[test]
+fn test_view_with_alias() {
+    let mut capa = Capability::new(MemoryRegion {
+        kind: RegionKind::Carve,
+        status: Status::Exclusive,
+        access: Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE),
+        attributes: Attributes::NONE,
+        remapped: Remapped::Identity,
+    });
+
+    capa.alias(&Access::new(0x1400, 0x200, Rights::READ | Rights::WRITE))
+        .unwrap(); // should NOT affect view
+    let views = capa.view();
+    assert_view_display_eq(&views, &vec!["0x1000 0x2000 with RW_ mapped Identity"]);
+}

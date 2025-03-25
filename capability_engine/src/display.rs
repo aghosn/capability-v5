@@ -1,5 +1,5 @@
 // display_impl.rs
-use crate::{Access, Capability, MemoryRegion, Remapped, Rights};
+use crate::{Access, Capability, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
 
 impl fmt::Display for Rights {
@@ -68,5 +68,11 @@ impl fmt::Display for Capability<MemoryRegion> {
             }
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for ViewRegion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} mapped {}", self.access, self.remap)
     }
 }
