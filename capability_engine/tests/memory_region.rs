@@ -1,4 +1,6 @@
 use capa_engine::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn create_root() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {
@@ -244,6 +246,33 @@ fn test_carve_then_alias_then_carve() {
 // ——————————————————————————————— Revocation ——————————————————————————————— //
 
 #[test]
+fn test_revoke_single_node() {
+    let mut root = create_root();
+
+    // Create a simple child node under the root
+    let child = root
+        .carve(&Access::new(0x1000, 0x2000, Rights::READ | Rights::WRITE))
+        .unwrap();
+
+    // Track revoked nodes
+    let mut seen = Vec::new();
+
+    // Revoke the child node
+    let revoked = root.revoke_with(&child, |c| {
+        seen.push(c.data.access.start);
+    });
+
+    // Check that the revocation was successful
+    assert!(revoked.is_ok());
+
+    // Check that the callback was called with the correct access start address
+    assert_eq!(seen, vec![0x1000]);
+
+    // Check that the child node is now removed
+    assert_eq!(root.children.len(), 0);
+}
+
+#[test]
 fn test_revoke_complex_subtree() {
     let mut root = create_root();
 
@@ -255,21 +284,22 @@ fn test_revoke_complex_subtree() {
         .borrow_mut()
         .alias(&Access::new(0x1000, 0x1000, Rights::READ))
         .unwrap();
-    let b1a1 = b1a
+    let _b1a1 = b1a
         .borrow_mut()
         .carve(&Access::new(0x1000, 0x0800, Rights::READ))
         .unwrap();
 
     // Branch 2 (will not be revoked)
-    let b2 = root
+    let _b2 = root
         .carve(&Access::new(0x5000, 0x1000, Rights::READ))
         .unwrap();
 
     // Track revoked nodes
     let mut seen = Vec::new();
 
+    //let data = b1a.borrow().data;
     // Revoke b1a
-    let revoked = b1.borrow_mut().revoke_with(&b1a.borrow().data, |c| {
+    let revoked = b1.borrow_mut().revoke_with(&b1a, |c| {
         seen.push((
             c.data.kind.clone(),
             c.data.status.clone(),
@@ -278,7 +308,7 @@ fn test_revoke_complex_subtree() {
     });
 
     // Check the callback was called for b1a1 then b1a
-    assert_eq!(revoked, true);
+    assert!(revoked.is_ok());
     assert_eq!(seen.len(), 2);
     assert!(seen.contains(&(RegionKind::Carve, Status::Aliased, 0x1000)));
     assert!(seen.contains(&(RegionKind::Alias, Status::Aliased, 0x1000)));
@@ -310,16 +340,17 @@ fn test_revoke_deep_leaf_order() {
         .borrow_mut()
         .alias(&Access::new(0x2000, 0x1000, Rights::READ))
         .unwrap();
-    let c4 = c3
+    let _c4 = c3
         .borrow_mut()
         .carve(&Access::new(0x2000, 0x0800, Rights::READ))
         .unwrap();
 
     let mut seen = Vec::new();
 
-    c2.borrow_mut().revoke_with(&c3.borrow().data, |c| {
+    let res = c2.borrow_mut().revoke_with(&c3, |c| {
         seen.push(c.data.access.start);
     });
+    assert!(res.is_ok());
 
     // Order of callback: c4 then c3
     assert_eq!(seen, vec![0x2000, 0x2000]);
@@ -330,6 +361,12 @@ fn test_revoke_deep_leaf_order() {
 fn test_revoke_nonexistent() {
     let mut root = create_root();
 
+    // Create a valid region in the root.
+    let _valid_region = root
+        .carve(&Access::new(0x0000, 0x1000, Rights::READ | Rights::WRITE))
+        .unwrap();
+
+    // Create a dummy region that doesn't exist in the children
     let dummy_region = MemoryRegion {
         kind: RegionKind::Carve,
         status: Status::Exclusive,
@@ -338,9 +375,21 @@ fn test_revoke_nonexistent() {
         remapped: Remapped::Identity,
     };
 
-    let revoked = root.revoke_with(&dummy_region, |_| {
-        panic!("Callback should not run on nonexistent revoke");
-    });
+    // Try to revoke the dummy region, which doesn't exist as a child
+    let result = root.revoke_with(
+        &Rc::new(RefCell::new(Capability::<MemoryRegion>::new(dummy_region))),
+        |_c| {
+            panic!("Callback should not run on nonexistent revoke");
+        },
+    );
 
-    assert_eq!(revoked, false);
+    // Assert that the result is an error, indicating that the child was not found
+    assert_eq!(result, Err(CapaError::ChildNotFound));
+
+    // Ensure the valid_region is still present
+    let valid_region_found = root
+        .children
+        .iter()
+        .any(|c| c.borrow().data.access.start == 0x0000);
+    assert!(valid_region_found);
 }

@@ -2,6 +2,8 @@ use bitflags::bitflags;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub mod display;
+
 type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
 #[derive(Debug, PartialEq)]
@@ -73,6 +75,9 @@ impl Access {
         let case_2 = other.start <= self.start && self.start < other.start + other.size;
         case_1 || case_2
     }
+    pub fn end(&self) -> u64 {
+        self.start + self.size
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -106,22 +111,17 @@ where
         }
     }
 
-    /// Revoke the subtree rooted at `child_data`.
-    /// The callback is called bottom-up after each node’s children are revoked.
-    pub fn revoke_with<F>(&mut self, child_data: &T, mut on_revoke: F) -> bool
+    pub fn revoke_with<F>(&mut self, child: &CapaRef<T>, mut on_revoke: F) -> Result<(), CapaError>
     where
         F: FnMut(&Capability<T>),
     {
-        if let Some(pos) = self
-            .children
-            .iter()
-            .position(|c| c.borrow().data == *child_data)
-        {
+        if let Some(pos) = self.children.iter().position(|c| Rc::ptr_eq(c, child)) {
+            // Safely remove the child and pass it for revocation
             let child = self.children.remove(pos);
             Capability::recurse_revoke(child, &mut on_revoke);
-            true
+            Ok(())
         } else {
-            false
+            Err(CapaError::ChildNotFound)
         }
     }
 
@@ -129,15 +129,18 @@ where
     where
         F: FnMut(&Capability<T>),
     {
-        let mut node_borrow = node.borrow_mut();
-        let children = std::mem::take(&mut node_borrow.children);
-        drop(node_borrow); // avoid nested borrow during recursion
+        // First, take the children out to avoid borrowing conflicts
+        let children = {
+            let mut node_borrow = node.borrow_mut();
+            std::mem::take(&mut node_borrow.children) // Extract the children
+        };
 
+        // Now we can safely recurse on the children
         for child in children {
             Capability::recurse_revoke(child, on_revoke);
         }
 
-        // Now safe to call callback after children
+        // Finally, call the callback after all children are revoked
         on_revoke(&node.borrow());
     }
 }
