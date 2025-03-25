@@ -1,4 +1,5 @@
-use capa_engine::*;
+use capa_engine::capability::*;
+use capa_engine::memory_region::*;
 
 fn create_root() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {

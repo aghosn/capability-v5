@@ -1,5 +1,5 @@
-// display_impl.rs
-use crate::{Access, Capability, MemoryRegion, Remapped, Rights, ViewRegion};
+use crate::capability::*;
+use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
 
 impl fmt::Display for Rights {

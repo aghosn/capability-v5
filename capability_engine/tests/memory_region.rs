@@ -1,4 +1,5 @@
-use capa_engine::*;
+use capa_engine::capability::*;
+use capa_engine::memory_region::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 

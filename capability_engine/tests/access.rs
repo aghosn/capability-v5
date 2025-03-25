@@ -1,4 +1,4 @@
-use capa_engine::{Access, Rights};
+use capa_engine::memory_region::{Access, Rights};
 
 #[test]
 fn test_contained_exact_match() {
