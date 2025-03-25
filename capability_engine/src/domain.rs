@@ -3,6 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use crate::capability::{CapaError, CapaRef};
 use crate::memory_region::MemoryRegion;
 use bitflags::bitflags;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
 bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct MonitorAPI: u16 {
@@ -30,6 +34,7 @@ bitflags! {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Status {
     Unsealed,
     Sealed,
@@ -41,13 +46,38 @@ pub struct Policies {
     pub interrupts: InterruptPolicy,
 }
 
+impl Policies {
+    pub fn new(cores: u64, api: MonitorAPI, interrupts: InterruptPolicy) -> Self {
+        Policies {
+            cores,
+            api,
+            interrupts,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
 pub struct VectorPolicy {
     pub visibility: VectorVisibility,
     pub read_set: u64,
     pub write_set: u64,
 }
 
-pub type InterruptPolicy = [VectorPolicy; 256];
+pub struct InterruptPolicy {
+    pub vectors: [VectorPolicy; 256],
+}
+
+impl InterruptPolicy {
+    pub fn default_none() -> Self {
+        InterruptPolicy {
+            vectors: [VectorPolicy {
+                visibility: VectorVisibility::NONE,
+                read_set: !(0 as u64),
+                write_set: !(0 as u64),
+            }; 256],
+        }
+    }
+}
 
 /// For the moment define a handle
 pub type LocalCapa = u64;
@@ -58,6 +88,21 @@ pub enum CapaWrapper {
     Domain(CapaRef<Domain>),
 }
 
+impl CapaWrapper {
+    pub fn as_domain(&self) -> Result<CapaRef<Domain>, CapaError> {
+        if let CapaWrapper::Domain(d) = self {
+            return Ok(d.clone());
+        }
+        return Err(CapaError::WrongCapaType);
+    }
+    pub fn as_region(&self) -> Result<CapaRef<MemoryRegion>, CapaError> {
+        if let CapaWrapper::Region(r) = self {
+            return Ok(r.clone());
+        }
+        return Err(CapaError::WrongCapaType);
+    }
+}
+
 pub struct CapabilityStore {
     pub capabilities: HashMap<LocalCapa, CapaWrapper>,
     pub next_handle: LocalCapa,
@@ -65,6 +110,13 @@ pub struct CapabilityStore {
 }
 
 impl CapabilityStore {
+    pub fn new() -> Self {
+        CapabilityStore {
+            capabilities: HashMap::new(),
+            next_handle: 1,
+            free_handles: VecDeque::new(),
+        }
+    }
     pub fn install_capability(&mut self, cap: CapaWrapper) -> LocalCapa {
         let handle = if let Some(recycled) = self.free_handles.pop_front() {
             recycled
@@ -92,12 +144,30 @@ impl CapabilityStore {
 }
 
 pub struct Domain {
+    pub id: u64,
     pub status: Status,
     pub capabilities: CapabilityStore,
     pub policies: Policies,
 }
 
+impl PartialEq for Domain {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
 impl Domain {
+    pub fn new(policies: Policies) -> Self {
+        Domain {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            status: Status::Unsealed,
+            capabilities: CapabilityStore::new(),
+            policies,
+        }
+    }
+    pub fn is_sealed(&self) -> bool {
+        return self.status == Status::Sealed;
+    }
     pub fn install(&mut self, capa: CapaWrapper) -> LocalCapa {
         self.capabilities.install_capability(capa)
     }

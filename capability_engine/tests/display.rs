@@ -168,7 +168,7 @@ fn test_display_viewregion_identity() {
         remapped: Remapped::Identity,
     };
 
-    let mut cap = Capability::new(region);
+    let mut cap = Capability::<MemoryRegion>::new(region);
 
     // Carve out a region in the middle
     let carved = Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE);
@@ -195,7 +195,7 @@ fn test_display_viewregion_remapped() {
         remapped: Remapped::Remapped(0x4000),
     };
 
-    let mut cap = Capability::new(region);
+    let mut cap = Capability::<MemoryRegion>::new(region);
 
     // Carve out a region at the start
     let carved = Access::new(
@@ -226,7 +226,7 @@ fn test_display_viewregion_no_carves() {
         remapped: Remapped::Identity,
     };
 
-    let cap = Capability::new(region);
+    let cap = Capability::<MemoryRegion>::new(region);
 
     let views = cap.view();
 
@@ -237,7 +237,7 @@ fn test_display_viewregion_no_carves() {
 
 #[test]
 fn test_view_with_alias() {
-    let mut capa = Capability::new(MemoryRegion {
+    let mut capa = Capability::<MemoryRegion>::new(MemoryRegion {
         kind: RegionKind::Carve,
         status: Status::Exclusive,
         access: Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE),

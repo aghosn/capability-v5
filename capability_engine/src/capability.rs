@@ -1,4 +1,6 @@
-use crate::domain::{Domain, LocalCapa, MonitorAPI};
+use crate::domain::{
+    CapaWrapper, Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status as DStatus,
+};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
@@ -21,6 +23,7 @@ pub enum CapaError {
     InvalidLocalCapa,
     WrongCapaType,
     CallNotAllowed,
+    DomainSealed,
 }
 
 impl<T> Capability<T>
@@ -209,11 +212,28 @@ impl Capability<MemoryRegion> {
 // ———————————————————— Domain Capability implementation ———————————————————— //
 
 impl Capability<Domain> {
-    pub fn create(&mut self) -> Result<LocalCapa, CapaError> {
+    pub fn new(domain: Domain) -> Self {
+        Capability::<Domain> {
+            data: domain,
+            children: Vec::new(),
+        }
+    }
+    pub fn create(
+        &mut self,
+        cores: u64,
+        api: MonitorAPI,
+        interrupts: InterruptPolicy,
+    ) -> Result<LocalCapa, CapaError> {
         if !self.data.operation_allowed(MonitorAPI::CREATE) {
             return Err(CapaError::CallNotAllowed);
         }
-        todo!()
+        let domain = Domain::new(Policies::new(cores, api, interrupts));
+
+        let capa = Self::new(domain);
+        let reference = Rc::new(RefCell::new(capa));
+        self.add_child(reference.clone());
+        let local_capa = self.data.install(CapaWrapper::Domain(reference));
+        Ok(local_capa)
     }
 
     pub fn set(&self, _child: LocalCapa) -> Result<(), CapaError> {
@@ -237,7 +257,16 @@ impl Capability<Domain> {
         if !self.data.is_domain(child)? {
             return Err(CapaError::WrongCapaType);
         }
-        todo!()
+        let domain = self.data.capabilities.get(&child)?.as_domain()?;
+
+        if domain.borrow().data.is_sealed() {
+            return Err(CapaError::DomainSealed);
+        }
+        domain.borrow_mut().data.status = DStatus::Sealed;
+
+        //TODO: should we generate anything now?
+
+        Ok(())
     }
 
     pub fn attest(&self, child: LocalCapa) -> Result<(), CapaError> {
@@ -248,5 +277,28 @@ impl Capability<Domain> {
             return Err(CapaError::WrongCapaType);
         }
         todo!()
+    }
+
+    pub fn send(&mut self, dest: LocalCapa, capa: LocalCapa) -> Result<(), CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::SEND) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        let dest = self.data.capabilities.get(&dest)?.as_domain()?;
+
+        // Is the dest allowed to receive capabilities.
+        if dest.borrow().data.is_sealed()
+            && !dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
+        {
+            return Err(CapaError::CallNotAllowed);
+        }
+        let region = self.data.capabilities.remove(&capa)?.as_region()?;
+
+        //TODO: UPDATE here because we're losing a region.
+        // We do not care about the receiver's local capa.
+        let _ = dest.borrow_mut().data.install(CapaWrapper::Region(region));
+
+        //TODO: Update Receiver too.
+
+        Ok(())
     }
 }
