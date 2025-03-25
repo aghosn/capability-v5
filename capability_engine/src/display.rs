@@ -1,5 +1,5 @@
 // display_impl.rs
-use crate::{Access, Capability, MemoryRegion, Rights};
+use crate::{Access, Capability, MemoryRegion, Remapped, Rights};
 use core::fmt;
 
 impl fmt::Display for Rights {
@@ -18,6 +18,16 @@ impl fmt::Display for Rights {
             write!(f, "X")?;
         } else {
             write!(f, "_")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Remapped {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Remapped::Identity => write!(f, "Identity")?,
+            Remapped::Remapped(x) => write!(f, "Remapped({:#x})", x)?,
         }
         Ok(())
     }
@@ -42,7 +52,7 @@ impl fmt::Display for Capability<MemoryRegion> {
         // Print the main region
         write!(
             f,
-            "{:?} {} mapped {:?}",
+            "{:?} {} mapped {}",
             region.status, region.access, region.remapped
         )?;
 
