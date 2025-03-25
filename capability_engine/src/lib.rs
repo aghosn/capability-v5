@@ -4,18 +4,19 @@ use std::rc::Rc;
 
 type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
+#[derive(Debug, PartialEq)]
 pub struct Capability<T> {
     pub data: T,
     pub children: Vec<CapaRef<T>>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum RegionKind {
     Carve,
     Alias,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Status {
     Exclusive,
     Aliased,
@@ -40,13 +41,13 @@ bitflags! {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum Remapped {
     Identity,
     Remapped(u64),
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub struct Access {
     pub start: u64,
     pub size: u64,
@@ -74,7 +75,7 @@ impl Access {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub struct MemoryRegion {
     pub kind: RegionKind,
     pub status: Status,
@@ -86,6 +87,7 @@ pub struct MemoryRegion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapaError {
     InvalidAccess,
+    ChildNotFound,
 }
 
 impl<T> Capability<T>
@@ -102,6 +104,41 @@ where
         } else {
             None
         }
+    }
+
+    /// Revoke the subtree rooted at `child_data`.
+    /// The callback is called bottom-up after each node’s children are revoked.
+    pub fn revoke_with<F>(&mut self, child_data: &T, mut on_revoke: F) -> bool
+    where
+        F: FnMut(&Capability<T>),
+    {
+        if let Some(pos) = self
+            .children
+            .iter()
+            .position(|c| c.borrow().data == *child_data)
+        {
+            let child = self.children.remove(pos);
+            Capability::recurse_revoke(child, &mut on_revoke);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn recurse_revoke<F>(node: CapaRef<T>, on_revoke: &mut F)
+    where
+        F: FnMut(&Capability<T>),
+    {
+        let mut node_borrow = node.borrow_mut();
+        let children = std::mem::take(&mut node_borrow.children);
+        drop(node_borrow); // avoid nested borrow during recursion
+
+        for child in children {
+            Capability::recurse_revoke(child, on_revoke);
+        }
+
+        // Now safe to call callback after children
+        on_revoke(&node.borrow());
     }
 }
 
