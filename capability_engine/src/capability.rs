@@ -1,10 +1,11 @@
+use crate::domain::{Domain, LocalCapa, MonitorAPI};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
 
-type CapaRef<T> = Rc<RefCell<Capability<T>>>;
+pub type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
 #[derive(Debug, PartialEq)]
 pub struct Capability<T> {
@@ -17,6 +18,9 @@ pub struct Capability<T> {
 pub enum CapaError {
     InvalidAccess,
     ChildNotFound,
+    InvalidLocalCapa,
+    WrongCapaType,
+    CallNotAllowed,
 }
 
 impl<T> Capability<T>
@@ -199,5 +203,50 @@ impl Capability<MemoryRegion> {
             }
         }
         return true;
+    }
+}
+
+// ———————————————————— Domain Capability implementation ———————————————————— //
+
+impl Capability<Domain> {
+    pub fn create(&mut self) -> Result<LocalCapa, CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::CREATE) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        todo!()
+    }
+
+    pub fn set(&self, _child: LocalCapa) -> Result<(), CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::SET) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        todo!()
+    }
+
+    pub fn get(&self, _child: LocalCapa) -> Result<(), CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::GET) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        todo!();
+    }
+
+    pub fn seal(&self, child: LocalCapa) -> Result<(), CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::SEAL) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        if !self.data.is_domain(child)? {
+            return Err(CapaError::WrongCapaType);
+        }
+        todo!()
+    }
+
+    pub fn attest(&self, child: LocalCapa) -> Result<(), CapaError> {
+        if !self.data.operation_allowed(MonitorAPI::ATTEST) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        if !self.data.is_domain(child)? {
+            return Err(CapaError::WrongCapaType);
+        }
+        todo!()
     }
 }
