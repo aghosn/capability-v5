@@ -147,4 +147,16 @@ r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
     assert_eq!(display, expected);
+
+    // Now display the children again.
+    let display = format!("{}", child.borrow());
+    let expected = r#"td0 = Sealed domain(r0,r1,r2)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
+r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+r2 = Exclusive 0x15000 0x35000 with RWX mapped Identity
+"#;
+    assert_eq!(display, expected);
 }
