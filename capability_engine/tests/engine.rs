@@ -74,16 +74,16 @@ fn test_engine_create_root_and_simple_child() {
     // Seal
     engine.seal(ref_td.clone(), child_td).unwrap();
 
-    // Print the domain.
+    // Print the root domain.
     let display = format!("{}", ref_td.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
 |cores: 0xffffffffffffffff
 |mon.api: 0x1fff
-|vec0–255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
 |cores: 0x1
 |mon.api: 0x1fff
-|vec0–255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Alias at 0x0 0x2000 with RW_ for r1
 | Carve at 0x2000 0x4000 with RWX for r2
@@ -91,5 +91,60 @@ r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
 
+    assert_eq!(display, expected);
+    // Print the child domain.
+    let child = ref_td
+        .borrow()
+        .data
+        .capabilities
+        .get(&child_td)
+        .unwrap()
+        .as_domain()
+        .unwrap();
+    let display = format!("{}", child.borrow());
+    let expected = r#"td0 = Sealed domain(r0,r1)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
+r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+"#;
+    assert_eq!(display, expected);
+
+    // Now hack the engine to make a new capability appear.
+    let phantom = Rc::new(RefCell::new(Capability::<MemoryRegion>::new(
+        MemoryRegion {
+            kind: RegionKind::Carve,
+            status: MStatus::Exclusive,
+            access: Access::new(
+                0x15000,
+                0x20000,
+                Rights::READ | Rights::WRITE | Rights::EXECUTE,
+            ),
+            attributes: Attributes::NONE,
+            remapped: Remapped::Identity,
+        },
+    )));
+    child
+        .borrow_mut()
+        .data
+        .install(CapaWrapper::Region(phantom));
+
+    // Now do the attestation again, we should see a region that is not reported.
+    let display = format!("{}", ref_td.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1,r2,r3)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Alias at 0x0 0x2000 with RW_ for r1
+| Carve at 0x2000 0x4000 with RWX for r2
+r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
+r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+"#;
     assert_eq!(display, expected);
 }

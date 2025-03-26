@@ -5,7 +5,7 @@ use crate::domain::{
 use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -234,6 +234,11 @@ impl fmt::Display for Capability<Domain> {
             .filter(|(_, x)| matches!(x, CapaWrapper::Domain(_)))
             .collect();
 
+        let regions: Vec<_> = as_sorted_vector
+            .iter()
+            .filter(|(_, x)| matches!(x, CapaWrapper::Region(_)))
+            .collect();
+
         // Assign names to domain capabilities
         let mut next_td: usize = 1;
         let mut next_region: usize = 0;
@@ -276,8 +281,22 @@ impl fmt::Display for Capability<Domain> {
                 .unwrap_or(0)
         });
 
+        // Filter the regions to be printed.
+        let mut region_set: HashSet<CapaKey<MemoryRegion>> = HashSet::new();
+        for r in regions {
+            if let (_, CapaWrapper::Region(reg)) = r {
+                region_set.insert(CapaKey(reg.clone()));
+                for c in &reg.borrow().children {
+                    region_set.insert(CapaKey(c.clone()));
+                }
+            }
+        }
+
         // Now iterate and print
         for (key, name) in sorted {
+            if !region_set.contains(&CapaKey(key.clone())) {
+                continue;
+            }
             write!(f, "{} = ", name)?;
             let capa = key.borrow(); // no conflict anymore
             capa.fmt_with_names(f, &mut names_region, String::from("r"), &mut next_region)?;
@@ -310,7 +329,7 @@ impl fmt::Display for InterruptPolicy {
             if start == i - 1 {
                 writeln!(f, "|vec{}: {}", start, vector)?;
             } else {
-                writeln!(f, "|vec{}–{}: {}", start, i - 1, vector)?;
+                writeln!(f, "|vec{}-{}: {}", start, i - 1, vector)?;
             }
 
             // Update start and vector for the next range
@@ -322,7 +341,7 @@ impl fmt::Display for InterruptPolicy {
         if start == NB_INTERRUPTS - 1 {
             writeln!(f, "|vec{}: {}", start, vector)?;
         } else {
-            writeln!(f, "|vec{}–{}: {}", start, NB_INTERRUPTS - 1, vector)?;
+            writeln!(f, "|vec{}-{}: {}", start, NB_INTERRUPTS - 1, vector)?;
         }
 
         Ok(())
