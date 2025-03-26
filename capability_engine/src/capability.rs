@@ -23,6 +23,7 @@ pub enum CapaError {
     CallNotAllowed,
     DomainSealed,
     InsufficientRights,
+    InvalidChildCapa,
 }
 
 impl<T> Capability<T>

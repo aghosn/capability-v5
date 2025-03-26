@@ -96,11 +96,34 @@ impl Engine {
 
     pub fn revoke(
         &self,
-        _domain: CapaRef<Domain>,
-        _capa: LocalCapa,
-        _child: usize,
-    ) -> Result<LocalCapa, CapaError> {
-        todo!();
+        domain: CapaRef<Domain>,
+        capa: LocalCapa,
+        child: usize,
+    ) -> Result<(), CapaError> {
+        let dom = domain.borrow_mut();
+        if !dom.data.operation_allowed(MonitorAPI::REVOKE) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        let is_domain = dom.data.is_domain(capa)?;
+        // Match directly on the wrapper while we hold the borrow
+        if is_domain {
+            todo!()
+        } else {
+            let r = dom.data.capabilities.get(&capa)?.as_region()?;
+            // Drop borrow of dom before borrowing r
+            let child = {
+                let r_borrow = r.borrow();
+                r_borrow
+                    .children
+                    .get(child)
+                    .cloned()
+                    .ok_or(CapaError::InvalidChildCapa)?
+            };
+            // TODO: Bug is that it doesn't remove the capa from the child.
+            r.borrow_mut().revoke_with(&child, |_| {})?;
+        }
+
+        Ok(())
     }
 
     pub fn send(

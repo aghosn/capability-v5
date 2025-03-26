@@ -125,7 +125,7 @@ r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
             remapped: Remapped::Identity,
         },
     )));
-    child
+    let ref_phantom = child
         .borrow_mut()
         .data
         .install(CapaWrapper::Region(phantom));
@@ -157,6 +157,46 @@ r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 r2 = Exclusive 0x15000 0x35000 with RWX mapped Identity
+"#;
+    assert_eq!(display, expected);
+
+    // Remove the phantom.
+    _ = child.borrow_mut().data.remove(ref_phantom);
+
+    // Now we can revoke, let's first revoke one capa, then revoke the domain.
+    engine.revoke(ref_td.clone(), ref_region, 0).unwrap();
+
+    let display = format!("{}", ref_td.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x2000 0x4000 with RWX for r1
+r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+"#;
+    assert_eq!(display, expected);
+
+    let display = format!("{}", child.borrow());
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+"#;
+    assert_eq!(display, expected);
+
+    engine.revoke(ref_td.clone(), child_td, 0).unwrap();
+    let display = format!("{}", ref_td.borrow());
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
     assert_eq!(display, expected);
 }
