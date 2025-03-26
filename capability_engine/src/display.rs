@@ -190,17 +190,32 @@ impl PrintWithNames<Domain> for Capability<Domain> {
             .iter()
             .filter(|(_, x)| matches!(x, CapaWrapper::Domain(_)))
             .collect();
+
+        // Insert names for the "tds" domains into the HashMap
         for (_, wrapper) in &tds {
             if let CapaWrapper::Domain(ref d) = wrapper {
+                // Only insert if the key does not exist
                 if !names.contains_key(&CapaKey(d.clone())) {
                     names.insert(CapaKey(d.clone()), format!("{}{}", prefix, *next_id));
                     *next_id += 1;
                 }
             }
         }
-        // Now build strings from those
-        let tds_display: Vec<String> = names.iter().map(|(_, name)| name.clone()).collect();
-        // Print them
+
+        // Now build strings only for the domains that are in `names`
+        let tds_display: Vec<String> = tds
+            .iter()
+            .filter_map(|(_, wrapper)| {
+                if let CapaWrapper::Domain(ref d) = wrapper {
+                    // Get the name from `names` based on the domain
+                    names.get(&CapaKey(d.clone())).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Print the names
         write!(f, "{}", tds_display.join(","))
     }
 }
@@ -305,9 +320,9 @@ impl fmt::Display for InterruptPolicy {
 
         // Print the final range
         if start == NB_INTERRUPTS - 1 {
-            writeln!(f, "vec{}: {}", start, vector)?;
+            writeln!(f, "|vec{}: {}", start, vector)?;
         } else {
-            writeln!(f, "vec{}–{}: {}", start, NB_INTERRUPTS - 1, vector)?;
+            writeln!(f, "|vec{}–{}: {}", start, NB_INTERRUPTS - 1, vector)?;
         }
 
         Ok(())

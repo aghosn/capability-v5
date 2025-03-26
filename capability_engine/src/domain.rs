@@ -18,10 +18,11 @@ bitflags! {
         const ATTEST    = 0b100000;
         const ENUMERATE = 0b1000000;
         const SWITCH    = 0b10000000;
-        const ALIAS     = 0b100000000;
-        const REVOKE    = 0b1000000000;
-        const GETCHAN   = 0b10000000000;
-        const RECEIVE   = 0b100000000000;
+        const CARVE     = 0b100000000;
+        const ALIAS     = 0b1000000000;
+        const REVOKE    = 0b10000000000;
+        const GETCHAN   = 0b100000000000;
+        const RECEIVE   = 0b1000000000000;
     }
 }
 

@@ -1,4 +1,10 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use capa_engine::capability::*;
+use capa_engine::domain::{
+    CapaWrapper, Domain, InterruptPolicy, MonitorAPI, Policies, Status as DStatus,
+};
 use capa_engine::memory_region::*;
 
 fn create_root() -> Capability<MemoryRegion> {
@@ -11,32 +17,21 @@ fn create_root() -> Capability<MemoryRegion> {
     })
 }
 
+fn create_root_domain() -> Capability<Domain> {
+    let policies = Policies::new(
+        !(0 as u64),
+        MonitorAPI::all(),
+        InterruptPolicy::default_all(),
+    );
+    let mut capa = Capability::<Domain>::new(Domain::new(policies));
+    capa.data.status = DStatus::Sealed;
+    capa
+}
+
 fn main() {
-    let mut root = create_root();
-    let _ = root
-        .carve(&Access::new(0x2000, 0x1000, Rights::READ | Rights::WRITE))
-        .unwrap();
-    let a1 = root
-        .alias(&Access::new(
-            0x0000,
-            0x2000,
-            Rights::READ | Rights::WRITE | Rights::EXECUTE,
-        ))
-        .expect("Error");
-
-    {
-        // Borrow the capability mutably
-        let a1_borrow = &mut a1.borrow_mut();
-
-        // Now you can call carve on the actual Capability<MemoryRegion>
-        let _ = a1_borrow.carve(&Access::new(
-            0x0000,
-            0x1000,
-            Rights::READ | Rights::WRITE | Rights::EXECUTE,
-        ));
-    } // The mutable borrow goes out of scope here
-
-    // Now it is safe to print the capabilities because no mutable borrow exists
-    println!("The root capability:\n{}", root);
-    println!("The alias child:\n{}", a1.borrow());
+    let mut domain = create_root_domain();
+    let region = create_root();
+    let reference = Rc::new(RefCell::new(region));
+    domain.data.install(CapaWrapper::Region(reference));
+    println!("The root domain:\n{}", domain);
 }

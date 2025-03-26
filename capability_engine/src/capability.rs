@@ -1,6 +1,4 @@
-use crate::domain::{
-    CapaWrapper, Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status as DStatus,
-};
+use crate::domain::{CapaWrapper, Domain, LocalCapa, MonitorAPI, Policies, Status as DStatus};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
@@ -24,6 +22,7 @@ pub enum CapaError {
     WrongCapaType,
     CallNotAllowed,
     DomainSealed,
+    InsufficientRights,
 }
 
 impl<T> Capability<T>
@@ -211,6 +210,10 @@ impl Capability<MemoryRegion> {
 
 // ———————————————————— Domain Capability implementation ———————————————————— //
 
+fn is_core_subset(reference: u64, other: u64) -> bool {
+    (reference & other) == other
+}
+
 impl Capability<Domain> {
     pub fn new(domain: Domain) -> Self {
         Capability::<Domain> {
@@ -218,16 +221,15 @@ impl Capability<Domain> {
             children: Vec::new(),
         }
     }
-    pub fn create(
-        &mut self,
-        cores: u64,
-        api: MonitorAPI,
-        interrupts: InterruptPolicy,
-    ) -> Result<LocalCapa, CapaError> {
+    pub fn create(&mut self, policies: Policies) -> Result<LocalCapa, CapaError> {
         if !self.data.operation_allowed(MonitorAPI::CREATE) {
             return Err(CapaError::CallNotAllowed);
         }
-        let domain = Domain::new(Policies::new(cores, api, interrupts));
+        // Check cores.
+        if !is_core_subset(self.data.policies.cores, policies.cores) {
+            return Err(CapaError::InsufficientRights);
+        }
+        let domain = Domain::new(policies);
 
         let capa = Self::new(domain);
         let reference = Rc::new(RefCell::new(capa));
