@@ -28,13 +28,12 @@ bitflags! {
 bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct VectorVisibility: u8 {
-        const NONE = 0b0;
         const ALLOWED = 0b1;
         const VISIBLE = 0b10;
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Status {
     Unsealed,
     Sealed,
@@ -56,24 +55,35 @@ impl Policies {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct VectorPolicy {
     pub visibility: VectorVisibility,
     pub read_set: u64,
     pub write_set: u64,
 }
 
+pub const NB_INTERRUPTS: usize = 256;
+
 pub struct InterruptPolicy {
-    pub vectors: [VectorPolicy; 256],
+    pub vectors: [VectorPolicy; NB_INTERRUPTS],
 }
 
 impl InterruptPolicy {
     pub fn default_none() -> Self {
         InterruptPolicy {
             vectors: [VectorPolicy {
-                visibility: VectorVisibility::NONE,
+                visibility: VectorVisibility::empty(),
                 read_set: !(0 as u64),
                 write_set: !(0 as u64),
+            }; 256],
+        }
+    }
+    pub fn default_all() -> Self {
+        InterruptPolicy {
+            vectors: [VectorPolicy {
+                visibility: VectorVisibility::all(),
+                read_set: 0,
+                write_set: 0,
             }; 256],
         }
     }
