@@ -30,7 +30,7 @@ fn create_root() -> Capability<MemoryRegion> {
 fn test_empty_root_domain() {
     let domain = create_root_domain();
     let display_output = format!("{}", domain);
-    let expected_output = format!("{} = Sealed domain()\n|cores: 0xffffffffffffffff\n|mon.api: 0xfff\nvec0–255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\n", domain.data.id);
+    let expected_output = format!("td0 = Sealed domain()\n|cores: 0xffffffffffffffff\n|mon.api: 0xfff\nvec0–255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\n");
     assert_eq!(display_output, expected_output)
 }
 
@@ -42,6 +42,6 @@ fn test_root_domain_with_root_memory() {
     domain.data.install(CapaWrapper::Region(reference));
 
     let display_output = format!("{}", domain);
-    let expected_output = format!("{} = Sealed domain(r0)\n|cores: 0xffffffffffffffff\n|mon.api: 0xfff\nvec0–255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\nr0 = Exclusive 0x0 0x10000 with RWX mapped Identity\n", domain.data.id);
+    let expected_output = format!("td0 = Sealed domain(r0)\n|cores: 0xffffffffffffffff\n|mon.api: 0xfff\nvec0–255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\nr0 = Exclusive 0x0 0x10000 with RWX mapped Identity\n");
     assert_eq!(display_output, expected_output);
 }
