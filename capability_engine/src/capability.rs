@@ -43,6 +43,7 @@ pub enum CapaError {
     InvalidLocalCapa,
     WrongCapaType,
     CallNotAllowed,
+    DomainUnsealed,
     DomainSealed,
     InsufficientRights,
     InvalidChildCapa,

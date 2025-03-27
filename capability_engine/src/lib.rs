@@ -24,6 +24,21 @@ impl Engine {
         Engine {}
     }
 
+    fn is_sealed_and_allowed(
+        &self,
+        domain: &CapaRef<Domain>,
+        call: MonitorAPI,
+    ) -> Result<(), CapaError> {
+        let dom = domain.borrow();
+        if dom.data.status != Status::Sealed {
+            return Err(CapaError::DomainUnsealed);
+        }
+        if !dom.data.operation_allowed(call) {
+            return Err(CapaError::CallNotAllowed);
+        }
+        Ok(())
+    }
+
     pub fn add_root_region(
         &self,
         domain: &CapaRef<Domain>,
@@ -45,10 +60,9 @@ impl Engine {
         api: MonitorAPI,
         interrupts: InterruptPolicy,
     ) -> Result<LocalCapa, CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::CREATE)?;
+
         let dom = &mut domain.borrow_mut();
-        if !dom.data.operation_allowed(MonitorAPI::CREATE) {
-            return Err(CapaError::CallNotAllowed);
-        }
         if !is_core_subset(dom.data.policies.cores, cores) {
             return Err(CapaError::InsufficientRights);
         }
@@ -62,15 +76,19 @@ impl Engine {
         Ok(local_capa)
     }
 
-    pub fn set(&self, _domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+    pub fn set(&self, domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::SET)?;
         todo!();
     }
 
-    pub fn get(&self, _domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+    pub fn get(&self, domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::GET)?;
         todo!();
     }
 
     pub fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::SEAL)?;
+
         let current_policies = &domain.borrow().data.policies;
         if !current_policies.contains(
             &domain
@@ -93,17 +111,21 @@ impl Engine {
         domain: CapaRef<Domain>,
         other: Option<LocalCapa>,
     ) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::ATTEST)?;
+
         if let Some(child) = other {
             return domain.borrow().attest(child);
         }
         todo!();
     }
 
-    pub fn enumerate(&self, _domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    pub fn enumerate(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::ENUMERATE)?;
         todo!();
     }
 
-    pub fn switch(&self, _domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    pub fn switch(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::SWITCH)?;
         todo!();
     }
 
@@ -113,10 +135,9 @@ impl Engine {
         capa: LocalCapa,
         access: &Access,
     ) -> Result<LocalCapa, CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::ALIAS)?;
+
         let dom = &mut domain.borrow_mut();
-        if !dom.data.operation_allowed(MonitorAPI::ALIAS) {
-            return Err(CapaError::CallNotAllowed);
-        }
         let region = dom.data.capabilities.get(&capa)?.as_region()?;
         let aliased = region.borrow_mut().alias(access)?;
         let aliased_capa = dom.data.install(CapaWrapper::Region(aliased.clone()));
@@ -133,10 +154,9 @@ impl Engine {
         capa: LocalCapa,
         access: &Access,
     ) -> Result<LocalCapa, CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::CARVE)?;
+
         let dom = &mut domain.borrow_mut();
-        if !dom.data.operation_allowed(MonitorAPI::CARVE) {
-            return Err(CapaError::CallNotAllowed);
-        }
         let region = dom.data.capabilities.get(&capa)?.as_region()?;
         let carved = region.borrow_mut().carve(access)?;
         let carved_capa = dom.data.install(CapaWrapper::Region(carved.clone()));
@@ -166,11 +186,10 @@ impl Engine {
         capa: LocalCapa,
         child: usize,
     ) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::REVOKE)?;
+
         let is_domain = {
             let dom = &mut domain.borrow_mut();
-            if !dom.data.operation_allowed(MonitorAPI::REVOKE) {
-                return Err(CapaError::CallNotAllowed);
-            }
             dom.data.is_domain(capa)?
         };
         // Match directly on the wrapper while we hold the borrow
@@ -220,10 +239,9 @@ impl Engine {
         dest: LocalCapa,
         capa: LocalCapa,
     ) -> Result<(), CapaError> {
+        self.is_sealed_and_allowed(&domain, MonitorAPI::SEND)?;
+
         let dom = &mut domain.borrow_mut();
-        if !dom.data.operation_allowed(MonitorAPI::SEND) {
-            return Err(CapaError::CallNotAllowed);
-        }
         let dest = dom.data.capabilities.get(&dest)?.as_domain()?;
         if dest.borrow().data.is_sealed()
             && !dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
