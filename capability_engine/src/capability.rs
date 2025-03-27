@@ -3,12 +3,13 @@ use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 pub type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Capability<T> {
+    pub owner: Weak<Capability<Domain>>,
     pub data: T,
     pub children: Vec<CapaRef<T>>,
 }
@@ -24,6 +25,15 @@ pub enum CapaError {
     DomainSealed,
     InsufficientRights,
     InvalidChildCapa,
+}
+
+/// Have to implement it by hand because Weak does not support PartialEq
+impl<T: PartialEq> PartialEq for Capability<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.owner, &other.owner)
+            && self.data == other.data
+            && self.children == other.children
+    }
 }
 
 impl<T> Capability<T>
@@ -80,6 +90,7 @@ where
 impl Capability<MemoryRegion> {
     pub fn new(region: MemoryRegion) -> Self {
         Capability::<MemoryRegion> {
+            owner: Weak::new(),
             data: region,
             children: Vec::new(),
         }
@@ -218,6 +229,7 @@ fn is_core_subset(reference: u64, other: u64) -> bool {
 impl Capability<Domain> {
     pub fn new(domain: Domain) -> Self {
         Capability::<Domain> {
+            owner: Weak::new(),
             data: domain,
             children: Vec::new(),
         }
