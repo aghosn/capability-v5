@@ -695,5 +695,5 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     }
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
 }
