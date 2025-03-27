@@ -259,8 +259,9 @@ fn test_revoke_single_node() {
     let mut seen = Vec::new();
 
     // Revoke the child node
-    let revoked = root.revoke_with(&child, |c| {
+    let revoked = root.revoke_child(&child, &mut |c: &mut Capability<MemoryRegion>| {
         seen.push(c.data.access.start);
+        Ok(())
     });
 
     // Check that the revocation was successful
@@ -300,13 +301,16 @@ fn test_revoke_complex_subtree() {
 
     //let data = b1a.borrow().data;
     // Revoke b1a
-    let revoked = b1.borrow_mut().revoke_with(&b1a, |c| {
-        seen.push((
-            c.data.kind.clone(),
-            c.data.status.clone(),
-            c.data.access.start,
-        ));
-    });
+    let revoked = b1
+        .borrow_mut()
+        .revoke_child(&b1a, &mut |c: &mut Capability<MemoryRegion>| {
+            seen.push((
+                c.data.kind.clone(),
+                c.data.status.clone(),
+                c.data.access.start,
+            ));
+            Ok(())
+        });
 
     // Check the callback was called for b1a1 then b1a
     assert!(revoked.is_ok());
@@ -348,9 +352,12 @@ fn test_revoke_deep_leaf_order() {
 
     let mut seen = Vec::new();
 
-    let res = c2.borrow_mut().revoke_with(&c3, |c| {
-        seen.push(c.data.access.start);
-    });
+    let res = c2
+        .borrow_mut()
+        .revoke_child(&c3, &mut |c: &mut Capability<MemoryRegion>| {
+            seen.push(c.data.access.start);
+            Ok(())
+        });
     assert!(res.is_ok());
 
     // Order of callback: c4 then c3
@@ -377,9 +384,9 @@ fn test_revoke_nonexistent() {
     };
 
     // Try to revoke the dummy region, which doesn't exist as a child
-    let result = root.revoke_with(
+    let result = root.revoke_child(
         &Rc::new(RefCell::new(Capability::<MemoryRegion>::new(dummy_region))),
-        |_c| {
+        &mut |_c: &mut Capability<MemoryRegion>| {
             panic!("Callback should not run on nonexistent revoke");
         },
     );

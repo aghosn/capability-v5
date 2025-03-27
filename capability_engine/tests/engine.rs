@@ -31,52 +31,58 @@ fn create_root_region() -> Capability<MemoryRegion> {
 fn test_engine_create_root_and_simple_child() {
     // Initial setup
     let engine = Engine::new();
-    let mut root_domain = create_root_domain();
+    let root_domain = create_root_domain();
     let root_region = create_root_region();
     let ref_mem = Rc::new(RefCell::new(root_region));
-    let ref_region = root_domain.data.install(CapaWrapper::Region(ref_mem));
     let ref_td = Rc::new(RefCell::new(root_domain));
 
-    // Create a child.
-    let child_td = engine
-        .create(
-            ref_td.clone(),
-            1,
-            MonitorAPI::all(),
-            InterruptPolicy::default_none(),
-        )
-        .unwrap();
+    let ref_region = engine.add_root_region(&ref_td, &ref_mem).unwrap();
 
-    // Create some regions.
-    let ref_aliased = engine
-        .alias(
-            ref_td.clone(),
-            ref_region,
-            &Access::new(0x0, 0x2000, Rights::READ | Rights::WRITE),
-        )
-        .unwrap();
-    let ref_carved = engine
-        .carve(
-            ref_td.clone(),
-            ref_region,
-            &Access::new(
-                0x2000,
-                0x2000,
-                Rights::READ | Rights::WRITE | Rights::EXECUTE,
-            ),
-        )
-        .unwrap();
+    assert_eq!(Rc::strong_count(&ref_td), 1);
+    assert_eq!(Rc::weak_count(&ref_td), 1);
+    assert_eq!(Rc::strong_count(&ref_mem), 2);
 
-    // Send the region, this moves the references.
-    engine.send(ref_td.clone(), child_td, ref_aliased).unwrap();
-    engine.send(ref_td.clone(), child_td, ref_carved).unwrap();
+    {
+        // Create a child.
+        let child_td = engine
+            .create(
+                ref_td.clone(),
+                1,
+                MonitorAPI::all(),
+                InterruptPolicy::default_none(),
+            )
+            .unwrap();
 
-    // Seal
-    engine.seal(ref_td.clone(), child_td).unwrap();
+        // Create some regions.
+        let ref_aliased = engine
+            .alias(
+                ref_td.clone(),
+                ref_region,
+                &Access::new(0x0, 0x2000, Rights::READ | Rights::WRITE),
+            )
+            .unwrap();
+        let ref_carved = engine
+            .carve(
+                ref_td.clone(),
+                ref_region,
+                &Access::new(
+                    0x2000,
+                    0x2000,
+                    Rights::READ | Rights::WRITE | Rights::EXECUTE,
+                ),
+            )
+            .unwrap();
 
-    // Print the root domain.
-    let display = format!("{}", ref_td.borrow());
-    let expected = r#"td0 = Sealed domain(td1,r0)
+        // Send the region, this moves the references.
+        engine.send(ref_td.clone(), child_td, ref_aliased).unwrap();
+        engine.send(ref_td.clone(), child_td, ref_carved).unwrap();
+
+        // Seal
+        engine.seal(ref_td.clone(), child_td).unwrap();
+
+        // Print the root domain.
+        let display = format!("{}", ref_td.borrow());
+        let expected = r#"td0 = Sealed domain(td1,r0)
 |cores: 0xffffffffffffffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
@@ -91,48 +97,48 @@ r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
 
-    assert_eq!(display, expected);
-    // Print the child domain.
-    let child = ref_td
-        .borrow()
-        .data
-        .capabilities
-        .get(&child_td)
-        .unwrap()
-        .as_domain()
-        .unwrap();
-    let display = format!("{}", child.borrow());
-    let expected = r#"td0 = Sealed domain(r0,r1)
+        assert_eq!(display, expected);
+        // Print the child domain.
+        let child = ref_td
+            .borrow()
+            .data
+            .capabilities
+            .get(&child_td)
+            .unwrap()
+            .as_domain()
+            .unwrap();
+        let display = format!("{}", child.borrow());
+        let expected = r#"td0 = Sealed domain(r0,r1)
 |cores: 0x1
 |mon.api: 0x1fff
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
 
-    // Now hack the engine to make a new capability appear.
-    let phantom = Rc::new(RefCell::new(Capability::<MemoryRegion>::new(
-        MemoryRegion {
-            kind: RegionKind::Carve,
-            status: MStatus::Exclusive,
-            access: Access::new(
-                0x15000,
-                0x20000,
-                Rights::READ | Rights::WRITE | Rights::EXECUTE,
-            ),
-            attributes: Attributes::NONE,
-            remapped: Remapped::Identity,
-        },
-    )));
-    let ref_phantom = child
-        .borrow_mut()
-        .data
-        .install(CapaWrapper::Region(phantom));
+        // Now hack the engine to make a new capability appear.
+        let phantom = Rc::new(RefCell::new(Capability::<MemoryRegion>::new(
+            MemoryRegion {
+                kind: RegionKind::Carve,
+                status: MStatus::Exclusive,
+                access: Access::new(
+                    0x15000,
+                    0x20000,
+                    Rights::READ | Rights::WRITE | Rights::EXECUTE,
+                ),
+                attributes: Attributes::NONE,
+                remapped: Remapped::Identity,
+            },
+        )));
+        let ref_phantom = child
+            .borrow_mut()
+            .data
+            .install(CapaWrapper::Region(phantom));
 
-    // Now do the attestation again, we should see a region that is not reported.
-    let display = format!("{}", ref_td.borrow());
-    let expected = r#"td0 = Sealed domain(td1,r0)
+        // Now do the attestation again, we should see a region that is not reported.
+        let display = format!("{}", ref_td.borrow());
+        let expected = r#"td0 = Sealed domain(td1,r0)
 |cores: 0xffffffffffffffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
@@ -146,11 +152,11 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
 
-    // Now display the children again.
-    let display = format!("{}", child.borrow());
-    let expected = r#"td0 = Sealed domain(r0,r1,r2)
+        // Now display the children again.
+        let display = format!("{}", child.borrow());
+        let expected = r#"td0 = Sealed domain(r0,r1,r2)
 |cores: 0x1
 |mon.api: 0x1fff
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
@@ -158,16 +164,16 @@ r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 r2 = Exclusive 0x15000 0x35000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
 
-    // Remove the phantom.
-    _ = child.borrow_mut().data.remove(ref_phantom);
+        // Remove the phantom.
+        _ = child.borrow_mut().data.remove(ref_phantom);
 
-    // Now we can revoke, let's first revoke one capa, then revoke the domain.
-    engine.revoke(ref_td.clone(), ref_region, 0).unwrap();
+        // Now we can revoke, let's first revoke one capa, then revoke the domain.
+        engine.revoke(ref_td.clone(), ref_region, 0).unwrap();
 
-    let display = format!("{}", ref_td.borrow());
-    let expected = r#"td0 = Sealed domain(td1,r0)
+        let display = format!("{}", ref_td.borrow());
+        let expected = r#"td0 = Sealed domain(td1,r0)
 |cores: 0xffffffffffffffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
@@ -179,24 +185,29 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Carve at 0x2000 0x4000 with RWX for r1
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
 
-    let display = format!("{}", child.borrow());
-    let expected = r#"td0 = Sealed domain(r0)
+        let display = format!("{}", child.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
 |cores: 0x1
 |mon.api: 0x1fff
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
 
-    engine.revoke(ref_td.clone(), child_td, 0).unwrap();
-    let display = format!("{}", ref_td.borrow());
-    let expected = r#"td0 = Sealed domain(r0)
+        engine.revoke(ref_td.clone(), child_td, 0).unwrap();
+        let display = format!("{}", ref_td.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
 |cores: 0xffffffffffffffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
-    assert_eq!(display, expected);
+        assert_eq!(display, expected);
+    }
+
+    assert_eq!(Rc::strong_count(&ref_td), 1);
+    assert_eq!(Rc::weak_count(&ref_td), 1);
+    assert_eq!(Rc::strong_count(&ref_mem), 2);
 }

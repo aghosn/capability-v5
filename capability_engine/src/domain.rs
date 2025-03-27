@@ -38,6 +38,7 @@ bitflags! {
 pub enum Status {
     Unsealed,
     Sealed,
+    Revoked,
 }
 
 pub struct Policies {
@@ -151,6 +152,25 @@ impl CapabilityStore {
         self.capabilities
             .get(handle)
             .ok_or(CapaError::InvalidLocalCapa)
+    }
+
+    pub fn foreach_region_mut<F>(&mut self, op: F) -> Result<(), CapaError>
+    where
+        F: Fn(&CapaRef<MemoryRegion>) -> Result<(), CapaError>,
+    {
+        for (_k, c) in &mut self.capabilities {
+            if c.as_region().is_err() {
+                continue;
+            }
+            let region = c.as_region()?;
+            op(&region)?;
+        }
+        Ok(())
+    }
+    pub fn reset(&mut self) {
+        self.capabilities = HashMap::new();
+        self.next_handle = 1;
+        self.free_handles = VecDeque::new();
     }
 }
 

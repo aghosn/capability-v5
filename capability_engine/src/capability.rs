@@ -1,4 +1,4 @@
-use crate::domain::{CapaWrapper, Domain, LocalCapa, MonitorAPI, Policies, Status as DStatus};
+use crate::domain::{Domain, LocalCapa, MonitorAPI, Status as DStatus};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
@@ -7,10 +7,31 @@ use std::rc::{Rc, Weak};
 
 pub type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
+pub type WeakRef<T> = Weak<RefCell<T>>;
+
+#[derive(Debug)]
+pub struct Ownership {
+    pub owner: WeakRef<Capability<Domain>>,
+    pub handle: LocalCapa,
+}
+
+impl Ownership {
+    pub fn new(owner: WeakRef<Capability<Domain>>, handle: LocalCapa) -> Self {
+        Ownership { owner, handle }
+    }
+    pub fn empty() -> Self {
+        Ownership {
+            owner: WeakRef::new(),
+            handle: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Capability<T> {
-    pub owner: Weak<Capability<Domain>>,
+    pub owned: Ownership,
     pub data: T,
+    pub parent: WeakRef<Capability<T>>,
     pub children: Vec<CapaRef<T>>,
 }
 
@@ -25,12 +46,14 @@ pub enum CapaError {
     DomainSealed,
     InsufficientRights,
     InvalidChildCapa,
+    CapaNotOwned,
+    RevokeOnRootCapa,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq
 impl<T: PartialEq> PartialEq for Capability<T> {
     fn eq(&self, other: &Self) -> bool {
-        Weak::ptr_eq(&self.owner, &other.owner)
+        Weak::ptr_eq(&self.owned.owner, &other.owned.owner)
             && self.data == other.data
             && self.children == other.children
     }
@@ -40,49 +63,71 @@ impl<T> Capability<T>
 where
     T: PartialEq,
 {
-    pub fn add_child(&mut self, child: CapaRef<T>) {
+    pub fn add_child(&mut self, child: CapaRef<T>, owner: WeakRef<Capability<Domain>>) {
+        {
+            child.borrow_mut().owned = Ownership::new(owner, 0);
+        }
         self.children.push(child)
     }
 
-    pub fn remove_child(&mut self, child: &T) -> Option<CapaRef<T>> {
-        if let Some(pos) = self.children.iter().position(|c| c.borrow().data == *child) {
-            Some(self.children.remove(pos))
-        } else {
-            None
-        }
+    pub fn revoke_node<F>(node: CapaRef<T>, on_revoke: &mut F) -> Result<(), CapaError>
+    where
+        F: FnMut(&mut Capability<T>) -> Result<(), CapaError>,
+    {
+        let parent = {
+            let borrowed = node.borrow();
+            borrowed
+                .parent
+                .upgrade()
+                .ok_or(CapaError::RevokeOnRootCapa)?
+        };
+
+        parent.borrow_mut().revoke_child(&node, on_revoke)?;
+        Ok(())
     }
 
-    pub fn revoke_with<F>(&mut self, child: &CapaRef<T>, mut on_revoke: F) -> Result<(), CapaError>
+    pub fn revoke_child<F>(
+        &mut self,
+        child: &CapaRef<T>,
+        on_revoke: &mut F,
+    ) -> Result<(), CapaError>
     where
-        F: FnMut(&Capability<T>),
+        F: FnMut(&mut Capability<T>) -> Result<(), CapaError>,
     {
         if let Some(pos) = self.children.iter().position(|c| Rc::ptr_eq(c, child)) {
             // Safely remove the child and pass it for revocation
             let child = self.children.remove(pos);
-            Capability::recurse_revoke(child, &mut on_revoke);
+            // Remove the backward edge to the parent.
+            child.borrow_mut().parent = WeakRef::new();
+            child.borrow_mut().revoke_all(on_revoke)?;
             Ok(())
         } else {
             Err(CapaError::ChildNotFound)
         }
     }
 
-    fn recurse_revoke<F>(node: CapaRef<T>, on_revoke: &mut F)
+    pub fn revoke_all<F>(&mut self, on_revoke: &mut F) -> Result<(), CapaError>
     where
-        F: FnMut(&Capability<T>),
+        F: FnMut(&mut Capability<T>) -> Result<(), CapaError>,
     {
-        // First, take the children out to avoid borrowing conflicts
-        let children = {
-            let mut node_borrow = node.borrow_mut();
-            std::mem::take(&mut node_borrow.children) // Extract the children
-        };
-
-        // Now we can safely recurse on the children
-        for child in children {
-            Capability::recurse_revoke(child, on_revoke);
+        for c in &self.children {
+            let child = &mut c.borrow_mut();
+            child.parent = WeakRef::new();
+            child.revoke_all(on_revoke)?;
         }
+        self.children = Vec::new();
+        // Remove the node from its parent.
+        on_revoke(self)
+    }
 
-        // Finally, call the callback after all children are revoked
-        on_revoke(&node.borrow());
+    pub fn dfs<F>(&mut self, visit: &F) -> Result<(), CapaError>
+    where
+        F: Fn(&mut Capability<T>) -> Result<(), CapaError>,
+    {
+        for c in &self.children {
+            c.borrow_mut().dfs(visit)?;
+        }
+        visit(self)
     }
 }
 
@@ -90,8 +135,9 @@ where
 impl Capability<MemoryRegion> {
     pub fn new(region: MemoryRegion) -> Self {
         Capability::<MemoryRegion> {
-            owner: Weak::new(),
+            owned: Ownership::empty(),
             data: region,
+            parent: WeakRef::new(),
             children: Vec::new(),
         }
     }
@@ -140,7 +186,7 @@ impl Capability<MemoryRegion> {
     }
 
     pub fn add_child_sorted(&mut self, child: CapaRef<MemoryRegion>) {
-        self.add_child(child);
+        self.add_child(child, Weak::new());
         self.children.sort_by(|a, b| {
             a.borrow()
                 .data
@@ -222,33 +268,14 @@ impl Capability<MemoryRegion> {
 
 // ———————————————————— Domain Capability implementation ———————————————————— //
 
-fn is_core_subset(reference: u64, other: u64) -> bool {
-    (reference & other) == other
-}
-
 impl Capability<Domain> {
     pub fn new(domain: Domain) -> Self {
         Capability::<Domain> {
-            owner: Weak::new(),
+            owned: Ownership::empty(),
             data: domain,
+            parent: WeakRef::new(),
             children: Vec::new(),
         }
-    }
-    pub fn create(&mut self, policies: Policies) -> Result<LocalCapa, CapaError> {
-        if !self.data.operation_allowed(MonitorAPI::CREATE) {
-            return Err(CapaError::CallNotAllowed);
-        }
-        // Check cores.
-        if !is_core_subset(self.data.policies.cores, policies.cores) {
-            return Err(CapaError::InsufficientRights);
-        }
-        let domain = Domain::new(policies);
-
-        let capa = Self::new(domain);
-        let reference = Rc::new(RefCell::new(capa));
-        self.add_child(reference.clone());
-        let local_capa = self.data.install(CapaWrapper::Domain(reference));
-        Ok(local_capa)
     }
 
     pub fn set(&self, _child: LocalCapa) -> Result<(), CapaError> {
@@ -292,28 +319,5 @@ impl Capability<Domain> {
             return Err(CapaError::WrongCapaType);
         }
         todo!()
-    }
-
-    pub fn send(&mut self, dest: LocalCapa, capa: LocalCapa) -> Result<(), CapaError> {
-        if !self.data.operation_allowed(MonitorAPI::SEND) {
-            return Err(CapaError::CallNotAllowed);
-        }
-        let dest = self.data.capabilities.get(&dest)?.as_domain()?;
-
-        // Is the dest allowed to receive capabilities.
-        if dest.borrow().data.is_sealed()
-            && !dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
-        {
-            return Err(CapaError::CallNotAllowed);
-        }
-        let region = self.data.capabilities.remove(&capa)?.as_region()?;
-
-        //TODO: UPDATE here because we're losing a region.
-        // We do not care about the receiver's local capa.
-        let _ = dest.borrow_mut().data.install(CapaWrapper::Region(region));
-
-        //TODO: Update Receiver too.
-
-        Ok(())
     }
 }
