@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::capability::{CapaError, CapaRef};
 use crate::memory_region::MemoryRegion;
@@ -122,7 +122,7 @@ impl CapaWrapper {
 }
 
 pub struct CapabilityStore {
-    pub capabilities: HashMap<LocalCapa, CapaWrapper>,
+    pub capabilities: BTreeMap<LocalCapa, CapaWrapper>,
     pub next_handle: LocalCapa,
     pub free_handles: VecDeque<LocalCapa>,
 }
@@ -130,7 +130,7 @@ pub struct CapabilityStore {
 impl CapabilityStore {
     pub fn new() -> Self {
         CapabilityStore {
-            capabilities: HashMap::new(),
+            capabilities: BTreeMap::new(),
             next_handle: 1,
             free_handles: VecDeque::new(),
         }
@@ -174,7 +174,7 @@ impl CapabilityStore {
         Ok(())
     }
     pub fn reset(&mut self) {
-        self.capabilities = HashMap::new();
+        self.capabilities = BTreeMap::new();
         self.next_handle = 1;
         self.free_handles = VecDeque::new();
     }

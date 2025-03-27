@@ -583,3 +583,89 @@ r0 = Aliased 0x5000 0x6000 with RW_ mapped Identity
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
+
+#[test]
+fn test_engine_two_children_revoke_aliased_twice() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    {
+        // Let td0 create td1.
+        let td0_td1 = engine
+            .create(
+                td0.clone(),
+                0b111,
+                MonitorAPI::all(),
+                InterruptPolicy::default_all(),
+            )
+            .unwrap();
+        // Let td0 create td2
+        let td0_td2 = engine
+            .create(
+                td0.clone(),
+                0b111,
+                MonitorAPI::all(),
+                InterruptPolicy::default_all(),
+            )
+            .unwrap();
+
+        // Carve a region.
+        let td0_carve = engine
+            .carve(
+                td0.clone(),
+                td0_r0,
+                &Access::new(0x0, 0x2000, Rights::all()),
+            )
+            .unwrap();
+
+        // Do two aliases.
+        let td0_alias_td1 = engine
+            .alias(
+                td0.clone(),
+                td0_carve,
+                &Access::new(0x0, 0x2000, Rights::all()),
+            )
+            .unwrap();
+        let td0_alias_td2 = engine
+            .alias(
+                td0.clone(),
+                td0_carve,
+                &Access::new(0x0, 0x1000, Rights::all()),
+            )
+            .unwrap();
+        // Send the capas.
+        engine.send(td0.clone(), td0_td1, td0_alias_td1).unwrap();
+        engine.send(td0.clone(), td0_td2, td0_alias_td2).unwrap();
+
+        // Seal the domains.
+        engine.seal(td0.clone(), td0_td1).unwrap();
+        engine.seal(td0.clone(), td0_td2).unwrap();
+
+        // Now check the output.
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(td1,td2,r0,r1)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r2)
+|cores: 0x7
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td2 = Sealed domain(r3)
+|cores: 0x7
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x2000 with RWX for r1
+r1 = Exclusive 0x0 0x2000 with RWX mapped Identity
+| Alias at 0x0 0x2000 with RWX for r2
+| Alias at 0x0 0x1000 with RWX for r3
+r2 = Aliased 0x0 0x2000 with RWX mapped Identity
+r3 = Aliased 0x0 0x1000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+    }
+}

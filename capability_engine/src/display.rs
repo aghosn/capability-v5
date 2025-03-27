@@ -13,7 +13,7 @@ pub trait PrintWithNames<T> {
     fn fmt_with_names(
         &self,
         f: &mut fmt::Formatter,
-        names: &mut HashMap<CapaKey<T>, String>,
+        names: &mut HashMap<CapaKey<T>, usize>,
         prefix: String,
         next_id: &mut usize,
         full: bool,
@@ -67,7 +67,7 @@ impl PrintWithNames<MemoryRegion> for Capability<MemoryRegion> {
     fn fmt_with_names(
         &self,
         f: &mut fmt::Formatter,
-        names: &mut HashMap<CapaKey<MemoryRegion>, String>,
+        names: &mut HashMap<CapaKey<MemoryRegion>, usize>,
         prefix: String,
         next_id: &mut usize,
         full: bool,
@@ -89,19 +89,19 @@ impl PrintWithNames<MemoryRegion> for Capability<MemoryRegion> {
         if !self.children.is_empty() {
             for (_, child) in self.children.iter().enumerate() {
                 let name = if names.contains_key(&CapaKey(child.clone())) {
-                    names.get(&CapaKey(child.clone())).unwrap().clone()
+                    *names.get(&CapaKey(child.clone())).unwrap()
                 } else {
                     // Generate a new name.
-                    let name = format!("{}{}", prefix, *next_id);
+                    let name = *next_id;
                     *next_id += 1;
-                    names.insert(CapaKey(child.clone()), name.clone());
+                    names.insert(CapaKey(child.clone()), name);
                     name
                 };
                 let child_borrowed = child.borrow();
                 write!(
                     f,
-                    "\n| {:?} at {} for {}",
-                    child_borrowed.data.kind, child_borrowed.data.access, name
+                    "\n| {:?} at {} for {}{}",
+                    child_borrowed.data.kind, child_borrowed.data.access, prefix, name
                 )?;
             }
         }
@@ -113,7 +113,7 @@ impl fmt::Display for Capability<MemoryRegion> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut next_id = 0;
         let prefix: String = String::from(".");
-        let mut names: HashMap<CapaKey<MemoryRegion>, String> = HashMap::new();
+        let mut names: HashMap<CapaKey<MemoryRegion>, usize> = HashMap::new();
         self.fmt_with_names(f, &mut names, prefix, &mut next_id, true)
     }
 }
@@ -147,18 +147,31 @@ impl Capability<Domain> {
     pub fn print_header(
         &self,
         f: &mut fmt::Formatter,
-        names_td: &mut HashMap<CapaKey<Domain>, String>,
+        names_td: &mut HashMap<CapaKey<Domain>, usize>,
         next_td: &mut usize,
-        names_regions: &mut HashMap<CapaKey<MemoryRegion>, String>,
+        names_regions: &mut HashMap<CapaKey<MemoryRegion>, usize>,
         next_region: &mut usize,
     ) -> fmt::Result {
         write!(f, "{:?} domain(", self.data.status)?;
         let mut as_sorted_vector: Vec<_> = self.data.capabilities.capabilities.iter().collect();
         as_sorted_vector.sort_by_key(|(id, _)| *id);
-        let regions: Vec<_> = as_sorted_vector
+        let mut regions: Vec<_> = self
+            .data
+            .capabilities
+            .capabilities
             .iter()
-            .filter(|(_, x)| matches!(x, CapaWrapper::Region(_)))
+            .filter_map(|(_, x)| match x {
+                CapaWrapper::Region(r) => {
+                    if !names_regions.contains_key(&CapaKey(r.clone())) {
+                        names_regions.insert(CapaKey(r.clone()), *next_region);
+                        *next_region += 1;
+                    }
+                    Some(r)
+                }
+                _ => None,
+            })
             .collect();
+        regions.sort_by_key(|c| *names_regions.get(&CapaKey((*c).clone())).unwrap());
 
         // Now build strings from those
         self.fmt_with_names(f, names_td, String::from("td"), next_td, true)?;
@@ -169,13 +182,8 @@ impl Capability<Domain> {
         // Print the regions.
         let mut region_print: Vec<String> = Vec::new();
         for r in regions {
-            if let (_, CapaWrapper::Region(reg)) = r {
-                if !names_regions.contains_key(&CapaKey(reg.clone())) {
-                    names_regions.insert(CapaKey(reg.clone()), format!("r{}", *next_region));
-                    *next_region += 1;
-                }
-                region_print.push(names_regions.get(&CapaKey(reg.clone())).unwrap().clone());
-            }
+            let r_name = names_regions.get(&CapaKey(r.clone())).unwrap();
+            region_print.push(format!("r{}", r_name));
         }
         writeln!(f, "{})", region_print.join(","))?;
         // Print policies
@@ -187,7 +195,7 @@ impl PrintWithNames<Domain> for Capability<Domain> {
     fn fmt_with_names(
         &self,
         f: &mut fmt::Formatter,
-        names: &mut HashMap<CapaKey<Domain>, String>,
+        names: &mut HashMap<CapaKey<Domain>, usize>,
         prefix: String,
         next_id: &mut usize,
         _full: bool,
@@ -203,7 +211,7 @@ impl PrintWithNames<Domain> for Capability<Domain> {
             if let CapaWrapper::Domain(ref d) = wrapper {
                 // Only insert if the key does not exist
                 if !names.contains_key(&CapaKey(d.clone())) {
-                    names.insert(CapaKey(d.clone()), format!("{}{}", prefix, *next_id));
+                    names.insert(CapaKey(d.clone()), *next_id);
                     *next_id += 1;
                 }
             }
@@ -215,7 +223,8 @@ impl PrintWithNames<Domain> for Capability<Domain> {
             .filter_map(|(_, wrapper)| {
                 if let CapaWrapper::Domain(ref d) = wrapper {
                     // Get the name from `names` based on the domain
-                    names.get(&CapaKey(d.clone())).cloned()
+                    let name = names.get(&CapaKey(d.clone())).unwrap();
+                    Some(format!("{}{}", prefix, *name))
                 } else {
                     None
                 }
@@ -231,25 +240,44 @@ impl fmt::Display for Capability<Domain> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "td0 = ")?;
         let mut as_sorted_vector: Vec<_> = self.data.capabilities.capabilities.iter().collect();
-        let mut names_region: HashMap<CapaKey<MemoryRegion>, String> = HashMap::new();
-        let mut names_td: HashMap<CapaKey<Domain>, String> = HashMap::new();
+        let mut names_region: HashMap<CapaKey<MemoryRegion>, usize> = HashMap::new();
+        let mut names_td: HashMap<CapaKey<Domain>, usize> = HashMap::new();
         as_sorted_vector.sort_by_key(|(id, _)| *id);
-
-        // Keep actual capabilities separate
-        let tds: Vec<_> = as_sorted_vector
-            .iter()
-            .filter(|(_, x)| matches!(x, CapaWrapper::Domain(_)))
-            .collect();
-
-        let regions: Vec<_> = as_sorted_vector
-            .iter()
-            .filter(|(_, x)| matches!(x, CapaWrapper::Region(_)))
-            .collect();
-
         // Assign names to domain capabilities
         let mut next_td: usize = 1;
         let mut next_region: usize = 0;
 
+        // Keep actual capabilities separate
+        let mut tds: Vec<_> = self.children.iter().collect();
+
+        let mut regions: Vec<_> = as_sorted_vector
+            .iter()
+            .filter_map(|(_, x)| match x {
+                CapaWrapper::Region(r) => {
+                    // Let generate names now.
+                    names_region.insert(CapaKey(r.clone()), next_region);
+                    next_region += 1;
+                    Some(r)
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Sort the regions by name.
+        regions.sort_by_key(|c| names_region.get(&CapaKey((*c).clone())).unwrap());
+
+        // Give names to children regions first.
+        for r in &regions {
+            let reg = &r.borrow();
+            for c in &reg.children {
+                if !names_region.contains_key(&CapaKey(c.clone())) {
+                    names_region.insert(CapaKey(c.clone()), next_region);
+                    next_region += 1;
+                }
+            }
+        }
+
+        // Now we can go through the header of the current capa.
         self.print_header(
             f,
             &mut names_td,
@@ -258,56 +286,51 @@ impl fmt::Display for Capability<Domain> {
             &mut next_region,
         )?;
 
-        // Print the domains.
-        for td in tds {
-            if let (_, CapaWrapper::Domain(d)) = td {
-                if !names_td.contains_key(&CapaKey(d.clone())) {
-                    names_td.insert(CapaKey(d.clone()), format!("td{}", next_td));
-                    next_td += 1;
-                }
-                write!(f, "{} = ", names_td.get(&CapaKey(d.clone())).unwrap())?;
-                d.borrow().print_header(
-                    f,
-                    &mut names_td,
-                    &mut next_td,
-                    &mut names_region,
-                    &mut next_region,
-                )?;
+        tds.sort_by_key(|td| {
+            if !names_td.contains_key(&CapaKey((*td).clone())) {
+                names_td.insert(CapaKey((*td).clone()), next_td);
+                next_td += 1;
             }
+            *names_td.get(&CapaKey((*td).clone())).unwrap()
+        });
+        for td in tds {
+            write!(f, "td{} = ", names_td.get(&CapaKey(td.clone())).unwrap())?;
+            td.borrow().print_header(
+                f,
+                &mut names_td,
+                &mut next_td,
+                &mut names_region,
+                &mut next_region,
+            )?;
         }
+
         // Print the regions.
-        let mut sorted: Vec<(CapaRef<MemoryRegion>, String)> = names_region
+        let mut regions_sorted: Vec<(CapaRef<MemoryRegion>, usize)> = names_region
             .iter()
-            .map(|(k, v)| (k.0.clone(), v.clone()))
+            .map(|(k, v)| (k.0.clone(), *v))
             .collect();
 
         // Now we can sort without borrowing names_region
-        sorted.sort_by_key(|(_, v)| {
-            v.strip_prefix('r')
-                .and_then(|n| n.parse::<u32>().ok())
-                .unwrap_or(0)
-        });
+        regions_sorted.sort_by_key(|(_, v)| *v);
 
         // Filter the regions to be printed.
         let mut region_set: HashMap<CapaKey<MemoryRegion>, bool> = HashMap::new();
         for r in regions {
-            if let (_, CapaWrapper::Region(reg)) = r {
-                region_set.insert(CapaKey(reg.clone()), true);
-                for c in &reg.borrow().children {
-                    // If we do not own the child region anymore.
-                    if !region_set.contains_key(&CapaKey(c.clone())) {
-                        region_set.insert(CapaKey(c.clone()), false);
-                    }
+            region_set.insert(CapaKey(r.clone()), true);
+            for c in &r.borrow().children {
+                // If we do not own the child region anymore.
+                if !region_set.contains_key(&CapaKey(c.clone())) {
+                    region_set.insert(CapaKey(c.clone()), false);
                 }
             }
         }
 
         // Now iterate and print
-        for (key, name) in sorted {
+        for (key, name) in regions_sorted {
             if !region_set.contains_key(&CapaKey(key.clone())) {
                 continue;
             }
-            write!(f, "{} = ", name)?;
+            write!(f, "r{} = ", name)?;
             let full = *region_set.get(&CapaKey(key.clone())).unwrap();
             let capa = key.borrow(); // no conflict anymore
             capa.fmt_with_names(
