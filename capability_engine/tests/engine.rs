@@ -667,5 +667,33 @@ r2 = Aliased 0x0 0x2000 with RWX mapped Identity
 r3 = Aliased 0x0 0x1000 with RWX mapped Identity
 "#;
         assert_eq!(display, expected);
+
+        // Now revoke the carve.
+        engine.revoke(td0.clone(), td0_r0, 0).unwrap();
+
+        // Now make sure the display is correct.
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(td1,td2,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain()
+|cores: 0x7
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td2 = Sealed domain()
+|cores: 0x7
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+
+        // Now revoke both domains.
+        engine.revoke(td0.clone(), td0_td1, 0).unwrap();
+        engine.revoke(td0.clone(), td0_td2, 0).unwrap();
     }
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 1);
 }

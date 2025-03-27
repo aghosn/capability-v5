@@ -153,13 +153,16 @@ impl Engine {
         capa: LocalCapa,
         child: usize,
     ) -> Result<(), CapaError> {
-        let dom = &mut domain.borrow_mut();
-        if !dom.data.operation_allowed(MonitorAPI::REVOKE) {
-            return Err(CapaError::CallNotAllowed);
-        }
-        let is_domain = dom.data.is_domain(capa)?;
+        let is_domain = {
+            let dom = &mut domain.borrow_mut();
+            if !dom.data.operation_allowed(MonitorAPI::REVOKE) {
+                return Err(CapaError::CallNotAllowed);
+            }
+            dom.data.is_domain(capa)?
+        };
         // Match directly on the wrapper while we hold the borrow
         if is_domain {
+            let dom = &mut domain.borrow_mut();
             let d = dom.data.capabilities.get(&capa)?.as_domain()?;
 
             dom.revoke_child(&d, &mut |c: &mut Capability<Domain>| {
@@ -175,7 +178,12 @@ impl Engine {
             // Remove the handle
             dom.data.capabilities.remove(&capa)?;
         } else {
-            let r = dom.data.capabilities.get(&capa)?.as_region()?;
+            let r = domain
+                .borrow_mut()
+                .data
+                .capabilities
+                .get(&capa)?
+                .as_region()?;
             // Drop borrow of dom before borrowing r
             let child = {
                 let r_borrow = r.borrow();
@@ -185,6 +193,7 @@ impl Engine {
                     .cloned()
                     .ok_or(CapaError::InvalidChildCapa)?
             };
+            // The region might belong to the dom, so we need to drop the domain.
             r.borrow_mut()
                 .revoke_child(&child, &mut Self::revoke_region_handler)?;
         }
