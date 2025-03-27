@@ -5,7 +5,7 @@ use crate::domain::{
 use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -16,6 +16,7 @@ pub trait PrintWithNames<T> {
         names: &mut HashMap<CapaKey<T>, String>,
         prefix: String,
         next_id: &mut usize,
+        full: bool,
     ) -> fmt::Result;
 }
 
@@ -69,6 +70,7 @@ impl PrintWithNames<MemoryRegion> for Capability<MemoryRegion> {
         names: &mut HashMap<CapaKey<MemoryRegion>, String>,
         prefix: String,
         next_id: &mut usize,
+        full: bool,
     ) -> fmt::Result {
         let region = &self.data;
 
@@ -79,6 +81,10 @@ impl PrintWithNames<MemoryRegion> for Capability<MemoryRegion> {
             region.status, region.access, region.remapped
         )?;
 
+        // Skip over the children.
+        if !full {
+            return Ok(());
+        }
         // Print children recursively
         if !self.children.is_empty() {
             for (_, child) in self.children.iter().enumerate() {
@@ -108,7 +114,7 @@ impl fmt::Display for Capability<MemoryRegion> {
         let mut next_id = 0;
         let prefix: String = String::from(".");
         let mut names: HashMap<CapaKey<MemoryRegion>, String> = HashMap::new();
-        self.fmt_with_names(f, &mut names, prefix, &mut next_id)
+        self.fmt_with_names(f, &mut names, prefix, &mut next_id, true)
     }
 }
 
@@ -155,7 +161,7 @@ impl Capability<Domain> {
             .collect();
 
         // Now build strings from those
-        self.fmt_with_names(f, names_td, String::from("td"), next_td)?;
+        self.fmt_with_names(f, names_td, String::from("td"), next_td, true)?;
 
         if as_sorted_vector.len() != 0 && as_sorted_vector.len() != regions.len() {
             write!(f, ",")?;
@@ -184,6 +190,7 @@ impl PrintWithNames<Domain> for Capability<Domain> {
         names: &mut HashMap<CapaKey<Domain>, String>,
         prefix: String,
         next_id: &mut usize,
+        _full: bool,
     ) -> fmt::Result {
         let as_sorted_vector: Vec<_> = self.data.capabilities.capabilities.iter().collect();
         let tds: Vec<_> = as_sorted_vector
@@ -282,24 +289,34 @@ impl fmt::Display for Capability<Domain> {
         });
 
         // Filter the regions to be printed.
-        let mut region_set: HashSet<CapaKey<MemoryRegion>> = HashSet::new();
+        let mut region_set: HashMap<CapaKey<MemoryRegion>, bool> = HashMap::new();
         for r in regions {
             if let (_, CapaWrapper::Region(reg)) = r {
-                region_set.insert(CapaKey(reg.clone()));
+                region_set.insert(CapaKey(reg.clone()), true);
                 for c in &reg.borrow().children {
-                    region_set.insert(CapaKey(c.clone()));
+                    // If we do not own the child region anymore.
+                    if !region_set.contains_key(&CapaKey(c.clone())) {
+                        region_set.insert(CapaKey(c.clone()), false);
+                    }
                 }
             }
         }
 
         // Now iterate and print
         for (key, name) in sorted {
-            if !region_set.contains(&CapaKey(key.clone())) {
+            if !region_set.contains_key(&CapaKey(key.clone())) {
                 continue;
             }
             write!(f, "{} = ", name)?;
+            let full = *region_set.get(&CapaKey(key.clone())).unwrap();
             let capa = key.borrow(); // no conflict anymore
-            capa.fmt_with_names(f, &mut names_region, String::from("r"), &mut next_region)?;
+            capa.fmt_with_names(
+                f,
+                &mut names_region,
+                String::from("r"),
+                &mut next_region,
+                full,
+            )?;
             write!(f, "\n")?;
         }
 

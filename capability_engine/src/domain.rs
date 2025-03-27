@@ -26,6 +26,12 @@ bitflags! {
     }
 }
 
+impl MonitorAPI {
+    pub fn encapsulated() -> Self {
+        Self::ENUMERATE | Self::ATTEST | Self::SWITCH
+    }
+}
+
 bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct VectorVisibility: u8 {
