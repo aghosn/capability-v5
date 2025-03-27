@@ -176,7 +176,10 @@ impl Capability<Domain> {
         // Now build strings from those
         self.fmt_with_names(f, names_td, String::from("td"), next_td, true)?;
 
-        if as_sorted_vector.len() != 0 && as_sorted_vector.len() != regions.len() {
+        if as_sorted_vector.len() != 0
+            && as_sorted_vector.len() != regions.len()
+            && regions.len() != 0
+        {
             write!(f, ",")?;
         }
         // Print the regions.

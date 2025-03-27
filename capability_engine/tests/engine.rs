@@ -697,3 +697,197 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
+
+#[test]
+fn test_engine_nested_domains_three_branches() {
+    // Initial setup
+    let (engine, td0, r0, _) = setup_engine_with_root();
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    let create_three_domains = |capa_me: &CapaRef<Domain>| -> Vec<LocalCapa> {
+        let mut handles: Vec<LocalCapa> = Vec::new();
+        for _i in 0..3 {
+            let local = engine
+                .create(
+                    capa_me.clone(),
+                    0x1,
+                    MonitorAPI::all(),
+                    InterruptPolicy::default_all(),
+                )
+                .unwrap();
+            handles.push(local);
+            engine.seal(capa_me.clone(), local).unwrap();
+        }
+        handles
+    };
+
+    {
+        let handles_td0 = create_three_domains(&td0);
+        for child in &td0.borrow().children {
+            let _ = create_three_domains(&child);
+            for grandchild in &child.borrow().children {
+                let _ = create_three_domains(&grandchild);
+            }
+        }
+
+        // Now make sure everyone has three children.
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(td1,td2,td3,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(td4,td5,td6)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td2 = Sealed domain(td7,td8,td9)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td3 = Sealed domain(td10,td11,td12)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+
+        // Now attest each of the children.
+        for i in &handles_td0 {
+            let child = td0
+                .borrow()
+                .data
+                .capabilities
+                .get(i)
+                .unwrap()
+                .as_domain()
+                .unwrap();
+            let display = format!("{}", child.borrow());
+            let expected = r#"td0 = Sealed domain(td1,td2,td3)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(td4,td5,td6)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td2 = Sealed domain(td7,td8,td9)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td3 = Sealed domain(td10,td11,td12)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+"#;
+            assert_eq!(display, expected);
+        }
+
+        // Now revoke them
+        for i in &handles_td0 {
+            engine.revoke(td0.clone(), *i, 0).unwrap();
+        }
+
+        // Display td0
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+    }
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+}
+
+#[test]
+fn test_engine_reclaim_from_grand_child() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    let carve = engine
+        .carve(
+            td0.clone(),
+            td0_r0,
+            &Access::new(0x0, 0x1000, Rights::all()),
+        )
+        .unwrap();
+
+    {
+        let mut current: CapaRef<Domain> = td0.clone();
+        let mut to_send: LocalCapa = carve;
+        for _i in 0..5 {
+            let child = engine
+                .create(
+                    current.clone(),
+                    0b1,
+                    MonitorAPI::all(),
+                    InterruptPolicy::default_all(),
+                )
+                .unwrap();
+            engine.seal(current.clone(), child).unwrap();
+            engine.send(current.clone(), child, to_send).unwrap();
+            // Update to point to the child.
+            let child_ref = current
+                .borrow()
+                .data
+                .capabilities
+                .get(&child)
+                .unwrap()
+                .as_domain()
+                .unwrap();
+            current = child_ref;
+            to_send = 1;
+        }
+
+        // Now check the child that has the region.
+        let display = format!("{}", current.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x1000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+
+        // Now revoke from td0.
+        engine.revoke(td0.clone(), td0_r0, 0).unwrap();
+
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(td2)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+
+        // Now revoke the domains in cascade.
+        engine.revoke(td0.clone(), 3, 0).unwrap();
+
+        // Check it worked.
+        let display = format!("{}", td0.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+"#;
+        assert_eq!(display, expected);
+    }
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+}
