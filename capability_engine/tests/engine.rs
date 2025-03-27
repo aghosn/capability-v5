@@ -891,3 +891,70 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
+
+#[test]
+fn test_engine_policies_core_fail() {
+    // Initial setup
+    let (engine, td0, r0, _td0_r0) = setup_engine_with_root();
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    // Let td0 create a domain and that domain try to gain more writes.
+    {
+        let mut api_without_send_rcv = MonitorAPI::all();
+        api_without_send_rcv.remove(MonitorAPI::SEND | MonitorAPI::RECEIVE);
+        let td0_td1 = engine
+            .create(
+                td0.clone(),
+                0b1,
+                api_without_send_rcv,
+                InterruptPolicy::default_none(),
+            )
+            .unwrap();
+        engine.seal(td0.clone(), td0_td1).unwrap();
+
+        // Now let the domain try to create a new one with more cores.
+        let td1 = td0
+            .borrow()
+            .data
+            .capabilities
+            .get(&td0_td1)
+            .unwrap()
+            .as_domain()
+            .unwrap();
+
+        let td2_err = engine.create(
+            td1.clone(),
+            0x2,
+            MonitorAPI::all(),
+            InterruptPolicy::default_all(),
+        );
+        assert!(td2_err.is_err());
+
+        // Now let's try the wrong interrupt policies.
+        let td1_td2 = engine
+            .create(
+                td1.clone(),
+                0b1,
+                api_without_send_rcv,
+                InterruptPolicy::default_all(),
+            )
+            .unwrap();
+
+        assert!(engine.seal(td1.clone(), td1_td2).is_err());
+
+        // Now let's try the wrong api policies.
+        engine.revoke(td1.clone(), td1_td2, 0).unwrap();
+        let td1_td2 = engine
+            .create(
+                td1.clone(),
+                0b1,
+                MonitorAPI::all(),
+                InterruptPolicy::default_none(),
+            )
+            .unwrap();
+
+        assert!(engine.seal(td1.clone(), td1_td2).is_err());
+    }
+}

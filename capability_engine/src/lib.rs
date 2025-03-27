@@ -71,7 +71,20 @@ impl Engine {
     }
 
     pub fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
-        //TODO:  Check the policies here before the seal.
+        let current_policies = &domain.borrow().data.policies;
+        if !current_policies.contains(
+            &domain
+                .borrow()
+                .data
+                .capabilities
+                .get(&child)?
+                .as_domain()?
+                .borrow()
+                .data
+                .policies,
+        ) {
+            return Err(CapaError::InsufficientRights);
+        }
         domain.borrow().seal(child)
     }
 

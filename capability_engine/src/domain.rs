@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::capability::{CapaError, CapaRef};
+use crate::is_core_subset;
 use crate::memory_region::MemoryRegion;
 use bitflags::bitflags;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +62,13 @@ impl Policies {
             interrupts,
         }
     }
+
+    /// Is the other a subset of self
+    pub fn contains(&self, other: &Policies) -> bool {
+        is_core_subset(self.cores, other.cores)
+            && self.api.contains(other.api)
+            && self.interrupts.contains(&other.interrupts)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -68,6 +76,13 @@ pub struct VectorPolicy {
     pub visibility: VectorVisibility,
     pub read_set: u64,
     pub write_set: u64,
+}
+
+impl VectorPolicy {
+    pub fn contains(&self, other: &VectorPolicy) -> bool {
+        //TODO: do we care about register sets?
+        self.visibility.contains(other.visibility)
+    }
 }
 
 pub const NB_INTERRUPTS: usize = 256;
@@ -94,6 +109,15 @@ impl InterruptPolicy {
                 write_set: 0,
             }; 256],
         }
+    }
+
+    pub fn contains(&self, other: &InterruptPolicy) -> bool {
+        for i in 0..NB_INTERRUPTS {
+            if !self.vectors[i].contains(&other.vectors[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }
 
