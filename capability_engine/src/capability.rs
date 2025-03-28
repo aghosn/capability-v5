@@ -182,19 +182,8 @@ impl Capability<MemoryRegion> {
         };
         let new_capa = Self::new(region);
         let reference = Rc::new(RefCell::new(new_capa));
-        self.add_child_sorted(reference.clone());
+        self.add_child(reference.clone(), Weak::new());
         Ok(reference)
-    }
-
-    pub fn add_child_sorted(&mut self, child: CapaRef<MemoryRegion>) {
-        self.add_child(child, Weak::new());
-        self.children.sort_by(|a, b| {
-            a.borrow()
-                .data
-                .access
-                .start
-                .cmp(&b.borrow().data.access.start)
-        });
     }
 
     pub fn view(&self) -> Vec<ViewRegion> {
@@ -206,7 +195,15 @@ impl Capability<MemoryRegion> {
         let base = self.data.access.start;
 
         // Children are sorted.
-        for c in &self.children {
+        let mut sorted = self.children.clone();
+        sorted.sort_by(|a, b| {
+            a.borrow()
+                .data
+                .access
+                .start
+                .cmp(&b.borrow().data.access.start)
+        });
+        for c in sorted {
             let c_borrow = c.borrow();
             // We do not care
             if c_borrow.data.kind == RegionKind::Alias {

@@ -91,27 +91,6 @@ fn test_alias_with_extra_rights_rejected() {
     assert_eq!(result, Err(CapaError::InvalidAccess));
 }
 
-#[test]
-fn test_add_child_sorted_ordering() {
-    let mut root = create_root();
-
-    let a1 = Access::new(0x4000, 0x1000, Rights::READ);
-    let a2 = Access::new(0x2000, 0x1000, Rights::READ);
-    let a3 = Access::new(0x1000, 0x1000, Rights::READ);
-
-    root.alias(&a1).unwrap();
-    root.alias(&a2).unwrap();
-    root.alias(&a3).unwrap();
-
-    let starts: Vec<u64> = root
-        .children
-        .iter()
-        .map(|c| c.borrow().data.access.start)
-        .collect();
-
-    assert_eq!(starts, vec![0x1000, 0x2000, 0x4000]);
-}
-
 // ——————————————————————————— Nested operations ———————————————————————————— //
 
 #[test]
