@@ -1,4 +1,4 @@
-use crate::domain::{Domain, LocalCapa, MonitorAPI, Status as DStatus};
+use crate::domain::{CapaWrapper, Domain, LocalCapa, MonitorAPI, Status as DStatus};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
@@ -49,6 +49,7 @@ pub enum CapaError {
     InvalidChildCapa,
     CapaNotOwned,
     RevokeOnRootCapa,
+    DoubleRemapping,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq
@@ -317,5 +318,36 @@ impl Capability<Domain> {
             return Err(CapaError::WrongCapaType);
         }
         todo!()
+    }
+
+    pub fn coalesce_view_regions(regions: &mut Vec<ViewRegion>) -> Result<(), CapaError> {
+        let mut curr: usize = 0;
+        while curr < regions.len() {
+            let next = ViewRegion::merge_at(curr, regions)?;
+            curr = next;
+        }
+        Ok(())
+    }
+
+    pub fn view(&self) -> Result<Vec<ViewRegion>, CapaError> {
+        let mut regions: Vec<ViewRegion> = self
+            .data
+            .capabilities
+            .capabilities
+            .iter()
+            .filter_map(|(_, c)| match c {
+                CapaWrapper::Region(r) => Some(r.borrow().view()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        // Now we need to sort and coalesce.
+        regions.sort_by_key(|c| c.access.start);
+
+        // Now go through it and merge.
+        Self::coalesce_view_regions(&mut regions)?;
+
+        Ok(regions)
     }
 }

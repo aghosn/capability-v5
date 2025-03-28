@@ -1,4 +1,8 @@
+use std::cmp::Ordering;
+
 use bitflags::bitflags;
+
+use crate::capability::CapaError;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum RegionKind {
@@ -81,4 +85,138 @@ pub struct MemoryRegion {
 pub struct ViewRegion {
     pub access: Access,
     pub remap: Remapped,
+}
+
+impl ViewRegion {
+    pub fn new(access: Access, remap: Remapped) -> Self {
+        ViewRegion { access, remap }
+    }
+
+    pub fn active_start(&self) -> u64 {
+        if let Remapped::Remapped(gva) = self.remap {
+            gva
+        } else {
+            self.access.start
+        }
+    }
+    pub fn active_end(&self) -> u64 {
+        self.active_start() + self.access.size
+    }
+
+    pub fn contains_remap(&self, other: &ViewRegion) -> bool {
+        self.active_start() <= other.active_start()
+            && other.active_end() <= self.active_end()
+            && self.access.rights.contains(other.access.rights)
+    }
+
+    pub fn contiguous(&self, other: &ViewRegion) -> bool {
+        // They must be contiguous in remaps and non remaps
+        // and have the same access rights
+        self.active_end() == other.active_start()
+            && self.access.end() == other.access.start
+            && self.access.rights == other.access.rights
+    }
+
+    pub fn overlap_remap(&self, other: &ViewRegion) -> bool {
+        self.active_start() <= other.active_start()
+            && other.active_start() < self.active_end()
+            && self.active_end() < other.active_end()
+    }
+
+    pub fn overlap(&self, other: &ViewRegion) -> bool {
+        self.access.start <= other.access.start
+            && other.access.start < self.access.end()
+            && self.access.end() < other.access.end()
+    }
+
+    pub fn merge_at(curr: usize, regions: &mut Vec<Self>) -> Result<usize, CapaError> {
+        if curr == regions.len() - 1 {
+            return Ok(regions.len());
+        }
+
+        let mut current = regions[curr];
+        let mut other = regions[curr + 1];
+
+        // Case 1: contained.
+        if current.contains_remap(&other) {
+            // Safety check, this should only happen if they are the same in physical space.
+            if !(current.access.start <= other.access.start
+                && other.access.end() <= current.access.end())
+            {
+                return Err(CapaError::DoubleRemapping);
+            }
+            // Remove the next.
+            regions.remove(curr + 1);
+            return Ok(curr);
+        }
+
+        // Case 2: contiguous
+        if current.contiguous(&other) {
+            current = ViewRegion::new(
+                Access::new(
+                    current.access.start,
+                    current.access.size + other.access.size,
+                    current.access.rights,
+                ),
+                current.remap,
+            );
+            // Commit the change.
+            regions[curr] = current;
+            regions.remove(curr + 1);
+            return Ok(curr);
+        }
+
+        if current.overlap_remap(&other) {
+            // Check that they are in the same physical space.
+            if !current.overlap(&other) {
+                return Err(CapaError::DoubleRemapping);
+            }
+            // Split the overlap and let the next round merge contiguous.
+            let middle_remap = match current.remap {
+                Remapped::Identity => Remapped::Identity,
+                Remapped::Remapped(x) => {
+                    Remapped::Remapped(other.access.start - current.access.start + x)
+                }
+            };
+            let middle = ViewRegion::new(
+                Access::new(
+                    other.access.start,
+                    current.access.end() - other.access.start,
+                    current.access.rights.union(other.access.rights),
+                ),
+                middle_remap,
+            );
+            // Update left.
+            current.access.size -= middle.access.size;
+            // Update right
+            other.access.start = middle.access.end();
+            let other_remap = match other.remap {
+                Remapped::Identity => Remapped::Identity,
+                Remapped::Remapped(x) => Remapped::Remapped(x + middle.access.size),
+            };
+
+            other.remap = other_remap;
+            // Commit the changes before inserting the new view.
+            regions[curr] = current;
+            regions[curr + 1] = other;
+            // Now insert
+            regions.insert(curr + 1, middle);
+            return Ok(curr);
+        }
+        Ok(curr + 1)
+    }
+}
+
+impl PartialOrd for ViewRegion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ViewRegion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.active_start()
+            .cmp(&other.active_start())
+            .then(self.access.size.cmp(&other.access.size))
+    }
 }
