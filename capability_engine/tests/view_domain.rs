@@ -542,3 +542,64 @@ fn test_view_child_start_overlap_remap() {
     let obtained = child.borrow().view().unwrap();
     assert_eq!(obtained, expected);
 }
+
+#[test]
+fn test_view_child_end_overlap_remap() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    let alias_access = Access::new(0x0, 0x5000, Rights::READ | Rights::WRITE);
+    let alias = engine.alias(td0.clone(), td0_r0, &alias_access).unwrap();
+
+    let start_access = Access::new(0x4000, 0x1000, Rights::all());
+    let start = engine.alias(td0.clone(), td0_r0, &start_access).unwrap();
+
+    // Create a child.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Send the capa to the child.
+    engine
+        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x30000))
+        .unwrap();
+
+    engine
+        .send(td0.clone(), child_td, start, Remapped::Remapped(0x34000))
+        .unwrap();
+
+    // Seal the child.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    // The view we expect for the child.
+    let child = td0
+        .borrow()
+        .data
+        .capabilities
+        .get(&child_td)
+        .unwrap()
+        .as_domain()
+        .unwrap();
+
+    let expected = vec![
+        ViewRegion::new(
+            Access::new(0, 0x4000, Rights::READ | Rights::WRITE),
+            Remapped::Remapped(0x30000),
+        ),
+        ViewRegion::new(
+            Access::new(0x4000, 0x1000, Rights::all()),
+            Remapped::Remapped(0x34000),
+        ),
+    ];
+    let obtained = child.borrow().view().unwrap();
+    assert_eq!(obtained, expected);
+}
