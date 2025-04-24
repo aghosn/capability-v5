@@ -360,16 +360,14 @@ impl Capability<Domain> {
         Ok(view)
     }
 
-    pub fn check_conflict(&self, capa: CapaRef<MemoryRegion>) -> Result<(), CapaError> {
+    pub fn check_conflict(&self, view: &ViewRegion) -> Result<(), CapaError> {
         // Ensure there is no ambiguity when we map a gva.
-        let view = capa.borrow().view();
         let effective = self.gva_view()?;
         for r in effective.iter() {
-            for v in view.iter() {
-                // Check that they are mapping to the same thing.
-                if !r.compatible(v) {
-                    return Err(CapaError::IncompatibleRemap);
-                }
+            // Check that they are mapping to the same thing.
+            println!("R {:?} and view {:?}", r, view);
+            if !r.compatible(view) {
+                return Err(CapaError::IncompatibleRemap);
             }
         }
         Ok(())

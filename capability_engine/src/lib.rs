@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use capability::{CapaError, CapaRef, Capability, Ownership};
 use domain::{Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status};
-use memory_region::{Access, MemoryRegion, Remapped};
+use memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
 
 use crate::domain::CapaWrapper;
 
@@ -249,6 +249,15 @@ impl Engine {
         {
             return Err(CapaError::CallNotAllowed);
         }
+
+        // Check the conflicts in the dest.
+        {
+            let region = dom.data.capabilities.get(&capa)?.as_region()?;
+            dest.borrow()
+                .check_conflict(&ViewRegion::new(region.borrow().data.access, remap))?;
+            println!("we survived the conflict {:#?}", dest.borrow().gva_view());
+        }
+
         let region = dom.data.capabilities.remove(&capa)?.as_region()?;
 
         //TODO: do vital clean etc?
@@ -258,9 +267,6 @@ impl Engine {
             let mut ref_reg = region.borrow_mut();
             ref_reg.data.remapped = remap;
         };
-
-        // Check there is no conflict for the new capability.
-        dest.borrow().check_conflict(region.clone())?;
 
         let dest_capa = dest
             .borrow_mut()

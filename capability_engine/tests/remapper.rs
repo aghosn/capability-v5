@@ -45,7 +45,7 @@ fn setup_engine_with_root() -> (
 }
 
 #[test]
-fn test_remap_alias() {
+fn test_remap_carve() {
     // Initial setup
     let (engine, td0, r0, td0_r0) = setup_engine_with_root();
 
@@ -94,9 +94,95 @@ r1 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
     // Check the views.
     let view = td0.borrow().view().unwrap();
     let expected = vec![ViewRegion::new(
-        Access::new(0x1000, 0x10000, Rights::all()),
+        Access::new(0x1000, 0xf000, Rights::all()),
         Remapped::Identity,
     )];
 
-    //assert_eq!(view, expected);
+    assert_eq!(view, expected);
+    // Get the child and check the view.
+    {
+        let child = td0
+            .borrow()
+            .data
+            .capabilities
+            .get(&child_td)
+            .unwrap()
+            .as_domain()
+            .unwrap();
+        let view = child.borrow().view().unwrap();
+        let expected = vec![ViewRegion::new(
+            Access::new(0x0, 0x1000, Rights::all()),
+            Remapped::Remapped(0x2000),
+        )];
+        assert_eq!(view, expected);
+
+        let display = format!("{}", child.borrow());
+        let expected = r#"td0 = Sealed domain(r0)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
+"#;
+        assert_eq!(display, expected);
+    }
+    // Now let's cleanup.
+    engine.revoke(td0.clone(), child_td, 0).unwrap();
+    let view = td0.borrow().view().unwrap();
+    let expected = vec![ViewRegion::new(
+        Access::new(0x0, 0x10000, Rights::all()),
+        Remapped::Identity,
+    )];
+    assert_eq!(view, expected);
+}
+
+#[test]
+fn test_remap_illegal() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    // Create a child.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Create a region and send it with a remap
+    let alias_access = Access::new(0x0, 0x2000, Rights::all());
+    let alias2_access = Access::new(0x0, 0x1000, Rights::all());
+    let alias = engine.alias(td0.clone(), td0_r0, &alias_access).unwrap();
+    let alias2 = engine.alias(td0.clone(), td0_r0, &alias2_access).unwrap();
+
+    // Send them with a remap.
+    engine
+        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x10000))
+        .unwrap();
+    let res = engine.send(td0.clone(), child_td, alias2, Remapped::Remapped(0x10000));
+    assert!(res.is_err());
+    let res = engine.send(td0.clone(), child_td, alias2, Remapped::Remapped(0x11000));
+    assert!(res.is_err());
+
+    engine
+        .send(td0.clone(), child_td, alias2, Remapped::Remapped(0x12000))
+        .unwrap();
+
+    // Seal the child.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    // Check revoking makes all things good.
+    engine.revoke(td0.clone(), child_td, 0).unwrap();
+
+    let view = td0.borrow().view().unwrap();
+    let expected = vec![ViewRegion::new(
+        Access::new(0x0, 0x10000, Rights::all()),
+        Remapped::Identity,
+    )];
+    assert_eq!(view, expected);
 }

@@ -118,22 +118,22 @@ impl ViewRegion {
     }
 
     pub fn overlap_remap(&self, other: &ViewRegion) -> bool {
-        self.active_start() <= other.active_start()
-            && other.active_start() < self.active_end()
-            && self.active_end() < other.active_end()
+        self.active_start() <= other.active_start() && other.active_start() < self.active_end()
+        //&& self.active_end() < other.active_end()
     }
 
     pub fn overlap(&self, other: &ViewRegion) -> bool {
-        self.access.start <= other.access.start
-            && other.access.start < self.access.end()
-            && self.access.end() < other.access.end()
+        self.access.start <= other.access.start && other.access.start < self.access.end()
+        //&& self.access.end() < other.access.end()
     }
 
     pub fn compatible(&self, other: &ViewRegion) -> bool {
         if self.active_start() <= other.active_start() && !self.overlap_remap(other) {
+            println!("No overlap");
             return true;
         }
         if self.active_start() >= other.active_start() && !other.overlap_remap(self) {
+            println!("No overlap 2");
             return true;
         }
         let (first, second) = if self.active_start() <= other.active_start() {
@@ -144,6 +144,7 @@ impl ViewRegion {
 
         match (first.remap, second.remap) {
             (Remapped::Identity, Remapped::Identity) => {
+                println!("Both are identity what the fuck");
                 return true;
             }
             // Needs to be remapped in exactly the same way.
