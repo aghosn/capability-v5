@@ -85,8 +85,12 @@ fn test_engine_create_root_and_simple_child() {
             .unwrap();
 
         // Send the region, this moves the references.
-        engine.send(ref_td.clone(), child_td, ref_aliased).unwrap();
-        engine.send(ref_td.clone(), child_td, ref_carved).unwrap();
+        engine
+            .send(ref_td.clone(), child_td, ref_aliased, Remapped::Identity)
+            .unwrap();
+        engine
+            .send(ref_td.clone(), child_td, ref_carved, Remapped::Identity)
+            .unwrap();
 
         // Seal
         engine.seal(ref_td.clone(), child_td).unwrap();
@@ -258,8 +262,12 @@ fn test_engine_nested_child_revoke_td() {
                     &Access::new(0x5000, 0x1000, Rights::READ | Rights::WRITE),
                 )
                 .unwrap();
-            engine.send(td0.clone(), td0_td1, td0_r0_carve).unwrap();
-            engine.send(td0.clone(), td0_td1, td0_r0_alias).unwrap();
+            engine
+                .send(td0.clone(), td0_td1, td0_r0_carve, Remapped::Identity)
+                .unwrap();
+            engine
+                .send(td0.clone(), td0_td1, td0_r0_alias, Remapped::Identity)
+                .unwrap();
             // Finally seal the td.
             engine.seal(td0.clone(), td0_td1).unwrap();
         }
@@ -287,8 +295,12 @@ fn test_engine_nested_child_revoke_td() {
                     &Access::new(0x3000, 0x1000, Rights::READ | Rights::WRITE),
                 )
                 .unwrap();
-            engine.send(td1.clone(), td1_td2, td1_carve).unwrap();
-            engine.send(td1.clone(), td1_td2, td1_alias).unwrap();
+            engine
+                .send(td1.clone(), td1_td2, td1_carve, Remapped::Identity)
+                .unwrap();
+            engine
+                .send(td1.clone(), td1_td2, td1_alias, Remapped::Identity)
+                .unwrap();
             engine.seal(td1.clone(), td1_td2).unwrap();
         }
         td0_td1
@@ -420,8 +432,12 @@ fn test_engine_nested_revoke_r1() {
                     &Access::new(0x5000, 0x1000, Rights::READ | Rights::WRITE),
                 )
                 .unwrap();
-            engine.send(td0.clone(), td0_td1, td0_r0_carve).unwrap();
-            engine.send(td0.clone(), td0_td1, td0_r0_alias).unwrap();
+            engine
+                .send(td0.clone(), td0_td1, td0_r0_carve, Remapped::Identity)
+                .unwrap();
+            engine
+                .send(td0.clone(), td0_td1, td0_r0_alias, Remapped::Identity)
+                .unwrap();
             // Finally seal the td.
             engine.seal(td0.clone(), td0_td1).unwrap();
         }
@@ -449,8 +465,12 @@ fn test_engine_nested_revoke_r1() {
                     &Access::new(0x3000, 0x1000, Rights::READ | Rights::WRITE),
                 )
                 .unwrap();
-            engine.send(td1.clone(), td1_td2, td1_carve).unwrap();
-            engine.send(td1.clone(), td1_td2, td1_alias).unwrap();
+            engine
+                .send(td1.clone(), td1_td2, td1_carve, Remapped::Identity)
+                .unwrap();
+            engine
+                .send(td1.clone(), td1_td2, td1_alias, Remapped::Identity)
+                .unwrap();
             engine.seal(td1.clone(), td1_td2).unwrap();
         }
         td0_td1
@@ -637,8 +657,12 @@ fn test_engine_two_children_revoke_aliased_twice() {
             )
             .unwrap();
         // Send the capas.
-        engine.send(td0.clone(), td0_td1, td0_alias_td1).unwrap();
-        engine.send(td0.clone(), td0_td2, td0_alias_td2).unwrap();
+        engine
+            .send(td0.clone(), td0_td1, td0_alias_td1, Remapped::Identity)
+            .unwrap();
+        engine
+            .send(td0.clone(), td0_td2, td0_alias_td2, Remapped::Identity)
+            .unwrap();
 
         // Seal the domains.
         engine.seal(td0.clone(), td0_td1).unwrap();
@@ -834,7 +858,9 @@ fn test_engine_reclaim_from_grand_child() {
                 )
                 .unwrap();
             engine.seal(current.clone(), child).unwrap();
-            engine.send(current.clone(), child, to_send).unwrap();
+            engine
+                .send(current.clone(), child, to_send, Remapped::Identity)
+                .unwrap();
             // Update to point to the child.
             let child_ref = current
                 .borrow()

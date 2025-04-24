@@ -129,6 +129,38 @@ impl ViewRegion {
             && self.access.end() < other.access.end()
     }
 
+    pub fn compatible(&self, other: &ViewRegion) -> bool {
+        if self.active_start() <= other.active_start() && !self.overlap_remap(other) {
+            return true;
+        }
+        if self.active_start() >= other.active_start() && !other.overlap_remap(self) {
+            return true;
+        }
+        let (first, second) = if self.active_start() <= other.active_start() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+
+        match (first.remap, second.remap) {
+            (Remapped::Identity, Remapped::Identity) => {
+                return true;
+            }
+            // Needs to be remapped in exactly the same way.
+            (Remapped::Remapped(x), Remapped::Remapped(y)) => {
+                // They are not ordered in the same way, that won't work.
+                if first.access.start >= second.access.start {
+                    return false;
+                }
+                let diff_active = y - x;
+                let diff_real = second.access.start - first.access.start;
+                return diff_active == diff_real;
+            }
+            // For the moment, let's disallow all remapping overlaps.
+            _ => return false,
+        }
+    }
+
     pub fn merge_at(curr: usize, regions: &mut Vec<Self>) -> Result<usize, CapaError> {
         if curr == regions.len() - 1 {
             return Ok(regions.len());

@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use capability::{CapaError, CapaRef, Capability, Ownership};
 use domain::{Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status};
-use memory_region::{Access, MemoryRegion};
+use memory_region::{Access, MemoryRegion, Remapped};
 
 use crate::domain::CapaWrapper;
 
@@ -238,6 +238,7 @@ impl Engine {
         domain: CapaRef<Domain>,
         dest: LocalCapa,
         capa: LocalCapa,
+        remap: Remapped,
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEND)?;
 
@@ -249,6 +250,18 @@ impl Engine {
             return Err(CapaError::CallNotAllowed);
         }
         let region = dom.data.capabilities.remove(&capa)?.as_region()?;
+
+        //TODO: do vital clean etc?
+
+        // Apply the remapping.
+        {
+            let mut ref_reg = region.borrow_mut();
+            ref_reg.data.remapped = remap;
+        };
+
+        // Check there is no conflict for the new capability.
+        dest.borrow().check_conflict(region.clone())?;
+
         let dest_capa = dest
             .borrow_mut()
             .data

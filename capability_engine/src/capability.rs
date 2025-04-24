@@ -50,6 +50,7 @@ pub enum CapaError {
     CapaNotOwned,
     RevokeOnRootCapa,
     DoubleRemapping,
+    IncompatibleRemap,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq
@@ -211,19 +212,21 @@ impl Capability<MemoryRegion> {
                 continue;
             }
             // It is a carve, the segment loses access.
-            if start < c_borrow.data.access.start {
+            if start <= c_borrow.data.access.start {
                 let r = match self.data.remapped {
                     Remapped::Identity => Remapped::Identity,
                     Remapped::Remapped(x) => Remapped::Remapped(x + (start - base)),
                 };
-                views.push(ViewRegion {
-                    access: Access {
-                        start,
-                        size: (c_borrow.data.access.start - start),
-                        rights: self.data.access.rights,
-                    },
-                    remap: r,
-                });
+                if c_borrow.data.access.start != start {
+                    views.push(ViewRegion {
+                        access: Access {
+                            start,
+                            size: (c_borrow.data.access.start - start),
+                            rights: self.data.access.rights,
+                        },
+                        remap: r,
+                    });
+                }
                 start = c_borrow.data.access.end();
             }
         }
@@ -349,5 +352,26 @@ impl Capability<Domain> {
         Self::coalesce_view_regions(&mut regions)?;
 
         Ok(regions)
+    }
+
+    pub fn gva_view(&self) -> Result<Vec<ViewRegion>, CapaError> {
+        let mut view = self.view()?;
+        view.sort_by(|a, b| a.active_start().cmp(&b.active_start()));
+        Ok(view)
+    }
+
+    pub fn check_conflict(&self, capa: CapaRef<MemoryRegion>) -> Result<(), CapaError> {
+        // Ensure there is no ambiguity when we map a gva.
+        let view = capa.borrow().view();
+        let effective = self.gva_view()?;
+        for r in effective.iter() {
+            for v in view.iter() {
+                // Check that they are mapping to the same thing.
+                if !r.compatible(v) {
+                    return Err(CapaError::IncompatibleRemap);
+                }
+            }
+        }
+        Ok(())
     }
 }

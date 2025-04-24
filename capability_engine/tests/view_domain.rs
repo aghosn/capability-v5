@@ -156,7 +156,9 @@ fn test_view_sending_alias() {
         .unwrap();
 
     // Send the capa to the child.
-    engine.send(td0.clone(), child_td, aliased).unwrap();
+    engine
+        .send(td0.clone(), child_td, aliased, Remapped::Identity)
+        .unwrap();
 
     // Seal the child.
     engine.seal(td0.clone(), child_td).unwrap();
@@ -208,7 +210,9 @@ fn test_view_sending_carve() {
         .unwrap();
 
     // Send the capa to the child.
-    engine.send(td0.clone(), child_td, carved).unwrap();
+    engine
+        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .unwrap();
 
     // Seal the child.
     engine.seal(td0.clone(), child_td).unwrap();
@@ -221,6 +225,114 @@ fn test_view_sending_carve() {
             Remapped::Identity,
         ),
     ];
+
+    let obtained = td0.borrow().view().unwrap();
+    assert_eq!(obtained, expected);
+
+    // The view we expect for the child.
+    let child = td0
+        .borrow()
+        .data
+        .capabilities
+        .get(&child_td)
+        .unwrap()
+        .as_domain()
+        .unwrap();
+
+    let expected = vec![ViewRegion::new(carve_access, Remapped::Identity)];
+    let obtained = child.borrow().view().unwrap();
+    assert_eq!(obtained, expected);
+}
+
+#[test]
+fn test_view_sending_carve_begin() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    let carve_access = Access::new(0x0, 0x1000, Rights::READ | Rights::WRITE);
+    let carved = engine.carve(td0.clone(), td0_r0, &carve_access).unwrap();
+
+    // Create a child.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Send the capa to the child.
+    engine
+        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .unwrap();
+
+    // Seal the child.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    // The view we expect for td0.
+    let expected = vec![ViewRegion::new(
+        Access::new(0x1000, 0xf000, Rights::all()),
+        Remapped::Identity,
+    )];
+
+    let obtained = td0.borrow().view().unwrap();
+    assert_eq!(obtained, expected);
+
+    // The view we expect for the child.
+    let child = td0
+        .borrow()
+        .data
+        .capabilities
+        .get(&child_td)
+        .unwrap()
+        .as_domain()
+        .unwrap();
+
+    let expected = vec![ViewRegion::new(carve_access, Remapped::Identity)];
+    let obtained = child.borrow().view().unwrap();
+    assert_eq!(obtained, expected);
+}
+
+#[test]
+fn test_view_sending_carve_end() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    let carve_access = Access::new(0xf000, 0x1000, Rights::READ | Rights::WRITE);
+    let carved = engine.carve(td0.clone(), td0_r0, &carve_access).unwrap();
+
+    // Create a child.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Send the capa to the child.
+    engine
+        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .unwrap();
+
+    // Seal the child.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    // The view we expect for td0.
+    let expected = vec![ViewRegion::new(
+        Access::new(0x0, 0xf000, Rights::all()),
+        Remapped::Identity,
+    )];
 
     let obtained = td0.borrow().view().unwrap();
     assert_eq!(obtained, expected);
