@@ -214,15 +214,23 @@ impl ViewRegion {
             let middle = ViewRegion::new(
                 Access::new(
                     other.access.start,
-                    current.access.end() - other.access.start,
+                    u64::min(current.access.end(), other.access.end()) - other.access.start,
                     current.access.rights.union(other.access.rights),
                 ),
                 middle_remap,
             );
+            let remainder = u64::max(current.access.end(), other.access.end());
+            let rights = if remainder == current.access.end() {
+                current.access.rights
+            } else {
+                other.access.rights
+            };
             // Update left.
-            current.access.size -= middle.access.size;
+            current.access.size = middle.access.start - current.access.start;
             // Update right
             other.access.start = middle.access.end();
+            other.access.size = remainder - other.access.start;
+            other.access.rights = rights;
             let other_remap = match other.remap {
                 Remapped::Identity => Remapped::Identity,
                 Remapped::Remapped(x) => Remapped::Remapped(x + middle.access.size),
