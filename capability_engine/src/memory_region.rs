@@ -150,7 +150,7 @@ impl ViewRegion {
             // we need to avoid gva mapping to multiple hpa.
             (Remapped::Remapped(x), Remapped::Remapped(y)) => {
                 // They are not ordered in the same way, that won't work.
-                if first.access.start >= second.access.start {
+                if first.access.start > second.access.start {
                     return false;
                 }
                 let diff_active = y - x;
@@ -241,7 +241,11 @@ impl ViewRegion {
             regions[curr] = current;
             regions[curr + 1] = other;
             // Now insert
-            regions.insert(curr + 1, middle);
+            if current.access.size == 0 {
+                regions[curr] = middle;
+            } else {
+                regions.insert(curr + 1, middle);
+            }
             return Ok(curr);
         }
         Ok(curr + 1)

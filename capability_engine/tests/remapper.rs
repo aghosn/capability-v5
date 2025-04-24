@@ -164,14 +164,11 @@ fn test_remap_illegal() {
     engine
         .send(td0.clone(), child_td, alias, Remapped::Remapped(0x10000))
         .unwrap();
-    let res = engine.send(td0.clone(), child_td, alias2, Remapped::Remapped(0x10000));
-    assert!(res.is_err());
+    engine
+        .send(td0.clone(), child_td, alias2, Remapped::Remapped(0x10000))
+        .unwrap();
     let res = engine.send(td0.clone(), child_td, alias2, Remapped::Remapped(0x11000));
     assert!(res.is_err());
-
-    engine
-        .send(td0.clone(), child_td, alias2, Remapped::Remapped(0x12000))
-        .unwrap();
 
     // Seal the child.
     engine.seal(td0.clone(), child_td).unwrap();
