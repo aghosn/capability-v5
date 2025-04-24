@@ -255,7 +255,6 @@ impl Engine {
             let region = dom.data.capabilities.get(&capa)?.as_region()?;
             dest.borrow()
                 .check_conflict(&ViewRegion::new(region.borrow().data.access, remap))?;
-            println!("we survived the conflict {:#?}", dest.borrow().gva_view());
         }
 
         let region = dom.data.capabilities.remove(&capa)?.as_region()?;

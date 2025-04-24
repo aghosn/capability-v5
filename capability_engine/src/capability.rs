@@ -248,6 +248,12 @@ impl Capability<MemoryRegion> {
         views
     }
 
+    // Does not remove the carved.
+    // This is used to check for compatible sends.
+    pub fn view_raw(&self) -> Vec<ViewRegion> {
+        vec![ViewRegion::new(self.data.access, self.data.remapped)]
+    }
+
     pub fn contained(&self, access: &Access) -> bool {
         // Easy case, it's not even contained without considering children.
         if !access.contained(&self.data.access) {
@@ -354,18 +360,27 @@ impl Capability<Domain> {
         Ok(regions)
     }
 
-    pub fn gva_view(&self) -> Result<Vec<ViewRegion>, CapaError> {
-        let mut view = self.view()?;
-        view.sort_by(|a, b| a.active_start().cmp(&b.active_start()));
-        Ok(view)
+    pub fn gva_view_raw(&self) -> Result<Vec<ViewRegion>, CapaError> {
+        let mut regions: Vec<ViewRegion> = self
+            .data
+            .capabilities
+            .capabilities
+            .iter()
+            .filter_map(|(_, c)| match c {
+                CapaWrapper::Region(r) => Some(r.borrow().view_raw()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        regions.sort_by(|a, b| a.active_start().cmp(&b.active_start()));
+        Ok(regions)
     }
 
     pub fn check_conflict(&self, view: &ViewRegion) -> Result<(), CapaError> {
         // Ensure there is no ambiguity when we map a gva.
-        let effective = self.gva_view()?;
+        let effective = self.gva_view_raw()?;
         for r in effective.iter() {
             // Check that they are mapping to the same thing.
-            println!("R {:?} and view {:?}", r, view);
             if !r.compatible(view) {
                 return Err(CapaError::IncompatibleRemap);
             }

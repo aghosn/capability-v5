@@ -129,11 +129,9 @@ impl ViewRegion {
 
     pub fn compatible(&self, other: &ViewRegion) -> bool {
         if self.active_start() <= other.active_start() && !self.overlap_remap(other) {
-            println!("No overlap");
             return true;
         }
         if self.active_start() >= other.active_start() && !other.overlap_remap(self) {
-            println!("No overlap 2");
             return true;
         }
         let (first, second) = if self.active_start() <= other.active_start() {
@@ -144,10 +142,12 @@ impl ViewRegion {
 
         match (first.remap, second.remap) {
             (Remapped::Identity, Remapped::Identity) => {
-                println!("Both are identity what the fuck");
                 return true;
             }
             // Needs to be remapped in exactly the same way.
+            // We can have several capabilities with the same physical and remaped
+            // range but we cannot have a gap with two different ranges, i.e.,
+            // we need to avoid gva mapping to multiple hpa.
             (Remapped::Remapped(x), Remapped::Remapped(y)) => {
                 // They are not ordered in the same way, that won't work.
                 if first.access.start >= second.access.start {

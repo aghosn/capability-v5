@@ -186,3 +186,113 @@ fn test_remap_illegal() {
     )];
     assert_eq!(view, expected);
 }
+
+#[test]
+fn test_remap_illegal_in_hole() {
+    // Initial setup
+    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+
+    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::weak_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&r0), 2);
+
+    // Create a child.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Create a region and send it with a remap
+    let alias_access = Access::new(0x0, 0x3000, Rights::all());
+    let alias = engine.alias(td0.clone(), td0_r0, &alias_access).unwrap();
+    let plug_access = Access::new(0x4000, 0x1000, Rights::all());
+    let plug = engine.alias(td0.clone(), td0_r0, &plug_access).unwrap();
+
+    // Send them with a remap.
+    engine
+        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x10000))
+        .unwrap();
+
+    // Seal the child.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    // Let the child create a hole in his address space.
+    {
+        let child = td0
+            .borrow()
+            .data
+            .capabilities
+            .get(&child_td)
+            .unwrap()
+            .as_domain()
+            .unwrap();
+
+        let carve_access = Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE);
+        let carve = engine.carve(child.clone(), 1, &carve_access).unwrap();
+
+        let view = child.borrow().view().unwrap();
+        let expected = vec![
+            ViewRegion::new(
+                Access::new(0x0, 0x1000, Rights::all()),
+                Remapped::Remapped(0x10000),
+            ),
+            ViewRegion::new(
+                Access::new(0x1000, 0x1000, Rights::READ | Rights::WRITE),
+                Remapped::Remapped(0x11000),
+            ),
+            ViewRegion::new(
+                Access::new(0x2000, 0x1000, Rights::all()),
+                Remapped::Remapped(0x12000),
+            ),
+        ];
+        assert_eq!(view, expected);
+
+        // Create the grandchild.
+        let gc_td = engine
+            .create(
+                child.clone(),
+                1,
+                MonitorAPI::all(),
+                InterruptPolicy::default_none(),
+            )
+            .unwrap();
+
+        engine
+            .send(child.clone(), gc_td, carve, Remapped::Identity)
+            .unwrap();
+        engine.seal(child.clone(), gc_td).unwrap();
+
+        // Now check the view.
+        let view = child.borrow().view().unwrap();
+        let expected = vec![
+            ViewRegion::new(
+                Access::new(0x0, 0x1000, Rights::all()),
+                Remapped::Remapped(0x10000),
+            ),
+            ViewRegion::new(
+                Access::new(0x2000, 0x1000, Rights::all()),
+                Remapped::Remapped(0x12000),
+            ),
+        ];
+        assert_eq!(view, expected);
+    }
+
+    // Okay now attempt to plug the hole.
+    let err = engine.send(td0.clone(), child_td, plug, Remapped::Remapped(0x11000));
+    assert!(err.is_err());
+
+    // Let's revoke everything.
+    engine.revoke(td0.clone(), child_td, 0).unwrap();
+
+    // Check revoking makes all things good.
+    let view = td0.borrow().view().unwrap();
+    let expected = vec![ViewRegion::new(
+        Access::new(0x0, 0x10000, Rights::all()),
+        Remapped::Identity,
+    )];
+    assert_eq!(view, expected);
+}
