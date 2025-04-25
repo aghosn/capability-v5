@@ -1,4 +1,6 @@
-use crate::domain::{CapaWrapper, Domain, LocalCapa, MonitorAPI, Status as DStatus};
+use crate::domain::{
+    CapaWrapper, Domain, Field, FieldType, LocalCapa, MonitorAPI, Status as DStatus,
+};
 use crate::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
@@ -51,6 +53,8 @@ pub enum CapaError {
     RevokeOnRootCapa,
     DoubleRemapping,
     IncompatibleRemap,
+    InvalidField,
+    InvalidValue,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq
@@ -286,18 +290,35 @@ impl Capability<Domain> {
         }
     }
 
-    pub fn set(&self, _child: LocalCapa) -> Result<(), CapaError> {
-        if !self.data.operation_allowed(MonitorAPI::SET) {
-            return Err(CapaError::CallNotAllowed);
+    // Set on self.
+    pub fn set(
+        &mut self,
+        _core: usize,
+        tpe: FieldType,
+        field: Field,
+        value: usize,
+    ) -> Result<(), CapaError> {
+        match tpe {
+            FieldType::Register => {
+                todo!()
+            }
+            _ => {
+                if self.data.is_sealed() {
+                    return Err(CapaError::DomainSealed);
+                }
+
+                self.data.set_policy(tpe, field, value)?;
+            }
         }
-        todo!()
+        Ok(())
     }
 
-    pub fn get(&self, _child: LocalCapa) -> Result<(), CapaError> {
-        if !self.data.operation_allowed(MonitorAPI::GET) {
-            return Err(CapaError::CallNotAllowed);
+    // Get on self.
+    pub fn get(&self, _core: usize, tpe: FieldType, field: Field) -> Result<usize, CapaError> {
+        match tpe {
+            FieldType::Register => todo!(),
+            _ => self.data.get_policy(tpe, field),
         }
-        todo!();
     }
 
     pub fn seal(&self, child: LocalCapa) -> Result<(), CapaError> {

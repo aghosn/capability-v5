@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use capability::{CapaError, CapaRef, Capability, Ownership};
-use domain::{Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status};
+use domain::{Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status};
 use memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
 
 use crate::domain::CapaWrapper;
@@ -10,6 +10,7 @@ pub mod capability;
 pub mod display;
 pub mod domain;
 pub mod memory_region;
+pub mod platform;
 
 /// Engine implementation.
 /// This is the entry point for all operations.
@@ -76,20 +77,65 @@ impl Engine {
         Ok(local_capa)
     }
 
-    pub fn set(&self, domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+    pub fn set(
+        &self,
+        domain: CapaRef<Domain>,
+        child: LocalCapa,
+        core: usize,
+        tpe: FieldType,
+        field: Field,
+        value: usize,
+    ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SET)?;
-        todo!();
+        // Check if the domain is sealed in which case policies cannot be set.
+        if tpe != FieldType::Register
+            && domain
+                .borrow()
+                .data
+                .capabilities
+                .get(&child)?
+                .as_domain()?
+                .borrow()
+                .data
+                .is_sealed()
+        {
+            return Err(CapaError::DomainSealed);
+        }
+        // The fact that it is a subset will be checked at seal time for policies.
+        domain
+            .borrow()
+            .data
+            .capabilities
+            .get(&child)?
+            .as_domain()?
+            .borrow_mut()
+            .set(core, tpe, field, value)
     }
 
-    pub fn get(&self, domain: CapaRef<Domain>, _child: LocalCapa) -> Result<(), CapaError> {
+    pub fn get(
+        &self,
+        domain: CapaRef<Domain>,
+        child: LocalCapa,
+        core: usize,
+        tpe: FieldType,
+        field: Field,
+    ) -> Result<usize, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::GET)?;
-        todo!();
+        domain
+            .borrow()
+            .data
+            .capabilities
+            .get(&child)?
+            .as_domain()?
+            .borrow()
+            .get(core, tpe, field)
     }
 
     pub fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEAL)?;
 
         let current_policies = &domain.borrow().data.policies;
+        // Check the child's policies are a subset of the parent.
         if !current_policies.contains(
             &domain
                 .borrow()

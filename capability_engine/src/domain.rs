@@ -48,6 +48,19 @@ pub enum Status {
     Revoked,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FieldType {
+    Register,
+    Cores,
+    Api,
+    InterruptVisibility,
+    InterruptRead,
+    InterruptWrite,
+}
+
+/// Define the type for field here
+pub type Field = usize;
+
 pub struct Policies {
     pub cores: u64,
     pub api: MonitorAPI,
@@ -118,6 +131,27 @@ impl InterruptPolicy {
             }
         }
         return true;
+    }
+
+    pub fn set(&mut self, tpe: FieldType, field: usize, value: usize) -> Result<(), CapaError> {
+        if field >= NB_INTERRUPTS {
+            return Err(CapaError::InvalidField);
+        }
+        match tpe {
+            FieldType::InterruptVisibility => {
+                let vis =
+                    VectorVisibility::from_bits(value as u8).ok_or(CapaError::InvalidValue)?;
+                self.vectors[field].visibility = vis;
+            }
+            FieldType::InterruptRead => {
+                self.vectors[field].read_set = value as u64;
+            }
+            FieldType::InterruptWrite => {
+                self.vectors[field].write_set = value as u64;
+            }
+            _ => return Err(CapaError::InvalidField),
+        }
+        Ok(())
     }
 }
 
@@ -253,5 +287,57 @@ impl Domain {
 
     pub fn operation_allowed(&self, apicall: MonitorAPI) -> bool {
         self.policies.api.contains(apicall)
+    }
+
+    pub fn set_policy(
+        &mut self,
+        tpe: FieldType,
+        field: usize,
+        value: usize,
+    ) -> Result<(), CapaError> {
+        if self.is_sealed() {
+            return Err(CapaError::DomainSealed);
+        }
+        match tpe {
+            FieldType::Register => return Err(CapaError::InvalidField),
+            FieldType::Cores => {
+                self.policies.cores = value as u64;
+                return Ok(());
+            }
+            FieldType::Api => {
+                self.policies.api =
+                    MonitorAPI::from_bits(value as u16).ok_or(CapaError::InvalidValue)?;
+                return Ok(());
+            }
+            FieldType::InterruptVisibility
+            | FieldType::InterruptRead
+            | FieldType::InterruptWrite => self.policies.interrupts.set(tpe, field, value),
+        }
+    }
+
+    pub fn get_policy(&self, tpe: FieldType, field: usize) -> Result<usize, CapaError> {
+        match tpe {
+            FieldType::Register => return Err(CapaError::InvalidField),
+            FieldType::Api => Ok(self.policies.api.bits() as usize),
+            FieldType::Cores => Ok(self.policies.cores as usize),
+            FieldType::InterruptWrite => {
+                if field >= NB_INTERRUPTS {
+                    return Err(CapaError::InvalidField);
+                }
+                Ok(self.policies.interrupts.vectors[field].write_set as usize)
+            }
+            FieldType::InterruptRead => {
+                if field >= NB_INTERRUPTS {
+                    return Err(CapaError::InvalidField);
+                }
+                Ok(self.policies.interrupts.vectors[field].read_set as usize)
+            }
+            FieldType::InterruptVisibility => {
+                if field >= NB_INTERRUPTS {
+                    return Err(CapaError::InvalidField);
+                }
+                Ok(self.policies.interrupts.vectors[field].visibility.bits() as usize)
+            }
+        }
     }
 }

@@ -173,3 +173,134 @@ fn test_unallowed_calls() {
     let res = td0.borrow().seal(td0_r0);
     assert_eq!(res, Err(CapaError::WrongCapaType));
 }
+
+#[test]
+fn test_set_get() {
+    let (engine, td0, _r0, _td0_r0) = setup_engine_with_root();
+
+    // Create a child domain
+
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // First let's seal it and see if we read the right things.
+    engine.seal(td0.clone(), child_td).unwrap();
+
+    let cores = engine
+        .get(td0.clone(), child_td, 0, FieldType::Cores, 0)
+        .unwrap();
+    assert_eq!(cores, 1);
+
+    let api = engine
+        .get(td0.clone(), child_td, 0, FieldType::Api, 0)
+        .unwrap();
+    assert_eq!(api, MonitorAPI::all().bits() as usize);
+
+    for i in 0..NB_INTERRUPTS {
+        let vis = engine
+            .get(td0.clone(), child_td, 0, FieldType::InterruptVisibility, i)
+            .unwrap();
+        let read = engine
+            .get(td0.clone(), child_td, 0, FieldType::InterruptRead, i)
+            .unwrap();
+        let write = engine
+            .get(td0.clone(), child_td, 0, FieldType::InterruptWrite, i)
+            .unwrap();
+        assert_eq!(vis, 0);
+        assert_eq!(read, !0);
+        assert_eq!(write, !0);
+    }
+
+    // Now attempt to change policies.
+    let res = engine.set(td0.clone(), child_td, 0, FieldType::Cores, 0, 0b11);
+    assert_eq!(res, Err(CapaError::DomainSealed));
+    let res = engine.set(td0.clone(), child_td, 0, FieldType::Api, 0, 0);
+    assert_eq!(res, Err(CapaError::DomainSealed));
+    for i in 0..NB_INTERRUPTS {
+        let res = engine.set(
+            td0.clone(),
+            child_td,
+            0,
+            FieldType::InterruptVisibility,
+            i,
+            1,
+        );
+        assert_eq!(res, Err(CapaError::DomainSealed));
+        let res = engine.set(td0.clone(), child_td, 0, FieldType::InterruptRead, i, 1);
+        assert_eq!(res, Err(CapaError::DomainSealed));
+        let res = engine.set(td0.clone(), child_td, 0, FieldType::InterruptWrite, i, 1);
+        assert_eq!(res, Err(CapaError::DomainSealed));
+    }
+
+    // Revoke and now lets do sets.
+    engine.revoke(td0.clone(), child_td, 0).unwrap();
+
+    // Create the new one and play with its values.
+    let child_td = engine
+        .create(
+            td0.clone(),
+            1,
+            MonitorAPI::empty(),
+            InterruptPolicy::default_none(),
+        )
+        .unwrap();
+
+    // Now attempt to change policies.
+    engine
+        .set(td0.clone(), child_td, 0, FieldType::Cores, 0, 0b11)
+        .unwrap();
+    engine
+        .set(
+            td0.clone(),
+            child_td,
+            0,
+            FieldType::Api,
+            0,
+            MonitorAPI::all().bits() as usize,
+        )
+        .unwrap();
+    for i in 0..NB_INTERRUPTS {
+        engine
+            .set(
+                td0.clone(),
+                child_td,
+                0,
+                FieldType::InterruptVisibility,
+                i,
+                VectorVisibility::all().bits() as usize,
+            )
+            .unwrap();
+        engine
+            .set(td0.clone(), child_td, 0, FieldType::InterruptRead, i, 0)
+            .unwrap();
+        engine
+            .set(td0.clone(), child_td, 0, FieldType::InterruptWrite, i, 0)
+            .unwrap();
+    }
+
+    // Try to set a field that's above the allowed range.
+    let res = engine.set(
+        td0.clone(),
+        child_td,
+        0,
+        FieldType::InterruptVisibility,
+        NB_INTERRUPTS + 2,
+        555,
+    );
+    assert_eq!(res, Err(CapaError::InvalidField));
+    // Same for get.
+    let res = engine.get(
+        td0.clone(),
+        child_td,
+        0,
+        FieldType::InterruptVisibility,
+        NB_INTERRUPTS + 2,
+    );
+    assert_eq!(res, Err(CapaError::InvalidField));
+}
