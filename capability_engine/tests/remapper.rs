@@ -88,6 +88,7 @@ td1 = Sealed domain(r1)
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Carve at 0x0 0x1000 with RWX for r1
 r1 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
+|indices: 1->r0 2->td1
 "#;
     assert_eq!(display, expected);
 
@@ -122,6 +123,7 @@ r1 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
 |mon.api: 0x1fff
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
+|indices: 1->r0
 "#;
         assert_eq!(display, expected);
     }

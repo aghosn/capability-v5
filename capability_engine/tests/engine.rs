@@ -110,6 +110,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Carve at 0x2000 0x4000 with RWX for r2
 r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+|indices: 1->r0 2->td1
 "#;
 
         assert_eq!(display, expected);
@@ -129,6 +130,7 @@ r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+|indices: 1->r0 2->r1
 "#;
         assert_eq!(display, expected);
 
@@ -166,6 +168,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Carve at 0x2000 0x4000 with RWX for r2
 r1 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+|indices: 1->r0 2->td1
 "#;
         assert_eq!(display, expected);
 
@@ -178,6 +181,7 @@ r2 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 r0 = Aliased 0x0 0x2000 with RW_ mapped Identity
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 r2 = Exclusive 0x15000 0x35000 with RWX mapped Identity
+|indices: 1->r0 2->r1 3->r2
 "#;
         assert_eq!(display, expected);
 
@@ -199,6 +203,7 @@ td1 = Sealed domain(r1)
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Carve at 0x2000 0x4000 with RWX for r1
 r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+|indices: 1->r0 2->td1
 "#;
         assert_eq!(display, expected);
 
@@ -208,6 +213,7 @@ r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 |mon.api: 0x1fff
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x2000 0x4000 with RWX mapped Identity
+|indices: 2->r0
 "#;
         assert_eq!(display, expected);
 
@@ -218,6 +224,7 @@ r0 = Exclusive 0x2000 0x4000 with RWX mapped Identity
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
 "#;
         assert_eq!(display, expected);
     }
@@ -324,6 +331,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Alias at 0x5000 0x6000 with RW_ for r2
 r1 = Exclusive 0x0 0x4000 with RWX mapped Identity
 r2 = Aliased 0x5000 0x6000 with RW_ mapped Identity
+|indices: 1->r0 2->td1
 "#;
             assert_eq!(display, expected);
         }
@@ -345,6 +353,7 @@ r0 = Exclusive 0x0 0x4000 with RWX mapped Identity
 r1 = Aliased 0x5000 0x6000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 r3 = Aliased 0x3000 0x4000 with RW_ mapped Identity
+|indices: 1->r0 2->r1 3->td1
 "#;
             assert_eq!(display, expected);
         }
@@ -360,6 +369,7 @@ r3 = Aliased 0x3000 0x4000 with RW_ mapped Identity
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 r1 = Aliased 0x3000 0x4000 with RW_ mapped Identity
+|indices: 1->r0 2->r1
 "#;
             assert_eq!(display, expected);
         }
@@ -374,6 +384,7 @@ r1 = Aliased 0x3000 0x4000 with RW_ mapped Identity
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
 "#;
             assert_eq!(display, expected);
 
@@ -494,6 +505,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Alias at 0x5000 0x6000 with RW_ for r2
 r1 = Exclusive 0x0 0x4000 with RWX mapped Identity
 r2 = Aliased 0x5000 0x6000 with RW_ mapped Identity
+|indices: 1->r0 2->td1
 "#;
             assert_eq!(display, expected);
         }
@@ -515,6 +527,7 @@ r0 = Exclusive 0x0 0x4000 with RWX mapped Identity
 r1 = Aliased 0x5000 0x6000 with RW_ mapped Identity
 r2 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 r3 = Aliased 0x3000 0x4000 with RW_ mapped Identity
+|indices: 1->r0 2->r1 3->td1
 "#;
             assert_eq!(display, expected);
         }
@@ -530,6 +543,7 @@ r3 = Aliased 0x3000 0x4000 with RW_ mapped Identity
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 r1 = Aliased 0x3000 0x4000 with RW_ mapped Identity
+|indices: 1->r0 2->r1
 "#;
             assert_eq!(display, expected);
         }
@@ -550,6 +564,7 @@ td1 = Sealed domain(td2,r1)
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 | Alias at 0x5000 0x6000 with RW_ for r1
 r1 = Aliased 0x5000 0x6000 with RW_ mapped Identity
+|indices: 1->r0 2->td1
 "#;
             assert_eq!(display, expected);
 
@@ -579,6 +594,7 @@ td1 = Sealed domain()
 |mon.api: 0xe0
 |vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
 r0 = Aliased 0x5000 0x6000 with RW_ mapped Identity
+|indices: 2->r0 3->td1
 "#;
             assert_eq!(display, expected);
 
@@ -689,6 +705,7 @@ r1 = Exclusive 0x0 0x2000 with RWX mapped Identity
 | Alias at 0x0 0x1000 with RWX for r3
 r2 = Aliased 0x0 0x2000 with RWX mapped Identity
 r3 = Aliased 0x0 0x1000 with RWX mapped Identity
+|indices: 1->r0 2->td1 3->td2 4->r1
 "#;
         assert_eq!(display, expected);
 
@@ -710,6 +727,7 @@ td2 = Sealed domain()
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0 2->td1 3->td2
 "#;
         assert_eq!(display, expected);
 
@@ -775,6 +793,7 @@ td3 = Sealed domain(td10,td11,td12)
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0 2->td1 3->td2 4->td3
 "#;
         assert_eq!(display, expected);
 
@@ -805,6 +824,7 @@ td3 = Sealed domain(td10,td11,td12)
 |cores: 0x1
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+|indices: 1->td1 2->td2 3->td3
 "#;
             assert_eq!(display, expected);
         }
@@ -821,6 +841,7 @@ td3 = Sealed domain(td10,td11,td12)
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
 "#;
         assert_eq!(display, expected);
     }
@@ -881,6 +902,7 @@ fn test_engine_reclaim_from_grand_child() {
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x1000 with RWX mapped Identity
+|indices: 1->r0
 "#;
         assert_eq!(display, expected);
 
@@ -897,6 +919,7 @@ td1 = Sealed domain(td2)
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0 3->td1
 "#;
         assert_eq!(display, expected);
 
@@ -910,6 +933,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
 "#;
         assert_eq!(display, expected);
     }

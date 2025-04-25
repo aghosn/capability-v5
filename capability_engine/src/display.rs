@@ -347,6 +347,25 @@ impl fmt::Display for Capability<Domain> {
             write!(f, "\n")?;
         }
 
+        // Print the local indices
+        if as_sorted_vector.len() != 0 {
+            write!(f, "|indices:")?;
+            for (key, capa) in as_sorted_vector {
+                match capa {
+                    CapaWrapper::Region(r) => {
+                        let name = names_region.get(&CapaKey(r.clone())).unwrap();
+                        write!(f, " {}->r{}", key, name)?;
+                    }
+                    CapaWrapper::Domain(d) => {
+                        let name = names_td.get(&CapaKey(d.clone())).unwrap();
+                        write!(f, " {}->td{}", key, name)?;
+                    }
+                }
+            }
+
+            write!(f, "\n")?;
+        }
+
         Ok(())
     }
 }
