@@ -499,7 +499,7 @@ impl Unmarshall for Domain {
                 )
             } else {
                 let value =
-                    usize::from_str_radix(parts[0], 10).map_err(|_| CapaError::InvalidValue)?;
+                    usize::from_str_radix(range, 10).map_err(|_| CapaError::InvalidValue)?;
                 (value, value)
             };
 
