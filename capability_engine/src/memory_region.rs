@@ -1,16 +1,18 @@
+use crate::serializer_helper;
 use std::cmp::Ordering;
 
 use bitflags::bitflags;
 
 use crate::capability::CapaError;
+use serde::{Deserialize, Serialize};
 
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RegionKind {
     Carve,
     Alias,
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Status {
     Exclusive,
     Aliased,
@@ -35,16 +37,17 @@ bitflags! {
     }
 }
 
-#[derive(PartialEq, Debug, Clone, Copy, Eq)]
+#[derive(PartialEq, Debug, Clone, Copy, Eq, Serialize, Deserialize)]
 pub enum Remapped {
     Identity,
     Remapped(u64),
 }
 
-#[derive(PartialEq, Clone, Copy, Debug, Eq)]
+#[derive(PartialEq, Clone, Copy, Debug, Eq, Serialize, Deserialize)]
 pub struct Access {
     pub start: u64,
     pub size: u64,
+    #[serde(with = "serializer_helper::serialize_rights")]
     pub rights: Rights,
 }
 
@@ -72,11 +75,12 @@ impl Access {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Serialize, Deserialize)]
 pub struct MemoryRegion {
     pub kind: RegionKind,
     pub status: Status,
     pub access: Access,
+    #[serde(with = "serializer_helper::serialize_attributes")]
     pub attributes: Attributes,
     pub remapped: Remapped,
 }

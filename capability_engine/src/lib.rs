@@ -7,10 +7,12 @@ use memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
 use crate::domain::CapaWrapper;
 
 pub mod capability;
+pub mod client;
 pub mod display;
 pub mod domain;
 pub mod memory_region;
 pub mod platform;
+pub mod serializer_helper;
 
 /// Engine implementation.
 /// This is the entry point for all operations.
@@ -165,7 +167,7 @@ impl Engine {
         todo!();
     }
 
-    pub fn enumerate(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    pub fn enumerate(&self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::ENUMERATE)?;
         todo!();
     }

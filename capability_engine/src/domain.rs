@@ -1,8 +1,14 @@
+use core::fmt;
 use std::collections::{BTreeMap, VecDeque};
+
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::capability::{CapaError, CapaRef};
 use crate::is_core_subset;
 use crate::memory_region::MemoryRegion;
+use crate::serializer_helper;
 use bitflags::bitflags;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,14 +40,14 @@ impl MonitorAPI {
 }
 
 bitflags! {
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
     pub struct VectorVisibility: u8 {
         const ALLOWED = 0b1;
         const VISIBLE = 0b10;
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum Status {
     Unsealed,
     Sealed,
@@ -61,8 +67,10 @@ pub enum FieldType {
 /// Define the type for field here
 pub type Field = usize;
 
+#[derive(PartialEq, Debug, Serialize, Deserialize)]
 pub struct Policies {
     pub cores: u64,
+    #[serde(with = "serializer_helper::serialize_monapi")]
     pub api: MonitorAPI,
     pub interrupts: InterruptPolicy,
 }
@@ -84,8 +92,9 @@ impl Policies {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct VectorPolicy {
+    #[serde(with = "serializer_helper::serialize_visibility")]
     pub visibility: VectorVisibility,
     pub read_set: u64,
     pub write_set: u64,
@@ -96,12 +105,82 @@ impl VectorPolicy {
         //TODO: do we care about register sets?
         self.visibility.contains(other.visibility)
     }
+
+    pub fn default() -> Self {
+        Self {
+            visibility: VectorVisibility::empty(),
+            read_set: 0,
+            write_set: 0,
+        }
+    }
 }
 
 pub const NB_INTERRUPTS: usize = 256;
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct InterruptPolicy {
     pub vectors: [VectorPolicy; NB_INTERRUPTS],
+}
+
+impl Default for InterruptPolicy {
+    fn default() -> Self {
+        Self::default_none()
+    }
+}
+
+impl Serialize for InterruptPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Use a sequence serializer since `vectors` is an array
+        let mut seq = serializer.serialize_seq(Some(NB_INTERRUPTS))?;
+        for vector in &self.vectors {
+            seq.serialize_element(vector)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for InterruptPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct InterruptPolicyVisitor;
+
+        impl<'de> Visitor<'de> for InterruptPolicyVisitor {
+            type Value = InterruptPolicy;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(&format!("an array of {} VectorPolicy items", NB_INTERRUPTS))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut vectors = Vec::with_capacity(NB_INTERRUPTS);
+
+                for _ in 0..NB_INTERRUPTS {
+                    let vector = seq
+                        .next_element::<VectorPolicy>()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(vectors.len(), &self))?;
+                    vectors.push(vector);
+                }
+
+                if vectors.len() != NB_INTERRUPTS {
+                    return Err(serde::de::Error::invalid_length(vectors.len(), &self));
+                }
+
+                let mut array = [VectorPolicy::default(); NB_INTERRUPTS];
+                array.copy_from_slice(&vectors);
+
+                Ok(InterruptPolicy { vectors: array })
+            }
+        }
+        deserializer.deserialize_seq(InterruptPolicyVisitor)
+    }
 }
 
 impl InterruptPolicy {
@@ -179,6 +258,7 @@ impl CapaWrapper {
     }
 }
 
+#[derive(Default)]
 pub struct CapabilityStore {
     pub capabilities: BTreeMap<LocalCapa, CapaWrapper>,
     pub next_handle: LocalCapa,
@@ -238,9 +318,11 @@ impl CapabilityStore {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Domain {
     pub id: u64,
     pub status: Status,
+    #[serde(skip)]
     pub capabilities: CapabilityStore,
     pub policies: Policies,
 }
