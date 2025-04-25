@@ -1,4 +1,5 @@
 use capa_engine::capability::*;
+use capa_engine::display::Unmarshall;
 use capa_engine::domain::*;
 use capa_engine::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
@@ -321,4 +322,27 @@ fn test_set_get() {
         .unwrap();
     engine.seal(td0.clone(), child_td).unwrap();
     engine.revoke(td0.clone(), child_td, 0).unwrap();
+}
+
+#[test]
+fn test_display_unmarshall() {
+    let (_engine, td0, _r0, _td0_r0) = setup_engine_with_root();
+
+    // Let try on TD0 first.
+    let display = format!("{}", td0.borrow());
+
+    let unmarshed_td0 = Domain::from_string(display).unwrap();
+
+    assert_eq!(unmarshed_td0.status, td0.borrow().data.status);
+    assert_eq!(
+        unmarshed_td0.policies.cores,
+        td0.borrow().data.policies.cores
+    );
+    assert_eq!(unmarshed_td0.policies.api, td0.borrow().data.policies.api);
+    for i in 0..NB_INTERRUPTS {
+        assert_eq!(
+            unmarshed_td0.policies.interrupts.vectors[i],
+            td0.borrow().data.policies.interrupts.vectors[i]
+        );
+    }
 }

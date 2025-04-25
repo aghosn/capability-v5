@@ -55,6 +55,9 @@ pub enum CapaError {
     IncompatibleRemap,
     InvalidField,
     InvalidValue,
+    // For parsing
+    ParserStatus,
+    ParserMonitor,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq

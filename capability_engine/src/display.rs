@@ -1,6 +1,7 @@
 use crate::capability::*;
 use crate::domain::{
-    CapaWrapper, Domain, InterruptPolicy, Policies, VectorPolicy, VectorVisibility, NB_INTERRUPTS,
+    CapaWrapper, CapabilityStore, Domain, InterruptPolicy, MonitorAPI, Policies, Status,
+    VectorPolicy, VectorVisibility, NB_INTERRUPTS,
 };
 use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
@@ -410,5 +411,127 @@ impl fmt::Display for VectorVisibility {
             3 => write!(f, "ALLOWED|VISIBLE"),
             _ => write!(f, "INVALID({:#b})", self.bits()),
         }
+    }
+}
+
+// ——————————————————————————————— Unmarshall ——————————————————————————————— //
+
+pub trait Unmarshall {
+    type Output;
+    fn from_string(input: String) -> Result<Self::Output, CapaError>;
+}
+
+impl Unmarshall for Status {
+    type Output = Status;
+    fn from_string(input: String) -> Result<Self::Output, CapaError> {
+        match input.trim().to_lowercase().as_str() {
+            "sealed" => Ok(crate::domain::Status::Sealed),
+            "unsealed" => Ok(crate::domain::Status::Unsealed),
+            _ => return Err(CapaError::ParserStatus),
+        }
+    }
+}
+
+impl Unmarshall for MonitorAPI {
+    type Output = MonitorAPI;
+    fn from_string(input: String) -> Result<Self::Output, CapaError> {
+        let value = input.trim_start_matches("|mon.api: 0x");
+        let raw = u64::from_str_radix(value, 16).map_err(|_| CapaError::ParserMonitor)?;
+        MonitorAPI::from_bits(raw as u16).ok_or(CapaError::ParserMonitor)
+    }
+}
+
+impl Unmarshall for Domain {
+    type Output = Domain;
+
+    //TODO: cut that down into smaller bits.
+    fn from_string(input: String) -> Result<Domain, CapaError> {
+        let lines: Vec<&str> = input.lines().collect();
+        if lines.len() < 4 {
+            return Err(CapaError::InvalidValue);
+        }
+
+        // Parse the status
+        let status = {
+            let first: Vec<&str> = lines
+                .get(0)
+                .ok_or(CapaError::InvalidValue)?
+                .split_whitespace()
+                .filter(|x| {
+                    x.to_lowercase().contains("sealed") || x.to_lowercase().contains("unsealed")
+                })
+                .collect();
+            Status::from_string(first.get(0).ok_or(CapaError::ParserStatus)?.to_string())?
+        };
+        // Parse the cores.
+        let cores = {
+            let mask = lines
+                .get(1)
+                .ok_or(CapaError::InvalidValue)?
+                .trim_start_matches("|cores: 0x");
+            u64::from_str_radix(mask, 16).map_err(|_| CapaError::InvalidValue)?
+        };
+
+        // Parse the API calls.
+        let api =
+            MonitorAPI::from_string(lines.get(2).ok_or(CapaError::InvalidValue)?.to_string())?;
+
+        // Parse the interrupt policies.
+        let mut inter_policy: InterruptPolicy = InterruptPolicy::default_none();
+
+        for l in lines.iter().skip(3) {
+            if !l.starts_with("|vec") {
+                break;
+            }
+            let prefix = l.strip_prefix("|vec").ok_or(CapaError::InvalidValue)?;
+            let parts: Vec<&str> = prefix.split(',').collect();
+            if parts.len() != 3 {
+                return Err(CapaError::InvalidValue);
+            }
+
+            let tmp: Vec<&str> = parts[0].split(':').collect();
+            let (range, visi) = (tmp[0].trim_start_matches("|vec"), tmp[1]);
+            // We have the start and end vector.
+            let (vs, ve) = if let Some((start, end)) = range.split_once('-') {
+                (
+                    usize::from_str_radix(start, 10).map_err(|_| CapaError::InvalidValue)?,
+                    usize::from_str_radix(end, 10).map_err(|_| CapaError::InvalidValue)?,
+                )
+            } else {
+                let value =
+                    usize::from_str_radix(parts[0], 10).map_err(|_| CapaError::InvalidValue)?;
+                (value, value)
+            };
+
+            let visibility = match visi.trim().to_lowercase().as_str() {
+                "allowed|visible" => VectorVisibility::all(),
+                "allowed" => VectorVisibility::ALLOWED,
+                "visible" => VectorVisibility::VISIBLE,
+                "not reported" => VectorVisibility::empty(),
+                _ => return Err(CapaError::InvalidValue),
+            };
+
+            let read = u64::from_str_radix(parts[1].trim_start_matches(" r: 0x"), 16)
+                .map_err(|_| CapaError::InvalidValue)
+                .unwrap();
+            let write = u64::from_str_radix(parts[2].trim_start_matches(" w: 0x"), 16)
+                .map_err(|_| CapaError::InvalidValue)
+                .unwrap();
+
+            // Now set the values
+            for j in vs..=ve {
+                inter_policy.vectors[j] = VectorPolicy {
+                    visibility,
+                    read_set: read,
+                    write_set: write,
+                };
+            }
+        }
+        Ok(Domain {
+            id: 0,
+            status,
+            capabilities: CapabilityStore::new(),
+            policies: Policies::new(cores, api, inter_policy),
+        })
     }
 }
