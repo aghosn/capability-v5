@@ -8,11 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(
-        !(0 as u64),
-        MonitorAPI::all(),
-        InterruptPolicy::default_all(),
-    );
+    let policies = Policies::new(0b111111, MonitorAPI::all(), InterruptPolicy::default_all());
     let mut capa = Capability::<Domain>::new(Domain::new(policies));
     capa.data.status = Status::Sealed;
     capa
@@ -58,7 +54,7 @@ fn setup_engine_with_root() -> (
 fn test_empty_root_domain() {
     let domain = create_root_domain();
     let display_output = format!("{}", domain);
-    let expected_output = format!("td0 = Sealed domain()\n|cores: 0xffffffffffffffff\n|mon.api: 0x1fff\n|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\n");
+    let expected_output = format!("td0 = Sealed domain()\n|cores: 0x3f\n|mon.api: 0x1fff\n|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\n");
     assert_eq!(display_output, expected_output)
 }
 
@@ -70,7 +66,7 @@ fn test_root_domain_with_root_memory() {
     domain.data.install(CapaWrapper::Region(reference));
 
     let display_output = format!("{}", domain);
-    let expected_output = format!("td0 = Sealed domain(r0)\n|cores: 0xffffffffffffffff\n|mon.api: 0x1fff\n|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\nr0 = Exclusive 0x0 0x10000 with RWX mapped Identity\n");
+    let expected_output = format!("td0 = Sealed domain(r0)\n|cores: 0x3f\n|mon.api: 0x1fff\n|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0\nr0 = Exclusive 0x0 0x10000 with RWX mapped Identity\n");
     assert_eq!(display_output, expected_output);
 }
 
@@ -303,4 +299,26 @@ fn test_set_get() {
         NB_INTERRUPTS + 2,
     );
     assert_eq!(res, Err(CapaError::InvalidField));
+
+    // Let's try to see if we can overload the cores before sealing.
+    // This should work, but then we will see if when we attempt to seal.
+    engine
+        .set(
+            td0.clone(),
+            child_td,
+            0,
+            FieldType::Cores,
+            0,
+            0b1111111111111111,
+        )
+        .unwrap();
+
+    let res = engine.seal(td0.clone(), child_td);
+    assert_eq!(res, Err(CapaError::InsufficientRights));
+
+    engine
+        .set(td0.clone(), child_td, 0, FieldType::Cores, 0, 0b11)
+        .unwrap();
+    engine.seal(td0.clone(), child_td).unwrap();
+    engine.revoke(td0.clone(), child_td, 0).unwrap();
 }
