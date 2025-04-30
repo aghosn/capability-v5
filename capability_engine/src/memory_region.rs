@@ -72,7 +72,7 @@ impl Access {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct MemoryRegion {
     pub kind: RegionKind,
     pub status: Status,

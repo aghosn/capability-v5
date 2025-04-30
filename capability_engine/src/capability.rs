@@ -56,8 +56,11 @@ pub enum CapaError {
     InvalidField,
     InvalidValue,
     // For parsing
+    ParserDomain,
+    ParserRegion,
     ParserStatus,
     ParserMonitor,
+    ParserCapability,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq

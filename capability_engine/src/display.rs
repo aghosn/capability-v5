@@ -1,6 +1,6 @@
 use crate::capability::*;
 use crate::domain::{
-    CapaWrapper, CapabilityStore, Domain, InterruptPolicy, MonitorAPI, Policies, Status,
+    CapaWrapper, CapabilityStore, Domain, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
     VectorPolicy, VectorVisibility, NB_INTERRUPTS,
 };
 use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
@@ -460,6 +460,198 @@ impl Unmarshall for MonitorAPI {
     }
 }
 
+impl InterruptPolicy {
+    pub fn parse_one(&mut self, l: String) -> Result<(), CapaError> {
+        if !l.starts_with("|vec") {
+            return Err(CapaError::InvalidValue);
+        }
+        let prefix = l.strip_prefix("|vec").ok_or(CapaError::InvalidValue)?;
+        let parts: Vec<&str> = prefix.split(',').collect();
+        if parts.len() != 3 {
+            return Err(CapaError::InvalidValue);
+        }
+
+        let tmp: Vec<&str> = parts[0].split(':').collect();
+        let (range, visi) = (tmp[0].trim_start_matches("|vec"), tmp[1]);
+        // We have the start and end vector.
+        let (vs, ve) = if let Some((start, end)) = range.split_once('-') {
+            (
+                usize::from_str_radix(start, 10).map_err(|_| CapaError::InvalidValue)?,
+                usize::from_str_radix(end, 10).map_err(|_| CapaError::InvalidValue)?,
+            )
+        } else {
+            let value = usize::from_str_radix(range, 10).map_err(|_| CapaError::InvalidValue)?;
+            (value, value)
+        };
+
+        let visibility = match visi.trim().to_lowercase().as_str() {
+            "allowed|visible" => VectorVisibility::all(),
+            "allowed" => VectorVisibility::ALLOWED,
+            "visible" => VectorVisibility::VISIBLE,
+            "not reported" => VectorVisibility::empty(),
+            _ => return Err(CapaError::InvalidValue),
+        };
+
+        let read = u64::from_str_radix(parts[1].trim_start_matches(" r: 0x"), 16)
+            .map_err(|_| CapaError::InvalidValue)
+            .unwrap();
+        let write = u64::from_str_radix(parts[2].trim_start_matches(" w: 0x"), 16)
+            .map_err(|_| CapaError::InvalidValue)
+            .unwrap();
+
+        // Now set the values
+        for j in vs..=ve {
+            self.vectors[j] = VectorPolicy {
+                visibility,
+                read_set: read,
+                write_set: write,
+            };
+        }
+        Ok(())
+    }
+}
+
+impl Domain {
+    fn parse_domain(input: &[&str], parse_capas: bool) -> Result<Domain, CapaError> {
+        if input.len() < 4 {
+            return Err(CapaError::InvalidValue);
+        }
+
+        let end = {
+            let mut idx: usize = input.len();
+            for (i, v) in input.iter().skip(1).enumerate() {
+                if !v.starts_with('|') {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        };
+
+        let domain_lines = &input[0..end];
+
+        // Parse the status
+        let status = {
+            let first: Vec<&str> = domain_lines[0]
+                .split_whitespace()
+                .filter(|x| {
+                    x.to_lowercase().contains("sealed") || x.to_lowercase().contains("unsealed")
+                })
+                .collect();
+            Status::from_string(first.get(0).ok_or(CapaError::ParserStatus)?.to_string())?
+        };
+
+        // Parse the capabilities.
+        let capabilites: Vec<&str> = {
+            let start = domain_lines[0].find('(').ok_or(CapaError::InvalidValue)?;
+            let end = start
+                + domain_lines[0][start..]
+                    .find(")")
+                    .ok_or(CapaError::InvalidValue)?;
+            domain_lines[0][start + 1..end].split(",").collect()
+        };
+
+        // Parse the cores.
+        let cores = {
+            let mask = domain_lines[1].trim_start_matches("|cores: 0x");
+            u64::from_str_radix(mask, 16).map_err(|_| CapaError::InvalidValue)?
+        };
+
+        // Parse the API calls.
+        let api = MonitorAPI::from_string(domain_lines[2].to_string())?;
+
+        // Parse the interrupt policies.
+        let mut inter_policy: InterruptPolicy = InterruptPolicy::default_none();
+
+        for l in domain_lines[3..end].iter() {
+            if !l.starts_with("|vec") {
+                break;
+            }
+            inter_policy.parse_one(l.to_string())?;
+        }
+
+        //TODO: Find the capabilities.
+        if parse_capas {
+            let parsed = CapabilityStore::parse(&input[end..].to_vec(), &capabilites)?;
+        }
+
+        //Create the domain.
+
+        todo!()
+    }
+}
+
+impl CapabilityStore {
+    pub fn parse(lines: &Vec<&str>, owned: &Vec<&str>) -> Result<Self, CapaError> {
+        let mut store = Self::new();
+        if lines.len() == 0 || owned.len() == 0 || lines.len() < owned.len() - 1 {
+            return Err(CapaError::ParserCapability);
+        }
+        // Parse the indicies.
+        let indicies = {
+            let indicies = lines.last().ok_or(CapaError::ParserCapability)?;
+            if !indicies.starts_with("|indicies:") {
+                return Err(CapaError::ParserCapability);
+            }
+            let mut map: HashMap<&str, LocalCapa> = HashMap::new();
+            let indicies = indicies
+                .trim_start_matches("|indicies: ")
+                .split_whitespace();
+            for l in indicies {
+                let splitted: Vec<&str> = l.split("->").collect();
+                if splitted.len() != 2 {
+                    return Err(CapaError::ParserCapability);
+                }
+                map.insert(
+                    splitted[1],
+                    LocalCapa::from_str_radix(splitted[0], 10)
+                        .map_err(|_| CapaError::ParserCapability)?,
+                );
+            }
+            map
+        };
+        // Go through all the capabilities.
+        for name in owned.iter() {
+            let mut found = false;
+            let mut start = 0;
+            let mut end = 0;
+            for (i, l) in lines.iter().enumerate() {
+                if !found && l.starts_with(name) {
+                    found = true;
+                    start = i;
+                    end = i;
+                } else if found && l.starts_with("|") {
+                    end += 1;
+                } else if found {
+                    // We are done parsing.
+                    break;
+                }
+            }
+            let capa_lines = &lines[start..=end];
+            let is_td = name.starts_with("td");
+            let is_region = name.starts_with("r");
+            if is_td {
+                let local_index = indicies.get(*name).ok_or(CapaError::ParserCapability)?;
+                let child = Domain::parse_domain(capa_lines, false)?;
+                let capa = Capability::<Domain>::new(child);
+                let reference = Rc::new(RefCell::new(capa));
+                store
+                    .capabilities
+                    .insert(*local_index, CapaWrapper::Domain(reference));
+                if store.next_handle <= *local_index {
+                    store.next_handle = *local_index + 1;
+                }
+            } else if is_region {
+                // Parse the region.
+            }
+        }
+
+        Ok(store)
+    }
+}
+
+impl MemoryRegion {}
+
 impl Unmarshall for Domain {
     type Output = Domain;
 
@@ -469,7 +661,6 @@ impl Unmarshall for Domain {
         if lines.len() < 4 {
             return Err(CapaError::InvalidValue);
         }
-
         // Parse the status
         let status = {
             let first: Vec<&str> = lines
