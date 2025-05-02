@@ -72,13 +72,7 @@ impl Parser {
         // Should be tdX = STATUS domain(CAPAS)
         let header: Vec<&str> = lines[0].split_whitespace().collect();
         let name = header[0].trim();
-        let status = if header[2].to_lowercase().eq("sealed") {
-            Status::Sealed
-        } else if header[2].to_lowercase().eq("unsealed") {
-            Status::Unsealed
-        } else {
-            return Err(CapaError::ParserDomain);
-        };
+        let status = Status::from_string(header[2].to_string())?;
         let capabilities: Vec<&str> = {
             let start = header[3].find('(').ok_or(CapaError::ParserDomain)?;
             let end = start

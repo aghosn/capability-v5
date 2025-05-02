@@ -209,7 +209,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 }
 
 #[test]
-fn test_parse_with_td1_and_regions() {
+fn test_parse_with_td1_and_region() {
     // Initial setup
     let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
@@ -257,4 +257,117 @@ r1 = Exclusive 0x1000 0x3000 with RWX mapped Remapped(0x0)
     let td0_r = parser.domains.get("td0").unwrap();
     let display = format!("{}", td0_r.borrow());
     assert_eq!(display, expected);
+}
+
+#[test]
+fn test_parse_with_td1_and_regions() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    let c_access = Access::new(0x1000, 0x2000, Rights::all());
+    let carved = engine.carve(td0.clone(), td0_r0, &c_access).unwrap();
+
+    let a_access = Access::new(0x3000, 0x1000, Rights::all());
+    let alias = engine.alias(td0.clone(), td0_r0, &a_access).unwrap();
+
+    // Create a child domain.
+    let ipolicy = InterruptPolicy::default_none();
+
+    let td1 = engine
+        .create(td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .unwrap();
+    engine
+        .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
+        .unwrap();
+    engine
+        .send(td0.clone(), td1, alias, Remapped::Remapped(0x2000))
+        .unwrap();
+    engine.seal(td0.clone(), td1).unwrap();
+
+    // Check the display
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1,r2)
+|cores: 0x1
+|mon.api: 0x0
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x1000 0x3000 with RWX for r1
+| Alias at 0x3000 0x4000 with RWX for r2
+r1 = Exclusive 0x1000 0x3000 with RWX mapped Remapped(0x0)
+r2 = Aliased 0x3000 0x4000 with RWX mapped Remapped(0x2000)
+|indices: 1->r0 4->td1
+"#;
+    assert_eq!(display, expected);
+
+    // Now parse.
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_r = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_r.borrow());
+    assert_eq!(display, expected);
+}
+
+#[test]
+fn test_invalid_td0() {
+    let _correct = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let missing_cores = r#"td0 = Sealed domain(r0)
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let missing_api = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let missing_vec = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let incorrect_vector = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWEDVISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let incorrect_hex = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWEDVISIBLE, r: 0x4G, w: 0x5H0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+
+    let values = [
+        missing_cores,
+        missing_api,
+        missing_vec,
+        incorrect_vector,
+        incorrect_hex,
+    ];
+    for i in values.iter() {
+        let mut parser = Parser::new();
+        assert!(parser.parse_attestation(i.to_string()).is_err());
+    }
 }
