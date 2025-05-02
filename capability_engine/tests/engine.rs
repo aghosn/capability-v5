@@ -1037,3 +1037,36 @@ r2 = Aliased 0x0 0x1000 with RWX mapped Identity
 "#;
     assert_eq!(display, expected);
 }
+
+#[test]
+fn test_engine_alias_carve_root() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    let access = Access::new(0x0, 0x1000, Rights::all());
+    let carve = engine.carve(td0.clone(), td0_r0, &access).unwrap();
+    let err = engine.alias(td0.clone(), td0_r0, &access);
+    assert!(err.is_err());
+
+    // Try to alias it a second time.
+    let carve2 = engine.carve(td0.clone(), td0_r0, &access);
+    assert!(carve2.is_err());
+
+    // Carve the carve.
+    engine.carve(td0.clone(), carve, &access).unwrap();
+
+    // Do the display.
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(r0,r1,r2)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x1000 with RWX for r1
+r1 = Exclusive 0x0 0x1000 with RWX mapped Identity
+| Carve at 0x0 0x1000 with RWX for r2
+r2 = Exclusive 0x0 0x1000 with RWX mapped Identity
+|indices: 1->r0 2->r1 3->r2
+"#;
+    assert_eq!(display, expected);
+}
