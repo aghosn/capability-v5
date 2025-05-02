@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::capability::{CapaRef, Capability, Ownership};
-use crate::display::Unmarshall;
 
-use crate::domain::{CapaWrapper, CapabilityStore, InterruptPolicy, Policies};
+use crate::domain::{
+    CapaWrapper, CapabilityStore, InterruptPolicy, Policies, VectorPolicy, VectorVisibility,
+};
 use crate::memory_region::{Access, Attributes, RegionKind, Remapped, Rights, Status as MStatus};
 use crate::{
     capability::CapaError,
@@ -56,13 +57,10 @@ impl Parser {
             if sp.len() != 2 {
                 panic!("Invalid length {}", sp.len());
             }
-            self.indicies
-                .insert(
-                    sp[1].to_string(),
-                    LocalCapa::from_str_radix(sp[0], 10).unwrap(),
-                )
-                .ok_or(CapaError::ParserCapability)
-                .unwrap();
+            self.indicies.insert(
+                sp[1].to_string(),
+                LocalCapa::from_str_radix(sp[0], 10).unwrap(),
+            );
         });
         Ok(())
     }
@@ -74,9 +72,9 @@ impl Parser {
         // Should be tdX = STATUS domain(CAPAS)
         let header: Vec<&str> = lines[0].split_whitespace().collect();
         let name = header[0].trim();
-        let status = if header[2].to_lowercase().contains("sealed") {
+        let status = if header[2].to_lowercase().eq("sealed") {
             Status::Sealed
-        } else if header[2].to_lowercase().contains("unsealed") {
+        } else if header[2].to_lowercase().eq("unsealed") {
             Status::Unsealed
         } else {
             return Err(CapaError::ParserDomain);
@@ -87,7 +85,10 @@ impl Parser {
                 + header[3][start..]
                     .find(")")
                     .ok_or(CapaError::InvalidValue)?;
-            header[3][start + 1..end].split(",").collect()
+            header[3][start + 1..end]
+                .split(",")
+                .filter(|s| s.len() > 0)
+                .collect()
         };
         // Add the children now so it's done.
         for c in capabilities {
@@ -155,7 +156,7 @@ impl Parser {
         if !input.contains("Remapped") {
             return Err(CapaError::ParserRegion);
         }
-        let mut trimmed = input.trim().trim_start_matches("Remapped(");
+        let mut trimmed = input.trim().trim_start_matches("Remapped(0x");
         trimmed = &trimmed[0..trimmed.len() - 1];
         let addr = u64::from_str_radix(trimmed, 16).map_err(|_| CapaError::ParserRegion)?;
         Ok(Remapped::Remapped(addr))
@@ -173,12 +174,16 @@ impl Parser {
         if splitted.len() != 9 {
             return Err(CapaError::ParserRegion);
         }
-        let start = u64::from_str_radix(splitted[4].trim_start_matches("0x"), 16)
+
+        let start = u64::from_str_radix(splitted[3].trim_start_matches("0x"), 16)
             .map_err(|_| CapaError::ParserRegion)?;
-        let size = u64::from_str_radix(splitted[5].trim_start_matches("0x"), 16)
+        let end = u64::from_str_radix(splitted[4].trim_start_matches("0x"), 16)
             .map_err(|_| CapaError::ParserRegion)?;
-        let rights = Self::parse_rights(splitted[7])?;
-        let access = Access::new(start, size, rights);
+        if end <= start {
+            return Err(CapaError::InvalidValue);
+        }
+        let rights = Self::parse_rights(splitted[6])?;
+        let access = Access::new(start, end - start, rights);
         let name = splitted.last().ok_or(CapaError::ParserRegion)?;
         if !name.starts_with("r") {
             return Err(CapaError::ParserRegion);
@@ -215,11 +220,14 @@ impl Parser {
         };
         let start = u64::from_str_radix(header[3].trim().trim_start_matches("0x"), 16)
             .map_err(|_| CapaError::ParserRegion)?;
-        let size = u64::from_str_radix(header[4].trim().trim_start_matches("0x"), 16)
+        let end = u64::from_str_radix(header[4].trim().trim_start_matches("0x"), 16)
             .map_err(|_| CapaError::ParserRegion)?;
+        if end <= start {
+            return Err(CapaError::InvalidValue);
+        }
         let rights = Self::parse_rights(header[6])?;
 
-        let access: Access = Access::new(start, size, rights);
+        let access: Access = Access::new(start, end - start, rights);
 
         let remapped = Self::parse_remapped(header[8])?;
 
@@ -283,7 +291,7 @@ impl Parser {
                 let end = Self::find_end(lines, i);
                 self.parse_region(&lines[i..end])?;
                 i = end;
-            } else if lines[i].starts_with("|indicies:") {
+            } else if lines[i].starts_with("|indices:") {
                 self.parse_indicies(lines[i])?;
                 i += 1;
             } else {
@@ -331,8 +339,7 @@ impl Parser {
                 .data
                 .capabilities
                 .capabilities
-                .insert(*v, capa_wrapper)
-                .ok_or(CapaError::InvalidLocalCapa)?;
+                .insert(*v, capa_wrapper);
         }
 
         // Should setup the rest of the domains too?
@@ -341,16 +348,106 @@ impl Parser {
                 // We already did it
                 continue;
             }
-            let dom_owner = self.domains.get(owner).ok_or(CapaError::InvalidValue)?;
+            let dom_owner = self
+                .domains
+                .get(owner)
+                .ok_or(CapaError::InvalidValue)
+                .unwrap();
 
             let wrapper = if capa.starts_with("td") {
-                let dom = self.domains.get(capa).ok_or(CapaError::InvalidValue)?;
+                let dom = self
+                    .domains
+                    .get(capa)
+                    .ok_or(CapaError::InvalidValue)
+                    .unwrap();
                 CapaWrapper::Domain(dom.clone())
             } else {
-                let reg = self.regions.get(capa).ok_or(CapaError::InvalidValue)?;
+                println!("About to get {} from {:?} ", capa, self.owner);
+                let reg = self
+                    .regions
+                    .get(capa)
+                    .ok_or(CapaError::InvalidValue)
+                    .unwrap();
                 CapaWrapper::Region(reg.clone())
             };
             dom_owner.borrow_mut().data.install(wrapper);
+        }
+        Ok(())
+    }
+}
+
+// —————————————————————— Unmarshall specific elements —————————————————————— //
+pub trait Unmarshall {
+    type Output;
+    fn from_string(input: String) -> Result<Self::Output, CapaError>;
+}
+
+impl Unmarshall for Status {
+    type Output = Status;
+    fn from_string(input: String) -> Result<Self::Output, CapaError> {
+        match input.trim().to_lowercase().as_str() {
+            "sealed" => Ok(crate::domain::Status::Sealed),
+            "unsealed" => Ok(crate::domain::Status::Unsealed),
+            _ => return Err(CapaError::ParserStatus),
+        }
+    }
+}
+
+impl Unmarshall for MonitorAPI {
+    type Output = MonitorAPI;
+    fn from_string(input: String) -> Result<Self::Output, CapaError> {
+        let value = input.trim_start_matches("|mon.api: 0x");
+        let raw = u64::from_str_radix(value, 16).map_err(|_| CapaError::ParserMonitor)?;
+        MonitorAPI::from_bits(raw as u16).ok_or(CapaError::ParserMonitor)
+    }
+}
+
+impl InterruptPolicy {
+    pub fn parse_one(&mut self, l: String) -> Result<(), CapaError> {
+        if !l.starts_with("|vec") {
+            return Err(CapaError::InvalidValue);
+        }
+        let prefix = l.strip_prefix("|vec").ok_or(CapaError::InvalidValue)?;
+        let parts: Vec<&str> = prefix.split(',').collect();
+        if parts.len() != 3 {
+            return Err(CapaError::InvalidValue);
+        }
+
+        let tmp: Vec<&str> = parts[0].split(':').collect();
+        let (range, visi) = (tmp[0].trim_start_matches("|vec"), tmp[1]);
+        // We have the start and end vector.
+        let (vs, ve) = if let Some((start, end)) = range.split_once('-') {
+            (
+                usize::from_str_radix(start, 10).map_err(|_| CapaError::InvalidValue)?,
+                usize::from_str_radix(end, 10).map_err(|_| CapaError::InvalidValue)?,
+            )
+        } else {
+            let value = usize::from_str_radix(range, 10).map_err(|_| CapaError::InvalidValue)?;
+            (value, value)
+        };
+
+        let visibility = match visi.trim().to_lowercase().as_str() {
+            "allowed|visible" => VectorVisibility::all(),
+            "allowed" => VectorVisibility::ALLOWED,
+            "visible" => VectorVisibility::VISIBLE,
+            "not reported" => VectorVisibility::empty(),
+            _ => return Err(CapaError::InvalidValue),
+        };
+
+        let read = u64::from_str_radix(parts[1].trim_start_matches(" r: 0x"), 16)
+            .map_err(|_| CapaError::InvalidValue)
+            .unwrap();
+        let write = u64::from_str_radix(parts[2].trim_start_matches(" w: 0x"), 16)
+            .map_err(|_| CapaError::InvalidValue)
+            .unwrap();
+
+        // Now set the values
+        for j in vs..=ve {
+            self.vectors[j] = VectorPolicy {
+                visibility,
+                read_set: read,
+                write_set: write,
+            };
         }
         Ok(())
     }

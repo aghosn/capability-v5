@@ -48,7 +48,7 @@ fn setup_engine_with_root() -> (
 #[test]
 fn test_parse_simple_td0() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (_engine, td0, _r0, _td0_r0) = setup_engine_with_root();
 
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0)
@@ -63,4 +63,198 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     // Now parse the attestation.
     let mut parser = Parser::new();
     parser.parse_attestation(display).unwrap();
+
+    // Now print td0 from the parser
+    let reconstructed_td0 = parser.domains.get("td0").unwrap();
+    let display = format!("{}", reconstructed_td0.borrow());
+    assert_eq!(display, expected);
+}
+
+#[test]
+fn test_parse_with_alias() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    // Let's create some regions.
+    let alias_access = Access::new(0x0, 0x3000, Rights::all());
+
+    let _alias = engine.alias(td0.clone(), td0_r0, &alias_access).unwrap();
+
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(r0,r1)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Alias at 0x0 0x3000 with RWX for r1
+r1 = Aliased 0x0 0x3000 with RWX mapped Identity
+|indices: 1->r0 2->r1
+"#;
+    assert_eq!(display, expected);
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_recon = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_recon.borrow());
+    assert_eq!(display, expected);
+
+    // Do some reconstruction checks.
+    let r1 = parser.regions.get("r1").unwrap();
+    assert_eq!(r1.borrow().data.kind, RegionKind::Alias);
+    assert_eq!(r1.borrow().data.status, MStatus::Aliased);
+    assert_eq!(r1.borrow().owned.handle, 2);
+}
+
+#[test]
+fn test_parse_with_carve() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    // Let's create some regions.
+    let carve_access = Access::new(0x0, 0x3000, Rights::all());
+
+    let _carve = engine.carve(td0.clone(), td0_r0, &carve_access).unwrap();
+
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(r0,r1)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x3000 with RWX for r1
+r1 = Exclusive 0x0 0x3000 with RWX mapped Identity
+|indices: 1->r0 2->r1
+"#;
+    assert_eq!(display, expected);
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_recon = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_recon.borrow());
+    assert_eq!(display, expected);
+
+    // Do some reconstruction checks.
+    let r1 = parser.regions.get("r1").unwrap();
+    assert_eq!(r1.borrow().data.kind, RegionKind::Carve);
+    assert_eq!(r1.borrow().data.status, MStatus::Exclusive);
+    assert_eq!(r1.borrow().owned.handle, 2);
+}
+
+#[test]
+fn test_parse_with_td1() {
+    // Initial setup
+    let (engine, td0, _r0, _td0_r0) = setup_engine_with_root();
+
+    // Let's create a child domain.
+    let td1 = engine
+        .create(
+            td0.clone(),
+            0b1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_all(),
+        )
+        .unwrap();
+
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Unsealed domain()
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0 2->td1
+"#;
+    assert_eq!(display, expected);
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_recon = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_recon.borrow());
+    assert_eq!(display, expected);
+
+    // Do some reconstruction checks.
+    let r1 = parser.domains.get("td1").unwrap();
+    assert_eq!(r1.borrow().data.status, Status::Unsealed);
+    assert_eq!(r1.borrow().owned.handle, 2);
+
+    // Now seal it.
+    engine.seal(td0.clone(), td1).unwrap();
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain()
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0 2->td1
+"#;
+    assert_eq!(display, expected);
+    assert_eq!(display, expected);
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_recon = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_recon.borrow());
+    assert_eq!(display, expected);
+    // Do some reconstruction checks.
+    let r1 = parser.domains.get("td1").unwrap();
+    assert_eq!(r1.borrow().data.status, Status::Sealed);
+    assert_eq!(r1.borrow().owned.handle, 2);
+}
+
+#[test]
+fn test_parse_with_td1_and_regions() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    let access = Access::new(0x1000, 0x2000, Rights::all());
+    let carved = engine.carve(td0.clone(), td0_r0, &access).unwrap();
+
+    // Create a child domain.
+    let mut ipolicy = InterruptPolicy::default_none();
+    ipolicy.vectors[3] = VectorPolicy {
+        visibility: VectorVisibility::empty(),
+        read_set: 0,
+        write_set: 0,
+    };
+    let td1 = engine
+        .create(td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .unwrap();
+    engine
+        .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
+        .unwrap();
+    engine.seal(td0.clone(), td1).unwrap();
+
+    // Check the display
+    let display = format!("{}", td0.borrow());
+    let expected = r#"td0 = Sealed domain(td1,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1)
+|cores: 0x1
+|mon.api: 0x0
+|vec0-2: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+|vec3: NOT REPORTED, r: 0x0, w: 0x0
+|vec4-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x1000 0x3000 with RWX for r1
+r1 = Exclusive 0x1000 0x3000 with RWX mapped Remapped(0x0)
+|indices: 1->r0 3->td1
+"#;
+    assert_eq!(display, expected);
+
+    // Now parse.
+    let mut parser = Parser::new();
+    parser.parse_attestation(display).unwrap();
+
+    let td0_r = parser.domains.get("td0").unwrap();
+    let display = format!("{}", td0_r.borrow());
+    assert_eq!(display, expected);
 }
