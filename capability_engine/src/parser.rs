@@ -1,8 +1,11 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
+use crate::capability::{CapaRef, Capability, Ownership};
 use crate::display::Unmarshall;
 
-use crate::domain::{CapabilityStore, InterruptPolicy, Policies};
+use crate::domain::{CapaWrapper, CapabilityStore, InterruptPolicy, Policies};
 use crate::memory_region::{Access, Attributes, RegionKind, Remapped, Rights, Status as MStatus};
 use crate::{
     capability::CapaError,
@@ -16,10 +19,10 @@ pub enum ParserChild {
 }
 
 pub struct Parser {
-    pub regions: HashMap<String, MemoryRegion>,
+    pub regions: HashMap<String, CapaRef<MemoryRegion>>,
     pub owner: HashMap<String, String>,
     pub parent_children: HashMap<String, Vec<String>>,
-    pub domains: HashMap<String, Domain>,
+    pub domains: HashMap<String, CapaRef<Domain>>,
     pub indicies: HashMap<String, LocalCapa>,
 }
 
@@ -117,15 +120,16 @@ impl Parser {
             }
             inter_policy.parse_one(l.to_string())?;
         }
+        let domain = Domain {
+            id: 0,
+            status,
+            capabilities: CapabilityStore::new(),
+            policies: Policies::new(cores, api, inter_policy),
+        };
         // Add the domain.
         self.domains.insert(
             name.to_string(),
-            Domain {
-                id: 0,
-                status,
-                capabilities: CapabilityStore::new(),
-                policies: Policies::new(cores, api, inter_policy),
-            },
+            CapaRef::new(RefCell::new(Capability::<Domain>::new(domain))),
         );
         Ok(())
     }
@@ -157,7 +161,7 @@ impl Parser {
         Ok(Remapped::Remapped(addr))
     }
 
-    pub fn parse_region_child(input: &str) -> Result<(String, MemoryRegion), CapaError> {
+    pub fn parse_region_child(input: &str) -> Result<(String, CapaRef<MemoryRegion>), CapaError> {
         let kind = if input.starts_with("| Alias") {
             RegionKind::Alias
         } else if input.starts_with("| Carve") {
@@ -181,13 +185,15 @@ impl Parser {
         }
         Ok((
             name.to_string(),
-            MemoryRegion {
-                kind,
-                status: MStatus::Exclusive,
-                access,
-                attributes: Attributes::empty(),
-                remapped: Remapped::Identity,
-            },
+            CapaRef::new(RefCell::new(Capability::<MemoryRegion>::new(
+                MemoryRegion {
+                    kind,
+                    status: MStatus::Exclusive,
+                    access,
+                    attributes: Attributes::empty(),
+                    remapped: Remapped::Identity,
+                },
+            ))),
         ))
     }
 
@@ -226,23 +232,32 @@ impl Parser {
         let region = self
             .regions
             .entry(name.to_string())
-            .or_insert(MemoryRegion {
-                kind,
-                status,
-                access,
-                attributes: Attributes::empty(),
-                remapped,
-            });
+            .or_insert(CapaRef::new(RefCell::new(Capability::<MemoryRegion>::new(
+                MemoryRegion {
+                    kind,
+                    status,
+                    access,
+                    attributes: Attributes::empty(),
+                    remapped,
+                },
+            ))));
         // Make sure we set what might be missing, i.e., the status, remapped, and attributes.
-        region.status = status;
-        region.remapped = remapped;
+        region.borrow_mut().data.status = status;
+        region.borrow_mut().data.remapped = remapped;
         //region.attributes = ???;
 
         // Now parse the children and populate the map.
         for i in 1..input.len() {
             let (cname, child) = Self::parse_region_child(input[i])?;
-            let entry = self.regions.entry(cname.clone()).or_insert(child.clone());
-            entry.kind = child.kind;
+            if self.regions.contains_key(&cname) {
+                let entry = self
+                    .regions
+                    .get_mut(&cname)
+                    .ok_or(CapaError::ParserRegion)?;
+                entry.borrow_mut().data.kind = child.borrow_mut().data.kind;
+            } else {
+                self.regions.insert(cname.clone(), child);
+            }
             self.parent_children
                 .entry(name.to_string())
                 .or_insert_with(Vec::new)
@@ -252,7 +267,12 @@ impl Parser {
         Ok(())
     }
 
-    pub fn parse_attestation(&mut self, lines: &[&str]) -> Result<(), CapaError> {
+    pub fn parse_attestation(&mut self, attestation: String) -> Result<(), CapaError> {
+        let lines: Vec<&str> = attestation.lines().collect();
+        self.parse_attestation_internal(&lines)
+    }
+
+    fn parse_attestation_internal(&mut self, lines: &Vec<&str>) -> Result<(), CapaError> {
         let mut i: usize = 0;
         while i < lines.len() {
             if lines[i].starts_with("td") {
@@ -268,7 +288,68 @@ impl Parser {
                 i += 1;
             }
         }
-        // Now create the capabilities.
-        todo!()
+        // Now create the tree for the capabilities.
+        for (k, v) in self.parent_children.iter() {
+            if k.starts_with("td") {
+                let parent = self.domains.get(k).ok_or(CapaError::ParserCapability)?;
+                for c in v.iter() {
+                    if !self.domains.contains_key(c) {
+                        continue;
+                    }
+                    let child = self.domains.get(c).unwrap();
+                    parent.borrow_mut().children.push(child.clone());
+                    child.borrow_mut().parent = Rc::downgrade(parent);
+                }
+            } else if k.starts_with("r") {
+                let parent = self.regions.get(k).ok_or(CapaError::ParserCapability)?;
+                for c in v.iter() {
+                    if !self.regions.contains_key(c) {
+                        continue;
+                    }
+                    let child = self.regions.get(c).unwrap();
+                    parent.borrow_mut().children.push(child.clone());
+                    child.borrow_mut().parent = Rc::downgrade(parent);
+                }
+            }
+        }
+        let td0 = self.domains.get("td0").ok_or(CapaError::ParserDomain)?;
+        // Now use the indicies to set ownership.
+        for (k, v) in self.indicies.iter() {
+            let capa_wrapper = if k.starts_with("td") {
+                let dom = self.domains.get(k).ok_or(CapaError::ParserDomain)?;
+                dom.borrow_mut().owned = Ownership::new(Rc::downgrade(td0), *v);
+                CapaWrapper::Domain(dom.clone())
+            } else {
+                let reg = self.regions.get(k).ok_or(CapaError::ParserRegion)?;
+                reg.borrow_mut().owned = Ownership::new(Rc::downgrade(td0), *v);
+                CapaWrapper::Region(reg.clone())
+            };
+
+            td0.borrow_mut()
+                .data
+                .capabilities
+                .capabilities
+                .insert(*v, capa_wrapper)
+                .ok_or(CapaError::InvalidLocalCapa)?;
+        }
+
+        // Should setup the rest of the domains too?
+        for (capa, owner) in self.owner.iter() {
+            if owner.contains("td0") {
+                // We already did it
+                continue;
+            }
+            let dom_owner = self.domains.get(owner).ok_or(CapaError::InvalidValue)?;
+
+            let wrapper = if capa.starts_with("td") {
+                let dom = self.domains.get(capa).ok_or(CapaError::InvalidValue)?;
+                CapaWrapper::Domain(dom.clone())
+            } else {
+                let reg = self.regions.get(capa).ok_or(CapaError::InvalidValue)?;
+                CapaWrapper::Region(reg.clone())
+            };
+            dom_owner.borrow_mut().data.install(wrapper);
+        }
+        Ok(())
     }
 }
