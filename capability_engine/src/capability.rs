@@ -168,7 +168,8 @@ impl Capability<MemoryRegion> {
         access: &Access,
         kind_op: RegionKind,
     ) -> Result<CapaRef<MemoryRegion>, CapaError> {
-        if !self.contained(access) {
+        //TODO: bug should not be able to carve an aliased region.
+        if !self.contained(access, kind_op == RegionKind::Carve) {
             return Err(CapaError::InvalidAccess);
         }
         // Compute the remapping
@@ -264,7 +265,7 @@ impl Capability<MemoryRegion> {
         vec![ViewRegion::new(self.data.access, self.data.remapped)]
     }
 
-    pub fn contained(&self, access: &Access) -> bool {
+    pub fn contained(&self, access: &Access, strict: bool) -> bool {
         // Easy case, it's not even contained without considering children.
         if !access.contained(&self.data.access) {
             return false;
@@ -272,11 +273,10 @@ impl Capability<MemoryRegion> {
         // Now see if it's carved.
         let children = &self.children;
         for c in children {
-            if c.borrow().data.kind == RegionKind::Alias {
+            if !strict && c.borrow().data.kind == RegionKind::Alias {
                 continue;
             }
-            if c.borrow().data.kind == RegionKind::Carve && c.borrow().data.access.intersect(access)
-            {
+            if c.borrow().data.access.intersect(access) {
                 return false;
             }
         }
