@@ -39,7 +39,7 @@ impl Parser {
 
     pub fn find_end(lines: &[&str], start: usize) -> usize {
         let mut j = start + 1;
-        while j < lines.len() && lines[j].starts_with("|") {
+        while j < lines.len() && lines[j].starts_with("|") && !lines[j].starts_with("|indices:") {
             j += 1;
         }
         return j;
@@ -149,10 +149,10 @@ impl Parser {
     }
 
     pub fn parse_remapped(input: &str) -> Result<Remapped, CapaError> {
-        if input.trim().to_lowercase().contains("Identity") {
+        if input.trim().contains("Identity") {
             return Ok(Remapped::Identity);
         }
-        if !input.to_lowercase().contains("Remapped") {
+        if !input.contains("Remapped") {
             return Err(CapaError::ParserRegion);
         }
         let mut trimmed = input.trim().trim_start_matches("Remapped(");
@@ -286,6 +286,8 @@ impl Parser {
             } else if lines[i].starts_with("|indicies:") {
                 self.parse_indicies(lines[i])?;
                 i += 1;
+            } else {
+                break;
             }
         }
         // Now create the tree for the capabilities.
