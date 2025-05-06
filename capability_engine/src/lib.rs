@@ -3,11 +3,28 @@ use core::{
     memory_region::{Access, Remapped},
 };
 
+pub mod client;
 pub mod core;
 pub mod server;
 
 fn is_core_subset(reference: u64, other: u64) -> bool {
     (reference & other) == other
+}
+
+// Call identifiers for the engine trait.
+#[repr(u8)]
+pub enum CallInterface {
+    CREATE = 1,
+    SET = 2,
+    GET = 3,
+    SEAL = 4,
+    ATTEST = 5,
+    ENUMERATE = 6,
+    SWITCH = 7,
+    ALIAS = 8,
+    CARVE = 9,
+    REVOKE = 10,
+    SEND = 11,
 }
 
 // Common interface for a capability engine.
@@ -17,6 +34,7 @@ pub trait EngineInterface {
     type CapaReference;
     type OwnedCapa;
     type CapabilityError;
+
     fn create(
         &self,
         domain: &Self::CapaReference,

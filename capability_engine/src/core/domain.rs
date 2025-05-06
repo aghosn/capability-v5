@@ -49,6 +49,7 @@ pub enum Status {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
 pub enum FieldType {
     Register,
     Cores,
@@ -204,6 +205,11 @@ impl CapabilityStore {
         self.capabilities.insert(handle, cap);
         handle
     }
+
+    pub fn install_capabilitiy_at(&mut self, cap: CapaWrapper, idx: LocalCapa) {
+        self.capabilities.insert(idx, cap);
+    }
+
     pub fn remove(&mut self, handle: &LocalCapa) -> Result<CapaWrapper, CapaError> {
         if let Some(cap) = self.capabilities.remove(handle) {
             self.free_handles.push_back(*handle);
