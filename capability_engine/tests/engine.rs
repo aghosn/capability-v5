@@ -4,6 +4,7 @@ use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
 };
 use capa_engine::server::engine::Engine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -57,7 +58,7 @@ fn test_engine_create_root_and_simple_child() {
         // Create a child.
         let child_td = engine
             .create(
-                ref_td.clone(),
+                &ref_td.clone(),
                 1,
                 MonitorAPI::all(),
                 InterruptPolicy::default_none(),
@@ -246,7 +247,7 @@ fn test_engine_nested_child_revoke_td() {
         // Let td0 create td1.
         let td0_td1 = engine
             .create(
-                td0.clone(),
+                &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
                 InterruptPolicy::default_all(),
@@ -284,7 +285,7 @@ fn test_engine_nested_child_revoke_td() {
             let td1 = &td0.borrow().children[0];
             let td1_td2 = engine
                 .create(
-                    td1.clone(),
+                    &td1.clone(),
                     0b11,
                     MonitorAPI::encapsulated(),
                     InterruptPolicy::default_none(),
@@ -420,7 +421,7 @@ fn test_engine_nested_revoke_r1() {
         // Let td0 create td1.
         let td0_td1 = engine
             .create(
-                td0.clone(),
+                &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
                 InterruptPolicy::default_all(),
@@ -458,7 +459,7 @@ fn test_engine_nested_revoke_r1() {
             let td1 = &td0.borrow().children[0];
             let td1_td2 = engine
                 .create(
-                    td1.clone(),
+                    &td1.clone(),
                     0b11,
                     MonitorAPI::encapsulated(),
                     InterruptPolicy::default_none(),
@@ -632,7 +633,7 @@ fn test_engine_two_children_revoke_aliased_twice() {
         // Let td0 create td1.
         let td0_td1 = engine
             .create(
-                td0.clone(),
+                &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
                 InterruptPolicy::default_all(),
@@ -641,7 +642,7 @@ fn test_engine_two_children_revoke_aliased_twice() {
         // Let td0 create td2
         let td0_td2 = engine
             .create(
-                td0.clone(),
+                &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
                 InterruptPolicy::default_all(),
@@ -753,7 +754,7 @@ fn test_engine_nested_domains_three_branches() {
         for _i in 0..3 {
             let local = engine
                 .create(
-                    capa_me.clone(),
+                    &capa_me.clone(),
                     0x1,
                     MonitorAPI::all(),
                     InterruptPolicy::default_all(),
@@ -872,7 +873,7 @@ fn test_engine_reclaim_from_grand_child() {
         for _i in 0..5 {
             let child = engine
                 .create(
-                    current.clone(),
+                    &current.clone(),
                     0b1,
                     MonitorAPI::all(),
                     InterruptPolicy::default_all(),
@@ -956,7 +957,7 @@ fn test_engine_policies_core_fail() {
         api_without_send_rcv.remove(MonitorAPI::SEND | MonitorAPI::RECEIVE);
         let td0_td1 = engine
             .create(
-                td0.clone(),
+                &td0.clone(),
                 0b1,
                 api_without_send_rcv,
                 InterruptPolicy::default_none(),
@@ -975,7 +976,7 @@ fn test_engine_policies_core_fail() {
             .unwrap();
 
         let td2_err = engine.create(
-            td1.clone(),
+            &td1.clone(),
             0x2,
             MonitorAPI::all(),
             InterruptPolicy::default_all(),
@@ -985,7 +986,7 @@ fn test_engine_policies_core_fail() {
         // Now let's try the wrong interrupt policies.
         let td1_td2 = engine
             .create(
-                td1.clone(),
+                &td1.clone(),
                 0b1,
                 api_without_send_rcv,
                 InterruptPolicy::default_all(),
@@ -998,7 +999,7 @@ fn test_engine_policies_core_fail() {
         engine.revoke(td1.clone(), td1_td2, 0).unwrap();
         let td1_td2 = engine
             .create(
-                td1.clone(),
+                &td1.clone(),
                 0b1,
                 MonitorAPI::all(),
                 InterruptPolicy::default_none(),

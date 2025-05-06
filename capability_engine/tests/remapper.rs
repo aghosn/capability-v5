@@ -4,6 +4,7 @@ use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus, ViewRegion,
 };
 use capa_engine::server::engine::Engine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -56,7 +57,7 @@ fn test_remap_carve() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -149,7 +150,7 @@ fn test_remap_illegal() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -198,7 +199,7 @@ fn test_remap_illegal_in_hole() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -253,7 +254,7 @@ fn test_remap_illegal_in_hole() {
         // Create the grandchild.
         let gc_td = engine
             .create(
-                child.clone(),
+                &child.clone(),
                 1,
                 MonitorAPI::all(),
                 InterruptPolicy::default_none(),

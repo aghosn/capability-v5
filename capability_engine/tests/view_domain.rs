@@ -4,6 +4,7 @@ use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus, ViewRegion,
 };
 use capa_engine::server::engine::Engine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -148,7 +149,7 @@ fn test_view_sending_alias() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -202,7 +203,7 @@ fn test_view_sending_carve() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -259,7 +260,7 @@ fn test_view_sending_carve_begin() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -313,7 +314,7 @@ fn test_view_sending_carve_end() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -370,7 +371,7 @@ fn test_view_child_middle_overlap() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -435,7 +436,7 @@ fn test_view_child_middle_overlap_remap() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -500,7 +501,7 @@ fn test_view_child_start_overlap_remap() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -561,7 +562,7 @@ fn test_view_child_end_overlap_remap() {
     // Create a child.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),

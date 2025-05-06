@@ -4,6 +4,7 @@ use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
 };
 use capa_engine::server::engine::Engine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -76,7 +77,7 @@ fn test_unallowed_calls() {
 
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::ATTEST,
             InterruptPolicy::default_none(),
@@ -98,7 +99,7 @@ fn test_unallowed_calls() {
     // Now try to make the child do stuff while not sealed.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -129,7 +130,7 @@ fn test_unallowed_calls() {
     // Okay last one.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::CARVE,
             InterruptPolicy::default_none(),
@@ -178,7 +179,7 @@ fn test_set_get() {
 
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::all(),
             InterruptPolicy::default_none(),
@@ -240,7 +241,7 @@ fn test_set_get() {
     // Create the new one and play with its values.
     let child_td = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             1,
             MonitorAPI::empty(),
             InterruptPolicy::default_none(),

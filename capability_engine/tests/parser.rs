@@ -5,6 +5,7 @@ use capa_engine::core::memory_region::{
 };
 use capa_engine::core::parser::Parser;
 use capa_engine::server::engine::Engine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -148,7 +149,7 @@ fn test_parse_with_td1() {
     // Let's create a child domain.
     let td1 = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             0b1,
             MonitorAPI::all(),
             InterruptPolicy::default_all(),
@@ -224,7 +225,7 @@ fn test_parse_with_td1_and_region() {
         write_set: 0,
     };
     let td1 = engine
-        .create(td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
         .unwrap();
     engine
         .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
@@ -274,7 +275,7 @@ fn test_parse_with_td1_and_regions() {
     let ipolicy = InterruptPolicy::default_none();
 
     let td1 = engine
-        .create(td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
         .unwrap();
     engine
         .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
@@ -396,7 +397,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     // Start building more complex example.
     let td1 = engine
         .create(
-            td0.clone(),
+            &td0.clone(),
             0x1,
             MonitorAPI::empty(),
             InterruptPolicy::default_all(),

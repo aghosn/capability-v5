@@ -6,7 +6,7 @@ use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
 use crate::core::memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
-use crate::is_core_subset;
+use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
 /// This is the entry point for all operations.
@@ -46,9 +46,26 @@ impl Engine {
         Ok(local_handle)
     }
 
-    pub fn create(
+    fn revoke_region_handler(capa: &mut Capability<MemoryRegion>) -> Result<(), CapaError> {
+        let owner = capa.owned.owner.upgrade().ok_or(CapaError::CapaNotOwned)?;
+        owner
+            .borrow_mut()
+            .data
+            .capabilities
+            .remove(&capa.owned.handle)?;
+        //TODO: probably will need an update.
+        Ok(())
+    }
+}
+
+impl EngineInterface for Engine {
+    type CapaReference = CapaRef<Domain>;
+    type OwnedCapa = LocalCapa;
+    type CapabilityError = CapaError;
+
+    fn create(
         &self,
-        domain: CapaRef<Domain>,
+        domain: &CapaRef<Domain>,
         cores: u64,
         api: MonitorAPI,
         interrupts: InterruptPolicy,
@@ -69,7 +86,7 @@ impl Engine {
         Ok(local_capa)
     }
 
-    pub fn set(
+    fn set(
         &self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
@@ -104,7 +121,7 @@ impl Engine {
             .set(core, tpe, field, value)
     }
 
-    pub fn get(
+    fn get(
         &self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
@@ -123,7 +140,7 @@ impl Engine {
             .get(core, tpe, field)
     }
 
-    pub fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
+    fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEAL)?;
 
         let current_policies = &domain.borrow().data.policies;
@@ -144,7 +161,7 @@ impl Engine {
         domain.borrow().seal(child)
     }
 
-    pub fn attest(
+    fn attest(
         &self,
         domain: CapaRef<Domain>,
         other: Option<LocalCapa>,
@@ -158,7 +175,7 @@ impl Engine {
         return Ok(display);
     }
 
-    pub fn enumerate(&self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<String, CapaError> {
+    fn enumerate(&self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<String, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::ENUMERATE)?;
         let binding = domain.borrow();
         let capa = binding.data.capabilities.get(&capa)?;
@@ -168,12 +185,12 @@ impl Engine {
         }
     }
 
-    pub fn switch(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    fn switch(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SWITCH)?;
         todo!();
     }
 
-    pub fn alias(
+    fn alias(
         &self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
@@ -192,7 +209,7 @@ impl Engine {
         Ok(aliased_capa)
     }
 
-    pub fn carve(
+    fn carve(
         &self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
@@ -213,18 +230,7 @@ impl Engine {
         Ok(carved_capa)
     }
 
-    fn revoke_region_handler(capa: &mut Capability<MemoryRegion>) -> Result<(), CapaError> {
-        let owner = capa.owned.owner.upgrade().ok_or(CapaError::CapaNotOwned)?;
-        owner
-            .borrow_mut()
-            .data
-            .capabilities
-            .remove(&capa.owned.handle)?;
-        //TODO: probably will need an update.
-        Ok(())
-    }
-
-    pub fn revoke(
+    fn revoke(
         &self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
@@ -277,7 +283,7 @@ impl Engine {
         Ok(())
     }
 
-    pub fn send(
+    fn send(
         &self,
         domain: CapaRef<Domain>,
         dest: LocalCapa,
