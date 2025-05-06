@@ -3,7 +3,7 @@ use capa_engine::core::domain::*;
 use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
 };
-use capa_engine::Engine;
+use capa_engine::server::engine::Engine;
 use std::cell::RefCell;
 use std::rc::Rc;
 
