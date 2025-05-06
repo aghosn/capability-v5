@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use capa_engine::capability::*;
-use capa_engine::domain::{
+use capa_engine::core::capability::*;
+use capa_engine::core::domain::{
     CapaWrapper, Domain, InterruptPolicy, MonitorAPI, Policies, Status as DStatus,
 };
-use capa_engine::memory_region::*;
+use capa_engine::core::memory_region::*;
 
 fn create_root() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {

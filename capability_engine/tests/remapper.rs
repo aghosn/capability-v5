@@ -1,6 +1,6 @@
-use capa_engine::capability::*;
-use capa_engine::domain::*;
-use capa_engine::memory_region::{
+use capa_engine::core::capability::*;
+use capa_engine::core::domain::*;
+use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus, ViewRegion,
 };
 use capa_engine::Engine;

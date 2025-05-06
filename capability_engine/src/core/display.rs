@@ -1,8 +1,8 @@
-use crate::capability::*;
-use crate::domain::{
+use crate::core::capability::*;
+use crate::core::domain::{
     CapaWrapper, Domain, InterruptPolicy, Policies, VectorPolicy, VectorVisibility, NB_INTERRUPTS,
 };
-use crate::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
+use crate::core::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
 use std::cell::RefCell;
 use std::collections::HashMap;

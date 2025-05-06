@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use bitflags::bitflags;
 
-use crate::capability::CapaError;
+use crate::core::capability::CapaError;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum RegionKind {

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::capability::{CapaError, CapaRef};
+use crate::core::capability::{CapaError, CapaRef};
+use crate::core::memory_region::MemoryRegion;
 use crate::is_core_subset;
-use crate::memory_region::MemoryRegion;
 use bitflags::bitflags;
 use std::sync::atomic::{AtomicU64, Ordering};
 

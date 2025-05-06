@@ -1,7 +1,7 @@
-use crate::domain::{
+use crate::core::domain::{
     CapaWrapper, Domain, Field, FieldType, LocalCapa, MonitorAPI, Status as DStatus,
 };
-use crate::memory_region::{
+use crate::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Status, ViewRegion,
 };
 use std::cell::RefCell;

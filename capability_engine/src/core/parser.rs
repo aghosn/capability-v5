@@ -2,13 +2,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::capability::{CapaRef, Capability, Ownership};
+use crate::core::capability::{CapaRef, Capability, Ownership};
 
-use crate::domain::{
+use crate::core::domain::{
     CapaWrapper, CapabilityStore, InterruptPolicy, Policies, VectorPolicy, VectorVisibility,
 };
-use crate::memory_region::{Access, Attributes, RegionKind, Remapped, Rights, Status as MStatus};
-use crate::{
+use crate::core::memory_region::{
+    Access, Attributes, RegionKind, Remapped, Rights, Status as MStatus,
+};
+use crate::core::{
     capability::CapaError,
     domain::{Domain, LocalCapa, MonitorAPI, Status},
     memory_region::MemoryRegion,
@@ -380,8 +382,8 @@ impl Unmarshall for Status {
     type Output = Status;
     fn from_string(input: String) -> Result<Self::Output, CapaError> {
         match input.trim().to_lowercase().as_str() {
-            "sealed" => Ok(crate::domain::Status::Sealed),
-            "unsealed" => Ok(crate::domain::Status::Unsealed),
+            "sealed" => Ok(crate::core::domain::Status::Sealed),
+            "unsealed" => Ok(crate::core::domain::Status::Unsealed),
             _ => return Err(CapaError::ParserStatus),
         }
     }

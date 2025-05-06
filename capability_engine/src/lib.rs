@@ -1,17 +1,14 @@
 use std::{cell::RefCell, rc::Rc};
 
-use capability::{CapaError, CapaRef, Capability, Ownership};
-use domain::{Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status};
-use memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
+use core::capability::{CapaError, CapaRef, Capability, Ownership};
+use core::domain::{
+    Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
+};
+use core::memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
 
-use crate::domain::CapaWrapper;
+use core::domain::CapaWrapper;
 
-pub mod capability;
-pub mod display;
-pub mod domain;
-pub mod memory_region;
-pub mod parser;
-pub mod platform;
+pub mod core;
 
 /// Engine implementation.
 /// This is the entry point for all operations.
