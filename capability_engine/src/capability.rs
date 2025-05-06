@@ -346,14 +346,16 @@ impl Capability<Domain> {
         Ok(())
     }
 
-    pub fn attest(&self, child: LocalCapa) -> Result<(), CapaError> {
+    pub fn attest(&self, child: LocalCapa) -> Result<String, CapaError> {
         if !self.data.operation_allowed(MonitorAPI::ATTEST) {
             return Err(CapaError::CallNotAllowed);
         }
         if !self.data.is_domain(child)? {
             return Err(CapaError::WrongCapaType);
         }
-        todo!()
+        let child = self.data.capabilities.get(&child)?.as_domain()?;
+        let attestation = format!("{}", child.borrow());
+        return Ok(attestation);
     }
 
     pub fn coalesce_view_regions(regions: &mut Vec<ViewRegion>) -> Result<(), CapaError> {

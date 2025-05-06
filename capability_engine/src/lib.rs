@@ -157,18 +157,24 @@ impl Engine {
         &self,
         domain: CapaRef<Domain>,
         other: Option<LocalCapa>,
-    ) -> Result<(), CapaError> {
+    ) -> Result<String, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::ATTEST)?;
 
         if let Some(child) = other {
             return domain.borrow().attest(child);
         }
-        todo!();
+        let display = format!("{}", domain.borrow());
+        return Ok(display);
     }
 
-    pub fn enumerate(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    pub fn enumerate(&self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<String, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::ENUMERATE)?;
-        todo!();
+        let binding = domain.borrow();
+        let capa = binding.data.capabilities.get(&capa)?;
+        match capa {
+            CapaWrapper::Region(r) => Ok(format!("{}", r.borrow())),
+            CapaWrapper::Domain(d) => Ok(format!("{}", d.borrow())),
+        }
     }
 
     pub fn switch(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {

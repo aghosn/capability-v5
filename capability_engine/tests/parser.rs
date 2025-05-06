@@ -371,3 +371,126 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         assert!(parser.parse_attestation(i.to_string()).is_err());
     }
 }
+
+#[test]
+fn test_enumerate_attest() {
+    // Initial setup
+    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+
+    // Test attestation.
+    let attestation = engine.attest(td0.clone(), None).unwrap();
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+    assert_eq!(attestation, expected);
+
+    // Now enumerate r0.
+    let enumeration = engine.enumerate(td0.clone(), td0_r0).unwrap();
+    let expected = r#"Exclusive 0x0 0x10000 with RWX mapped Identity"#;
+    assert_eq!(enumeration, expected);
+
+    // Start building more complex example.
+    let td1 = engine
+        .create(
+            td0.clone(),
+            0x1,
+            MonitorAPI::empty(),
+            InterruptPolicy::default_all(),
+        )
+        .unwrap();
+
+    let r1 = engine
+        .carve(
+            td0.clone(),
+            td0_r0,
+            &Access::new(0x2000, 0x1000, Rights::READ),
+        )
+        .unwrap();
+
+    // Attestation td0.
+    let attestation = engine.attest(td0.clone(), None).unwrap();
+    let expected = r#"td0 = Sealed domain(td1,r0,r1)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Unsealed domain()
+|cores: 0x1
+|mon.api: 0x0
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x2000 0x3000 with R__ for r1
+r1 = Exclusive 0x2000 0x3000 with R__ mapped Identity
+|indices: 1->r0 2->td1 3->r1
+"#;
+    assert_eq!(attestation, expected);
+
+    // Enumerate td1.
+    let enumeration = engine.enumerate(td0.clone(), r1).unwrap();
+    let expected = r#"Exclusive 0x2000 0x3000 with R__ mapped Identity"#;
+    assert_eq!(enumeration, expected);
+    // Enumerate td0.
+    let enumeration = engine.enumerate(td0.clone(), td0_r0).unwrap();
+    let expected = r#"Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x2000 0x3000 with R__ for .0"#;
+    assert_eq!(enumeration, expected);
+
+    // Does the index change if we revoke the child?
+    let r2 = engine
+        .carve(
+            td0.clone(),
+            td0_r0,
+            &Access::new(0x3000, 0x1000, Rights::READ | Rights::WRITE),
+        )
+        .unwrap();
+
+    let enumeration = engine.enumerate(td0.clone(), td0_r0).unwrap();
+    let expected = r#"Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x2000 0x3000 with R__ for .0
+| Carve at 0x3000 0x4000 with RW_ for .1"#;
+    assert_eq!(enumeration, expected);
+
+    // Revoke the first.
+    engine.revoke(td0.clone(), td0_r0, 0).unwrap();
+    let enumeration = engine.enumerate(td0.clone(), td0_r0).unwrap();
+    let expected = r#"Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x3000 0x4000 with RW_ for .0"#;
+    assert_eq!(enumeration, expected);
+
+    // Enumerate the local capa indices.
+    let attestation = engine.attest(td0.clone(), None).unwrap();
+    let expected = r#"td0 = Sealed domain(td1,r0,r1)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Unsealed domain()
+|cores: 0x1
+|mon.api: 0x0
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x3000 0x4000 with RW_ for r1
+r1 = Exclusive 0x3000 0x4000 with RW_ mapped Identity
+|indices: 1->r0 2->td1 4->r1
+"#;
+    assert_eq!(attestation, expected);
+
+    // Send the region to td1.
+    engine
+        .send(td0.clone(), td1, r2, Remapped::Identity)
+        .unwrap();
+    engine.revoke(td0.clone(), td1, 0).unwrap();
+
+    // Check we got back to the expected configuration.
+    let attestation = engine.attest(td0.clone(), None).unwrap();
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+    assert_eq!(attestation, expected);
+}
