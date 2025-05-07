@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::{
     core::{
         capability::{CapaError, CapaRef, Capability, Ownership},
-        domain::{CapaWrapper, Domain, LocalCapa},
+        domain::{CapaWrapper, Domain, FieldType, LocalCapa},
         memory_region::{Access, MemoryRegion, RegionKind, Remapped, Rights},
     },
     server, CallInterface, EngineInterface,
@@ -18,6 +18,7 @@ pub enum ClientError {
     FailedCarve,
     FailedAttest,
     FailedRevoke,
+    FailedCreate,
     CapaError(CapaError),
 }
 
@@ -158,13 +159,51 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
     fn create(
         &self,
         _domain: &Self::CapaReference,
-        _cores: u64,
-        _api: crate::core::domain::MonitorAPI,
-        _interrupts: crate::core::domain::InterruptPolicy,
+        cores: u64,
+        api: crate::core::domain::MonitorAPI,
+        interrupts: crate::core::domain::InterruptPolicy,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError> {
-        // This one is gonna be a bitch.
-        todo!()
+        let args = [cores as usize, api.bits() as usize, 0, 0, 0, 0];
+        let res = self.platform.send(CallInterface::CREATE, &args)?;
+
+        match res {
+            ClientResult::SingleValue(child) => {
+                // Now set the interrutps.
+                for (i, v) in interrupts.vectors.iter().enumerate() {
+                    let args = [
+                        0,
+                        FieldType::InterruptVisibility as usize,
+                        i,
+                        v.visibility.bits() as usize,
+                        0,
+                        0,
+                    ];
+                    self.platform.send(CallInterface::SET, &args)?;
+                    let args = [
+                        0,
+                        FieldType::InterruptRead as usize,
+                        i,
+                        v.read_set as usize,
+                        0,
+                        0,
+                    ];
+                    self.platform.send(CallInterface::SET, &args)?;
+                    let args = [
+                        0,
+                        FieldType::InterruptWrite as usize,
+                        i,
+                        v.write_set as usize,
+                        0,
+                        0,
+                    ];
+                    self.platform.send(CallInterface::SET, &args)?;
+                }
+                return Ok(child as LocalCapa);
+            }
+            _ => return Err(ClientError::FailedCreate),
+        }
     }
+
     fn attest(
         &self,
         _domain: Self::CapaReference,
@@ -181,6 +220,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
             _ => Err(ClientError::FailedAttest),
         }
     }
+
     fn switch(
         &self,
         _domain: Self::CapaReference,
@@ -188,6 +228,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
     ) -> Result<(), Self::CapabilityError> {
         todo!()
     }
+
     fn revoke(
         &self,
         _domain: Self::CapaReference,
@@ -201,6 +242,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
             _ => Err(ClientError::FailedRevoke),
         }
     }
+
     fn enumerate(
         &self,
         _domain: Self::CapaReference,
@@ -263,6 +305,7 @@ impl<T: ClientInterface> Engine<T> {
         self.add_region(local, region, &access, RegionKind::Alias);
         Ok(alias)
     }
+
     pub fn r_carve(
         &mut self,
         region: &CapaRef<MemoryRegion>,
