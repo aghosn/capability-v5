@@ -528,3 +528,49 @@ fn test_client_exercise_set_get() {
         assert_eq!(write, i as u64);
     }
 }
+
+#[test]
+fn test_client_100_children() {
+    let mut client = setup();
+
+    let r0 = client.find_region(|_x| true).unwrap();
+    for _i in 0..100 {
+        let child = client
+            .r_create(0x1, MonitorAPI::empty(), InterruptPolicy::default_none())
+            .unwrap();
+        let r = client
+            .r_alias(&r0.clone(), 0x2000, 0x1000, Rights::all().bits())
+            .unwrap();
+        client
+            .r_send(&child.clone(), &r, Remapped::Identity)
+            .unwrap();
+        client.r_seal(&child).unwrap();
+    }
+
+    // Compare the two attestations.
+    let local = format!("{}", client.current.borrow());
+    let remote = client.r_attest(None).unwrap();
+    assert_eq!(local, remote);
+
+    // Now use find_child to loop and kill all the kids.
+    let mut child = client.find_child(|_x| true);
+    while child.is_some() {
+        let c = child.unwrap();
+        client.r_revoke_child(&c).unwrap();
+        child = client.find_child(|_x| true);
+    }
+
+    // Attest everything is good.
+    let attestation = format!("{}", client.current.borrow());
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+    assert_eq!(attestation, expected);
+
+    let attestation = client.r_attest(None).unwrap();
+    assert_eq!(attestation, expected);
+}
