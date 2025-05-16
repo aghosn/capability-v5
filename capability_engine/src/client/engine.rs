@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
+use crate::core::domain::Field;
 use crate::server::engine::Engine as SEngine;
 use crate::{
     core::{
@@ -317,6 +318,37 @@ impl<T: ClientInterface> Engine<T> {
             .capabilities
             .remove(&capa.owned.handle)?;
         Ok(())
+    }
+
+    pub fn r_set(
+        &mut self,
+        child: &CapaRef<Domain>,
+        core: u64,
+        tpe: FieldType,
+        field: Field,
+        value: u64,
+    ) -> Result<(), ClientError> {
+        let local = child.borrow().owned.handle;
+        self.set(self.current.clone(), local, core, tpe, field, value)?;
+        {
+            let engine = SEngine {};
+            engine
+                .set(self.current.clone(), local, core, tpe, field, value)
+                .unwrap();
+        }
+        Ok(())
+    }
+
+    pub fn r_get(
+        &mut self,
+        child: &CapaRef<Domain>,
+        core: u64,
+        tpe: FieldType,
+        field: Field,
+    ) -> Result<u64, ClientError> {
+        let local = child.borrow().owned.handle;
+        //TODO: check if we wanna bypass.
+        self.get(self.current.clone(), local, core, tpe, field)
     }
 
     pub fn r_alias(

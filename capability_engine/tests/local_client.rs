@@ -431,3 +431,100 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     let attestation = format!("{}", client.current.borrow());
     assert_eq!(attestation, expected);
 }
+
+#[test]
+fn test_client_exercise_set_get() {
+    let mut client = setup();
+
+    let td1 = client
+        .r_create(0x1, MonitorAPI::all(), InterruptPolicy::default_none())
+        .unwrap();
+
+    // Change cores.
+    client
+        .r_set(&td1.clone(), 0, FieldType::Cores, 0, 0x22)
+        .unwrap();
+    // Get it and check.
+    let v = client.r_get(&td1.clone(), 0, FieldType::Cores, 0).unwrap();
+    assert_eq!(v, 0x22);
+
+    // Check local and remote attestation.
+    let attestation = format!("{}", td1.borrow());
+    let expected = r#"td0 = Unsealed domain()
+|cores: 0x22
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+"#;
+    assert_eq!(attestation, expected);
+    let attestation = client.r_attest(Some(&td1.clone())).unwrap();
+    assert_eq!(attestation, expected);
+
+    // Change the monitor API.
+    client
+        .r_set(
+            &td1.clone(),
+            0,
+            FieldType::Api,
+            0,
+            MonitorAPI::RECEIVE.bits() as u64,
+        )
+        .unwrap();
+    // Get it and check.
+    let v = client.r_get(&td1.clone(), 0, FieldType::Api, 0).unwrap();
+    assert_eq!(v, MonitorAPI::RECEIVE.bits() as u64);
+
+    // Check local and remote attestation.
+    let attestation = format!("{}", td1.borrow());
+    let expected = r#"td0 = Unsealed domain()
+|cores: 0x22
+|mon.api: 0x1000
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+"#;
+    assert_eq!(attestation, expected);
+    let attestation = client.r_attest(Some(&td1.clone())).unwrap();
+    assert_eq!(attestation, expected);
+
+    // Now go through the vectors.
+    for i in 0..NB_INTERRUPTS {
+        client
+            .r_set(
+                &td1.clone(),
+                0,
+                FieldType::InterruptVisibility,
+                i as u64,
+                VectorVisibility::ALLOWED.bits() as u64,
+            )
+            .unwrap();
+        client
+            .r_set(
+                &td1.clone(),
+                0,
+                FieldType::InterruptRead,
+                i as u64,
+                i as u64,
+            )
+            .unwrap();
+        client
+            .r_set(
+                &td1.clone(),
+                0,
+                FieldType::InterruptWrite,
+                i as u64,
+                i as u64,
+            )
+            .unwrap();
+        // Now do the gets.
+        let vis = client
+            .r_get(&td1.clone(), 0, FieldType::InterruptVisibility, i as u64)
+            .unwrap();
+        let read = client
+            .r_get(&td1.clone(), 0, FieldType::InterruptRead, i as u64)
+            .unwrap();
+        let write = client
+            .r_get(&td1.clone(), 0, FieldType::InterruptWrite, i as u64)
+            .unwrap();
+        assert_eq!(vis, VectorVisibility::ALLOWED.bits() as u64);
+        assert_eq!(read, i as u64);
+        assert_eq!(write, i as u64);
+    }
+}
