@@ -7,6 +7,7 @@ use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
 };
 use capa_engine::server::engine::Engine as SEngine;
+use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -564,6 +565,21 @@ fn test_client_100_children() {
     let mut child = client.find_child(|_x| true);
     while child.is_some() {
         let c = child.unwrap();
+        // Enumerate the child.
+        let handle = c.borrow().owned.handle;
+        let enumerate = client.enumerate(client.current.clone(), handle).unwrap();
+        let expected = r#"td0 = Sealed domain(r0)
+|cores: 0x1
+|mon.api: 0x0
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Aliased 0x2000 0x3000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+        assert_eq!(enumerate, expected);
+        // Do a wrong enumerate.
+        let err = client.enumerate(client.current.clone(), 2000);
+        assert!(err.is_err());
+
         client.r_revoke_child(&c).unwrap();
         child = client.find_child(|_x| true);
     }
