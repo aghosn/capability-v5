@@ -197,17 +197,29 @@ fn test_set_get() {
     let api = engine
         .get(td0.clone(), child_td, 0, FieldType::Api, 0)
         .unwrap();
-    assert_eq!(api, MonitorAPI::all().bits() as usize);
+    assert_eq!(api, MonitorAPI::all().bits() as u64);
 
     for i in 0..NB_INTERRUPTS {
         let vis = engine
-            .get(td0.clone(), child_td, 0, FieldType::InterruptVisibility, i)
+            .get(
+                td0.clone(),
+                child_td,
+                0,
+                FieldType::InterruptVisibility,
+                i as u64,
+            )
             .unwrap();
         let read = engine
-            .get(td0.clone(), child_td, 0, FieldType::InterruptRead, i)
+            .get(td0.clone(), child_td, 0, FieldType::InterruptRead, i as u64)
             .unwrap();
         let write = engine
-            .get(td0.clone(), child_td, 0, FieldType::InterruptWrite, i)
+            .get(
+                td0.clone(),
+                child_td,
+                0,
+                FieldType::InterruptWrite,
+                i as u64,
+            )
             .unwrap();
         assert_eq!(vis, 0);
         assert_eq!(read, !0);
@@ -225,13 +237,27 @@ fn test_set_get() {
             child_td,
             0,
             FieldType::InterruptVisibility,
-            i,
+            i as u64,
             1,
         );
         assert_eq!(res, Err(CapaError::DomainSealed));
-        let res = engine.set(td0.clone(), child_td, 0, FieldType::InterruptRead, i, 1);
+        let res = engine.set(
+            td0.clone(),
+            child_td,
+            0,
+            FieldType::InterruptRead,
+            i as u64,
+            1,
+        );
         assert_eq!(res, Err(CapaError::DomainSealed));
-        let res = engine.set(td0.clone(), child_td, 0, FieldType::InterruptWrite, i, 1);
+        let res = engine.set(
+            td0.clone(),
+            child_td,
+            0,
+            FieldType::InterruptWrite,
+            i as u64,
+            1,
+        );
         assert_eq!(res, Err(CapaError::DomainSealed));
     }
 
@@ -259,7 +285,7 @@ fn test_set_get() {
             0,
             FieldType::Api,
             0,
-            MonitorAPI::all().bits() as usize,
+            MonitorAPI::all().bits() as u64,
         )
         .unwrap();
     for i in 0..NB_INTERRUPTS {
@@ -269,15 +295,29 @@ fn test_set_get() {
                 child_td,
                 0,
                 FieldType::InterruptVisibility,
-                i,
-                VectorVisibility::all().bits() as usize,
+                i as u64,
+                VectorVisibility::all().bits() as u64,
             )
             .unwrap();
         engine
-            .set(td0.clone(), child_td, 0, FieldType::InterruptRead, i, 0)
+            .set(
+                td0.clone(),
+                child_td,
+                0,
+                FieldType::InterruptRead,
+                i as u64,
+                0,
+            )
             .unwrap();
         engine
-            .set(td0.clone(), child_td, 0, FieldType::InterruptWrite, i, 0)
+            .set(
+                td0.clone(),
+                child_td,
+                0,
+                FieldType::InterruptWrite,
+                i as u64,
+                0,
+            )
             .unwrap();
     }
 
@@ -287,7 +327,7 @@ fn test_set_get() {
         child_td,
         0,
         FieldType::InterruptVisibility,
-        NB_INTERRUPTS + 2,
+        (NB_INTERRUPTS + 2) as u64,
         555,
     );
     assert_eq!(res, Err(CapaError::InvalidField));
@@ -297,7 +337,7 @@ fn test_set_get() {
         child_td,
         0,
         FieldType::InterruptVisibility,
-        NB_INTERRUPTS + 2,
+        (NB_INTERRUPTS + 2) as u64,
     );
     assert_eq!(res, Err(CapaError::InvalidField));
 

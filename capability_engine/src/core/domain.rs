@@ -51,16 +51,30 @@ pub enum Status {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(u8)]
 pub enum FieldType {
-    Register,
-    Cores,
-    Api,
-    InterruptVisibility,
-    InterruptRead,
-    InterruptWrite,
+    Register = 1,
+    Cores = 2,
+    Api = 3,
+    InterruptVisibility = 4,
+    InterruptRead = 5,
+    InterruptWrite = 6,
+}
+
+impl FieldType {
+    pub fn from_u64(v: u64) -> Option<Self> {
+        match v {
+            1 => Some(Self::Register),
+            2 => Some(Self::Cores),
+            3 => Some(Self::Api),
+            4 => Some(Self::InterruptVisibility),
+            5 => Some(Self::InterruptRead),
+            6 => Some(Self::InterruptWrite),
+            _ => None,
+        }
+    }
 }
 
 /// Define the type for field here
-pub type Field = usize;
+pub type Field = u64;
 
 pub struct Policies {
     pub cores: u64,
@@ -101,6 +115,7 @@ impl VectorPolicy {
 
 pub const NB_INTERRUPTS: usize = 256;
 
+#[derive(Clone, Copy)]
 pub struct InterruptPolicy {
     pub vectors: [VectorPolicy; NB_INTERRUPTS],
 }
@@ -134,21 +149,21 @@ impl InterruptPolicy {
         return true;
     }
 
-    pub fn set(&mut self, tpe: FieldType, field: usize, value: usize) -> Result<(), CapaError> {
-        if field >= NB_INTERRUPTS {
+    pub fn set(&mut self, tpe: FieldType, field: u64, value: u64) -> Result<(), CapaError> {
+        if field as usize >= NB_INTERRUPTS {
             return Err(CapaError::InvalidField);
         }
         match tpe {
             FieldType::InterruptVisibility => {
                 let vis =
                     VectorVisibility::from_bits(value as u8).ok_or(CapaError::InvalidValue)?;
-                self.vectors[field].visibility = vis;
+                self.vectors[field as usize].visibility = vis;
             }
             FieldType::InterruptRead => {
-                self.vectors[field].read_set = value as u64;
+                self.vectors[field as usize].read_set = value as u64;
             }
             FieldType::InterruptWrite => {
-                self.vectors[field].write_set = value as u64;
+                self.vectors[field as usize].write_set = value as u64;
             }
             _ => return Err(CapaError::InvalidField),
         }
@@ -295,12 +310,7 @@ impl Domain {
         self.policies.api.contains(apicall)
     }
 
-    pub fn set_policy(
-        &mut self,
-        tpe: FieldType,
-        field: usize,
-        value: usize,
-    ) -> Result<(), CapaError> {
+    pub fn set_policy(&mut self, tpe: FieldType, field: u64, value: u64) -> Result<(), CapaError> {
         if self.is_sealed() {
             return Err(CapaError::DomainSealed);
         }
@@ -321,28 +331,30 @@ impl Domain {
         }
     }
 
-    pub fn get_policy(&self, tpe: FieldType, field: usize) -> Result<usize, CapaError> {
+    pub fn get_policy(&self, tpe: FieldType, field: u64) -> Result<u64, CapaError> {
         match tpe {
             FieldType::Register => return Err(CapaError::InvalidField),
-            FieldType::Api => Ok(self.policies.api.bits() as usize),
-            FieldType::Cores => Ok(self.policies.cores as usize),
+            FieldType::Api => Ok(self.policies.api.bits() as u64),
+            FieldType::Cores => Ok(self.policies.cores),
             FieldType::InterruptWrite => {
-                if field >= NB_INTERRUPTS {
+                if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field].write_set as usize)
+                Ok(self.policies.interrupts.vectors[field as usize].write_set)
             }
             FieldType::InterruptRead => {
-                if field >= NB_INTERRUPTS {
+                if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field].read_set as usize)
+                Ok(self.policies.interrupts.vectors[field as usize].read_set)
             }
             FieldType::InterruptVisibility => {
-                if field >= NB_INTERRUPTS {
+                if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field].visibility.bits() as usize)
+                Ok(self.policies.interrupts.vectors[field as usize]
+                    .visibility
+                    .bits() as u64)
             }
         }
     }

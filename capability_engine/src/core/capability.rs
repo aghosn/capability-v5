@@ -299,10 +299,10 @@ impl Capability<Domain> {
     // Set on self.
     pub fn set(
         &mut self,
-        _core: usize,
+        _core: u64,
         tpe: FieldType,
         field: Field,
-        value: usize,
+        value: u64,
     ) -> Result<(), CapaError> {
         match tpe {
             FieldType::Register => {
@@ -320,7 +320,7 @@ impl Capability<Domain> {
     }
 
     // Get on self.
-    pub fn get(&self, _core: usize, tpe: FieldType, field: Field) -> Result<usize, CapaError> {
+    pub fn get(&self, _core: u64, tpe: FieldType, field: Field) -> Result<u64, CapaError> {
         match tpe {
             FieldType::Register => todo!(),
             _ => self.data.get_policy(tpe, field),

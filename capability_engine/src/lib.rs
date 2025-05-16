@@ -12,6 +12,7 @@ fn is_core_subset(reference: u64, other: u64) -> bool {
 }
 
 // Call identifiers for the engine trait.
+#[derive(Debug)]
 #[repr(u8)]
 pub enum CallInterface {
     CREATE = 1,
@@ -47,20 +48,20 @@ pub trait EngineInterface {
         &self,
         domain: Self::CapaReference,
         child: Self::OwnedCapa,
-        core: usize,
+        core: u64,
         tpe: FieldType,
         field: Field,
-        value: usize,
+        value: u64,
     ) -> Result<(), Self::CapabilityError>;
 
     fn get(
         &self,
         domain: Self::CapaReference,
         child: Self::OwnedCapa,
-        core: usize,
+        core: u64,
         tpe: FieldType,
         field: Field,
-    ) -> Result<usize, Self::CapabilityError>;
+    ) -> Result<u64, Self::CapabilityError>;
 
     fn seal(
         &self,
@@ -104,7 +105,7 @@ pub trait EngineInterface {
         &self,
         domain: Self::CapaReference,
         capa: Self::OwnedCapa,
-        child: usize,
+        child: u64,
     ) -> Result<(), Self::CapabilityError>;
 
     fn send(

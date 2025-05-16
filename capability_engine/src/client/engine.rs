@@ -1,14 +1,17 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     core::{
         capability::{CapaError, CapaRef, Capability, Ownership},
-        domain::{CapaWrapper, Domain, FieldType, LocalCapa},
+        domain::{
+            CapaWrapper, Domain, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies,
+        },
         memory_region::{Access, MemoryRegion, RegionKind, Remapped, Rights},
     },
-    server, CallInterface, EngineInterface,
+    CallInterface, EngineInterface,
 };
 
+#[derive(Debug)]
 pub enum ClientError {
     FailedSet,
     FailedGet,
@@ -23,19 +26,43 @@ pub enum ClientError {
 }
 
 pub enum ClientResult {
-    SingleValue(usize),
+    SingleValue(u64),
     StringValue(String),
     EmptyValue,
 }
 
+impl ClientResult {
+    pub fn wrap_empty(input: Result<(), CapaError>) -> Result<ClientResult, ClientError> {
+        match input {
+            Ok(()) => Ok(Self::EmptyValue),
+            Err(e) => Err(ClientError::CapaError(e)),
+        }
+    }
+
+    pub fn wrap_value(input: Result<u64, CapaError>) -> Result<ClientResult, ClientError> {
+        match input {
+            Ok(v) => Ok(Self::SingleValue(v)),
+            Err(e) => Err(ClientError::CapaError(e)),
+        }
+    }
+
+    pub fn wrap_string(input: Result<String, CapaError>) -> Result<ClientResult, ClientError> {
+        match input {
+            Ok(s) => Ok(Self::StringValue(s)),
+            Err(e) => Err(ClientError::CapaError(e)),
+        }
+    }
+}
+
 // Platform interface.
 pub trait ClientInterface {
-    fn send(&self, call: CallInterface, args: &[usize; 6]) -> Result<ClientResult, ClientError>;
+    fn init() -> Self;
+    fn send(&self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
     fn receive(
         &self,
         engine: &mut crate::server::engine::Engine,
         call: CallInterface,
-        args: &[usize; 6],
+        args: &[u64; 6],
     ) -> Result<ClientResult, ClientError>;
 }
 
@@ -43,8 +70,6 @@ pub trait ClientInterface {
 pub struct Engine<T: ClientInterface> {
     pub platform: T,
     pub current: CapaRef<Domain>,
-    // Copy of the server-side state. This makes it easier to perform operations.
-    pub state: server::engine::Engine,
 }
 
 impl<T: ClientInterface> EngineInterface for Engine<T> {
@@ -55,12 +80,12 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         &self,
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
-        core: usize,
+        core: u64,
         tpe: crate::core::domain::FieldType,
         field: crate::core::domain::Field,
-        value: usize,
+        value: u64,
     ) -> Result<(), Self::CapabilityError> {
-        let args: [usize; 6] = [child as usize, core, tpe as usize, field, value, 0];
+        let args: [u64; 6] = [child as u64, core, tpe as u64, field, value, 0];
         let res = self.platform.send(CallInterface::SET, &args)?;
         match res {
             ClientResult::EmptyValue => Ok(()),
@@ -72,11 +97,11 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         &self,
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
-        core: usize,
+        core: u64,
         tpe: crate::core::domain::FieldType,
         field: crate::core::domain::Field,
-    ) -> Result<usize, Self::CapabilityError> {
-        let args: [usize; 6] = [child as usize, core, tpe as usize, field, 0, 0];
+    ) -> Result<u64, Self::CapabilityError> {
+        let args: [u64; 6] = [child as u64, core, tpe as u64, field, 0, 0];
         let res = self.platform.send(CallInterface::GET, &args)?;
         match res {
             ClientResult::SingleValue(v) => Ok(v),
@@ -89,7 +114,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
     ) -> Result<(), Self::CapabilityError> {
-        let args: [usize; 6] = [child as usize, 0, 0, 0, 0, 0];
+        let args: [u64; 6] = [child as u64, 0, 0, 0, 0, 0];
         let res = self.platform.send(CallInterface::SEAL, &args)?;
         match res {
             ClientResult::EmptyValue => Ok(()),
@@ -104,9 +129,9 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         capa: Self::OwnedCapa,
         remap: crate::core::memory_region::Remapped,
     ) -> Result<(), Self::CapabilityError> {
-        let args: [usize; 6] = match remap {
-            Remapped::Identity => [dest as usize, capa as usize, 0, 0, 0, 0],
-            Remapped::Remapped(x) => [dest as usize, capa as usize, 1, x as usize, 0, 0],
+        let args: [u64; 6] = match remap {
+            Remapped::Identity => [dest as u64, capa as u64, 0, 0, 0, 0],
+            Remapped::Remapped(x) => [dest as u64, capa as u64, 1, x as u64, 0, 0],
         };
         let res = self.platform.send(CallInterface::SEND, &args)?;
         match res {
@@ -120,11 +145,11 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         capa: Self::OwnedCapa,
         access: &crate::core::memory_region::Access,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError> {
-        let args: [usize; 6] = [
-            capa as usize,
-            access.start as usize,
-            access.size as usize,
-            access.rights.bits() as usize,
+        let args: [u64; 6] = [
+            capa as u64,
+            access.start as u64,
+            access.size as u64,
+            access.rights.bits() as u64,
             0,
             0,
         ];
@@ -141,11 +166,11 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         capa: Self::OwnedCapa,
         access: &crate::core::memory_region::Access,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError> {
-        let args: [usize; 6] = [
-            capa as usize,
-            access.start as usize,
-            access.size as usize,
-            access.rights.bits() as usize,
+        let args: [u64; 6] = [
+            capa as u64,
+            access.start as u64,
+            access.size as u64,
+            access.rights.bits() as u64,
             0,
             0,
         ];
@@ -161,9 +186,9 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         _domain: &Self::CapaReference,
         cores: u64,
         api: crate::core::domain::MonitorAPI,
-        interrupts: crate::core::domain::InterruptPolicy,
+        interrupts: InterruptPolicy,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError> {
-        let args = [cores as usize, api.bits() as usize, 0, 0, 0, 0];
+        let args = [cores as u64, api.bits() as u64, 0, 0, 0, 0];
         let res = self.platform.send(CallInterface::CREATE, &args)?;
 
         match res {
@@ -171,29 +196,29 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
                 // Now set the interrutps.
                 for (i, v) in interrupts.vectors.iter().enumerate() {
                     let args = [
+                        child,
                         0,
-                        FieldType::InterruptVisibility as usize,
-                        i,
-                        v.visibility.bits() as usize,
-                        0,
-                        0,
-                    ];
-                    self.platform.send(CallInterface::SET, &args)?;
-                    let args = [
-                        0,
-                        FieldType::InterruptRead as usize,
-                        i,
-                        v.read_set as usize,
-                        0,
+                        FieldType::InterruptVisibility as u64,
+                        i as u64,
+                        v.visibility.bits() as u64,
                         0,
                     ];
                     self.platform.send(CallInterface::SET, &args)?;
                     let args = [
+                        child,
                         0,
-                        FieldType::InterruptWrite as usize,
-                        i,
-                        v.write_set as usize,
+                        FieldType::InterruptRead as u64,
+                        i as u64,
+                        v.read_set as u64,
                         0,
+                    ];
+                    self.platform.send(CallInterface::SET, &args)?;
+                    let args = [
+                        child,
+                        0,
+                        FieldType::InterruptWrite as u64,
+                        i as u64,
+                        v.write_set as u64,
                         0,
                     ];
                     self.platform.send(CallInterface::SET, &args)?;
@@ -209,8 +234,8 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         _domain: Self::CapaReference,
         other: Option<Self::OwnedCapa>,
     ) -> Result<String, Self::CapabilityError> {
-        let args: [usize; 6] = if let Some(v) = other {
-            [v as usize; 6]
+        let args: [u64; 6] = if let Some(v) = other {
+            [v as u64; 6]
         } else {
             [0; 6]
         };
@@ -233,9 +258,9 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         &self,
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
-        child: usize,
+        child: u64,
     ) -> Result<(), Self::CapabilityError> {
-        let args: [usize; 6] = [capa as usize, child, 0, 0, 0, 0];
+        let args: [u64; 6] = [capa as u64, child, 0, 0, 0, 0];
         let res = self.platform.send(CallInterface::REVOKE, &args)?;
         match res {
             ClientResult::EmptyValue => Ok(()),
@@ -248,7 +273,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
     ) -> Result<String, Self::CapabilityError> {
-        let args: [usize; 6] = [capa as usize, 0, 0, 0, 0, 0];
+        let args: [u64; 6] = [capa as u64, 0, 0, 0, 0, 0];
         let res = self.platform.send(CallInterface::ENUMERATE, &args)?;
         match res {
             ClientResult::StringValue(v) => Ok(v),
@@ -315,23 +340,54 @@ impl<T: ClientInterface> Engine<T> {
     ) -> Result<LocalCapa, ClientError> {
         let local = region.borrow().owned.handle;
         let access = Access::new(start, size, Rights::from_bits_truncate(rights));
-        let alias = self.carve(self.current.clone(), local, &access)?;
+        let carve = self.carve(self.current.clone(), local, &access)?;
         // Now make sure we update the state.
         self.add_region(local, region, &access, RegionKind::Carve);
-        Ok(alias)
+        Ok(carve)
+    }
+
+    pub fn r_create(
+        &mut self,
+        cores: u64,
+        api: MonitorAPI,
+        interrupts: InterruptPolicy,
+    ) -> Result<CapaRef<Domain>, ClientError> {
+        let local = self.create(&self.current.clone(), cores, api, interrupts)?;
+        let policies = Policies::new(cores, api, interrupts);
+        let child_dom = Domain::new(policies);
+        let capa = Capability::<Domain>::new(child_dom);
+        let reference = Rc::new(RefCell::new(capa));
+        {
+            let dom = &mut self.current.borrow_mut();
+            dom.add_child(reference.clone(), Rc::downgrade(&self.current.clone()));
+            reference.borrow_mut().owned.handle = local;
+            dom.data
+                .capabilities
+                .install_capabilitiy_at(CapaWrapper::Domain(reference.clone()), local);
+        }
+        Ok(reference)
+    }
+
+    pub fn r_attest(&mut self, child: Option<&CapaRef<Domain>>) -> Result<String, ClientError> {
+        let idx = if let Some(c) = child {
+            Some(c.borrow().owned.handle)
+        } else {
+            None
+        };
+        self.attest(self.current.clone(), idx)
     }
 
     pub fn r_revoke_region(
         &mut self,
         region: &CapaRef<MemoryRegion>,
-        child: usize,
+        child: u64,
     ) -> Result<(), ClientError> {
         let local = region.borrow().owned.handle;
         self.revoke(self.current.clone(), local, child)?;
 
         let child = {
             let r_borrow = region.borrow();
-            r_borrow.children.get(child).cloned().unwrap()
+            r_borrow.children.get(child as usize).cloned().unwrap()
         };
         // It got revoked, time to update.
         region
@@ -374,6 +430,7 @@ impl<T: ClientInterface> Engine<T> {
 
     pub fn r_seal(&mut self, child: &CapaRef<Domain>) -> Result<(), ClientError> {
         let local = child.borrow().owned.handle;
+        println!("The handle in seal {}", local);
         self.seal(self.current.clone(), local)?;
         child.borrow_mut().data.status = crate::core::domain::Status::Sealed;
         Ok(())

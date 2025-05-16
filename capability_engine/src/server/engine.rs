@@ -90,10 +90,10 @@ impl EngineInterface for Engine {
         &self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
-        core: usize,
+        core: u64,
         tpe: FieldType,
         field: Field,
-        value: usize,
+        value: u64,
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SET)?;
         // Check if the domain is sealed in which case policies cannot be set.
@@ -125,10 +125,10 @@ impl EngineInterface for Engine {
         &self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
-        core: usize,
+        core: u64,
         tpe: FieldType,
         field: Field,
-    ) -> Result<usize, CapaError> {
+    ) -> Result<u64, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::GET)?;
         domain
             .borrow()
@@ -234,7 +234,7 @@ impl EngineInterface for Engine {
         &self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
-        child: usize,
+        child: u64,
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::REVOKE)?;
 
@@ -271,7 +271,7 @@ impl EngineInterface for Engine {
                 let r_borrow = r.borrow();
                 r_borrow
                     .children
-                    .get(child)
+                    .get(child as usize)
                     .cloned()
                     .ok_or(CapaError::InvalidChildCapa)?
             };
