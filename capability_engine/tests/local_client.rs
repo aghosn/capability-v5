@@ -255,3 +255,179 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     let attestation = format!("{}", client.current.borrow());
     assert_eq!(attestation, expected);
 }
+
+#[test]
+fn test_client_multiple_children() {
+    let mut client = setup();
+
+    let r0 = client.find_region(|_| true).unwrap();
+    let r1 = client
+        .r_carve(&r0.clone(), 0x0, 0x1000, Rights::all().bits())
+        .unwrap();
+    let r2 = client
+        .r_alias(
+            &r0.clone(),
+            0x1000,
+            0x1000,
+            (Rights::READ | Rights::WRITE).bits(),
+        )
+        .unwrap();
+    let r3 = client
+        .r_alias(
+            &r0.clone(),
+            0x1000,
+            0x1000,
+            (Rights::READ | Rights::WRITE).bits(),
+        )
+        .unwrap();
+    let r4 = client
+        .r_carve(&r0.clone(), 0x2000, 0x1000, Rights::all().bits())
+        .unwrap();
+
+    let td1 = client
+        .r_create(0x1, MonitorAPI::all(), InterruptPolicy::default_none())
+        .unwrap();
+    let td2 = client
+        .r_create(0x2, MonitorAPI::all(), InterruptPolicy::default_none())
+        .unwrap();
+    client
+        .r_send(&td1.clone(), &r1, Remapped::Identity)
+        .unwrap();
+    client
+        .r_send(&td1.clone(), &r2, Remapped::Identity)
+        .unwrap();
+    client.r_seal(&td1.clone()).unwrap();
+
+    client
+        .r_send(&td2.clone(), &r3, Remapped::Identity)
+        .unwrap();
+    client
+        .r_send(&td2.clone(), &r4, Remapped::Identity)
+        .unwrap();
+    client.r_seal(&td2.clone()).unwrap();
+
+    // Double children.
+    let attestation = client.r_attest(None).unwrap();
+    let expected = r#"td0 = Sealed domain(td1,td2,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1,r2)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+td2 = Sealed domain(r3,r4)
+|cores: 0x2
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x1000 with RWX for r1
+| Alias at 0x1000 0x2000 with RW_ for r2
+| Alias at 0x1000 0x2000 with RW_ for r3
+| Carve at 0x2000 0x3000 with RWX for r4
+r1 = Exclusive 0x0 0x1000 with RWX mapped Identity
+r2 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r3 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
+|indices: 1->r0 6->td1 7->td2
+"#;
+    assert_eq!(attestation, expected);
+    // Check the local state now.
+    let attestation = format!("{}", client.current.borrow());
+    assert_eq!(attestation, expected);
+
+    // Now do something weird.
+    let r5 = client
+        .r_alias(&r0.clone(), 0x5000, 0x1000, Rights::all().bits())
+        .unwrap();
+    let r6 = client
+        .r_alias(&r5.clone(), 0x5000, 0x1000, Rights::all().bits())
+        .unwrap();
+
+    client
+        .r_send(&td2.clone(), &r5, Remapped::Identity)
+        .unwrap();
+    client
+        .r_send(&td1.clone(), &r6, Remapped::Identity)
+        .unwrap();
+
+    let attestation = client.r_attest(None).unwrap();
+    let expected = r#"td0 = Sealed domain(td1,td2,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1,r2,r6)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+td2 = Sealed domain(r3,r4,r5)
+|cores: 0x2
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x1000 with RWX for r1
+| Alias at 0x1000 0x2000 with RW_ for r2
+| Alias at 0x1000 0x2000 with RW_ for r3
+| Carve at 0x2000 0x3000 with RWX for r4
+| Alias at 0x5000 0x6000 with RWX for r5
+r1 = Exclusive 0x0 0x1000 with RWX mapped Identity
+r2 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r3 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
+r5 = Aliased 0x5000 0x6000 with RWX mapped Identity
+|indices: 1->r0 6->td1 7->td2
+"#;
+    assert_eq!(attestation, expected);
+
+    // Check the local state.
+    let attestation = format!("{}", client.current.borrow());
+    assert_eq!(attestation, expected);
+
+    // Now revoke the r5 child.
+    client.r_revoke_region(&r5).unwrap();
+    let attestation = client.r_attest(None).unwrap();
+    let expected = r#"td0 = Sealed domain(td1,td2,r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+td1 = Sealed domain(r1,r2)
+|cores: 0x1
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+td2 = Sealed domain(r3,r4)
+|cores: 0x2
+|mon.api: 0x1fff
+|vec0-255: NOT REPORTED, r: 0xffffffffffffffff, w: 0xffffffffffffffff
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+| Carve at 0x0 0x1000 with RWX for r1
+| Alias at 0x1000 0x2000 with RW_ for r2
+| Alias at 0x1000 0x2000 with RW_ for r3
+| Carve at 0x2000 0x3000 with RWX for r4
+r1 = Exclusive 0x0 0x1000 with RWX mapped Identity
+r2 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r3 = Aliased 0x1000 0x2000 with RW_ mapped Identity
+r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
+|indices: 1->r0 6->td1 7->td2
+"#;
+    assert_eq!(attestation, expected);
+    // Check locally
+    let attestation = format!("{}", client.current.borrow());
+    assert_eq!(attestation, expected);
+
+    // Now revoke everything.
+    client.r_revoke_child(&td2).unwrap();
+    client.r_revoke_child(&td1).unwrap();
+
+    let attestation = client.r_attest(None).unwrap();
+    let expected = r#"td0 = Sealed domain(r0)
+|cores: 0xffffffffffffffff
+|mon.api: 0x1fff
+|vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
+r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
+|indices: 1->r0
+"#;
+    assert_eq!(attestation, expected);
+    // Check the local state.
+    let attestation = format!("{}", client.current.borrow());
+    assert_eq!(attestation, expected);
+}

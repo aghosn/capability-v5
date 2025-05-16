@@ -377,20 +377,43 @@ impl<T: ClientInterface> Engine<T> {
         self.attest(self.current.clone(), idx)
     }
 
-    pub fn r_revoke_region(
-        &mut self,
-        region: &CapaRef<MemoryRegion>,
-        child: u64,
-    ) -> Result<(), ClientError> {
-        let local = region.borrow().owned.handle;
-        self.revoke(self.current.clone(), local, child)?;
+    pub fn r_revoke_region(&mut self, child: &CapaRef<MemoryRegion>) -> Result<(), ClientError> {
+        let parent = child
+            .borrow()
+            .parent
+            .upgrade()
+            .ok_or(ClientError::FailedRevoke)?;
+        // Check it belongs to us.
+        if parent
+            .borrow()
+            .owned
+            .owner
+            .upgrade()
+            .ok_or(ClientError::FailedRevoke)?
+            != self.current
+        {
+            return Err(ClientError::FailedRevoke);
+        }
+        let mut idx = -1;
+        for (i, c) in parent.borrow().children.iter().enumerate() {
+            if c == child {
+                idx = i as i32;
+                break;
+            }
+        }
+        if idx == -1 {
+            return Err(ClientError::FailedRevoke);
+        }
+        let local = parent.borrow().owned.handle;
+        //let local = region.borrow().owned.handle;
+        self.revoke(self.current.clone(), local, idx as u64)?;
 
         let child = {
-            let r_borrow = region.borrow();
-            r_borrow.children.get(child as usize).cloned().unwrap()
+            let r_borrow = parent.borrow();
+            r_borrow.children.get(idx as usize).cloned().unwrap()
         };
         // It got revoked, time to update.
-        region
+        parent
             .borrow_mut()
             .revoke_child(&child, &mut Self::revoke_region_handler)
             .map_err(|e| ClientError::CapaError(e))?;
