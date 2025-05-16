@@ -358,7 +358,6 @@ impl Parser {
                     .unwrap();
                 CapaWrapper::Domain(dom.clone())
             } else {
-                println!("About to get {} from {:?} ", capa, self.owner);
                 let reg = self
                     .regions
                     .get(capa)

@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
+use crate::server::engine::Engine as SEngine;
 use crate::{
     core::{
         capability::{CapaError, CapaRef, Capability, Ownership},
@@ -25,6 +26,7 @@ pub enum ClientError {
     CapaError(CapaError),
 }
 
+#[derive(Debug)]
 pub enum ClientResult {
     SingleValue(u64),
     StringValue(String),
@@ -154,7 +156,6 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
             0,
         ];
         let res = self.platform.send(CallInterface::ALIAS, &args)?;
-        // TODO: Should probably update the local state.
         match res {
             ClientResult::SingleValue(v) => Ok(v as LocalCapa),
             _ => Err(ClientError::FailedAlias),
@@ -291,7 +292,7 @@ impl<T: ClientInterface> Engine<T> {
         parent: &CapaRef<MemoryRegion>,
         access: &Access,
         kind: RegionKind,
-    ) {
+    ) -> CapaRef<MemoryRegion> {
         let child = match kind {
             RegionKind::Carve => parent.borrow_mut().carve(access).unwrap(),
             RegionKind::Alias => parent.borrow_mut().alias(access).unwrap(),
@@ -305,6 +306,7 @@ impl<T: ClientInterface> Engine<T> {
         // Tree & ownership logic.
         child.borrow_mut().parent = Rc::downgrade(&parent);
         child.borrow_mut().owned = Ownership::new(Rc::downgrade(&self.current), idx);
+        child.clone()
     }
 
     fn revoke_region_handler(capa: &mut Capability<MemoryRegion>) -> Result<(), CapaError> {
@@ -323,12 +325,11 @@ impl<T: ClientInterface> Engine<T> {
         start: u64,
         size: u64,
         rights: u8,
-    ) -> Result<LocalCapa, ClientError> {
+    ) -> Result<CapaRef<MemoryRegion>, ClientError> {
         let local = region.borrow().owned.handle;
         let access = Access::new(start, size, Rights::from_bits_truncate(rights));
         let alias = self.alias(self.current.clone(), local, &access)?;
-        self.add_region(local, region, &access, RegionKind::Alias);
-        Ok(alias)
+        Ok(self.add_region(alias, region, &access, RegionKind::Alias))
     }
 
     pub fn r_carve(
@@ -337,13 +338,12 @@ impl<T: ClientInterface> Engine<T> {
         start: u64,
         size: u64,
         rights: u8,
-    ) -> Result<LocalCapa, ClientError> {
+    ) -> Result<CapaRef<MemoryRegion>, ClientError> {
         let local = region.borrow().owned.handle;
         let access = Access::new(start, size, Rights::from_bits_truncate(rights));
         let carve = self.carve(self.current.clone(), local, &access)?;
         // Now make sure we update the state.
-        self.add_region(local, region, &access, RegionKind::Carve);
-        Ok(carve)
+        Ok(self.add_region(carve, region, &access, RegionKind::Carve))
     }
 
     pub fn r_create(
@@ -430,9 +430,61 @@ impl<T: ClientInterface> Engine<T> {
 
     pub fn r_seal(&mut self, child: &CapaRef<Domain>) -> Result<(), ClientError> {
         let local = child.borrow().owned.handle;
-        println!("The handle in seal {}", local);
         self.seal(self.current.clone(), local)?;
         child.borrow_mut().data.status = crate::core::domain::Status::Sealed;
         Ok(())
+    }
+
+    pub fn r_send(
+        &mut self,
+        child: &CapaRef<Domain>,
+        region: &CapaRef<MemoryRegion>,
+        remap: Remapped,
+    ) -> Result<(), ClientError> {
+        let local_c = child.borrow().owned.handle;
+        let local_m = region.borrow().owned.handle;
+        self.send(self.current.clone(), local_c, local_m, remap)?;
+        // Update locally by abusing the server interface.
+        {
+            let engine = SEngine {};
+            engine
+                .send(self.current.clone(), local_c, local_m, remap)
+                .unwrap();
+        }
+        Ok(())
+    }
+
+    pub fn find_region<F>(&self, condition: F) -> Option<CapaRef<MemoryRegion>>
+    where
+        F: Fn(&CapaRef<MemoryRegion>) -> bool,
+    {
+        for (_, c) in self.current.borrow().data.capabilities.capabilities.iter() {
+            match c {
+                CapaWrapper::Region(r) => {
+                    if condition(r) {
+                        return Some(r.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+
+    pub fn find_child<F>(&self, condition: F) -> Option<CapaRef<Domain>>
+    where
+        F: Fn(&CapaRef<Domain>) -> bool,
+    {
+        for (_, c) in self.current.borrow().data.capabilities.capabilities.iter() {
+            match c {
+                CapaWrapper::Domain(d) => {
+                    if condition(d) {
+                        return Some(d.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
     }
 }
