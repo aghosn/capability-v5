@@ -551,6 +551,14 @@ fn test_client_100_children() {
     let local = format!("{}", client.current.borrow());
     let remote = client.r_attest(None).unwrap();
     assert_eq!(local, remote);
+    // Check the first line of the attestation.
+    {
+        assert_eq!(*local
+            .split("\n")
+            .collect::<Vec<_>>()
+            .get(0)
+            .unwrap(), "td0 = Sealed domain(td1,td2,td3,td4,td5,td6,td7,td8,td9,td10,td11,td12,td13,td14,td15,td16,td17,td18,td19,td20,td21,td22,td23,td24,td25,td26,td27,td28,td29,td30,td31,td32,td33,td34,td35,td36,td37,td38,td39,td40,td41,td42,td43,td44,td45,td46,td47,td48,td49,td50,td51,td52,td53,td54,td55,td56,td57,td58,td59,td60,td61,td62,td63,td64,td65,td66,td67,td68,td69,td70,td71,td72,td73,td74,td75,td76,td77,td78,td79,td80,td81,td82,td83,td84,td85,td86,td87,td88,td89,td90,td91,td92,td93,td94,td95,td96,td97,td98,td99,td100,r0)");
+    }
 
     // Now use find_child to loop and kill all the kids.
     let mut child = client.find_child(|_x| true);
