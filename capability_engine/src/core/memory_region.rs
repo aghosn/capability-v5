@@ -47,6 +47,15 @@ pub enum Remapped {
     Remapped(u64),
 }
 
+impl Remapped {
+    pub fn shift(&self, x: u64) -> Self {
+        match self {
+            Self::Identity => Self::Identity,
+            Self::Remapped(y) => Self::Remapped(x + y),
+        }
+    }
+}
+
 #[derive(PartialEq, Clone, Copy, Debug, Eq)]
 pub struct Access {
     pub start: u64,
@@ -149,6 +158,11 @@ impl ViewRegion {
     pub fn overlap(&self, other: &ViewRegion) -> bool {
         self.access.start <= other.access.start && other.access.start < self.access.end()
         //&& self.access.end() < other.access.end()
+    }
+
+    // Check if they intersect.
+    pub fn intersect_remap(&self, other: &ViewRegion) -> bool {
+        self.overlap_remap(other) || other.overlap_remap(self)
     }
 
     pub fn compatible(&self, other: &ViewRegion) -> bool {

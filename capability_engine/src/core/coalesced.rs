@@ -1,10 +1,11 @@
-use std::ops::{Add, Sub};
-
-use super::memory_region::{Access, ViewRegion};
+use super::{
+    capability::CapaError,
+    memory_region::{Access, ViewRegion},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoalescedView {
-    regions: Vec<ViewRegion>,
+    pub regions: Vec<ViewRegion>,
 }
 
 impl CoalescedView {
@@ -12,117 +13,106 @@ impl CoalescedView {
         CoalescedView { regions: vec![] }
     }
 
-    pub fn from_regions(mut regions: Vec<ViewRegion>) -> Self {
-        regions.sort_by_key(|r| r.access.start);
-        let mut coalesced = Vec::new();
+    pub fn from_regions(mut regions: Vec<ViewRegion>) -> Result<Self, CapaError> {
+        Self::coalesce(&mut regions)?;
+        Ok(CoalescedView { regions })
+    }
 
-        for region in regions {
-            if let Some(last) = coalesced.last_mut() {
-                if Self::can_merge(last, &region) {
-                    last.access.size =
-                        (region.access.start + region.access.size) - last.access.start;
-                } else {
-                    coalesced.push(region);
-                }
-            } else {
-                coalesced.push(region);
-            }
+    pub fn coalesce(regions: &mut Vec<ViewRegion>) -> Result<(), CapaError> {
+        regions.sort_by_key(|c| c.access.start);
+        let mut curr: usize = 0;
+        while curr < regions.len() {
+            let next = ViewRegion::merge_at(curr, regions)?;
+            curr = next;
         }
-
-        CoalescedView { regions: coalesced }
+        Ok(())
     }
 
-    fn can_merge(a: &ViewRegion, b: &ViewRegion) -> bool {
-        let a_end = a.access.start + a.access.size;
-        let b_end = b.access.start + b.access.size;
+    // Add a single ViewRegion
 
-        a_end >= b.access.start
-            && a.remap == b.remap
-            && a.access.rights == b.access.rights
-            && (a_end == b.access.start || b.access.start <= a_end)
-    }
-
-    pub fn regions(&self) -> &[ViewRegion] {
-        &self.regions
-    }
-}
-
-// Add a single ViewRegion
-impl Add<ViewRegion> for CoalescedView {
-    type Output = CoalescedView;
-
-    fn add(mut self, region: ViewRegion) -> Self::Output {
+    pub fn add(&mut self, region: ViewRegion) -> Result<(), CapaError> {
         self.regions.push(region);
-        CoalescedView::from_regions(self.regions)
+        Self::coalesce(&mut self.regions)
     }
-}
 
-// Subtract a single ViewRegion
-impl Sub<ViewRegion> for CoalescedView {
-    type Output = CoalescedView;
+    pub fn sub(&mut self, region: &ViewRegion) -> Result<(), CapaError> {
+        let mut idx: usize = 0;
+        while idx < self.regions.len() {
+            if !self.regions[idx].intersect_remap(&region) {
+                continue;
+            }
 
-    fn sub(self, region: ViewRegion) -> Self::Output {
-        let mut result = Vec::new();
-        let start = region.access.start;
-        let end = start + region.access.size;
+            // We have an overlap.
+            let current = &mut self.regions[idx];
 
-        for r in self.regions {
-            let r_start = r.access.start;
-            let r_end = r_start + r.access.size;
+            // Check compatibility now.
+            if !current.compatible(region) {
+                return Err(CapaError::IncompatibleRemap);
+            }
 
-            if end <= r_start || start >= r_end {
-                result.push(r); // no overlap
-            } else if start <= r_start && end >= r_end {
-                continue; // fully covered: drop
-            } else if start > r_start && end < r_end {
-                // split into two
-                let left = ViewRegion {
-                    access: Access {
-                        start: r_start,
-                        size: start - r_start,
-                        rights: r.access.rights,
-                    },
-                    remap: r.remap,
-                };
-                let right = ViewRegion {
-                    access: Access {
-                        start: end,
-                        size: r_end - end,
-                        rights: r.access.rights,
-                    },
-                    remap: r.remap,
-                };
-                result.push(left);
-                result.push(right);
-            } else if start <= r_start {
-                // truncate left
-                let truncated = ViewRegion {
-                    access: Access {
-                        start: end,
-                        size: r_end.saturating_sub(end),
-                        rights: r.access.rights,
-                    },
-                    remap: r.remap,
-                };
-                if truncated.access.size > 0 {
-                    result.push(truncated);
-                }
-            } else if end >= r_end {
-                // truncate right
-                let truncated = ViewRegion {
-                    access: Access {
-                        start: r_start,
-                        size: start - r_start,
-                        rights: r.access.rights,
-                    },
-                    remap: r.remap,
-                };
-                if truncated.access.size > 0 {
-                    result.push(truncated);
-                }
+            if region.contains_remap(current) {
+                // Easy case, fully contained including access rights.
+                self.regions.remove(idx);
+                continue;
+            }
+            // Less easy, fully contained but not access rights.
+            if region.active_start() <= current.active_start()
+                && current.active_end() <= region.active_end()
+            {
+                current.access.rights.remove(region.access.rights);
+                idx += 1;
+                continue;
+            }
+            // Worst scenario is if we have split.
+            let mut replace: Vec<ViewRegion> = Vec::new();
+            let mut rights = current.access.rights;
+            rights.remove(region.access.rights);
+
+            // left.
+            if region.active_start() > current.active_start() {
+                let left = ViewRegion::new(
+                    Access::new(
+                        current.access.start,
+                        region.access.start - current.access.start,
+                        current.access.rights,
+                    ),
+                    current.remap,
+                );
+                replace.push(left);
+            };
+
+            // Middle
+            if !rights.is_empty() {
+                let start = u64::max(current.access.start, region.access.start);
+                let end = u64::min(current.access.end(), region.access.end());
+                let m = ViewRegion::new(
+                    Access::new(start, end - start, rights),
+                    current.remap.shift(start - current.access.start),
+                );
+                replace.push(m);
+            }
+
+            // Right
+            if region.active_end() < current.active_end() {
+                let r = ViewRegion::new(
+                    Access::new(
+                        region.access.end(),
+                        current.access.end() - region.access.end(),
+                        current.access.rights,
+                    ),
+                    current
+                        .remap
+                        .shift(region.access.end() - current.access.start),
+                );
+                replace.push(r);
+            }
+            // Add the regions now.
+            self.regions.remove(idx);
+            for c in replace.iter() {
+                self.regions.insert(idx, *c);
+                idx += 1;
             }
         }
-
-        CoalescedView::from_regions(result)
+        Ok(())
     }
 }
