@@ -6,20 +6,20 @@ use crate::{
         domain::{
             Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
         },
-        memory_region::{Access, Remapped, Rights},
+        memory_region::{Access, Attributes, Remapped, Rights},
     },
     server::engine::Engine,
     CallInterface, EngineInterface,
 };
 
-use super::engine::{ClientError, ClientInterface, ClientResult};
+use super::engine::{ClientError, ClientResult, CommunicationInterface};
 
 pub struct LocalClient {
     pub server: Engine,
     pub current: CapaRef<Domain>,
 }
 
-impl ClientInterface for LocalClient {
+impl CommunicationInterface for LocalClient {
     fn init() -> Self {
         let engine = Engine::new();
         let policies = Policies::new(
@@ -78,6 +78,7 @@ impl ClientInterface for LocalClient {
                     args[0] as LocalCapa,
                     args[1] as LocalCapa,
                     remap,
+                    Attributes::from_bits_truncate(args[4] as u8),
                 ))
             }
             CallInterface::ALIAS => {

@@ -70,7 +70,13 @@ fn test_remap_carve() {
 
     // Send it with a remap.
     engine
-        .send(td0.clone(), child_td, carved, Remapped::Remapped(0x2000))
+        .send(
+            td0.clone(),
+            child_td,
+            carved,
+            Remapped::Remapped(0x2000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -165,12 +171,30 @@ fn test_remap_illegal() {
 
     // Send them with a remap.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x10000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Remapped(0x10000),
+            Attributes::empty(),
+        )
         .unwrap();
     engine
-        .send(td0.clone(), child_td, alias2, Remapped::Remapped(0x10000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias2,
+            Remapped::Remapped(0x10000),
+            Attributes::empty(),
+        )
         .unwrap();
-    let res = engine.send(td0.clone(), child_td, alias2, Remapped::Remapped(0x11000));
+    let res = engine.send(
+        td0.clone(),
+        child_td,
+        alias2,
+        Remapped::Remapped(0x11000),
+        Attributes::empty(),
+    );
     assert!(res.is_err());
 
     // Seal the child.
@@ -214,7 +238,13 @@ fn test_remap_illegal_in_hole() {
 
     // Send them with a remap.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x10000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Remapped(0x10000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -262,7 +292,13 @@ fn test_remap_illegal_in_hole() {
             .unwrap();
 
         engine
-            .send(child.clone(), gc_td, carve, Remapped::Identity)
+            .send(
+                child.clone(),
+                gc_td,
+                carve,
+                Remapped::Identity,
+                Attributes::empty(),
+            )
             .unwrap();
         engine.seal(child.clone(), gc_td).unwrap();
 
@@ -282,7 +318,13 @@ fn test_remap_illegal_in_hole() {
     }
 
     // Okay now attempt to plug the hole.
-    let err = engine.send(td0.clone(), child_td, plug, Remapped::Remapped(0x11000));
+    let err = engine.send(
+        td0.clone(),
+        child_td,
+        plug,
+        Remapped::Remapped(0x11000),
+        Attributes::empty(),
+    );
     assert!(err.is_err());
 
     // Let's revoke everything.

@@ -91,7 +91,13 @@ fn test_unallowed_calls() {
     let access = Access::new(0x0, 0x1000, Rights::all());
     let alias = engine.alias(td0.clone(), td0_r0, &access).unwrap();
 
-    let res = engine.send(td0.clone(), child_td, alias, Remapped::Identity);
+    let res = engine.send(
+        td0.clone(),
+        child_td,
+        alias,
+        Remapped::Identity,
+        Attributes::empty(),
+    );
     assert!(res.is_err());
 
     engine.revoke(td0.clone(), child_td, 0).unwrap();
@@ -107,7 +113,13 @@ fn test_unallowed_calls() {
         .unwrap();
 
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     {
@@ -139,7 +151,13 @@ fn test_unallowed_calls() {
 
     let alias = engine.alias(td0.clone(), td0_r0, &access).unwrap();
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
     engine.seal(td0.clone(), child_td).unwrap();
 

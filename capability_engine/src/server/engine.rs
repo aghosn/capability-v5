@@ -5,7 +5,7 @@ use crate::core::domain::CapaWrapper;
 use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
-use crate::core::memory_region::{Access, MemoryRegion, Remapped, ViewRegion};
+use crate::core::memory_region::{Access, Attributes, MemoryRegion, Remapped, ViewRegion};
 use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
@@ -289,13 +289,15 @@ impl EngineInterface for Engine {
         dest: LocalCapa,
         capa: LocalCapa,
         remap: Remapped,
+        attributes: Attributes,
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEND)?;
 
         let dom = &mut domain.borrow_mut();
         let dest = dom.data.capabilities.get(&dest)?.as_domain()?;
         if dest.borrow().data.is_sealed()
-            && !dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
+            && (!dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
+                || !attributes.is_empty())
         {
             return Err(CapaError::CallNotAllowed);
         }

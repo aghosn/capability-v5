@@ -1,6 +1,6 @@
 use core::{
     domain::{Field, FieldType, InterruptPolicy, MonitorAPI},
-    memory_region::{Access, Remapped},
+    memory_region::{Access, Attributes, Remapped},
 };
 
 pub mod client;
@@ -114,5 +114,6 @@ pub trait EngineInterface {
         dest: Self::OwnedCapa,
         capa: Self::OwnedCapa,
         remap: Remapped,
+        attributes: Attributes,
     ) -> Result<(), Self::CapabilityError>;
 }

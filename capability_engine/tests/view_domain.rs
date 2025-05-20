@@ -158,7 +158,13 @@ fn test_view_sending_alias() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, aliased, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            aliased,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -212,7 +218,13 @@ fn test_view_sending_carve() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            carved,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -269,7 +281,13 @@ fn test_view_sending_carve_begin() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            carved,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -323,7 +341,13 @@ fn test_view_sending_carve_end() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, carved, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            carved,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -380,11 +404,23 @@ fn test_view_child_middle_overlap() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     engine
-        .send(td0.clone(), child_td, middle, Remapped::Identity)
+        .send(
+            td0.clone(),
+            child_td,
+            middle,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -445,11 +481,23 @@ fn test_view_child_middle_overlap_remap() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x30000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Remapped(0x30000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     engine
-        .send(td0.clone(), child_td, middle, Remapped::Remapped(0x32000))
+        .send(
+            td0.clone(),
+            child_td,
+            middle,
+            Remapped::Remapped(0x32000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -510,11 +558,23 @@ fn test_view_child_start_overlap_remap() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x30000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Remapped(0x30000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     engine
-        .send(td0.clone(), child_td, start, Remapped::Remapped(0x30000))
+        .send(
+            td0.clone(),
+            child_td,
+            start,
+            Remapped::Remapped(0x30000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.
@@ -571,11 +631,23 @@ fn test_view_child_end_overlap_remap() {
 
     // Send the capa to the child.
     engine
-        .send(td0.clone(), child_td, alias, Remapped::Remapped(0x30000))
+        .send(
+            td0.clone(),
+            child_td,
+            alias,
+            Remapped::Remapped(0x30000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     engine
-        .send(td0.clone(), child_td, start, Remapped::Remapped(0x34000))
+        .send(
+            td0.clone(),
+            child_td,
+            start,
+            Remapped::Remapped(0x34000),
+            Attributes::empty(),
+        )
         .unwrap();
 
     // Seal the child.

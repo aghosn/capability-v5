@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::core::domain::Field;
+use crate::core::memory_region::Attributes;
 use crate::server::engine::Engine as SEngine;
 use crate::{
     core::{
@@ -57,8 +58,8 @@ impl ClientResult {
     }
 }
 
-// Platform interface.
-pub trait ClientInterface {
+// Communication interface.
+pub trait CommunicationInterface {
     fn init() -> Self;
     fn send(&self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
     fn receive(
@@ -70,12 +71,12 @@ pub trait ClientInterface {
 }
 
 // Client-side engine
-pub struct Engine<T: ClientInterface> {
+pub struct Engine<T: CommunicationInterface> {
     pub platform: T,
     pub current: CapaRef<Domain>,
 }
 
-impl<T: ClientInterface> EngineInterface for Engine<T> {
+impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     type CapabilityError = ClientError;
     type OwnedCapa = LocalCapa;
     type CapaReference = CapaRef<Domain>;
@@ -131,10 +132,18 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
         dest: Self::OwnedCapa,
         capa: Self::OwnedCapa,
         remap: crate::core::memory_region::Remapped,
+        attributes: crate::core::memory_region::Attributes,
     ) -> Result<(), Self::CapabilityError> {
         let args: [u64; 6] = match remap {
-            Remapped::Identity => [dest as u64, capa as u64, 0, 0, 0, 0],
-            Remapped::Remapped(x) => [dest as u64, capa as u64, 1, x as u64, 0, 0],
+            Remapped::Identity => [dest as u64, capa as u64, 0, 0, attributes.bits() as u64, 0],
+            Remapped::Remapped(x) => [
+                dest as u64,
+                capa as u64,
+                1,
+                x as u64,
+                attributes.bits() as u64,
+                0,
+            ],
         };
         let res = self.platform.send(CallInterface::SEND, &args)?;
         match res {
@@ -285,7 +294,7 @@ impl<T: ClientInterface> EngineInterface for Engine<T> {
 }
 
 // Simplified client interface.
-impl<T: ClientInterface> Engine<T> {
+impl<T: CommunicationInterface> Engine<T> {
     // Internal functions to maintain some state.
     fn add_region(
         &mut self,
@@ -495,15 +504,16 @@ impl<T: ClientInterface> Engine<T> {
         child: &CapaRef<Domain>,
         region: &CapaRef<MemoryRegion>,
         remap: Remapped,
+        attributes: Attributes,
     ) -> Result<(), ClientError> {
         let local_c = child.borrow().owned.handle;
         let local_m = region.borrow().owned.handle;
-        self.send(self.current.clone(), local_c, local_m, remap)?;
+        self.send(self.current.clone(), local_c, local_m, remap, attributes)?;
         // Update locally by abusing the server interface.
         {
             let engine = SEngine {};
             engine
-                .send(self.current.clone(), local_c, local_m, remap)
+                .send(self.current.clone(), local_c, local_m, remap, attributes)
                 .unwrap();
         }
         Ok(())

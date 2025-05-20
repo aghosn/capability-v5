@@ -1,4 +1,4 @@
-use capa_engine::client::engine::ClientInterface;
+use capa_engine::client::engine::CommunicationInterface;
 use capa_engine::client::engine::Engine;
 use capa_engine::client::local_client::LocalClient;
 use capa_engine::core::capability::*;
@@ -209,10 +209,10 @@ fn test_client_child_alias_carve() {
         .unwrap();
 
     client
-        .r_send(&td1.clone(), &r1, Remapped::Identity)
+        .r_send(&td1.clone(), &r1, Remapped::Identity, Attributes::empty())
         .unwrap();
     client
-        .r_send(&td1.clone(), &r2, Remapped::Identity)
+        .r_send(&td1.clone(), &r2, Remapped::Identity, Attributes::empty())
         .unwrap();
 
     client.r_seal(&td1.clone()).unwrap();
@@ -292,18 +292,18 @@ fn test_client_multiple_children() {
         .r_create(0x2, MonitorAPI::all(), InterruptPolicy::default_none())
         .unwrap();
     client
-        .r_send(&td1.clone(), &r1, Remapped::Identity)
+        .r_send(&td1.clone(), &r1, Remapped::Identity, Attributes::empty())
         .unwrap();
     client
-        .r_send(&td1.clone(), &r2, Remapped::Identity)
+        .r_send(&td1.clone(), &r2, Remapped::Identity, Attributes::empty())
         .unwrap();
     client.r_seal(&td1.clone()).unwrap();
 
     client
-        .r_send(&td2.clone(), &r3, Remapped::Identity)
+        .r_send(&td2.clone(), &r3, Remapped::Identity, Attributes::empty())
         .unwrap();
     client
-        .r_send(&td2.clone(), &r4, Remapped::Identity)
+        .r_send(&td2.clone(), &r4, Remapped::Identity, Attributes::empty())
         .unwrap();
     client.r_seal(&td2.clone()).unwrap();
 
@@ -346,10 +346,10 @@ r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
         .unwrap();
 
     client
-        .r_send(&td2.clone(), &r5, Remapped::Identity)
+        .r_send(&td2.clone(), &r5, Remapped::Identity, Attributes::empty())
         .unwrap();
     client
-        .r_send(&td1.clone(), &r6, Remapped::Identity)
+        .r_send(&td1.clone(), &r6, Remapped::Identity, Attributes::empty())
         .unwrap();
 
     let attestation = client.r_attest(None).unwrap();
@@ -543,7 +543,7 @@ fn test_client_100_children() {
             .r_alias(&r0.clone(), 0x2000, 0x1000, Rights::all().bits())
             .unwrap();
         client
-            .r_send(&child.clone(), &r, Remapped::Identity)
+            .r_send(&child.clone(), &r, Remapped::Identity, Attributes::empty())
             .unwrap();
         client.r_seal(&child).unwrap();
     }

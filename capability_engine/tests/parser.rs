@@ -228,7 +228,13 @@ fn test_parse_with_td1_and_region() {
         .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
         .unwrap();
     engine
-        .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
+        .send(
+            td0.clone(),
+            td1,
+            carved,
+            Remapped::Remapped(0x0),
+            Attributes::empty(),
+        )
         .unwrap();
     engine.seal(td0.clone(), td1).unwrap();
 
@@ -278,10 +284,22 @@ fn test_parse_with_td1_and_regions() {
         .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
         .unwrap();
     engine
-        .send(td0.clone(), td1, carved, Remapped::Remapped(0x0))
+        .send(
+            td0.clone(),
+            td1,
+            carved,
+            Remapped::Remapped(0x0),
+            Attributes::empty(),
+        )
         .unwrap();
     engine
-        .send(td0.clone(), td1, alias, Remapped::Remapped(0x2000))
+        .send(
+            td0.clone(),
+            td1,
+            alias,
+            Remapped::Remapped(0x2000),
+            Attributes::empty(),
+        )
         .unwrap();
     engine.seal(td0.clone(), td1).unwrap();
 
@@ -480,7 +498,13 @@ r1 = Exclusive 0x3000 0x4000 with RW_ mapped Identity
 
     // Send the region to td1.
     engine
-        .send(td0.clone(), td1, r2, Remapped::Identity)
+        .send(
+            td0.clone(),
+            td1,
+            r2,
+            Remapped::Identity,
+            Attributes::empty(),
+        )
         .unwrap();
     engine.revoke(td0.clone(), td1, 0).unwrap();
 

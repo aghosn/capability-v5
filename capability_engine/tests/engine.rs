@@ -87,10 +87,22 @@ fn test_engine_create_root_and_simple_child() {
 
         // Send the region, this moves the references.
         engine
-            .send(ref_td.clone(), child_td, ref_aliased, Remapped::Identity)
+            .send(
+                ref_td.clone(),
+                child_td,
+                ref_aliased,
+                Remapped::Identity,
+                Attributes::empty(),
+            )
             .unwrap();
         engine
-            .send(ref_td.clone(), child_td, ref_carved, Remapped::Identity)
+            .send(
+                ref_td.clone(),
+                child_td,
+                ref_carved,
+                Remapped::Identity,
+                Attributes::empty(),
+            )
             .unwrap();
 
         // Seal
@@ -271,10 +283,22 @@ fn test_engine_nested_child_revoke_td() {
                 )
                 .unwrap();
             engine
-                .send(td0.clone(), td0_td1, td0_r0_carve, Remapped::Identity)
+                .send(
+                    td0.clone(),
+                    td0_td1,
+                    td0_r0_carve,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine
-                .send(td0.clone(), td0_td1, td0_r0_alias, Remapped::Identity)
+                .send(
+                    td0.clone(),
+                    td0_td1,
+                    td0_r0_alias,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             // Finally seal the td.
             engine.seal(td0.clone(), td0_td1).unwrap();
@@ -304,10 +328,22 @@ fn test_engine_nested_child_revoke_td() {
                 )
                 .unwrap();
             engine
-                .send(td1.clone(), td1_td2, td1_carve, Remapped::Identity)
+                .send(
+                    td1.clone(),
+                    td1_td2,
+                    td1_carve,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine
-                .send(td1.clone(), td1_td2, td1_alias, Remapped::Identity)
+                .send(
+                    td1.clone(),
+                    td1_td2,
+                    td1_alias,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine.seal(td1.clone(), td1_td2).unwrap();
         }
@@ -445,10 +481,22 @@ fn test_engine_nested_revoke_r1() {
                 )
                 .unwrap();
             engine
-                .send(td0.clone(), td0_td1, td0_r0_carve, Remapped::Identity)
+                .send(
+                    td0.clone(),
+                    td0_td1,
+                    td0_r0_carve,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine
-                .send(td0.clone(), td0_td1, td0_r0_alias, Remapped::Identity)
+                .send(
+                    td0.clone(),
+                    td0_td1,
+                    td0_r0_alias,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             // Finally seal the td.
             engine.seal(td0.clone(), td0_td1).unwrap();
@@ -478,10 +526,22 @@ fn test_engine_nested_revoke_r1() {
                 )
                 .unwrap();
             engine
-                .send(td1.clone(), td1_td2, td1_carve, Remapped::Identity)
+                .send(
+                    td1.clone(),
+                    td1_td2,
+                    td1_carve,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine
-                .send(td1.clone(), td1_td2, td1_alias, Remapped::Identity)
+                .send(
+                    td1.clone(),
+                    td1_td2,
+                    td1_alias,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             engine.seal(td1.clone(), td1_td2).unwrap();
         }
@@ -675,10 +735,22 @@ fn test_engine_two_children_revoke_aliased_twice() {
             .unwrap();
         // Send the capas.
         engine
-            .send(td0.clone(), td0_td1, td0_alias_td1, Remapped::Identity)
+            .send(
+                td0.clone(),
+                td0_td1,
+                td0_alias_td1,
+                Remapped::Identity,
+                Attributes::empty(),
+            )
             .unwrap();
         engine
-            .send(td0.clone(), td0_td2, td0_alias_td2, Remapped::Identity)
+            .send(
+                td0.clone(),
+                td0_td2,
+                td0_alias_td2,
+                Remapped::Identity,
+                Attributes::empty(),
+            )
             .unwrap();
 
         // Seal the domains.
@@ -881,7 +953,13 @@ fn test_engine_reclaim_from_grand_child() {
                 .unwrap();
             engine.seal(current.clone(), child).unwrap();
             engine
-                .send(current.clone(), child, to_send, Remapped::Identity)
+                .send(
+                    current.clone(),
+                    child,
+                    to_send,
+                    Remapped::Identity,
+                    Attributes::empty(),
+                )
                 .unwrap();
             // Update to point to the child.
             let child_ref = current
