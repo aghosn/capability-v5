@@ -37,7 +37,7 @@ pub trait EngineInterface {
     type CapabilityError;
 
     fn create(
-        &self,
+        &mut self,
         domain: &Self::CapaReference,
         cores: u64,
         api: MonitorAPI,
@@ -45,7 +45,7 @@ pub trait EngineInterface {
     ) -> Result<Self::OwnedCapa, Self::CapabilityError>;
 
     fn set(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         child: Self::OwnedCapa,
         core: u64,
@@ -55,7 +55,7 @@ pub trait EngineInterface {
     ) -> Result<(), Self::CapabilityError>;
 
     fn get(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         child: Self::OwnedCapa,
         core: u64,
@@ -64,52 +64,52 @@ pub trait EngineInterface {
     ) -> Result<u64, Self::CapabilityError>;
 
     fn seal(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         child: Self::OwnedCapa,
     ) -> Result<(), Self::CapabilityError>;
 
     fn attest(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         other: Option<Self::OwnedCapa>,
     ) -> Result<String, Self::CapabilityError>;
 
     fn enumerate(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         capa: Self::OwnedCapa,
     ) -> Result<String, Self::CapabilityError>;
 
     fn switch(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         _capa: Self::OwnedCapa,
     ) -> Result<(), Self::CapabilityError>;
 
     fn alias(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         access: &Access,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError>;
 
     fn carve(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         access: &Access,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError>;
 
     fn revoke(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         child: u64,
     ) -> Result<(), Self::CapabilityError>;
 
     fn send(
-        &self,
+        &mut self,
         domain: Self::CapaReference,
         dest: Self::OwnedCapa,
         capa: Self::OwnedCapa,

@@ -48,7 +48,7 @@ fn setup_engine_with_root() -> (
 #[test]
 fn test_remap_carve() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -147,7 +147,7 @@ r0 = Exclusive 0x0 0x1000 with RWX mapped Remapped(0x2000)
 #[test]
 fn test_remap_illegal() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -214,7 +214,7 @@ fn test_remap_illegal() {
 #[test]
 fn test_remap_illegal_in_hole() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);

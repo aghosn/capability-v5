@@ -73,7 +73,7 @@ fn test_root_domain_with_root_memory() {
 
 #[test]
 fn test_unallowed_calls() {
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     let child_td = engine
         .create(
@@ -191,7 +191,7 @@ fn test_unallowed_calls() {
 
 #[test]
 fn test_set_get() {
-    let (engine, td0, _r0, _td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, _td0_r0) = setup_engine_with_root();
 
     // Create a child domain
 

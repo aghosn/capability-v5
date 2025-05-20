@@ -74,7 +74,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_parse_with_alias() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     // Let's create some regions.
     let alias_access = Access::new(0x0, 0x3000, Rights::all());
@@ -109,7 +109,7 @@ r1 = Aliased 0x0 0x3000 with RWX mapped Identity
 #[test]
 fn test_parse_with_carve() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     // Let's create some regions.
     let carve_access = Access::new(0x0, 0x3000, Rights::all());
@@ -144,7 +144,7 @@ r1 = Exclusive 0x0 0x3000 with RWX mapped Identity
 #[test]
 fn test_parse_with_td1() {
     // Initial setup
-    let (engine, td0, _r0, _td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, _td0_r0) = setup_engine_with_root();
 
     // Let's create a child domain.
     let td1 = engine
@@ -212,7 +212,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_parse_with_td1_and_region() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     let access = Access::new(0x1000, 0x2000, Rights::all());
     let carved = engine.carve(td0.clone(), td0_r0, &access).unwrap();
@@ -269,7 +269,7 @@ r1 = Exclusive 0x1000 0x3000 with RWX mapped Remapped(0x0)
 #[test]
 fn test_parse_with_td1_and_regions() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     let c_access = Access::new(0x1000, 0x2000, Rights::all());
     let carved = engine.carve(td0.clone(), td0_r0, &c_access).unwrap();
@@ -394,7 +394,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_enumerate_attest() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     // Test attestation.
     let attestation = engine.attest(td0.clone(), None).unwrap();

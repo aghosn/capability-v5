@@ -41,6 +41,7 @@ pub struct Capability<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapaError {
     InvalidAccess,
+    InvalidAttributes,
     ChildNotFound,
     InvalidLocalCapa,
     WrongCapaType,
@@ -190,6 +191,7 @@ impl Capability<MemoryRegion> {
             kind: kind_op,
             status: status_obtained,
             access: *access,
+            // A new region has no attributes.
             attributes: Attributes::NONE,
             remapped: remapping,
         };

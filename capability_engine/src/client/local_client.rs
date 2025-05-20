@@ -37,7 +37,7 @@ impl CommunicationInterface for LocalClient {
     }
 
     fn send(
-        &self,
+        &mut self,
         call: crate::CallInterface,
         args: &[u64; 6],
     ) -> Result<ClientResult, ClientError> {
@@ -136,7 +136,7 @@ impl CommunicationInterface for LocalClient {
 
     // This is local, we do not care about the receive.
     fn receive(
-        &self,
+        &mut self,
         _engine: &mut crate::server::engine::Engine,
         call: crate::CallInterface,
         args: &[u64; 6],

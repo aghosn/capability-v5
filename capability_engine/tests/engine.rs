@@ -48,7 +48,7 @@ fn setup_engine_with_root() -> (
 #[test]
 fn test_engine_create_root_and_simple_child() {
     // Initial setup
-    let (engine, ref_td, ref_mem, ref_region) = setup_engine_with_root();
+    let (mut engine, ref_td, ref_mem, ref_region) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&ref_td), 1);
     assert_eq!(Rc::weak_count(&ref_td), 1);
@@ -250,7 +250,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_engine_nested_child_revoke_td() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
@@ -448,7 +448,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_engine_nested_revoke_r1() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
@@ -684,7 +684,7 @@ r0 = Aliased 0x5000 0x6000 with RW_ mapped Identity
 #[test]
 fn test_engine_two_children_revoke_aliased_twice() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
@@ -816,12 +816,12 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_engine_nested_domains_three_branches() {
     // Initial setup
-    let (engine, td0, r0, _) = setup_engine_with_root();
+    let (mut engine, td0, r0, _) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
-    let create_three_domains = |capa_me: &CapaRef<Domain>| -> Vec<LocalCapa> {
+    let mut create_three_domains = |capa_me: &CapaRef<Domain>| -> Vec<LocalCapa> {
         let mut handles: Vec<LocalCapa> = Vec::new();
         for _i in 0..3 {
             let local = engine
@@ -926,7 +926,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_engine_reclaim_from_grand_child() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
@@ -1024,7 +1024,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 #[test]
 fn test_engine_policies_core_fail() {
     // Initial setup
-    let (engine, td0, r0, _td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, _td0_r0) = setup_engine_with_root();
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
@@ -1091,7 +1091,7 @@ fn test_engine_policies_core_fail() {
 #[test]
 fn test_engine_alias_then_carve_root() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     let access = Access::new(0x0, 0x1000, Rights::all());
     let _alias = engine.alias(td0.clone(), td0_r0, &access).unwrap();
@@ -1120,7 +1120,7 @@ r2 = Aliased 0x0 0x1000 with RWX mapped Identity
 #[test]
 fn test_engine_alias_carve_root() {
     // Initial setup
-    let (engine, td0, _r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, _r0, td0_r0) = setup_engine_with_root();
 
     let access = Access::new(0x0, 0x1000, Rights::all());
     let carve = engine.carve(td0.clone(), td0_r0, &access).unwrap();

@@ -61,9 +61,9 @@ impl ClientResult {
 // Communication interface.
 pub trait CommunicationInterface {
     fn init() -> Self;
-    fn send(&self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
+    fn send(&mut self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
     fn receive(
-        &self,
+        &mut self,
         engine: &mut crate::server::engine::Engine,
         call: CallInterface,
         args: &[u64; 6],
@@ -81,7 +81,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     type OwnedCapa = LocalCapa;
     type CapaReference = CapaRef<Domain>;
     fn set(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
         core: u64,
@@ -98,7 +98,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn get(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
         core: u64,
@@ -114,7 +114,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn seal(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         child: Self::OwnedCapa,
     ) -> Result<(), Self::CapabilityError> {
@@ -127,7 +127,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn send(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         dest: Self::OwnedCapa,
         capa: Self::OwnedCapa,
@@ -152,7 +152,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         }
     }
     fn alias(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         access: &crate::core::memory_region::Access,
@@ -172,7 +172,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         }
     }
     fn carve(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         access: &crate::core::memory_region::Access,
@@ -193,7 +193,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         }
     }
     fn create(
-        &self,
+        &mut self,
         _domain: &Self::CapaReference,
         cores: u64,
         api: crate::core::domain::MonitorAPI,
@@ -241,7 +241,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn attest(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         other: Option<Self::OwnedCapa>,
     ) -> Result<String, Self::CapabilityError> {
@@ -258,7 +258,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn switch(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         _capa: Self::OwnedCapa,
     ) -> Result<(), Self::CapabilityError> {
@@ -266,7 +266,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn revoke(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
         child: u64,
@@ -280,7 +280,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     }
 
     fn enumerate(
-        &self,
+        &mut self,
         _domain: Self::CapaReference,
         capa: Self::OwnedCapa,
     ) -> Result<String, Self::CapabilityError> {
@@ -340,7 +340,7 @@ impl<T: CommunicationInterface> Engine<T> {
         let local = child.borrow().owned.handle;
         self.set(self.current.clone(), local, core, tpe, field, value)?;
         {
-            let engine = SEngine {};
+            let mut engine = SEngine::new();
             engine
                 .set(self.current.clone(), local, core, tpe, field, value)
                 .unwrap();
@@ -511,7 +511,7 @@ impl<T: CommunicationInterface> Engine<T> {
         self.send(self.current.clone(), local_c, local_m, remap, attributes)?;
         // Update locally by abusing the server interface.
         {
-            let engine = SEngine {};
+            let mut engine = SEngine::new();
             engine
                 .send(self.current.clone(), local_c, local_m, remap, attributes)
                 .unwrap();

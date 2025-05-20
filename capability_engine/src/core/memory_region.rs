@@ -4,6 +4,12 @@ use bitflags::bitflags;
 
 use crate::core::capability::CapaError;
 
+use super::{
+    capability::{Capability, WeakRef},
+    domain::Domain,
+    update::Update,
+};
+
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum RegionKind {
     Carve,
@@ -79,6 +85,24 @@ pub struct MemoryRegion {
     pub access: Access,
     pub attributes: Attributes,
     pub remapped: Remapped,
+}
+
+impl MemoryRegion {
+    // Returns the updates when this region gets revoked.
+    // TODO: should do the equivalent for access.
+    pub fn on_revoke_attributes(&self, owner: WeakRef<Capability<Domain>>) -> Vec<Update> {
+        let mut updates = Vec::<Update>::new();
+        if self.attributes.contains(Attributes::VITAL) {
+            updates.push(Update::Revoke { dom: owner });
+        }
+        if self.attributes.contains(Attributes::CLEAN) {
+            updates.push(Update::Clean {
+                start: self.access.start,
+                size: self.access.size,
+            });
+        }
+        updates
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

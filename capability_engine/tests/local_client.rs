@@ -52,7 +52,7 @@ fn setup() -> Engine<LocalClient> {
     {
         let root_reg = create_root_region();
         let ref_mem = Rc::new(RefCell::new(root_reg));
-        let sengine = SEngine {};
+        let sengine = SEngine::new();
         let _ = sengine
             .add_root_region(&engine.current.clone(), &ref_mem)
             .unwrap();

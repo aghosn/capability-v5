@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use super::memory_region::Attributes;
+
 pub trait PrintWithNames<T> {
     fn fmt_with_names(
         &self,
@@ -58,8 +60,23 @@ impl fmt::Display for Access {
             "{:#x} {:#x} with {}",
             self.start,
             self.end(),
-            self.rights
+            self.rights,
         )
+    }
+}
+
+impl fmt::Display for Attributes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.contains(Attributes::HASH) {
+            write!(f, "H")?;
+        }
+        if self.contains(Attributes::CLEAN) {
+            write!(f, "C")?;
+        }
+        if self.contains(Attributes::VITAL) {
+            write!(f, "V")?;
+        }
+        Ok(())
     }
 }
 
@@ -80,6 +97,10 @@ impl PrintWithNames<MemoryRegion> for Capability<MemoryRegion> {
             "{:?} {} mapped {}",
             region.status, region.access, region.remapped
         )?;
+        // Print the attributes is any
+        if !region.attributes.is_empty() {
+            write!(f, " {}", region.attributes)?;
+        }
 
         // Skip over the children.
         if !full {

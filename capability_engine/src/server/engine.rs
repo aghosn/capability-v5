@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::core::capability::{CapaError, CapaRef, Capability, Ownership};
@@ -6,15 +7,20 @@ use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
 use crate::core::memory_region::{Access, Attributes, MemoryRegion, Remapped, ViewRegion};
+use crate::core::update::Update;
 use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
 /// This is the entry point for all operations.
-pub struct Engine {}
+pub struct Engine {
+    pub updates: VecDeque<Vec<Update>>,
+}
 
 impl Engine {
     pub fn new() -> Self {
-        Engine {}
+        Engine {
+            updates: VecDeque::<Vec<Update>>::new(),
+        }
     }
 
     fn is_sealed_and_allowed(
@@ -46,14 +52,23 @@ impl Engine {
         Ok(local_handle)
     }
 
-    fn revoke_region_handler(capa: &mut Capability<MemoryRegion>) -> Result<(), CapaError> {
+    fn revoke_region_handler(
+        capa: &mut Capability<MemoryRegion>,
+        updates: &mut Vec<Update>,
+    ) -> Result<(), CapaError> {
+        let mut to_add = capa.data.on_revoke_attributes(capa.owned.owner.clone());
         let owner = capa.owned.owner.upgrade().ok_or(CapaError::CapaNotOwned)?;
         owner
             .borrow_mut()
             .data
             .capabilities
             .remove(&capa.owned.handle)?;
-        //TODO: probably will need an update.
+
+        // Add the updates to the vector.
+        // This takes care of clean and update, not access.
+        // TODO: Maybe we should consider a more complex structure for updates.
+        // One that keeps per-domain ones?
+        updates.append(&mut to_add);
         Ok(())
     }
 }
@@ -64,7 +79,7 @@ impl EngineInterface for Engine {
     type CapabilityError = CapaError;
 
     fn create(
-        &self,
+        &mut self,
         domain: &CapaRef<Domain>,
         cores: u64,
         api: MonitorAPI,
@@ -87,7 +102,7 @@ impl EngineInterface for Engine {
     }
 
     fn set(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
         core: u64,
@@ -122,7 +137,7 @@ impl EngineInterface for Engine {
     }
 
     fn get(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         child: LocalCapa,
         core: u64,
@@ -140,7 +155,7 @@ impl EngineInterface for Engine {
             .get(core, tpe, field)
     }
 
-    fn seal(&self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
+    fn seal(&mut self, domain: CapaRef<Domain>, child: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEAL)?;
 
         let current_policies = &domain.borrow().data.policies;
@@ -162,7 +177,7 @@ impl EngineInterface for Engine {
     }
 
     fn attest(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         other: Option<LocalCapa>,
     ) -> Result<String, CapaError> {
@@ -175,7 +190,7 @@ impl EngineInterface for Engine {
         return Ok(display);
     }
 
-    fn enumerate(&self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<String, CapaError> {
+    fn enumerate(&mut self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<String, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::ENUMERATE)?;
         let binding = domain.borrow();
         let capa = binding.data.capabilities.get(&capa)?;
@@ -185,13 +200,13 @@ impl EngineInterface for Engine {
         }
     }
 
-    fn switch(&self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    fn switch(&mut self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SWITCH)?;
         todo!();
     }
 
     fn alias(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
         access: &Access,
@@ -210,7 +225,7 @@ impl EngineInterface for Engine {
     }
 
     fn carve(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
         access: &Access,
@@ -231,7 +246,7 @@ impl EngineInterface for Engine {
     }
 
     fn revoke(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         capa: LocalCapa,
         child: u64,
@@ -247,6 +262,8 @@ impl EngineInterface for Engine {
             let dom = &mut domain.borrow_mut();
             let d = dom.data.capabilities.get(&capa)?.as_domain()?;
 
+            // Mark the domain as being revoked.
+            d.borrow_mut().data.status = Status::Revoked;
             dom.revoke_child(&d, &mut |c: &mut Capability<Domain>| {
                 c.data.status = Status::Revoked;
                 c.data
@@ -276,15 +293,18 @@ impl EngineInterface for Engine {
                     .ok_or(CapaError::InvalidChildCapa)?
             };
             // The region might belong to the dom, so we need to drop the domain.
-            r.borrow_mut()
-                .revoke_child(&child, &mut Self::revoke_region_handler)?;
+            let mut updates = Vec::<Update>::new();
+            r.borrow_mut().revoke_child(&child, &mut |a| {
+                Self::revoke_region_handler(a, &mut updates)
+            })?;
+            self.updates.push_back(updates);
         }
 
         Ok(())
     }
 
     fn send(
-        &self,
+        &mut self,
         domain: CapaRef<Domain>,
         dest: LocalCapa,
         capa: LocalCapa,
@@ -302,21 +322,30 @@ impl EngineInterface for Engine {
             return Err(CapaError::CallNotAllowed);
         }
 
-        // Check the conflicts in the dest.
+        // Check the attributes for the owner and conflicts in the dest.
         {
             let region = dom.data.capabilities.get(&capa)?.as_region()?;
+            // Check attributes.
+            if region
+                .borrow()
+                .data
+                .attributes
+                .intersects(Attributes::VITAL | Attributes::CLEAN)
+            {
+                return Err(CapaError::InvalidAttributes);
+            }
+            // Check conflicts.
             dest.borrow()
                 .check_conflict(&ViewRegion::new(region.borrow().data.access, remap))?;
         }
 
         let region = dom.data.capabilities.remove(&capa)?.as_region()?;
 
-        //TODO: do vital clean etc?
-
-        // Apply the remapping.
+        // Apply the remapping and attributes.
         {
             let mut ref_reg = region.borrow_mut();
             ref_reg.data.remapped = remap;
+            ref_reg.data.attributes = attributes;
         };
 
         let dest_capa = dest

@@ -67,7 +67,7 @@ fn test_view_root_td() {
 #[test]
 fn test_view_root_td_carve() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -93,7 +93,7 @@ fn test_view_root_td_carve() {
 #[test]
 fn test_view_root_td_carve_no_change() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -115,7 +115,7 @@ fn test_view_root_td_carve_no_change() {
 #[test]
 fn test_view_root_td_alias() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -137,7 +137,7 @@ fn test_view_root_td_alias() {
 #[test]
 fn test_view_sending_alias() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -197,7 +197,7 @@ fn test_view_sending_alias() {
 #[test]
 fn test_view_sending_carve() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -260,7 +260,7 @@ fn test_view_sending_carve() {
 #[test]
 fn test_view_sending_carve_begin() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -320,7 +320,7 @@ fn test_view_sending_carve_begin() {
 #[test]
 fn test_view_sending_carve_end() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -380,7 +380,7 @@ fn test_view_sending_carve_end() {
 #[test]
 fn test_view_child_middle_overlap() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -457,7 +457,7 @@ fn test_view_child_middle_overlap() {
 #[test]
 fn test_view_child_middle_overlap_remap() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -534,7 +534,7 @@ fn test_view_child_middle_overlap_remap() {
 #[test]
 fn test_view_child_start_overlap_remap() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
@@ -607,7 +607,7 @@ fn test_view_child_start_overlap_remap() {
 #[test]
 fn test_view_child_end_overlap_remap() {
     // Initial setup
-    let (engine, td0, r0, td0_r0) = setup_engine_with_root();
+    let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
     assert_eq!(Rc::strong_count(&td0), 1);
     assert_eq!(Rc::weak_count(&td0), 1);
