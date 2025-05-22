@@ -7,6 +7,8 @@ use crate::core::memory_region::{
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+use super::update::{OperationUpdate, Update};
+
 pub type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
 pub type WeakRef<T> = Weak<RefCell<T>>;
@@ -134,14 +136,15 @@ where
         on_revoke(self)
     }
 
-    pub fn dfs<F>(&mut self, visit: &F) -> Result<(), CapaError>
+    pub fn dfs<F>(&self, visit: &mut F) -> Result<(), CapaError>
     where
-        F: Fn(&mut Capability<T>) -> Result<(), CapaError>,
+        F: FnMut(&Capability<T>) -> Result<(), CapaError>,
     {
+        visit(self)?;
         for c in &self.children {
-            c.borrow_mut().dfs(visit)?;
+            c.borrow().dfs(visit)?;
         }
-        visit(self)
+        Ok(())
     }
 }
 
@@ -284,6 +287,49 @@ impl Capability<MemoryRegion> {
         }
         return true;
     }
+
+    // We should implement two on_revoke.
+    // One will do the dfs, the other will consider local changes
+    pub fn on_revoke(&self, operation: &mut OperationUpdate) -> Result<(), CapaError> {
+        // Simple per node visit to collect attributes.
+        let mut visit = |capa: &Capability<MemoryRegion>| -> Result<(), CapaError> {
+            // This algorithm is a bit complicated so here is the explanation.
+            // we go top to bottom dfs style, so technically if the parent was visited,
+            // we do not need to do a reenable in the case of a carve.
+            // In the case of an alias, it will be merged within the updates for the domain
+            // as they are subsets of each other.
+            if capa.data.attributes.contains(Attributes::VITAL) {
+                operation.add(Update::Revoke {
+                    dom: capa.owned.owner.clone(),
+                });
+            }
+            if capa.data.attributes.contains(Attributes::CLEAN) {
+                operation.add(Update::Clean {
+                    start: capa.data.access.start,
+                    size: capa.data.access.size,
+                });
+            }
+            // We lose this access.
+            operation.add(Update::ChangeMemory {
+                dom: capa.owned.owner.clone(),
+            });
+
+            // For a carve the parent is affected as well.
+            if capa.data.kind == RegionKind::Carve {
+                if let Some(parent) = capa.parent.upgrade() {
+                    operation.add(Update::ChangeMemory {
+                        dom: parent.borrow().owned.owner.clone(),
+                    });
+                } else {
+                    return Err(CapaError::InvalidValue);
+                }
+            }
+            Ok(())
+        };
+
+        // Now go through the nodes.
+        self.dfs(&mut visit)
+    }
 }
 
 // ———————————————————— Domain Capability implementation ———————————————————— //
@@ -417,5 +463,31 @@ impl Capability<Domain> {
             }
         }
         Ok(())
+    }
+
+    pub fn on_revoke_child(
+        &self,
+        child: &CapaRef<Domain>,
+        updates: &mut OperationUpdate,
+    ) -> Result<(), CapaError> {
+        // Add the child to the revoke.
+        updates.add(Update::Revoke {
+            dom: Rc::downgrade(child),
+        });
+        let mut visit = |capa: &Capability<Domain>| -> Result<(), CapaError> {
+            // The capa should have been marked for removal already.
+            for c in &capa.children {
+                updates.add(Update::Revoke {
+                    dom: Rc::downgrade(c),
+                });
+            }
+            // Now go through the domain's regions.
+            capa.data
+                .capabilities
+                .foreach_region(&mut |c: &CapaRef<MemoryRegion>| c.borrow().on_revoke(updates))
+        };
+
+        // We go through the child.
+        child.borrow().dfs(&mut visit)
     }
 }

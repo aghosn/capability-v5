@@ -4,11 +4,9 @@ use crate::core::domain::{
 };
 use crate::core::memory_region::{Access, MemoryRegion, Remapped, Rights, ViewRegion};
 use core::fmt;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
+use super::capakey::CapaKey;
 use super::memory_region::Attributes;
 
 pub trait PrintWithNames<T> {
@@ -142,25 +140,6 @@ impl fmt::Display for Capability<MemoryRegion> {
 impl fmt::Display for ViewRegion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{} mapped {}", self.access, self.remap)
-    }
-}
-
-// Identity wrapper
-#[derive(Clone)]
-pub struct CapaKey<T>(pub CapaRef<T>);
-
-impl<T> PartialEq for CapaKey<T> {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl<T> Eq for CapaKey<T> {}
-
-impl<T> Hash for CapaKey<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let ptr: *const RefCell<Capability<T>> = Rc::as_ptr(&self.0);
-        ptr.hash(state);
     }
 }
 

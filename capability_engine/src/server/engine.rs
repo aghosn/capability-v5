@@ -7,7 +7,7 @@ use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
 use crate::core::memory_region::{Access, Attributes, MemoryRegion, Remapped, ViewRegion};
-use crate::core::update::Update;
+use crate::core::update::{OperationUpdate, Update};
 use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
@@ -52,23 +52,13 @@ impl Engine {
         Ok(local_handle)
     }
 
-    fn revoke_region_handler(
-        capa: &mut Capability<MemoryRegion>,
-        updates: &mut Vec<Update>,
-    ) -> Result<(), CapaError> {
-        let mut to_add = capa.data.on_revoke_attributes(capa.owned.owner.clone());
+    fn revoke_region_handler(capa: &mut Capability<MemoryRegion>) -> Result<(), CapaError> {
         let owner = capa.owned.owner.upgrade().ok_or(CapaError::CapaNotOwned)?;
         owner
             .borrow_mut()
             .data
             .capabilities
             .remove(&capa.owned.handle)?;
-
-        // Add the updates to the vector.
-        // This takes care of clean and update, not access.
-        // TODO: Maybe we should consider a more complex structure for updates.
-        // One that keeps per-domain ones?
-        updates.append(&mut to_add);
         Ok(())
     }
 }
@@ -232,8 +222,23 @@ impl EngineInterface for Engine {
     ) -> Result<LocalCapa, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::CARVE)?;
 
+        let mut updates = OperationUpdate::new();
+
+        let region = {
+            let dom = &domain.borrow();
+            dom.data.capabilities.get(&capa)?.as_region()?
+        };
+
+        // Carve can require updates if we reduce access rights.
+        if region.borrow().data.access.rights != access.rights {
+            updates.add(Update::ChangeMemory {
+                dom: Rc::downgrade(&domain.clone()),
+            });
+        }
+        updates.snapshot()?;
+        //TODO: notify all cores
+
         let dom = &mut domain.borrow_mut();
-        let region = dom.data.capabilities.get(&capa)?.as_region()?;
         let carved = region.borrow_mut().carve(access)?;
         let carved_capa = dom.data.install(CapaWrapper::Region(carved.clone()));
 
@@ -241,7 +246,7 @@ impl EngineInterface for Engine {
         carved.borrow_mut().parent = Rc::downgrade(&region);
         carved.borrow_mut().owned = Ownership::new(Rc::downgrade(&domain), carved_capa);
 
-        //TODO: Updates
+        updates.compute()?;
         Ok(carved_capa)
     }
 
@@ -259,6 +264,16 @@ impl EngineInterface for Engine {
         };
         // Match directly on the wrapper while we hold the borrow
         if is_domain {
+            // Prepare the update.
+            let mut update = OperationUpdate::new();
+            {
+                let dom = domain.borrow();
+                let d = dom.data.capabilities.get(&capa)?.as_domain()?;
+                dom.on_revoke_child(&d, &mut update)?;
+            }
+            update.snapshot()?;
+            //TODO: notify all then we process the revoke.
+
             let dom = &mut domain.borrow_mut();
             let d = dom.data.capabilities.get(&capa)?.as_domain()?;
 
@@ -272,6 +287,8 @@ impl EngineInterface for Engine {
                         Capability::<MemoryRegion>::revoke_node(c.clone(), &mut |_c| Ok(()))
                     })?;
                 c.data.capabilities.reset();
+                update.compute()?;
+                //TODO: notify
                 Ok(())
             })?;
             // Remove the handle
@@ -292,12 +309,21 @@ impl EngineInterface for Engine {
                     .cloned()
                     .ok_or(CapaError::InvalidChildCapa)?
             };
+
+            // Prepare the update, this finds affected domains.
+            let mut updates = OperationUpdate::new();
+            child.borrow().on_revoke(&mut updates)?;
+            updates.snapshot()?;
+
+            // Now we should know all the affected domains.
+            // TODO: preempt and process them.
+
+            // Now actually do the revocation.
             // The region might belong to the dom, so we need to drop the domain.
-            let mut updates = Vec::<Update>::new();
-            r.borrow_mut().revoke_child(&child, &mut |a| {
-                Self::revoke_region_handler(a, &mut updates)
-            })?;
-            self.updates.push_back(updates);
+            r.borrow_mut()
+                .revoke_child(&child, &mut |a| Self::revoke_region_handler(a))?;
+            updates.compute()?
+            // TODO Will need to notify
         }
 
         Ok(())

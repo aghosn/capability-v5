@@ -252,6 +252,21 @@ impl CapabilityStore {
         }
         Ok(())
     }
+
+    pub fn foreach_region<F>(&self, op: &mut F) -> Result<(), CapaError>
+    where
+        F: FnMut(&CapaRef<MemoryRegion>) -> Result<(), CapaError>,
+    {
+        for (_k, c) in &self.capabilities {
+            if c.as_region().is_err() {
+                continue;
+            }
+            let region = c.as_region()?;
+            op(&region)?;
+        }
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         self.capabilities = BTreeMap::new();
         self.next_handle = 1;

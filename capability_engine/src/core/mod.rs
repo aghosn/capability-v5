@@ -1,4 +1,5 @@
 pub mod capability;
+pub mod capakey;
 pub mod coalesced;
 pub mod display;
 pub mod domain;
