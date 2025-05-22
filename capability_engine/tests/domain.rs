@@ -40,14 +40,14 @@ fn setup_engine_with_root() -> (
     CapaRef<MemoryRegion>,
     LocalCapa, // ref_region returned by `add_root_region`
 ) {
-    let engine = Engine::new();
-    let root_domain = create_root_domain();
+    let engine = Engine::new(16);
     let root_region = create_root_region();
 
-    let ref_td = Rc::new(RefCell::new(root_domain));
     let ref_mem = Rc::new(RefCell::new(root_region));
-    let ref_region = engine.add_root_region(&ref_td, &ref_mem).unwrap();
-
+    let ref_region = engine
+        .add_root_region(&engine.root.clone(), &ref_mem)
+        .unwrap();
+    let ref_td = engine.root.clone();
     (engine, ref_td, ref_mem, ref_region)
 }
 
@@ -368,7 +368,7 @@ fn test_set_get() {
             0,
             FieldType::Cores,
             0,
-            0b1111111111111111,
+            0b11111111111111111,
         )
         .unwrap();
 

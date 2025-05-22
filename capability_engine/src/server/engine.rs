@@ -1,28 +1,26 @@
 use std::collections::VecDeque;
 use std::{cell::RefCell, rc::Rc};
 
-use crate::core::capability::{CapaError, CapaRef, Capability, Ownership};
+use crate::core::capability::{CapaError, CapaRef, Capability, Ownership, WeakRef};
 use crate::core::domain::CapaWrapper;
 use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
 use crate::core::memory_region::{Access, Attributes, MemoryRegion, Remapped, ViewRegion};
-use crate::core::update::{OperationUpdate, Update};
+use crate::core::update::{CoreUpdate, OperationUpdate, Update};
 use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
 /// This is the entry point for all operations.
 pub struct Engine {
+    // The root lives in the engine.
+    pub root: CapaRef<Domain>,
+    pub scheduled: Vec<WeakRef<Domain>>,
     pub updates: VecDeque<Vec<Update>>,
+    pub core_update: Vec<Vec<CoreUpdate>>,
 }
 
 impl Engine {
-    pub fn new() -> Self {
-        Engine {
-            updates: VecDeque::<Vec<Update>>::new(),
-        }
-    }
-
     fn is_sealed_and_allowed(
         &self,
         domain: &CapaRef<Domain>,
@@ -67,6 +65,24 @@ impl EngineInterface for Engine {
     type CapaReference = CapaRef<Domain>;
     type OwnedCapa = LocalCapa;
     type CapabilityError = CapaError;
+
+    fn new(nb_cores: u64) -> Self {
+        // Create the root capability for the domain.
+        let mut root = Domain::new(Policies::new(
+            (1 << nb_cores) - 1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_all(),
+        ));
+        root.status = Status::Sealed;
+        let dom = Capability::<Domain>::new(root);
+        let ref_td = Rc::new(RefCell::new(dom));
+        Engine {
+            root: ref_td,
+            scheduled: Vec::new(), /*vec![&ref_td; nb_cores]*/
+            updates: VecDeque::<Vec<Update>>::new(),
+            core_update: Vec::new(),
+        }
+    }
 
     fn create(
         &mut self,
@@ -339,8 +355,9 @@ impl EngineInterface for Engine {
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SEND)?;
 
-        let dom = &mut domain.borrow_mut();
-        let dest = dom.data.capabilities.get(&dest)?.as_domain()?;
+        // Perform all the checks to ensure the operation is allowed.
+        let dest = { domain.borrow().data.capabilities.get(&dest)?.as_domain()? };
+
         if dest.borrow().data.is_sealed()
             && (!dest.borrow().data.operation_allowed(MonitorAPI::RECEIVE)
                 || !attributes.is_empty())
@@ -350,7 +367,7 @@ impl EngineInterface for Engine {
 
         // Check the attributes for the owner and conflicts in the dest.
         {
-            let region = dom.data.capabilities.get(&capa)?.as_region()?;
+            let region = domain.borrow().data.capabilities.get(&capa)?.as_region()?;
             // Check attributes.
             if region
                 .borrow()
@@ -365,6 +382,20 @@ impl EngineInterface for Engine {
                 .check_conflict(&ViewRegion::new(region.borrow().data.access, remap))?;
         }
 
+        // Compute the updates, only trigger one if the dest is sealed.
+        let mut updates = OperationUpdate::new();
+        updates.add(Update::ChangeMemory {
+            dom: Rc::downgrade(&domain.clone()),
+        });
+        if dest.borrow().data.is_sealed() {
+            updates.add(Update::ChangeMemory {
+                dom: Rc::downgrade(&dest.clone()),
+            });
+        }
+        updates.snapshot()?;
+
+        // Now effect the send.
+        let dom = &mut domain.borrow_mut();
         let region = dom.data.capabilities.remove(&capa)?.as_region()?;
 
         // Apply the remapping and attributes.
@@ -379,6 +410,9 @@ impl EngineInterface for Engine {
             .data
             .install(CapaWrapper::Region(region.clone()));
         region.borrow_mut().owned = Ownership::new(Rc::downgrade(&dest), dest_capa);
+
+        // Apply the updates.
+        updates.compute()?;
         Ok(())
     }
 }

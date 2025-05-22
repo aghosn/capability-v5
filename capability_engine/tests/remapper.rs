@@ -8,16 +8,6 @@ use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(
-        !(0 as u64),
-        MonitorAPI::all(),
-        InterruptPolicy::default_all(),
-    );
-    let mut capa = Capability::<Domain>::new(Domain::new(policies));
-    capa.data.status = Status::Sealed;
-    capa
-}
 fn create_root_region() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {
         kind: RegionKind::Carve,
@@ -34,14 +24,14 @@ fn setup_engine_with_root() -> (
     CapaRef<MemoryRegion>,
     LocalCapa, // ref_region returned by `add_root_region`
 ) {
-    let engine = Engine::new();
-    let root_domain = create_root_domain();
+    let engine = Engine::new(16);
     let root_region = create_root_region();
 
-    let ref_td = Rc::new(RefCell::new(root_domain));
     let ref_mem = Rc::new(RefCell::new(root_region));
-    let ref_region = engine.add_root_region(&ref_td, &ref_mem).unwrap();
-
+    let ref_region = engine
+        .add_root_region(&engine.root.clone(), &ref_mem)
+        .unwrap();
+    let ref_td = engine.root.clone();
     (engine, ref_td, ref_mem, ref_region)
 }
 
@@ -50,7 +40,7 @@ fn test_remap_carve() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -85,7 +75,7 @@ fn test_remap_carve() {
     // Now check the views and attestations.
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1)
@@ -149,7 +139,7 @@ fn test_remap_illegal() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -216,7 +206,7 @@ fn test_remap_illegal_in_hole() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
 
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 

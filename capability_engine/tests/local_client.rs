@@ -1,4 +1,3 @@
-use capa_engine::client::engine::CommunicationInterface;
 use capa_engine::client::engine::Engine;
 use capa_engine::client::local_client::LocalClient;
 use capa_engine::core::capability::*;
@@ -6,7 +5,6 @@ use capa_engine::core::domain::*;
 use capa_engine::core::memory_region::{
     Access, Attributes, MemoryRegion, RegionKind, Remapped, Rights, Status as MStatus,
 };
-use capa_engine::server::engine::Engine as SEngine;
 use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,42 +19,22 @@ fn create_root_region() -> Capability<MemoryRegion> {
     })
 }
 
-fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(
-        !(0 as u64),
-        MonitorAPI::all(),
-        InterruptPolicy::default_all(),
-    );
-    let mut capa = Capability::<Domain>::new(Domain::new(policies));
-    capa.data.status = Status::Sealed;
-    capa
-}
-
 fn setup() -> Engine<LocalClient> {
-    let local = LocalClient::init();
-    let root_domain = create_root_domain();
-    let ref_root = Rc::new(RefCell::new(root_domain));
-    let engine = Engine::<LocalClient> {
-        platform: local,
-        current: ref_root,
-    };
+    let engine = Engine::<LocalClient>::new(16);
 
     let root_region = create_root_region();
+    let root_region2 = create_root_region();
     let ref_mem = Rc::new(RefCell::new(root_region));
+    let ref_mem2 = Rc::new(RefCell::new(root_region2));
     let _ = engine
         .platform
         .server
         .add_root_region(&engine.platform.current.clone(), &ref_mem)
         .unwrap();
     // Cheat to add a root region for client engine.
-    {
-        let root_reg = create_root_region();
-        let ref_mem = Rc::new(RefCell::new(root_reg));
-        let sengine = SEngine::new();
-        let _ = sengine
-            .add_root_region(&engine.current.clone(), &ref_mem)
-            .unwrap();
-    }
+    let _ = engine
+        .add_root_region(&engine.current.clone(), &ref_mem2)
+        .unwrap();
     engine
 }
 
@@ -67,7 +45,7 @@ fn test_client_create() {
     // Check that the initial attesttion is correct.
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -81,7 +59,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         .unwrap();
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Unsealed domain()
@@ -97,7 +75,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     client.r_seal(&child_td).unwrap();
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain()
@@ -127,7 +105,7 @@ fn test_client_alias() {
     // Check we have the right attestations.
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -165,7 +143,7 @@ fn test_client_carve() {
     // Check we have the right attestations.
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -220,7 +198,7 @@ fn test_client_child_alias_carve() {
     // Check we have the right attestations.
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
@@ -245,7 +223,7 @@ r2 = Aliased 0x1000 0x2000 with RW_ mapped Identity
 
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -310,7 +288,7 @@ fn test_client_multiple_children() {
     // Double children.
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,td2,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
@@ -354,7 +332,7 @@ r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,td2,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2,r6)
@@ -388,7 +366,7 @@ r5 = Aliased 0x5000 0x6000 with RWX mapped Identity
     client.r_revoke_region(&r5).unwrap();
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,td2,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
@@ -421,7 +399,7 @@ r4 = Exclusive 0x2000 0x3000 with RWX mapped Identity
 
     let attestation = client.r_attest(None).unwrap();
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -587,7 +565,7 @@ r0 = Aliased 0x2000 0x3000 with RWX mapped Identity
     // Attest everything is good.
     let attestation = format!("{}", client.current.borrow());
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity

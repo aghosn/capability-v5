@@ -1,8 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::core::domain::Field;
+use crate::core::domain::{Field, Status};
 use crate::core::memory_region::Attributes;
-use crate::server::engine::Engine as SEngine;
 use crate::{
     core::{
         capability::{CapaError, CapaRef, Capability, Ownership},
@@ -60,7 +59,7 @@ impl ClientResult {
 
 // Communication interface.
 pub trait CommunicationInterface {
-    fn init() -> Self;
+    fn new(nb_cores: u64) -> Self;
     fn send(&mut self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
     fn receive(
         &mut self,
@@ -76,10 +75,42 @@ pub struct Engine<T: CommunicationInterface> {
     pub current: CapaRef<Domain>,
 }
 
+impl<T: CommunicationInterface> Engine<T> {
+    pub fn add_root_region(
+        &self,
+        domain: &CapaRef<Domain>,
+        region: &CapaRef<MemoryRegion>,
+    ) -> Result<LocalCapa, CapaError> {
+        let local_handle = {
+            let dom = &mut domain.borrow_mut();
+            dom.data.install(CapaWrapper::Region(region.clone()))
+        };
+        let reg = &mut region.borrow_mut();
+        reg.owned = Ownership::new(Rc::downgrade(domain), local_handle);
+        Ok(local_handle)
+    }
+}
+
 impl<T: CommunicationInterface> EngineInterface for Engine<T> {
     type CapabilityError = ClientError;
     type OwnedCapa = LocalCapa;
     type CapaReference = CapaRef<Domain>;
+
+    fn new(nb_cores: u64) -> Self {
+        let policies = Policies::new(
+            (1 << nb_cores) - 1,
+            MonitorAPI::all(),
+            InterruptPolicy::default_all(),
+        );
+        let mut capa = Capability::<Domain>::new(Domain::new(policies));
+        capa.data.status = Status::Sealed;
+        let ref_td = Rc::new(RefCell::new(capa));
+        Self {
+            platform: T::new(nb_cores),
+            current: ref_td,
+        }
+    }
+
     fn set(
         &mut self,
         _domain: Self::CapaReference,
@@ -340,10 +371,11 @@ impl<T: CommunicationInterface> Engine<T> {
         let local = child.borrow().owned.handle;
         self.set(self.current.clone(), local, core, tpe, field, value)?;
         {
-            let mut engine = SEngine::new();
-            engine
-                .set(self.current.clone(), local, core, tpe, field, value)
-                .unwrap();
+            // Everything went well, set it now.
+            child
+                .borrow_mut()
+                .set(core, tpe, field, value)
+                .map_err(|_| ClientError::FailedSet)?;
         }
         Ok(())
     }
@@ -511,10 +543,24 @@ impl<T: CommunicationInterface> Engine<T> {
         self.send(self.current.clone(), local_c, local_m, remap, attributes)?;
         // Update locally by abusing the server interface.
         {
-            let mut engine = SEngine::new();
-            engine
-                .send(self.current.clone(), local_c, local_m, remap, attributes)
-                .unwrap();
+            let current = &mut self.current.borrow_mut();
+            let region = current
+                .data
+                .capabilities
+                .remove(&local_m)
+                .map_err(|_| ClientError::FailedSend)?
+                .as_region()
+                .map_err(|_| ClientError::FailedSend)?;
+            {
+                let reg = &mut region.borrow_mut();
+                reg.data.remapped = remap;
+                reg.data.attributes = attributes;
+            }
+            let dest_capa = child
+                .borrow_mut()
+                .data
+                .install(CapaWrapper::Region(region.clone()));
+            region.borrow_mut().owned = Ownership::new(Rc::downgrade(&child), dest_capa);
         }
         Ok(())
     }

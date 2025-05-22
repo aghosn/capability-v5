@@ -9,16 +9,6 @@ use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(
-        !(0 as u64),
-        MonitorAPI::all(),
-        InterruptPolicy::default_all(),
-    );
-    let mut capa = Capability::<Domain>::new(Domain::new(policies));
-    capa.data.status = Status::Sealed;
-    capa
-}
 fn create_root_region() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {
         kind: RegionKind::Carve,
@@ -35,14 +25,14 @@ fn setup_engine_with_root() -> (
     CapaRef<MemoryRegion>,
     LocalCapa, // ref_region returned by `add_root_region`
 ) {
-    let engine = Engine::new();
-    let root_domain = create_root_domain();
+    let engine = Engine::new(16);
     let root_region = create_root_region();
 
-    let ref_td = Rc::new(RefCell::new(root_domain));
     let ref_mem = Rc::new(RefCell::new(root_region));
-    let ref_region = engine.add_root_region(&ref_td, &ref_mem).unwrap();
-
+    let ref_region = engine
+        .add_root_region(&engine.root.clone(), &ref_mem)
+        .unwrap();
+    let ref_td = engine.root.clone();
     (engine, ref_td, ref_mem, ref_region)
 }
 
@@ -53,7 +43,7 @@ fn test_parse_simple_td0() {
 
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -83,7 +73,7 @@ fn test_parse_with_alias() {
 
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -118,7 +108,7 @@ fn test_parse_with_carve() {
 
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -158,7 +148,7 @@ fn test_parse_with_td1() {
 
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Unsealed domain()
@@ -185,7 +175,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     engine.seal(td0.clone(), td1).unwrap();
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain()
@@ -241,7 +231,7 @@ fn test_parse_with_td1_and_region() {
     // Check the display
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1)
@@ -306,7 +296,7 @@ fn test_parse_with_td1_and_regions() {
     // Check the display
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
@@ -334,7 +324,7 @@ r2 = Aliased 0x3000 0x4000 with RWX mapped Remapped(0x2000)
 #[test]
 fn test_invalid_td0() {
     let _correct = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -349,21 +339,21 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
 
     let missing_api = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 |indices: 1->r0
 "#;
 
     let missing_vec = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 |indices: 1->r0
 "#;
 
     let incorrect_vector = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWEDVISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -371,7 +361,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
 
     let incorrect_hex = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWEDVISIBLE, r: 0x4G, w: 0x5H0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -399,7 +389,7 @@ fn test_enumerate_attest() {
     // Test attestation.
     let attestation = engine.attest(td0.clone(), None).unwrap();
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -433,7 +423,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
     // Attestation td0.
     let attestation = engine.attest(td0.clone(), None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Unsealed domain()
@@ -482,7 +472,7 @@ r1 = Exclusive 0x2000 0x3000 with R__ mapped Identity
     // Enumerate the local capa indices.
     let attestation = engine.attest(td0.clone(), None).unwrap();
     let expected = r#"td0 = Sealed domain(td1,r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Unsealed domain()
@@ -511,7 +501,7 @@ r1 = Exclusive 0x3000 0x4000 with RW_ mapped Identity
     // Check we got back to the expected configuration.
     let attestation = engine.attest(td0.clone(), None).unwrap();
     let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity

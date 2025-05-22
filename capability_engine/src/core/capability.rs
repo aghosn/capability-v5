@@ -11,16 +11,16 @@ use super::update::{OperationUpdate, Update};
 
 pub type CapaRef<T> = Rc<RefCell<Capability<T>>>;
 
-pub type WeakRef<T> = Weak<RefCell<T>>;
+pub type WeakRef<T> = Weak<RefCell<Capability<T>>>;
 
 #[derive(Debug)]
 pub struct Ownership {
-    pub owner: WeakRef<Capability<Domain>>,
+    pub owner: WeakRef<Domain>,
     pub handle: LocalCapa,
 }
 
 impl Ownership {
-    pub fn new(owner: WeakRef<Capability<Domain>>, handle: LocalCapa) -> Self {
+    pub fn new(owner: WeakRef<Domain>, handle: LocalCapa) -> Self {
         Ownership { owner, handle }
     }
     pub fn empty() -> Self {
@@ -35,7 +35,7 @@ impl Ownership {
 pub struct Capability<T> {
     pub owned: Ownership,
     pub data: T,
-    pub parent: WeakRef<Capability<T>>,
+    pub parent: WeakRef<T>,
     pub children: Vec<CapaRef<T>>,
 }
 
@@ -79,7 +79,7 @@ impl<T> Capability<T>
 where
     T: PartialEq,
 {
-    pub fn add_child(&mut self, child: CapaRef<T>, owner: WeakRef<Capability<Domain>>) {
+    pub fn add_child(&mut self, child: CapaRef<T>, owner: WeakRef<Domain>) {
         {
             child.borrow_mut().owned = Ownership::new(owner, 0);
         }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    capability::{CapaError, Capability, WeakRef},
+    capability::{CapaError, WeakRef},
     capakey::WeakKey,
     coalesced::CoalescedView,
     domain::Domain,
@@ -12,10 +12,13 @@ pub enum Update {
     // Zero-out a region.
     Clean { start: u64, size: u64 },
     // Revoke the domain
-    Revoke { dom: WeakRef<Capability<Domain>> },
+    Revoke { dom: WeakRef<Domain> },
     // Change in memory mappings for a domain.
-    ChangeMemory { dom: WeakRef<Capability<Domain>> },
+    ChangeMemory { dom: WeakRef<Domain> },
 }
+
+//TODO: implement this.
+pub enum CoreUpdate {}
 
 // This structure maintains updates during an operation and attempts to keep them compact.
 pub struct OperationUpdate {
@@ -63,6 +66,7 @@ impl OperationUpdate {
 
     // Compute the views for all the domains that are affected.
     pub fn snapshot(&mut self) -> Result<(), CapaError> {
+        //TODO: we might change this.
         for d in &self.to_change {
             let weak = &d.0;
             if let Some(domain) = weak.clone().upgrade() {
@@ -75,7 +79,13 @@ impl OperationUpdate {
     }
 
     pub fn compute(&mut self) -> Result<(), CapaError> {
-        //TODO
+        //TODO: I'll have to think about the most efficient change.
+        /*for (d, v) in self.snap.iter() {
+            if let Some(dom) = &d.0.upgrade() {
+                let view = CoalescedView::from_regions(dom.borrow().view()?)?;
+                let (add, remove) = v.diff(view);
+            }
+        }*/
         Ok(())
     }
 }

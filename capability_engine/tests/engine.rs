@@ -8,16 +8,6 @@ use capa_engine::EngineInterface;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(
-        !(0 as u64),
-        MonitorAPI::all(),
-        InterruptPolicy::default_all(),
-    );
-    let mut capa = Capability::<Domain>::new(Domain::new(policies));
-    capa.data.status = Status::Sealed;
-    capa
-}
 fn create_root_region() -> Capability<MemoryRegion> {
     Capability::<MemoryRegion>::new(MemoryRegion {
         kind: RegionKind::Carve,
@@ -34,14 +24,14 @@ fn setup_engine_with_root() -> (
     CapaRef<MemoryRegion>,
     LocalCapa, // ref_region returned by `add_root_region`
 ) {
-    let engine = Engine::new();
-    let root_domain = create_root_domain();
+    let engine = Engine::new(16);
     let root_region = create_root_region();
 
-    let ref_td = Rc::new(RefCell::new(root_domain));
     let ref_mem = Rc::new(RefCell::new(root_region));
-    let ref_region = engine.add_root_region(&ref_td, &ref_mem).unwrap();
-
+    let ref_region = engine
+        .add_root_region(&engine.root.clone(), &ref_mem)
+        .unwrap();
+    let ref_td = engine.root.clone();
     (engine, ref_td, ref_mem, ref_region)
 }
 
@@ -50,7 +40,7 @@ fn test_engine_create_root_and_simple_child() {
     // Initial setup
     let (mut engine, ref_td, ref_mem, ref_region) = setup_engine_with_root();
 
-    assert_eq!(Rc::strong_count(&ref_td), 1);
+    assert_eq!(Rc::strong_count(&ref_td), 2);
     assert_eq!(Rc::weak_count(&ref_td), 1);
     assert_eq!(Rc::strong_count(&ref_mem), 2);
 
@@ -111,7 +101,7 @@ fn test_engine_create_root_and_simple_child() {
         // Print the root domain.
         let display = format!("{}", ref_td.borrow());
         let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2)
@@ -169,7 +159,7 @@ r1 = Exclusive 0x2000 0x4000 with RWX mapped Identity
         // Now do the attestation again, we should see a region that is not reported.
         let display = format!("{}", ref_td.borrow());
         let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1,r2,r3)
@@ -206,7 +196,7 @@ r2 = Exclusive 0x15000 0x35000 with RWX mapped Identity
 
         let display = format!("{}", ref_td.borrow());
         let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r1)
@@ -233,7 +223,7 @@ r0 = Exclusive 0x2000 0x4000 with RWX mapped Identity
         engine.revoke(ref_td.clone(), child_td, 0).unwrap();
         let display = format!("{}", ref_td.borrow());
         let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -242,7 +232,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         assert_eq!(display, expected);
     }
 
-    assert_eq!(Rc::strong_count(&ref_td), 1);
+    assert_eq!(Rc::strong_count(&ref_td), 2);
     assert_eq!(Rc::weak_count(&ref_td), 1);
     assert_eq!(Rc::strong_count(&ref_mem), 2);
 }
@@ -251,7 +241,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 fn test_engine_nested_child_revoke_td() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
     // Main logic.
@@ -356,7 +346,7 @@ fn test_engine_nested_child_revoke_td() {
             let c_td0 = &td0.borrow();
             let display = format!("{}", c_td0);
             let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(td2,r1,r2)
@@ -417,7 +407,7 @@ r1 = Aliased 0x3000 0x4000 with RW_ mapped Identity
             let c_td0 = &td0.borrow();
             let display = format!("{}", c_td0);
             let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -440,7 +430,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         }
     }
 
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
@@ -449,7 +439,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 fn test_engine_nested_revoke_r1() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
     // Main logic.
@@ -554,7 +544,7 @@ fn test_engine_nested_revoke_r1() {
             let c_td0 = &td0.borrow();
             let display = format!("{}", c_td0);
             let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(td2,r1,r2)
@@ -615,7 +605,7 @@ r1 = Aliased 0x3000 0x4000 with RW_ mapped Identity
             let c_td0 = &td0.borrow();
             let display = format!("{}", c_td0);
             let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(td2,r1)
@@ -676,7 +666,7 @@ r0 = Aliased 0x5000 0x6000 with RW_ mapped Identity
         engine.revoke(td0.clone(), td0_td1, 0).unwrap();
     }
 
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
@@ -685,7 +675,7 @@ r0 = Aliased 0x5000 0x6000 with RW_ mapped Identity
 fn test_engine_two_children_revoke_aliased_twice() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -760,7 +750,7 @@ fn test_engine_two_children_revoke_aliased_twice() {
         // Now check the output.
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(td1,td2,r0,r1)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(r2)
@@ -788,7 +778,7 @@ r3 = Aliased 0x0 0x1000 with RWX mapped Identity
         // Now make sure the display is correct.
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(td1,td2,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain()
@@ -808,7 +798,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         engine.revoke(td0.clone(), td0_td1, 0).unwrap();
         engine.revoke(td0.clone(), td0_td2, 0).unwrap();
     }
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
@@ -817,7 +807,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 fn test_engine_nested_domains_three_branches() {
     // Initial setup
     let (mut engine, td0, r0, _) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -850,7 +840,7 @@ fn test_engine_nested_domains_three_branches() {
         // Now make sure everyone has three children.
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(td1,td2,td3,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(td4,td5,td6)
@@ -910,7 +900,7 @@ td3 = Sealed domain(td10,td11,td12)
         // Display td0
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -918,7 +908,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
         assert_eq!(display, expected);
     }
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
@@ -927,7 +917,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 fn test_engine_reclaim_from_grand_child() {
     // Initial setup
     let (mut engine, td0, r0, td0_r0) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -990,7 +980,7 @@ r0 = Exclusive 0x0 0x1000 with RWX mapped Identity
 
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(td1,r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 td1 = Sealed domain(td2)
@@ -1008,7 +998,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
         // Check it worked.
         let display = format!("{}", td0.borrow());
         let expected = r#"td0 = Sealed domain(r0)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -1016,7 +1006,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 "#;
         assert_eq!(display, expected);
     }
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 }
@@ -1025,7 +1015,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
 fn test_engine_policies_core_fail() {
     // Initial setup
     let (mut engine, td0, r0, _td0_r0) = setup_engine_with_root();
-    assert_eq!(Rc::strong_count(&td0), 1);
+    assert_eq!(Rc::strong_count(&td0), 2);
     assert_eq!(Rc::weak_count(&td0), 1);
     assert_eq!(Rc::strong_count(&r0), 2);
 
@@ -1104,7 +1094,7 @@ fn test_engine_alias_then_carve_root() {
     // Do the display.
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0,r1,r2)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
@@ -1137,7 +1127,7 @@ fn test_engine_alias_carve_root() {
     // Do the display.
     let display = format!("{}", td0.borrow());
     let expected = r#"td0 = Sealed domain(r0,r1,r2)
-|cores: 0xffffffffffffffff
+|cores: 0xffff
 |mon.api: 0x1fff
 |vec0-255: ALLOWED|VISIBLE, r: 0x0, w: 0x0
 r0 = Exclusive 0x0 0x10000 with RWX mapped Identity

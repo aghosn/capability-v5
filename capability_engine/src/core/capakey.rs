@@ -25,7 +25,7 @@ impl<T> Hash for CapaKey<T> {
     }
 }
 
-pub struct WeakKey<T>(pub WeakRef<Capability<T>>);
+pub struct WeakKey<T>(pub WeakRef<T>);
 
 impl<T> PartialEq for WeakKey<T> {
     fn eq(&self, other: &Self) -> bool {

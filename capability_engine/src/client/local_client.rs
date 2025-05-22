@@ -20,10 +20,10 @@ pub struct LocalClient {
 }
 
 impl CommunicationInterface for LocalClient {
-    fn init() -> Self {
-        let engine = Engine::new();
+    fn new(nb_cores: u64) -> Self {
+        let engine = Engine::new(nb_cores);
         let policies = Policies::new(
-            !(0 as u64),
+            (1 << nb_cores) - 1,
             MonitorAPI::all(),
             InterruptPolicy::default_all(),
         );

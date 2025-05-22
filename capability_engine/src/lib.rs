@@ -36,6 +36,8 @@ pub trait EngineInterface {
     type OwnedCapa;
     type CapabilityError;
 
+    fn new(nb_cores: u64) -> Self;
+
     fn create(
         &mut self,
         domain: &Self::CapaReference,
