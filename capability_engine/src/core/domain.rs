@@ -34,7 +34,7 @@ impl MonitorAPI {
 }
 
 bitflags! {
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
     pub struct VectorVisibility: u8 {
         const ALLOWED = 0b1;
         const VISIBLE = 0b10;
@@ -83,11 +83,11 @@ pub struct Policies {
 }
 
 impl Policies {
-    pub fn new(cores: u64, api: MonitorAPI, interrupts: InterruptPolicy) -> Self {
+    pub fn new(cores: u64, api: MonitorAPI, interrupts: &InterruptPolicy) -> Self {
         Policies {
             cores,
             api,
-            interrupts,
+            interrupts: interrupts.clone(),
         }
     }
 
@@ -99,7 +99,7 @@ impl Policies {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub struct VectorPolicy {
     pub visibility: VectorVisibility,
     pub read_set: u64,
@@ -114,60 +114,137 @@ impl VectorPolicy {
 }
 
 pub const NB_INTERRUPTS: usize = 256;
+pub const MASK_LEN: usize = (NB_INTERRUPTS + 63) / 64;
 
 #[derive(Clone, Copy)]
+pub struct BitMask {
+    bits: [u64; MASK_LEN],
+}
+
+impl BitMask {
+    /*fn is_set(&self, i: usize) -> bool {
+        let idx = i / 64;
+        let bit = i % 64;
+        (self.bits[idx] & (1 << bit)) != 0
+    }*/
+
+    fn set(&mut self, i: usize) {
+        let idx = i / 64;
+        let bit = i % 64;
+        self.bits[idx] |= 1 << bit;
+    }
+
+    fn zero() -> Self {
+        BitMask {
+            bits: [0; MASK_LEN],
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct InterruptPolicy {
-    //TODO: Need to compact this.
-    pub vectors: [VectorPolicy; NB_INTERRUPTS],
+    pub default: VectorPolicy,
+    pub overrides: BTreeMap<VectorPolicy, BitMask>,
 }
 
 impl InterruptPolicy {
     pub fn default_none() -> Self {
         InterruptPolicy {
-            vectors: [VectorPolicy {
+            default: VectorPolicy {
                 visibility: VectorVisibility::empty(),
                 read_set: !(0 as u64),
                 write_set: !(0 as u64),
-            }; 256],
+            },
+            overrides: BTreeMap::new(),
         }
     }
     pub fn default_all() -> Self {
         InterruptPolicy {
-            vectors: [VectorPolicy {
+            default: VectorPolicy {
                 visibility: VectorVisibility::all(),
                 read_set: 0,
                 write_set: 0,
-            }; 256],
+            },
+            overrides: BTreeMap::new(),
         }
+    }
+
+    pub fn get(&self, i: usize) -> VectorPolicy {
+        for (policy, mask) in &self.overrides {
+            let idx = i / 64;
+            let bit = i % 64;
+            if idx < mask.bits.len() && (mask.bits[idx] & (1 << bit)) != 0 {
+                return *policy;
+            }
+        }
+        self.default
     }
 
     pub fn contains(&self, other: &InterruptPolicy) -> bool {
         for i in 0..NB_INTERRUPTS {
-            if !self.vectors[i].contains(&other.vectors[i]) {
+            if !self.get(i).contains(&other.get(i)) {
                 return false;
             }
         }
         return true;
     }
 
+    pub fn remove(&mut self, i: usize) {
+        let mut to_remove = Vec::new();
+
+        for (policy, mask) in self.overrides.iter_mut() {
+            let idx = i / 64;
+            let bit = i % 64;
+            if idx < mask.bits.len() && (mask.bits[idx] & (1 << bit)) != 0 {
+                mask.bits[idx] &= !(1 << bit); // remove vector from old mask
+                if mask.bits.iter().all(|&x| x == 0) {
+                    to_remove.push(*policy); // mark empty masks for removal
+                }
+                break; // vector can only be in one policy
+            }
+        }
+
+        for policy in to_remove {
+            self.overrides.remove(&policy);
+        }
+    }
+
     pub fn set(&mut self, tpe: FieldType, field: u64, value: u64) -> Result<(), CapaError> {
         if field as usize >= NB_INTERRUPTS {
             return Err(CapaError::InvalidField);
         }
+        let mut prev = self.get(field as usize);
+
         match tpe {
             FieldType::InterruptVisibility => {
                 let vis =
                     VectorVisibility::from_bits(value as u8).ok_or(CapaError::InvalidValue)?;
-                self.vectors[field as usize].visibility = vis;
+                prev.visibility = vis;
             }
             FieldType::InterruptRead => {
-                self.vectors[field as usize].read_set = value as u64;
+                prev.read_set = value as u64;
             }
             FieldType::InterruptWrite => {
-                self.vectors[field as usize].write_set = value as u64;
+                prev.write_set = value as u64;
             }
             _ => return Err(CapaError::InvalidField),
         }
+
+        // Now add it back.
+        self.set_full(field, prev)
+    }
+
+    pub fn set_full(&mut self, field: u64, value: VectorPolicy) -> Result<(), CapaError> {
+        if field as usize >= NB_INTERRUPTS {
+            return Err(CapaError::InvalidField);
+        }
+        self.remove(field as usize);
+        // Now add it back.
+        let mask = self
+            .overrides
+            .entry(value)
+            .or_insert_with(|| BitMask::zero());
+        mask.set(field as usize);
         Ok(())
     }
 }
@@ -356,19 +433,22 @@ impl Domain {
                 if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field as usize].write_set)
+                Ok(self.policies.interrupts.get(field as usize).write_set)
             }
             FieldType::InterruptRead => {
                 if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field as usize].read_set)
+                Ok(self.policies.interrupts.get(field as usize).read_set)
             }
             FieldType::InterruptVisibility => {
                 if field as usize >= NB_INTERRUPTS {
                     return Err(CapaError::InvalidField);
                 }
-                Ok(self.policies.interrupts.vectors[field as usize]
+                Ok(self
+                    .policies
+                    .interrupts
+                    .get(field as usize)
                     .visibility
                     .bits() as u64)
             }

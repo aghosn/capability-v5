@@ -121,7 +121,7 @@ impl Parser {
             id: 0,
             status,
             capabilities: CapabilityStore::new(),
-            policies: Policies::new(cores, api, inter_policy),
+            policies: Policies::new(cores, api, &inter_policy),
         };
         // Add the domain.
         self.domains.insert(
@@ -438,11 +438,14 @@ impl InterruptPolicy {
 
         // Now set the values
         for j in vs..=ve {
-            self.vectors[j] = VectorPolicy {
-                visibility,
-                read_set: read,
-                write_set: write,
-            };
+            self.set_full(
+                j as u64,
+                VectorPolicy {
+                    visibility,
+                    read_set: read,
+                    write_set: write,
+                },
+            )?;
         }
         Ok(())
     }

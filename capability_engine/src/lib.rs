@@ -43,7 +43,7 @@ pub trait EngineInterface {
         domain: &Self::CapaReference,
         cores: u64,
         api: MonitorAPI,
-        interrupts: InterruptPolicy,
+        interrupts: &InterruptPolicy,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError>;
 
     fn set(

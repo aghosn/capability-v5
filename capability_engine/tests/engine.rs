@@ -52,7 +52,7 @@ fn test_engine_create_root_and_simple_child() {
                 &ref_td.clone(),
                 1,
                 MonitorAPI::all(),
-                InterruptPolicy::default_none(),
+                &InterruptPolicy::default_none(),
             )
             .unwrap();
 
@@ -253,7 +253,7 @@ fn test_engine_nested_child_revoke_td() {
                 &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
-                InterruptPolicy::default_all(),
+                &InterruptPolicy::default_all(),
             )
             .unwrap();
 
@@ -303,7 +303,7 @@ fn test_engine_nested_child_revoke_td() {
                     &td1.clone(),
                     0b11,
                     MonitorAPI::encapsulated(),
-                    InterruptPolicy::default_none(),
+                    &InterruptPolicy::default_none(),
                 )
                 .unwrap();
 
@@ -451,7 +451,7 @@ fn test_engine_nested_revoke_r1() {
                 &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
-                InterruptPolicy::default_all(),
+                &InterruptPolicy::default_all(),
             )
             .unwrap();
 
@@ -501,7 +501,7 @@ fn test_engine_nested_revoke_r1() {
                     &td1.clone(),
                     0b11,
                     MonitorAPI::encapsulated(),
-                    InterruptPolicy::default_none(),
+                    &InterruptPolicy::default_none(),
                 )
                 .unwrap();
 
@@ -687,7 +687,7 @@ fn test_engine_two_children_revoke_aliased_twice() {
                 &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
-                InterruptPolicy::default_all(),
+                &InterruptPolicy::default_all(),
             )
             .unwrap();
         // Let td0 create td2
@@ -696,7 +696,7 @@ fn test_engine_two_children_revoke_aliased_twice() {
                 &td0.clone(),
                 0b111,
                 MonitorAPI::all(),
-                InterruptPolicy::default_all(),
+                &InterruptPolicy::default_all(),
             )
             .unwrap();
 
@@ -820,7 +820,7 @@ fn test_engine_nested_domains_three_branches() {
                     &capa_me.clone(),
                     0x1,
                     MonitorAPI::all(),
-                    InterruptPolicy::default_all(),
+                    &InterruptPolicy::default_all(),
                 )
                 .unwrap();
             handles.push(local);
@@ -939,7 +939,7 @@ fn test_engine_reclaim_from_grand_child() {
                     &current.clone(),
                     0b1,
                     MonitorAPI::all(),
-                    InterruptPolicy::default_all(),
+                    &InterruptPolicy::default_all(),
                 )
                 .unwrap();
             engine.seal(current.clone(), child).unwrap();
@@ -1029,7 +1029,7 @@ fn test_engine_policies_core_fail() {
                 &td0.clone(),
                 0b1,
                 api_without_send_rcv,
-                InterruptPolicy::default_none(),
+                &InterruptPolicy::default_none(),
             )
             .unwrap();
         engine.seal(td0.clone(), td0_td1).unwrap();
@@ -1048,7 +1048,7 @@ fn test_engine_policies_core_fail() {
             &td1.clone(),
             0x2,
             MonitorAPI::all(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         );
         assert!(td2_err.is_err());
 
@@ -1058,7 +1058,7 @@ fn test_engine_policies_core_fail() {
                 &td1.clone(),
                 0b1,
                 api_without_send_rcv,
-                InterruptPolicy::default_all(),
+                &InterruptPolicy::default_all(),
             )
             .unwrap();
 
@@ -1071,7 +1071,7 @@ fn test_engine_policies_core_fail() {
                 &td1.clone(),
                 0b1,
                 MonitorAPI::all(),
-                InterruptPolicy::default_none(),
+                &InterruptPolicy::default_none(),
             )
             .unwrap();
 

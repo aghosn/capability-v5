@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::core::domain::{Field, Status};
+use crate::core::domain::{Field, Status, NB_INTERRUPTS};
 use crate::core::memory_region::Attributes;
 use crate::{
     core::{
@@ -99,7 +99,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         let policies = Policies::new(
             (1 << nb_cores) - 1,
             MonitorAPI::all(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         );
         let mut capa = Capability::<Domain>::new(Domain::new(policies));
         capa.data.status = Status::Sealed;
@@ -227,7 +227,7 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         _domain: &Self::CapaReference,
         cores: u64,
         api: crate::core::domain::MonitorAPI,
-        interrupts: InterruptPolicy,
+        interrupts: &InterruptPolicy,
     ) -> Result<Self::OwnedCapa, Self::CapabilityError> {
         let args = [cores as u64, api.bits() as u64, 0, 0, 0, 0];
         let res = self.platform.send(CallInterface::CREATE, &args)?;
@@ -235,7 +235,8 @@ impl<T: CommunicationInterface> EngineInterface for Engine<T> {
         match res {
             ClientResult::SingleValue(child) => {
                 // Now set the interrutps.
-                for (i, v) in interrupts.vectors.iter().enumerate() {
+                for i in 0..NB_INTERRUPTS {
+                    let v = interrupts.get(i);
                     let args = [
                         child,
                         0,
@@ -424,8 +425,8 @@ impl<T: CommunicationInterface> Engine<T> {
         api: MonitorAPI,
         interrupts: InterruptPolicy,
     ) -> Result<CapaRef<Domain>, ClientError> {
-        let local = self.create(&self.current.clone(), cores, api, interrupts)?;
-        let policies = Policies::new(cores, api, interrupts);
+        let local = self.create(&self.current.clone(), cores, api, &interrupts)?;
+        let policies = Policies::new(cores, api, &interrupts);
         let child_dom = Domain::new(policies);
         let capa = Capability::<Domain>::new(child_dom);
         let reference = Rc::new(RefCell::new(capa));

@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn create_root_domain() -> Capability<Domain> {
-    let policies = Policies::new(0b111111, MonitorAPI::all(), InterruptPolicy::default_all());
+    let policies = Policies::new(0b111111, MonitorAPI::all(), &InterruptPolicy::default_all());
     let mut capa = Capability::<Domain>::new(Domain::new(policies));
     capa.data.status = Status::Sealed;
     capa
@@ -81,7 +81,7 @@ fn test_unallowed_calls() {
             &td0.clone(),
             1,
             MonitorAPI::ATTEST,
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -109,7 +109,7 @@ fn test_unallowed_calls() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -146,7 +146,7 @@ fn test_unallowed_calls() {
             &td0.clone(),
             1,
             MonitorAPI::CARVE,
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -201,7 +201,7 @@ fn test_set_get() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -289,7 +289,7 @@ fn test_set_get() {
             &td0.clone(),
             1,
             MonitorAPI::empty(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 

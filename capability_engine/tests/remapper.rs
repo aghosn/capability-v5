@@ -51,7 +51,7 @@ fn test_remap_carve() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -150,7 +150,7 @@ fn test_remap_illegal() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -217,7 +217,7 @@ fn test_remap_illegal_in_hole() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -278,7 +278,7 @@ fn test_remap_illegal_in_hole() {
                 &child.clone(),
                 1,
                 MonitorAPI::all(),
-                InterruptPolicy::default_none(),
+                &InterruptPolicy::default_none(),
             )
             .unwrap();
 

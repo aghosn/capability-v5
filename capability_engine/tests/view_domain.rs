@@ -143,7 +143,7 @@ fn test_view_sending_alias() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -203,7 +203,7 @@ fn test_view_sending_carve() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -266,7 +266,7 @@ fn test_view_sending_carve_begin() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -326,7 +326,7 @@ fn test_view_sending_carve_end() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -389,7 +389,7 @@ fn test_view_child_middle_overlap() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -466,7 +466,7 @@ fn test_view_child_middle_overlap_remap() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -543,7 +543,7 @@ fn test_view_child_start_overlap_remap() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 
@@ -616,7 +616,7 @@ fn test_view_child_end_overlap_remap() {
             &td0.clone(),
             1,
             MonitorAPI::all(),
-            InterruptPolicy::default_none(),
+            &InterruptPolicy::default_none(),
         )
         .unwrap();
 

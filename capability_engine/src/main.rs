@@ -21,7 +21,7 @@ fn create_root_domain() -> Capability<Domain> {
     let policies = Policies::new(
         !(0 as u64),
         MonitorAPI::all(),
-        InterruptPolicy::default_all(),
+        &InterruptPolicy::default_all(),
     );
     let mut capa = Capability::<Domain>::new(Domain::new(policies));
     capa.data.status = DStatus::Sealed;

@@ -28,7 +28,7 @@ impl CommunicationInterface for LocalClient {
         let policies = Policies::new(
             (1 << nb_cores) - 1,
             MonitorAPI::all(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         );
         let mut capa = Capability::<Domain>::new(Domain::new(policies));
         capa.data.status = Status::Sealed;
@@ -112,7 +112,7 @@ impl CommunicationInterface for LocalClient {
                 &self.current.clone(),
                 args[0],
                 MonitorAPI::from_bits_truncate(args[1] as u16),
-                InterruptPolicy::default_none(),
+                &InterruptPolicy::default_none(),
             )),
             CallInterface::ATTEST => {
                 let other = if args[0] != 0 {

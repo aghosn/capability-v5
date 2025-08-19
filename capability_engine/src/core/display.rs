@@ -380,10 +380,10 @@ impl fmt::Display for Policies {
 impl fmt::Display for InterruptPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut start = 0;
-        let mut vector = &self.vectors[0];
+        let mut vector = self.get(0);
 
         for i in 1..NB_INTERRUPTS {
-            if &self.vectors[i] == vector {
+            if self.get(i) == vector {
                 continue;
             }
 
@@ -396,7 +396,7 @@ impl fmt::Display for InterruptPolicy {
 
             // Update start and vector for the next range
             start = i;
-            vector = &self.vectors[i];
+            vector = self.get(i);
         }
 
         // Print the final range

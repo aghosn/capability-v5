@@ -73,7 +73,7 @@ impl<P: PlatformState> EngineInterface for Engine<P> {
         let mut root = Domain::new(Policies::new(
             (1 << nb_cores) - 1,
             MonitorAPI::all(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         ));
         root.status = Status::Sealed;
         let dom = Capability::<Domain>::new(root);
@@ -92,7 +92,7 @@ impl<P: PlatformState> EngineInterface for Engine<P> {
         domain: &CapaRef<Domain>,
         cores: u64,
         api: MonitorAPI,
-        interrupts: InterruptPolicy,
+        interrupts: &InterruptPolicy,
     ) -> Result<LocalCapa, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::CREATE)?;
 

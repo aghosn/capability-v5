@@ -143,7 +143,7 @@ fn test_parse_with_td1() {
             &td0.clone(),
             0b1,
             MonitorAPI::all(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         )
         .unwrap();
 
@@ -210,13 +210,18 @@ fn test_parse_with_td1_and_region() {
 
     // Create a child domain.
     let mut ipolicy = InterruptPolicy::default_none();
-    ipolicy.vectors[3] = VectorPolicy {
-        visibility: VectorVisibility::empty(),
-        read_set: 0,
-        write_set: 0,
-    };
+    ipolicy
+        .set_full(
+            3,
+            VectorPolicy {
+                visibility: VectorVisibility::empty(),
+                read_set: 0,
+                write_set: 0,
+            },
+        )
+        .unwrap();
     let td1 = engine
-        .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .create(&td0.clone(), 0b1, MonitorAPI::empty(), &ipolicy)
         .unwrap();
     engine
         .send(
@@ -272,7 +277,7 @@ fn test_parse_with_td1_and_regions() {
     let ipolicy = InterruptPolicy::default_none();
 
     let td1 = engine
-        .create(&td0.clone(), 0b1, MonitorAPI::empty(), ipolicy)
+        .create(&td0.clone(), 0b1, MonitorAPI::empty(), &ipolicy)
         .unwrap();
     engine
         .send(
@@ -409,7 +414,7 @@ r0 = Exclusive 0x0 0x10000 with RWX mapped Identity
             &td0.clone(),
             0x1,
             MonitorAPI::empty(),
-            InterruptPolicy::default_all(),
+            &InterruptPolicy::default_all(),
         )
         .unwrap();
 
