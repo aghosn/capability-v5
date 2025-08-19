@@ -403,6 +403,10 @@ impl Domain {
         self.policies.api.contains(apicall)
     }
 
+    pub fn core_allowed(&self, core: usize) -> bool {
+        self.policies.cores & (1 << core) != 0
+    }
+
     pub fn set_policy(&mut self, tpe: FieldType, field: u64, value: u64) -> Result<(), CapaError> {
         if self.is_sealed() {
             return Err(CapaError::DomainSealed);

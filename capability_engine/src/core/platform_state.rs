@@ -27,4 +27,5 @@ pub trait PlatformState {
     ) -> Result<u64, CapaError>;
     fn interrupted_on_core(&self, dom: WeakRef<Domain>, core: u64) -> bool;
     fn interrupt_info_on_core(&self, dom: WeakRef<Domain>, core: u64) -> Option<InterruptInfo>;
+    fn current_core(&self) -> usize;
 }

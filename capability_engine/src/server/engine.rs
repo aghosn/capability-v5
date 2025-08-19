@@ -38,6 +38,21 @@ impl<P: PlatformState> Engine<P> {
         Ok(())
     }
 
+    fn is_sealed_and_allowed_on_core(
+        &self,
+        domain: &CapaRef<Domain>,
+        core: usize,
+    ) -> Result<(), CapaError> {
+        let dom = domain.borrow();
+        if dom.data.status != Status::Sealed {
+            return Err(CapaError::DomainUnsealed);
+        }
+        if !dom.data.core_allowed(core) {
+            return Err(CapaError::InvalidCore);
+        }
+        Ok(())
+    }
+
     pub fn add_root_region(
         &self,
         domain: &CapaRef<Domain>,
@@ -242,9 +257,36 @@ impl<P: PlatformState> EngineInterface for Engine<P> {
         }
     }
 
-    fn switch(&mut self, domain: CapaRef<Domain>, _capa: LocalCapa) -> Result<(), CapaError> {
+    fn switch(&mut self, domain: CapaRef<Domain>, capa: LocalCapa) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SWITCH)?;
-        todo!();
+        let core = self.platform.current_core();
+        // Check that we're running on the current core.
+        if self.scheduled.len() <= core
+            || self.scheduled[core].clone().upgrade() != Some(domain.clone())
+        {
+            return Err(CapaError::InvalidCore);
+        }
+
+        // Now get the target.
+        let dest = {
+            domain
+                .clone()
+                .borrow()
+                .data
+                .capabilities
+                .get(&capa)?
+                .as_domain()?
+        };
+
+        // Check the dest is allowed.
+        self.is_sealed_and_allowed_on_core(&dest, core)?;
+
+        // TODO: Probaly should call the platform to do the switch or something.
+        // TODO: should probably do an update.
+
+        // The dest is now running on the core.
+        self.scheduled[core] = Rc::downgrade(&dest);
+        Ok(())
     }
 
     fn alias(

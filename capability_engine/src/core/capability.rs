@@ -58,6 +58,7 @@ pub enum CapaError {
     IncompatibleRemap,
     InvalidField,
     InvalidValue,
+    InvalidCore,
     // For parsing
     ParserDomain,
     ParserRegion,

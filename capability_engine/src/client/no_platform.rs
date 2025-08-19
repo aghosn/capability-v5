@@ -38,4 +38,9 @@ impl PlatformState for NoPlatform {
     fn interrupt_info_on_core(&self, _dom: WeakRef<Domain>, _core: u64) -> Option<InterruptInfo> {
         todo!()
     }
+
+    fn current_core(&self) -> usize {
+        //TODO implement.
+        todo!();
+    }
 }
