@@ -64,6 +64,8 @@ pub enum CapaError {
     ParserStatus,
     ParserMonitor,
     ParserCapability,
+    // Platform related issues
+    PlatformState,
 }
 
 /// Have to implement it by hand because Weak does not support PartialEq
@@ -354,7 +356,7 @@ impl Capability<Domain> {
     ) -> Result<(), CapaError> {
         match tpe {
             FieldType::Register => {
-                todo!()
+                return Err(CapaError::PlatformState);
             }
             _ => {
                 if self.data.is_sealed() {
@@ -370,7 +372,7 @@ impl Capability<Domain> {
     // Get on self.
     pub fn get(&self, _core: u64, tpe: FieldType, field: Field) -> Result<u64, CapaError> {
         match tpe {
-            FieldType::Register => todo!(),
+            FieldType::Register => return Err(CapaError::PlatformState),
             _ => self.data.get_policy(tpe, field),
         }
     }

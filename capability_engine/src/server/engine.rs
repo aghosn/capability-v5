@@ -7,20 +7,22 @@ use crate::core::domain::{
     Domain, Field, FieldType, InterruptPolicy, LocalCapa, MonitorAPI, Policies, Status,
 };
 use crate::core::memory_region::{Access, Attributes, MemoryRegion, Remapped, ViewRegion};
+use crate::core::platform_state::PlatformState;
 use crate::core::update::{CoreUpdate, OperationUpdate, Update};
 use crate::{is_core_subset, EngineInterface};
 
 /// Engine implementation.
 /// This is the entry point for all operations.
-pub struct Engine {
+pub struct Engine<P: PlatformState> {
     // The root lives in the engine.
     pub root: CapaRef<Domain>,
     pub scheduled: Vec<WeakRef<Domain>>,
     pub updates: VecDeque<Vec<Update>>,
     pub core_update: Vec<Vec<CoreUpdate>>,
+    pub platform: P,
 }
 
-impl Engine {
+impl<P: PlatformState> Engine<P> {
     fn is_sealed_and_allowed(
         &self,
         domain: &CapaRef<Domain>,
@@ -61,7 +63,7 @@ impl Engine {
     }
 }
 
-impl EngineInterface for Engine {
+impl<P: PlatformState> EngineInterface for Engine<P> {
     type CapaReference = CapaRef<Domain>;
     type OwnedCapa = LocalCapa;
     type CapabilityError = CapaError;
@@ -81,6 +83,7 @@ impl EngineInterface for Engine {
             scheduled: Vec::new(), /*vec![&ref_td; nb_cores]*/
             updates: VecDeque::<Vec<Update>>::new(),
             core_update: Vec::new(),
+            platform: P::new(),
         }
     }
 
@@ -117,9 +120,10 @@ impl EngineInterface for Engine {
         value: u64,
     ) -> Result<(), CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::SET)?;
-        // Check if the domain is sealed in which case policies cannot be set.
-        if tpe != FieldType::Register
-            && domain
+        // We are not setting registers
+        if tpe != FieldType::Register {
+            // Check if the domain is sealed in which case policies cannot be set.
+            if domain
                 .borrow()
                 .data
                 .capabilities
@@ -128,18 +132,47 @@ impl EngineInterface for Engine {
                 .borrow()
                 .data
                 .is_sealed()
-        {
-            return Err(CapaError::DomainSealed);
+            {
+                return Err(CapaError::DomainSealed);
+            }
+
+            // The fact that it is a subset will be checked at seal time for policies.
+            return domain
+                .borrow()
+                .data
+                .capabilities
+                .get(&child)?
+                .as_domain()?
+                .borrow_mut()
+                .set(core, tpe, field, value);
         }
-        // The fact that it is a subset will be checked at seal time for policies.
-        domain
-            .borrow()
-            .data
-            .capabilities
-            .get(&child)?
-            .as_domain()?
-            .borrow_mut()
-            .set(core, tpe, field, value)
+
+        // It is a platform set, check if the {interrupt, register} is allowed.
+        let child = domain.borrow().data.capabilities.get(&child)?.as_domain()?;
+        let allowed = {
+            if !child.borrow().data.is_sealed() {
+                true
+            } else if let Some(vec) = self
+                .platform
+                .interrupt_info_on_core(Rc::downgrade(&child), core)
+            {
+                //Check that the interrupt allows this field in the write set.
+                let mask = child
+                    .borrow()
+                    .data
+                    .get_policy(FieldType::InterruptWrite, vec.vector)?;
+                mask & (1 << field) != 0
+            } else {
+                false
+            }
+        };
+
+        // The write is not allowed, return an error.
+        if !allowed {
+            return Err(CapaError::InvalidField);
+        }
+        self.platform
+            .set_register_on_core(Rc::downgrade(&child), core, field, value)
     }
 
     fn get(
@@ -151,6 +184,9 @@ impl EngineInterface for Engine {
         field: Field,
     ) -> Result<u64, CapaError> {
         self.is_sealed_and_allowed(&domain, MonitorAPI::GET)?;
+
+        //if tpe !=
+
         domain
             .borrow()
             .data

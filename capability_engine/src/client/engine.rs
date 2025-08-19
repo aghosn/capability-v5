@@ -63,7 +63,6 @@ pub trait CommunicationInterface {
     fn send(&mut self, call: CallInterface, args: &[u64; 6]) -> Result<ClientResult, ClientError>;
     fn receive(
         &mut self,
-        engine: &mut crate::server::engine::Engine,
         call: CallInterface,
         args: &[u64; 6],
     ) -> Result<ClientResult, ClientError>;

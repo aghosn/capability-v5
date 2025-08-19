@@ -117,6 +117,7 @@ pub const NB_INTERRUPTS: usize = 256;
 
 #[derive(Clone, Copy)]
 pub struct InterruptPolicy {
+    //TODO: Need to compact this.
     pub vectors: [VectorPolicy; NB_INTERRUPTS],
 }
 

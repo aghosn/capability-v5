@@ -12,10 +12,13 @@ use crate::{
     CallInterface, EngineInterface,
 };
 
-use super::engine::{ClientError, ClientResult, CommunicationInterface};
+use super::{
+    engine::{ClientError, ClientResult, CommunicationInterface},
+    no_platform::NoPlatform,
+};
 
 pub struct LocalClient {
-    pub server: Engine,
+    pub server: Engine<NoPlatform>,
     pub current: CapaRef<Domain>,
 }
 
@@ -137,7 +140,6 @@ impl CommunicationInterface for LocalClient {
     // This is local, we do not care about the receive.
     fn receive(
         &mut self,
-        _engine: &mut crate::server::engine::Engine,
         call: crate::CallInterface,
         args: &[u64; 6],
     ) -> Result<ClientResult, ClientError> {

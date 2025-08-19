@@ -1,3 +1,4 @@
+use capa_engine::client::no_platform::NoPlatform;
 use capa_engine::core::capability::*;
 use capa_engine::core::domain::*;
 use capa_engine::core::memory_region::{
@@ -35,7 +36,7 @@ fn create_root_region() -> Capability<MemoryRegion> {
 }
 
 fn setup_engine_with_root() -> (
-    Engine,
+    Engine<NoPlatform>,
     CapaRef<Domain>,
     CapaRef<MemoryRegion>,
     LocalCapa, // ref_region returned by `add_root_region`

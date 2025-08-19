@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use capa_engine::core::capability::*;
 use capa_engine::core::domain::{
-    CapaWrapper, Domain, InterruptPolicy, MonitorAPI, Policies, Status as DStatus,
+    CapaWrapper, CapabilityStore, Domain, InterruptPolicy, MonitorAPI, Policies, Status as DStatus,
 };
 use capa_engine::core::memory_region::*;
 
@@ -34,4 +34,18 @@ fn main() {
     let reference = Rc::new(RefCell::new(region));
     domain.data.install(CapaWrapper::Region(reference));
     println!("The root domain:\n{}", domain);
+    println!(
+        "Here is the size of a memory region capa {}",
+        std::mem::size_of::<Capability<MemoryRegion>>()
+    );
+    println!(
+        "Here is the size of a memory region capa {}",
+        std::mem::size_of::<Capability<Domain>>()
+    );
+    println!(
+        "sizes inside a domain: status {}, capabilities: {}, policies: {}",
+        std::mem::size_of::<Status>(),
+        std::mem::size_of::<CapabilityStore>(),
+        std::mem::size_of::<Policies>()
+    );
 }
