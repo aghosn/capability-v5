@@ -1,0 +1,254 @@
+//! Switch and interrupt routing mechanisms
+
+use crate::capability::CapabilityRef;
+use crate::domain::{Domain, InterruptVisibility};
+use crate::error::{CapaError, Result};
+use alloc::format;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use parking_lot::RwLock;
+
+/// Core state tracking which domain is running
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreState {
+    /// Core is idle
+    Idle,
+    /// Core is running a domain
+    Running(u64), // domain_id
+}
+
+/// Per-core execution context
+pub struct CoreContext {
+    /// Current state of the core
+    pub state: RwLock<CoreState>,
+    /// Core ID
+    pub core_id: u64,
+}
+
+impl CoreContext {
+    pub fn new(core_id: u64) -> Self {
+        CoreContext {
+            state: RwLock::new(CoreState::Idle),
+            core_id,
+        }
+    }
+
+    /// Check if this core can run the given domain
+    pub fn can_run_domain(&self, domain: &Domain) -> bool {
+        let core_bit = 1u64 << self.core_id;
+        (domain.policy.cores & core_bit) != 0
+    }
+
+    /// Get the currently running domain (if any)
+    pub fn current_domain(&self) -> Option<u64> {
+        match *self.state.read() {
+            CoreState::Running(domain_id) => Some(domain_id),
+            CoreState::Idle => None,
+        }
+    }
+}
+
+/// Switch context for a domain transition
+#[derive(Debug, Clone)]
+pub struct SwitchContext {
+    /// Source domain ID (caller)
+    pub from_domain: u64,
+    /// Target domain ID (callee)
+    pub to_domain: u64,
+    /// Core performing the switch
+    pub core_id: u64,
+    /// Whether this is a return (switch with no target)
+    pub is_return: bool,
+}
+
+/// Interrupt context
+#[derive(Debug, Clone)]
+pub struct InterruptContext {
+    /// Interrupt vector number
+    pub vector: u8,
+    /// Domain that was interrupted
+    pub interrupted_domain: u64,
+    /// Core that received the interrupt
+    pub core_id: u64,
+}
+
+/// Switch manager handles domain transitions and interrupt routing
+pub struct SwitchManager {
+    /// Per-core contexts
+    cores: Vec<Arc<CoreContext>>,
+}
+
+impl SwitchManager {
+    /// Create a new switch manager with the given number of cores
+    pub fn new(num_cores: usize) -> Self {
+        let mut cores = Vec::new();
+        for i in 0..num_cores {
+            cores.push(Arc::new(CoreContext::new(i as u64)));
+        }
+        SwitchManager { cores }
+    }
+
+    /// Get the context for a specific core
+    pub fn get_core(&self, core_id: u64) -> Result<&Arc<CoreContext>> {
+        self.cores
+            .get(core_id as usize)
+            .ok_or(CapaError::InvalidOperation(format!(
+                "Invalid core ID: {}",
+                core_id
+            )))
+    }
+
+    /// Perform a switch from one domain to another
+    ///
+    /// Returns the switch context for the transition
+    pub fn switch(
+        &self,
+        core_id: u64,
+        from: &CapabilityRef<Domain>,
+        to: Option<&CapabilityRef<Domain>>,
+    ) -> Result<SwitchContext> {
+        let core = self.get_core(core_id)?;
+
+        let from_domain = from.read();
+        let from_id = from_domain.data.id;
+
+        // Verify the from domain is actually running on this core
+        if core.current_domain() != Some(from_id) {
+            return Err(CapaError::InvalidOperation(
+                "Domain is not running on this core".to_string(),
+            ));
+        }
+
+        let (to_id, is_return) = if let Some(to_ref) = to {
+            let to_domain = to_ref.read();
+
+            // Verify target domain is sealed
+            if !to_domain.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+
+            // Verify target can run on this core
+            if !core.can_run_domain(&to_domain.data) {
+                return Err(CapaError::PermissionDenied);
+            }
+
+            (to_domain.data.id, false)
+        } else {
+            // Returning to parent
+            let parent_ref = from_domain
+                .get_parent()
+                .ok_or(CapaError::InvalidOperation(
+                    "No parent to return to".to_string(),
+                ))?;
+            let parent_id = parent_ref.read().data.id;
+            (parent_id, true)
+        };
+
+        drop(from_domain);
+
+        // Update core state
+        *core.state.write() = CoreState::Running(to_id);
+
+        Ok(SwitchContext {
+            from_domain: from_id,
+            to_domain: to_id,
+            core_id,
+            is_return,
+        })
+    }
+
+    /// Route an interrupt through the domain hierarchy
+    ///
+    /// Returns the domain ID that should handle the interrupt
+    pub fn route_interrupt(
+        &self,
+        vector: u8,
+        interrupted: &CapabilityRef<Domain>,
+        _core_id: u64,
+    ) -> Result<(u64, Vec<u64>)> {
+        let mut current_ref = interrupted.clone();
+        let mut reported_to = Vec::new();
+
+        loop {
+            let current = current_ref.read();
+            let policy = current.data.policy.interrupts.get_policy(vector);
+
+            match policy.visibility {
+                InterruptVisibility::Deliver => {
+                    // This domain handles the interrupt
+                    return Ok((current.data.id, reported_to));
+                }
+                InterruptVisibility::Report => {
+                    // Report to this domain but continue walking up
+                    reported_to.push(current.data.id);
+                }
+                InterruptVisibility::NotReport => {
+                    // Skip this domain
+                }
+            }
+
+            // Move to parent
+            let parent = current.get_parent();
+            drop(current);
+
+            match parent {
+                Some(parent_ref) => current_ref = parent_ref,
+                None => {
+                    // Reached root without finding a handler
+                    return Err(CapaError::InvalidOperation(
+                        "No interrupt handler found".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Resume execution after interrupt handling
+    ///
+    /// Walks back down the tree, reporting to domains with Report policy
+    pub fn resume_after_interrupt(
+        &self,
+        vector: u8,
+        handler: &CapabilityRef<Domain>,
+        original_interrupted: &CapabilityRef<Domain>,
+    ) -> Result<Vec<u64>> {
+        let mut notified = Vec::new();
+
+        // Build path from handler back to original interrupted domain
+        let mut path = Vec::new();
+        let mut current_ref = original_interrupted.clone();
+
+        loop {
+            let current = current_ref.read();
+            let current_id = current.data.id;
+            path.push(current_ref.clone());
+
+            if current_id == handler.read().data.id {
+                break;
+            }
+
+            let parent = current.get_parent();
+            drop(current);
+
+            match parent {
+                Some(parent_ref) => current_ref = parent_ref,
+                None => break,
+            }
+        }
+
+        // Walk back down, notifying domains with Report policy
+        path.reverse();
+        for domain_ref in path {
+            let domain = domain_ref.read();
+            let policy = domain.data.policy.interrupts.get_policy(vector);
+
+            if matches!(policy.visibility, InterruptVisibility::Report) {
+                notified.push(domain.data.id);
+            }
+        }
+
+        Ok(notified)
+    }
+}
+
