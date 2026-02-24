@@ -143,11 +143,13 @@ fn test_concurrent_carve_operations() {
             let base = (i as u64) * 0x40000; // 256KB sections
             let access = Access::new(base, 0x10000, Rights::RWX); // Carve 64KB
 
-            match Capability::carve_child(&mem_clone, access, i as u64, i as u64) {
+            // Note: owner must match parent owner (0) for carve to not generate updates
+            match Capability::carve_child(&mem_clone, access, 0, i as u64) {
                 Ok((child, updates)) => {
                     let child_read = child.read();
                     assert_eq!(child_read.data.status, RegionStatus::Exclusive);
-                    assert!(!updates.is_empty());
+                    // Carve with same owner generates no updates
+                    assert!(updates.is_empty());
                     println!("Thread {} carved region at {:#x}", i, base);
                 }
                 Err(e) => panic!("Thread {} failed to carve: {}", i, e),

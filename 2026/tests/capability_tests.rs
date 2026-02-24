@@ -31,10 +31,11 @@ fn test_carve_child() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, updates) = Capability::carve_child(&root, child_access, 1, 1).unwrap();
+    let (_child, updates) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
     assert_eq!(root.read().children.len(), 1);
-    assert!(!updates.is_empty());
+    // Carve should NOT generate updates because owner doesn't change (parent owner = 0, child owner = 0)
+    assert!(updates.is_empty());
 }
 
 #[test]
@@ -43,12 +44,14 @@ fn test_revoke_child() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&root, child_access, 1, 1).unwrap();
+    let (_child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 
     assert_eq!(root.read().children.len(), 0);
-    assert!(!updates.is_empty());
+    // Revoke should NOT generate updates for a carved child that was never sent
+    // because the parent owner never lost access
+    assert!(updates.is_empty());
 }
 
 // ==================== Nested Operations ====================
@@ -316,8 +319,13 @@ fn test_send_capability() {
     assert_eq!(child.read().owned.owner, 5);
     assert_eq!(child.read().owned.handle, 10);
 
-    // Should have unmap and map updates
-    assert!(updates.len() >= 2);
+    // Should only have map update (no unmap) because parent (owned by domain 0) still has access
+    assert_eq!(updates.len(), 1);
+    // Verify it's a map to the new owner
+    match &updates.updates()[0] {
+        Update::Map { domain, .. } => assert_eq!(*domain, 5),
+        _ => panic!("Expected Map update"),
+    }
 }
 
 #[test]

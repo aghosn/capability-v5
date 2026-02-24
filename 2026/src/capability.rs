@@ -150,16 +150,20 @@ impl Capability<MemoryRegion> {
         // Create carved region from parent
         let child_region = parent.data.carve(access)?;
 
-        let parent_owner = parent.owned.owner;
-
         // Drop parent read lock
         drop(parent);
 
         // Create update batch for the carve operation
-        let mut updates = UpdateBatch::new();
+        let updates = UpdateBatch::new();
 
-        // Unmap the carved region from parent's address space
-        updates.add_unmap(parent_owner, access.start, access.size);
+        // IMPORTANT: When carving, the owner of the child is the same as the owner
+        // of the parent. According to the paper (Section 4.2), carving removes access
+        // from the parent capability's view, but since ownership doesn't change,
+        // the parent owner retains access to the memory region through the child capability.
+        // Therefore, NO unmapping is needed here.
+        //
+        // Only when the child is sent to a different domain (changing ownership) or
+        // when the child is revoked should address space updates occur.
 
         // Create child capability
         let child = Capability::new_child(
@@ -186,6 +190,13 @@ impl Capability<MemoryRegion> {
 
         let old_owner = capa.owned.owner;
 
+        // Check if old owner retains access via parent capability
+        let parent_owned_by_old_owner = if let Some(parent_ref) = capa.get_parent() {
+            parent_ref.read().owned.owner == old_owner
+        } else {
+            false
+        };
+
         // Update ownership
         capa.owned.owner = new_owner;
         capa.owned.handle = new_handle;
@@ -196,10 +207,25 @@ impl Capability<MemoryRegion> {
         // Create updates
         let mut updates = UpdateBatch::new();
 
-        // Unmap from old owner
-        updates.add_unmap(old_owner, capa.data.access.start, capa.data.access.size);
+        // IMPORTANT: According to the paper (Section 4.2), when sending a capability,
+        // we might or might not lose access to the region depending on whether we
+        // retain ownership over a memory capability that covers the same region.
+        //
+        // Key insight: If the old owner still owns the parent capability, they retain
+        // access to this memory region through the parent, so we should NOT unmap.
+        // We only unmap if the old owner loses all ownership over capabilities covering
+        // this region.
+        //
+        // NOTE: This is a simplification. A complete implementation would need to check
+        // all ancestor capabilities and sibling capabilities for overlaps. For now, we
+        // only check the direct parent.
 
-        // Map to new owner
+        if !parent_owned_by_old_owner {
+            // Old owner loses access - unmap from their address space
+            updates.add_unmap(old_owner, capa.data.access.start, capa.data.access.size);
+        }
+
+        // Map to new owner's address space
         let phys_addr = match capa.data.remapped {
             crate::memory::Remapped::Identity => capa.data.access.start,
             crate::memory::Remapped::Remapped(phys) => phys,
@@ -264,29 +290,23 @@ impl Capability<MemoryRegion> {
             updates.add_zero_memory(capa.data.access.start, capa.data.access.size);
         }
 
-        // If this is a carved region, we need to restore access to parent
-        if capa.data.kind == RegionKind::Carve {
-            if let Some(parent_ref) = capa.get_parent() {
-                let parent = parent_ref.read();
-                let parent_owner = parent.owned.owner;
-
-                // Map the region back to the parent
-                let phys_addr = match capa.data.remapped {
-                    crate::memory::Remapped::Identity => capa.data.access.start,
-                    crate::memory::Remapped::Remapped(phys) => phys,
-                };
-
-                updates.add_map(
-                    parent_owner,
-                    capa.data.access.start,
-                    capa.data.access.size,
-                    phys_addr,
-                    parent.data.access.rights.read,
-                    parent.data.access.rights.write,
-                    parent.data.access.rights.execute,
-                );
-            }
-        }
+        // IMPORTANT: Do NOT remap carved regions to parent!
+        //
+        // The previous code incorrectly assumed that when a carved region is revoked,
+        // we need to restore access to the parent. However, according to the paper
+        // (Section 4.2), the parent never lost access in the first place!
+        //
+        // When a region is carved:
+        // - The child owner is the same as the parent owner
+        // - No unmapping occurs (ownership doesn't change)
+        // - The parent owner retains access through their ownership
+        //
+        // When a carved region is revoked:
+        // - If the child was never sent to another domain, parent still has access
+        // - If the child was sent to another domain, only that domain loses access
+        // - The parent's access was never affected by the carve operation
+        //
+        // Therefore, we should NOT add a map update here for carved regions.
 
         // If vital, revoke the owning domain
         if capa.data.attributes.vital {

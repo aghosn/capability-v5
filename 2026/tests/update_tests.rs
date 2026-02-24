@@ -175,11 +175,10 @@ fn test_carve_generates_updates() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, updates) = Capability::carve_child(&root, child_access, 1, 1).unwrap();
+    let (_child, updates) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
-    // Should generate unmap for parent
-    assert!(!updates.is_empty());
-    assert!(updates.affected_domains().contains(&0)); // Parent domain 0
+    // Carve with same owner generates NO updates
+    assert!(updates.is_empty());
 }
 
 #[test]
@@ -192,9 +191,12 @@ fn test_send_generates_updates() {
 
     let updates = Capability::send_to(&child, 5, 10, Attributes::NONE).unwrap();
 
-    // Should have updates for both old and new owner
-    assert!(!updates.is_empty());
-    assert!(updates.len() >= 2); // Unmap from 0, map to 5
+    // Should only have map (no unmap) because parent still owns overlapping capability
+    assert_eq!(updates.len(), 1);
+    match &updates.updates()[0] {
+        Update::Map { domain, .. } => assert_eq!(*domain, 5),
+        _ => panic!("Expected Map update"),
+    }
 }
 
 #[test]
@@ -203,12 +205,12 @@ fn test_revoke_generates_updates() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&root, child_access, 1, 1).unwrap();
+    let (_child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 
-    // Should generate updates for restoring access to parent
-    assert!(!updates.is_empty());
+    // Should NOT generate updates because parent never lost access
+    assert!(updates.is_empty());
 }
 
 #[test]
