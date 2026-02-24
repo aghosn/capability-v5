@@ -260,8 +260,89 @@ fn test_policy_subset_all_cores() {
 #[test]
 fn test_receive_after_seal_flag() {
     let root_policy = DomainPolicy::new_root();
-    assert!(root_policy.receive_after_seal);
+    assert!(root_policy.receive_after_seal());
 
     let restricted_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
-    assert!(!restricted_policy.receive_after_seal);
+    assert!(!restricted_policy.receive_after_seal());
+}
+
+#[test]
+fn test_receive_after_seal_in_api_bitmap() {
+    // Verify it's in the API bitmap as bit 12
+    let api_with = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
+    assert!(api_with.receive_after_seal());
+    assert_eq!(api_with.bits(), 1 << 12);
+
+    let api_without = MonitorAPI::from_bits(0);
+    assert!(!api_without.receive_after_seal());
+}
+
+#[test]
+fn test_receive_after_seal_in_all_permissions() {
+    // ALL should include RECEIVE_AFTER_SEAL
+    assert!(MonitorAPI::ALL.receive_after_seal());
+    assert_eq!(MonitorAPI::ALL.bits() & MonitorAPI::RECEIVE_AFTER_SEAL, MonitorAPI::RECEIVE_AFTER_SEAL);
+}
+
+#[test]
+fn test_receive_after_seal_subset_check() {
+    let parent_api = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL | MonitorAPI::GET);
+    let child_api_with = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
+    let child_api_without = MonitorAPI::from_bits(MonitorAPI::GET);
+
+    // Child with RECEIVE_AFTER_SEAL should be subset of parent with it
+    assert!(child_api_with.is_subset_of(&parent_api));
+
+    // Child with GET should be subset of parent with GET
+    assert!(child_api_without.is_subset_of(&parent_api));
+
+    // Child with RECEIVE_AFTER_SEAL cannot be subset of parent without it
+    let parent_without = MonitorAPI::from_bits(MonitorAPI::GET);
+    assert!(!child_api_with.is_subset_of(&parent_without));
+}
+
+#[test]
+fn test_receive_after_seal_monotonicity() {
+    let parent = DomainPolicy::new_root(); // Has RECEIVE_AFTER_SEAL
+    let child_without = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
+
+    // Child without should be subset of parent with
+    assert!(child_without.is_subset_of(&parent).is_ok());
+
+    // But trying to create parent without and child with should fail
+    let parent_without_api = MonitorAPI::from_bits(MonitorAPI::GET);
+    let parent_without = DomainPolicy::new_restricted(0b1111, parent_without_api);
+
+    let child_with_api = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
+    let child_with = DomainPolicy::new_restricted(0b1, child_with_api);
+
+    assert_eq!(child_with.is_subset_of(&parent_without), Err(CapaError::MonotonicityViolation));
+}
+
+#[test]
+fn test_receive_after_seal_explicit_grant() {
+    // Create a domain with explicit RECEIVE_AFTER_SEAL permission
+    let api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::RECEIVE_AFTER_SEAL);
+    let policy = DomainPolicy::new_restricted(0b1, api);
+
+    assert!(policy.receive_after_seal());
+    assert!(policy.api.get());
+}
+
+#[test]
+fn test_receive_after_seal_default_values() {
+    // Root should have it by default (ALL includes it)
+    let root = Domain::new_root();
+    assert!(root.policy.receive_after_seal());
+
+    // Restricted domain should not have it unless explicitly granted
+    let restricted = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
+    assert!(!restricted.receive_after_seal());
+
+    // Can be explicitly added
+    let with_receive = DomainPolicy::new_restricted(
+        0b1,
+        MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL),
+    );
+    assert!(with_receive.receive_after_seal());
 }

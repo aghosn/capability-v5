@@ -46,16 +46,17 @@ impl MonitorAPI {
     pub const CARVE: u16 = 1 << 9;
     pub const REVOKE: u16 = 1 << 10;
     pub const GETCHAN: u16 = 1 << 11;
+    pub const RECEIVE_AFTER_SEAL: u16 = 1 << 12;
 
-    /// All operations allowed
-    pub const ALL: Self = MonitorAPI { bits: 0xFFF };
+    /// All operations allowed (including receive_after_seal)
+    pub const ALL: Self = MonitorAPI { bits: 0x1FFF };
 
     /// No operations allowed
     pub const NONE: Self = MonitorAPI { bits: 0 };
 
     /// Create from raw bits
     pub const fn from_bits(bits: u16) -> Self {
-        MonitorAPI { bits: bits & 0xFFF }
+        MonitorAPI { bits: bits & 0x1FFF }
     }
 
     /// Get raw bits
@@ -70,12 +71,12 @@ impl MonitorAPI {
 
     /// Add an operation permission
     pub fn set(&mut self, flag: u16) {
-        self.bits |= flag & 0xFFF;
+        self.bits |= flag & 0x1FFF;
     }
 
     /// Remove an operation permission
     pub fn clear(&mut self, flag: u16) {
-        self.bits &= !(flag & 0xFFF);
+        self.bits &= !(flag & 0x1FFF);
     }
 
     /// Check if self is a subset of other (for monotonicity)
@@ -119,6 +120,9 @@ impl MonitorAPI {
     }
     pub const fn getchan(&self) -> bool {
         self.has(Self::GETCHAN)
+    }
+    pub const fn receive_after_seal(&self) -> bool {
+        self.has(Self::RECEIVE_AFTER_SEAL)
     }
 }
 
@@ -213,14 +217,11 @@ pub struct DomainPolicy {
     /// Bitmap of allowed physical cores (bit i = core i)
     pub cores: u64,
 
-    /// Allowed monitor API calls
+    /// Allowed monitor API calls (includes receive_after_seal flag)
     pub api: MonitorAPI,
 
     /// Interrupt routing policy
     pub interrupts: InterruptPolicy,
-
-    /// Whether domain can receive new capabilities after sealing
-    pub receive_after_seal: bool,
 
     /// List of valid virtual processor states
     pub vprocessor_states: Vec<VProcessorState>,
@@ -231,9 +232,8 @@ impl DomainPolicy {
     pub fn new_root() -> Self {
         DomainPolicy {
             cores: u64::MAX, // All cores
-            api: MonitorAPI::ALL,
+            api: MonitorAPI::ALL, // ALL includes RECEIVE_AFTER_SEAL
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
-            receive_after_seal: true,
             vprocessor_states: Vec::new(),
         }
     }
@@ -242,11 +242,15 @@ impl DomainPolicy {
     pub fn new_restricted(cores: u64, api: MonitorAPI) -> Self {
         DomainPolicy {
             cores,
-            api,
+            api, // Use provided API (caller must explicitly add RECEIVE_AFTER_SEAL if needed)
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
-            receive_after_seal: false,
             vprocessor_states: Vec::new(),
         }
+    }
+
+    /// Check if domain can receive capabilities after sealing
+    pub fn receive_after_seal(&self) -> bool {
+        self.api.receive_after_seal()
     }
 
     /// Check if this policy is a subset of another (for monotonicity)
@@ -374,6 +378,26 @@ impl Domain {
     /// Get all domain capability handles
     pub fn domain_capability_handles(&self) -> alloc::vec::Vec<LocalHandle> {
         self.domain_capabilities.keys().copied().collect()
+    }
+
+    /// Allocate the next available handle for a memory capability
+    pub fn allocate_memory_handle(&self) -> LocalHandle {
+        // Find the first unused handle starting from 1
+        let mut handle: LocalHandle = 1;
+        while self.memory_capabilities.contains_key(&handle) {
+            handle += 1;
+        }
+        handle
+    }
+
+    /// Allocate the next available handle for a domain capability
+    pub fn allocate_domain_handle(&self) -> LocalHandle {
+        // Find the first unused handle starting from 1
+        let mut handle: LocalHandle = 1;
+        while self.domain_capabilities.contains_key(&handle) {
+            handle += 1;
+        }
+        handle
     }
 }
 

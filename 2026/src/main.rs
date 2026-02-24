@@ -115,7 +115,7 @@ fn main() {
     println!("✓ Child domain sealed and ready for execution");
     println!("  • Status: {:?}", child.read().data.status);
     println!("  • Can no longer receive capabilities: {}",
-             !child.read().data.policy.receive_after_seal);
+             !child.read().data.policy.receive_after_seal());
 
     // ================================================================
     // STEP 6: Generate and display attestations
