@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// Access rights for memory regions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rights {
     pub read: bool,
     pub write: bool,
@@ -132,7 +132,7 @@ pub enum RegionKind {
 }
 
 /// Physical address remapping information
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Remapped {
     /// Identity mapping (virtual == physical)
     Identity,
@@ -141,7 +141,7 @@ pub enum Remapped {
 }
 
 /// Memory access descriptor
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Access {
     /// Virtual start address
     pub start: u64,

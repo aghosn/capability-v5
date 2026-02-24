@@ -43,11 +43,7 @@ fn test_root_domain_is_sealed() {
 
 #[test]
 fn test_api_subset() {
-    let api1 = MonitorAPI {
-        create: true,
-        seal: true,
-        ..MonitorAPI::NONE
-    };
+    let api1 = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
     let api2 = MonitorAPI::ALL;
     assert!(api1.is_subset_of(&api2));
     assert!(!api2.is_subset_of(&api1));
@@ -182,41 +178,32 @@ fn test_root_domain_has_id_zero() {
 
 #[test]
 fn test_policy_with_limited_cores_and_api() {
+    let api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let policy = DomainPolicy::new_restricted(
         0b1010, // Cores 1 and 3
-        MonitorAPI {
-            attest: true,
-            enumerate: true,
-            ..MonitorAPI::NONE
-        },
+        api,
     );
 
     assert_eq!(policy.cores, 0b1010);
-    assert!(policy.api.attest);
-    assert!(policy.api.enumerate);
-    assert!(!policy.api.create);
+    assert!(policy.api.attest());
+    assert!(policy.api.enumerate());
+    assert!(!policy.api.create());
 }
 
 #[test]
 fn test_complex_policy_hierarchy() {
     let root_policy = DomainPolicy::new_root();
 
+    let level1_api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST);
     let level1_policy = DomainPolicy::new_restricted(
         0b1111, // Cores 0-3
-        MonitorAPI {
-            create: true,
-            seal: true,
-            attest: true,
-            ..MonitorAPI::NONE
-        },
+        level1_api,
     );
 
+    let level2_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let level2_policy = DomainPolicy::new_restricted(
         0b0011, // Cores 0-1 (subset of level1)
-        MonitorAPI {
-            attest: true,
-            ..MonitorAPI::NONE
-        },
+        level2_api,
     );
 
     // level1 should be subset of root

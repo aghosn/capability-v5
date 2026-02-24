@@ -25,69 +25,98 @@ pub enum DomainStatus {
 }
 
 /// Monitor API operations that can be allowed for a domain
+/// Implemented as a bitmap for compact representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorAPI {
-    pub create: bool,
-    pub set: bool,
-    pub get: bool,
-    pub send: bool,
-    pub seal: bool,
-    pub attest: bool,
-    pub enumerate: bool,
-    pub switch: bool,
-    pub alias: bool,
-    pub carve: bool,
-    pub revoke: bool,
-    pub getchan: bool,
+    bits: u16,
 }
 
 impl MonitorAPI {
+    pub const CREATE: u16 = 1 << 0;
+    pub const SET: u16 = 1 << 1;
+    pub const GET: u16 = 1 << 2;
+    pub const SEND: u16 = 1 << 3;
+    pub const SEAL: u16 = 1 << 4;
+    pub const ATTEST: u16 = 1 << 5;
+    pub const ENUMERATE: u16 = 1 << 6;
+    pub const SWITCH: u16 = 1 << 7;
+    pub const ALIAS: u16 = 1 << 8;
+    pub const CARVE: u16 = 1 << 9;
+    pub const REVOKE: u16 = 1 << 10;
+    pub const GETCHAN: u16 = 1 << 11;
+
     /// All operations allowed
-    pub const ALL: Self = MonitorAPI {
-        create: true,
-        set: true,
-        get: true,
-        send: true,
-        seal: true,
-        attest: true,
-        enumerate: true,
-        switch: true,
-        alias: true,
-        carve: true,
-        revoke: true,
-        getchan: true,
-    };
+    pub const ALL: Self = MonitorAPI { bits: 0xFFF };
 
     /// No operations allowed
-    pub const NONE: Self = MonitorAPI {
-        create: false,
-        set: false,
-        get: false,
-        send: false,
-        seal: false,
-        attest: false,
-        enumerate: false,
-        switch: false,
-        alias: false,
-        carve: false,
-        revoke: false,
-        getchan: false,
-    };
+    pub const NONE: Self = MonitorAPI { bits: 0 };
+
+    /// Create from raw bits
+    pub const fn from_bits(bits: u16) -> Self {
+        MonitorAPI { bits: bits & 0xFFF }
+    }
+
+    /// Get raw bits
+    pub const fn bits(&self) -> u16 {
+        self.bits
+    }
+
+    /// Check if an operation is allowed
+    pub const fn has(&self, flag: u16) -> bool {
+        (self.bits & flag) != 0
+    }
+
+    /// Add an operation permission
+    pub fn set(&mut self, flag: u16) {
+        self.bits |= flag & 0xFFF;
+    }
+
+    /// Remove an operation permission
+    pub fn clear(&mut self, flag: u16) {
+        self.bits &= !(flag & 0xFFF);
+    }
 
     /// Check if self is a subset of other (for monotonicity)
     pub fn is_subset_of(&self, other: &MonitorAPI) -> bool {
-        (!self.create || other.create)
-            && (!self.set || other.set)
-            && (!self.get || other.get)
-            && (!self.send || other.send)
-            && (!self.seal || other.seal)
-            && (!self.attest || other.attest)
-            && (!self.enumerate || other.enumerate)
-            && (!self.switch || other.switch)
-            && (!self.alias || other.alias)
-            && (!self.carve || other.carve)
-            && (!self.revoke || other.revoke)
-            && (!self.getchan || other.getchan)
+        (self.bits & !other.bits) == 0
+    }
+
+    // Convenience getters for compatibility
+    pub const fn create(&self) -> bool {
+        self.has(Self::CREATE)
+    }
+    pub const fn set_perm(&self) -> bool {
+        self.has(Self::SET)
+    }
+    pub const fn get(&self) -> bool {
+        self.has(Self::GET)
+    }
+    pub const fn send(&self) -> bool {
+        self.has(Self::SEND)
+    }
+    pub const fn seal(&self) -> bool {
+        self.has(Self::SEAL)
+    }
+    pub const fn attest(&self) -> bool {
+        self.has(Self::ATTEST)
+    }
+    pub const fn enumerate(&self) -> bool {
+        self.has(Self::ENUMERATE)
+    }
+    pub const fn switch(&self) -> bool {
+        self.has(Self::SWITCH)
+    }
+    pub const fn alias(&self) -> bool {
+        self.has(Self::ALIAS)
+    }
+    pub const fn carve(&self) -> bool {
+        self.has(Self::CARVE)
+    }
+    pub const fn revoke(&self) -> bool {
+        self.has(Self::REVOKE)
+    }
+    pub const fn getchan(&self) -> bool {
+        self.has(Self::GETCHAN)
     }
 }
 

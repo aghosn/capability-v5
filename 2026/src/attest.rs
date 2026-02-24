@@ -45,18 +45,18 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
         domain.data.policy.cores
     ));
     report.push_str("API:\n");
-    report.push_str(&format!("  CREATE: {}\n", domain.data.policy.api.create));
-    report.push_str(&format!("  SET: {}\n", domain.data.policy.api.set));
-    report.push_str(&format!("  GET: {}\n", domain.data.policy.api.get));
-    report.push_str(&format!("  SEND: {}\n", domain.data.policy.api.send));
-    report.push_str(&format!("  SEAL: {}\n", domain.data.policy.api.seal));
-    report.push_str(&format!("  ATTEST: {}\n", domain.data.policy.api.attest));
-    report.push_str(&format!("  ENUMERATE: {}\n", domain.data.policy.api.enumerate));
-    report.push_str(&format!("  SWITCH: {}\n", domain.data.policy.api.switch));
-    report.push_str(&format!("  ALIAS: {}\n", domain.data.policy.api.alias));
-    report.push_str(&format!("  CARVE: {}\n", domain.data.policy.api.carve));
-    report.push_str(&format!("  REVOKE: {}\n", domain.data.policy.api.revoke));
-    report.push_str(&format!("  GETCHAN: {}\n", domain.data.policy.api.getchan));
+    report.push_str(&format!("  CREATE: {}\n", domain.data.policy.api.create()));
+    report.push_str(&format!("  SET: {}\n", domain.data.policy.api.set_perm()));
+    report.push_str(&format!("  GET: {}\n", domain.data.policy.api.get()));
+    report.push_str(&format!("  SEND: {}\n", domain.data.policy.api.send()));
+    report.push_str(&format!("  SEAL: {}\n", domain.data.policy.api.seal()));
+    report.push_str(&format!("  ATTEST: {}\n", domain.data.policy.api.attest()));
+    report.push_str(&format!("  ENUMERATE: {}\n", domain.data.policy.api.enumerate()));
+    report.push_str(&format!("  SWITCH: {}\n", domain.data.policy.api.switch()));
+    report.push_str(&format!("  ALIAS: {}\n", domain.data.policy.api.alias()));
+    report.push_str(&format!("  CARVE: {}\n", domain.data.policy.api.carve()));
+    report.push_str(&format!("  REVOKE: {}\n", domain.data.policy.api.revoke()));
+    report.push_str(&format!("  GETCHAN: {}\n", domain.data.policy.api.getchan()));
 
     report.push_str(&format!(
         "Children: {}\n",

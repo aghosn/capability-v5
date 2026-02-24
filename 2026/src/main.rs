@@ -14,30 +14,20 @@ fn main() {
     println!("Created root memory region: [0x0..0x100000)");
 
     // Create a child domain with restricted permissions
+    let child_api = MonitorAPI::from_bits(
+        MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::ENUMERATE | MonitorAPI::SWITCH,
+    );
     let child_policy = DomainPolicy::new_restricted(
         0b1111, // cores 0-3
-        MonitorAPI {
-            create: false,
-            set: false,
-            get: true,
-            send: false,
-            seal: false,
-            attest: true,
-            enumerate: true,
-            switch: true,
-            alias: false,
-            carve: false,
-            revoke: false,
-            getchan: false,
-        },
+        child_api,
     );
 
     match Capability::create_child_domain(&root, child_policy, 1, 0) {
         Ok(child) => {
             println!("\nCreated child domain (ID: {})", child.read().data.id);
             println!("  Cores: 0b{:04b}", child.read().data.policy.cores);
-            println!("  API.get: {}", child.read().data.policy.api.get);
-            println!("  API.attest: {}", child.read().data.policy.api.attest);
+            println!("  API.get: {}", child.read().data.policy.api.get());
+            println!("  API.attest: {}", child.read().data.policy.api.attest());
 
             // Carve memory for the child
             let child_access = Access::new(0x10000, 0x10000, Rights::RWX);

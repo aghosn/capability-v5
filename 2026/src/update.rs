@@ -1,10 +1,15 @@
 //! Update tracking for domain address space modifications
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use parking_lot::RwLock;
 
 /// A domain identifier
 pub type DomainId = u64;
+
+/// Core identifier
+pub type CoreId = u64;
 
 /// Types of updates that affect domain address spaces
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +74,7 @@ impl Update {
 }
 
 /// A batch of updates that should be applied atomically
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct UpdateBatch {
     /// List of updates to apply
     updates: Vec<Update>,
@@ -168,6 +173,163 @@ impl UpdateBatch {
         self.updates.extend(other.updates);
         self.affected_domains.extend(other.affected_domains);
         self.snapshots.extend(other.snapshots);
+    }
+}
+
+/// Status of an update on a specific core
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Update is pending and needs to be processed
+    Pending,
+    /// Update is being processed
+    InProgress,
+    /// Update has been completed
+    Completed,
+}
+
+/// Per-core update queue entry
+#[derive(Debug, Clone)]
+pub struct CoreUpdate {
+    /// The update batch
+    pub batch: UpdateBatch,
+    /// Status of this update on this core
+    pub status: UpdateStatus,
+}
+
+/// Update processor that manages distributing updates to cores
+pub struct UpdateProcessor {
+    /// Mapping from core ID to pending updates
+    core_queues: Arc<RwLock<BTreeMap<CoreId, Vec<CoreUpdate>>>>,
+    /// Mapping from domain ID to currently running core (if any)
+    domain_to_core: Arc<RwLock<BTreeMap<DomainId, CoreId>>>,
+}
+
+impl UpdateProcessor {
+    /// Create a new update processor
+    pub fn new() -> Self {
+        UpdateProcessor {
+            core_queues: Arc::new(RwLock::new(BTreeMap::new())),
+            domain_to_core: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    /// Register a domain as running on a specific core
+    pub fn register_domain_on_core(&self, domain_id: DomainId, core_id: CoreId) {
+        let mut mapping = self.domain_to_core.write();
+        mapping.insert(domain_id, core_id);
+    }
+
+    /// Unregister a domain from its core (domain stopped running)
+    pub fn unregister_domain(&self, domain_id: DomainId) {
+        let mut mapping = self.domain_to_core.write();
+        mapping.remove(&domain_id);
+    }
+
+    /// Get the core a domain is currently running on
+    pub fn get_domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
+        let mapping = self.domain_to_core.read();
+        mapping.get(&domain_id).copied()
+    }
+
+    /// Submit an update batch for processing
+    /// Returns the set of cores that need to process this update
+    pub fn submit_updates(&self, batch: UpdateBatch) -> BTreeSet<CoreId> {
+        let mut cores_to_notify = BTreeSet::new();
+        let mapping = self.domain_to_core.read();
+
+        // Find which cores are running affected domains
+        for domain_id in batch.affected_domains() {
+            if let Some(core_id) = mapping.get(domain_id) {
+                cores_to_notify.insert(*core_id);
+            }
+        }
+
+        drop(mapping);
+
+        // Add update to each affected core's queue
+        let mut queues = self.core_queues.write();
+        for core_id in &cores_to_notify {
+            let queue = queues.entry(*core_id).or_insert_with(Vec::new);
+            queue.push(CoreUpdate {
+                batch: batch.clone(),
+                status: UpdateStatus::Pending,
+            });
+        }
+
+        cores_to_notify
+    }
+
+    /// Get pending updates for a specific core
+    pub fn get_pending_updates(&self, core_id: CoreId) -> Vec<CoreUpdate> {
+        let queues = self.core_queues.read();
+        queues
+            .get(&core_id)
+            .map(|q| {
+                q.iter()
+                    .filter(|u| matches!(u.status, UpdateStatus::Pending))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Mark an update as in progress for a core
+    pub fn mark_in_progress(&self, core_id: CoreId, batch_index: usize) -> bool {
+        let mut queues = self.core_queues.write();
+        if let Some(queue) = queues.get_mut(&core_id) {
+            if let Some(update) = queue.get_mut(batch_index) {
+                if matches!(update.status, UpdateStatus::Pending) {
+                    update.status = UpdateStatus::InProgress;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Mark an update as completed for a core
+    pub fn mark_completed(&self, core_id: CoreId, batch_index: usize) -> bool {
+        let mut queues = self.core_queues.write();
+        if let Some(queue) = queues.get_mut(&core_id) {
+            if let Some(update) = queue.get_mut(batch_index) {
+                update.status = UpdateStatus::Completed;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Clean completed updates from a core's queue
+    pub fn clean_completed(&self, core_id: CoreId) {
+        let mut queues = self.core_queues.write();
+        if let Some(queue) = queues.get_mut(&core_id) {
+            queue.retain(|u| !matches!(u.status, UpdateStatus::Completed));
+        }
+    }
+
+    /// Check if a core has any pending updates
+    pub fn has_pending_updates(&self, core_id: CoreId) -> bool {
+        let queues = self.core_queues.read();
+        queues
+            .get(&core_id)
+            .map(|q| q.iter().any(|u| matches!(u.status, UpdateStatus::Pending)))
+            .unwrap_or(false)
+    }
+
+    /// Get all cores with pending updates
+    pub fn get_cores_with_pending_updates(&self) -> Vec<CoreId> {
+        let queues = self.core_queues.read();
+        queues
+            .iter()
+            .filter(|(_, q)| q.iter().any(|u| matches!(u.status, UpdateStatus::Pending)))
+            .map(|(core_id, _)| *core_id)
+            .collect()
+    }
+}
+
+impl Default for UpdateProcessor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
