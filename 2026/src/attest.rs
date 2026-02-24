@@ -78,6 +78,8 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
 pub fn attest_memory_region(region_ref: &CapabilityRef<MemoryRegion>) -> String {
     let region = region_ref.read();
     let mut report = format!("Memory Region:\n");
+    report.push_str(&format!("  Owner: {}\n", region.owned.owner));
+    report.push_str(&format!("  Handle: {}\n", region.owned.handle));
     report.push_str(&format!("  Kind: {:?}\n", region.data.kind));
     report.push_str(&format!("  Status: {:?}\n", region.data.status));
     report.push_str(&format!("  Access: {}\n", region.data.access));

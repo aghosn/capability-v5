@@ -1,0 +1,13 @@
+# Example CLI Session Commands
+# This file shows example commands you can use in the CLI
+# Copy and paste these into the CLI prompt
+
+init root 0x1000000
+list
+create-domain root_domain child1 0b1111 GET,ATTEST,SWITCH
+carve root_mem mem1 0x1000 0x1000 RWX
+send mem1 child1 10 CLEAN
+seal child1
+view child1
+attest child1
+save-session test_from_cli.rs

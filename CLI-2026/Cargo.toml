@@ -1,0 +1,10 @@
+[package]
+name = "capability-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+capability_engine = { package = "capability-engine-v2", path = "../2026" }
+parking_lot = "0.12"
+rustyline = "14.0"
+colored = "2.1"
