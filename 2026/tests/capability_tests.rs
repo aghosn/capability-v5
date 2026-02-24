@@ -336,16 +336,11 @@ fn test_send_with_attributes() {
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
-    // Send with vital attribute
-    let attrs = Attributes {
-        hash: false,
-        clean: true,
-        vital: true,
-        meta: false,
-    };
+    // Send with vital and clean attributes
+    let attrs = Attributes::from_bits(Attributes::CLEAN | Attributes::VITAL);
     let _updates = Capability::send_to(&child, 5, 10, attrs).unwrap();
 
     // Check attributes were set
-    assert_eq!(child.read().data.attributes.vital, true);
-    assert_eq!(child.read().data.attributes.clean, true);
+    assert!(child.read().owned.attributes.vital());
+    assert!(child.read().owned.attributes.clean());
 }

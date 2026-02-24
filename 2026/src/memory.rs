@@ -4,59 +4,62 @@ use crate::error::{CapaError, Result};
 use alloc::vec::Vec;
 use core::fmt;
 
-/// Access rights for memory regions
+/// Access rights for memory regions (bitmap representation)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rights {
-    pub read: bool,
-    pub write: bool,
-    pub execute: bool,
+    bits: u8,
 }
 
 impl Rights {
-    pub const NONE: Self = Rights {
-        read: false,
-        write: false,
-        execute: false,
-    };
+    /// Read permission
+    pub const READ: u8 = 1 << 0;
+    /// Write permission
+    pub const WRITE: u8 = 1 << 1;
+    /// Execute permission
+    pub const EXECUTE: u8 = 1 << 2;
 
-    pub const R: Self = Rights {
-        read: true,
-        write: false,
-        execute: false,
-    };
+    pub const NONE: Self = Rights { bits: 0 };
+    pub const R: Self = Rights { bits: Self::READ };
+    pub const RW: Self = Rights { bits: Self::READ | Self::WRITE };
+    pub const RX: Self = Rights { bits: Self::READ | Self::EXECUTE };
+    pub const RWX: Self = Rights { bits: Self::READ | Self::WRITE | Self::EXECUTE };
 
-    pub const RW: Self = Rights {
-        read: true,
-        write: true,
-        execute: false,
-    };
+    /// Create Rights from raw bits
+    pub const fn from_bits(bits: u8) -> Self {
+        Rights { bits: bits & 0x07 } // Mask to 3 bits
+    }
 
-    pub const RX: Self = Rights {
-        read: true,
-        write: false,
-        execute: true,
-    };
+    /// Get raw bits
+    pub const fn bits(&self) -> u8 {
+        self.bits
+    }
 
-    pub const RWX: Self = Rights {
-        read: true,
-        write: true,
-        execute: true,
-    };
+    /// Check if a specific flag is set
+    pub const fn has(&self, flag: u8) -> bool {
+        (self.bits & flag) != 0
+    }
 
     /// Check if self is a subset of other (for monotonicity)
     pub fn is_subset_of(&self, other: &Rights) -> bool {
-        (!self.read || other.read)
-            && (!self.write || other.write)
-            && (!self.execute || other.execute)
+        (self.bits & !other.bits) == 0
     }
 
     /// Compute intersection of rights
     pub fn intersect(&self, other: &Rights) -> Rights {
-        Rights {
-            read: self.read && other.read,
-            write: self.write && other.write,
-            execute: self.execute && other.execute,
-        }
+        Rights { bits: self.bits & other.bits }
+    }
+
+    // Convenience methods for compatibility with existing code
+    pub const fn read(&self) -> bool {
+        self.has(Self::READ)
+    }
+
+    pub const fn write(&self) -> bool {
+        self.has(Self::WRITE)
+    }
+
+    pub const fn execute(&self) -> bool {
+        self.has(Self::EXECUTE)
     }
 }
 
@@ -65,48 +68,83 @@ impl fmt::Display for Rights {
         write!(
             f,
             "{}{}{}",
-            if self.read { "R" } else { "-" },
-            if self.write { "W" } else { "-" },
-            if self.execute { "X" } else { "-" }
+            if self.read() { "R" } else { "-" },
+            if self.write() { "W" } else { "-" },
+            if self.execute() { "X" } else { "-" }
         )
     }
 }
 
-/// Memory region attributes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Memory region attributes (bitmap representation)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attributes {
-    /// Region content is hashed and verified
-    pub hash: bool,
-    /// Region is zeroed on revocation
-    pub clean: bool,
-    /// Revocation of this region causes domain revocation
-    pub vital: bool,
-    /// Region is used for metadata storage
-    pub meta: bool,
+    bits: u8,
 }
 
 impl Attributes {
-    pub const NONE: Self = Attributes {
-        hash: false,
-        clean: false,
-        vital: false,
-        meta: false,
-    };
+    /// Region content is hashed and verified
+    pub const HASH: u8 = 1 << 0;
+    /// Region is zeroed on revocation
+    pub const CLEAN: u8 = 1 << 1;
+    /// Revocation of this region causes domain revocation
+    pub const VITAL: u8 = 1 << 2;
+    /// Region is used for metadata storage
+    pub const META: u8 = 1 << 3;
+
+    pub const NONE: Self = Attributes { bits: 0 };
+
+    /// Create Attributes from raw bits
+    pub const fn from_bits(bits: u8) -> Self {
+        Attributes { bits: bits & 0x0F } // Mask to 4 bits
+    }
+
+    /// Get raw bits
+    pub const fn bits(&self) -> u8 {
+        self.bits
+    }
+
+    /// Check if a specific flag is set
+    pub const fn has(&self, flag: u8) -> bool {
+        (self.bits & flag) != 0
+    }
+
+    // Convenience methods for compatibility with existing code
+    pub const fn hash(&self) -> bool {
+        self.has(Self::HASH)
+    }
+
+    pub const fn clean(&self) -> bool {
+        self.has(Self::CLEAN)
+    }
+
+    pub const fn vital(&self) -> bool {
+        self.has(Self::VITAL)
+    }
+
+    pub const fn meta(&self) -> bool {
+        self.has(Self::META)
+    }
+}
+
+impl Default for Attributes {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl fmt::Display for Attributes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut attrs = Vec::new();
-        if self.hash {
+        if self.hash() {
             attrs.push("HASH");
         }
-        if self.clean {
+        if self.clean() {
             attrs.push("CLEAN");
         }
-        if self.vital {
+        if self.vital() {
             attrs.push("VITAL");
         }
-        if self.meta {
+        if self.meta() {
             attrs.push("META");
         }
         write!(f, "{}", attrs.join("|"))
@@ -129,15 +167,6 @@ pub enum RegionKind {
     Alias,
     /// Created via carve operation
     Carve,
-}
-
-/// Physical address remapping information
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Remapped {
-    /// Identity mapping (virtual == physical)
-    Identity,
-    /// Remapped to specific physical address
-    Remapped(u64),
 }
 
 /// Memory access descriptor
@@ -199,10 +228,6 @@ pub struct MemoryRegion {
     pub status: RegionStatus,
     /// Access descriptor
     pub access: Access,
-    /// Security attributes
-    pub attributes: Attributes,
-    /// Physical address remapping
-    pub remapped: Remapped,
     /// Hash of region content (if hash attribute is set)
     pub content_hash: Option<[u8; 32]>,
 }
@@ -214,8 +239,6 @@ impl MemoryRegion {
             kind: RegionKind::Carve,
             status: RegionStatus::Exclusive,
             access: Access::new(start, size, Rights::RWX),
-            attributes: Attributes::NONE,
-            remapped: Remapped::Identity,
             content_hash: None,
         }
     }
@@ -232,21 +255,10 @@ impl MemoryRegion {
             return Err(CapaError::InvalidAccess);
         }
 
-        // Compute remapping for child
-        let child_remapped = match self.remapped {
-            Remapped::Identity => Remapped::Identity,
-            Remapped::Remapped(phys) => {
-                let offset = access.start - self.access.start;
-                Remapped::Remapped(phys + offset)
-            }
-        };
-
         Ok(MemoryRegion {
             kind: RegionKind::Alias,
             status: RegionStatus::Aliased,
             access,
-            attributes: Attributes::NONE,
-            remapped: child_remapped,
             content_hash: None,
         })
     }
@@ -263,30 +275,13 @@ impl MemoryRegion {
             return Err(CapaError::InvalidAccess);
         }
 
-        // Compute remapping for child
-        let child_remapped = match self.remapped {
-            Remapped::Identity => Remapped::Identity,
-            Remapped::Remapped(phys) => {
-                let offset = access.start - self.access.start;
-                Remapped::Remapped(phys + offset)
-            }
-        };
-
         // Carved child inherits parent's status
         Ok(MemoryRegion {
             kind: RegionKind::Carve,
             status: self.status,
             access,
-            attributes: Attributes::NONE,
-            remapped: child_remapped,
             content_hash: None,
         })
-    }
-
-    /// Set attributes when sending to another domain
-    pub fn with_attributes(mut self, attributes: Attributes) -> Self {
-        self.attributes = attributes;
-        self
     }
 
     /// Set content hash
@@ -300,8 +295,8 @@ impl fmt::Display for MemoryRegion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MemoryRegion {{ {:?} {:?} {} attrs:{} }}",
-            self.kind, self.status, self.access, self.attributes
+            "MemoryRegion {{ {:?} {:?} {} }}",
+            self.kind, self.status, self.access
         )
     }
 }

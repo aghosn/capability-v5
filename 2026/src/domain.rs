@@ -1,6 +1,8 @@
 //! Domain capabilities and policies
 
 use crate::error::{CapaError, Result};
+use crate::capability::{CapabilityWeak, LocalHandle};
+use crate::memory::MemoryRegion;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -279,6 +281,12 @@ pub struct Domain {
 
     /// Domain policies
     pub policy: DomainPolicy,
+
+    /// Memory capabilities owned by this domain (handle -> weak ref)
+    pub memory_capabilities: BTreeMap<LocalHandle, CapabilityWeak<MemoryRegion>>,
+
+    /// Domain capabilities owned by this domain (handle -> weak ref)
+    pub domain_capabilities: BTreeMap<LocalHandle, CapabilityWeak<Domain>>,
 }
 
 impl Domain {
@@ -288,6 +296,8 @@ impl Domain {
             id: generate_domain_id(),
             status: DomainStatus::Unsealed,
             policy,
+            memory_capabilities: BTreeMap::new(),
+            domain_capabilities: BTreeMap::new(),
         }
     }
 
@@ -297,6 +307,8 @@ impl Domain {
             id: 0,
             status: DomainStatus::Sealed,
             policy: DomainPolicy::new_root(),
+            memory_capabilities: BTreeMap::new(),
+            domain_capabilities: BTreeMap::new(),
         }
     }
 
@@ -322,6 +334,46 @@ impl Domain {
     /// Revoke the domain
     pub fn revoke(&mut self) {
         self.status = DomainStatus::Revoked;
+    }
+
+    /// Register a memory capability owned by this domain
+    pub fn add_memory_capability(&mut self, handle: LocalHandle, capa: CapabilityWeak<MemoryRegion>) {
+        self.memory_capabilities.insert(handle, capa);
+    }
+
+    /// Register a domain capability owned by this domain
+    pub fn add_domain_capability(&mut self, handle: LocalHandle, capa: CapabilityWeak<Domain>) {
+        self.domain_capabilities.insert(handle, capa);
+    }
+
+    /// Remove a memory capability from tracking
+    pub fn remove_memory_capability(&mut self, handle: LocalHandle) -> Option<CapabilityWeak<MemoryRegion>> {
+        self.memory_capabilities.remove(&handle)
+    }
+
+    /// Remove a domain capability from tracking
+    pub fn remove_domain_capability(&mut self, handle: LocalHandle) -> Option<CapabilityWeak<Domain>> {
+        self.domain_capabilities.remove(&handle)
+    }
+
+    /// Get a memory capability by handle
+    pub fn get_memory_capability(&self, handle: LocalHandle) -> Option<&CapabilityWeak<MemoryRegion>> {
+        self.memory_capabilities.get(&handle)
+    }
+
+    /// Get a domain capability by handle
+    pub fn get_domain_capability(&self, handle: LocalHandle) -> Option<&CapabilityWeak<Domain>> {
+        self.domain_capabilities.get(&handle)
+    }
+
+    /// Get all memory capability handles
+    pub fn memory_capability_handles(&self) -> alloc::vec::Vec<LocalHandle> {
+        self.memory_capabilities.keys().copied().collect()
+    }
+
+    /// Get all domain capability handles
+    pub fn domain_capability_handles(&self) -> alloc::vec::Vec<LocalHandle> {
+        self.domain_capabilities.keys().copied().collect()
     }
 }
 

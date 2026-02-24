@@ -221,8 +221,8 @@ fn test_vital_revoke_generates_domain_revocation() {
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (child, _) = Capability::carve_child(&root, child_access, 5, 1).unwrap();
 
-    // Set vital attribute
-    child.write().data.attributes.vital = true;
+    // Set vital attribute on ownership
+    child.write().owned.attributes = Attributes::from_bits(Attributes::VITAL);
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 
@@ -241,8 +241,8 @@ fn test_clean_revoke_generates_zero_memory() {
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (child, _) = Capability::carve_child(&root, child_access, 5, 1).unwrap();
 
-    // Set clean attribute
-    child.write().data.attributes.clean = true;
+    // Set clean attribute on ownership
+    child.write().owned.attributes = Attributes::from_bits(Attributes::CLEAN);
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 

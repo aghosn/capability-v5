@@ -28,13 +28,13 @@ pub mod update;
 pub mod view;
 
 pub use attest::{attest_domain, attest_memory_region, enumerate_domain_tree, AttestationReport};
-pub use capability::{Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership};
+pub use capability::{Capability, CapabilityRef, CapabilityWeak, DomainCapabilityExt, LocalHandle, MemoryCapabilityExt, Ownership};
 pub use domain::{
     Domain, DomainPolicy, DomainStatus, InterruptPolicy, InterruptVisibility, MonitorAPI,
     VProcessorState, VectorPolicy,
 };
 pub use error::{CapaError, Result};
-pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Remapped, Rights};
+pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
 pub use switch::{CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager};
 pub use update::{CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus};
 pub use view::{AddressSpaceView, ViewRegion, compute_address_space, compute_view_from_capabilities};

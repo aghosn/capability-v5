@@ -23,24 +23,20 @@ fn test_rights_intersect() {
     let r2 = Rights::RW;
     let intersection = r1.intersect(&r2);
 
-    assert!(intersection.read);
-    assert!(intersection.write);
-    assert!(!intersection.execute);
+    assert!(intersection.read());
+    assert!(intersection.write());
+    assert!(!intersection.execute());
 }
 
 #[test]
 fn test_rights_intersect_disjoint() {
     let r1 = Rights::R;
-    let r2 = Rights {
-        read: false,
-        write: true,
-        execute: false,
-    };
+    let r2 = Rights::from_bits(Rights::WRITE);
     let intersection = r1.intersect(&r2);
 
-    assert!(!intersection.read);
-    assert!(!intersection.write);
-    assert!(!intersection.execute);
+    assert!(!intersection.read());
+    assert!(!intersection.write());
+    assert!(!intersection.execute());
 }
 
 // ==================== Access Tests ====================
@@ -118,7 +114,6 @@ fn test_root_region_properties() {
     assert_eq!(region.access.start, 0x1000);
     assert_eq!(region.access.size, 0x5000);
     assert_eq!(region.access.rights, Rights::RWX);
-    assert!(matches!(region.remapped, Remapped::Identity));
 }
 
 // ==================== Invalid Memory Operations ====================
@@ -174,28 +169,24 @@ fn test_carve_excessive_rights() {
 #[test]
 fn test_attributes_none() {
     let attrs = Attributes::NONE;
-    assert!(!attrs.hash);
-    assert!(!attrs.clean);
-    assert!(!attrs.vital);
-    assert!(!attrs.meta);
+    assert!(!attrs.hash());
+    assert!(!attrs.clean());
+    assert!(!attrs.vital());
+    assert!(!attrs.meta());
 }
 
 #[test]
 fn test_with_attributes() {
     let region = MemoryRegion::new_root(0x0, 0x10000);
+    let capa = Capability::new_root(0, 0, region);
 
-    let attrs = Attributes {
-        hash: true,
-        clean: true,
-        vital: false,
-        meta: false,
-    };
+    // Set attributes via ownership
+    let attrs = Attributes::from_bits(Attributes::HASH | Attributes::CLEAN);
+    capa.write().owned.attributes = attrs;
 
-    let region_with_attrs = region.with_attributes(attrs);
-
-    assert!(region_with_attrs.attributes.hash);
-    assert!(region_with_attrs.attributes.clean);
-    assert!(!region_with_attrs.attributes.vital);
+    assert!(capa.read().owned.attributes.hash());
+    assert!(capa.read().owned.attributes.clean());
+    assert!(!capa.read().owned.attributes.vital());
 }
 
 #[test]
@@ -206,38 +197,6 @@ fn test_with_hash() {
     let region_with_hash = region.with_hash(hash);
 
     assert_eq!(region_with_hash.content_hash, Some(hash));
-}
-
-// ==================== Remapping Tests ====================
-
-#[test]
-fn test_identity_remapping() {
-    let region = MemoryRegion::new_root(0x1000, 0x1000);
-    assert!(matches!(region.remapped, Remapped::Identity));
-}
-
-#[test]
-fn test_alias_inherits_remapping() {
-    let mut region = MemoryRegion::new_root(0x1000, 0x4000);
-    region.remapped = Remapped::Remapped(0x50000);
-
-    let child_access = Access::new(0x2000, 0x1000, Rights::R);
-    let aliased = region.alias(child_access).unwrap();
-
-    // Child should have offset remapping
-    assert!(matches!(aliased.remapped, Remapped::Remapped(0x51000)));
-}
-
-#[test]
-fn test_carve_inherits_remapping() {
-    let mut region = MemoryRegion::new_root(0x1000, 0x4000);
-    region.remapped = Remapped::Remapped(0x50000);
-
-    let child_access = Access::new(0x2000, 0x1000, Rights::R);
-    let carved = region.carve(child_access).unwrap();
-
-    // Child should have offset remapping
-    assert!(matches!(carved.remapped, Remapped::Remapped(0x51000)));
 }
 
 // ==================== Status Inheritance ====================
@@ -327,17 +286,16 @@ fn test_large_memory_region() {
 
 #[test]
 fn test_multiple_attributes() {
-    let attrs = Attributes {
-        hash: true,
-        clean: true,
-        vital: true,
-        meta: true,
-    };
+    let attrs = Attributes::from_bits(
+        Attributes::HASH | Attributes::CLEAN | Attributes::VITAL | Attributes::META
+    );
 
-    let region = MemoryRegion::new_root(0, 0x1000).with_attributes(attrs);
+    let region = MemoryRegion::new_root(0, 0x1000);
+    let capa = Capability::new_root(0, 0, region);
+    capa.write().owned.attributes = attrs;
 
-    assert!(region.attributes.hash);
-    assert!(region.attributes.clean);
-    assert!(region.attributes.vital);
-    assert!(region.attributes.meta);
+    assert!(capa.read().owned.attributes.hash());
+    assert!(capa.read().owned.attributes.clean());
+    assert!(capa.read().owned.attributes.vital());
+    assert!(capa.read().owned.attributes.meta());
 }

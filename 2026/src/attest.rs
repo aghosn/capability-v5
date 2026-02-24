@@ -81,10 +81,9 @@ pub fn attest_memory_region(region_ref: &CapabilityRef<MemoryRegion>) -> String 
     report.push_str(&format!("  Kind: {:?}\n", region.data.kind));
     report.push_str(&format!("  Status: {:?}\n", region.data.status));
     report.push_str(&format!("  Access: {}\n", region.data.access));
-    report.push_str(&format!("  Attributes: {}\n", region.data.attributes));
-    report.push_str(&format!("  Remapped: {:?}\n", region.data.remapped));
+    report.push_str(&format!("  Attributes: {}\n", region.owned.attributes));
 
-    if region.data.attributes.hash {
+    if region.owned.attributes.hash() {
         if let Some(hash) = &region.data.content_hash {
             report.push_str(&format!("  Content Hash: {:?}\n", hash));
         }
