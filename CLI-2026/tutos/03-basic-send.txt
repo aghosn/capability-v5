@@ -1,0 +1,64 @@
+# Tutorial 3: Capability Transfer with Send
+# ==========================================
+# Demonstrates sending memory capabilities to child domains.
+
+@msg ━━━ Tutorial 3: Sending Capabilities ━━━
+@msg
+@msg This tutorial shows how to transfer memory capabilities to domains.
+@msg We'll create domains and send them memory access rights.
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize system
+init root 0x10000000
+
+@msg
+@msg ✓ System initialized
+@msg
+
+# Create a child domain
+@msg 📋 Step 2: Create a child domain with GET, ATTEST, and SWITCH permissions
+create-domain root child1 0b1111 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created domain 'child1' - can run on all 4 cores
+@msg
+
+# Carve memory for the child
+@msg 📋 Step 3: Carve exclusive memory for child1
+carve r0 child1_mem 0x100000 0x10000 RWX
+
+@msg
+@msg ✓ Carved 64KB of memory for child1
+@msg
+
+# Send the memory to child1
+@msg 📋 Step 4: Send the memory capability to child1
+send child1_mem child1
+
+@msg
+@msg ✓ Memory sent! child1 can now access [0x100000..0x110000)
+@msg   MMU mappings automatically updated
+@msg
+
+# Create shared memory and send it
+@msg 📋 Step 5: Create shared memory and send to child1
+alias r0 shared_buf 0x200000 0x4000 RW
+send shared_buf child1
+
+@msg
+@msg ✓ Sent shared buffer - both root and child1 can access it
+@msg
+
+# View domain's address space
+@msg 📋 Step 6: View child1's address space
+view child1
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Send transfers memory capabilities to domains
+@msg   • Handles are auto-allocated for each capability
+@msg   • MMU mappings are automatically configured
+@msg   • Both exclusive and shared memory can be sent
+@msg   • Domains must exist before receiving capabilities
+@msg

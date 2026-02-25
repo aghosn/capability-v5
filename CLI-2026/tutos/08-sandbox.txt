@@ -1,0 +1,141 @@
+# Tutorial 8: Sandboxed Execution Environment
+# ============================================
+# Demonstrates creating a sandbox using aliased memory with limited permissions.
+
+@msg ━━━ Tutorial 8: Sandbox with Aliased Memory ━━━
+@msg
+@msg This tutorial shows how to create a sandbox that:
+@msg   • Uses ALIASED memory (parent retains access)
+@msg   • Has attenuated rights (read-only or limited execute)
+@msg   • Cannot receive additional capabilities
+@msg   • Provides isolation without full confidentiality
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize host system
+init host 0x40000000
+
+@msg
+@msg ✓ Host initialized with 1GB memory
+@msg
+
+# Create sandbox domain with limited permissions
+@msg 📋 Step 2: Create sandbox with minimal permissions
+create-domain host sandbox1 0b0001 GET,SWITCH
+
+@msg
+@msg ✓ Sandbox created with NO ATTEST, NO SEAL, NO CARVE
+@msg   • Can only run on core 0
+@msg   • Can only GET capabilities and SWITCH contexts
+@msg   • Cannot create child domains or modify itself
+@msg
+
+# Create code region (read-execute only)
+@msg 📋 Step 3: Create read-execute code region (aliased)
+alias r0 sandbox_code 0x1000000 0x100000 RX
+
+@msg
+@msg ✓ 1MB code region - sandbox can read/execute but not write
+@msg   Host retains access to update code if needed
+@msg
+
+# Create data region (read-write, no execute)
+@msg 📋 Step 4: Create read-write data region (aliased)
+alias r0 sandbox_data 0x2000000 0x100000 RW
+
+@msg
+@msg ✓ 1MB data region - sandbox can read/write but not execute
+@msg   Host retains access to monitor sandbox activity
+@msg
+
+# Create read-only shared library
+@msg 📋 Step 5: Create read-only shared library region
+alias r0 shared_lib 0x3000000 0x50000 R
+
+@msg
+@msg ✓ Read-only shared library - sandbox cannot modify
+@msg
+
+# Send capabilities to sandbox
+@msg 📋 Step 6: Send memory capabilities to sandbox
+send sandbox_code sandbox1
+send sandbox_data sandbox1
+send shared_lib sandbox1
+
+@msg
+@msg ✓ Sandbox has all its memory regions
+@msg
+
+# Seal the sandbox WITHOUT RECEIVE_AFTER_SEAL
+@msg 📋 Step 7: Seal sandbox (no RECEIVE_AFTER_SEAL permission)
+seal sandbox1
+
+@msg
+@msg ✓ Sandbox sealed - CANNOT receive more capabilities!
+@msg   This ensures the sandbox is fully encapsulated
+@msg
+
+# Try to send more memory (will fail)
+@msg 📋 Step 8: Attempt to send additional memory (expected to fail)
+alias r0 extra_mem 0x4000000 0x10000 RW
+send extra_mem sandbox1
+
+@msg
+@msg ⚠️  This should fail - sandbox is sealed without RECEIVE_AFTER_SEAL
+@msg   Sandbox cannot receive unexpected capabilities
+@msg
+
+# View sandbox's address space
+@msg 📋 Step 9: View sandbox's complete address space
+view sandbox1
+
+@msg
+@msg ✓ Sandbox has limited, well-defined address space
+@msg
+
+# Attest sandbox (will fail - no ATTEST permission)
+@msg 📋 Step 10: Try to attest sandbox (expected to fail)
+attest sandbox1
+
+@msg
+@msg ⚠️  This should fail - sandbox doesn't have ATTEST permission
+@msg   Sandbox cannot prove its own configuration
+@msg
+
+# Create another sandbox for comparison
+@msg 📋 Step 11: Create a second sandbox with even more restrictions
+create-domain host sandbox2 0b0001 GET
+alias r0 sandbox2_mem 0x5000000 0x50000 R
+send sandbox2_mem sandbox2
+seal sandbox2
+
+@msg
+@msg ✓ Created sandbox2 with only GET permission and read-only memory
+@msg   Even more restricted - cannot even switch contexts!
+@msg
+
+# View everything
+@msg 📋 Step 12: View complete system state
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Sandboxes use ALIASED memory (parent monitors/controls)
+@msg   • Rights can be attenuated (RWX → RX or R)
+@msg   • Sealing without RECEIVE_AFTER_SEAL prevents capability injection
+@msg   • Limited API permissions restrict sandbox capabilities
+@msg   • Parent retains access to all sandbox memory (aliased)
+@msg   • Sandbox provides isolation without confidentiality
+@msg
+@msg 💡 Sandbox vs. CVM:
+@msg   ┌─────────────────────────┬──────────────────────┐
+@msg   │       Sandbox           │         CVM          │
+@msg   ├─────────────────────────┼──────────────────────┤
+@msg   │ Aliased memory          │ Carved memory        │
+@msg   │ Parent has access       │ Parent loses access  │
+@msg   │ Isolation only          │ Full confidentiality │
+@msg   │ Limited permissions     │ Full permissions     │
+@msg   │ Cannot be attested      │ Can be attested      │
+@msg   │ Use case: Untrusted code│ Use case: Secrets    │
+@msg   └─────────────────────────┴──────────────────────┘
+@msg

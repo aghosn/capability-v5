@@ -1,0 +1,88 @@
+# Tutorial 4: Domain Switching - Context Switches
+# ================================================
+# Demonstrates switching execution between domains on cores.
+
+@msg ━━━ Tutorial 4: Domain Switching ━━━
+@msg
+@msg This tutorial demonstrates context switching between domains.
+@msg We'll create domains, seal them, and switch execution on cores.
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize system and create domains
+init root 0x10000000
+create-domain root app1 0b0011 GET,ATTEST,SWITCH
+create-domain root app2 0b1100 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created two domains:
+@msg   • app1 can run on cores 0-1
+@msg   • app2 can run on cores 2-3
+@msg
+
+# Give them some memory
+@msg 📋 Step 2: Allocate memory to each domain
+carve r0 app1_mem 0x100000 0x50000 RWX
+carve r0 app2_mem 0x200000 0x50000 RWX
+send app1_mem app1
+send app2_mem app2
+
+@msg
+@msg ✓ Each domain has its own memory region
+@msg
+
+# Seal the domains
+@msg 📋 Step 3: Seal domains (make them ready for execution)
+seal root
+seal app1
+seal app2
+
+@msg
+@msg ✓ All domains sealed and ready to run
+@msg
+
+# View current core allocation
+@msg 📋 Step 4: Check which domains are running on each core
+list
+
+@msg
+@msg Notice: All cores currently running 'root'
+@msg
+
+# Switch to app1 on core 0
+@msg 📋 Step 5: Switch core 0 from root to app1
+switch app1 0
+
+@msg
+@msg ✓ Core 0 now executing app1
+@msg
+
+# Switch to app1 on core 1
+@msg 📋 Step 6: Switch core 1 to app1 as well
+switch app1 1
+
+@msg
+@msg ✓ Cores 0-1 now executing app1
+@msg
+
+# Switch to app2 on cores 2-3
+@msg 📋 Step 7: Switch cores 2-3 to app2
+switch app2 2
+switch app2 3
+
+@msg
+@msg ✓ Cores 2-3 now executing app2
+@msg
+
+# View final state
+@msg 📋 Step 8: View final core allocation
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Domains must be sealed before switching to them
+@msg   • switch command updates core execution context
+@msg   • Domains can specify which cores they're allowed to run on
+@msg   • Multiple cores can run the same domain
+@msg   • Context switches are explicit in the capability model
+@msg

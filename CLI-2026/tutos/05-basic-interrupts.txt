@@ -1,0 +1,95 @@
+# Tutorial 5: Interrupt Routing and Policies
+# ===========================================
+# Demonstrates interrupt routing based on domain policies.
+
+@msg ━━━ Tutorial 5: Interrupt Routing ━━━
+@msg
+@msg This tutorial demonstrates hierarchical interrupt routing.
+@msg We'll configure interrupt policies and see how interrupts route up the domain tree.
+@msg
+
+# Initialize
+@msg 📋 Step 1: Set up domain hierarchy
+init root 0x10000000
+create-domain root parent 0b1111 GET,ATTEST,SWITCH
+create-domain parent child 0b1111 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created hierarchy: root → parent → child
+@msg
+
+# Give them memory and seal
+@msg 📋 Step 2: Allocate memory and seal domains
+carve r0 parent_mem 0x100000 0x50000 RWX
+carve parent_mem child_mem 0x100000 0x10000 RWX
+send parent_mem parent
+send child_mem child
+seal root
+seal parent
+seal child
+
+@msg
+@msg ✓ All domains sealed and ready
+@msg
+
+# Set interrupt policies - child cannot handle interrupt 55
+@msg 📋 Step 3: Configure interrupt policies
+@msg   • child: NOTREPORT for vector 55 (cannot handle it)
+@msg   • parent: DELIVER for vector 55 (will handle it)
+set-interrupt-policy child 55 NOTREPORT
+set-interrupt-policy parent 55 DELIVER
+
+@msg
+@msg ✓ Configured: child ignores interrupt 55, parent handles it
+@msg
+
+# Switch to child on core 0
+@msg 📋 Step 4: Switch to child domain on core 0
+switch child 0
+
+@msg
+@msg ✓ Core 0 now running child
+@msg
+
+# Send interrupt to core 0
+@msg 📋 Step 5: Deliver interrupt 55 to core 0 (currently running child)
+interrupt 55 0
+
+@msg
+@msg ✓ Interrupt routed from child → parent
+@msg   Core automatically switched to parent (the handler)
+@msg
+
+# Check core status
+@msg 📋 Step 6: Verify core status after interrupt routing
+list
+
+@msg
+@msg Notice: Core 0 now running 'parent' (automatically switched during routing)
+@msg
+
+# Set default policy
+@msg 📋 Step 7: Set default interrupt policy for all other vectors
+set-default-interrupt-policy child REPORT
+
+@msg
+@msg ✓ Child will be notified of other interrupts but routing continues
+@msg
+
+# Demonstrate REPORT policy
+@msg 📋 Step 8: Switch back to child and try interrupt 42
+switch child 0
+interrupt 42 0
+
+@msg
+@msg ✓ Interrupt 42 reported to child, then routed to parent
+@msg
+
+@msg 📖 Key Takeaways:
+@msg   • DELIVER: Domain handles the interrupt (routing stops)
+@msg   • REPORT: Domain is notified but routing continues to parent
+@msg   • NOTREPORT: Domain skipped silently, routing continues
+@msg   • Interrupt routing is hierarchical (up the domain tree)
+@msg   • Core automatically switches to the handler domain
+@msg   • Per-vector and default policies provide fine-grained control
+@msg

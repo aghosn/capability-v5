@@ -23,6 +23,8 @@ pub struct CliState {
     pub domain_id_to_name: HashMap<u64, String>,
     /// Number of cores
     pub num_cores: usize,
+    /// Auto-list mode: automatically run 'list' after each successful command
+    pub auto_list: bool,
 }
 
 impl CliState {
@@ -36,6 +38,7 @@ impl CliState {
             next_cap_id: 0,
             domain_id_to_name: HashMap::new(),
             num_cores,
+            auto_list: false,
         }
     }
 

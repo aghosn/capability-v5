@@ -1,0 +1,104 @@
+# Tutorial 6: Confidential VM with Shared VirtIO Buffer
+# ======================================================
+# Demonstrates creating a CVM with a shared buffer for I/O communication.
+
+@msg ━━━ Tutorial 6: Confidential VM with VirtIO Buffer ━━━
+@msg
+@msg This tutorial shows how to create a Confidential VM (CVM) with:
+@msg   • Private memory for the VM (carved, exclusive)
+@msg   • Shared VirtIO buffer for I/O communication (aliased)
+@msg   • Proper isolation and controlled sharing
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize hypervisor (root) with large memory pool
+init hypervisor 0x40000000
+
+@msg
+@msg ✓ Hypervisor initialized with 1GB memory
+@msg
+
+# Create the CVM domain
+@msg 📋 Step 2: Create a Confidential VM domain
+create-domain hypervisor cvm1 0b0011 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created CVM that can run on cores 0-1
+@msg
+
+# Carve exclusive private memory for the CVM
+@msg 📋 Step 3: Carve exclusive private memory for CVM (128MB)
+carve r0 cvm1_private 0x1000000 0x8000000 RWX
+
+@msg
+@msg ✓ Carved 128MB private memory - hypervisor cannot access this
+@msg   This is the CVM's protected memory region
+@msg
+
+# Create a shared VirtIO buffer using alias
+@msg 📋 Step 4: Create shared VirtIO buffer (aliased, 64KB)
+alias r0 virtio_ring 0x10000000 0x10000 RW
+
+@msg
+@msg ✓ Created shared VirtIO ring buffer
+@msg   Both hypervisor and CVM will have access
+@msg
+
+# Send private memory to CVM
+@msg 📋 Step 5: Send private memory to CVM
+send cvm1_private cvm1
+
+@msg
+@msg ✓ CVM now owns its private memory
+@msg   Hypervisor has lost access to this region
+@msg
+
+# Send shared buffer to CVM
+@msg 📋 Step 6: Send shared VirtIO buffer to CVM
+send virtio_ring cvm1
+
+@msg
+@msg ✓ CVM can now access the shared buffer
+@msg   Hypervisor retains access (aliased memory)
+@msg
+
+# Seal the CVM
+@msg 📋 Step 7: Seal the CVM (finalize its configuration)
+seal cvm1
+
+@msg
+@msg ✓ CVM sealed - configuration is locked
+@msg
+
+# Attest the CVM
+@msg 📋 Step 8: Generate attestation for the CVM
+attest cvm1
+
+@msg
+@msg ✓ Attestation shows:
+@msg   • Private memory region (carved)
+@msg   • Shared VirtIO buffer (aliased)
+@msg   • Sealed status
+@msg
+
+# View CVM's address space
+@msg 📋 Step 9: View CVM's address space
+view cvm1
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • CVMs use CARVED memory for private execution
+@msg   • ALIASED memory enables controlled sharing (e.g., VirtIO)
+@msg   • Hypervisor loses access to carved regions (confidentiality)
+@msg   • Shared buffers allow I/O without breaking isolation
+@msg   • Attestation proves the CVM's memory configuration
+@msg
+@msg 💡 Architecture Pattern:
+@msg   ┌──────────────┐
+@msg   │  Hypervisor  │ ← Has access to VirtIO ring
+@msg   └──────┬───────┘
+@msg          │ creates
+@msg   ┌──────▼───────┐
+@msg   │     CVM      │ ← Has private mem + VirtIO ring
+@msg   └──────────────┘
+@msg

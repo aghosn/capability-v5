@@ -116,6 +116,16 @@ const COMMANDS: &[CommandInfo] = &[
         description: "Clear session history",
     },
     CommandInfo {
+        name: "auto-list",
+        usage: "auto-list",
+        description: "Toggle auto-list mode on/off",
+    },
+    CommandInfo {
+        name: "tutos",
+        usage: "tutos [number]",
+        description: "Interactive tutorials",
+    },
+    CommandInfo {
         name: "help",
         usage: "help",
         description: "Show help message",

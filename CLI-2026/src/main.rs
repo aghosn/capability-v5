@@ -59,8 +59,17 @@ fn main() {
                     continue;
                 }
 
-                if let Err(e) = handle_command(&mut state, line) {
-                    println!("{} {}", "Error:".bright_red().bold(), e);
+                match handle_command(&mut state, line) {
+                    Ok(_) => {
+                        // If auto-list is enabled and command is not list/help/exit,
+                        // automatically run list
+                        if state.auto_list && line != "list" && line != "help" && !line.starts_with("auto-list") {
+                            let _ = commands::dispatch(&mut state, "list", &[]);
+                        }
+                    }
+                    Err(e) => {
+                        println!("{} {}", "Error:".bright_red().bold(), e);
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -182,6 +191,14 @@ fn show_help() {
     println!("  {} <filename>", "load".bright_white().bold());
     println!("    Load and execute commands from a text file");
     println!("    Example: load setup.txt");
+    println!("  {}", "auto-list".bright_white().bold());
+    println!("    Toggle auto-list mode (automatically run 'list' after each command)");
+    println!();
+
+    println!("{}", "Learning:".bright_yellow());
+    println!("  {} [number]", "tutos".bright_white().bold());
+    println!("    Interactive tutorials for learning the capability model");
+    println!("    Example: tutos (list all) or tutos 1 (run tutorial 1)");
     println!();
 
     println!("{}", "Other:".bright_yellow());

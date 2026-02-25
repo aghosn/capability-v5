@@ -2,6 +2,7 @@
 
 use capability_engine::*;
 use colored::*;
+use std::collections::{HashMap, HashSet};
 
 use crate::session::Command;
 use crate::state::CliState;
@@ -54,6 +55,192 @@ pub fn cmd_view(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     println!("{}", view);
 
     Ok(())
+}
+
+/// Memory region node for hierarchical tree visualization
+#[derive(Debug, Clone)]
+struct MemoryNode {
+    name: String,
+    start: u64,
+    end: u64,
+    kind: RegionKind,
+    children: Vec<MemoryNode>,
+    owner_name: String,
+}
+
+/// Build hierarchical memory tree from state
+fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
+    let mut roots = Vec::new();
+    let mut all_names: HashSet<String> = state.memories.keys().cloned().collect();
+    let mut child_names: HashSet<String> = HashSet::new();
+
+    // Build parent -> children mapping based on address containment
+    let mut parent_children: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (parent_name, parent_mem) in &state.memories {
+        let p = parent_mem.read();
+        let parent_start = p.data.access.start;
+        let parent_end = p.data.access.end();
+
+        for (child_name, child_mem) in &state.memories {
+            if child_name == parent_name {
+                continue;
+            }
+            let c = child_mem.read();
+            let child_start = c.data.access.start;
+            let child_end = c.data.access.end();
+
+            // Check if child is within parent's range and is actually a child
+            if child_start >= parent_start && child_end <= parent_end && p.children.len() > 0 {
+                // Verify it's actually in the children list by checking if any child overlaps
+                let is_child = p.children.iter().any(|child_ref| {
+                    let cr = child_ref.read();
+                    cr.data.access.start == c.data.access.start && cr.data.access.end() == c.data.access.end()
+                });
+
+                if is_child {
+                    parent_children.entry(parent_name.clone())
+                        .or_insert_with(Vec::new)
+                        .push(child_name.clone());
+                    child_names.insert(child_name.clone());
+                }
+            }
+        }
+    }
+
+    // Build nodes recursively, starting from roots
+    fn build_node(name: &str, state: &CliState, parent_children: &HashMap<String, Vec<String>>) -> Option<MemoryNode> {
+        let mem = state.memories.get(name)?;
+        let m = mem.read();
+
+        let owner_name = state.get_domain_name(m.owned.owner)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("DOM{}", m.owned.owner));
+
+        let mut children_nodes = Vec::new();
+
+        // Get children from the map
+        if let Some(children) = parent_children.get(name) {
+            for child_name in children {
+                if let Some(child_node) = build_node(child_name, state, parent_children) {
+                    children_nodes.push(child_node);
+                }
+            }
+        }
+
+        children_nodes.sort_by_key(|n| n.start);
+
+        Some(MemoryNode {
+            name: name.to_string(),
+            start: m.data.access.start,
+            end: m.data.access.end(),
+            kind: m.data.kind.clone(),
+            children: children_nodes,
+            owner_name,
+        })
+    }
+
+    // Get root nodes (those not in child_names)
+    for name in all_names.difference(&child_names) {
+        if let Some(node) = build_node(name, state, &parent_children) {
+            roots.push(node);
+        }
+    }
+
+    roots.sort_by_key(|n| n.start);
+    roots
+}
+
+/// Draw a horizontal bar representing a memory region
+fn draw_memory_bar(node: &MemoryNode, depth: usize, total_size: u64, carved_ranges: &[(u64, u64)]) {
+    let indent = "  ".repeat(depth);
+    let bar_width = 60;
+
+    // Calculate bar position and width
+    let start_ratio = node.start as f64 / total_size as f64;
+    let size_ratio = (node.end - node.start) as f64 / total_size as f64;
+
+    let bar_start = (start_ratio * bar_width as f64) as usize;
+    let bar_size = ((size_ratio * bar_width as f64).max(1.0)) as usize;
+
+    // Choose color based on kind
+    let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = match node.kind {
+        RegionKind::Carve => ('█', |s| s.bright_cyan()),
+        RegionKind::Alias => ('▓', |s| s.bright_yellow()),
+    };
+
+    // Build the bar with carved regions shown as greyed out
+    print!("{}{:8} ", indent, node.name.bright_white());
+
+    for i in 0..bar_width {
+        if i >= bar_start && i < bar_start + bar_size {
+            // Check if this position is in a carved child region
+            let pos_in_region = ((i - bar_start) as f64 / bar_size as f64 * (node.end - node.start) as f64) as u64 + node.start;
+            let is_carved = carved_ranges.iter().any(|(s, e)| pos_in_region >= *s && pos_in_region < *e);
+
+            if is_carved {
+                print!("{}", color_fn("░"));  // Greyed out for carved portion
+            } else {
+                print!("{}", color_fn(&bar_char.to_string()));  // Full color for available portion
+            }
+        } else {
+            print!(" ");
+        }
+    }
+
+    // Show address range and owner
+    println!("  {} [0x{:x}..0x{:x}) owner:{}",
+        format!("{:?}", node.kind).bright_black(),
+        node.start, node.end, node.owner_name.bright_magenta());
+}
+
+/// Display memory tree hierarchically with horizontal bars
+fn display_memory_tree(nodes: &[MemoryNode], depth: usize, total_size: u64) {
+    for node in nodes {
+        // Collect carved child ranges to show as greyed out in parent
+        let carved_ranges: Vec<(u64, u64)> = node.children.iter()
+            .filter(|c| matches!(c.kind, RegionKind::Carve))
+            .map(|c| (c.start, c.end))
+            .collect();
+
+        draw_memory_bar(node, depth, total_size, &carved_ranges);
+
+        // Recursively display children
+        if !node.children.is_empty() {
+            display_memory_tree(&node.children, depth + 1, total_size);
+        }
+    }
+}
+
+/// Display physical address space visualization inspired by Figure 3
+fn display_physical_address_space(state: &CliState) {
+    if state.memories.is_empty() {
+        println!("  (no memory allocated)");
+        return;
+    }
+
+    let tree = build_memory_tree(state);
+
+    if tree.is_empty() {
+        println!("  (no memory allocated)");
+        return;
+    }
+
+    // Find total address space size for visualization
+    let max_end = state.memories.values()
+        .map(|m| m.read().data.access.end())
+        .max()
+        .unwrap_or(0);
+
+    println!();
+    println!("  Memory Hierarchy (horizontal bars show address ranges):");
+    println!("  {}", "─".repeat(70));
+
+    display_memory_tree(&tree, 0, max_end);
+
+    println!();
+    println!("  Legend: {} = Carved (exclusive), {} = Aliased (shared), {} = Carved portion in parent",
+        "█".bright_cyan(), "▓".bright_yellow(), "░".bright_cyan());
 }
 
 /// List all domains and memory regions with active core status
@@ -119,6 +306,9 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
             );
         }
     }
+
+    println!("\n{}", "Physical Address Space:".bright_cyan().bold());
+    display_physical_address_space(state);
 
     println!();
     Ok(())

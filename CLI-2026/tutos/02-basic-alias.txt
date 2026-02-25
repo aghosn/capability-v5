@@ -1,0 +1,55 @@
+# Tutorial 2: Memory Aliasing - Shared Access
+# ============================================
+# This tutorial demonstrates aliasing for shared memory regions.
+# Aliasing creates shared references - parent retains access.
+
+@msg ━━━ Tutorial 2: Memory Aliasing ━━━
+@msg
+@msg We'll create shared memory regions using aliasing.
+@msg Unlike carving, aliasing allows both parent and child to access the same memory.
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize root domain with 256MB
+init root 0x10000000
+
+@msg
+@msg ✓ Root domain created with memory 'r0'
+@msg
+
+# Create an alias with full rights
+@msg 📋 Step 2: Create a shared alias with read-write-execute rights
+alias r0 shared1 0x1000 0x10000 RWX
+
+@msg
+@msg ✓ Created 'shared1' - both r0 and shared1 can access [0x1000..0x11000)
+@msg
+
+# Create overlapping alias (should work!)
+@msg 📋 Step 3: Create an overlapping alias (this works with aliasing!)
+alias r0 shared2 0x5000 0x8000 RW
+
+@msg
+@msg ✓ Overlapping aliases are allowed - shared memory can have multiple views
+@msg
+
+# Create alias with reduced rights
+@msg 📋 Step 4: Create a read-only alias for restricted access
+alias r0 readonly 0x20000 0x4000 R
+
+@msg
+@msg ✓ Created read-only view - demonstrates rights attenuation
+@msg
+
+# View everything
+@msg 📋 Step 5: View the memory layout
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Aliasing creates shared memory references
+@msg   • Parent retains access to aliased regions
+@msg   • Aliases can overlap (shared memory can have multiple views)
+@msg   • Rights can be attenuated (e.g., RWX → R)
+@msg   • Useful for shared buffers, virtio rings, etc.
+@msg

@@ -52,6 +52,18 @@ pub fn cmd_reset(state: &mut CliState) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Toggle auto-list mode on or off
+pub fn cmd_toggle_auto_list(state: &mut CliState, _args: &[&str]) -> std::result::Result<(), String> {
+    state.auto_list = !state.auto_list;
+    let status = if state.auto_list { "ON" } else { "OFF" };
+    println!(
+        "{} Auto-list mode: {}",
+        "✓".bright_green().bold(),
+        status.bright_white().bold()
+    );
+    Ok(())
+}
+
 /// Load and execute commands from a file
 pub fn cmd_load(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     if args.is_empty() {

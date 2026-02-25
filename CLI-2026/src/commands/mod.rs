@@ -5,6 +5,7 @@ pub mod memory;
 pub mod info;
 pub mod execution;
 pub mod session_cmd;
+pub mod tutos;
 
 use crate::state::CliState;
 
@@ -40,6 +41,10 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "clear-session" => session_cmd::cmd_clear_session(state),
         "reset" => session_cmd::cmd_reset(state),
         "load" => session_cmd::cmd_load(state, args),
+        "auto-list" => session_cmd::cmd_toggle_auto_list(state, args),
+
+        // Tutorial command
+        "tutos" => tutos::cmd_tutos(state, args),
 
         // Unknown command
         _ => Err(format!("Unknown command: {}", cmd)),

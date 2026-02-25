@@ -1,0 +1,140 @@
+# Tutorial 9: Domain Encapsulation and Communication
+# ===================================================
+# Demonstrates how domains are encapsulated and can only communicate with parent.
+
+@msg ━━━ Tutorial 9: Domain Encapsulation ━━━
+@msg
+@msg This tutorial demonstrates:
+@msg   • How domains are encapsulated (limited communication)
+@msg   • Parent-child communication patterns
+@msg   • Inability to communicate with siblings
+@msg   • Pending capabilities for sealed domains
+@msg
+
+# Initialize
+@msg 📋 Step 1: Initialize root and create domain hierarchy
+init root 0x40000000
+
+@msg
+@msg ✓ Root domain created
+@msg
+
+# Create parent domain with RECEIVE_AFTER_SEAL
+@msg 📋 Step 2: Create parent domain with RECEIVE_AFTER_SEAL permission
+create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,RECEIVE_AFTER_SEAL
+
+@msg
+@msg ✓ Parent can receive capabilities even after sealing
+@msg
+
+# Create two child domains (siblings)
+@msg 📋 Step 3: Create two sibling domains under parent
+create-domain parent child1 0b0011 GET,ATTEST,SWITCH
+create-domain parent child2 0b1100 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created child1 and child2 - they are siblings
+@msg
+
+# Allocate memory for everyone
+@msg 📋 Step 4: Allocate memory to each domain
+carve r0 parent_mem 0x10000000 0x10000000 RWX
+carve parent_mem child1_mem 0x10000000 0x1000000 RWX
+carve parent_mem child2_mem 0x11000000 0x1000000 RWX
+send parent_mem parent
+send child1_mem child1
+send child2_mem child2
+
+@msg
+@msg ✓ Each domain has its own private memory
+@msg
+
+# Seal all domains
+@msg 📋 Step 5: Seal all domains
+seal root
+seal parent
+seal child1
+seal child2
+
+@msg
+@msg ✓ All domains sealed
+@msg
+
+# Demonstrate parent can still receive capabilities
+@msg 📋 Step 6: Root sends new capability to sealed parent
+carve r0 new_mem 0x20000000 0x100000 RW
+send new_mem parent
+
+@msg
+@msg ⏸ Capability sent to parent - it's PENDING (parent is sealed)
+@msg   Parent must explicitly accept it
+@msg
+
+# Check parent's pending capabilities
+@msg 📋 Step 7: Enumerate parent's pending capabilities
+enumerate-pending parent
+
+@msg
+@msg ✓ Parent has 1 pending capability waiting
+@msg
+
+# Accept the capability
+@msg 📋 Step 8: Parent accepts the pending capability
+accept-capability parent 0
+
+@msg
+@msg ✓ Parent accepted and activated the capability
+@msg   MMU mappings updated automatically
+@msg
+
+# Try to send from child1 to child2 (not possible directly)
+@msg 📋 Step 9: Demonstrate child1 cannot send to child2
+@msg   (This would require child1 to have a domain capability for child2)
+@msg
+@msg ⚠️  child1 has no way to reference child2 - they are encapsulated!
+@msg   Siblings cannot directly communicate
+@msg
+
+# Create shared buffer between parent and child1
+@msg 📋 Step 10: Parent creates shared buffer for communication with child1
+alias parent_mem parent_child1_shared 0x12000000 0x10000 RW
+send parent_child1_shared child1
+
+@msg
+@msg ✓ Parent and child1 can communicate via shared buffer
+@msg   child2 has no access to this buffer
+@msg
+
+# View address spaces
+@msg 📋 Step 11: View each domain's address space
+view parent
+view child1
+view child2
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Domains are encapsulated by default
+@msg   • Domains can only communicate with their parent
+@msg   • Siblings cannot directly communicate (no capability exchange)
+@msg   • RECEIVE_AFTER_SEAL + pending capabilities enable controlled updates
+@msg   • Shared buffers (aliased memory) enable parent-child communication
+@msg   • Child has no way to reference siblings without parent mediation
+@msg
+@msg 💡 Communication Patterns:
+@msg
+@msg   Valid:
+@msg   ┌──────┐
+@msg   │ Root │ ──────► Can send to Parent
+@msg   └───┬──┘
+@msg       │
+@msg   ┌───▼────┐
+@msg   │ Parent │ ──────► Can send to Child1 or Child2
+@msg   └───┬────┘
+@msg       │
+@msg   ┌───▼────┐  ✗  ┌────────┐
+@msg   │ Child1 │ ───X──► Child2 │ ← Siblings cannot communicate
+@msg   └────────┘     └────────┘
+@msg
+@msg   Communication must go through parent:
+@msg   Child1 → shared_buffer ← Parent → shared_buffer ← Child2
+@msg
