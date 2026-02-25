@@ -176,6 +176,15 @@ impl Capability<MemoryRegion> {
     ) -> Result<CapabilityRef<MemoryRegion>> {
         let parent = parent_ref.read();
 
+        // Check if the requested range overlaps with any existing carved children
+        // Aliasing is not allowed to overlap with carved regions
+        for child_ref in &parent.children {
+            let child = child_ref.read();
+            if child.data.kind == RegionKind::Carve && access.overlaps(&child.data.access) {
+                return Err(CapaError::InvalidAccess);
+            }
+        }
+
         // Create aliased region from parent
         let child_region = parent.data.alias(access)?;
 
@@ -204,6 +213,15 @@ impl Capability<MemoryRegion> {
         handle: LocalHandle,
     ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
         let parent = parent_ref.read();
+
+        // Check if the requested range overlaps with any existing carved children
+        // Carving is not allowed to overlap with existing carved regions
+        for child_ref in &parent.children {
+            let child = child_ref.read();
+            if child.data.kind == RegionKind::Carve && access.overlaps(&child.data.access) {
+                return Err(CapaError::InvalidAccess);
+            }
+        }
 
         // Create carved region from parent
         let child_region = parent.data.carve(access)?;
@@ -418,12 +436,14 @@ impl Capability<MemoryRegion> {
     /// Compute the current view of memory (considering carved children)
     pub fn compute_view(&self) -> Vec<Access> {
         let mut view = vec![self.data.access];
+        let parent_owner = self.owned.owner;
 
-        // Subtract carved children from the view
+        // Subtract carved children that were sent to different domains
+        // If a carved child is still owned by the same domain, it's still accessible
         for child_ref in &self.children {
             let child = child_ref.read();
-            if child.data.kind == RegionKind::Carve {
-                // Remove the carved region from the view
+            if child.data.kind == RegionKind::Carve && child.owned.owner != parent_owner {
+                // Child was sent to another domain - remove from parent's view
                 view = subtract_region(&view, &child.data.access);
             }
         }

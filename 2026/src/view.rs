@@ -143,6 +143,8 @@ pub fn compute_address_space(domain_ref: &CapabilityRef<Domain>) -> AddressSpace
 }
 
 /// Compute view from explicitly provided memory capabilities
+/// This function trusts that the caller has provided the correct set of capabilities
+/// for the domain, so it doesn't filter by ownership
 pub fn compute_view_from_capabilities(
     domain_id: u64,
     memory_caps: &[CapabilityRef<MemoryRegion>],
@@ -150,22 +152,51 @@ pub fn compute_view_from_capabilities(
     let mut view = AddressSpaceView::new(domain_id);
 
     for mem_ref in memory_caps {
-        add_capability_to_view(&mut view, mem_ref);
+        add_capability_to_view_no_filter(&mut view, mem_ref);
     }
 
     view.coalesce();
     view
 }
 
+/// Add capability to view without ownership filtering
+/// Used when the caller explicitly provides the capabilities to include
+fn add_capability_to_view_no_filter(view: &mut AddressSpaceView, mem_ref: &CapabilityRef<MemoryRegion>) {
+    let mem = mem_ref.read();
+
+    // Use compute_view() to get the actual accessible regions
+    // This subtracts carved children that were sent to other domains
+    let accessible_regions = mem.compute_view();
+    for access in accessible_regions {
+        let region = ViewRegion::new(access);
+        view.add_region(region);
+    }
+
+    // Process children
+    for child_ref in &mem.children {
+        add_capability_to_view_no_filter(view, child_ref);
+    }
+}
+
 /// Recursively add a memory capability and its accessible children to the view
 fn add_capability_to_view(view: &mut AddressSpaceView, mem_ref: &CapabilityRef<MemoryRegion>) {
     let mem = mem_ref.read();
 
-    // Add this region
-    let region = ViewRegion::new(mem.data.access);
-    view.add_region(region);
+    // IMPORTANT: Only add regions that are actually accessible by this domain
+    // For carved children sent to other domains, they should NOT appear in the parent's view
 
-    // Process children
+    // Check if this capability is owned by the domain we're viewing
+    if mem.owned.owner == view.domain_id {
+        // Use compute_view() to get the actual accessible regions
+        // This subtracts carved children that were sent to other domains
+        let accessible_regions = mem.compute_view();
+        for access in accessible_regions {
+            let region = ViewRegion::new(access);
+            view.add_region(region);
+        }
+    }
+
+    // Process children - they may be owned by this domain even if parent isn't
     for child_ref in &mem.children {
         add_capability_to_view(view, child_ref);
     }

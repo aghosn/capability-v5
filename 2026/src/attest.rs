@@ -71,6 +71,56 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
         report.push_str("Parent: None (root domain)\n");
     }
 
+    // List owned domain capabilities
+    report.push_str("\nOwned Domain Capabilities:\n");
+    if domain.data.domain_capabilities.is_empty() {
+        report.push_str("  (none)\n");
+    } else {
+        for (handle, weak_ref) in &domain.data.domain_capabilities {
+            if let Some(child_domain_ref) = weak_ref.upgrade() {
+                let child = child_domain_ref.read();
+                report.push_str(&format!(
+                    "  Handle {}: Domain {} (status: {:?})\n",
+                    handle, child.data.id, child.data.status
+                ));
+            }
+        }
+    }
+
+    // List owned memory capabilities with their children
+    report.push_str("\nOwned Memory Capabilities:\n");
+    if domain.data.memory_capabilities.is_empty() {
+        report.push_str("  (none)\n");
+    } else {
+        for (handle, weak_ref) in &domain.data.memory_capabilities {
+            if let Some(mem_ref) = weak_ref.upgrade() {
+                let mem = mem_ref.read();
+                report.push_str(&format!(
+                    "  Handle {}: {} (kind: {:?}, attrs: {})\n",
+                    handle, mem.data.access, mem.data.kind, mem.owned.attributes
+                ));
+
+                // Show direct children
+                if !mem.children.is_empty() {
+                    for child_ref in &mem.children {
+                        let child = child_ref.read();
+                        let operation = match child.data.kind {
+                            crate::memory::RegionKind::Carve => "carved",
+                            crate::memory::RegionKind::Alias => "aliased",
+                        };
+                        report.push_str(&format!(
+                            "    | {} at {:#x} size {:#x} {}\n",
+                            operation,
+                            child.data.access.start,
+                            child.data.access.size,
+                            child.data.access.rights
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     AttestationReport::new(domain.data.id, report)
 }
 
