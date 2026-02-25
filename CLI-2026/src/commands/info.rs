@@ -64,6 +64,7 @@ struct MemoryNode {
     start: u64,
     end: u64,
     kind: RegionKind,
+    status: RegionStatus,
     children: Vec<MemoryNode>,
     owner_name: String,
 }
@@ -135,6 +136,7 @@ fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
             start: m.data.access.start,
             end: m.data.access.end(),
             kind: m.data.kind.clone(),
+            status: m.data.status,
             children: children_nodes,
             owner_name,
         })
@@ -165,10 +167,12 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
     let bar_end = addr_to_bar_pos(node.end, total_size, bar_width);
     let bar_size = (bar_end - bar_start).max(1);
 
-    // Choose color based on kind
-    let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = match node.kind {
-        RegionKind::Carve => ('█', |s| s.bright_cyan()),
-        RegionKind::Alias => ('▓', |s| s.bright_yellow()),
+    // Choose color based on kind and status:
+    //   Carve + Exclusive => cyan, Carve + Aliased (carved from alias) => green, Alias => yellow
+    let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = match (node.kind, node.status) {
+        (RegionKind::Carve, RegionStatus::Exclusive) => ('█', |s| s.bright_cyan()),
+        (RegionKind::Carve, RegionStatus::Aliased)   => ('█', |s| s.bright_green()),
+        (RegionKind::Alias, _)                       => ('▓', |s| s.bright_yellow()),
     };
 
     // Print name without indentation - no hierarchy in the visual
@@ -198,8 +202,9 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
     }
 
     // Show address range and owner
-    println!("  {} [0x{:x}..0x{:x}) owner:{}",
+    println!("  {} {} [0x{:x}..0x{:x}) owner:{}",
         format!("{:?}", node.kind).bright_black(),
+        format!("{:?}", node.status).bright_black(),
         node.start, node.end, node.owner_name.bright_magenta());
 }
 
@@ -249,8 +254,8 @@ fn display_physical_address_space(state: &CliState) {
     display_memory_tree(&tree, 0, max_end);
 
     println!();
-    println!("  Legend: {} = Carved (exclusive), {} = Aliased (shared), {} = Carved portion in parent",
-        "█".bright_cyan(), "▓".bright_yellow(), "░".bright_cyan());
+    println!("  Legend: {} = Carved (exclusive), {} = Carved (from alias), {} = Aliased, {} = Carved portion in parent",
+        "█".bright_cyan(), "█".bright_green(), "▓".bright_yellow(), "░".bright_cyan());
 }
 
 /// List all domains and memory regions with active core status
