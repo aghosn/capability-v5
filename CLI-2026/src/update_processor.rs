@@ -3,8 +3,26 @@
 use capability_engine::*;
 use colored::*;
 use std::collections::HashSet;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use crate::state::CliState;
+
+/// Walk up the parent chain of a domain capability and return the ID of the
+/// first ancestor that is NOT in `revoked_domains`. Returns `None` if there
+/// is no such ancestor (i.e. the root itself was revoked).
+fn find_non_revoked_ancestor(
+    domain_ref: &Arc<RwLock<Capability<Domain>>>,
+    revoked_domains: &HashSet<u64>,
+) -> Option<u64> {
+    let parent = domain_ref.read().get_parent()?;
+    let parent_id = parent.read().data.id;
+    if revoked_domains.contains(&parent_id) {
+        find_non_revoked_ancestor(&parent, revoked_domains)
+    } else {
+        Some(parent_id)
+    }
+}
 
 /// Process an UpdateBatch returned from a capability operation
 pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
@@ -28,7 +46,56 @@ pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
         }
     }
 
-    // Second pass: remove revoked domains and their owned capabilities
+    // Second pass: update cores that were running a revoked domain
+    if !revoked_domains.is_empty() {
+        let num_cores = state.num_cores as u64;
+        for core_id in 0..num_cores {
+            if let Ok(core_ref) = state.switch_manager.get_core(core_id) {
+                if let Some(running_id) = core_ref.current_domain() {
+                    if revoked_domains.contains(&running_id) {
+                        // Walk up the parent chain to find the first non-revoked ancestor.
+                        let domain_arc = state
+                            .get_domain_name(running_id)
+                            .and_then(|n| state.domains.get(n))
+                            .cloned();
+
+                        let new_state = if let Some(arc) = domain_arc {
+                            match find_non_revoked_ancestor(&arc, &revoked_domains) {
+                                Some(ancestor_id) => {
+                                    let name = state
+                                        .get_domain_name(ancestor_id)
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    println!(
+                                        "    {} Core {} domain revoked, returning to ancestor '{}' (ID: {})",
+                                        "→".bright_blue(),
+                                        core_id,
+                                        name.bright_white(),
+                                        ancestor_id
+                                    );
+                                    CoreState::Running(ancestor_id)
+                                }
+                                None => {
+                                    println!(
+                                        "    {} Core {} domain revoked with no surviving ancestor, core is now idle",
+                                        "→".bright_blue(),
+                                        core_id
+                                    );
+                                    CoreState::Idle
+                                }
+                            }
+                        } else {
+                            CoreState::Idle
+                        };
+
+                        *core_ref.state.write() = new_state;
+                    }
+                }
+            }
+        }
+    }
+
+    // Third pass: remove revoked domains and their owned capabilities
     if !revoked_domains.is_empty() {
         println!(
             "{}Processing {} domain revocation(s)...",
