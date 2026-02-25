@@ -1,4 +1,4 @@
-load test_commands.txt
+load examples/test_commands.txt
 list
 reset
 list

@@ -24,7 +24,6 @@ carve r0 parent_mem 0x100000 0x50000 RWX
 carve parent_mem child_mem 0x100000 0x10000 RWX
 send parent_mem parent
 send child_mem child
-seal root
 seal parent
 seal child
 

@@ -1,6 +1,6 @@
 init root 0x10000
-carve root_mem r1 0x1000 0x1000 RWX
-create-domain root_domain d1 0b1111 SWITCH_TO
+carve r0 r1 0x1000 0x1000 RWX
+create-domain root d1 0b1111 SWITCH
 send r1 d1
-view root_domain
+view root
 list

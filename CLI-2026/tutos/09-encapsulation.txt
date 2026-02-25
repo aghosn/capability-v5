@@ -37,21 +37,23 @@ create-domain parent child2 0b1100 GET,ATTEST,SWITCH
 @msg
 
 # Allocate memory for everyone
-@msg 📋 Step 4: Allocate memory to each domain
+@msg 📋 Step 4: Allocate memory to each domain, including a shared buffer for parent ↔ child1
 carve r0 parent_mem 0x10000000 0x10000000 RWX
 carve parent_mem child1_mem 0x10000000 0x1000000 RWX
 carve parent_mem child2_mem 0x11000000 0x1000000 RWX
+alias parent_mem parent_child1_shared 0x12000000 0x10000 RW
 send parent_mem parent
 send child1_mem child1
+send parent_child1_shared child1
 send child2_mem child2
 
 @msg
 @msg ✓ Each domain has its own private memory
+@msg ✓ parent and child1 share a communication buffer (sent before sealing)
 @msg
 
 # Seal all domains
 @msg 📋 Step 5: Seal all domains
-seal root
 seal parent
 seal child1
 seal child2
@@ -93,20 +95,11 @@ accept-capability parent 0
 @msg
 @msg ⚠️  child1 has no way to reference child2 - they are encapsulated!
 @msg   Siblings cannot directly communicate
-@msg
-
-# Create shared buffer between parent and child1
-@msg 📋 Step 10: Parent creates shared buffer for communication with child1
-alias parent_mem parent_child1_shared 0x12000000 0x10000 RW
-send parent_child1_shared child1
-
-@msg
-@msg ✓ Parent and child1 can communicate via shared buffer
-@msg   child2 has no access to this buffer
+@msg   Communication must be brokered through the parent via shared buffers.
 @msg
 
 # View address spaces
-@msg 📋 Step 11: View each domain's address space
+@msg 📋 Step 10: View each domain's address space
 view parent
 view child1
 view child2

@@ -88,7 +88,6 @@ send enclave_shared enclave1
 
 # Seal everything
 @msg 📋 Step 10: Seal all domains
-seal hypervisor
 seal cvm1
 seal enclave1
 

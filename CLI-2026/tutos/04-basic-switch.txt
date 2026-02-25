@@ -33,7 +33,6 @@ send app2_mem app2
 
 # Seal the domains
 @msg 📋 Step 3: Seal domains (make them ready for execution)
-seal root
 seal app1
 seal app2
 

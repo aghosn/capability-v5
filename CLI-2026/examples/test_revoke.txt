@@ -1,11 +1,10 @@
 init root 0x10000
-create-domain root_domain d1 0b1111 SWITCH
+create-domain root d1 0b1111 SWITCH
+carve r0 r1 0x1000 0x1000 RWX
+carve r0 r2 0x2000 0x1000 RWX
+send r1 d1 CLEAN|VITAL
+send r2 d1 CLEAN|VITAL
 seal d1
-carve root_mem r1_aliased 0x1000 0x1000 RWX
-carve root_mem r2_aliased 0x2000 0x1000 RWX
-send r1_aliased d1 CLEAN|VITAL
-send r2_aliased d1 CLEAN|VITAL
 list
-revoke root_domain d1
+revoke root d1
 list
-exit
