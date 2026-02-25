@@ -3,6 +3,7 @@
 use capability_engine::*;
 use colored::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::session::Command;
 use crate::state::CliState;
@@ -93,10 +94,11 @@ fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
 
             // Check if child is within parent's range and is actually a child
             if child_start >= parent_start && child_end <= parent_end && p.children.len() > 0 {
-                // Verify it's actually in the children list by checking if any child overlaps
+                // Verify by Arc pointer identity to avoid false matches when two regions
+                // share the same address range (e.g., a carve and an alias at identical ranges)
+                let child_ptr = Arc::as_ptr(child_mem);
                 let is_child = p.children.iter().any(|child_ref| {
-                    let cr = child_ref.read();
-                    cr.data.access.start == c.data.access.start && cr.data.access.end() == c.data.access.end()
+                    Arc::as_ptr(child_ref) == child_ptr
                 });
 
                 if is_child {
