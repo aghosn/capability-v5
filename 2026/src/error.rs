@@ -41,6 +41,9 @@ pub enum CapaError {
     /// Monotonicity violation (child exceeds parent permissions)
     MonotonicityViolation,
 
+    /// Operation not allowed by domain's MonitorAPI
+    ApiNotAllowed,
+
     /// Capability tree is locked (concurrent access)
     TreeLocked,
 
@@ -63,6 +66,9 @@ impl fmt::Display for CapaError {
             CapaError::AlreadyExists => write!(f, "Resource already exists"),
             CapaError::MonotonicityViolation => {
                 write!(f, "Monotonicity violation: child exceeds parent permissions")
+            }
+            CapaError::ApiNotAllowed => {
+                write!(f, "Operation not allowed by domain's MonitorAPI")
             }
             CapaError::TreeLocked => write!(f, "Capability tree is locked"),
             CapaError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),

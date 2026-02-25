@@ -1,6 +1,6 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy};
+use crate::domain::{Domain, DomainPolicy, MonitorAPI};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
 use crate::update::{DomainId, UpdateBatch};
@@ -28,6 +28,8 @@ pub struct Ownership {
     pub handle: LocalHandle,
     /// Security attributes for this ownership
     pub attributes: Attributes,
+    /// Weak reference to the owning domain capability (for sealed/API validation)
+    pub owner_domain: Option<CapabilityWeak<Domain>>,
 }
 
 impl Ownership {
@@ -36,6 +38,7 @@ impl Ownership {
             owner,
             handle,
             attributes: Attributes::NONE,
+            owner_domain: None,
         }
     }
 
@@ -44,7 +47,30 @@ impl Ownership {
             owner,
             handle,
             attributes,
+            owner_domain: None,
         }
+    }
+
+    /// Set the owning domain reference
+    pub fn set_owner_domain(&mut self, domain: CapabilityWeak<Domain>) {
+        self.owner_domain = Some(domain);
+    }
+
+    /// Validate that the owning domain is sealed and allows the given API operation.
+    /// If no owner domain is set (e.g., standalone test capabilities), the check is skipped.
+    pub fn validate_operation(&self, required_api: u16) -> Result<()> {
+        if let Some(ref weak_domain) = self.owner_domain {
+            let domain_ref = weak_domain.upgrade()
+                .ok_or(CapaError::PermissionDenied)?;
+            let domain = domain_ref.read();
+            if !domain.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            if !domain.data.policy.api.has(required_api) {
+                return Err(CapaError::ApiNotAllowed);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -176,6 +202,9 @@ impl Capability<MemoryRegion> {
     ) -> Result<CapabilityRef<MemoryRegion>> {
         let parent = parent_ref.read();
 
+        // Validate owner domain is sealed and has ALIAS permission
+        parent.owned.validate_operation(MonitorAPI::ALIAS)?;
+
         // Check if the requested range overlaps with any existing carved children
         // Aliasing is not allowed to overlap with carved regions
         for child_ref in &parent.children {
@@ -213,6 +242,9 @@ impl Capability<MemoryRegion> {
         handle: LocalHandle,
     ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
         let parent = parent_ref.read();
+
+        // Validate owner domain is sealed and has CARVE permission
+        parent.owned.validate_operation(MonitorAPI::CARVE)?;
 
         // Check if the requested range overlaps with any existing children.
         // Carving is not allowed to overlap with carved regions (exclusivity) or
@@ -266,6 +298,9 @@ impl Capability<MemoryRegion> {
     ) -> Result<UpdateBatch> {
         let mut capa = capa_ref.write();
 
+        // Validate owner domain is sealed and has SEND permission
+        capa.owned.validate_operation(MonitorAPI::SEND)?;
+
         let old_owner = capa.owned.owner;
 
         // Check if old owner retains access via parent capability
@@ -279,6 +314,9 @@ impl Capability<MemoryRegion> {
         capa.owned.owner = new_owner;
         capa.owned.handle = new_handle;
         capa.owned.attributes = attributes;
+        // Clear owner_domain since the capability now belongs to a new domain;
+        // the caller is responsible for setting the new owner_domain reference.
+        capa.owned.owner_domain = None;
 
         // Create updates
         let mut updates = UpdateBatch::new();
@@ -324,6 +362,9 @@ impl Capability<MemoryRegion> {
     ) -> Result<UpdateBatch> {
         let mut parent = parent_ref.write();
 
+        // Validate owner domain is sealed and has REVOKE permission
+        parent.owned.validate_operation(MonitorAPI::REVOKE)?;
+
         // Find and remove child by Arc pointer equality
         let child_arc_ptr = Arc::as_ptr(child_ref);
         let pos = parent
@@ -353,6 +394,9 @@ impl Capability<MemoryRegion> {
         child_handle: LocalHandle,
     ) -> Result<UpdateBatch> {
         let mut parent = parent_ref.write();
+
+        // Validate owner domain is sealed and has REVOKE permission
+        parent.owned.validate_operation(MonitorAPI::REVOKE)?;
 
         // Remove child from parent's children list
         let child_ref = parent
@@ -517,6 +561,9 @@ impl Capability<Domain> {
     ) -> Result<CapabilityRef<Domain>> {
         let parent = parent_ref.read();
 
+        // Validate owner domain is sealed and has CREATE permission
+        parent.owned.validate_operation(MonitorAPI::CREATE)?;
+
         // Validate child policy is subset of parent
         policy.is_subset_of(&parent.data.policy)?;
 
@@ -546,6 +593,9 @@ impl Capability<Domain> {
         child_handle: LocalHandle,
     ) -> Result<UpdateBatch> {
         let mut parent = parent_ref.write();
+
+        // Validate owner domain is sealed and has REVOKE permission
+        parent.owned.validate_operation(MonitorAPI::REVOKE)?;
 
         // Remove child from parent's children list
         let child_ref = parent
