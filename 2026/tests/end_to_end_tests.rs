@@ -20,7 +20,7 @@ use std::thread;
 #[test]
 fn test_cvm_with_exclusive_and_shared_memory() {
     // Setup: Root domain and memory
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     // Total memory: 1GB
@@ -108,7 +108,7 @@ fn test_cvm_with_exclusive_and_shared_memory() {
 #[test]
 fn test_enclave_inside_cvm() {
     // Setup root
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let total_mem = MemoryRegion::new_root(0x0, 0x40000000);
@@ -177,7 +177,7 @@ fn test_enclave_inside_cvm() {
 #[test]
 fn test_sandbox_inside_cvm() {
     // Setup root
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let total_mem = MemoryRegion::new_root(0x0, 0x40000000);
@@ -248,7 +248,7 @@ fn test_sandbox_inside_cvm() {
 #[test]
 fn test_two_cvms_with_shared_memory() {
     // Setup root
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let total_mem = MemoryRegion::new_root(0x0, 0x80000000); // 2GB
@@ -358,7 +358,7 @@ fn test_two_cvms_with_shared_memory() {
 #[test]
 fn test_complex_hierarchy_with_updates() {
     // Root -> CVM -> Enclave -> Nested sandbox
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let total_mem = MemoryRegion::new_root(0x0, 0x10000000); // 256MB

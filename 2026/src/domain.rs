@@ -229,9 +229,16 @@ pub struct DomainPolicy {
 
 impl DomainPolicy {
     /// Create a default policy with all permissions
-    pub fn new_root() -> Self {
+    pub fn new_root(num_cores: usize) -> Self {
+        // Create a bitmask for the specified number of cores
+        let cores = if num_cores >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << num_cores) - 1
+        };
+
         DomainPolicy {
-            cores: u64::MAX, // All cores
+            cores,
             api: MonitorAPI::ALL, // ALL includes RECEIVE_AFTER_SEAL
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
             vprocessor_states: Vec::new(),
@@ -306,11 +313,11 @@ impl Domain {
     }
 
     /// Create the root domain
-    pub fn new_root() -> Self {
+    pub fn new_root(num_cores: usize) -> Self {
         Domain {
             id: 0,
             status: DomainStatus::Sealed,
-            policy: DomainPolicy::new_root(),
+            policy: DomainPolicy::new_root(num_cores),
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
         }

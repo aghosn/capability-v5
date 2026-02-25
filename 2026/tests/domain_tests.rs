@@ -6,7 +6,7 @@ use capability_engine::*;
 
 #[test]
 fn test_domain_creation() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     assert_eq!(domain.status, DomainStatus::Unsealed);
     assert!(!domain.is_sealed());
@@ -14,7 +14,7 @@ fn test_domain_creation() {
 
 #[test]
 fn test_domain_seal() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     assert!(domain.seal().is_ok());
     assert!(domain.is_sealed());
@@ -22,7 +22,7 @@ fn test_domain_seal() {
 
 #[test]
 fn test_cannot_seal_twice() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     assert!(domain.seal().is_ok());
 
@@ -33,7 +33,7 @@ fn test_cannot_seal_twice() {
 
 #[test]
 fn test_root_domain_is_sealed() {
-    let domain = Domain::new_root();
+    let domain = Domain::new_root(4);
     assert_eq!(domain.id, 0);
     assert!(domain.is_sealed());
     assert_eq!(domain.status, DomainStatus::Sealed);
@@ -65,7 +65,7 @@ fn test_api_subset_none_is_subset_of_all() {
 
 #[test]
 fn test_policy_subset() {
-    let parent = DomainPolicy::new_root();
+    let parent = DomainPolicy::new_root(4);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     assert!(child.is_subset_of(&parent).is_ok());
 }
@@ -95,7 +95,7 @@ fn test_policy_not_subset_api() {
 
 #[test]
 fn test_domain_revocation() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     domain.seal().unwrap();
 
@@ -145,7 +145,7 @@ fn test_vprocessor_state_creation() {
 
 #[test]
 fn test_add_vprocessor_state() {
-    let mut policy = DomainPolicy::new_root();
+    let mut policy = DomainPolicy::new_root(4);
     assert_eq!(policy.vprocessor_states.len(), 0);
 
     let vproc = VProcessorState::new(1);
@@ -159,7 +159,7 @@ fn test_add_vprocessor_state() {
 
 #[test]
 fn test_domain_id_generation() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let domain1 = Domain::new(policy.clone());
     let domain2 = Domain::new(policy.clone());
 
@@ -170,7 +170,7 @@ fn test_domain_id_generation() {
 
 #[test]
 fn test_root_domain_has_id_zero() {
-    let root = Domain::new_root();
+    let root = Domain::new_root(4);
     assert_eq!(root.id, 0);
 }
 
@@ -192,7 +192,7 @@ fn test_policy_with_limited_cores_and_api() {
 
 #[test]
 fn test_complex_policy_hierarchy() {
-    let root_policy = DomainPolicy::new_root();
+    let root_policy = DomainPolicy::new_root(4);
 
     let level1_api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST);
     let level1_policy = DomainPolicy::new_restricted(
@@ -250,7 +250,7 @@ fn test_domain_with_custom_interrupt_policy() {
 
 #[test]
 fn test_policy_subset_all_cores() {
-    let parent = DomainPolicy::new_root(); // All cores
+    let parent = DomainPolicy::new_root(4); // All cores
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
 
     // Child with 4 cores should be subset of parent with all cores
@@ -259,7 +259,7 @@ fn test_policy_subset_all_cores() {
 
 #[test]
 fn test_receive_after_seal_flag() {
-    let root_policy = DomainPolicy::new_root();
+    let root_policy = DomainPolicy::new_root(4);
     assert!(root_policy.receive_after_seal());
 
     let restricted_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
@@ -303,7 +303,7 @@ fn test_receive_after_seal_subset_check() {
 
 #[test]
 fn test_receive_after_seal_monotonicity() {
-    let parent = DomainPolicy::new_root(); // Has RECEIVE_AFTER_SEAL
+    let parent = DomainPolicy::new_root(4); // Has RECEIVE_AFTER_SEAL
     let child_without = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
 
     // Child without should be subset of parent with
@@ -332,7 +332,7 @@ fn test_receive_after_seal_explicit_grant() {
 #[test]
 fn test_receive_after_seal_default_values() {
     // Root should have it by default (ALL includes it)
-    let root = Domain::new_root();
+    let root = Domain::new_root(4);
     assert!(root.policy.receive_after_seal());
 
     // Restricted domain should not have it unless explicitly granted

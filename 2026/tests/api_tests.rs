@@ -89,7 +89,7 @@ fn test_instance_method_nested_carve() {
 
 #[test]
 fn test_domain_instance_method_create_child() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     // Using the new instance method API (owner inferred from parent)
@@ -104,7 +104,7 @@ fn test_domain_instance_method_create_child() {
 
 #[test]
 fn test_domain_instance_method_revoke_child() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);

@@ -1,0 +1,11 @@
+init root 0x10000
+create-domain root_domain d1 0b1111 SWITCH
+seal d1
+carve root_mem r1 0x1000 0x1000 RWX
+list
+view root_domain
+send r1 d1
+list
+view root_domain
+view d1
+exit

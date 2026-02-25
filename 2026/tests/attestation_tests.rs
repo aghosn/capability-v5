@@ -4,7 +4,7 @@ use capability_engine::*;
 
 #[test]
 fn test_attest_domain() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
 
@@ -15,11 +15,11 @@ fn test_attest_domain() {
 
 #[test]
 fn test_enumerate_tree() {
-    let root_policy = DomainPolicy::new_root();
+    let root_policy = DomainPolicy::new_root(4);
     let root_domain = Domain::new(root_policy);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
-    let child_policy = DomainPolicy::new_root();
+    let child_policy = DomainPolicy::new_root(4);
     let child_domain = Domain::new(child_policy);
     let child_ref = Capability::new_child(1, 1, child_domain, std::sync::Arc::downgrade(&root_ref));
     root_ref.write().add_child(child_ref);
@@ -30,7 +30,7 @@ fn test_enumerate_tree() {
 
 #[test]
 fn test_attest_with_signature() {
-    let policy = DomainPolicy::new_root();
+    let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
 
@@ -55,23 +55,23 @@ fn test_attest_memory_region() {
 
 #[test]
 fn test_enumerate_tree_with_multiple_levels() {
-    let root_policy = DomainPolicy::new_root();
+    let root_policy = DomainPolicy::new_root(4);
     let root_domain = Domain::new(root_policy);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
     // Create first level children
-    let child1_policy = DomainPolicy::new_root();
+    let child1_policy = DomainPolicy::new_root(4);
     let child1_domain = Domain::new(child1_policy);
     let child1_ref = Capability::new_child(1, 1, child1_domain, std::sync::Arc::downgrade(&root_ref));
     root_ref.write().add_child(child1_ref.clone());
 
-    let child2_policy = DomainPolicy::new_root();
+    let child2_policy = DomainPolicy::new_root(4);
     let child2_domain = Domain::new(child2_policy);
     let child2_ref = Capability::new_child(2, 2, child2_domain, std::sync::Arc::downgrade(&root_ref));
     root_ref.write().add_child(child2_ref);
 
     // Create second level child under child1
-    let grandchild_policy = DomainPolicy::new_root();
+    let grandchild_policy = DomainPolicy::new_root(4);
     let grandchild_domain = Domain::new(grandchild_policy);
     let grandchild_ref = Capability::new_child(3, 3, grandchild_domain, std::sync::Arc::downgrade(&child1_ref));
     child1_ref.write().add_child(grandchild_ref);

@@ -13,7 +13,7 @@ fn test_complex_memory_update_scenario() {
     // ================================================================
     println!("\n=== Initial Setup ===");
 
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let dom0 = Capability::new_root(0, 0, root_domain);
 
     let root_region = MemoryRegion::new_root(0x0, 0x10000);

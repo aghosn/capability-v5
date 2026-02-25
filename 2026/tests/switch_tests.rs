@@ -18,7 +18,7 @@ fn test_core_context() {
 fn test_core_can_run_domain() {
     let ctx = CoreContext::new(2); // Core 2
 
-    let mut policy = DomainPolicy::new_root();
+    let mut policy = DomainPolicy::new_root(4);
     policy.cores = 0b0100; // Only core 2
     let domain = Domain::new(policy);
 
@@ -29,7 +29,7 @@ fn test_core_can_run_domain() {
 fn test_core_cannot_run_domain() {
     let ctx = CoreContext::new(3); // Core 3
 
-    let mut policy = DomainPolicy::new_root();
+    let mut policy = DomainPolicy::new_root(4);
     policy.cores = 0b0011; // Only cores 0 and 1
     let domain = Domain::new(policy);
 
@@ -65,7 +65,7 @@ fn test_domain_switch() {
     let mgr = SwitchManager::new(1);
 
     // Use new_root() to get domain ID 0
-    let parent_domain = Domain::new_root();
+    let parent_domain = Domain::new_root(4);
     let parent = Capability::new_root(0, 0, parent_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
@@ -94,7 +94,7 @@ fn test_domain_switch() {
 fn test_switch_to_unsealed_fails() {
     let mgr = SwitchManager::new(1);
 
-    let parent_domain = Domain::new_root();
+    let parent_domain = Domain::new_root(4);
     let parent = Capability::new_root(0, 0, parent_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
@@ -118,7 +118,7 @@ fn test_switch_to_unsealed_fails() {
 fn test_switch_without_permission_fails() {
     let mgr = SwitchManager::new(2);
 
-    let parent_domain = Domain::new_root();
+    let parent_domain = Domain::new_root(4);
     let parent = Capability::new_root(0, 0, parent_domain);
 
     // Child can only run on core 0
@@ -144,7 +144,7 @@ fn test_switch_without_permission_fails() {
 fn test_switch_not_running_fails() {
     let mgr = SwitchManager::new(1);
 
-    let parent_domain = Domain::new_root();
+    let parent_domain = Domain::new_root(4);
     let parent = Capability::new_root(0, 0, parent_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
@@ -165,7 +165,7 @@ fn test_switch_not_running_fails() {
 fn test_return_to_parent() {
     let mgr = SwitchManager::new(1);
 
-    let parent_domain = Domain::new_root();
+    let parent_domain = Domain::new_root(4);
     let parent = Capability::new_root(0, 0, parent_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
@@ -201,7 +201,7 @@ fn test_interrupt_delivery_to_domain() {
     let mgr = SwitchManager::new(1);
 
     // Domain configured to deliver vector 32
-    let mut policy = DomainPolicy::new_root();
+    let mut policy = DomainPolicy::new_root(4);
     policy.interrupts.set_policy(32, VectorPolicy::default_deliver());
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -217,13 +217,13 @@ fn test_interrupt_report_to_parent() {
     let mgr = SwitchManager::new(1);
 
     // Parent delivers vector 32
-    let mut parent_policy = DomainPolicy::new_root();
+    let mut parent_policy = DomainPolicy::new_root(4);
     parent_policy.interrupts.set_policy(32, VectorPolicy::default_deliver());
     let parent_domain = Domain::new(parent_policy);
     let parent_ref = Capability::new_root(0, 0, parent_domain);
 
     // Child reports vector 32
-    let mut child_policy = DomainPolicy::new_root();
+    let mut child_policy = DomainPolicy::new_root(4);
     child_policy.interrupts.set_policy(32, VectorPolicy::default_report());
     let child_domain = Domain::new(child_policy);
     let child_ref = Capability::new_child(1, 1, child_domain, Arc::downgrade(&parent_ref));
@@ -244,7 +244,7 @@ fn test_interrupt_no_handler() {
     let mgr = SwitchManager::new(1);
 
     // Domain configured to NOT report and NOT deliver (essentially ignores)
-    let mut policy = DomainPolicy::new_root();
+    let mut policy = DomainPolicy::new_root(4);
     policy.interrupts.default = VectorPolicy {
         visibility: InterruptVisibility::NotReport,
         read_set: 0,
@@ -266,13 +266,13 @@ fn test_resume_after_interrupt() {
     let mgr = SwitchManager::new(1);
 
     // Parent delivers
-    let mut parent_policy = DomainPolicy::new_root();
+    let mut parent_policy = DomainPolicy::new_root(4);
     parent_policy.interrupts.set_policy(32, VectorPolicy::default_deliver());
     let parent_domain = Domain::new(parent_policy);
     let parent_ref = Capability::new_root(0, 0, parent_domain);
 
     // Child reports
-    let mut child_policy = DomainPolicy::new_root();
+    let mut child_policy = DomainPolicy::new_root(4);
     child_policy.interrupts.set_policy(32, VectorPolicy::default_report());
     let child_domain = Domain::new(child_policy);
     let child_ref = Capability::new_child(1, 1, child_domain, Arc::downgrade(&parent_ref));
@@ -294,20 +294,20 @@ fn test_multi_level_interrupt_routing() {
     let mgr = SwitchManager::new(1);
 
     // Root delivers
-    let mut root_policy = DomainPolicy::new_root();
+    let mut root_policy = DomainPolicy::new_root(4);
     root_policy.interrupts.set_policy(40, VectorPolicy::default_deliver());
     let root_domain = Domain::new(root_policy);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
     // Level 1 reports
-    let mut l1_policy = DomainPolicy::new_root();
+    let mut l1_policy = DomainPolicy::new_root(4);
     l1_policy.interrupts.set_policy(40, VectorPolicy::default_report());
     let l1_domain = Domain::new(l1_policy);
     let l1_ref = Capability::new_child(1, 1, l1_domain, Arc::downgrade(&root_ref));
     root_ref.write().add_child(l1_ref.clone());
 
     // Level 2 reports
-    let mut l2_policy = DomainPolicy::new_root();
+    let mut l2_policy = DomainPolicy::new_root(4);
     l2_policy.interrupts.set_policy(40, VectorPolicy::default_report());
     let l2_domain = Domain::new(l2_policy);
     let l2_ref = Capability::new_child(2, 2, l2_domain, Arc::downgrade(&l1_ref));

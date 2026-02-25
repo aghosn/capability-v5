@@ -11,7 +11,7 @@ fn test_interrupt_routing_walk_upward() {
     // dom3 has not report (no visibility)
 
     // Create root domain (dom0) with deliver policy for vector 6
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let dom0 = Capability::new_root(0, 0, root_domain);
 
     // Create dom1 with Report policy for vector 6
@@ -55,7 +55,7 @@ fn test_interrupt_routing_walk_upward() {
 #[test]
 fn test_interrupt_no_handler_found() {
     // Setup: All domains have NotReport, so no handler
-    let mut root_domain = Domain::new_root();
+    let mut root_domain = Domain::new_root(4);
     let mut vector_policy = VectorPolicy::default_report();
     vector_policy.visibility = InterruptVisibility::NotReport;
     root_domain.policy.interrupts.set_policy(7, vector_policy.clone());
@@ -76,7 +76,7 @@ fn test_interrupt_no_handler_found() {
 #[test]
 fn test_interrupt_immediate_delivery() {
     // If the interrupted domain itself has Deliver policy, it should handle it
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let dom0 = Capability::new_root(0, 0, root_domain);
 
     let mut dom1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
@@ -97,7 +97,7 @@ fn test_interrupt_immediate_delivery() {
 #[test]
 fn test_resume_after_interrupt() {
     // Setup hierarchy with multiple Report domains
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let dom0 = Capability::new_root(0, 0, root_domain);
 
     let mut dom1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
@@ -128,7 +128,7 @@ fn test_resume_after_interrupt() {
 #[test]
 fn test_mixed_report_and_not_report() {
     // Test a mix of Report and NotReport in the path
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let dom0 = Capability::new_root(0, 0, root_domain);
 
     // dom1: Report

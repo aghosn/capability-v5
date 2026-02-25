@@ -254,7 +254,7 @@ fn test_view_with_aliases_unchanged() {
 
 #[test]
 fn test_create_child_domain() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
@@ -266,7 +266,7 @@ fn test_create_child_domain() {
 
 #[test]
 fn test_revoke_child_domain() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
@@ -283,15 +283,15 @@ fn test_revoke_child_domain() {
 
 #[test]
 fn test_domain_tree_revocation() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     // Create a child
-    let child_policy = DomainPolicy::new_root();
+    let child_policy = DomainPolicy::new_root(4);
     let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
 
     // Create a grandchild
-    let grandchild_policy = DomainPolicy::new_root();
+    let grandchild_policy = DomainPolicy::new_root(4);
     let _grandchild = Capability::create_child_domain(&child, grandchild_policy, 2, 2).unwrap();
 
     // Revoke child (should also revoke grandchild)

@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[test]
 fn test_session() {
     // Initialize root domain and memory
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root_domain = Capability::new_root(0, 0, root_domain);
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let root_mem = Capability::new_root(0, 1, root_region);

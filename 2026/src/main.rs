@@ -10,7 +10,7 @@ fn main() {
     println!("STEP 1: Initialize root domain and memory");
     println!("------------------------------------------");
 
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     println!("✓ Created root domain (ID: 0)");
 

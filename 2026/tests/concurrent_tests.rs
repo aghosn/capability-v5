@@ -8,7 +8,7 @@ use std::time::Duration;
 #[test]
 fn test_concurrent_reads() {
     // Create a root domain and share it across threads
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
     // Clone the Arc for sharing across threads
@@ -43,7 +43,7 @@ fn test_concurrent_reads() {
 #[test]
 fn test_concurrent_child_creation() {
     // Create a root domain
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_shared = Arc::new(root);
 
@@ -170,7 +170,7 @@ fn test_concurrent_carve_operations() {
 
 #[test]
 fn test_concurrent_read_write_mix() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_shared = Arc::new(root);
 
@@ -222,7 +222,7 @@ fn test_concurrent_read_write_mix() {
 #[test]
 fn test_concurrent_revocation() {
     // Create root with multiple children
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_shared = Arc::new(root);
 
@@ -306,7 +306,7 @@ fn test_memory_view_computation_concurrent() {
 
 #[test]
 fn test_attestation_concurrent() {
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_shared = Arc::new(root);
 
@@ -344,7 +344,7 @@ fn test_attestation_concurrent() {
 fn test_stress_test_mixed_operations() {
     println!("\n=== Running stress test with mixed operations ===");
 
-    let root_domain = Domain::new_root();
+    let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_shared = Arc::new(root);
 

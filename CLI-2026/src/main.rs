@@ -113,6 +113,12 @@ fn show_help() {
     println!("  {} <domain>", "seal".bright_white().bold());
     println!("    Seal a domain (make it ready for execution)");
     println!("    Example: seal child1");
+    println!("  {} <domain> <vector> <visibility>", "set-interrupt-policy".bright_white().bold());
+    println!("    Set interrupt policy for a specific vector (DELIVER, REPORT, NOTREPORT)");
+    println!("    Example: set-interrupt-policy child1 55 REPORT");
+    println!("  {} <domain> <visibility>", "set-default-interrupt-policy".bright_white().bold());
+    println!("    Set default interrupt policy for all vectors");
+    println!("    Example: set-default-interrupt-policy child1 NOTREPORT");
     println!();
 
     println!("{}", "Memory Operations:".bright_yellow());
