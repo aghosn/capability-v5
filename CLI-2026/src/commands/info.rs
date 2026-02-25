@@ -71,7 +71,7 @@ struct MemoryNode {
 /// Build hierarchical memory tree from state
 fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
     let mut roots = Vec::new();
-    let mut all_names: HashSet<String> = state.memories.keys().cloned().collect();
+    let all_names: HashSet<String> = state.memories.keys().cloned().collect();
     let mut child_names: HashSet<String> = HashSet::new();
 
     // Build parent -> children mapping based on address containment
@@ -151,17 +151,24 @@ fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
     roots
 }
 
+/// Convert a bar position to physical address
+fn bar_pos_to_addr(bar_pos: usize, bar_width: usize, total_size: u64) -> u64 {
+    ((bar_pos as f64 / bar_width as f64) * total_size as f64) as u64
+}
+
+/// Convert a physical address to bar position
+fn addr_to_bar_pos(addr: u64, total_size: u64, bar_width: usize) -> usize {
+    ((addr as f64 / total_size as f64) * bar_width as f64) as usize
+}
+
 /// Draw a horizontal bar representing a memory region
-fn draw_memory_bar(node: &MemoryNode, depth: usize, total_size: u64, carved_ranges: &[(u64, u64)]) {
-    let indent = "  ".repeat(depth);
+fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_ranges: &[(u64, u64)]) {
     let bar_width = 60;
 
-    // Calculate bar position and width
-    let start_ratio = node.start as f64 / total_size as f64;
-    let size_ratio = (node.end - node.start) as f64 / total_size as f64;
-
-    let bar_start = (start_ratio * bar_width as f64) as usize;
-    let bar_size = ((size_ratio * bar_width as f64).max(1.0)) as usize;
+    // Calculate bar position and width based on actual address ranges
+    let bar_start = addr_to_bar_pos(node.start, total_size, bar_width);
+    let bar_end = addr_to_bar_pos(node.end, total_size, bar_width);
+    let bar_size = (bar_end - bar_start).max(1);
 
     // Choose color based on kind
     let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = match node.kind {
@@ -169,23 +176,31 @@ fn draw_memory_bar(node: &MemoryNode, depth: usize, total_size: u64, carved_rang
         RegionKind::Alias => ('▓', |s| s.bright_yellow()),
     };
 
-    // Build the bar with carved regions shown as greyed out
-    print!("{}{:8} ", indent, node.name.bright_white());
+    // Print name without indentation - no hierarchy in the visual
+    print!("{:<8} ", node.name.bright_white());
 
-    for i in 0..bar_width {
-        if i >= bar_start && i < bar_start + bar_size {
-            // Check if this position is in a carved child region
-            let pos_in_region = ((i - bar_start) as f64 / bar_size as f64 * (node.end - node.start) as f64) as u64 + node.start;
-            let is_carved = carved_ranges.iter().any(|(s, e)| pos_in_region >= *s && pos_in_region < *e);
+    // Add leading spaces to align bar by physical address
+    for _ in 0..bar_start {
+        print!(" ");
+    }
 
-            if is_carved {
-                print!("{}", color_fn("░"));  // Greyed out for carved portion
-            } else {
-                print!("{}", color_fn(&bar_char.to_string()));  // Full color for available portion
-            }
+    // Draw the bar itself
+    for i in 0..bar_size {
+        // Calculate absolute address for this position in the bar
+        let bar_pos = bar_start + i;
+        let addr = bar_pos_to_addr(bar_pos, bar_width, total_size);
+        let is_carved = carved_ranges.iter().any(|(s, e)| addr >= *s && addr < *e);
+
+        if is_carved {
+            print!("{}", color_fn("░"));  // Greyed out for carved portion
         } else {
-            print!(" ");
+            print!("{}", color_fn(&bar_char.to_string()));  // Full color for available portion
         }
+    }
+
+    // Add trailing spaces to fill the bar width
+    for _ in (bar_start + bar_size)..bar_width {
+        print!(" ");
     }
 
     // Show address range and owner
