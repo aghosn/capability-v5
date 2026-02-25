@@ -1,11 +1,14 @@
 //! Tab completion and hints for CLI commands
 
-use rustyline::completion::{Completer, Pair};
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::hint::Hinter;
 use rustyline::highlight::Highlighter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
+
+/// Commands whose first argument is a filename (eligible for path completion)
+const FILENAME_COMMANDS: &[&str] = &["load", "save-session", "export-as-unit-test"];
 
 /// Command information for completion and hints
 struct CommandInfo {
@@ -142,11 +145,15 @@ const COMMANDS: &[CommandInfo] = &[
     },
 ];
 
-pub struct CliHelper;
+pub struct CliHelper {
+    filename_completer: FilenameCompleter,
+}
 
 impl CliHelper {
     pub fn new() -> Self {
-        CliHelper
+        CliHelper {
+            filename_completer: FilenameCompleter::new(),
+        }
     }
 }
 
@@ -159,11 +166,32 @@ impl Completer for CliHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let mut candidates = Vec::new();
+        let before_cursor = &line[..pos];
+        let parts: Vec<&str> = before_cursor.split_whitespace().collect();
 
-        // Only complete at the beginning of the line (command names)
-        if line[..pos].trim().split_whitespace().count() <= 1 {
-            let prefix = line[..pos].trim();
+        // If we're typing the first argument of a filename command, do path completion.
+        // Also handle the case where there's a trailing space (parts.len() == 1 but
+        // the user already typed the command and a space).
+        let on_filename_arg = {
+            let word_count = parts.len();
+            let trailing_space = before_cursor.ends_with(' ');
+            if word_count == 1 && !trailing_space {
+                false // still typing the command name
+            } else {
+                let cmd = parts.first().copied().unwrap_or("");
+                let arg_index = if trailing_space { word_count } else { word_count - 1 };
+                FILENAME_COMMANDS.contains(&cmd) && arg_index == 1
+            }
+        };
+
+        if on_filename_arg {
+            return self.filename_completer.complete_path(line, pos);
+        }
+
+        // Otherwise complete command names when on the first word
+        let mut candidates = Vec::new();
+        if before_cursor.trim().split_whitespace().count() <= 1 {
+            let prefix = before_cursor.trim();
             for cmd in COMMANDS {
                 if cmd.name.starts_with(prefix) {
                     candidates.push(Pair {
