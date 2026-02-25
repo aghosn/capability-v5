@@ -5,7 +5,7 @@ use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::sync::Arc;
 
-use crate::parser::{parse_attributes, parse_number, parse_rights};
+use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
 use crate::session::Command;
 use crate::state::CliState;
 use crate::update_processor::process_updates;
@@ -45,7 +45,7 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         name: child_name.to_string(),
         start,
         size,
-        rights: format!("{:?}", rights),
+        rights: format_rights(&rights),
     });
 
     println!(
@@ -92,7 +92,7 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         name: child_name.to_string(),
         start,
         size,
-        rights: format!("{:?}", rights),
+        rights: format_rights(&rights),
     });
 
     println!(
@@ -135,9 +135,16 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let is_sealed = domain.read().data.is_sealed();
     let can_receive_after_seal = domain.read().data.policy.receive_after_seal();
 
+    // Always validate that the sender's domain allows SEND.
+    mem.read()
+        .owned
+        .validate_operation(MonitorAPI::SEND)
+        .map_err(|e| format!("Send not allowed: {:?}", e))?;
+
     // Check if we need to use pending queue
     if is_sealed && can_receive_after_seal {
-        // Domain is sealed with RECEIVE_AFTER_SEAL - add to pending queue
+        // Domain is sealed with RECEIVE_AFTER_SEAL - add to pending queue.
+        // Ownership is NOT transferred yet; it moves only when the receiver accepts.
         let pending_id = domain
             .write()
             .data
@@ -147,8 +154,8 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         state.session.add_command(Command::Send {
             mem: mem_name.to_string(),
             domain: domain_name.to_string(),
-            handle: pending_id, // Use pending_id as handle for recording
-            attrs: format!("{:?}", attrs),
+            handle: pending_id,
+            attrs: format_attributes(&attrs),
         });
 
         println!(
@@ -178,6 +185,10 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
             .data
             .add_memory_capability(handle, Arc::downgrade(mem));
 
+        // Set owner_domain so future operations on this capability enforce
+        // that the new owner domain is sealed with the required API permission.
+        mem.write().owned.set_owner_domain(Arc::downgrade(domain));
+
         // Process updates
         process_updates(state, &updates);
 
@@ -186,7 +197,7 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
             mem: mem_name.to_string(),
             domain: domain_name.to_string(),
             handle,
-            attrs: format!("{:?}", attrs),
+            attrs: format_attributes(&attrs),
         });
 
         println!(

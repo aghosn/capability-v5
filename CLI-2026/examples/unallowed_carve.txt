@@ -1,0 +1,6 @@
+# Capability CLI session — replay with: load examples/unallowed_carve.txt
+init d0 0x10000
+create-domain d0 d1 1 0x20
+carve r0 r1 0x1000 0x1000 Rights { bits: 7 }
+send r1 d1 Attributes { bits: 0 }
+carve r1 r2 0x1000 0x1000 Rights { bits: 3 }

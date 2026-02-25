@@ -57,6 +57,64 @@ pub fn parse_api(s: &str) -> Result<MonitorAPI, String> {
     Ok(MonitorAPI::from_bits(api_bits))
 }
 
+/// Format Rights as a CLI-parseable string (e.g., "RWX", "RW", "R", "---")
+pub fn format_rights(rights: &Rights) -> String {
+    let bits = rights.bits();
+    if bits == 0 {
+        return "---".to_string();
+    }
+    let mut s = String::new();
+    if bits & Rights::READ != 0 { s.push('R'); }
+    if bits & Rights::WRITE != 0 { s.push('W'); }
+    if bits & Rights::EXECUTE != 0 { s.push('X'); }
+    s
+}
+
+/// Format Attributes as a CLI-parseable string (e.g., "NONE", "CLEAN", "CLEAN,VITAL")
+pub fn format_attributes(attrs: &Attributes) -> String {
+    let bits = attrs.bits();
+    if bits == 0 {
+        return "NONE".to_string();
+    }
+    let mut parts = Vec::new();
+    if bits & Attributes::HASH != 0 { parts.push("HASH"); }
+    if bits & Attributes::CLEAN != 0 { parts.push("CLEAN"); }
+    if bits & Attributes::VITAL != 0 { parts.push("VITAL"); }
+    if bits & Attributes::META != 0 { parts.push("META"); }
+    parts.join(",")
+}
+
+/// Format MonitorAPI bits as a CLI-parseable string (e.g., "CREATE,SEND,CARVE")
+pub fn format_api(api: &MonitorAPI) -> String {
+    let bits = api.bits();
+    if bits == 0 {
+        return "NONE".to_string();
+    }
+    if bits == MonitorAPI::from_bits(0x1FFF).bits() {
+        return "ALL".to_string();
+    }
+    let flags = [
+        (MonitorAPI::CREATE, "CREATE"),
+        (MonitorAPI::SET, "SET"),
+        (MonitorAPI::GET, "GET"),
+        (MonitorAPI::SEND, "SEND"),
+        (MonitorAPI::SEAL, "SEAL"),
+        (MonitorAPI::ATTEST, "ATTEST"),
+        (MonitorAPI::ENUMERATE, "ENUMERATE"),
+        (MonitorAPI::SWITCH, "SWITCH"),
+        (MonitorAPI::ALIAS, "ALIAS"),
+        (MonitorAPI::CARVE, "CARVE"),
+        (MonitorAPI::REVOKE, "REVOKE"),
+        (MonitorAPI::GETCHAN, "GETCHAN"),
+        (MonitorAPI::RECEIVE_AFTER_SEAL, "RECEIVE_AFTER_SEAL"),
+    ];
+    flags.iter()
+        .filter(|(flag, _)| bits & flag != 0)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Parse capability attributes from comma or pipe-separated string
 pub fn parse_attributes(s: &str) -> Result<Attributes, String> {
     let mut attrs_bits: u8 = 0;

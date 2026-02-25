@@ -5,7 +5,7 @@ use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::sync::Arc;
 
-use crate::parser::{parse_api, parse_number};
+use crate::parser::{parse_api, parse_number, format_api};
 use crate::session::Command;
 use crate::state::CliState;
 use crate::update_processor::process_updates;
@@ -111,7 +111,7 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
         parent: parent_name.to_string(),
         name: child_name.to_string(),
         cores,
-        api_bits: api.bits() as u64,
+        api: format_api(&api),
     });
 
     println!(

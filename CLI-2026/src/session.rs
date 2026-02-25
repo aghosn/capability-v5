@@ -12,7 +12,7 @@ pub enum Command {
         parent: String,
         name: String,
         cores: u64,
-        api_bits: u64,
+        api: String,
     },
     Carve {
         parent: String,
@@ -102,8 +102,8 @@ impl Session {
                 Command::Init { name, size } => {
                     format!("init {} 0x{:x}", name, size)
                 }
-                Command::CreateDomain { parent, name, cores, api_bits } => {
-                    format!("create-domain {} {} {} 0x{:x}", parent, name, cores, api_bits)
+                Command::CreateDomain { parent, name, cores, api } => {
+                    format!("create-domain {} {} {} {}", parent, name, cores, api)
                 }
                 Command::Carve { parent, name, start, size, rights } => {
                     format!("carve {} {} 0x{:x} 0x{:x} {}", parent, name, start, size, rights)
@@ -200,7 +200,7 @@ impl Session {
                     parent,
                     name,
                     cores,
-                    api_bits,
+                    api,
                 } => {
                     let parent_var = var_map
                         .get(parent)
@@ -211,8 +211,8 @@ impl Session {
                     writeln!(file, "    // Create child domain: {}", name)?;
                     writeln!(
                         file,
-                        "    let api = MonitorAPI::from_bits(0x{:x});",
-                        api_bits
+                        "    let api = parse_api(\"{}\").unwrap();",
+                        api
                     )?;
                     writeln!(
                         file,
