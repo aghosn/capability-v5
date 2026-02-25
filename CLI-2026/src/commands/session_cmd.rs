@@ -1,4 +1,4 @@
-//! Session management commands: save-session, clear-session, reset, load
+//! Session management commands: save-session, export-as-unit-test, clear-session, reset, load
 
 use colored::*;
 use std::fs;
@@ -7,7 +7,7 @@ use std::io::{self, BufRead};
 use crate::commands;
 use crate::state::CliState;
 
-/// Save current session as a unit test
+/// Save current session as plain CLI commands for later replay via `load`
 pub fn cmd_save_session(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     if args.is_empty() {
         return Err("Usage: save-session <filename>".to_string());
@@ -16,11 +16,33 @@ pub fn cmd_save_session(state: &mut CliState, args: &[&str]) -> std::result::Res
     let filename = args[0];
     state
         .session
-        .save_as_test(filename)
+        .save_as_commands(filename)
         .map_err(|e| format!("Failed to save session: {}", e))?;
 
     println!(
-        "{} Session saved to '{}'",
+        "{} Session saved to '{}' (replay with: load {})",
+        "✓".bright_green().bold(),
+        filename.bright_white(),
+        filename
+    );
+
+    Ok(())
+}
+
+/// Export current session as a Rust unit test
+pub fn cmd_export_as_unit_test(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.is_empty() {
+        return Err("Usage: export-as-unit-test <filename>".to_string());
+    }
+
+    let filename = args[0];
+    state
+        .session
+        .save_as_test(filename)
+        .map_err(|e| format!("Failed to export unit test: {}", e))?;
+
+    println!(
+        "{} Session exported as unit test to '{}'",
         "✓".bright_green().bold(),
         filename.bright_white()
     );

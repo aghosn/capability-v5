@@ -38,6 +38,7 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
 
         // Session commands
         "save-session" => session_cmd::cmd_save_session(state, args),
+        "export-as-unit-test" => session_cmd::cmd_export_as_unit_test(state, args),
         "clear-session" => session_cmd::cmd_clear_session(state),
         "reset" => session_cmd::cmd_reset(state),
         "load" => session_cmd::cmd_load(state, args),

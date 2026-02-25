@@ -79,6 +79,54 @@ impl Session {
         self.commands.clear();
     }
 
+    /// Save the session as plain CLI commands for later replay via `load`
+    pub fn save_as_commands(&self, filename: &str) -> std::io::Result<()> {
+        let mut file = File::create(filename)?;
+
+        writeln!(file, "# Capability CLI session — replay with: load {}", filename)?;
+
+        for cmd in &self.commands {
+            let line = match cmd {
+                Command::Init { name, size } => {
+                    format!("init {} 0x{:x}", name, size)
+                }
+                Command::CreateDomain { parent, name, cores, api_bits } => {
+                    format!("create-domain {} {} {} 0x{:x}", parent, name, cores, api_bits)
+                }
+                Command::Carve { parent, name, start, size, rights } => {
+                    format!("carve {} {} 0x{:x} 0x{:x} {}", parent, name, start, size, rights)
+                }
+                Command::Alias { parent, name, start, size, rights } => {
+                    format!("alias {} {} 0x{:x} 0x{:x} {}", parent, name, start, size, rights)
+                }
+                Command::Send { mem, domain, handle: _, attrs } => {
+                    format!("send {} {} {}", mem, domain, attrs)
+                }
+                Command::Seal { domain } => {
+                    format!("seal {}", domain)
+                }
+                Command::Revoke { parent, child } => {
+                    format!("revoke {} {}", parent, child)
+                }
+                Command::Attest { domain } => {
+                    format!("attest {}", domain)
+                }
+                Command::View { domain } => {
+                    format!("view {}", domain)
+                }
+                Command::Switch { core, from, to } => {
+                    format!("switch {} {} {}", core, from, to)
+                }
+                Command::Interrupt { vector, domain, core } => {
+                    format!("interrupt {} {} {}", vector, domain, core)
+                }
+            };
+            writeln!(file, "{}", line)?;
+        }
+
+        Ok(())
+    }
+
     /// Save the session as a Rust unit test
     pub fn save_as_test(&self, filename: &str) -> std::io::Result<()> {
         let mut file = File::create(filename)?;

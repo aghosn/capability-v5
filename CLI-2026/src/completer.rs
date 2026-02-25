@@ -108,7 +108,12 @@ const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "save-session",
         usage: "save-session <filename>",
-        description: "Save current session",
+        description: "Save current session as CLI commands for later replay via load",
+    },
+    CommandInfo {
+        name: "export-as-unit-test",
+        usage: "export-as-unit-test <filename>",
+        description: "Export current session as a Rust unit test",
     },
     CommandInfo {
         name: "clear-session",

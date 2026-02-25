@@ -182,15 +182,18 @@ fn show_help() {
 
     println!("{}", "Session Management:".bright_yellow());
     println!("  {} <filename>", "save-session".bright_white().bold());
-    println!("    Save current session as a unit test");
-    println!("    Example: save-session my_test.rs");
+    println!("    Save current session as CLI commands for later replay");
+    println!("    Example: save-session my_session.txt");
+    println!("  {} <filename>", "export-as-unit-test".bright_white().bold());
+    println!("    Export current session as a Rust unit test");
+    println!("    Example: export-as-unit-test my_test.rs");
     println!("  {}", "clear-session".bright_white().bold());
     println!("    Clear session history");
     println!("  {}", "reset".bright_white().bold());
     println!("    Reset CLI to initial state (clear all domains and memory)");
     println!("  {} <filename>", "load".bright_white().bold());
-    println!("    Load and execute commands from a text file");
-    println!("    Example: load setup.txt");
+    println!("    Load and execute commands from a saved session file");
+    println!("    Example: load my_session.txt");
     println!("  {}", "auto-list".bright_white().bold());
     println!("    Toggle auto-list mode (automatically run 'list' after each command)");
     println!();
