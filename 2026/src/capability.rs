@@ -214,11 +214,13 @@ impl Capability<MemoryRegion> {
     ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
         let parent = parent_ref.read();
 
-        // Check if the requested range overlaps with any existing carved children
-        // Carving is not allowed to overlap with existing carved regions
+        // Check if the requested range overlaps with any existing children.
+        // Carving is not allowed to overlap with carved regions (exclusivity) or
+        // aliased regions (an alias means shared access already exists in that range,
+        // so a carve would falsely appear exclusive).
         for child_ref in &parent.children {
             let child = child_ref.read();
-            if child.data.kind == RegionKind::Carve && access.overlaps(&child.data.access) {
+            if access.overlaps(&child.data.access) {
                 return Err(CapaError::InvalidAccess);
             }
         }
