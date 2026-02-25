@@ -1,7 +1,7 @@
 //! Attestation support for capability trees and domains
 
 use crate::capability::CapabilityRef;
-use crate::domain::Domain;
+use crate::domain::{Domain, InterruptVisibility};
 use crate::memory::MemoryRegion;
 use alloc::format;
 use alloc::string::String;
@@ -58,6 +58,35 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
     report.push_str(&format!("  REVOKE: {}\n", domain.data.policy.api.revoke()));
     report.push_str(&format!("  GETCHAN: {}\n", domain.data.policy.api.getchan()));
     report.push_str(&format!("  RECEIVE_AFTER_SEAL: {}\n", domain.data.policy.api.receive_after_seal()));
+
+    // Interrupt configuration
+    report.push_str("Interrupts:\n");
+    let irq = &domain.data.policy.interrupts;
+    let default_vis = match irq.default.visibility {
+        InterruptVisibility::Deliver => "Deliver",
+        InterruptVisibility::Report => "Report",
+        InterruptVisibility::NotReport => "NotReport",
+    };
+    report.push_str(&format!(
+        "  Default: visibility={}, read_set={:#018x}, write_set={:#018x}\n",
+        default_vis, irq.default.read_set, irq.default.write_set
+    ));
+    if irq.overrides.is_empty() {
+        report.push_str("  Overrides: (none)\n");
+    } else {
+        report.push_str("  Overrides:\n");
+        for (vector, policy) in &irq.overrides {
+            let vis = match policy.visibility {
+                InterruptVisibility::Deliver => "Deliver",
+                InterruptVisibility::Report => "Report",
+                InterruptVisibility::NotReport => "NotReport",
+            };
+            report.push_str(&format!(
+                "    Vector {:#04x}: visibility={}, read_set={:#018x}, write_set={:#018x}\n",
+                vector, vis, policy.read_set, policy.write_set
+            ));
+        }
+    }
 
     report.push_str(&format!(
         "Children: {}\n",
