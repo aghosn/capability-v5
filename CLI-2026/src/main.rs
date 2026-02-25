@@ -134,6 +134,9 @@ fn show_help() {
     println!("  {} <domain> <pending_id> [handle]", "accept-capability".bright_white().bold());
     println!("    Accept a pending capability and activate it");
     println!("    Example: accept-capability child1 0");
+    println!("  {} <domain> <pending_id>", "reject-capability".bright_white().bold());
+    println!("    Reject (discard) a pending capability without activating it");
+    println!("    Example: reject-capability child1 0");
     println!();
 
     println!("{}", "Memory Operations:".bright_yellow());

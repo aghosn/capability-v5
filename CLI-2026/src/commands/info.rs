@@ -1,6 +1,7 @@
 //! Information commands: attest, view, list
 
 use capability_engine::*;
+use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -301,6 +302,34 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
                 d.data.id,
                 d.data.status
             );
+            let pending_ids = d.data.get_pending_ids();
+            if !pending_ids.is_empty() {
+                println!("    {} Pending capabilities ({}):", "⏸".bright_yellow(), pending_ids.len());
+                for pending_id in pending_ids {
+                    if let Some(cap) = d.data.get_pending_capability(pending_id) {
+                        match cap {
+                            PendingCapability::Memory(weak_ref) => {
+                                if let Some(m) = weak_ref.upgrade() {
+                                    let m = m.read();
+                                    println!(
+                                        "      [ID: {}] Memory [0x{:x}..0x{:x}) {}",
+                                        pending_id, m.data.access.start, m.data.access.end(), m.data.access.rights
+                                    );
+                                }
+                            }
+                            PendingCapability::Domain(weak_ref) => {
+                                if let Some(dom) = weak_ref.upgrade() {
+                                    let dom = dom.read();
+                                    println!(
+                                        "      [ID: {}] Domain (ID: {}, status: {:?})",
+                                        pending_id, dom.data.id, dom.data.status
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

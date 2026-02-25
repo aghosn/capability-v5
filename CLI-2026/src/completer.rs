@@ -89,6 +89,11 @@ const COMMANDS: &[CommandInfo] = &[
         description: "Accept a pending capability",
     },
     CommandInfo {
+        name: "reject-capability",
+        usage: "reject-capability <domain> <pending_id>",
+        description: "Reject (discard) a pending capability",
+    },
+    CommandInfo {
         name: "reset",
         usage: "reset",
         description: "Reset CLI to initial state",

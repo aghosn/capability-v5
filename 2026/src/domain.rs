@@ -464,6 +464,13 @@ impl Domain {
         Ok(capability)
     }
 
+    /// Reject (discard) a pending capability without activating it
+    pub fn reject_pending_capability(&mut self, pending_id: u64) -> Result<PendingCapability> {
+        self.pending_capabilities
+            .remove(&pending_id)
+            .ok_or(CapaError::NotFound)
+    }
+
     /// Get a pending capability by ID (for inspection)
     pub fn get_pending_capability(&self, pending_id: u64) -> Option<&PendingCapability> {
         self.pending_capabilities.get(&pending_id)

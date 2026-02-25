@@ -386,6 +386,11 @@ pub fn cmd_enumerate_pending(state: &mut CliState, args: &[&str]) -> std::result
     }
     println!();
 
+    // Record command
+    state.session.add_command(Command::EnumeratePending {
+        domain: domain_name.to_string(),
+    });
+
     Ok(())
 }
 
@@ -481,6 +486,63 @@ pub fn cmd_accept_capability(state: &mut CliState, args: &[&str]) -> std::result
             );
         }
     }
+
+    // Record command
+    state.session.add_command(Command::AcceptCapability {
+        domain: domain_name.to_string(),
+        pending_id,
+        handle,
+    });
+
+    Ok(())
+}
+
+/// Reject (discard) a pending capability
+pub fn cmd_reject_capability(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 2 {
+        return Err("Usage: reject-capability <domain> <pending_id>".to_string());
+    }
+
+    let domain_name = args[0];
+    let pending_id = parse_number(args[1])?;
+
+    let domain = state
+        .domains
+        .get(domain_name)
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+
+    let rejected = domain
+        .write()
+        .data
+        .reject_pending_capability(pending_id)
+        .map_err(|e| format!("Failed to reject capability: {:?}", e))?;
+
+    match rejected {
+        PendingCapability::Memory(weak_ref) => {
+            let range = weak_ref.upgrade().map(|m| {
+                let r = m.read();
+                format!("Memory [0x{:x}..0x{:x})", r.data.access.start, r.data.access.end())
+            }).unwrap_or_else(|| "Memory (dropped)".to_string());
+            println!(
+                "{} Rejected pending capability {} ({}) for domain '{}'",
+                "✓".bright_green().bold(), pending_id, range, domain_name.bright_white()
+            );
+        }
+        PendingCapability::Domain(weak_ref) => {
+            let id = weak_ref.upgrade().map(|d| d.read().data.id.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            println!(
+                "{} Rejected pending capability {} (Domain ID: {}) for domain '{}'",
+                "✓".bright_green().bold(), pending_id, id, domain_name.bright_white()
+            );
+        }
+    }
+
+    // Record command
+    state.session.add_command(Command::RejectCapability {
+        domain: domain_name.to_string(),
+        pending_id,
+    });
 
     Ok(())
 }

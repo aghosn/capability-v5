@@ -21,6 +21,7 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "set-default-interrupt-policy" => domain::cmd_set_default_interrupt_policy(state, args),
         "enumerate-pending" => domain::cmd_enumerate_pending(state, args),
         "accept-capability" => domain::cmd_accept_capability(state, args),
+        "reject-capability" => domain::cmd_reject_capability(state, args),
 
         // Memory commands
         "carve" => memory::cmd_carve(state, args),

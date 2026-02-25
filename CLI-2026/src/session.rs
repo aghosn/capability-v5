@@ -57,6 +57,18 @@ pub enum Command {
         domain: String,
         core: u64,
     },
+    EnumeratePending {
+        domain: String,
+    },
+    AcceptCapability {
+        domain: String,
+        pending_id: u64,
+        handle: u64,
+    },
+    RejectCapability {
+        domain: String,
+        pending_id: u64,
+    },
 }
 
 /// Session recorder that can export commands as unit tests
@@ -119,6 +131,15 @@ impl Session {
                 }
                 Command::Interrupt { vector, domain, core } => {
                     format!("interrupt {} {} {}", vector, domain, core)
+                }
+                Command::EnumeratePending { domain } => {
+                    format!("enumerate-pending {}", domain)
+                }
+                Command::AcceptCapability { domain, pending_id, handle: _ } => {
+                    format!("accept-capability {} {}", domain, pending_id)
+                }
+                Command::RejectCapability { domain, pending_id } => {
+                    format!("reject-capability {} {}", domain, pending_id)
                 }
             };
             writeln!(file, "{}", line)?;
@@ -425,6 +446,48 @@ impl Session {
                         vector, domain_var, core
                     )?;
                     writeln!(file, "    // Add assertions on handler_id and reported_to if needed")?;
+                    writeln!(file)?;
+                }
+
+                Command::EnumeratePending { domain } => {
+                    let domain_var = var_map
+                        .get(domain)
+                        .cloned()
+                        .unwrap_or_else(|| sanitize_name(domain));
+
+                    writeln!(file, "    // Enumerate pending capabilities for {}", domain)?;
+                    writeln!(file, "    let pending_ids = {}.read().data.get_pending_ids();", domain_var)?;
+                    writeln!(file, "    // Add assertions on pending_ids if needed")?;
+                    writeln!(file)?;
+                }
+
+                Command::AcceptCapability { domain, pending_id, handle } => {
+                    let domain_var = var_map
+                        .get(domain)
+                        .cloned()
+                        .unwrap_or_else(|| sanitize_name(domain));
+
+                    writeln!(file, "    // Accept pending capability {} for {}", pending_id, domain)?;
+                    writeln!(
+                        file,
+                        "    let _accepted = {}.write().data.accept_pending_capability({}, {}).unwrap();",
+                        domain_var, pending_id, handle
+                    )?;
+                    writeln!(file)?;
+                }
+
+                Command::RejectCapability { domain, pending_id } => {
+                    let domain_var = var_map
+                        .get(domain)
+                        .cloned()
+                        .unwrap_or_else(|| sanitize_name(domain));
+
+                    writeln!(file, "    // Reject pending capability {} for {}", pending_id, domain)?;
+                    writeln!(
+                        file,
+                        "    let _rejected = {}.write().data.reject_pending_capability({}).unwrap();",
+                        domain_var, pending_id
+                    )?;
                     writeln!(file)?;
                 }
             }

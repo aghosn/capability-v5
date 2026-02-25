@@ -1,0 +1,115 @@
+# Tutorial 10: Pending Capabilities and RECEIVE_AFTER_SEAL
+# =========================================================
+# Demonstrates the full pending capability lifecycle:
+# sending to a sealed domain, enumerating, accepting, and rejecting.
+
+@msg ━━━ Tutorial 10: Pending Capabilities ━━━
+@msg
+@msg By default a sealed domain cannot receive new capabilities.
+@msg The RECEIVE_AFTER_SEAL permission enables this: capabilities arrive
+@msg in a PENDING queue and the domain must explicitly accept or reject them.
+@msg
+
+# Step 1: Initialize and create a domain that can receive after sealing
+@msg 📋 Step 1: Initialize and create a domain with RECEIVE_AFTER_SEAL
+init root 0x10000000
+create-domain root receiver 0b1111 GET,ATTEST,SWITCH,RECEIVE_AFTER_SEAL
+
+@msg
+@msg ✓ 'receiver' has RECEIVE_AFTER_SEAL - it can accept new capabilities post-seal
+@msg
+
+# Step 2: Give the receiver some initial memory and seal it
+@msg 📋 Step 2: Give receiver initial memory, then seal it
+carve r0 base_mem 0x1000000 0x100000 RWX
+send base_mem receiver
+seal receiver
+
+@msg
+@msg ✓ receiver is now sealed with base_mem already mapped
+@msg
+
+# Step 3: Also create a sealed domain WITHOUT RECEIVE_AFTER_SEAL to contrast
+@msg 📋 Step 3: Create a domain WITHOUT RECEIVE_AFTER_SEAL for contrast
+create-domain root strict 0b1111 GET,ATTEST,SWITCH
+carve r0 strict_mem 0x2000000 0x100000 RWX
+send strict_mem strict
+seal strict
+
+@msg
+@msg ✓ 'strict' is sealed and cannot receive any new capabilities
+@msg
+
+# Step 4: Try sending to the strict domain (should fail)
+@msg 📋 Step 4: Attempt to send a new capability to 'strict' (expected to fail)
+carve r0 extra1 0x3000000 0x10000 RW
+send extra1 strict
+
+@msg
+@msg ⚠️  This fails - 'strict' is sealed without RECEIVE_AFTER_SEAL
+@msg
+
+# Step 5: Send multiple capabilities to receiver (they queue as pending)
+@msg 📋 Step 5: Send two new capabilities to sealed 'receiver' - they go pending
+carve r0 pending_mem1 0x4000000 0x10000 RW
+carve r0 pending_mem2 0x5000000 0x20000 RWX
+send pending_mem1 receiver
+send pending_mem2 receiver
+
+@msg
+@msg ⏸ Both capabilities are queued as PENDING - receiver must act on them
+@msg
+
+# Step 6: List to see pending capabilities shown in domain listing
+@msg 📋 Step 6: List domains - notice pending capabilities shown under 'receiver'
+list
+
+@msg
+
+# Step 7: Enumerate pending capabilities explicitly
+@msg 📋 Step 7: Enumerate pending capabilities for 'receiver'
+enumerate-pending receiver
+
+@msg
+@msg ✓ Two pending capabilities shown with their IDs
+@msg
+
+# Step 8: Accept the first pending capability (ID 0)
+@msg 📋 Step 8: Accept pending capability 0 (pending_mem1)
+accept-capability receiver 0
+
+@msg
+@msg ✓ pending_mem1 is now active in receiver's address space
+@msg
+
+# Step 9: Reject the second pending capability (ID 1)
+@msg 📋 Step 9: Reject pending capability 1 (pending_mem2 - receiver doesn't want it)
+reject-capability receiver 1
+
+@msg
+@msg ✓ pending_mem2 was discarded - receiver chose not to accept it
+@msg   The capability is gone; root still holds pending_mem2 in state
+@msg
+
+# Step 10: Verify final state
+@msg 📋 Step 10: Enumerate pending again - should be empty now
+enumerate-pending receiver
+
+@msg
+@msg 📋 Step 11: View receiver's address space - only accepted memory visible
+view receiver
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Sealed domains reject sends by default (no RECEIVE_AFTER_SEAL)
+@msg   • RECEIVE_AFTER_SEAL queues incoming capabilities as PENDING
+@msg   • enumerate-pending lists all pending capability IDs
+@msg   • accept-capability activates a pending capability (maps it into address space)
+@msg   • reject-capability discards a pending capability without activating it
+@msg   • Domains have explicit control over what they accept post-seal
+@msg   • 'list' shows pending capabilities inline under each domain
+@msg
+@msg 💡 Lifecycle:
+@msg   sender → send → [PENDING queue] → accept → active in address space
+@msg                                   ↘ reject → discarded
+@msg

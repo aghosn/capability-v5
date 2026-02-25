@@ -14,3 +14,4 @@
 07-nested-enclave.txt|Nested Enclave Architecture|Create a CVM with a nested secure enclave
 08-sandbox.txt|Sandboxed Execution Environment|Create a sandbox with aliased memory
 09-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
+10-pending-capabilities.txt|Pending Capabilities and RECEIVE_AFTER_SEAL|Accept or reject capabilities sent to a sealed domain
