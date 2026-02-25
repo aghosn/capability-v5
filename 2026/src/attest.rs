@@ -57,6 +57,7 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
     report.push_str(&format!("  CARVE: {}\n", domain.data.policy.api.carve()));
     report.push_str(&format!("  REVOKE: {}\n", domain.data.policy.api.revoke()));
     report.push_str(&format!("  GETCHAN: {}\n", domain.data.policy.api.getchan()));
+    report.push_str(&format!("  RECEIVE_AFTER_SEAL: {}\n", domain.data.policy.api.receive_after_seal()));
 
     report.push_str(&format!(
         "Children: {}\n",
