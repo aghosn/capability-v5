@@ -151,18 +151,13 @@ fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
     roots
 }
 
-/// Convert a bar position to physical address
-fn bar_pos_to_addr(bar_pos: usize, bar_width: usize, total_size: u64) -> u64 {
-    ((bar_pos as f64 / bar_width as f64) * total_size as f64) as u64
-}
-
 /// Convert a physical address to bar position
 fn addr_to_bar_pos(addr: u64, total_size: u64, bar_width: usize) -> usize {
     ((addr as f64 / total_size as f64) * bar_width as f64) as usize
 }
 
 /// Draw a horizontal bar representing a memory region
-fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_ranges: &[(u64, u64)]) {
+fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar_ranges: &[(usize, usize)]) {
     let bar_width = 60;
 
     // Calculate bar position and width based on actual address ranges
@@ -186,10 +181,9 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_ran
 
     // Draw the bar itself
     for i in 0..bar_size {
-        // Calculate absolute address for this position in the bar
         let bar_pos = bar_start + i;
-        let addr = bar_pos_to_addr(bar_pos, bar_width, total_size);
-        let is_carved = carved_ranges.iter().any(|(s, e)| addr >= *s && addr < *e);
+        // Use pre-computed bar positions for carved ranges to guarantee alignment
+        let is_carved = carved_bar_ranges.iter().any(|(s, e)| bar_pos >= *s && bar_pos < *e);
 
         if is_carved {
             print!("{}", color_fn("░"));  // Greyed out for carved portion
@@ -211,14 +205,15 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_ran
 
 /// Display memory tree hierarchically with horizontal bars
 fn display_memory_tree(nodes: &[MemoryNode], depth: usize, total_size: u64) {
+    let bar_width = 60;
     for node in nodes {
-        // Collect carved child ranges to show as greyed out in parent
-        let carved_ranges: Vec<(u64, u64)> = node.children.iter()
+        // Pre-compute bar positions for carved children so they align exactly with child bars
+        let carved_bar_ranges: Vec<(usize, usize)> = node.children.iter()
             .filter(|c| matches!(c.kind, RegionKind::Carve))
-            .map(|c| (c.start, c.end))
+            .map(|c| (addr_to_bar_pos(c.start, total_size, bar_width), addr_to_bar_pos(c.end, total_size, bar_width)))
             .collect();
 
-        draw_memory_bar(node, depth, total_size, &carved_ranges);
+        draw_memory_bar(node, depth, total_size, &carved_bar_ranges);
 
         // Recursively display children
         if !node.children.is_empty() {
