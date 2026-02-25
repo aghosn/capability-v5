@@ -119,6 +119,12 @@ fn show_help() {
     println!("  {} <domain> <visibility>", "set-default-interrupt-policy".bright_white().bold());
     println!("    Set default interrupt policy for all vectors");
     println!("    Example: set-default-interrupt-policy child1 NOTREPORT");
+    println!("  {} <domain>", "enumerate-pending".bright_white().bold());
+    println!("    List pending capabilities waiting for acceptance");
+    println!("    Example: enumerate-pending child1");
+    println!("  {} <domain> <pending_id> [handle]", "accept-capability".bright_white().bold());
+    println!("    Accept a pending capability and activate it");
+    println!("    Example: accept-capability child1 0");
     println!();
 
     println!("{}", "Memory Operations:".bright_yellow());
@@ -171,6 +177,11 @@ fn show_help() {
     println!("    Example: save-session my_test.rs");
     println!("  {}", "clear-session".bright_white().bold());
     println!("    Clear session history");
+    println!("  {}", "reset".bright_white().bold());
+    println!("    Reset CLI to initial state (clear all domains and memory)");
+    println!("  {} <filename>", "load".bright_white().bold());
+    println!("    Load and execute commands from a text file");
+    println!("    Example: load setup.txt");
     println!();
 
     println!("{}", "Other:".bright_yellow());

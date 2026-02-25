@@ -281,6 +281,13 @@ impl DomainPolicy {
     }
 }
 
+/// Pending capability waiting to be accepted by a sealed domain
+#[derive(Debug, Clone)]
+pub enum PendingCapability {
+    Memory(CapabilityWeak<MemoryRegion>),
+    Domain(CapabilityWeak<Domain>),
+}
+
 /// Domain capability data
 #[derive(Debug)]
 pub struct Domain {
@@ -298,6 +305,13 @@ pub struct Domain {
 
     /// Domain capabilities owned by this domain (handle -> weak ref)
     pub domain_capabilities: BTreeMap<LocalHandle, CapabilityWeak<Domain>>,
+
+    /// Pending capabilities that have been sent but not yet accepted (sealed domains only)
+    /// Maps a temporary pending ID to the capability
+    pub pending_capabilities: BTreeMap<u64, PendingCapability>,
+
+    /// Next pending capability ID
+    next_pending_id: u64,
 }
 
 impl Domain {
@@ -309,6 +323,8 @@ impl Domain {
             policy,
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
+            pending_capabilities: BTreeMap::new(),
+            next_pending_id: 0,
         }
     }
 
@@ -320,6 +336,8 @@ impl Domain {
             policy: DomainPolicy::new_root(num_cores),
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
+            pending_capabilities: BTreeMap::new(),
+            next_pending_id: 0,
         }
     }
 
@@ -405,6 +423,50 @@ impl Domain {
             handle += 1;
         }
         handle
+    }
+
+    /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)
+    /// Returns the pending ID
+    pub fn add_pending_capability(&mut self, capability: PendingCapability) -> u64 {
+        let pending_id = self.next_pending_id;
+        self.next_pending_id += 1;
+        self.pending_capabilities.insert(pending_id, capability);
+        pending_id
+    }
+
+    /// Get all pending capability IDs
+    pub fn get_pending_ids(&self) -> Vec<u64> {
+        self.pending_capabilities.keys().copied().collect()
+    }
+
+    /// Accept a pending capability and activate it with the given handle
+    /// Returns the activated capability
+    pub fn accept_pending_capability(
+        &mut self,
+        pending_id: u64,
+        handle: LocalHandle,
+    ) -> Result<PendingCapability> {
+        let capability = self
+            .pending_capabilities
+            .remove(&pending_id)
+            .ok_or(CapaError::NotFound)?;
+
+        // Add to the appropriate active capability map
+        match &capability {
+            PendingCapability::Memory(weak_ref) => {
+                self.memory_capabilities.insert(handle, weak_ref.clone());
+            }
+            PendingCapability::Domain(weak_ref) => {
+                self.domain_capabilities.insert(handle, weak_ref.clone());
+            }
+        }
+
+        Ok(capability)
+    }
+
+    /// Get a pending capability by ID (for inspection)
+    pub fn get_pending_capability(&self, pending_id: u64) -> Option<&PendingCapability> {
+        self.pending_capabilities.get(&pending_id)
     }
 }
 

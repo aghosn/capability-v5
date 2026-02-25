@@ -76,6 +76,26 @@ const COMMANDS: &[CommandInfo] = &[
         description: "Set default interrupt policy",
     },
     CommandInfo {
+        name: "enumerate-pending",
+        usage: "enumerate-pending <domain>",
+        description: "List pending capabilities for domain",
+    },
+    CommandInfo {
+        name: "accept-capability",
+        usage: "accept-capability <domain> <pending_id> [handle]",
+        description: "Accept a pending capability",
+    },
+    CommandInfo {
+        name: "reset",
+        usage: "reset",
+        description: "Reset CLI to initial state",
+    },
+    CommandInfo {
+        name: "load",
+        usage: "load <filename>",
+        description: "Load and execute commands from file",
+    },
+    CommandInfo {
         name: "switch",
         usage: "switch <domain> <core>",
         description: "Switch to domain on core",

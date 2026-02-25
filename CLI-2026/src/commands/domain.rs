@@ -1,6 +1,7 @@
-//! Domain-related commands: init, create-domain, seal, revoke, set-interrupt-policy
+//! Domain-related commands: init, create-domain, seal, revoke, set-interrupt-policy, enumerate-pending, accept-capability
 
 use capability_engine::*;
+use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::sync::Arc;
 
@@ -317,6 +318,169 @@ pub fn cmd_set_default_interrupt_policy(state: &mut CliState, args: &[&str]) -> 
         domain_name.bright_white(),
         visibility
     );
+
+    Ok(())
+}
+
+/// Enumerate pending capabilities for a sealed domain
+pub fn cmd_enumerate_pending(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 1 {
+        return Err("Usage: enumerate-pending <domain>".to_string());
+    }
+
+    let domain_name = args[0];
+    let domain = state
+        .domains
+        .get(domain_name)
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+
+    let domain_read = domain.read();
+    let pending_ids = domain_read.data.get_pending_ids();
+
+    if pending_ids.is_empty() {
+        println!(
+            "  {} No pending capabilities for domain '{}'",
+            "ℹ".bright_blue(),
+            domain_name.bright_white()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n{} Pending capabilities for domain '{}':",
+        "📋".bright_cyan().bold(),
+        domain_name.bright_white()
+    );
+
+    for pending_id in pending_ids {
+        if let Some(pending_cap) = domain_read.data.get_pending_capability(pending_id) {
+            match pending_cap {
+                PendingCapability::Memory(weak_ref) => {
+                    if let Some(mem_ref) = weak_ref.upgrade() {
+                        let mem = mem_ref.read();
+                        println!(
+                            "  {} [ID: {}] Memory [0x{:x}..0x{:x}) {:?} (owner: {})",
+                            "→".bright_blue(),
+                            pending_id,
+                            mem.data.access.start,
+                            mem.data.access.end(),
+                            mem.data.access.rights,
+                            mem.owned.owner
+                        );
+                    }
+                }
+                PendingCapability::Domain(weak_ref) => {
+                    if let Some(dom_ref) = weak_ref.upgrade() {
+                        let dom = dom_ref.read();
+                        println!(
+                            "  {} [ID: {}] Domain (ID: {}, status: {:?})",
+                            "→".bright_blue(),
+                            pending_id,
+                            dom.data.id,
+                            dom.data.status
+                        );
+                    }
+                }
+            }
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
+/// Accept a pending capability and assign it a handle
+pub fn cmd_accept_capability(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err("Usage: accept-capability <domain> <pending_id> [handle]".to_string());
+    }
+
+    let domain_name = args[0];
+    let pending_id = parse_number(args[1])?;
+
+    let domain = state
+        .domains
+        .get(domain_name)
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+
+    let domain_id = domain.read().data.id;
+
+    // Determine handle: either user-provided or auto-allocated
+    let handle = if args.len() == 3 {
+        parse_number(args[2])?
+    } else {
+        // Auto-allocate based on capability type
+        // We need to peek at the pending capability first
+        let domain_read = domain.read();
+        let pending_cap = domain_read
+            .data
+            .get_pending_capability(pending_id)
+            .ok_or_else(|| format!("Pending capability {} not found", pending_id))?;
+
+        match pending_cap {
+            PendingCapability::Memory(_) => domain_read.data.allocate_memory_handle(),
+            PendingCapability::Domain(_) => domain_read.data.allocate_domain_handle(),
+        }
+    };
+
+    // Now accept the capability
+    let accepted_cap = domain
+        .write()
+        .data
+        .accept_pending_capability(pending_id, handle)
+        .map_err(|e| format!("Failed to accept capability: {:?}", e))?;
+
+    // Now we need to update ownership and generate MMU updates
+    match accepted_cap {
+        PendingCapability::Memory(weak_ref) => {
+            if let Some(mem_ref) = weak_ref.upgrade() {
+                // Update the capability's ownership
+                let mut mem = mem_ref.write();
+                let old_owner = mem.owned.owner;
+                mem.owned.owner = domain_id;
+                mem.owned.handle = handle;
+
+                // Generate MMU updates
+                let mut updates = UpdateBatch::new();
+
+                // Unmap from old owner if needed
+                if old_owner != domain_id {
+                    updates.add_unmap(old_owner, mem.data.access.start, mem.data.access.size);
+                }
+
+                // Map to new owner
+                updates.add_map(
+                    domain_id,
+                    mem.data.access.start,
+                    mem.data.access.size,
+                    mem.data.access.start,
+                    mem.data.access.rights.read(),
+                    mem.data.access.rights.write(),
+                    mem.data.access.rights.execute(),
+                );
+
+                drop(mem);
+
+                // Process updates
+                process_updates(state, &updates);
+
+                println!(
+                    "{} Accepted pending memory capability {} as handle {}",
+                    "✓".bright_green().bold(),
+                    pending_id,
+                    handle
+                );
+            }
+        }
+        PendingCapability::Domain(_) => {
+            println!(
+                "{} Accepted pending domain capability {} as handle {}",
+                "✓".bright_green().bold(),
+                pending_id,
+                handle
+            );
+        }
+    }
 
     Ok(())
 }

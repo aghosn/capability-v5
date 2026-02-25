@@ -1,6 +1,7 @@
 //! Memory-related commands: carve, alias, send
 
 use capability_engine::*;
+use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::sync::Arc;
 
@@ -131,38 +132,71 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
     let domain_id = domain.read().data.id;
+    let is_sealed = domain.read().data.is_sealed();
+    let can_receive_after_seal = domain.read().data.policy.receive_after_seal();
 
-    // Automatically allocate handle in the receiving domain
-    let handle = domain.read().data.allocate_memory_handle();
+    // Check if we need to use pending queue
+    if is_sealed && can_receive_after_seal {
+        // Domain is sealed with RECEIVE_AFTER_SEAL - add to pending queue
+        let pending_id = domain
+            .write()
+            .data
+            .add_pending_capability(PendingCapability::Memory(Arc::downgrade(mem)));
 
-    let updates = mem
-        .send(domain_id, handle, attrs)
-        .map_err(|e| format!("Failed to send: {:?}", e))?;
+        // Record command
+        state.session.add_command(Command::Send {
+            mem: mem_name.to_string(),
+            domain: domain_name.to_string(),
+            handle: pending_id, // Use pending_id as handle for recording
+            attrs: format!("{:?}", attrs),
+        });
 
-    // Register memory capability with domain
-    domain
-        .write()
-        .data
-        .add_memory_capability(handle, Arc::downgrade(mem));
+        println!(
+            "{} Sent '{}' to sealed domain '{}' - pending acceptance (ID: {})",
+            "⏸".bright_yellow().bold(),
+            mem_name.bright_white(),
+            domain_name.bright_white(),
+            pending_id
+        );
+    } else if is_sealed && !can_receive_after_seal {
+        // Domain is sealed and cannot receive capabilities
+        return Err(format!(
+            "Domain '{}' is sealed and does not have RECEIVE_AFTER_SEAL permission",
+            domain_name
+        ));
+    } else {
+        // Domain is unsealed - proceed normally
+        let handle = domain.read().data.allocate_memory_handle();
 
-    // Process updates
-    process_updates(state, &updates);
+        let updates = mem
+            .send(domain_id, handle, attrs)
+            .map_err(|e| format!("Failed to send: {:?}", e))?;
 
-    // Record command
-    state.session.add_command(Command::Send {
-        mem: mem_name.to_string(),
-        domain: domain_name.to_string(),
-        handle,
-        attrs: format!("{:?}", attrs),
-    });
+        // Register memory capability with domain
+        domain
+            .write()
+            .data
+            .add_memory_capability(handle, Arc::downgrade(mem));
 
-    println!(
-        "{} Sent '{}' to '{}' with auto-allocated handle {}",
-        "✓".bright_green().bold(),
-        mem_name.bright_white(),
-        domain_name.bright_white(),
-        handle
-    );
+        // Process updates
+        process_updates(state, &updates);
+
+        // Record command
+        state.session.add_command(Command::Send {
+            mem: mem_name.to_string(),
+            domain: domain_name.to_string(),
+            handle,
+            attrs: format!("{:?}", attrs),
+        });
+
+        println!(
+            "{} Sent '{}' to unsealed domain '{}' with auto-allocated handle {}",
+            "✓".bright_green().bold(),
+            mem_name.bright_white(),
+            domain_name.bright_white(),
+            handle
+        );
+    }
 
     Ok(())
 }

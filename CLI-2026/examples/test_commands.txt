@@ -1,0 +1,20 @@
+# Test command file for the CLI
+# This demonstrates the load command functionality
+
+# Initialize the system
+init root 0x10000000
+
+# Create a child domain
+create-domain root child1 0b1111 GET,ATTEST,SWITCH
+
+# Carve some memory
+carve r0 mem1 0x1000 0x5000 RWX
+
+# Send memory to child
+send mem1 child1
+
+# Seal the child domain
+seal child1
+
+# List everything
+list

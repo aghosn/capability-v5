@@ -18,6 +18,8 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "revoke" => domain::cmd_revoke(state, args),
         "set-interrupt-policy" => domain::cmd_set_interrupt_policy(state, args),
         "set-default-interrupt-policy" => domain::cmd_set_default_interrupt_policy(state, args),
+        "enumerate-pending" => domain::cmd_enumerate_pending(state, args),
+        "accept-capability" => domain::cmd_accept_capability(state, args),
 
         // Memory commands
         "carve" => memory::cmd_carve(state, args),
@@ -36,6 +38,8 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         // Session commands
         "save-session" => session_cmd::cmd_save_session(state, args),
         "clear-session" => session_cmd::cmd_clear_session(state),
+        "reset" => session_cmd::cmd_reset(state),
+        "load" => session_cmd::cmd_load(state, args),
 
         // Unknown command
         _ => Err(format!("Unknown command: {}", cmd)),
