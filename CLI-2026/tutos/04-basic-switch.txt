@@ -22,13 +22,13 @@ create-domain root app2 0b1100 GET,ATTEST,SWITCH
 
 # Give them some memory
 @msg 📋 Step 2: Allocate memory to each domain
-carve r0 app1_mem 0x100000 0x50000 RWX
-carve r0 app2_mem 0x200000 0x50000 RWX
+carve r0 app1_mem 0x80000 0x40000 RWX
+carve r0 app2_mem 0x100000 0x40000 RWX
 send app1_mem app1
 send app2_mem app2
 
 @msg
-@msg ✓ Each domain has its own memory region
+@msg ✓ Each domain has its own memory region (256KB each)
 @msg
 
 # Seal the domains

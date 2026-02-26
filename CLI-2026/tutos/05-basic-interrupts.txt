@@ -12,19 +12,26 @@
 @msg 📋 Step 1: Set up domain hierarchy
 init root 0x200000
 create-domain root parent 0b1111 GET,ATTEST,SWITCH
-create-domain parent child 0b1111 GET,ATTEST,SWITCH
 
 @msg
-@msg ✓ Created hierarchy: root → parent → child
+@msg ✓ Created parent domain
 @msg
 
-# Give them memory and seal
-@msg 📋 Step 2: Allocate memory and seal domains
-carve r0 parent_mem 0x100000 0x50000 RWX
-carve parent_mem child_mem 0x100000 0x10000 RWX
+# Give parent memory and seal it
+@msg 📋 Step 2: Allocate memory to parent and seal
+carve r0 parent_mem 0x80000 0x60000 RWX
+carve parent_mem child_mem 0x80000 0x20000 RWX
 send parent_mem parent
-send child_mem child
 seal parent
+
+@msg
+@msg ✓ Parent sealed with 384KB memory (child region carved from it)
+@msg
+
+# Create child domain and give it memory
+@msg 📋 Step 3: Create child domain (parent must be sealed first!)
+create-domain parent child 0b1111 GET,ATTEST,SWITCH
+send child_mem child
 seal child
 
 @msg
@@ -32,7 +39,7 @@ seal child
 @msg
 
 # Set interrupt policies - child cannot handle interrupt 55
-@msg 📋 Step 3: Configure interrupt policies
+@msg 📋 Step 4: Configure interrupt policies
 @msg   • child: NOTREPORT for vector 55 (cannot handle it)
 @msg   • parent: DELIVER for vector 55 (will handle it)
 set-interrupt-policy child 55 NOTREPORT
@@ -43,15 +50,16 @@ set-interrupt-policy parent 55 DELIVER
 @msg
 
 # Switch to child on core 0
-@msg 📋 Step 4: Switch to child domain on core 0
+@msg 📋 Step 5: Switch to child domain on core 0 (must go through parent)
+switch parent 0
 switch child 0
 
 @msg
-@msg ✓ Core 0 now running child
+@msg ✓ Core 0 now running child (switched via parent)
 @msg
 
 # Send interrupt to core 0
-@msg 📋 Step 5: Deliver interrupt 55 to core 0 (currently running child)
+@msg 📋 Step 6: Deliver interrupt 55 to core 0 (currently running child)
 interrupt 55 0
 
 @msg
@@ -60,7 +68,7 @@ interrupt 55 0
 @msg
 
 # Check core status
-@msg 📋 Step 6: Verify core status after interrupt routing
+@msg 📋 Step 7: Verify core status after interrupt routing
 list
 
 @msg
@@ -68,7 +76,7 @@ list
 @msg
 
 # Set default policy
-@msg 📋 Step 7: Set default interrupt policy for all other vectors
+@msg 📋 Step 8: Set default interrupt policy for all other vectors
 set-default-interrupt-policy child REPORT
 
 @msg
@@ -76,7 +84,7 @@ set-default-interrupt-policy child REPORT
 @msg
 
 # Demonstrate REPORT policy
-@msg 📋 Step 8: Switch back to child and try interrupt 42
+@msg 📋 Step 9: Switch back to child and try interrupt 42
 switch child 0
 interrupt 42 0
 

@@ -294,6 +294,10 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
 
     let tutorial = &tutorials[tutorial_num - 1];
 
+    // Automatically reset state before running tutorial to ensure clean environment
+    let num_cores = state.num_cores;
+    *state = CliState::new(num_cores);
+
     println!();
     println!("{}", "═".repeat(60).bright_cyan());
     println!("{} {}", "📚".bright_cyan(), tutorial.title.bright_cyan().bold());
@@ -304,7 +308,8 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
 
     println!("{}", "═".repeat(60).bright_cyan());
     println!("{} Tutorial completed!", "✓".bright_green().bold());
-    println!("   Use {} to reset and try another tutorial.", "reset".bright_white());
+    println!("   Run {} for another tutorial (auto-resets).", "tutos <number>".bright_white());
+    println!("   Use {} to manually reset state.", "reset".bright_white());
     println!("{}", "═".repeat(60).bright_cyan());
     println!();
 
