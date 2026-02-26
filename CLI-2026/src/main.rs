@@ -171,6 +171,8 @@ fn show_help() {
     println!("    Example: view child1");
     println!("  {}", "list".bright_white().bold());
     println!("    List all domains, memory regions, and core status");
+    println!("  {}", "mem-usage".bright_white().bold());
+    println!("    Report logical memory consumption of all capability engine objects");
     println!();
 
     println!("{}", "Execution:".bright_yellow());

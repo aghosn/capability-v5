@@ -32,6 +32,7 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "attest" => info::cmd_attest(state, args),
         "view" => info::cmd_view(state, args),
         "list" => info::cmd_list(state),
+        "mem-usage" => info::cmd_mem_usage(state),
 
         // Execution commands
         "switch" => execution::cmd_switch(state, args),

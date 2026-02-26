@@ -72,6 +72,11 @@ const COMMANDS: &[CommandInfo] = &[
         description: "List all domains and memory regions",
     },
     CommandInfo {
+        name: "mem-usage",
+        usage: "mem-usage",
+        description: "Report logical memory consumption of capability engine objects",
+    },
+    CommandInfo {
         name: "set-interrupt-policy",
         usage: "set-interrupt-policy <domain> <vector> <visibility>",
         description: "Set interrupt policy for a vector",

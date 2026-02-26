@@ -1,4 +1,4 @@
-//! Information commands: attest, view, list
+//! Information commands: attest, view, list, mem-usage
 
 use capability_engine::*;
 use capability_engine::domain::PendingCapability;
@@ -277,6 +277,201 @@ fn display_physical_address_space(state: &CliState) {
     println!();
     println!("  Legend: {} = Carved (exclusive), {} = Carved (from alias), {} = Aliased, {} = Carved portion in parent",
         "█".bright_cyan(), "█".bright_green(), "▓".bright_yellow(), "░".bright_cyan());
+}
+
+/// Compute logical memory footprint (bytes) of a single domain capability node.
+///
+/// Counts the fixed inline struct size plus all heap-allocated payloads.
+/// Child pointers in `children` are counted (the pointer storage), but the child
+/// objects themselves are NOT — they appear as their own entries when the caller
+/// iterates over `state.domains`.
+fn domain_logical_bytes(cap: &Capability<Domain>) -> usize {
+    let mut bytes = std::mem::size_of::<Capability<Domain>>();
+
+    // children Vec heap buffer: one CapabilityRef<Domain> pointer per child
+    bytes += cap.children.len() * std::mem::size_of::<CapabilityRef<Domain>>();
+
+    // memory_capabilities BTreeMap: key + value per entry
+    bytes += cap.data.memory_capabilities.len()
+        * (std::mem::size_of::<LocalHandle>() + std::mem::size_of::<CapabilityWeak<MemoryRegion>>());
+
+    // domain_capabilities BTreeMap: key + value per entry
+    bytes += cap.data.domain_capabilities.len()
+        * (std::mem::size_of::<LocalHandle>() + std::mem::size_of::<CapabilityWeak<Domain>>());
+
+    // pending_capabilities BTreeMap: key + value per entry
+    bytes += cap.data.pending_capabilities.len()
+        * (std::mem::size_of::<u64>() + std::mem::size_of::<PendingCapability>());
+
+    // interrupt policy overrides BTreeMap: key + value per entry
+    bytes += cap.data.policy.interrupts.overrides.len()
+        * (std::mem::size_of::<u8>() + std::mem::size_of::<VectorPolicy>());
+
+    // vprocessor_states Vec: each VProcessorState struct + its heap contents
+    for vp in &cap.data.policy.vprocessor_states {
+        bytes += std::mem::size_of::<VProcessorState>();
+        // registers BTreeMap: String heap bytes + u64 per entry
+        for (k, _) in &vp.registers {
+            bytes += k.len() + std::mem::size_of::<u64>();
+        }
+        // platform_data Vec payload
+        bytes += vp.platform_data.len();
+    }
+
+    bytes
+}
+
+/// Compute logical memory footprint (bytes) of a single memory capability node.
+fn memory_logical_bytes(cap: &Capability<MemoryRegion>) -> usize {
+    let mut bytes = std::mem::size_of::<Capability<MemoryRegion>>();
+
+    // children Vec heap buffer: one CapabilityRef<MemoryRegion> pointer per child
+    bytes += cap.children.len() * std::mem::size_of::<CapabilityRef<MemoryRegion>>();
+
+    bytes
+}
+
+/// Report logical memory usage of all capability engine objects
+pub fn cmd_mem_usage(state: &mut CliState) -> std::result::Result<(), String> {
+    struct DomainRow {
+        name: String,
+        id: u64,
+        status: DomainStatus,
+        num_children: usize,
+        num_mem_caps: usize,
+        num_domain_caps: usize,
+        num_pending: usize,
+        num_irq_overrides: usize,
+        bytes: usize,
+    }
+
+    let mut domain_rows: Vec<DomainRow> = state
+        .domains
+        .iter()
+        .map(|(name, arc)| {
+            let cap = arc.read();
+            DomainRow {
+                name: name.clone(),
+                id: cap.data.id,
+                status: cap.data.status,
+                num_children: cap.children.len(),
+                num_mem_caps: cap.data.memory_capabilities.len(),
+                num_domain_caps: cap.data.domain_capabilities.len(),
+                num_pending: cap.data.pending_capabilities.len(),
+                num_irq_overrides: cap.data.policy.interrupts.overrides.len(),
+                bytes: domain_logical_bytes(&cap),
+            }
+        })
+        .collect();
+    domain_rows.sort_by_key(|r| r.id);
+
+    struct MemRow {
+        name: String,
+        kind: RegionKind,
+        start: u64,
+        end: u64,
+        num_children: usize,
+        bytes: usize,
+    }
+
+    let mut mem_rows: Vec<MemRow> = state
+        .memories
+        .iter()
+        .map(|(name, arc)| {
+            let cap = arc.read();
+            MemRow {
+                name: name.clone(),
+                kind: cap.data.kind,
+                start: cap.data.access.start,
+                end: cap.data.access.end(),
+                num_children: cap.children.len(),
+                bytes: memory_logical_bytes(&cap),
+            }
+        })
+        .collect();
+    mem_rows.sort_by_key(|r| r.start);
+
+    let total_domain_bytes: usize = domain_rows.iter().map(|r| r.bytes).sum();
+    let total_mem_bytes: usize = mem_rows.iter().map(|r| r.bytes).sum();
+    let grand_total = total_domain_bytes + total_mem_bytes;
+
+    println!("\n{}", "Memory Usage Report (logical sizes):".bright_cyan().bold());
+    println!("{}", "─".repeat(72));
+
+    // Domains section
+    println!(
+        "\n{} {} total, {} bytes",
+        "Domains:".bright_yellow().bold(),
+        domain_rows.len(),
+        total_domain_bytes
+    );
+    if domain_rows.is_empty() {
+        println!("  (none)");
+    } else {
+        println!(
+            "  {:<16} {:>4}  {:<10}  {:>9}  {:>8}  {:>8}  {:>8}  {:>6}  {:>8}",
+            "Name", "ID", "Status", "#Children", "#MemCaps", "#DomCaps", "#Pending", "#IRQs", "Bytes"
+        );
+        println!("  {}", "─".repeat(80));
+        for r in &domain_rows {
+            println!(
+                "  {:<16} {:>4}  {:<10}  {:>9}  {:>8}  {:>8}  {:>8}  {:>6}  {:>8}",
+                r.name,
+                r.id,
+                format!("{:?}", r.status),
+                r.num_children,
+                r.num_mem_caps,
+                r.num_domain_caps,
+                r.num_pending,
+                r.num_irq_overrides,
+                r.bytes
+            );
+        }
+    }
+
+    // Memory regions section
+    println!(
+        "\n{} {} total, {} bytes",
+        "Memory Regions:".bright_yellow().bold(),
+        mem_rows.len(),
+        total_mem_bytes
+    );
+    if mem_rows.is_empty() {
+        println!("  (none)");
+    } else {
+        println!(
+            "  {:<16}  {:<6}  {:<28}  {:>9}  {:>8}",
+            "Name", "Kind", "Range", "#Children", "Bytes"
+        );
+        println!("  {}", "─".repeat(72));
+        for r in &mem_rows {
+            println!(
+                "  {:<16}  {:<6}  [{:#010x}..{:#010x})  {:>9}  {:>8}",
+                r.name,
+                format!("{:?}", r.kind),
+                r.start,
+                r.end,
+                r.num_children,
+                r.bytes
+            );
+        }
+    }
+
+    // Summary
+    println!("\n{}", "Summary:".bright_yellow().bold());
+    println!("  {:<22}  {:>8} bytes", "Domains:", total_domain_bytes);
+    println!("  {:<22}  {:>8} bytes", "Memory regions:", total_mem_bytes);
+    println!("  {}", "─".repeat(36));
+    println!("  {:<22}  {:>8} bytes", "Total:", grand_total);
+    println!();
+    println!(
+        "{}",
+        "Note: logical sizes only; excludes allocator overhead, Arc ref-counts, and RwLock state."
+            .bright_black()
+    );
+    println!();
+
+    Ok(())
 }
 
 /// List all domains and memory regions with active core status
