@@ -2,7 +2,7 @@
 
 **DISCLAIMER:** I used the paper description and the manual implementations from 2025 to generate a new implementation using Claude. The code and document in this subfolder is auto-generated and will be inspected.
 
-A thread-safe, `no_std` compatible Rust implementation of a capability-based security system for managing trust domains with composable isolation, based on the research paper ["Composable Isolation as a Foundation to Manage Trust in the Cloud"](eurosp2026-paper181.pdf).
+A thread-safe, `no_std` compatible Rust implementation of a capability-based security system for managing trust domains with composable isolation, based on the research paper "Composable Isolation as a Foundation to Manage Trust in the Cloud".
 
 ## Features
 
@@ -52,9 +52,9 @@ Physical address remapping:
 Trust domains with:
 - **Policies**:
   - Core bitmap (which physical cores can run the domain)
-  - Monitor API permissions (CREATE, SET, GET, SEND, SEAL, etc.)
-  - Interrupt routing policies (per-vector: Deliver, Report, NotReport)
-  - Receive-after-seal flag
+  - Monitor API permissions (CREATE, SET, GET, SEND, SEAL, ATTEST, ENUMERATE, SWITCH, ALIAS, CARVE, REVOKE, GETCHAN, RECEIVE_AFTER_SEAL)
+  - Interrupt routing policies (per-vector: Deliver, Report, NotReport; with per-vector `read_set`/`write_set` register masks)
+  - `RECEIVE_AFTER_SEAL` flag — when set, capabilities can be sent to this domain even after it is sealed; they are queued as pending and the domain calls `accept_pending_capability()` / `reject_pending_capability()` to process them
 - **Virtual Processor States**: Platform-specific register sets
 - **Status**: Unsealed, Sealed, or Revoked
 
@@ -63,30 +63,32 @@ Trust domains with:
 #### Memory Operations
 
 ```rust
-// Create an aliased child (shared access)
+// Static methods (explicit owner)
 let child = Capability::alias_child(&parent, access, owner_id, handle)?;
-
-// Create a carved child (exclusive access, removes from parent)
 let (child, updates) = Capability::carve_child(&parent, access, owner_id, handle)?;
-
-// Transfer ownership to another domain
 let updates = Capability::send_to(&region, new_owner, new_handle, attributes)?;
-
-// Revoke a child and all descendants
 let updates = Capability::revoke_child(&parent, child_handle)?;
+
+// Extension trait (MemoryCapabilityExt) — infers owner from the capability itself
+let child = parent_ref.alias(access, handle)?;
+let (child, updates) = parent_ref.carve(access, handle)?;
+let updates = region_ref.send(new_owner, new_handle, attributes)?;
+let updates = parent_ref.revoke(child_handle)?;
 ```
 
 #### Domain Operations
 
 ```rust
-// Create a child domain
+// Static methods (explicit owner)
 let child = Capability::create_child_domain(&parent, policy, owner_id, handle)?;
+let updates = Capability::revoke_child_domain(&parent, child_handle)?;
+
+// Extension trait (DomainCapabilityExt) — infers owner from the capability itself
+let child = parent_ref.create_child(policy, handle)?;
+let updates = parent_ref.revoke_child(child_handle)?;
 
 // Seal a domain (make it executable)
 domain.seal()?;
-
-// Revoke a domain and all descendants
-let updates = Capability::revoke_child_domain(&parent, child_handle)?;
 ```
 
 #### Switch Operations
@@ -95,8 +97,9 @@ let updates = Capability::revoke_child_domain(&parent, child_handle)?;
 // Create a switch manager
 let mgr = SwitchManager::new(num_cores);
 
-// Switch from one domain to another
+// Switch from one domain to another (pass None to return to parent)
 let ctx = mgr.switch(core_id, &from_domain, Some(&to_domain))?;
+let ctx = mgr.switch(core_id, &from_domain, None)?; // return to parent
 
 // Route an interrupt through the domain hierarchy
 let (handler_id, reported_to) = mgr.route_interrupt(vector, &interrupted, core_id)?;
@@ -112,7 +115,7 @@ pub enum Update {
     Map { domain, address, size, physical, read, write, execute },
     ChangeRights { domain, address, size, read, write, execute },
     ZeroMemory { address, size },
-    RevokeDomain { domain },
+    RevokeDomain { domain, fallback: Option<DomainId> },
     FlushTLB { domain },
 }
 ```
@@ -124,14 +127,49 @@ Updates are atomic and can affect multiple domains simultaneously.
 Generate attestation reports for domains and memory regions:
 
 ```rust
-// Attest a domain and its policies
-let report = attest_domain(&domain_ref);
+// Attest a domain and its policies — returns AttestationReport
+let report: AttestationReport = attest_domain(&domain_ref);
+println!("{}", report.report);
 
-// Attest a memory region
-let report = attest_memory_region(&region_ref);
+// Attest a memory region — returns String
+let report: String = attest_memory_region(&region_ref);
 
 // Enumerate all domains in a subtree
-let domain_ids = enumerate_domain_tree(&root_domain);
+let domain_ids: Vec<u64> = enumerate_domain_tree(&root_domain);
+```
+
+### Platform Abstraction (`platform.rs`)
+
+The `Platform` trait abstracts the hardware operations that the capability engine produces:
+
+```rust
+pub trait Platform: Send + Sync {
+    fn on_unmap(&self, domain: DomainId, address: u64, size: u64);
+    fn on_map(&self, domain: DomainId, address: u64, size: u64, physical: u64,
+              read: bool, write: bool, execute: bool);
+    fn on_domain_revoked(&self, domain: DomainId, fallback: Option<DomainId>);
+    // ...
+}
+
+// execute() drives an UpdateBatch through a Platform implementation
+execute(&platform, &update_batch);
+```
+
+### Address Space View (`view.rs`)
+
+Compute the set of memory regions accessible to a domain at any point:
+
+```rust
+// Walk the capability tree rooted at a domain and produce a merged view
+let view: AddressSpaceView = compute_address_space(&domain_ref);
+
+// Alternatively, build a view from an explicit list of CapabilityRef<MemoryRegion>
+let view: AddressSpaceView = compute_view_from_capabilities(domain_id, &caps);
+
+// Inspect the view
+for region in &view.regions {
+    println!("{:#x} - {:#x} ({:?})", region.start(), region.end(), region.rights());
+}
 ```
 
 ## Revocation
@@ -155,9 +193,8 @@ let updates = Capability::revoke_child(&parent, child_handle)?;
 ```rust
 use capability_engine::*;
 
-// Create root domain
-let root_policy = DomainPolicy::new_root();
-let root_domain = Domain::new_root();
+// Create root domain (pre-sealed, owns 4 cores)
+let root_domain = Domain::new_root(4);
 let root = Capability::new_root(0, 0, root_domain);
 
 // Create root memory region (0x0 - 0x100000)
@@ -169,7 +206,6 @@ let child_policy = DomainPolicy::new_restricted(
     0b1111, // cores 0-3
     MonitorAPI::NONE
 );
-let child_domain = Domain::new(child_policy);
 let child = Capability::create_child_domain(&root, child_policy, 1, 0)?;
 
 // Carve memory for the child (exclusive)
@@ -248,7 +284,9 @@ src/
 ├── capability.rs       # Generic capability structure
 ├── update.rs           # Update tracking for address space changes
 ├── switch.rs           # Switch and interrupt routing
-└── attest.rs           # Attestation support
+├── attest.rs           # Attestation support
+├── platform.rs         # Platform abstraction trait and execute helper
+└── view.rs             # Address space view computation
 ```
 
 ## Building
