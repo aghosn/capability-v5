@@ -10,7 +10,7 @@
 
 # Initialize
 @msg 📋 Step 1: Initialize system and create domains
-init root 0x10000000
+init root 0x200000
 create-domain root app1 0b0011 GET,ATTEST,SWITCH
 create-domain root app2 0b1100 GET,ATTEST,SWITCH
 

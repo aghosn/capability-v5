@@ -10,32 +10,32 @@
 @msg
 
 # Step 1: Initialize the system
-@msg 📋 Step 1: Initialize root domain with 256MB of memory
-init root 0x10000000
+@msg 📋 Step 1: Initialize root domain with 1MB of memory
+init root 0x100000
 
 @msg
-@msg ✓ Created root domain with memory region 'r0' [0x0..0x10000000)
+@msg ✓ Created root domain with memory region 'r0' [0x0..0x100000)
 @msg
 
 # Step 2: Carve exclusive memory
-@msg 📋 Step 2: Carve an exclusive 64KB region at offset 0x1000
-carve r0 exclusive1 0x1000 0x10000 RWX
+@msg 📋 Step 2: Carve an exclusive 64KB region at offset 0x10000
+carve r0 exclusive1 0x10000 0x10000 RWX
 
 @msg
-@msg ✓ Carved 'exclusive1' - root no longer has access to [0x1000..0x11000)
+@msg ✓ Carved 'exclusive1' - root no longer has access to [0x10000..0x20000)
 @msg
 
 # Step 3: Try to carve overlapping memory (will fail)
 @msg 📋 Step 3: Attempt to carve overlapping memory (expected to fail)
-carve r0 overlap 0x5000 0x10000 RW
+carve r0 overlap 0x15000 0x10000 RW
 
 @msg
 @msg ⚠️  This should fail - cannot carve overlapping regions!
 @msg
 
 # Step 4: Carve another non-overlapping region
-@msg 📋 Step 4: Carve another exclusive region at 0x20000
-carve r0 exclusive2 0x20000 0x8000 RW
+@msg 📋 Step 4: Carve another exclusive region at 0x40000
+carve r0 exclusive2 0x40000 0x20000 RW
 
 @msg
 @msg ✓ Successfully carved 'exclusive2' - no overlap with exclusive1

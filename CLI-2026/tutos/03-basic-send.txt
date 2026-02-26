@@ -10,10 +10,10 @@
 
 # Initialize
 @msg 📋 Step 1: Initialize system
-init root 0x10000000
+init root 0x200000
 
 @msg
-@msg ✓ System initialized
+@msg ✓ System initialized with 2MB memory
 @msg
 
 # Create a child domain
@@ -26,10 +26,10 @@ create-domain root child1 0b1111 GET,ATTEST,SWITCH
 
 # Carve memory for the child
 @msg 📋 Step 3: Carve exclusive memory for child1
-carve r0 child1_mem 0x100000 0x10000 RWX
+carve r0 child1_mem 0x80000 0x40000 RWX
 
 @msg
-@msg ✓ Carved 64KB of memory for child1
+@msg ✓ Carved 256KB of memory for child1
 @msg
 
 # Send the memory to child1
@@ -37,13 +37,13 @@ carve r0 child1_mem 0x100000 0x10000 RWX
 send child1_mem child1
 
 @msg
-@msg ✓ Memory sent! child1 can now access [0x100000..0x110000)
+@msg ✓ Memory sent! child1 can now access [0x80000..0xc0000)
 @msg   MMU mappings automatically updated
 @msg
 
 # Create shared memory and send it
 @msg 📋 Step 5: Create shared memory and send to child1
-alias r0 shared_buf 0x200000 0x4000 RW
+alias r0 shared_buf 0x100000 0x20000 RW
 send shared_buf child1
 
 @msg

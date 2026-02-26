@@ -10,7 +10,7 @@
 
 # Initialize
 @msg 📋 Step 1: Set up domain hierarchy
-init root 0x10000000
+init root 0x200000
 create-domain root parent 0b1111 GET,ATTEST,SWITCH
 create-domain parent child 0b1111 GET,ATTEST,SWITCH
 

@@ -10,8 +10,8 @@
 @msg
 
 # Initialize
-@msg 📋 Step 1: Initialize root domain with 256MB
-init root 0x10000000
+@msg 📋 Step 1: Initialize root domain with 1MB
+init root 0x100000
 
 @msg
 @msg ✓ Root domain created with memory 'r0'
@@ -19,15 +19,15 @@ init root 0x10000000
 
 # Create an alias with full rights
 @msg 📋 Step 2: Create a shared alias with read-write-execute rights
-alias r0 shared1 0x1000 0x10000 RWX
+alias r0 shared1 0x10000 0x10000 RWX
 
 @msg
-@msg ✓ Created 'shared1' - both r0 and shared1 can access [0x1000..0x11000)
+@msg ✓ Created 'shared1' - both r0 and shared1 can access [0x10000..0x20000)
 @msg
 
 # Create overlapping alias (should work!)
 @msg 📋 Step 3: Create an overlapping alias (this works with aliasing!)
-alias r0 shared2 0x5000 0x8000 RW
+alias r0 shared2 0x15000 0x18000 RW
 
 @msg
 @msg ✓ Overlapping aliases are allowed - shared memory can have multiple views
@@ -35,7 +35,7 @@ alias r0 shared2 0x5000 0x8000 RW
 
 # Create alias with reduced rights
 @msg 📋 Step 4: Create a read-only alias for restricted access
-alias r0 readonly 0x20000 0x4000 R
+alias r0 readonly 0x50000 0x10000 R
 
 @msg
 @msg ✓ Created read-only view - demonstrates rights attenuation
