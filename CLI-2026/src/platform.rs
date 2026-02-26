@@ -72,10 +72,6 @@ impl CliPlatform {
     pub fn get_core(&self, core_id: u64) -> Result<Arc<capability_engine::CoreContext>> {
         self.inner.lock().switch_manager.get_core(core_id).cloned()
     }
-
-    pub fn num_cores(&self) -> usize {
-        self.inner.lock().num_cores
-    }
 }
 
 impl Platform for CliPlatform {

@@ -283,8 +283,7 @@ fn display_physical_address_space(state: &CliState) {
 pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
     // Show active domains per core
     println!("\n{}", "Active Domains per Core:".bright_cyan().bold());
-    let num_cores = 4; // Match the number in CliState::new
-    for core_id in 0..num_cores {
+    for core_id in 0..state.num_cores {
         if let Ok(core_ref) = state.platform.get_core(core_id as u64) {
             let core_state = core_ref.state.read();
             match *core_state {
