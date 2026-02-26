@@ -263,6 +263,18 @@ cargo test
 # Check for no_std compatibility
 cargo check --lib --no-default-features
 ```
+
+## Test Coverage
+
+[cargo-tarpaulin](https://github.com/xd009642/tarpaulin) is used for unit test coverage measurement.
+
+```bash
+# Generate coverage report (summary printed to stdout, lcov report at target/tarpaulin/lcov.info)
+cargo coverage
+```
+
+- Runs all lib and integration tests with `--no-fail-fast` so a single failing test does not abort the report.
+- The lcov report can be consumed by editors, CI pipelines, or converted to HTML via `genhtml`.
 ## License
 
 This is a research prototype implementation.

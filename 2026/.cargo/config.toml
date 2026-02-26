@@ -1,0 +1,5 @@
+[alias]
+# Run tarpaulin and print coverage summary + generate lcov report.
+# Usage: cargo coverage
+# Output: lcov report at target/tarpaulin/lcov.info, summary printed to stdout.
+coverage = "tarpaulin --lib --tests --out Lcov --output-dir target/tarpaulin --no-fail-fast"
