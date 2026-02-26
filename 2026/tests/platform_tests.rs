@@ -8,8 +8,8 @@ mod common;
 use std::collections::BTreeSet;
 
 use capability_engine::{
-    execute, CapaError, Capability, CoreId, DomainCapabilityExt, DomainId, DomainPolicy,
-    Domain, MonitorAPI, Platform, Update, UpdateBatch,
+    execute, CapaError, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform,
+    Update,
 };
 use common::TestPlatform;
 
@@ -216,9 +216,10 @@ fn test_revoke_child_domain_carries_fallback() {
     .expect("execute should succeed");
 
     // The UpdateBatch must contain RevokeDomain with fallback = Some(ROOT_ID)
-    let revoke_update = batch.updates().iter().find(|u| {
-        matches!(u, Update::RevokeDomain { domain, .. } if *domain == child_id)
-    });
+    let revoke_update = batch
+        .updates()
+        .iter()
+        .find(|u| matches!(u, Update::RevokeDomain { domain, .. } if *domain == child_id));
     assert!(revoke_update.is_some(), "should have RevokeDomain update");
 
     if let Some(Update::RevokeDomain { fallback, .. }) = revoke_update {
