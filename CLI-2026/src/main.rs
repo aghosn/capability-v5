@@ -7,6 +7,8 @@ use colored::*;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use rustyline::Config;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 mod commands;
 mod completer;
@@ -24,14 +26,15 @@ fn main() {
     println!("Type 'help' for available commands, 'exit' to quit");
     println!("{}", "Press TAB for command completion and hints\n".bright_black());
 
-    let mut state = CliState::new(4); // 4 cores
+    let state = Arc::new(RwLock::new(CliState::new(4))); // 4 cores
 
     // Configure rustyline with our custom helper
     let config = Config::builder()
         .auto_add_history(false)
         .build();
 
-    let helper = CliHelper::new();
+    let mut helper = CliHelper::new();
+    helper.set_state(Arc::downgrade(&state));
     let mut rl = Editor::with_config(config).expect("Failed to create readline editor");
     rl.set_helper(Some(helper));
 
@@ -60,12 +63,13 @@ fn main() {
                     continue;
                 }
 
-                match handle_command(&mut state, line) {
+                match handle_command(&state, line) {
                     Ok(_) => {
                         // If auto-list is enabled and command is not list/help/exit,
                         // automatically run list
-                        if state.auto_list && line != "list" && line != "help" && !line.starts_with("auto-list") {
-                            let _ = commands::dispatch(&mut state, "list", &[]);
+                        let should_auto_list = state.read().auto_list;
+                        if should_auto_list && line != "list" && line != "help" && !line.starts_with("auto-list") {
+                            let _ = commands::dispatch(&mut state.write(), "list", &[]);
                         }
                     }
                     Err(e) => {
@@ -93,7 +97,7 @@ fn main() {
 }
 
 /// Handle a command by dispatching to the appropriate handler
-fn handle_command(state: &mut CliState, line: &str) -> Result<(), String> {
+fn handle_command(state: &Arc<RwLock<CliState>>, line: &str) -> Result<(), String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(());
@@ -102,7 +106,7 @@ fn handle_command(state: &mut CliState, line: &str) -> Result<(), String> {
     let cmd = parts[0];
     let args = &parts[1..];
 
-    commands::dispatch(state, cmd, args)
+    commands::dispatch(&mut state.write(), cmd, args)
 }
 
 /// Display help information

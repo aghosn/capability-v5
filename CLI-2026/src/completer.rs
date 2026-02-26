@@ -6,6 +6,9 @@ use rustyline::highlight::Highlighter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
+use std::sync::Weak;
+use parking_lot::RwLock;
+use crate::state::CliState;
 
 /// Commands whose first argument is a filename (eligible for path completion)
 const FILENAME_COMMANDS: &[&str] = &["load", "save-session", "export-as-unit-test"];
@@ -152,13 +155,142 @@ const COMMANDS: &[CommandInfo] = &[
 
 pub struct CliHelper {
     filename_completer: FilenameCompleter,
+    state: Weak<RwLock<CliState>>,
 }
 
 impl CliHelper {
     pub fn new() -> Self {
         CliHelper {
             filename_completer: FilenameCompleter::new(),
+            state: Weak::new(),
         }
+    }
+
+    pub fn set_state(&mut self, state: Weak<RwLock<CliState>>) {
+        self.state = state;
+    }
+
+    /// Get capability names for completion based on command and argument position
+    fn get_capability_completions(&self, cmd: &str, arg_index: usize, prefix: &str) -> Vec<Pair> {
+        let state = match self.state.upgrade() {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let state = state.read();
+        let mut candidates = Vec::new();
+
+        // Determine what type of capability to suggest based on command and argument position
+        match (cmd, arg_index) {
+            // Commands where first arg is a domain name
+            ("seal", 1) | ("attest", 1) | ("view", 1) | ("enumerate-pending", 1)
+            | ("set-interrupt-policy", 1) | ("set-default-interrupt-policy", 1)
+            | ("accept-capability", 1) | ("reject-capability", 1) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            // create-domain: first arg is parent domain
+            ("create-domain", 1) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (parent domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            // carve/alias: first arg is parent memory
+            ("carve", 1) | ("alias", 1) => {
+                for name in state.memories.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (parent memory)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            // send: first arg is memory, second arg is domain
+            ("send", 1) => {
+                for name in state.memories.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (memory)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            ("send", 2) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            // revoke: first arg is parent (domain or memory), second arg is child
+            ("revoke", 1) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+                for name in state.memories.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (memory)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            ("revoke", 2) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+                for name in state.memories.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (memory)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            // switch: first arg is domain
+            ("switch", 1) => {
+                for name in state.domains.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        candidates.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+        candidates
     }
 }
 
@@ -173,41 +305,55 @@ impl Completer for CliHelper {
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let before_cursor = &line[..pos];
         let parts: Vec<&str> = before_cursor.split_whitespace().collect();
+        let trailing_space = before_cursor.ends_with(' ');
+        let word_count = parts.len();
+
+        // Determine what we're completing
+        let cmd = parts.first().copied().unwrap_or("");
+        let arg_index = if trailing_space { word_count } else { word_count - 1 };
 
         // If we're typing the first argument of a filename command, do path completion.
-        // Also handle the case where there's a trailing space (parts.len() == 1 but
-        // the user already typed the command and a space).
-        let on_filename_arg = {
-            let word_count = parts.len();
-            let trailing_space = before_cursor.ends_with(' ');
-            if word_count == 1 && !trailing_space {
-                false // still typing the command name
-            } else {
-                let cmd = parts.first().copied().unwrap_or("");
-                let arg_index = if trailing_space { word_count } else { word_count - 1 };
-                FILENAME_COMMANDS.contains(&cmd) && arg_index == 1
-            }
-        };
-
-        if on_filename_arg {
+        if word_count >= 1 && FILENAME_COMMANDS.contains(&cmd) && arg_index == 1 {
             return self.filename_completer.complete_path(line, pos);
         }
 
-        // Otherwise complete command names when on the first word
-        let mut candidates = Vec::new();
-        if before_cursor.trim().split_whitespace().count() <= 1 {
+        // Complete command names when on the first word
+        if word_count == 0 || (word_count == 1 && !trailing_space) {
             let prefix = before_cursor.trim();
-            for cmd in COMMANDS {
-                if cmd.name.starts_with(prefix) {
+            let mut candidates = Vec::new();
+            for cmd_info in COMMANDS {
+                if cmd_info.name.starts_with(prefix) {
                     candidates.push(Pair {
-                        display: format!("{} - {}", cmd.name, cmd.description),
-                        replacement: cmd.name.to_string(),
+                        display: format!("{} - {}", cmd_info.name, cmd_info.description),
+                        replacement: cmd_info.name.to_string(),
                     });
                 }
             }
+            return Ok((0, candidates));
         }
 
-        Ok((0, candidates))
+        // Complete capability names for command arguments
+        if word_count >= 1 {
+            let current_word = if trailing_space {
+                ""
+            } else {
+                parts.last().copied().unwrap_or("")
+            };
+
+            let candidates = self.get_capability_completions(cmd, arg_index, current_word);
+
+            if !candidates.is_empty() {
+                // Calculate the start position for replacement
+                let start = if trailing_space {
+                    pos
+                } else {
+                    pos - current_word.len()
+                };
+                return Ok((start, candidates));
+            }
+        }
+
+        Ok((0, Vec::new()))
     }
 }
 
