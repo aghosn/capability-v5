@@ -227,9 +227,16 @@ fn display_memory_tree(nodes: &[MemoryNode], depth: usize, total_size: u64) {
     let bar_width = 40;
     for node in nodes {
         // Pre-compute bar positions for carved children so they align exactly with child bars
+        // Grey out ALL carved regions in the parent display
         let carved_bar_ranges: Vec<(usize, usize)> = node.children.iter()
             .filter(|c| matches!(c.kind, RegionKind::Carve))
-            .map(|c| (addr_to_bar_pos(c.start, total_size, bar_width), addr_to_bar_pos(c.end, total_size, bar_width)))
+            .map(|c| {
+                let start_pos = addr_to_bar_pos(c.start, total_size, bar_width);
+                let end_pos = addr_to_bar_pos(c.end, total_size, bar_width);
+                // Ensure carved regions occupy at least 1 character in the display
+                let end_pos = if end_pos == start_pos { start_pos + 1 } else { end_pos };
+                (start_pos, end_pos)
+            })
             .collect();
 
         draw_memory_bar(node, depth, total_size, &carved_bar_ranges);
