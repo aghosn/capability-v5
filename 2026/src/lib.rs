@@ -23,6 +23,7 @@ pub mod capability;
 pub mod domain;
 pub mod error;
 pub mod memory;
+pub mod platform;
 pub mod switch;
 pub mod update;
 pub mod view;
@@ -35,6 +36,7 @@ pub use domain::{
 };
 pub use error::{CapaError, Result};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
+pub use platform::{execute, OpLockGuard, Platform};
 pub use switch::{CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager};
 pub use update::{CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus};
 pub use view::{AddressSpaceView, ViewRegion, compute_address_space, compute_view_from_capabilities};

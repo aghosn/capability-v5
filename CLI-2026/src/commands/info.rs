@@ -267,7 +267,7 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
     println!("\n{}", "Active Domains per Core:".bright_cyan().bold());
     let num_cores = 4; // Match the number in CliState::new
     for core_id in 0..num_cores {
-        if let Ok(core_ref) = state.switch_manager.get_core(core_id as u64) {
+        if let Ok(core_ref) = state.platform.get_core(core_id as u64) {
             let core_state = core_ref.state.read();
             match *core_state {
                 CoreState::Running(domain_id) => {

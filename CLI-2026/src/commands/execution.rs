@@ -24,7 +24,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         // Get current domain on this core
         let core_ref = state
-            .switch_manager
+            .platform
             .get_core(core)
             .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
 
@@ -79,7 +79,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         // Initialize core if needed
         {
             let core_ref = state
-                .switch_manager
+                .platform
                 .get_core(core)
                 .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
             let current_state = core_ref.state.read();
@@ -95,7 +95,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     };
 
     let _ctx = state
-        .switch_manager
+        .platform
         .switch(core, &from, Some(&to))
         .map_err(|e| format!("Failed to switch: {:?}", e))?;
 
@@ -129,7 +129,7 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
 
         // Get current domain on this core
         let core_ref = state
-            .switch_manager
+            .platform
             .get_core(core)
             .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
 
@@ -172,7 +172,7 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
     let interrupted_id = domain.read().data.id;
 
     let (handler_id, reported_to) = state
-        .switch_manager
+        .platform
         .route_interrupt(vector, &domain, core)
         .map_err(|e| format!("Failed to route interrupt: {:?}", e))?;
 
@@ -211,7 +211,7 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
     if handler_id != interrupted_id {
         // Update core state to run handler domain
         let core_ref = state
-            .switch_manager
+            .platform
             .get_core(core)
             .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
 

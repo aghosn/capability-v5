@@ -3,6 +3,7 @@
 use capability_engine::*;
 use capability_engine::domain::PendingCapability;
 use colored::*;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::parser::{parse_api, parse_number, format_api};
@@ -43,10 +44,9 @@ pub fn cmd_init(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     // Automatically schedule root domain on all cores
     let num_cores = state.num_cores as u64;
+    state.platform.register_domain(0, None);
     for core_id in 0..num_cores {
-        if let Ok(core_ref) = state.switch_manager.get_core(core_id) {
-            *core_ref.state.write() = CoreState::Running(0); // Root domain ID is 0
-        }
+        state.platform.set_core_domain(core_id, 0); // Root domain ID is 0
     }
 
     // Record command
@@ -95,6 +95,7 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
         .map_err(|e| format!("Failed to create child: {:?}", e))?;
 
     let child_id = child.read().data.id;
+    let parent_id = parent.read().data.id;
 
     // Register domain capability with parent
     parent
@@ -105,6 +106,9 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
     // Track domain name for reverse lookup
     state.register_domain_name(child_id, child_name.to_string());
     state.domains.insert(child_name.to_string(), child);
+
+    // Register with platform
+    state.platform.register_domain(child_id, Some(parent_id));
 
     // Record command
     state.session.add_command(Command::CreateDomain {
@@ -167,10 +171,15 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     let child_name = args[1];
 
     // Try to revoke as memory region first
-    if let (Some(parent), Some(child)) = (state.memories.get(parent_name), state.memories.get(child_name)) {
-        let updates = parent
-            .revoke_ref(child)
-            .map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
+    if let (Some(parent), Some(_child)) = (state.memories.get(parent_name).cloned(), state.memories.get(child_name).cloned()) {
+        let parent_owner = parent.read().owned.owner;
+        let affected = BTreeSet::from([parent_owner]);
+        let platform = state.platform.clone();
+        let child = state.memories.get(child_name).cloned().unwrap();
+        let (_, batch) = execute(&*platform, &affected, || {
+            let updates = parent.revoke_ref(&child)?;
+            Ok(((), updates))
+        }).map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
 
         println!(
             "{} Revoked memory '{}' from '{}'",
@@ -180,7 +189,7 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         );
 
         // Process updates (this will remove revoked capabilities from state)
-        process_updates(state, &updates);
+        process_updates(state, &batch);
 
         // Record command
         state.session.add_command(Command::Revoke {
@@ -192,9 +201,10 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     }
 
     // Try to revoke as domain
-    if let (Some(parent), Some(child)) = (state.domains.get(parent_name), state.domains.get(child_name)) {
+    if let (Some(parent), Some(child)) = (state.domains.get(parent_name).cloned(), state.domains.get(child_name).cloned()) {
         // Find the handle for the child domain in the parent
         let child_id = child.read().data.id;
+        let parent_id = parent.read().data.id;
         let parent_read = parent.read();
 
         let handle = parent_read
@@ -213,9 +223,12 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         drop(parent_read);
 
-        let updates = parent
-            .revoke_child(handle)
-            .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
+        let affected = BTreeSet::from([parent_id]);
+        let platform = state.platform.clone();
+        let (_, batch) = execute(&*platform, &affected, || {
+            let updates = parent.revoke_child(handle)?;
+            Ok(((), updates))
+        }).map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
 
         println!(
             "{} Revoked domain '{}' from '{}' - cascading to all children and capabilities",
@@ -225,7 +238,7 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         );
 
         // Process updates (this will remove revoked domains and their capabilities from state)
-        process_updates(state, &updates);
+        process_updates(state, &batch);
 
         // Record command
         state.session.add_command(Command::Revoke {

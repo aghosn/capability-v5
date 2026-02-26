@@ -48,9 +48,14 @@ pub enum Update {
         size: u64,
     },
 
-    /// Revoke a domain entirely
+    /// Revoke a domain entirely.
+    /// `fallback` is the first non-revoked ancestor domain ID computed by the
+    /// capability engine. If `None`, the platform must look up the parent from
+    /// its own domain-parent map (used when revocation originates from a vital
+    /// memory capability where the engine has no domain CDT context).
     RevokeDomain {
         domain: DomainId,
+        fallback: Option<DomainId>,
     },
 
     /// Flush TLB for a domain
@@ -66,7 +71,7 @@ impl Update {
             Update::Unmap { domain, .. }
             | Update::Map { domain, .. }
             | Update::ChangeRights { domain, .. }
-            | Update::RevokeDomain { domain }
+            | Update::RevokeDomain { domain, .. }
             | Update::FlushTLB { domain } => Some(*domain),
             Update::ZeroMemory { .. } => None,
         }
@@ -131,9 +136,17 @@ impl UpdateBatch {
         });
     }
 
-    /// Add domain revocation
+    /// Add domain revocation with no pre-computed fallback (platform looks up parent)
     pub fn add_revoke_domain(&mut self, domain: DomainId) {
-        self.add(Update::RevokeDomain { domain });
+        self.add_revoke_domain_with_fallback(domain, None);
+    }
+
+    /// Add domain revocation with an explicit fallback domain.
+    /// `fallback` is the first non-revoked ancestor; passed to the platform's
+    /// `on_domain_revoked` so it can redirect any core running `domain` without
+    /// needing CDT access. Must be `None` for vital-memory-triggered revocations.
+    pub fn add_revoke_domain_with_fallback(&mut self, domain: DomainId, fallback: Option<DomainId>) {
+        self.add(Update::RevokeDomain { domain, fallback });
     }
 
     /// Add memory zeroing (for clean attribute)

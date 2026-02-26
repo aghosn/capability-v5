@@ -471,9 +471,10 @@ impl Capability<MemoryRegion> {
             }
         }
 
-        // If vital, revoke the owning domain
+        // If vital, revoke the owning domain (no pre-computed fallback; platform
+        // will look up the parent from its own domain-parent map)
         if capa.owned.attributes.vital() {
-            updates.add_revoke_domain(capa.owned.owner);
+            updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
         }
 
         Ok(updates)
@@ -602,34 +603,45 @@ impl Capability<Domain> {
             .remove_child(child_handle)
             .ok_or(CapaError::NotFound)?;
 
-        // Drop parent lock
+        // Revoke the domain subtree; use parent's domain ID as fallback so that
+        // any core running the child (or a descendant) can switch back to the parent
+        let parent_id = parent.data.id;
         drop(parent);
 
         // Revoke the domain subtree
-        let updates = Self::revoke_domain_subtree(&child_ref)?;
+        let updates = Self::revoke_domain_subtree(&child_ref, Some(parent_id))?;
 
         Ok(updates)
     }
 
-    /// Recursively revoke a domain capability subtree
-    fn revoke_domain_subtree(domain_ref: &CapabilityRef<Domain>) -> Result<UpdateBatch> {
+    /// Recursively revoke a domain capability subtree.
+    ///
+    /// `fallback` is the first non-revoked ancestor domain ID to which cores
+    /// running any domain in this subtree should switch after revocation. All
+    /// nodes in the subtree emit the same fallback so the platform only ever
+    /// needs to walk the CDT once (here, at revocation time) rather than at
+    /// interrupt/IPI time.
+    fn revoke_domain_subtree(
+        domain_ref: &CapabilityRef<Domain>,
+        fallback: Option<DomainId>,
+    ) -> Result<UpdateBatch> {
         let mut domain = domain_ref.write();
 
         let mut updates = UpdateBatch::new();
 
-        // Revoke all children first
+        // Revoke all children first (same fallback applies to the whole subtree)
         let children = mem::take(&mut domain.children);
         drop(domain); // Release lock
 
         for child_ref in children {
-            let child_updates = Self::revoke_domain_subtree(&child_ref)?;
+            let child_updates = Self::revoke_domain_subtree(&child_ref, fallback)?;
             updates.merge(child_updates);
         }
 
         // Re-acquire lock and revoke this domain
         let mut domain = domain_ref.write();
         domain.data.revoke();
-        updates.add_revoke_domain(domain.data.id);
+        updates.add_revoke_domain_with_fallback(domain.data.id, fallback);
 
         Ok(updates)
     }

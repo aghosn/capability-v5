@@ -19,7 +19,7 @@ init hypervisor 0x80000000
 
 # Create CVM
 @msg 📋 Step 2: Create a Confidential VM
-create-domain hypervisor cvm1 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE
+create-domain hypervisor cvm1 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS
 
 @msg
 @msg ✓ CVM created with permissions to create child domains
@@ -51,8 +51,16 @@ send hv_cvm_shared cvm1
 @msg ✓ Hypervisor and CVM share I/O buffer
 @msg
 
+# Seal the CVM before it can carve memory for the enclave
+@msg 📋 Step 6: Seal the CVM (must be sealed before carving for child domains)
+seal cvm1
+
+@msg
+@msg ✓ CVM is now sealed - it can now carve memory for its enclave
+@msg
+
 # Now create an enclave inside the CVM
-@msg 📋 Step 6: CVM creates a secure enclave (nested domain)
+@msg 📋 Step 7: CVM creates a secure enclave (nested domain)
 create-domain cvm1 enclave1 0b0011 GET,ATTEST
 
 @msg
@@ -61,7 +69,7 @@ create-domain cvm1 enclave1 0b0011 GET,ATTEST
 @msg
 
 # CVM carves memory for the enclave
-@msg 📋 Step 7: CVM carves exclusive memory for enclave (16MB)
+@msg 📋 Step 8: CVM carves exclusive memory for enclave (16MB)
 carve cvm1_mem enclave_private 0x10000000 0x1000000 RWX
 
 @msg
@@ -70,7 +78,7 @@ carve cvm1_mem enclave_private 0x10000000 0x1000000 RWX
 @msg
 
 # CVM creates shared buffer with enclave
-@msg 📋 Step 8: CVM creates shared buffer for enclave communication
+@msg 📋 Step 9: CVM creates shared buffer for enclave communication
 alias cvm1_mem enclave_shared 0x11000000 0x10000 RW
 
 @msg
@@ -78,7 +86,7 @@ alias cvm1_mem enclave_shared 0x11000000 0x10000 RW
 @msg
 
 # Send memory to enclave
-@msg 📋 Step 9: Send memory capabilities to enclave
+@msg 📋 Step 10: Send memory capabilities to enclave
 send enclave_private enclave1
 send enclave_shared enclave1
 
@@ -86,9 +94,8 @@ send enclave_shared enclave1
 @msg ✓ Enclave has both private and shared memory
 @msg
 
-# Seal everything
-@msg 📋 Step 10: Seal all domains
-seal cvm1
+# Seal the enclave
+@msg 📋 Step 11: Seal enclave
 seal enclave1
 
 @msg
@@ -96,7 +103,7 @@ seal enclave1
 @msg
 
 # Attest the enclave
-@msg 📋 Step 11: Attest the enclave (most sensitive component)
+@msg 📋 Step 12: Attest the enclave (most sensitive component)
 attest enclave1
 
 @msg
@@ -107,7 +114,7 @@ attest enclave1
 @msg
 
 # View all domains
-@msg 📋 Step 12: View complete hierarchy
+@msg 📋 Step 13: View complete hierarchy
 list
 
 @msg

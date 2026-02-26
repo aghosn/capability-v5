@@ -5,6 +5,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::platform::CliPlatform;
 use crate::session::Session;
 
 /// CLI state maintaining all capabilities and domains
@@ -13,8 +14,8 @@ pub struct CliState {
     pub domains: HashMap<String, Arc<RwLock<Capability<Domain>>>>,
     /// Map from user-assigned names to memory capabilities
     pub memories: HashMap<String, Arc<RwLock<Capability<MemoryRegion>>>>,
-    /// Switch manager for domain switching
-    pub switch_manager: SwitchManager,
+    /// Platform abstraction (owns SwitchManager)
+    pub platform: Arc<CliPlatform>,
     /// Session recorder
     pub session: Session,
     /// Next available capability ID
@@ -33,7 +34,7 @@ impl CliState {
         CliState {
             domains: HashMap::new(),
             memories: HashMap::new(),
-            switch_manager: SwitchManager::new(num_cores),
+            platform: Arc::new(CliPlatform::new(num_cores)),
             session: Session::new(),
             next_cap_id: 0,
             domain_id_to_name: HashMap::new(),

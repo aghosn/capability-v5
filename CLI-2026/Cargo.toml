@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 capability_engine = { package = "capability-engine-v2", path = "../2026" }
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 rustyline = "14.0"
 colored = "2.1"

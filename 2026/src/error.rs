@@ -8,6 +8,9 @@ pub type Result<T> = core::result::Result<T, CapaError>;
 /// Errors that can occur during capability operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapaError {
+    /// Capability referenced a domain that has been revoked
+    DomainRevoked,
+
     /// Invalid access rights or range
     InvalidAccess,
 
@@ -54,6 +57,7 @@ pub enum CapaError {
 impl fmt::Display for CapaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CapaError::DomainRevoked => write!(f, "Domain has been revoked"),
             CapaError::InvalidAccess => write!(f, "Invalid access rights or range"),
             CapaError::PermissionDenied => write!(f, "Operation not permitted"),
             CapaError::NotFound => write!(f, "Capability not found"),

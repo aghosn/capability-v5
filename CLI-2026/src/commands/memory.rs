@@ -3,6 +3,7 @@
 use capability_engine::*;
 use capability_engine::domain::PendingCapability;
 use colored::*;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
@@ -28,16 +29,21 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let parent = state
         .memories
         .get(parent_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?;
+        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
+        .clone();
 
-    let (child, updates): (_, UpdateBatch) = parent
-        .carve(access, child_cap_id)
-        .map_err(|e| format!("Failed to carve: {:?}", e))?;
+    let parent_owner = parent.read().owned.owner;
+    let affected = BTreeSet::from([parent_owner]);
+    let platform = state.platform.clone();
+    let (child, batch) = execute(&*platform, &affected, || {
+        let (child, updates) = parent.carve(access, child_cap_id)?;
+        Ok((child, updates))
+    }).map_err(|e| format!("Failed to carve: {:?}", e))?;
 
     state.memories.insert(child_name.to_string(), child);
 
     // Process updates
-    process_updates(state, &updates);
+    process_updates(state, &batch);
 
     // Record command
     state.session.add_command(Command::Carve {
@@ -124,12 +130,14 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let mem = state
         .memories
         .get(mem_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?;
+        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?
+        .clone();
 
     let domain = state
         .domains
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
+        .clone();
 
     let domain_id = domain.read().data.id;
     let is_sealed = domain.read().data.is_sealed();
@@ -148,7 +156,7 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         let pending_id = domain
             .write()
             .data
-            .add_pending_capability(PendingCapability::Memory(Arc::downgrade(mem)));
+            .add_pending_capability(PendingCapability::Memory(Arc::downgrade(&mem)));
 
         // Record command
         state.session.add_command(Command::Send {
@@ -174,23 +182,26 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     } else {
         // Domain is unsealed - proceed normally
         let handle = domain.read().data.allocate_memory_handle();
-
-        let updates = mem
-            .send(domain_id, handle, attrs)
-            .map_err(|e| format!("Failed to send: {:?}", e))?;
+        let mem_owner = mem.read().owned.owner;
+        let affected = BTreeSet::from([mem_owner, domain_id]);
+        let platform = state.platform.clone();
+        let (_, batch) = execute(&*platform, &affected, || {
+            let updates = mem.send(domain_id, handle, attrs)?;
+            Ok(((), updates))
+        }).map_err(|e| format!("Failed to send: {:?}", e))?;
 
         // Register memory capability with domain
         domain
             .write()
             .data
-            .add_memory_capability(handle, Arc::downgrade(mem));
+            .add_memory_capability(handle, Arc::downgrade(&mem));
 
         // Set owner_domain so future operations on this capability enforce
         // that the new owner domain is sealed with the required API permission.
-        mem.write().owned.set_owner_domain(Arc::downgrade(domain));
+        mem.write().owned.set_owner_domain(Arc::downgrade(&domain));
 
         // Process updates
-        process_updates(state, &updates);
+        process_updates(state, &batch);
 
         // Record command
         state.session.add_command(Command::Send {

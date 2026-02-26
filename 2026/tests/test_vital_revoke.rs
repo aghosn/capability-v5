@@ -47,7 +47,7 @@ fn test_session() {
 
     // Verify that the update batch contains a domain revocation for dom1
     let has_domain_revoke = updates.updates().iter().any(|op| {
-        matches!(op, Update::RevokeDomain { domain } if *domain == domain_id)
+        matches!(op, Update::RevokeDomain { domain, .. } if *domain == domain_id)
     });
 
     assert!(

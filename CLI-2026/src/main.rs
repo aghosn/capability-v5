@@ -11,6 +11,7 @@ use rustyline::Config;
 mod commands;
 mod completer;
 mod parser;
+mod platform;
 mod session;
 mod state;
 mod update_processor;

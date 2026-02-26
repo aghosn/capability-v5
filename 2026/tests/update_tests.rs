@@ -109,7 +109,7 @@ fn test_revoke_domain_update() {
     let updates = batch.updates();
     assert_eq!(updates.len(), 1);
 
-    if let Update::RevokeDomain { domain } = &updates[0] {
+    if let Update::RevokeDomain { domain, .. } = &updates[0] {
         assert_eq!(*domain, 7);
     } else {
         panic!("Expected RevokeDomain update");
@@ -228,7 +228,7 @@ fn test_vital_revoke_generates_domain_revocation() {
 
     // Should include domain revocation update
     let has_domain_revoke = updates.updates().iter().any(|u| {
-        matches!(u, Update::RevokeDomain { domain } if *domain == 5)
+        matches!(u, Update::RevokeDomain { domain, .. } if *domain == 5)
     });
     assert!(has_domain_revoke);
 }
