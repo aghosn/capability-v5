@@ -3,7 +3,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use parking_lot::RwLock;
+use crate::sync::RwLock;
 
 /// A domain identifier
 pub type DomainId = u64;

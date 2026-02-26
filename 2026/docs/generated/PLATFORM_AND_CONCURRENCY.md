@@ -313,15 +313,68 @@ process_updates(state, &batch)
 
 ---
 
-## 11. File Map
+## 11. `no_std` / Bare-Metal Portability
+
+The library crate is `no_std` (uses `alloc` only).  The locking backend is
+selected via a Cargo feature:
+
+| Feature | Backend | Dependency | When to use |
+|---|---|---|---|
+| `hosted` *(default)* | `parking_lot::RwLock` | `libc` / OS futex | Linux / macOS / Windows |
+| *(none)* | `spin::RwLock` | none (pure Rust) | x86-64 bare metal, embedded |
+
+### Internal dispatch (`src/sync.rs`)
+
+```rust
+#[cfg(feature = "hosted")]
+pub use parking_lot::RwLock;   // OS-backed, efficient on SMP hosts
+
+#[cfg(not(feature = "hosted"))]
+pub use spin::RwLock;           // busy-wait spinlock, no libc, no_std
+```
+
+All internal modules (`capability.rs`, `update.rs`, `switch.rs`) import
+`crate::sync::RwLock`; the choice is invisible to callers.
+
+### Bare-metal build
+
+```sh
+cargo build --no-default-features --lib --target x86_64-unknown-none
+```
+
+### Caller responsibilities for bare metal
+
+The library uses `alloc`.  A bare-metal binary must:
+1. Provide a global heap allocator:
+   ```rust
+   #[global_allocator]
+   static HEAP: MyAllocator = MyAllocator::new();
+   ```
+2. Provide a `Platform` implementation backed by hardware spinlocks and IPIs.
+   The `acquire_shared_lock` / `acquire_exclusive_lock` trait methods map
+   directly to `rwlock_read_lock` / `rwlock_write_lock` hardware primitives.
+
+### Portability notes
+
+- `DomainId` is `u64` but the internal counter uses `AtomicUsize`, which is
+  available on all targets (32-bit and 64-bit).
+- `crossbeam` is a dev-dependency only; it never appears in the library crate.
+- The `Platform` trait is `Send + Sync`; implementations using hardware
+  spinlocks satisfy this without any OS threading.
+
+---
+
+## 12. File Map
 
 | File | Role |
 |---|---|
 | `2026/src/platform.rs` | `Platform` trait, `OpLockGuard` trait, `execute()` |
+| `2026/src/sync.rs` | Feature-gated `RwLock` re-export (parking_lot or spin) |
 | `2026/src/update.rs` | `Update::RevokeDomain` with `fallback`, `add_revoke_domain_with_fallback` |
 | `2026/src/capability.rs` | `revoke_domain_subtree(fallback)`, vital-memory revoke |
+| `2026/src/domain.rs` | `generate_domain_id()` using `AtomicUsize` |
 | `2026/src/error.rs` | `CapaError` variants |
-| `2026/src/lib.rs` | Exports `platform` module |
+| `2026/src/lib.rs` | Exports `platform` module, `pub(crate) mod sync` |
 | `2026/tests/common/mod.rs` | `TestPlatform` |
 | `2026/tests/platform_tests.rs` | Platform integration tests (6 tests) |
 | `2026/tests/crosscore_tests.rs` | Cross-core IPI/barrier tests (7 tests) |

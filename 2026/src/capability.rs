@@ -8,7 +8,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
-use parking_lot::RwLock;
+use crate::sync::RwLock;
 
 /// Thread-safe reference to a capability (strong reference, owned)
 pub type CapabilityRef<T> = Arc<RwLock<Capability<T>>>;

@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use parking_lot::RwLock;
+use crate::sync::RwLock;
 
 /// Core state tracking which domain is running
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5,14 +5,14 @@ use crate::capability::{CapabilityWeak, LocalHandle};
 use crate::memory::MemoryRegion;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global domain ID counter
-static NEXT_DOMAIN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DOMAIN_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Generate a unique domain ID
 pub fn generate_domain_id() -> u64 {
-    NEXT_DOMAIN_ID.fetch_add(1, Ordering::SeqCst)
+    NEXT_DOMAIN_ID.fetch_add(1, Ordering::SeqCst) as u64
 }
 
 /// Domain status

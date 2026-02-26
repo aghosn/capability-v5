@@ -25,6 +25,7 @@ struct CliPlatformInner {
 }
 
 impl CliPlatformInner {
+    #[allow(dead_code)]
     fn is_revoked(&self, id: DomainId) -> bool {
         self.domains.get(&id).map(|e| e.revoked).unwrap_or(true)
     }

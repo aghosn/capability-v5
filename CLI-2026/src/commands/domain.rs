@@ -1,11 +1,11 @@
 //! Domain-related commands: init, create-domain, seal, revoke, set-interrupt-policy, enumerate-pending, accept-capability
 
-use capability_engine::*;
 use capability_engine::domain::PendingCapability;
+use capability_engine::*;
 use colored::*;
 use std::sync::Arc;
 
-use crate::parser::{parse_api, parse_number, format_api};
+use crate::parser::{format_api, parse_api, parse_number};
 use crate::session::Command;
 use crate::state::CliState;
 use crate::update_processor::process_updates;
@@ -170,13 +170,17 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     let child_name = args[1];
 
     // Try to revoke as memory region first
-    if let (Some(parent), Some(_child)) = (state.memories.get(parent_name).cloned(), state.memories.get(child_name).cloned()) {
+    if let (Some(parent), Some(_child)) = (
+        state.memories.get(parent_name).cloned(),
+        state.memories.get(child_name).cloned(),
+    ) {
         let platform = state.platform.clone();
         let child = state.memories.get(child_name).cloned().unwrap();
         let (_, batch) = execute(&*platform, true, || {
             let updates = parent.revoke_ref(&child)?;
             Ok(((), updates))
-        }).map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
+        })
+        .map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
 
         println!(
             "{} Revoked memory '{}' from '{}'",
@@ -198,10 +202,12 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     }
 
     // Try to revoke as domain
-    if let (Some(parent), Some(child)) = (state.domains.get(parent_name).cloned(), state.domains.get(child_name).cloned()) {
+    if let (Some(parent), Some(child)) = (
+        state.domains.get(parent_name).cloned(),
+        state.domains.get(child_name).cloned(),
+    ) {
         // Find the handle for the child domain in the parent
         let child_id = child.read().data.id;
-        let parent_id = parent.read().data.id;
         let parent_read = parent.read();
 
         let handle = parent_read
@@ -216,7 +222,12 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 }
             })
             .map(|(h, _)| *h)
-            .ok_or_else(|| format!("Child domain '{}' not found in parent '{}'", child_name, parent_name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Child domain '{}' not found in parent '{}'",
+                    child_name, parent_name
+                )
+            })?;
 
         drop(parent_read);
 
@@ -224,7 +235,8 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         let (_, batch) = execute(&*platform, true, || {
             let updates = parent.revoke_child(handle)?;
             Ok(((), updates))
-        }).map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
+        })
+        .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
 
         println!(
             "{} Revoked domain '{}' from '{}' - cascading to all children and capabilities",
@@ -252,7 +264,10 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 }
 
 /// Set interrupt policy for a specific vector
-pub fn cmd_set_interrupt_policy(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_set_interrupt_policy(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 3 {
         return Err("Usage: set-interrupt-policy <domain> <vector> <visibility>".to_string());
     }
@@ -265,7 +280,12 @@ pub fn cmd_set_interrupt_policy(state: &mut CliState, args: &[&str]) -> std::res
         "DELIVER" => InterruptVisibility::Deliver,
         "REPORT" => InterruptVisibility::Report,
         "NOTREPORT" => InterruptVisibility::NotReport,
-        _ => return Err(format!("Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT", args[2])),
+        _ => {
+            return Err(format!(
+                "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
+                args[2]
+            ));
+        }
     };
 
     let domain = state
@@ -279,7 +299,12 @@ pub fn cmd_set_interrupt_policy(state: &mut CliState, args: &[&str]) -> std::res
         write_set: 0,
     };
 
-    domain.write().data.policy.interrupts.set_policy(vector, policy);
+    domain
+        .write()
+        .data
+        .policy
+        .interrupts
+        .set_policy(vector, policy);
 
     println!(
         "{} Set interrupt policy for vector {} on domain '{}': {:?}",
@@ -293,7 +318,10 @@ pub fn cmd_set_interrupt_policy(state: &mut CliState, args: &[&str]) -> std::res
 }
 
 /// Set default interrupt policy for all vectors
-pub fn cmd_set_default_interrupt_policy(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_set_default_interrupt_policy(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 2 {
         return Err("Usage: set-default-interrupt-policy <domain> <visibility>".to_string());
     }
@@ -305,7 +333,12 @@ pub fn cmd_set_default_interrupt_policy(state: &mut CliState, args: &[&str]) -> 
         "DELIVER" => InterruptVisibility::Deliver,
         "REPORT" => InterruptVisibility::Report,
         "NOTREPORT" => InterruptVisibility::NotReport,
-        _ => return Err(format!("Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT", args[1])),
+        _ => {
+            return Err(format!(
+                "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
+                args[1]
+            ));
+        }
     };
 
     let domain = state
@@ -332,7 +365,10 @@ pub fn cmd_set_default_interrupt_policy(state: &mut CliState, args: &[&str]) -> 
 }
 
 /// Enumerate pending capabilities for a sealed domain
-pub fn cmd_enumerate_pending(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_enumerate_pending(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 1 {
         return Err("Usage: enumerate-pending <domain>".to_string());
     }
@@ -404,7 +440,10 @@ pub fn cmd_enumerate_pending(state: &mut CliState, args: &[&str]) -> std::result
 }
 
 /// Accept a pending capability and assign it a handle
-pub fn cmd_accept_capability(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_accept_capability(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 2 && args.len() != 3 {
         return Err("Usage: accept-capability <domain> <pending_id> [handle]".to_string());
     }
@@ -507,7 +546,10 @@ pub fn cmd_accept_capability(state: &mut CliState, args: &[&str]) -> std::result
 }
 
 /// Reject (discard) a pending capability
-pub fn cmd_reject_capability(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_reject_capability(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 2 {
         return Err("Usage: reject-capability <domain> <pending_id>".to_string());
     }
@@ -528,21 +570,36 @@ pub fn cmd_reject_capability(state: &mut CliState, args: &[&str]) -> std::result
 
     match rejected {
         PendingCapability::Memory(weak_ref) => {
-            let range = weak_ref.upgrade().map(|m| {
-                let r = m.read();
-                format!("Memory [0x{:x}..0x{:x})", r.data.access.start, r.data.access.end())
-            }).unwrap_or_else(|| "Memory (dropped)".to_string());
+            let range = weak_ref
+                .upgrade()
+                .map(|m| {
+                    let r = m.read();
+                    format!(
+                        "Memory [0x{:x}..0x{:x})",
+                        r.data.access.start,
+                        r.data.access.end()
+                    )
+                })
+                .unwrap_or_else(|| "Memory (dropped)".to_string());
             println!(
                 "{} Rejected pending capability {} ({}) for domain '{}'",
-                "✓".bright_green().bold(), pending_id, range, domain_name.bright_white()
+                "✓".bright_green().bold(),
+                pending_id,
+                range,
+                domain_name.bright_white()
             );
         }
         PendingCapability::Domain(weak_ref) => {
-            let id = weak_ref.upgrade().map(|d| d.read().data.id.to_string())
+            let id = weak_ref
+                .upgrade()
+                .map(|d| d.read().data.id.to_string())
                 .unwrap_or_else(|| "?".to_string());
             println!(
                 "{} Rejected pending capability {} (Domain ID: {}) for domain '{}'",
-                "✓".bright_green().bold(), pending_id, id, domain_name.bright_white()
+                "✓".bright_green().bold(),
+                pending_id,
+                id,
+                domain_name.bright_white()
             );
         }
     }

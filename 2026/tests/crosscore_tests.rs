@@ -325,25 +325,23 @@ fn test_crosscore_send_triggers_ipi() {
 fn test_crosscore_revoke_with_fallback() {
     let platform = Arc::new(MultiCorePlatform::new(2));
     const ROOT_ID: DomainId = 0;
-    const CHILD_ID: DomainId = 1;
     const CORE_1: CoreId = 1;
 
-    // Setup
-    platform.register_domain(ROOT_ID, None);
-    platform.register_domain(CHILD_ID, Some(ROOT_ID));
-
-    // Core 1 is running the child
-    platform.set_core_domain(CORE_1, CHILD_ID);
-    assert_eq!(platform.get_core_domain(CORE_1), Some(CHILD_ID));
-
-    // Create domain capabilities
+    // Create domain capabilities first so we get the real generated IDs.
     let root_domain = Domain::new_root(2);
     let root = Capability::new_root(ROOT_ID, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
     let child = Capability::create_child_domain(&root, child_policy, ROOT_ID, 1).unwrap();
     let child_id = child.read().data.id;
-    assert_eq!(child_id, CHILD_ID);
+
+    // Register with the actual IDs (child_id is whatever the global counter gave us).
+    platform.register_domain(ROOT_ID, None);
+    platform.register_domain(child_id, Some(ROOT_ID));
+
+    // Core 1 is running the child
+    platform.set_core_domain(CORE_1, child_id);
+    assert_eq!(platform.get_core_domain(CORE_1), Some(child_id));
 
     // Seal the child so we can revoke it
     child.write().data.seal().unwrap();
@@ -364,7 +362,7 @@ fn test_crosscore_revoke_with_fallback() {
 
     // Verify child is marked revoked
     assert!(
-        platform.is_domain_revoked(CHILD_ID),
+        platform.is_domain_revoked(child_id),
         "Child should be revoked"
     );
 

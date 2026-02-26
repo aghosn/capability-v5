@@ -251,28 +251,52 @@ println!("{}", attestation.report);
 All operations are thread-safe:
 - `Arc<RwLock<T>>` for shared ownership
 - `Weak<RwLock<T>>` for non-owning references
-- `parking_lot::RwLock` for efficient reader-writer locking
-- `AtomicU64` for domain ID generation
+- Global RW lock via `Platform::acquire_shared_lock` / `acquire_exclusive_lock`
+- `AtomicUsize` for domain ID generation (portable to 32-bit targets)
 
-Multiple cores can concurrently:
-- Read capability trees
-- Create/revoke capabilities (with proper locking)
-- Execute switch operations
-- Generate attestations
+Multiple cores can concurrently run non-destructive operations (carve, alias,
+send) under a shared lock, while any revoke takes an exclusive lock to
+atomically quiesce all other operations before cascading through the subtree.
 
-## no_std Support
+## no_std / Bare-Metal Support
 
-The crate is `no_std` compatible but requires `alloc`:
+The library is `no_std` compatible (only `alloc` required).  The locking
+backend is selected at compile time via a feature flag:
+
+| Feature | Lock backend | When to use |
+|---|---|---|
+| `hosted` *(default)* | `parking_lot::RwLock` | OS environments (Linux, macOS, Windows) |
+| *(none)* `--no-default-features` | `spin::RwLock` | Bare-metal, no OS, no libc |
+
+### Adding to a bare-metal project
 
 ```toml
 [dependencies]
 capability-engine = { version = "0.1", default-features = false }
 ```
 
-Collections used:
+You must also provide a global allocator (e.g. `linked_list_allocator`, your
+own slab allocator, etc.) since the crate uses `alloc`:
+
+```rust
+#[global_allocator]
+static ALLOCATOR: MyAllocator = MyAllocator::new();
+```
+
+### Build check
+
+```sh
+# Hosted (default)
+cargo build
+
+# x86-64 bare-metal monitor (no OS)
+cargo build --no-default-features --lib --target x86_64-unknown-none
+```
+
+### Collections used
+
 - `alloc::vec::Vec`
-- `alloc::collections::BTreeMap` (ordered map)
-- `alloc::collections::BTreeSet` (ordered set)
+- `alloc::collections::BTreeMap` / `BTreeSet`
 - `alloc::sync::{Arc, Weak}`
 - `alloc::string::String`
 

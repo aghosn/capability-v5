@@ -24,6 +24,7 @@ pub mod domain;
 pub mod error;
 pub mod memory;
 pub mod platform;
+pub(crate) mod sync;
 pub mod switch;
 pub mod update;
 pub mod view;
