@@ -35,8 +35,6 @@ struct DomainEntry {
 struct BarrierState {
     /// Number of threads that have arrived at this barrier
     arrived: usize,
-    /// Total participants expected
-    participants: usize,
     /// Barrier ID (0 or 1)
     id: u8,
 }
@@ -59,8 +57,6 @@ pub struct MultiCorePlatform {
     op_lock: Arc<StdMutex<()>>,
     /// Platform state
     inner: Arc<StdMutex<MultiCorePlatformInner>>,
-    /// Number of cores
-    num_cores: usize,
 }
 
 struct MultiCoreOpLock {
@@ -87,13 +83,8 @@ impl MultiCorePlatform {
                 domains: BTreeMap::new(),
                 domain_to_core: BTreeMap::new(),
                 applied_updates: Vec::new(),
-                barrier: BarrierState {
-                    arrived: 0,
-                    participants: 0,
-                    id: 0,
-                },
+                barrier: BarrierState { arrived: 0, id: 0 },
             })),
-            num_cores,
         }
     }
 
@@ -106,7 +97,11 @@ impl MultiCorePlatform {
     /// Check if a domain is revoked
     pub fn is_domain_revoked(&self, domain_id: DomainId) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.domains.get(&domain_id).map(|e| e.revoked).unwrap_or(true)
+        inner
+            .domains
+            .get(&domain_id)
+            .map(|e| e.revoked)
+            .unwrap_or(true)
     }
 
     /// Drain applied updates for verification
@@ -118,7 +113,9 @@ impl MultiCorePlatform {
     /// Get the update count for a specific core
     pub fn get_core_update_count(&self, core_id: CoreId) -> u64 {
         let inner = self.inner.lock().unwrap();
-        inner.cores[core_id as usize].update_count.load(Ordering::SeqCst)
+        inner.cores[core_id as usize]
+            .update_count
+            .load(Ordering::SeqCst)
     }
 
     /// Simulate a core polling for IPIs (would be called in IPI handler in real system)
@@ -131,10 +128,7 @@ impl MultiCorePlatform {
 }
 
 impl Platform for MultiCorePlatform {
-    fn acquire_op_locks(
-        &self,
-        domains: &BTreeSet<DomainId>,
-    ) -> Result<Box<dyn OpLockGuard>> {
+    fn acquire_op_locks(&self, domains: &BTreeSet<DomainId>) -> Result<Box<dyn OpLockGuard>> {
         // Acquire the operation lock
         let guard = self.op_lock.lock().unwrap();
 
@@ -159,13 +153,14 @@ impl Platform for MultiCorePlatform {
         // 2. The guard will be dropped when the OpLockGuard is dropped
         // 3. The mutex is never destroyed while guards exist
         let static_guard = unsafe {
-            std::mem::transmute::<
-                std::sync::MutexGuard<'_, ()>,
-                std::sync::MutexGuard<'static, ()>,
-            >(guard)
+            std::mem::transmute::<std::sync::MutexGuard<'_, ()>, std::sync::MutexGuard<'static, ()>>(
+                guard,
+            )
         };
 
-        Ok(Box::new(MultiCoreOpLock { _guard: static_guard }))
+        Ok(Box::new(MultiCoreOpLock {
+            _guard: static_guard,
+        }))
     }
 
     fn send_ipi(&self, core_id: CoreId) {
@@ -176,7 +171,7 @@ impl Platform for MultiCorePlatform {
         // In a real system, this would trigger a hardware interrupt
     }
 
-    fn sync_barrier(&self, id: u8, participants: usize) {
+    fn sync_barrier(&self, id: u8, _participants: usize) {
         // In real system, remote cores would be preempted and waiting in IPI handler.
         // In our test platform, since we're not spawning actual core threads that run
         // domains, we just simulate the synchronization semantics:
@@ -231,9 +226,8 @@ impl Platform for MultiCorePlatform {
 
         if let Some(core_id) = core_id {
             // Determine fallback
-            let next_domain = fallback.or_else(|| {
-                inner.domains.get(&domain_id).and_then(|e| e.parent_id)
-            });
+            let next_domain =
+                fallback.or_else(|| inner.domains.get(&domain_id).and_then(|e| e.parent_id));
 
             // Update core state
             inner.cores[core_id as usize].current_domain = next_domain;
@@ -334,9 +328,9 @@ fn test_crosscore_send_triggers_ipi() {
     );
 
     // Verify receiver domain got the map update
-    let has_map_for_receiver = updates.iter().any(|u| {
-        matches!(u, Update::Map { domain, .. } if *domain == RECEIVER_ID)
-    });
+    let has_map_for_receiver = updates
+        .iter()
+        .any(|u| matches!(u, Update::Map { domain, .. } if *domain == RECEIVER_ID));
     assert!(has_map_for_receiver, "Receiver should have Map update");
 
     println!("✓ Cross-core send triggered IPI and applied updates");
@@ -415,8 +409,7 @@ fn test_barrier_calls_during_crosscore_operation() {
 
     let affected = BTreeSet::from([SENDER_ID, RECEIVER_ID]);
     let result = execute(&*platform, &affected, || {
-        Capability::send_to(&child, RECEIVER_ID, 2, Attributes::NONE)
-            .map(|updates| ((), updates))
+        Capability::send_to(&child, RECEIVER_ID, 2, Attributes::NONE).map(|updates| ((), updates))
     });
 
     assert!(result.is_ok(), "Cross-core operation should succeed");
@@ -517,16 +510,14 @@ fn test_multiple_cores_affected_by_single_operation() {
     // Send to receiver 1
     let affected = BTreeSet::from([SENDER_ID, RECEIVER1_ID]);
     execute(&*platform, &affected, || {
-        Capability::send_to(&child1, RECEIVER1_ID, 2, Attributes::NONE)
-            .map(|updates| ((), updates))
+        Capability::send_to(&child1, RECEIVER1_ID, 2, Attributes::NONE).map(|updates| ((), updates))
     })
     .unwrap();
 
     // Now send from receiver1 to receiver2 (affects both receiver cores)
     let affected = BTreeSet::from([RECEIVER1_ID, RECEIVER2_ID]);
     let result = execute(&*platform, &affected, || {
-        Capability::send_to(&child1, RECEIVER2_ID, 3, Attributes::NONE)
-            .map(|updates| ((), updates))
+        Capability::send_to(&child1, RECEIVER2_ID, 3, Attributes::NONE).map(|updates| ((), updates))
     });
 
     assert!(result.is_ok(), "Multi-receiver send should succeed");
@@ -619,7 +610,11 @@ fn test_toctou_with_concurrent_revocation() {
     .unwrap();
 
     // Verify child is revoked
-    assert!(platform.is_domain_revoked(child_id), "Child domain {} should be revoked", child_id);
+    assert!(
+        platform.is_domain_revoked(child_id),
+        "Child domain {} should be revoked",
+        child_id
+    );
 
     // Now try to operate on the revoked child - create memory and try to send to it
     let mem_region = MemoryRegion::new_root(0x100000, 0x10000);
@@ -630,8 +625,7 @@ fn test_toctou_with_concurrent_revocation() {
     // Try to send to the revoked child domain - should fail TOCTOU
     let affected = BTreeSet::from([ROOT_ID, child_id]);
     let result = execute(&*platform, &affected, || {
-        Capability::send_to(&carved, child_id, 11, Attributes::NONE)
-            .map(|updates| ((), updates))
+        Capability::send_to(&carved, child_id, 11, Attributes::NONE).map(|updates| ((), updates))
     });
 
     assert_eq!(

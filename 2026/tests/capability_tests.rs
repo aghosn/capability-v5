@@ -98,13 +98,8 @@ fn test_carve_then_alias_then_carve() {
     let root = Capability::new_root(0, 0, root_region);
 
     // Step 1: Carve a region from the root
-    let (carved, _) = Capability::carve_child(
-        &root,
-        Access::new(0x2000, 0x2000, Rights::RW),
-        1,
-        1,
-    )
-    .unwrap();
+    let (carved, _) =
+        Capability::carve_child(&root, Access::new(0x2000, 0x2000, Rights::RW), 1, 1).unwrap();
 
     // Step 2: Alias the carved region
     let alias_access = Access::new(0x2000, 0x1000, Rights::R);
@@ -176,8 +171,8 @@ fn test_revoke_complex_subtree() {
     let root = Capability::new_root(0, 0, root_region);
 
     // Branch 1
-    let (b1, _) = Capability::carve_child(&root, Access::new(0x0000, 0x4000, Rights::RW), 1, 1)
-        .unwrap();
+    let (b1, _) =
+        Capability::carve_child(&root, Access::new(0x0000, 0x4000, Rights::RW), 1, 1).unwrap();
     let b1a = Capability::alias_child(&b1, Access::new(0x1000, 0x1000, Rights::R), 2, 2).unwrap();
     let (_b1a1, _) =
         Capability::carve_child(&b1a, Access::new(0x1000, 0x0800, Rights::R), 3, 3).unwrap();
@@ -239,8 +234,10 @@ fn test_view_with_aliases_unchanged() {
     let root = Capability::new_root(0, 0, root_region);
 
     // Create aliases (shouldn't affect view)
-    let _alias1 = Capability::alias_child(&root, Access::new(0x1000, 0x1000, Rights::R), 1, 1).unwrap();
-    let _alias2 = Capability::alias_child(&root, Access::new(0x3000, 0x1000, Rights::R), 2, 2).unwrap();
+    let _alias1 =
+        Capability::alias_child(&root, Access::new(0x1000, 0x1000, Rights::R), 1, 1).unwrap();
+    let _alias2 =
+        Capability::alias_child(&root, Access::new(0x3000, 0x1000, Rights::R), 2, 2).unwrap();
 
     let view = root.read().compute_view();
 
@@ -258,7 +255,7 @@ fn test_create_child_domain() {
     let root = Capability::new_root(0, 0, root_domain);
 
     // Seal root before creating children
-    root.write().data.seal();
+    let _ = root.write().data.seal();
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
@@ -271,9 +268,6 @@ fn test_create_child_domain() {
 fn test_revoke_child_domain() {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
-
-    // Seal root before creating children
-    root.write().data.seal();
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let (_child, _) = {
@@ -292,15 +286,12 @@ fn test_domain_tree_revocation() {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
-    // Seal root before creating children
-    root.write().data.seal();
-
     // Create a child
     let child_policy = DomainPolicy::new_root(4);
     let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
 
     // Seal child before creating grandchildren
-    child.write().data.seal();
+    assert!(child.write().data.seal().is_ok());
 
     // Create a grandchild
     let grandchild_policy = DomainPolicy::new_root(4);
