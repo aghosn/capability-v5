@@ -208,7 +208,10 @@ fn execute_tutorial(state: &mut CliState, filename: &str) -> Result<(), String> 
         }
 
         if line.starts_with("@msg") {
-            let msg = line.strip_prefix("@msg").unwrap_or("").trim();
+            let after = line.strip_prefix("@msg").unwrap_or("");
+            // Strip exactly one space separator (the "@msg " prefix), but preserve
+            // any additional leading spaces that carry intentional indentation.
+            let msg = after.strip_prefix(' ').unwrap_or(after).trim_end();
             if msg.is_empty() {
                 pacer.print_blank();
             } else {
