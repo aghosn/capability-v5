@@ -562,6 +562,11 @@ impl Capability<Domain> {
     ) -> Result<CapabilityRef<Domain>> {
         let parent = parent_ref.read();
 
+        // Validate parent domain is sealed before creating a child
+        if !parent.data.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+
         // Validate owner domain is sealed and has CREATE permission
         parent.owned.validate_operation(MonitorAPI::CREATE)?;
 

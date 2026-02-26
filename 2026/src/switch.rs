@@ -133,6 +133,28 @@ impl SwitchManager {
                 return Err(CapaError::PermissionDenied);
             }
 
+            // Verify target is a direct child or parent of from domain (CDT hierarchy check)
+            let is_direct_relationship = {
+                // Check if to_domain is a child of from_domain
+                let is_child = from_domain.children.iter().any(|child| {
+                    Arc::ptr_eq(child, to_ref)
+                });
+
+                // Check if to_domain is the parent of from_domain
+                let is_parent = from_domain
+                    .get_parent()
+                    .map(|p| Arc::ptr_eq(&p, to_ref))
+                    .unwrap_or(false);
+
+                is_child || is_parent
+            };
+
+            if !is_direct_relationship {
+                return Err(CapaError::InvalidOperation(
+                    "Target domain must be a direct child or parent of the current domain".to_string()
+                ));
+            }
+
             (to_domain.data.id, false)
         } else {
             // Returning to parent

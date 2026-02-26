@@ -257,6 +257,9 @@ fn test_create_child_domain() {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
+    // Seal root before creating children
+    root.write().data.seal();
+
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
 
@@ -268,6 +271,9 @@ fn test_create_child_domain() {
 fn test_revoke_child_domain() {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
+
+    // Seal root before creating children
+    root.write().data.seal();
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let (_child, _) = {
@@ -286,9 +292,15 @@ fn test_domain_tree_revocation() {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
 
+    // Seal root before creating children
+    root.write().data.seal();
+
     // Create a child
     let child_policy = DomainPolicy::new_root(4);
     let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
+
+    // Seal child before creating grandchildren
+    child.write().data.seal();
 
     // Create a grandchild
     let grandchild_policy = DomainPolicy::new_root(4);
