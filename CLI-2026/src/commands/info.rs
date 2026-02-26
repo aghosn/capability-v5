@@ -161,9 +161,13 @@ fn addr_to_bar_pos(addr: u64, total_size: u64, bar_width: usize) -> usize {
     ((addr as f64 / total_size as f64) * bar_width as f64) as usize
 }
 
+/// Maximum width for capability names in the first column.
+/// Adjust this value to control the layout of the address space display.
+const NAME_COLUMN_WIDTH: usize = 20;
+
 /// Draw a horizontal bar representing a memory region
 fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar_ranges: &[(usize, usize)]) {
-    let bar_width = 60;
+    let bar_width = 40;
 
     // Calculate bar position and width based on actual address ranges
     let bar_start = addr_to_bar_pos(node.start, total_size, bar_width);
@@ -178,8 +182,15 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
         (RegionKind::Alias, _)                       => ('▓', |s| s.bright_yellow()),
     };
 
-    // Print name without indentation - no hierarchy in the visual
-    print!("{:<8} ", node.name.bright_white());
+    // Truncate name if too long, ensuring it fits within NAME_COLUMN_WIDTH
+    let display_name = if node.name.len() > NAME_COLUMN_WIDTH {
+        format!("{}...", &node.name[..NAME_COLUMN_WIDTH - 3])
+    } else {
+        node.name.clone()
+    };
+
+    // Print name with fixed width, left-aligned and padded
+    print!("{:<width$} ", display_name.bright_white(), width = NAME_COLUMN_WIDTH);
 
     // Add leading spaces to align bar by physical address
     for _ in 0..bar_start {
@@ -199,7 +210,7 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
         }
     }
 
-    // Add trailing spaces to fill the bar width
+    // Add trailing spaces to fill the bar width and ensure alignment
     for _ in (bar_start + bar_size)..bar_width {
         print!(" ");
     }
@@ -213,7 +224,7 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
 
 /// Display memory tree hierarchically with horizontal bars
 fn display_memory_tree(nodes: &[MemoryNode], depth: usize, total_size: u64) {
-    let bar_width = 60;
+    let bar_width = 40;
     for node in nodes {
         // Pre-compute bar positions for carved children so they align exactly with child bars
         let carved_bar_ranges: Vec<(usize, usize)> = node.children.iter()
