@@ -1,14 +1,26 @@
 //! Tutorial command - interactive tutorials for learning the capability model
 
 use colored::*;
+use crossterm::event;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::commands;
 use crate::state::CliState;
 
-/// Tutorial metadata
+// ── Timing constants ────────────────────────────────────────────────────────
+
+/// Milliseconds between each character when typing a command.
+const CHAR_MS: u64 = 35;
+/// Milliseconds delay before printing each @msg line.
+const MSG_LINE_MS: u64 = 60;
+/// Milliseconds to pause after a command finishes executing.
+const POST_CMD_MS: u64 = 600;
+
+// ── Tutorial metadata ────────────────────────────────────────────────────────
+
 #[derive(Debug)]
 struct Tutorial {
     filename: String,
@@ -16,7 +28,111 @@ struct Tutorial {
     description: String,
 }
 
-/// Load tutorial index
+// ── Pacer ────────────────────────────────────────────────────────────────────
+
+/// Controls tutorial pacing.
+///
+/// We intentionally stay in **cooked (normal) mode** the whole time so that
+/// all `println!` output from command execution is formatted correctly
+/// (`\n` → `\r\n` by the terminal).  In cooked mode, `crossterm::event::poll`
+/// still works: it detects that stdin has data once the user presses Enter
+/// (the line buffer is flushed).  That is enough to trigger fast-forward.
+struct Pacer {
+    fast: bool,
+}
+
+impl Pacer {
+    fn new() -> Self {
+        use std::io::IsTerminal;
+        // Non-TTY (piped / test): skip all delays immediately.
+        Pacer { fast: !io::stdin().is_terminal() }
+    }
+
+    /// Drain any pending input events; set fast-mode if anything is available.
+    ///
+    /// In cooked mode events arrive only after the user presses Enter, which
+    /// is exactly the interaction we advertise: "press Enter to fast-forward".
+    fn poll_input(&mut self) {
+        if self.fast {
+            return;
+        }
+        // Non-blocking poll: returns immediately if no input is ready.
+        if event::poll(Duration::ZERO).unwrap_or(false) {
+            // Drain all buffered events so they don't leak into rustyline.
+            while event::poll(Duration::ZERO).unwrap_or(false) {
+                let _ = event::read();
+            }
+            self.fast = true;
+        }
+    }
+
+    /// Sleep for up to `ms` milliseconds, breaking early on input.
+    fn sleep_ms(&mut self, ms: u64) {
+        if self.fast {
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(8));
+            self.poll_input();
+            if self.fast {
+                return;
+            }
+        }
+    }
+
+    /// Print an `@msg` line after a short leading delay.
+    fn print_msg(&mut self, colored_line: &str) {
+        self.sleep_ms(MSG_LINE_MS);
+        println!("{}", colored_line);
+    }
+
+    /// Print a blank line with a half-delay.
+    fn print_blank(&mut self) {
+        self.sleep_ms(MSG_LINE_MS / 2);
+        println!();
+    }
+
+    /// Typewrite a command line character by character.
+    ///
+    /// Prints `► ` instantly (already colored), then prints each character of
+    /// the raw command text with a per-character delay.  If fast-mode kicks in
+    /// mid-word the remainder is flushed instantly.
+    fn typewrite_cmd(&mut self, raw_cmd: &str) {
+        print!("{} ", "►".bright_cyan().bold());
+        let _ = io::stdout().flush();
+
+        if self.fast {
+            println!("{}", raw_cmd);
+            return;
+        }
+
+        let chars: Vec<char> = raw_cmd.chars().collect();
+        for (i, &ch) in chars.iter().enumerate() {
+            print!("{}", ch);
+            let _ = io::stdout().flush();
+
+            if i + 1 < chars.len() {
+                self.sleep_ms(CHAR_MS);
+                if self.fast {
+                    let rest: String = chars[i + 1..].iter().collect();
+                    print!("{}", rest);
+                    let _ = io::stdout().flush();
+                    break;
+                }
+            }
+        }
+        println!();
+    }
+
+    /// Pause after a command's output before the next tutorial section.
+    fn post_cmd_pause(&mut self) {
+        self.sleep_ms(POST_CMD_MS);
+    }
+}
+
+// ── Tutorial index loader ─────────────────────────────────────────────────────
+
 fn load_tutorial_index() -> Result<Vec<Tutorial>, String> {
     let index_path = "tutos/index.txt";
 
@@ -36,13 +152,9 @@ fn load_tutorial_index() -> Result<Vec<Tutorial>, String> {
     for line in reader.lines() {
         let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
         let line = line.trim();
-
-        // Skip empty lines and comments
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-
-        // Parse format: filename|title|description
         let parts: Vec<&str> = line.split('|').collect();
         if parts.len() == 3 {
             tutorials.push(Tutorial {
@@ -56,7 +168,8 @@ fn load_tutorial_index() -> Result<Vec<Tutorial>, String> {
     Ok(tutorials)
 }
 
-/// Execute a tutorial file
+// ── Tutorial executor ─────────────────────────────────────────────────────────
+
 fn execute_tutorial(state: &mut CliState, filename: &str) -> Result<(), String> {
     let tutorial_path = format!("tutos/{}", filename);
 
@@ -71,69 +184,67 @@ fn execute_tutorial(state: &mut CliState, filename: &str) -> Result<(), String> 
 
     println!();
 
+    // Print fast-forward hint.
+    println!(
+        "{}",
+        "  Press any key to fast-forward…".bright_black().italic()
+    );
+    println!();
+
+    let mut pacer = Pacer::new();
+
     for line in lines.iter() {
         let line = line.trim();
 
-        // Skip empty lines
         if line.is_empty() {
-            println!();
+            pacer.print_blank();
             continue;
         }
 
-        // Handle message lines (explanatory text)
         if line.starts_with("@msg") {
             let msg = line.strip_prefix("@msg").unwrap_or("").trim();
             if msg.is_empty() {
-                println!();
+                pacer.print_blank();
             } else {
-                println!("{}", msg.bright_black());
+                pacer.print_msg(&format!("{}", msg.bright_black()));
             }
             continue;
         }
 
-        // Skip comment lines that aren't messages
         if line.starts_with('#') {
             continue;
         }
 
-        // Parse and execute command
+        // It's a command line.
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             continue;
         }
 
-        let cmd = parts[0];
-        let cmd_args = &parts[1..];
+        pacer.typewrite_cmd(line);
 
-        // Show the command being executed
-        println!("{} {}", "►".bright_cyan().bold(), line.bright_white());
-
-        // Execute the command
-        match commands::dispatch(state, cmd, cmd_args) {
-            Ok(_) => {
-                // Command succeeded - output already printed by command
-            }
+        match commands::dispatch(state, parts[0], &parts[1..]) {
+            Ok(_) => {}
             Err(e) => {
-                // Show error but continue with tutorial
                 println!("  {} {}", "✗".bright_red().bold(), e.bright_red());
             }
         }
 
-        println!();
+        pacer.post_cmd_pause();
     }
 
+    // Drop pacer here → disable_raw_mode called in Drop.
     Ok(())
 }
 
-/// List all available tutorials
+// ── Public command ────────────────────────────────────────────────────────────
+
 pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
     let tutorials = load_tutorial_index()?;
 
     if args.is_empty() {
-        // No arguments - show tutorial menu
         println!("\n{}", "Available Tutorials:".bright_cyan().bold());
         println!();
-
         println!("{}", "Basic Tutorials:".bright_yellow().bold());
         for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i < 5) {
             println!(
@@ -143,7 +254,6 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
                 tutorial.description
             );
         }
-
         println!();
         println!("{}", "Advanced Tutorials:".bright_yellow().bold());
         for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i >= 5) {
@@ -154,23 +264,17 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
                 tutorial.description
             );
         }
-
         println!();
         println!(
             "{} Use {} to run a tutorial",
             "ℹ".bright_blue(),
             "tutos <number>".bright_white()
         );
-        println!(
-            "   Example: {}",
-            "tutos 1".bright_white()
-        );
+        println!("   Example: {}", "tutos 1".bright_white());
         println!();
-
         return Ok(());
     }
 
-    // Parse tutorial number
     let tutorial_num: usize = args[0]
         .parse()
         .map_err(|_| format!("Invalid tutorial number: {}", args[0]))?;
@@ -184,32 +288,20 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
 
     let tutorial = &tutorials[tutorial_num - 1];
 
-    // Print tutorial header
     println!();
     println!("{}", "═".repeat(60).bright_cyan());
-    println!(
-        "{} {}",
-        "📚".bright_cyan(),
-        tutorial.title.bright_cyan().bold()
-    );
+    println!("{} {}", "📚".bright_cyan(), tutorial.title.bright_cyan().bold());
     println!("{}", tutorial.description.bright_black());
     println!("{}", "═".repeat(60).bright_cyan());
 
-    // Execute the tutorial
     execute_tutorial(state, &tutorial.filename)?;
 
-    // Print footer
     println!("{}", "═".repeat(60).bright_cyan());
-    println!(
-        "{} Tutorial completed!",
-        "✓".bright_green().bold()
-    );
-    println!(
-        "   Use {} to reset and try another tutorial.",
-        "reset".bright_white()
-    );
+    println!("{} Tutorial completed!", "✓".bright_green().bold());
+    println!("   Use {} to reset and try another tutorial.", "reset".bright_white());
     println!("{}", "═".repeat(60).bright_cyan());
     println!();
 
     Ok(())
 }
+
