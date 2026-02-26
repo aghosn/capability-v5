@@ -191,6 +191,12 @@ fn execute_tutorial(state: &mut CliState, filename: &str) -> Result<(), String> 
     );
     println!();
 
+    // Clear any buffered input events before starting the tutorial
+    // to prevent immediate fast-forward from leftover Enter key presses
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        let _ = event::read();
+    }
+
     let mut pacer = Pacer::new();
 
     for line in lines.iter() {
