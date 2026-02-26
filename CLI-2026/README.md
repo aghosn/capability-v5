@@ -5,10 +5,14 @@ An interactive command-line interface for experimenting with the Capability Engi
 ## Features
 
 - **Interactive REPL**: Experiment with capability operations in real-time
-- **Command History**: Navigate previous commands with arrow keys
-- **Session Recording**: Save your session as a reusable unit test
-- **Colored Output**: Visual feedback for better user experience
-- **Comprehensive Help**: Built-in documentation for all commands
+- **Tab Completion & Inline Hints**: Complete command names and capability names with TAB; usage hints appear as you type
+- **Command History**: Navigate previous commands with arrow keys (persisted in `.capability_cli_history`)
+- **Session Replay**: Save your session as replayable CLI commands and reload with `load`
+- **Unit Test Export**: Export your session as a Rust unit test via `export-as-unit-test`
+- **Interactive Tutorials**: Ten built-in guided tutorials covering basic to advanced scenarios
+- **Auto-List Mode**: Toggle automatic `list` output after every command
+- **Memory Usage Reporting**: Inspect logical memory footprint of all capability objects
+- **Colored Output**: Visual feedback for better readability
 
 ## Installation
 
@@ -19,239 +23,242 @@ cargo build --release
 
 ## Usage
 
-Start the CLI:
-
 ```bash
 cargo run
-```
-
-Or run the compiled binary:
-
-```bash
+# or
 ./target/release/capability-cli
 ```
 
-## Quick Start Example
+## Quick Start
 
 ```
 cap> init root 0x1000000
-✓ Created root domain 'root_domain' and memory region 'root_mem' (size: 0x1000000)
+✓ Created root domain 'root' and memory region 'r0' (size: 0x1000000)
 
-cap> create-domain root_domain child1 0b1111 GET,ATTEST,SWITCH
+cap> create-domain root child1 0b1111 GET,ATTEST,SWITCH
 ✓ Created domain 'child1' (ID: 1, cores: 0b1111)
 
-cap> carve root_mem mem1 0x1000 0x1000 RWX
-✓ Carved memory region 'mem1' [0x1000..0x2000) RWX (0 updates)
+cap> carve r0 mem1 0x1000 0x1000 RWX
+✓ Carved memory region 'mem1' [0x1000..0x2000)
 
-cap> send mem1 child1 10 CLEAN
-✓ Sent 'mem1' to 'child1' with handle 10 (1 updates)
+cap> send mem1 child1 CLEAN
+✓ Sent 'mem1' to unsealed domain 'child1' with auto-allocated handle 1
 
 cap> seal child1
 ✓ Sealed domain 'child1'
 
 cap> view child1
-Address Space View:
 Address Space for Domain 1:
 Total accessible: 4096 bytes
 Regions (1):
   0: [0x1000..0x2000) RWX
 
-cap> list
-Domains:
-  • root_domain (ID: 0, status: Sealed)
-  • child1 (ID: 1, status: Sealed)
+cap> mem-usage
+...
 
-Memory Regions:
-  • root_mem [0x0..0x1000000) RWX (kind: Root)
-  • mem1 [0x1000..0x2000) RWX (kind: Carve)
-
-cap> save-session my_test.rs
-✓ Session saved to 'my_test.rs'
+cap> save-session my_session.txt
+✓ Session saved to 'my_session.txt' (replay with: load my_session.txt)
 ```
+
+> **Note:** `init <name> <size>` always names the root memory region `r0`.
 
 ## Command Reference
 
 ### Initialization
 
-- **`init <name> <size>`** - Initialize root domain and memory region
-  - Example: `init root 0x1000000`
+| Command | Description |
+|---------|-------------|
+| `init <name> <size>` | Create the root domain `<name>` and root memory region `r0` of the given size |
+
+Example: `init root 0x1000000`
 
 ### Domain Management
 
-- **`create-domain <parent> <name> <cores> <api>`** - Create a child domain
-  - Example: `create-domain root_domain child1 0b1111 GET,ATTEST,SWITCH`
-  - API flags: CREATE, SET, GET, SEND, SEAL, ATTEST, ENUMERATE, SWITCH, ALIAS, CARVE, REVOKE, GETCHAN, ALL, NONE
+| Command | Description |
+|---------|-------------|
+| `create-domain <parent> <name> <cores> <api>` | Create a child domain under `<parent>` |
+| `seal <domain>` | Seal a domain (required before execution) |
+| `set-interrupt-policy <domain> <vector> <visibility>` | Set policy for a specific interrupt vector |
+| `set-default-interrupt-policy <domain> <visibility>` | Set the default policy for all vectors |
+| `enumerate-pending <domain>` | List capabilities waiting to be accepted |
+| `accept-capability <domain> <pending_id> [handle]` | Accept a pending capability |
+| `reject-capability <domain> <pending_id>` | Discard a pending capability |
 
-- **`seal <domain>`** - Seal a domain (make it ready for execution)
-  - Example: `seal child1`
+- **`<cores>`**: bitmask of allowed cores, e.g. `0b1111` (all 4) or `0b0011` (cores 0–1)
+- **`<api>`**: comma-separated flags — `CREATE`, `SET`, `GET`, `SEND`, `SEAL`, `ATTEST`, `ENUMERATE`, `SWITCH`, `ALIAS`, `CARVE`, `REVOKE`, `GETCHAN`, `RECEIVE_AFTER_SEAL`, `ALL`, `NONE`
+- **`<visibility>`**: `DELIVER`, `REPORT`, or `NOTREPORT`
 
 ### Memory Operations
 
-- **`carve <parent> <name> <start> <size> <rights>`** - Carve exclusive memory from parent
-  - Example: `carve root_mem mem1 0x1000 0x1000 RWX`
-  - Rights: R (read), W (write), X (execute), or combinations like RW, RWX
+| Command | Description |
+|---------|-------------|
+| `carve <parent> <name> <start> <size> <rights>` | Carve an exclusive sub-region from `<parent>` |
+| `alias <parent> <name> <start> <size> <rights>` | Create a shared (aliased) sub-region from `<parent>` |
 
-- **`alias <parent> <name> <start> <size> <rights>`** - Create aliased (shared) memory
-  - Example: `alias root_mem mem2 0x2000 0x1000 RW`
+- **`<rights>`**: `R`, `RW`, `RX`, or `RWX`
 
 ### Capability Transfer
 
-- **`send <mem> <domain> <handle> [attrs]`** - Send memory capability to domain
-  - Example: `send mem1 child1 10 CLEAN`
-  - Attributes: CLEAN, VITAL, NONE
+| Command | Description |
+|---------|-------------|
+| `send <mem> <domain> [attrs]` | Send a memory capability to a domain (handle auto-allocated) |
+| `revoke <parent> <child>` | Revoke a child capability (domain or memory) |
 
-- **`revoke <parent> <child>`** - Revoke a child capability
-  - Example: `revoke root_mem mem1`
+- **`[attrs]`**: optional comma-separated flags — `CLEAN` (zero on revoke), `VITAL` (domain revoked when this is revoked), `META`, `NONE`
+- Sending to a sealed domain with `RECEIVE_AFTER_SEAL` places the capability in the pending queue
 
 ### Information
 
-- **`attest <domain>`** - Generate attestation report for domain
-  - Example: `attest child1`
-
-- **`view <domain>`** - Show address space view for domain
-  - Example: `view child1`
-
-- **`list`** - List all domains and memory regions
+| Command | Description |
+|---------|-------------|
+| `attest <domain>` | Generate an attestation report |
+| `view <domain>` | Show address space layout for a domain |
+| `list` | List all domains, memory regions, and per-core status |
+| `mem-usage` | Report logical memory footprint of all capability objects |
 
 ### Execution
 
-- **`switch <core> <from> <to>`** - Switch between domains on a core
-  - Example: `switch 0 root_domain child1`
+| Command | Description |
+|---------|-------------|
+| `switch <domain> <core>` | Switch to `<domain>` on `<core>` |
+| `interrupt <vector> <core>` | Deliver an interrupt to the current domain on `<core>` |
 
-- **`interrupt <vector> <domain> <core>`** - Simulate an interrupt
-  - Example: `interrupt 6 child1 0`
+Legacy two-argument forms are also accepted:
+- `switch <core> <from> <to>`
+- `interrupt <vector> <domain> <core>`
 
 ### Session Management
 
-- **`save-session <filename>`** - Save current session as a unit test
-  - Example: `save-session my_test.rs`
-  - The generated test can be placed in `../2026/tests/` and run with `cargo test`
+| Command | Description |
+|---------|-------------|
+| `save-session <filename>` | Save session as replayable CLI commands |
+| `load <filename>` | Load and execute a saved session file |
+| `export-as-unit-test <filename>` | Export session as a Rust unit test |
+| `clear-session` | Clear the in-memory session history |
+| `reset` | Reset CLI to its initial empty state |
+| `auto-list` | Toggle auto-`list` after every command |
 
-- **`clear-session`** - Clear session history
+### Learning
 
-### Other
+| Command | Description |
+|---------|-------------|
+| `tutos` | List all available tutorials |
+| `tutos <number>` | Run a specific tutorial interactively |
 
-- **`help`** - Show help message
-- **`exit`** or **`quit`** - Exit the CLI
+Ten tutorials are included:
+
+| # | Title |
+|---|-------|
+| 1 | Memory Carving — Exclusive Ownership |
+| 2 | Memory Aliasing — Shared Access |
+| 3 | Capability Transfer with Send |
+| 4 | Domain Switching — Context Switches |
+| 5 | Interrupt Routing and Policies |
+| 6 | Confidential VM with VirtIO Buffer |
+| 7 | Nested Enclave Architecture |
+| 8 | Sandboxed Execution Environment |
+| 9 | Domain Encapsulation and Communication |
+| 10 | Pending Capabilities and RECEIVE_AFTER_SEAL |
 
 ## Number Formats
 
-The CLI supports multiple number formats:
+| Format | Syntax | Example |
+|--------|--------|---------|
+| Hexadecimal | `0x` prefix | `0x1000`, `0x1000000` |
+| Binary | `0b` prefix | `0b1111`, `0b0011` |
+| Decimal | no prefix | `4096`, `16777216` |
 
-- **Hexadecimal**: Prefix with `0x` (e.g., `0x1000`, `0x1000000`)
-- **Binary**: Prefix with `0b` (e.g., `0b1111`, `0b1100`)
-- **Decimal**: No prefix (e.g., `4096`, `1000000`)
+## Session Workflow
 
-## Session Export
-
-The `save-session` command exports your interactive session as a Rust unit test. This is useful for:
-
-1. **Regression Testing**: Turn exploration into permanent test cases
-2. **Documentation**: Create executable examples
-3. **Reproducibility**: Share exact sequences of operations
-
-Example workflow:
+`save-session` saves your session as plain CLI commands that can be replayed with `load`. Use `export-as-unit-test` to turn a session into a Rust unit test:
 
 ```bash
-# In CLI
+# In the CLI
 cap> init root 0x1000000
-cap> create-domain root_domain child1 0b1111 GET,ATTEST
-cap> carve root_mem mem1 0x1000 0x1000 RWX
-cap> send mem1 child1 10 CLEAN
+cap> create-domain root child1 0b1111 GET,ATTEST,SWITCH
+cap> carve r0 mem1 0x1000 0x1000 RWX
+cap> send mem1 child1 CLEAN
 cap> seal child1
-cap> save-session test_basic_workflow.rs
+cap> export-as-unit-test test_basic.rs
 
-# Copy to test directory
-$ cp test_basic_workflow.rs ../2026/tests/
-
-# Run the test
-$ cd ../2026
-$ cargo test test_basic_workflow
+# Place the generated test in the engine test suite and run it
+$ cp test_basic.rs ../2026/tests/
+$ cd ../2026 && cargo test test_basic
 ```
-
-## Command History
-
-The CLI maintains a command history in `.capability_cli_history`. Use arrow keys to navigate:
-
-- **Up Arrow**: Previous command
-- **Down Arrow**: Next command
-- **Ctrl+R**: Search history (rustyline feature)
-
-## Architecture
-
-The CLI is built on:
-
-- **rustyline**: Interactive line editing and history
-- **colored**: Terminal color output
-- **capability-engine**: The core capability system
-
-The session recorder translates CLI commands into valid Rust test code, maintaining the exact semantics of your interactive session.
-
-## Tips
-
-1. **Use tab completion** (if your terminal supports it) for long names
-2. **Start with `list`** after commands to see the current state
-3. **Use `view <domain>`** to verify address space layouts
-4. **Save sessions frequently** to preserve complex setups
-5. **Use descriptive names** for better generated test code
 
 ## Examples
 
-### Creating a CVM with Exclusive Memory
+### CVM with Exclusive Memory
 
 ```
 init root 0x1000000
-create-domain root_domain cvm 0b1111 GET,ATTEST,SWITCH
-carve root_mem cvm_mem 0x100000 0x100000 RWX
-send cvm_mem cvm 10 CLEAN
+create-domain root cvm 0b1111 GET,ATTEST,SWITCH
+carve r0 cvm_mem 0x100000 0x100000 RWX
+send cvm_mem cvm CLEAN
 seal cvm
 view cvm
 ```
 
-### Creating an Enclave Hierarchy
+### Nested Enclave Hierarchy
 
 ```
 init root 0x1000000
-create-domain root_domain cvm 0b1111 CREATE,SEAL,CARVE,ATTEST
-carve root_mem cvm_mem 0x100000 0x200000 RWX
-send cvm_mem cvm 10 NONE
+create-domain root cvm 0b1111 CREATE,SEAL,CARVE,SEND,ATTEST
+carve r0 cvm_mem 0x100000 0x200000 RWX
+send cvm_mem cvm
 seal cvm
 create-domain cvm enclave 0b0011 GET,ATTEST
 carve cvm_mem enclave_mem 0x100000 0x100000 RW
-send enclave_mem enclave 20 CLEAN
+send enclave_mem enclave CLEAN
 seal enclave
 view enclave
-save-session test_enclave_hierarchy.rs
 ```
 
 ### Shared Memory Between Domains
 
 ```
 init root 0x2000000
-create-domain root_domain dom1 0b1111 GET,ATTEST,SWITCH
-create-domain root_domain dom2 0b1111 GET,ATTEST,SWITCH
-alias root_mem shared_mem 0x200000 0x80000 RW
-send shared_mem dom1 10 NONE
-send shared_mem dom2 11 NONE
+create-domain root dom1 0b1111 GET,ATTEST,SWITCH
+create-domain root dom2 0b1111 GET,ATTEST,SWITCH
+alias r0 shared 0x200000 0x80000 RW
+send shared dom1
+send shared dom2
 seal dom1
 seal dom2
 list
 ```
 
+### Pending Capabilities (sealed receiver)
+
+```
+init root 0x1000000
+create-domain root receiver 0b1111 GET,ATTEST,RECEIVE_AFTER_SEAL
+seal receiver
+carve r0 gift 0x1000 0x1000 RW
+send gift receiver
+enumerate-pending receiver
+accept-capability receiver 0
+```
+
 ## Troubleshooting
 
-### "Domain not found"
-Make sure you use the exact name given when creating the domain. Use `list` to see all available names.
+**"Domain not found"** — Use `list` to see exact names; names are case-sensitive.
 
-### "Failed to carve"
-Check that the memory range is valid and within the parent region's bounds.
+**"Failed to carve"** — The requested range must lie within the parent region and must not overlap any existing carved child.
 
-### "Monotonicity violation"
-Child domain policies must be subsets of parent policies. Reduce the API permissions or core mask.
+**"Monotonicity violation"** — Child domain core masks and API flags must be subsets of the parent's.
 
-### Session export issues
-The generated test may need minor adjustments for proper capability ID management in complex scenarios.
+**"Domain not sealed"** — Most capability operations (carve, send, etc.) require the owning domain to be sealed first.
 
-## Contributing
+**"Send not allowed"** — The owning domain must have the `SEND` API flag.
 
-This CLI is part of the Capability Engine V2 project. For issues or feature requests, please refer to the main project repository.
+## Architecture
+
+| Crate | Role |
+|-------|------|
+| `rustyline` | Interactive line editing, history, tab completion |
+| `colored` | Terminal colour output |
+| `parking_lot` | Efficient `RwLock` for shared state |
+| `capability-engine-v2` | Core capability and domain logic |
+
+Commands are organised in `src/commands/` by concern: `domain`, `memory`, `info`, `execution`, `session_cmd`, `tutos`. The dispatcher in `mod.rs` routes parsed input to the appropriate handler. Tab completion and inline hints are driven by the static `COMMANDS` table in `src/completer.rs`.
