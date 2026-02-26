@@ -140,20 +140,41 @@ let domain_ids: Vec<u64> = enumerate_domain_tree(&root_domain);
 
 ### Platform Abstraction (`platform.rs`)
 
-The `Platform` trait abstracts the hardware operations that the capability engine produces:
+The `Platform` trait abstracts hardware operations and serialisation primitives.
+Capability operations are serialised via a **global read-write lock**:
 
 ```rust
 pub trait Platform: Send + Sync {
-    fn on_unmap(&self, domain: DomainId, address: u64, size: u64);
-    fn on_map(&self, domain: DomainId, address: u64, size: u64, physical: u64,
-              read: bool, write: bool, execute: bool);
-    fn on_domain_revoked(&self, domain: DomainId, fallback: Option<DomainId>);
-    // ...
+    // Global RW lock — maps to rwlock_read/write_lock on bare metal
+    fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>>;   // carve/alias/send
+    fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>>; // any revoke
+
+    fn send_ipi(&self, core_id: CoreId);
+    fn sync_barrier(&self, id: u8, participants: usize);
+    fn apply_update(&self, update: &Update);
+    fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>);
+    fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>);
+    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId);
+    fn clear_core_domain(&self, core_id: CoreId);
+    fn domain_core(&self, domain_id: DomainId) -> Option<CoreId>;
 }
 
-// execute() drives an UpdateBatch through a Platform implementation
-execute(&platform, &update_batch);
+// execute() acquires the appropriate lock, runs the operation, and drives the
+// two-barrier IPI protocol for cross-core hardware updates.
+// Pass exclusive=false for carve/alias/send, exclusive=true for any revoke.
+execute(&platform, /*exclusive=*/false, || {
+    Capability::send_to(&cap, new_owner, handle, Attributes::NONE).map(|b| ((), b))
+});
+execute(&platform, /*exclusive=*/true, || {
+    Capability::revoke_child_domain(&root, child_handle).map(|u| ((), u))
+});
 ```
+
+**Why shared/exclusive?** Revocation may cascade through an arbitrarily deep
+subtree whose domain IDs are unknown to the caller in advance. An exclusive lock
+ensures the full revocation is atomic with respect to all other operations —
+no TOCTOU checks or domain-set enumeration required. On bare metal this maps
+directly to a hardware RW spinlock (`rwlock_read_lock` / `rwlock_write_lock`).
 
 ### Address Space View (`view.rs`)
 

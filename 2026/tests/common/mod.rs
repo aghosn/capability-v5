@@ -3,34 +3,37 @@
 //!
 //! Design principles:
 //!
-//! * **Two-lock design** to avoid deadlock:
-//!   - `op_lock` (`Arc<Mutex<()>>`) is held for the full duration of `execute`.
-//!     It serialises conflicting capability operations.
-//!   - `inner` (`Arc<Mutex<TestPlatformInner>>`) is locked briefly for each
-//!     state read/write (apply_update, on_domain_revoked, register_domain, …).
-//!     It is NEVER held at the same time as any other platform's op_lock.
+//! * **RW lock design**: a `parking_lot::RwLock<()>` provides shared access
+//!   for non-revoke operations and exclusive access for revoke operations,
+//!   mirroring the bare-metal RW spinlock a real platform would use.
+//!   Arc-wrapped guards (`ArcRwLockReadGuard` / `ArcRwLockWriteGuard`) are
+//!   used so the guard type has no lifetime parameter and can be boxed as
+//!   `Box<dyn OpLockGuard>`.
 //!
-//! * **Memory lifecycle safety**: `op_lock` is `Arc`-wrapped; the guard returned
-//!   by `acquire_op_locks` owns an `ArcMutexGuard` (no lifetime param) that
-//!   keeps the mutex alive even if the platform drops the domain entry before
-//!   the waiting thread acquires the lock.
+//! * **Two-lock separation**: `op_lock` (the RW lock) is held for the full
+//!   `execute()` duration. `inner` (a plain Mutex) is locked briefly for
+//!   individual state reads/writes. The two are never held simultaneously.
 //!
-//! * **TOCTOU protection**: after acquiring `op_lock`, we briefly lock `inner`
-//!   and check the `revoked` flag for every domain in the requested set.  If
-//!   any domain is revoked we return `CapaError::DomainRevoked`.
+//! * **No TOCTOU check**: the exclusive lock guarantees that no revocation
+//!   can happen concurrently with a shared-lock holder, and vice-versa.
+//!   Sequential revocation of a domain and then operating on it will fail
+//!   through normal capability-tree errors (e.g. NotFound), not via the lock.
 //!
 //! * **Barriers / IPIs are no-ops** — TestPlatform targets sequential unit
-//!   tests.  Cross-core behaviour is validated by the monitor platform.
+//!   tests. Cross-core behaviour is validated by the monitor platform.
 
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use parking_lot::{lock_api::ArcMutexGuard, Mutex, RawMutex};
+use parking_lot::{
+    lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard},
+    RawRwLock, RwLock,
+};
 
 use capability_engine::{
-    CapaError, CoreId, DomainId, OpLockGuard, Platform, Result, Update,
+    CoreId, DomainId, OpLockGuard, Platform, Result, Update,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,35 +94,37 @@ impl TestPlatformInner {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OpLockGuard implementation
+// OpLockGuard implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct TestOpLocks {
-    // Owns the Arc<Mutex<()>>; releasing this guard unlocks op_lock.
-    _guard: ArcMutexGuard<RawMutex, ()>,
+struct TestSharedLock {
+    _guard: ArcRwLockReadGuard<RawRwLock, ()>,
 }
+unsafe impl Send for TestSharedLock {}
+impl OpLockGuard for TestSharedLock {}
 
-// SAFETY: ArcMutexGuard<RawMutex, ()> is Send.
-unsafe impl Send for TestOpLocks {}
-
-impl OpLockGuard for TestOpLocks {}
+struct TestExclusiveLock {
+    _guard: ArcRwLockWriteGuard<RawRwLock, ()>,
+}
+unsafe impl Send for TestExclusiveLock {}
+impl OpLockGuard for TestExclusiveLock {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TestPlatform
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct TestPlatform {
-    /// Serialises concurrent capability operations (held for full execute duration).
-    op_lock: Arc<Mutex<()>>,
+    /// RW lock: shared for non-revoke ops, exclusive for revoke ops.
+    op_lock: Arc<RwLock<()>>,
     /// Platform state — locked briefly for individual reads/writes.
-    inner: Arc<Mutex<TestPlatformInner>>,
+    inner: Arc<parking_lot::Mutex<TestPlatformInner>>,
 }
 
 impl Default for TestPlatform {
     fn default() -> Self {
         TestPlatform {
-            op_lock: Arc::new(Mutex::new(())),
-            inner: Arc::new(Mutex::new(TestPlatformInner::default())),
+            op_lock: Arc::new(RwLock::new(())),
+            inner: Arc::new(parking_lot::Mutex::new(TestPlatformInner::default())),
         }
     }
 }
@@ -146,21 +151,16 @@ impl TestPlatform {
 }
 
 impl Platform for TestPlatform {
-    fn acquire_op_locks(&self, domains: &std::collections::BTreeSet<DomainId>) -> Result<Box<dyn OpLockGuard>> {
-        // Acquire the serialisation lock (blocking, no spinloop).
-        let guard = self.op_lock.lock_arc();
+    fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(TestSharedLock {
+            _guard: self.op_lock.read_arc(),
+        }))
+    }
 
-        // TOCTOU check: briefly inspect inner to detect mid-air revocations.
-        {
-            let inner = self.inner.lock();
-            for &d in domains {
-                if inner.is_revoked(d) {
-                    return Err(CapaError::DomainRevoked);
-                }
-            }
-        }
-
-        Ok(Box::new(TestOpLocks { _guard: guard }))
+    fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(TestExclusiveLock {
+            _guard: self.op_lock.write_arc(),
+        }))
     }
 
     // IPIs and barriers are no-ops in the test platform.

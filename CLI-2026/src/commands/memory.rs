@@ -3,7 +3,6 @@
 use capability_engine::*;
 use capability_engine::domain::PendingCapability;
 use colored::*;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
@@ -32,10 +31,8 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
         .clone();
 
-    let parent_owner = parent.read().owned.owner;
-    let affected = BTreeSet::from([parent_owner]);
     let platform = state.platform.clone();
-    let (child, batch) = execute(&*platform, &affected, || {
+    let (child, batch) = execute(&*platform, false, || {
         let (child, updates) = parent.carve(access, child_cap_id)?;
         Ok((child, updates))
     }).map_err(|e| format!("Failed to carve: {:?}", e))?;
@@ -182,10 +179,8 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     } else {
         // Domain is unsealed - proceed normally
         let handle = domain.read().data.allocate_memory_handle();
-        let mem_owner = mem.read().owned.owner;
-        let affected = BTreeSet::from([mem_owner, domain_id]);
         let platform = state.platform.clone();
-        let (_, batch) = execute(&*platform, &affected, || {
+        let (_, batch) = execute(&*platform, false, || {
             let updates = mem.send(domain_id, handle, attrs)?;
             Ok(((), updates))
         }).map_err(|e| format!("Failed to send: {:?}", e))?;

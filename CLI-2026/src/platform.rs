@@ -3,10 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use parking_lot::{lock_api::ArcMutexGuard, Mutex, RawMutex};
+use parking_lot::{
+    lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard},
+    Mutex, RawRwLock, RwLock,
+};
 
 use capability_engine::{
-    CapaError, CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
+    CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
 };
 use capability_engine::{CapabilityRef, Domain, SwitchContext};
 
@@ -27,22 +30,27 @@ impl CliPlatformInner {
     }
 }
 
-struct CliOpLocks {
-    _guard: ArcMutexGuard<RawMutex, ()>,
+struct CliSharedLock {
+    _guard: ArcRwLockReadGuard<RawRwLock, ()>,
 }
+unsafe impl Send for CliSharedLock {}
+impl OpLockGuard for CliSharedLock {}
 
-unsafe impl Send for CliOpLocks {}
-impl OpLockGuard for CliOpLocks {}
+struct CliExclusiveLock {
+    _guard: ArcRwLockWriteGuard<RawRwLock, ()>,
+}
+unsafe impl Send for CliExclusiveLock {}
+impl OpLockGuard for CliExclusiveLock {}
 
 pub struct CliPlatform {
-    op_lock: Arc<Mutex<()>>,
+    op_lock: Arc<RwLock<()>>,
     inner: Arc<Mutex<CliPlatformInner>>,
 }
 
 impl CliPlatform {
     pub fn new(num_cores: usize) -> Self {
         CliPlatform {
-            op_lock: Arc::new(Mutex::new(())),
+            op_lock: Arc::new(RwLock::new(())),
             inner: Arc::new(Mutex::new(CliPlatformInner {
                 domains: BTreeMap::new(),
                 switch_manager: SwitchManager::new(num_cores),
@@ -75,17 +83,16 @@ impl CliPlatform {
 }
 
 impl Platform for CliPlatform {
-    fn acquire_op_locks(&self, domains: &std::collections::BTreeSet<DomainId>) -> Result<Box<dyn OpLockGuard>> {
-        let guard = self.op_lock.lock_arc();
-        // TOCTOU check: verify none of the domains were revoked while waiting
-        let inner = self.inner.lock();
-        for &domain_id in domains {
-            if inner.is_revoked(domain_id) {
-                return Err(CapaError::DomainRevoked);
-            }
-        }
-        drop(inner);
-        Ok(Box::new(CliOpLocks { _guard: guard }))
+    fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(CliSharedLock {
+            _guard: self.op_lock.read_arc(),
+        }))
+    }
+
+    fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(CliExclusiveLock {
+            _guard: self.op_lock.write_arc(),
+        }))
     }
 
     fn send_ipi(&self, _core_id: CoreId) {

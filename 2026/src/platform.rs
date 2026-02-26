@@ -3,91 +3,81 @@
 //! The capability engine is platform-independent. It communicates with the
 //! hardware through the [`Platform`] trait, which the backend must implement.
 //!
+//! # Locking model
+//!
+//! Capability operations are serialised using a **global read-write lock**
+//! exposed through the [`Platform`] trait:
+//!
+//! - **Shared lock** ([`Platform::acquire_shared_lock`]): held by non-destructive
+//!   operations (carve, alias, send). Multiple holders can run concurrently.
+//! - **Exclusive lock** ([`Platform::acquire_exclusive_lock`]): held by any revoke
+//!   operation. Blocks until all shared-lock holders have released, then runs
+//!   alone. This ensures revocation is fully isolated — no concurrent operation
+//!   can observe a partially-revoked subtree, and no TOCTOU check is needed.
+//!
+//! On bare metal the two methods map directly to a hardware RW spinlock
+//! (`rwlock_read_lock` / `rwlock_write_lock`).
+//!
 //! # Cross-core atomicity (§5.2 of the paper)
 //!
-//! Capability operations that affect domains running on remote cores use a
-//! **two-barrier protocol**:
+//! After the lock is acquired and the tree mutation runs, hardware state
+//! (EPT, TLB) is updated via a **two-barrier IPI protocol**:
 //!
-//! 1. The initiating core acquires the operation lock (serialises conflicting ops).
-//! 2. It runs the pure tree mutation and collects the `UpdateBatch`.
-//! 3. For each core running an affected domain, it sends an IPI.
+//! 1. Acquire shared or exclusive lock.
+//! 2. Run the pure tree mutation → collect `UpdateBatch`.
+//! 3. For each core running an affected domain, send an IPI.
 //! 4. **Barrier 0**: all affected cores are preempted and waiting.
-//! 5. The initiating core applies hardware updates (EPT changes, zero memory…).
+//! 5. Initiating core applies hardware updates (EPT changes, zero memory…).
 //! 6. **Barrier 1**: affected cores resume and apply local state (TLB flush…).
 //! 7. `on_domain_revoked` is called for any revoked domains.
-//! 8. The operation lock is released.
+//! 8. Lock is released.
 //!
 //! For operations whose affected domains are not currently running on any
-//! other core ("local path"), steps 3-6 are skipped for efficiency.
+//! remote core ("local path"), steps 3-6 are skipped.
 //!
 //! # Memory lifecycle safety
 //!
-//! Domain objects must not be freed until all cores that may reference them
-//! have acknowledged their revocation. The two-barrier protocol guarantees
-//! this at the hardware level. In Rust library implementations (test, CLI),
-//! `Arc` reference counting provides the same guarantee automatically.
-//!
-//! The operation lock (`op_lock`) is kept alive via `Arc` inside the
-//! [`OpLockGuard`], so a thread waiting on the lock for a to-be-revoked
-//! domain will still hold a valid `Arc` to the lock entry when it eventually
-//! acquires it. After acquiring the lock, the TOCTOU check detects the
-//! revocation and returns [`CapaError::DomainRevoked`] before accessing any
-//! freed state.
-//!
-//! # Conflict identification
-//!
-//! The following capability operation pairs require serialisation:
-//!
-//! | Scenario | Affected domain set |
-//! |---|---|
-//! | `send` while receiver runs on another core | sender + receiver domains |
-//! | `send` rejected by receiver (rollback) | sender + receiver domains |
-//! | `carve`/`alias` overlapping with a concurrent `revoke` | parent domain |
-//! | `create_child_domain` while parent is being revoked | parent domain |
-//! | Concurrent `revoke` of overlapping subtrees | root parent domain |
-//! | Domain running on 2+ cores being revoked | all affected cores get IPI |
+//! `Arc` reference counting keeps capability tree nodes alive for the full
+//! duration of any operation that holds references to them. The exclusive lock
+//! ensures that by the time a revoke operation completes and releases the lock,
+//! no other thread is accessing the revoked domains.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use crate::error::Result;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 
-/// A RAII guard that holds all operation locks for a set of domains.
+/// A RAII guard that holds a platform operation lock (shared or exclusive).
 ///
-/// Dropping this guard releases every lock that was acquired during
-/// [`Platform::acquire_op_locks`]. The guard must remain alive for the
-/// entire duration of the capability operation — including the IPI/barrier
-/// phase and the update application — so that:
-///
-/// - Concurrent operations on the same domains are serialised.
-/// - Domain objects referenced by the operation remain alive (the Arc kept
-///   inside the guard prevents the lock entry from being freed, and callers
-///   keep their own Arcs to the capability tree nodes).
+/// Dropping this guard releases the lock, allowing other operations to proceed.
+/// The guard must remain alive for the entire duration of the capability
+/// operation — including the IPI/barrier phase and update application.
 pub trait OpLockGuard: Send {}
 
 /// Platform-specific primitives required by the capability engine.
 ///
 /// Implementations must be `Send + Sync` so the engine can share a platform
-/// reference across cores. Each method documents when it is called relative
-/// to the two-barrier protocol.
+/// reference across cores.
 pub trait Platform: Send + Sync {
     // -----------------------------------------------------------------------
-    // Serialisation
+    // Serialisation — global read-write lock
     // -----------------------------------------------------------------------
 
-    /// Acquire operation locks for the given set of domain IDs.
+    /// Acquire a **shared** operation lock for non-destructive operations
+    /// (carve, alias, send).
     ///
-    /// Locks must be acquired in a **canonical (domain-ID-sorted) order** to
-    /// prevent deadlocks when multiple cores race with overlapping domain sets.
+    /// Multiple shared-lock holders can coexist. Blocks only while an
+    /// exclusive lock is held. On bare metal, maps to `rwlock_read_lock`.
+    fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>>;
+
+    /// Acquire an **exclusive** operation lock for revoke operations.
     ///
-    /// After acquiring each domain's lock the implementation must perform a
-    /// **TOCTOU check**: if the domain has been revoked since the caller
-    /// determined its domain set, the implementation releases all acquired
-    /// locks and returns [`CapaError::DomainRevoked`]. This ensures the caller
-    /// never proceeds with a stale domain reference.
-    ///
-    /// The returned guard owns the locks; dropping it releases them all.
-    fn acquire_op_locks(&self, domains: &BTreeSet<DomainId>) -> Result<Box<dyn OpLockGuard>>;
+    /// Blocks until all shared and exclusive lock holders have released, then
+    /// runs alone. Guarantees that no other capability operation is in-flight
+    /// during the revocation, eliminating the need for TOCTOU checks or
+    /// per-domain domain-set enumeration. On bare metal, maps to
+    /// `rwlock_write_lock`.
+    fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>>;
 
     // -----------------------------------------------------------------------
     // Cross-core synchronisation (two-barrier protocol)
@@ -168,11 +158,16 @@ pub trait Platform: Send + Sync {
 /// This is the central execution entry point that implements the full
 /// cross-core synchronisation protocol described in §5.2 of the paper.
 ///
+/// # Lock kind
+///
+/// Pass `exclusive = false` for non-destructive operations (carve, alias,
+/// send). Pass `exclusive = true` for any revoke operation. The exclusive
+/// lock guarantees that no other capability operation is in-flight during
+/// revocation — no caller needs to enumerate affected domain IDs in advance.
+///
 /// # Protocol
 ///
-/// 1. **Lock**: acquire operation locks for `affected_domains` in sorted order.
-///    Returns [`CapaError::DomainRevoked`] if any domain was revoked while
-///    waiting (TOCTOU protection).
+/// 1. **Lock**: acquire shared or exclusive lock via the platform.
 /// 2. **Operate**: call `op()`, which performs the pure capability tree
 ///    mutation and returns `(R, UpdateBatch)`.
 /// 3. **Synchronise** (cross-core path — only if affected domains are running
@@ -181,25 +176,26 @@ pub trait Platform: Send + Sync {
 ///    - Wait at barrier 0 (all affected cores have stopped).
 ///    - Apply hardware updates (EPT, zero memory…).
 ///    - Wait at barrier 1 (cores apply local state: TLB flush…).
-/// 4. **Local path**: if no remote cores are affected, apply updates directly
-///    (avoids IPI/barrier overhead for the common case).
+/// 4. **Local path**: if no remote cores are affected, apply updates directly.
 /// 5. **Revocations**: for each `RevokeDomain` update, call
-///    [`Platform::on_domain_revoked`] so the platform can redirect cores and
-///    clean up its internal state.
-/// 6. **Unlock**: the `OpLockGuard` is dropped, releasing all operation locks.
+///    [`Platform::on_domain_revoked`] so the platform can redirect cores.
+/// 6. **Unlock**: the `OpLockGuard` is dropped, releasing the lock.
 ///
-/// Returns `(R, UpdateBatch)` so callers can inspect the updates (e.g. for
-/// higher-level state cleanup such as removing entries from CLI name maps).
+/// Returns `(R, UpdateBatch)` so callers can inspect the updates.
 pub fn execute<F, R>(
     platform: &dyn Platform,
-    affected_domains: &BTreeSet<DomainId>,
+    exclusive: bool,
     op: F,
 ) -> Result<(R, UpdateBatch)>
 where
     F: FnOnce() -> Result<(R, UpdateBatch)>,
 {
-    // Step 1 — acquire operation locks; fail fast if any domain is revoked
-    let _guard = platform.acquire_op_locks(affected_domains)?;
+    // Step 1 — acquire shared or exclusive lock
+    let _guard = if exclusive {
+        platform.acquire_exclusive_lock()?
+    } else {
+        platform.acquire_shared_lock()?
+    };
 
     // Step 2 — run the pure capability tree mutation
     let (result, batch) = op()?;

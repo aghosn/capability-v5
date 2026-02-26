@@ -5,10 +5,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::collections::BTreeSet;
-
 use capability_engine::{
-    execute, CapaError, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform,
+    execute, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform,
     Update,
 };
 use common::TestPlatform;
@@ -29,9 +27,7 @@ fn reg(platform: &TestPlatform, id: DomainId, parent: Option<DomainId>) {
 #[test]
 fn test_execute_local_no_cores() {
     let platform = TestPlatform::new();
-    let affected: BTreeSet<DomainId> = BTreeSet::new();
-
-    let (val, batch) = execute(&platform, &affected, || {
+    let (val, batch) = execute(&platform, false, || {
         Ok((42u32, capability_engine::UpdateBatch::new()))
     })
     .expect("local execute should succeed");
@@ -51,9 +47,7 @@ fn test_execute_apply_update_is_called() {
     let platform = TestPlatform::new();
     reg(&platform, 0, None); // root domain
 
-    let affected: BTreeSet<DomainId> = BTreeSet::from([0]);
-
-    execute(&platform, &affected, || {
+    execute(&platform, false, || {
         let mut batch = capability_engine::UpdateBatch::new();
         batch.add_map(0, 0x1000, 0x1000, 0x1000, true, true, false);
         Ok(((), batch))
@@ -88,9 +82,7 @@ fn test_execute_revoke_redirects_core_to_fallback() {
     assert_eq!(platform.get_core_domain(CORE_0), Some(CHILD_ID));
 
     // Execute a "revoke child domain" operation
-    let affected: BTreeSet<DomainId> = BTreeSet::from([ROOT_ID]);
-
-    execute(&platform, &affected, || {
+    execute(&platform, false, || {
         let mut batch = capability_engine::UpdateBatch::new();
         batch.add_revoke_domain_with_fallback(CHILD_ID, Some(ROOT_ID));
         Ok(((), batch))
@@ -112,37 +104,57 @@ fn test_execute_revoke_redirects_core_to_fallback() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. TOCTOU: domain revoked before lock is acquired
+// 4. Exclusive lock: revoke is fully isolated from concurrent shared ops
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_execute_toctou_domain_revoked() {
-    let platform = TestPlatform::new();
-    const DOMAIN_ID: DomainId = 5;
+fn test_execute_exclusive_blocks_shared() {
+    // Verifies that an exclusive lock (revoke) and a shared lock (non-revoke)
+    // cannot be held simultaneously, using real threads.
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    reg(&platform, DOMAIN_ID, None);
+    let platform = std::sync::Arc::new(TestPlatform::new());
+    reg(&platform, 0, None);
+    reg(&platform, 1, Some(0));
 
-    // Manually mark the domain as revoked (simulates concurrent revocation)
-    {
-        let mut batch = capability_engine::UpdateBatch::new();
-        batch.add_revoke_domain(DOMAIN_ID);
-        let affected: BTreeSet<DomainId> = BTreeSet::new();
-        execute(&platform, &affected, || Ok(((), batch))).unwrap();
-    }
+    // Set inside the exclusive closure to prove the lock is *actually* held.
+    let exclusive_lock_held = std::sync::Arc::new(AtomicBool::new(false));
+    let exclusive_done = std::sync::Arc::new(AtomicBool::new(false));
 
-    assert!(platform.is_domain_revoked(DOMAIN_ID));
+    let p_clone = platform.clone();
+    let held_clone = exclusive_lock_held.clone();
+    let done_clone = exclusive_done.clone();
 
-    // Attempting to execute an operation targeting the revoked domain should fail
-    let affected: BTreeSet<DomainId> = BTreeSet::from([DOMAIN_ID]);
-    let result = execute(&platform, &affected, || {
-        Ok(((), capability_engine::UpdateBatch::new()))
+    let t = std::thread::spawn(move || {
+        execute(&*p_clone, true, || {
+            // Prove we are inside execute with the exclusive lock held.
+            held_clone.store(true, Ordering::SeqCst);
+            // Hold the lock long enough for the shared thread to attempt entry.
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            done_clone.store(true, Ordering::SeqCst);
+            let mut batch = capability_engine::UpdateBatch::new();
+            batch.add_revoke_domain_with_fallback(1, Some(0));
+            Ok(((), batch))
+        })
+        .unwrap();
     });
 
-    assert_eq!(
-        result.unwrap_err(),
-        CapaError::DomainRevoked,
-        "should reject operation on revoked domain"
-    );
+    // Spin until the exclusive lock is *confirmed held* inside the closure.
+    while !exclusive_lock_held.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+
+    // Now attempt the shared lock — must block until exclusive is released.
+    execute(&*platform, false, || {
+        assert!(
+            exclusive_done.load(Ordering::SeqCst),
+            "exclusive op must finish before shared op can run"
+        );
+        Ok(((), capability_engine::UpdateBatch::new()))
+    })
+    .unwrap();
+
+    t.join().unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,10 +173,8 @@ fn test_execute_vital_revoke_none_fallback_uses_parent_map() {
 
     platform.set_core_domain(CORE_0, CHILD_ID);
 
-    let affected: BTreeSet<DomainId> = BTreeSet::new();
-
     // Vital memory revocation: fallback=None, platform walks parent map
-    execute(&platform, &affected, || {
+    execute(&platform, true, || {
         let mut batch = capability_engine::UpdateBatch::new();
         batch.add_revoke_domain_with_fallback(CHILD_ID, None);
         Ok(((), batch))
@@ -206,9 +216,7 @@ fn test_revoke_child_domain_carries_fallback() {
     // Root domain is already sealed (new_root); seal the child
     child.write().data.seal().unwrap();
 
-    let affected: BTreeSet<DomainId> = BTreeSet::from([ROOT_ID]);
-
-    let (_, batch) = execute(&platform, &affected, || {
+    let (_, batch) = execute(&platform, true, || {
         let updates = Capability::revoke_child_domain(&root, CHILD_HANDLE)
             .expect("revoke_child_domain should succeed");
         Ok(((), updates))

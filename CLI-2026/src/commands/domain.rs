@@ -3,7 +3,6 @@
 use capability_engine::*;
 use capability_engine::domain::PendingCapability;
 use colored::*;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::parser::{parse_api, parse_number, format_api};
@@ -172,11 +171,9 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
     // Try to revoke as memory region first
     if let (Some(parent), Some(_child)) = (state.memories.get(parent_name).cloned(), state.memories.get(child_name).cloned()) {
-        let parent_owner = parent.read().owned.owner;
-        let affected = BTreeSet::from([parent_owner]);
         let platform = state.platform.clone();
         let child = state.memories.get(child_name).cloned().unwrap();
-        let (_, batch) = execute(&*platform, &affected, || {
+        let (_, batch) = execute(&*platform, true, || {
             let updates = parent.revoke_ref(&child)?;
             Ok(((), updates))
         }).map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
@@ -223,9 +220,8 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         drop(parent_read);
 
-        let affected = BTreeSet::from([parent_id]);
         let platform = state.platform.clone();
-        let (_, batch) = execute(&*platform, &affected, || {
+        let (_, batch) = execute(&*platform, true, || {
             let updates = parent.revoke_child(handle)?;
             Ok(((), updates))
         }).map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
