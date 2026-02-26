@@ -134,7 +134,7 @@ view child2
 @msg   └───┬────┘
 @msg       │
 @msg   ┌───▼────┐  ✗  ┌────────┐
-@msg   │ Child1 │ ───X──► Child2 │ ← Siblings cannot communicate
+@msg   │ Child1 │ ─X──► Child2 │ ← Siblings cannot communicate
 @msg   └────────┘     └────────┘
 @msg
 @msg   Communication must go through parent:
