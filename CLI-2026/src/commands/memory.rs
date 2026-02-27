@@ -37,7 +37,17 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         Ok((child, updates))
     }).map_err(|e| format!("Failed to carve: {:?}", e))?;
 
+    // Determine the owner domain ID before moving child into the map
+    let owner_id = child.read().owned.owner;
+    let child_weak = Arc::downgrade(&child);
     state.memories.insert(child_name.to_string(), child);
+
+    // Register capability with owner domain so cmd_send can locate its handle
+    if let Some(domain_name) = state.domain_id_to_name.get(&owner_id).cloned() {
+        if let Some(domain) = state.domains.get(&domain_name) {
+            domain.write().data.add_memory_capability(child_cap_id, child_weak);
+        }
+    }
 
     // Process updates
     process_updates(state, &batch);
@@ -87,7 +97,15 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let child = Capability::alias_child(parent, access, owner, child_cap_id)
         .map_err(|e| format!("Failed to alias: {:?}", e))?;
 
+    let child_weak = Arc::downgrade(&child);
     state.memories.insert(child_name.to_string(), child);
+
+    // Register capability with owner domain so cmd_send can locate its handle
+    if let Some(domain_name) = state.domain_id_to_name.get(&owner).cloned() {
+        if let Some(domain) = state.domains.get(&domain_name) {
+            domain.write().data.add_memory_capability(child_cap_id, child_weak);
+        }
+    }
 
     // Record command
     state.session.add_command(Command::Alias {
