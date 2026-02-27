@@ -508,9 +508,8 @@ impl Capability<Domain> {
 
     /// Revoke a child domain and all its descendants by SubHandle
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`revoke_domain`] instead.
-    #[doc(hidden)]
-    pub fn revoke_child_domain(
+    /// Internal implementation called by [`revoke_domain`].
+    pub(crate) fn revoke_child_domain(
         parent_ref: &CapabilityRef<Domain>,
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {

@@ -332,7 +332,8 @@ fn test_crosscore_revoke_with_fallback() {
     let root = Capability::new_root(ROOT_ID, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID).unwrap();
+    let child_h = Capability::create_domain(&root, child_policy).unwrap();
+    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
     let child_id = child.read().data.id;
 
     // Register with the actual IDs (child_id is whatever the global counter gave us).
@@ -344,11 +345,11 @@ fn test_crosscore_revoke_with_fallback() {
     assert_eq!(platform.get_core_domain(CORE_1), Some(child_id));
 
     // Seal the child so we can revoke it
-    child.write().data.seal().unwrap();
+    Capability::seal_domain_op(&root, child_h).unwrap();
 
     // Revoke the child (cross-core path since core 1 is running it)
     let result = execute(&*platform, true, || {
-        Capability::revoke_child_domain(&root, 1).map(|updates| ((), updates))
+        Capability::revoke_domain(&root, child_h).map(|updates| ((), updates))
     });
 
     assert!(result.is_ok(), "Revoke should succeed");
@@ -566,16 +567,17 @@ fn test_exclusive_lock_serializes_revoke() {
     let root = Arc::new(Capability::new_root(ROOT_ID, 0, root_domain));
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID).unwrap();
+    let child_h = Capability::create_domain(&root, child_policy).unwrap();
+    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
     let child_id = child.read().data.id;
 
     platform.register_domain(child_id, Some(ROOT_ID));
     platform.set_core_domain(CORE_1, child_id);
-    child.write().data.seal().unwrap();
+    Capability::seal_domain_op(&root, child_h).unwrap();
 
     // Revoke the child under an exclusive lock.
     execute(&*platform, true, || {
-        Capability::revoke_child_domain(&root, 1).map(|updates| ((), updates))
+        Capability::revoke_domain(&root, child_h).map(|updates| ((), updates))
     })
     .unwrap();
 

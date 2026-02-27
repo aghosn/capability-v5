@@ -194,31 +194,30 @@ fn test_execute_vital_revoke_none_fallback_uses_parent_map() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_revoke_child_domain_carries_fallback() {
+fn test_revoke_domain_carries_fallback() {
     let platform = TestPlatform::new();
     const ROOT_ID: DomainId = 0;
-    const CHILD_HANDLE: capability_engine::LocalHandle = 1;
 
     // Build root domain capability
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(ROOT_ID, 0, root_domain);
     reg(&platform, ROOT_ID, None);
 
-    // Create a child domain using handle 1
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::REVOKE);
     let child_policy = DomainPolicy::new_restricted(0b0001, child_api);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID)
-        .expect("create_child_domain should succeed");
+    let child_h = Capability::create_domain(&root, child_policy)
+        .expect("create_domain should succeed");
 
+    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
     let child_id = child.read().data.id;
     reg(&platform, child_id, Some(ROOT_ID));
 
     // Root domain is already sealed (new_root); seal the child
-    child.write().data.seal().unwrap();
+    Capability::seal_domain_op(&root, child_h).unwrap();
 
     let (_, batch) = execute(&platform, true, || {
-        let updates = Capability::revoke_child_domain(&root, CHILD_HANDLE)
-            .expect("revoke_child_domain should succeed");
+        let updates = Capability::revoke_domain(&root, child_h)
+            .expect("revoke_domain should succeed");
         Ok(((), updates))
     })
     .expect("execute should succeed");

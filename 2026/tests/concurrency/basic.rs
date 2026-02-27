@@ -228,10 +228,10 @@ fn test_concurrent_revocation() {
 
     // First, create children sequentially
     let mut child_handles = vec![];
-    for i in 0..10 {
+    for _ in 0..10 {
         let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
-        let child = Capability::create_child_domain(&root_shared, child_policy, i).unwrap();
-        child_handles.push(child.read().sub_handle);
+        let child_h = Capability::create_domain(&root_shared, child_policy).unwrap();
+        child_handles.push(child_h);
     }
 
     println!("Created 10 children, now testing concurrent revocation");
@@ -243,7 +243,7 @@ fn test_concurrent_revocation() {
         let root_clone = Arc::clone(&root_shared);
         let child_handle = child_handles[i];
         let handle = thread::spawn(move || {
-            match Capability::revoke_child_domain(&root_clone, child_handle) {
+            match Capability::revoke_domain(&root_clone, child_handle) {
                 Ok(updates) => {
                     println!("Thread {} successfully revoked child {}, updates: {}", i, child_handle, updates.len());
                 }

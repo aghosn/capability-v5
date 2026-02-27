@@ -843,13 +843,13 @@ fn concurrent_domain_creation() {
 //
 // | Thread A (exclusive lock)                       | Thread B (shared lock)                          |
 // |-------------------------------------------------|-------------------------------------------------|
-// | revoke_child_domain(&parent, child_handle=1)    | create_child_domain(&parent, policy, …, h=2)    |
+// | revoke_domain(&parent, child_h)                 | create_domain(&parent, policy)                  |
 //
-// Setup: sealed parent domain with one child (handle = 1).
+// Setup: sealed parent domain with one child (LocalHandle = child_h).
 //
 // Exclusive ↔ shared platform lock serialisation for domain operations.
-// revoke_child_domain recursively drops and re-acquires locks in
-// revoke_domain_subtree.
+// revoke_domain (via revoke_child_domain internally) recursively drops and
+// re-acquires locks in revoke_domain_subtree.
 //
 // Valid outcomes (all schedules):
 // - A then B: child 1 revoked, then child 2 created.  Parent has 1 child
@@ -868,17 +868,14 @@ fn domain_revoke_vs_creation() {
 
         // Pre-create child 1.
         let child_policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
-        let child1 = Capability::create_child_domain(
-            &parent,
-            child_policy.clone(),
-            0)
-        .unwrap();
+        let child1_h = Capability::create_domain(&parent, child_policy.clone()).unwrap();
+        let child1 = parent.read().data.domain_capabilities[&child1_h].upgrade().unwrap();
 
         let pl = platform_lock.clone();
         let p = parent.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::revoke_child_domain(&p, 1)
+            Capability::revoke_domain(&p, child1_h)
         });
 
         let pl = platform_lock.clone();
@@ -886,7 +883,7 @@ fn domain_revoke_vs_creation() {
         let cp = child_policy.clone();
         let creator = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::create_child_domain(&p, cp, 0)
+            Capability::create_domain(&p, cp)
         });
 
         let revoke_res = revoker.join().unwrap();
