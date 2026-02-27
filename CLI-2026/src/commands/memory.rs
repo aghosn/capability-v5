@@ -33,7 +33,8 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
 
     let platform = state.platform.clone();
     let (child, batch) = execute(&*platform, false, || {
-        let (child, updates) = parent.carve(access, child_cap_id)?;
+        let owner = parent.read().owned.owner;
+        let (child, updates) = Capability::carve_child(&parent, access, owner, child_cap_id)?;
         Ok((child, updates))
     }).map_err(|e| format!("Failed to carve: {:?}", e))?;
 
@@ -83,8 +84,8 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         .get(parent_name)
         .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?;
 
-    let child = parent
-        .alias(access, child_cap_id)
+    let owner = parent.read().owned.owner;
+    let child = Capability::alias_child(parent, access, owner, child_cap_id)
         .map_err(|e| format!("Failed to alias: {:?}", e))?;
 
     state.memories.insert(child_name.to_string(), child);
@@ -148,12 +149,36 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     // Check if we need to use pending queue
     if is_sealed && can_receive_after_seal {
-        // Domain is sealed with RECEIVE_AFTER_SEAL - add to pending queue.
-        // Ownership is NOT transferred yet; it moves only when the receiver accepts.
-        let pending_id = domain
-            .write()
-            .data
-            .add_pending_capability(PendingCapability::Memory(Arc::downgrade(&mem)));
+        // Domain is sealed with RECEIVE_AFTER_SEAL - use freeze-based send.
+        // Find the sender domain for this memory capability
+        let sender_domain_id = mem.read().owned.owner;
+        let sender_domain = state.domains.values()
+            .find(|d| d.read().data.id == sender_domain_id)
+            .cloned()
+            .ok_or_else(|| format!("Sender domain (ID: {}) not found", sender_domain_id))?;
+
+        // Find the sender's handle for this memory capability
+        let sender_handle = {
+            let sd = sender_domain.read();
+            let mem_ptr = Arc::as_ptr(&mem);
+            sd.data.memory_capabilities.iter()
+                .find(|(_, weak)| {
+                    weak.upgrade().map(|r| Arc::as_ptr(&r) == mem_ptr).unwrap_or(false)
+                })
+                .map(|(h, _)| *h)
+                .ok_or_else(|| "Memory capability not found in sender's table".to_string())?
+        };
+
+        // Build PendingCapability and freeze the sender's handle
+        let pending = PendingCapability {
+            cap: Arc::downgrade(&mem),
+            sender_domain_id,
+            sender_handle,
+            sender_domain: Arc::downgrade(&sender_domain),
+        };
+        sender_domain.write().data.freeze_memory_handle(sender_handle);
+        mem.write().owned.attributes = attrs;
+        let pending_id = domain.write().data.add_pending_capability(pending);
 
         // Record command
         state.session.add_command(Command::Send {
@@ -177,11 +202,12 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
             domain_name
         ));
     } else {
-        // Domain is unsealed - proceed normally
+        // Domain is unsealed - proceed with direct send
+        let caller_id = mem.read().owned.owner;
         let handle = domain.read().data.allocate_memory_handle();
         let platform = state.platform.clone();
         let (_, batch) = execute(&*platform, false, || {
-            let updates = mem.send(domain_id, handle, attrs)?;
+            let updates = Capability::send_to(&mem, caller_id, domain_id, attrs)?;
             Ok(((), updates))
         }).map_err(|e| format!("Failed to send: {:?}", e))?;
 

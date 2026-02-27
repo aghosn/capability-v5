@@ -518,26 +518,14 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
             if !pending_ids.is_empty() {
                 println!("    {} Pending capabilities ({}):", "⏸".bright_yellow(), pending_ids.len());
                 for pending_id in pending_ids {
-                    if let Some(cap) = d.data.get_pending_capability(pending_id) {
-                        match cap {
-                            PendingCapability::Memory(weak_ref) => {
-                                if let Some(m) = weak_ref.upgrade() {
-                                    let m = m.read();
-                                    println!(
-                                        "      [ID: {}] Memory [0x{:x}..0x{:x}) {}",
-                                        pending_id, m.data.access.start, m.data.access.end(), m.data.access.rights
-                                    );
-                                }
-                            }
-                            PendingCapability::Domain(weak_ref) => {
-                                if let Some(dom) = weak_ref.upgrade() {
-                                    let dom = dom.read();
-                                    println!(
-                                        "      [ID: {}] Domain (ID: {}, status: {:?})",
-                                        pending_id, dom.data.id, dom.data.status
-                                    );
-                                }
-                            }
+                    if let Some(pending_cap) = d.data.pending_capabilities.get(&pending_id) {
+                        if let Some(m) = pending_cap.cap.upgrade() {
+                            let m = m.read();
+                            println!(
+                                "      [ID: {}] Memory [0x{:x}..0x{:x}) {} (sender: {})",
+                                pending_id, m.data.access.start, m.data.access.end(), m.data.access.rights,
+                                pending_cap.sender_domain_id
+                            );
                         }
                     }
                 }
@@ -552,13 +540,13 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
         for (name, mem) in &state.memories {
             let m = mem.read();
             println!(
-                "  {} {} {} (kind: {:?}, owner: {}, handle: {}, attrs: {}, children: {})",
+                "  {} {} {} (kind: {:?}, owner: {}, sub_handle: {}, attrs: {}, children: {})",
                 "•".bright_yellow(),
                 name.bright_white(),
                 m.data.access,
                 m.data.kind,
                 m.owned.owner,
-                m.owned.handle,
+                m.sub_handle,
                 m.owned.attributes,
                 m.children.len()
             );

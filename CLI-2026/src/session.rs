@@ -221,7 +221,12 @@ impl Session {
                     )?;
                     writeln!(
                         file,
-                        "    let {} = {}.create_child(policy, {}).unwrap();",
+                        "    let owner = {}.read().owned.owner;",
+                        parent_var
+                    )?;
+                    writeln!(
+                        file,
+                        "    let {} = Capability::create_child_domain(&{}, policy, owner, {}).unwrap();",
                         child_var,
                         parent_var,
                         get_next_cap_id(&var_map)
@@ -259,7 +264,12 @@ impl Session {
                     )?;
                     writeln!(
                         file,
-                        "    let ({}, _) = {}.carve(access, {}).unwrap();",
+                        "    let owner = {}.read().owned.owner;",
+                        parent_var
+                    )?;
+                    writeln!(
+                        file,
+                        "    let ({}, _) = Capability::carve_child(&{}, access, owner, {}).unwrap();",
                         child_var,
                         parent_var,
                         get_next_cap_id(&var_map)
@@ -290,7 +300,12 @@ impl Session {
                     )?;
                     writeln!(
                         file,
-                        "    let {} = {}.alias(access, {}).unwrap();",
+                        "    let owner = {}.read().owned.owner;",
+                        parent_var
+                    )?;
+                    writeln!(
+                        file,
+                        "    let {} = Capability::alias_child(&{}, access, owner, {}).unwrap();",
                         child_var,
                         parent_var,
                         get_next_cap_id(&var_map)
@@ -323,8 +338,13 @@ impl Session {
                     )?;
                     writeln!(
                         file,
-                        "    let _updates = {}.send(domain_id, {}, {}).unwrap();",
-                        mem_var, handle, attrs
+                        "    let caller_id = {}.read().owned.owner;",
+                        mem_var
+                    )?;
+                    writeln!(
+                        file,
+                        "    let _updates = Capability::send_to(&{}, caller_id, domain_id, {}).unwrap();",
+                        mem_var, attrs
                     )?;
                     writeln!(
                         file,
@@ -358,7 +378,7 @@ impl Session {
                     writeln!(file, "    // Revoke {} from {}", child, parent)?;
                     writeln!(
                         file,
-                        "    let _updates = {}.revoke_ref(&{}).unwrap();",
+                        "    let _updates = Capability::revoke_child_ref(&{}, &{}).unwrap();",
                         parent_var, child_var
                     )?;
                     writeln!(file)?;
@@ -461,7 +481,7 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::AcceptCapability { domain, pending_id, handle } => {
+                Command::AcceptCapability { domain, pending_id, handle: _ } => {
                     let domain_var = var_map
                         .get(domain)
                         .cloned()
@@ -470,8 +490,8 @@ impl Session {
                     writeln!(file, "    // Accept pending capability {} for {}", pending_id, domain)?;
                     writeln!(
                         file,
-                        "    let _accepted = {}.write().data.accept_pending_capability({}, {}).unwrap();",
-                        domain_var, pending_id, handle
+                        "    let (_handle, _updates) = Capability::accept_memory(&{}, {}).unwrap();",
+                        domain_var, pending_id
                     )?;
                     writeln!(file)?;
                 }
@@ -485,7 +505,7 @@ impl Session {
                     writeln!(file, "    // Reject pending capability {} for {}", pending_id, domain)?;
                     writeln!(
                         file,
-                        "    let _rejected = {}.write().data.reject_pending_capability({}).unwrap();",
+                        "    Capability::reject_memory(&{}, {}).unwrap();",
                         domain_var, pending_id
                     )?;
                     writeln!(file)?;
