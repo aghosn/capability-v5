@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::parser::{format_api, parse_api, parse_number};
 use crate::session::Command;
-use crate::state::CliState;
+use crate::state::{CliState, find_domain_handle, find_memory_handle};
 use crate::update_processor::process_updates;
 
 /// Initialize root domain and memory region
@@ -81,25 +81,30 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
     let api = parse_api(args[3])?;
 
     let child_policy = DomainPolicy::new_restricted(cores, api);
-    let child_cap_id = state.next_id();
 
     let parent = state
         .domains
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
+        .clone();
 
-    let owner = parent.read().owned.owner;
-    let child = Capability::create_child_domain(parent, child_policy, owner, child_cap_id)
-        .map_err(|e| format!("Failed to create child: {:?}", e))?;
-
-    let child_id = child.read().data.id;
     let parent_id = parent.read().data.id;
 
-    // Register domain capability with parent
-    parent
-        .write()
+    // Use the domain-mediated interface: allocates handle, sets owner_domain, registers in table.
+    let child_handle =
+        Capability::create_direct_child_domain(&parent, child_policy)
+            .map_err(|e| format!("Failed to create child: {:?}", e))?;
+
+    // Retrieve the new child Arc from parent's table.
+    let child = parent
+        .read()
         .data
-        .add_domain_capability(child_cap_id, Arc::downgrade(&child));
+        .domain_capabilities
+        .get(&child_handle)
+        .and_then(|w| w.upgrade())
+        .ok_or("Internal error: child not found in parent table after creation")?;
+
+    let child_id = child.read().data.id;
 
     // Track domain name for reverse lookup
     state.register_domain_name(child_id, child_name.to_string());
@@ -137,12 +142,19 @@ pub fn cmd_seal(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let domain = state
         .domains
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
+        .clone();
 
-    domain
-        .write()
-        .data
-        .seal()
+    // Find the owner domain and the handle it holds for this domain.
+    let owner_id = domain.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+
+    let cap_handle = find_domain_handle(&owner, &domain)
+        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
+
+    Capability::seal_domain_op(&owner, cap_handle)
         .map_err(|e| format!("Failed to seal: {:?}", e))?;
 
     // Record command
@@ -169,14 +181,23 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     let child_name = args[1];
 
     // Try to revoke as memory region first
-    if let (Some(parent), Some(_child)) = (
+    if let (Some(parent), Some(child)) = (
         state.memories.get(parent_name).cloned(),
         state.memories.get(child_name).cloned(),
     ) {
+        let child_sub = child.read().sub_handle;
+
+        // Find the owner of the parent memory and its handle for parent
+        let owner_id = parent.read().owned.owner;
+        let owner = state
+            .get_domain_cap_by_id(owner_id)
+            .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+        let parent_handle = find_memory_handle(&owner, &parent)
+            .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
+
         let platform = state.platform.clone();
-        let child = state.memories.get(child_name).cloned().unwrap();
         let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_child_ref(&parent, &child)?;
+            let updates = Capability::revoke_memory_child(&owner, parent_handle, child_sub)?;
             Ok(((), updates))
         })
         .map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
@@ -209,7 +230,7 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         let platform = state.platform.clone();
         let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_child_domain(&parent, child_sub)?;
+            let updates = Capability::revoke_direct_child_domain(&parent, child_sub)?;
             Ok(((), updates))
         })
         .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;

@@ -2,11 +2,10 @@
 
 use capability_engine::*;
 use colored::*;
-use std::sync::Arc;
 
 use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
 use crate::session::Command;
-use crate::state::CliState;
+use crate::state::{CliState, find_memory_handle};
 use crate::update_processor::process_updates;
 
 /// Carve exclusive memory from parent
@@ -22,7 +21,6 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let rights = parse_rights(args[4])?;
 
     let access = Access::new(start, size, rights);
-    let child_cap_id = state.next_id();
 
     let parent = state
         .memories
@@ -30,24 +28,30 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
         .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
         .clone();
 
+    // Find the owner domain and the handle it holds for parent.
+    let owner_id = parent.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let parent_handle = find_memory_handle(&owner, &parent)
+        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
+
     let platform = state.platform.clone();
-    let (child, batch) = execute(&*platform, false, || {
-        let owner = parent.read().owned.owner;
-        let (child, updates) = Capability::carve_child(&parent, access, owner, child_cap_id)?;
-        Ok((child, updates))
+    let (child_handle, batch) = execute(&*platform, false, || {
+        Capability::carve_memory(&owner, parent_handle, access)
+            .map(|(h, b)| (h, b))
     }).map_err(|e| format!("Failed to carve: {:?}", e))?;
 
-    // Determine the owner domain ID before moving child into the map
-    let owner_id = child.read().owned.owner;
-    let child_weak = Arc::downgrade(&child);
-    state.memories.insert(child_name.to_string(), child);
+    // Retrieve the child Arc from owner's memory table.
+    let child = owner
+        .read()
+        .data
+        .memory_capabilities
+        .get(&child_handle)
+        .and_then(|w| w.upgrade())
+        .ok_or("Internal error: child not found in owner table after carve")?;
 
-    // Register capability with owner domain so cmd_send can locate its handle
-    if let Some(domain_name) = state.domain_id_to_name.get(&owner_id).cloned() {
-        if let Some(domain) = state.domains.get(&domain_name) {
-            domain.write().data.add_memory_capability(child_cap_id, child_weak);
-        }
-    }
+    state.memories.insert(child_name.to_string(), child);
 
     // Process updates
     process_updates(state, &batch);
@@ -86,26 +90,34 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let rights = parse_rights(args[4])?;
 
     let access = Access::new(start, size, rights);
-    let child_cap_id = state.next_id();
 
     let parent = state
         .memories
         .get(parent_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?;
+        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
+        .clone();
 
-    let owner = parent.read().owned.owner;
-    let child = Capability::alias_child(parent, access, owner, child_cap_id)
+    // Find the owner domain and its handle for parent.
+    let owner_id = parent.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let parent_handle = find_memory_handle(&owner, &parent)
+        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
+
+    let child_handle = Capability::alias_memory(&owner, parent_handle, access)
         .map_err(|e| format!("Failed to alias: {:?}", e))?;
 
-    let child_weak = Arc::downgrade(&child);
-    state.memories.insert(child_name.to_string(), child);
+    // Retrieve the child Arc from owner's memory table.
+    let child = owner
+        .read()
+        .data
+        .memory_capabilities
+        .get(&child_handle)
+        .and_then(|w| w.upgrade())
+        .ok_or("Internal error: child not found in owner table after alias")?;
 
-    // Register capability with owner domain so cmd_send can locate its handle
-    if let Some(domain_name) = state.domain_id_to_name.get(&owner).cloned() {
-        if let Some(domain) = state.domains.get(&domain_name) {
-            domain.write().data.add_memory_capability(child_cap_id, child_weak);
-        }
-    }
+    state.memories.insert(child_name.to_string(), child);
 
     // Record command
     state.session.add_command(Command::Alias {
@@ -156,22 +168,13 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     // Find the sender domain
     let sender_domain_id = mem.read().owned.owner;
-    let sender_domain = state.domains.values()
-        .find(|d| d.read().data.id == sender_domain_id)
-        .cloned()
+    let sender_domain = state
+        .get_domain_cap_by_id(sender_domain_id)
         .ok_or_else(|| format!("Sender domain (ID: {}) not found", sender_domain_id))?;
 
     // Find the sender's handle for this memory capability
-    let sender_handle = {
-        let sd = sender_domain.read();
-        let mem_ptr = Arc::as_ptr(&mem);
-        sd.data.memory_capabilities.iter()
-            .find(|(_, weak)| {
-                weak.upgrade().map(|r| Arc::as_ptr(&r) == mem_ptr).unwrap_or(false)
-            })
-            .map(|(h, _)| *h)
-            .ok_or_else(|| "Memory capability not found in sender's table".to_string())?
-    };
+    let sender_handle = find_memory_handle(&sender_domain, &mem)
+        .ok_or_else(|| "Memory capability not found in sender's table".to_string())?;
 
     let is_sealed = domain.read().data.is_sealed();
 

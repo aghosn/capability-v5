@@ -8,6 +8,40 @@ use std::sync::Arc;
 use crate::platform::CliPlatform;
 use crate::session::Session;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Handle-lookup helpers (pointer-based search in domain capability tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Find the LocalHandle that `domain` holds for `mem` in its memory-capability table.
+pub fn find_memory_handle(
+    domain: &Arc<RwLock<Capability<Domain>>>,
+    mem: &Arc<RwLock<Capability<MemoryRegion>>>,
+) -> Option<LocalHandle> {
+    let mem_ptr = Arc::as_ptr(mem);
+    domain.read().data.memory_capabilities.iter()
+        .find(|(_, weak)| {
+            weak.upgrade().map(|r| Arc::as_ptr(&r) == mem_ptr).unwrap_or(false)
+        })
+        .map(|(h, _)| *h)
+}
+
+/// Find the LocalHandle that `owner` holds for `child` in its domain-capability table.
+pub fn find_domain_handle(
+    owner: &Arc<RwLock<Capability<Domain>>>,
+    child: &Arc<RwLock<Capability<Domain>>>,
+) -> Option<LocalHandle> {
+    let child_ptr = Arc::as_ptr(child);
+    owner.read().data.domain_capabilities.iter()
+        .find(|(_, weak)| {
+            weak.upgrade().map(|r| Arc::as_ptr(&r) == child_ptr).unwrap_or(false)
+        })
+        .map(|(h, _)| *h)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI State
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// CLI state maintaining all capabilities and domains
 pub struct CliState {
     /// Map from user-assigned names to domain capabilities
@@ -58,5 +92,11 @@ impl CliState {
     /// Register a domain name mapping
     pub fn register_domain_name(&mut self, domain_id: u64, name: String) {
         self.domain_id_to_name.insert(domain_id, name);
+    }
+
+    /// Find the Arc for the domain with the given ID.
+    pub fn get_domain_cap_by_id(&self, domain_id: u64) -> Option<Arc<RwLock<Capability<Domain>>>> {
+        let name = self.domain_id_to_name.get(&domain_id)?;
+        self.domains.get(name).cloned()
     }
 }
