@@ -176,7 +176,7 @@ case when the affected domain is not currently scheduled on any core.
 ```rust
 // Non-destructive operation — shared lock
 execute(&platform, false, || {
-    Capability::send_to(&cap, new_owner, handle, Attributes::NONE)
+    Capability::send_to(&cap, caller, new_owner, handle, Attributes::NONE)
         .map(|b| ((), b))
 });
 

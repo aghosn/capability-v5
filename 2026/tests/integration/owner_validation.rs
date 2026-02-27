@@ -78,7 +78,8 @@ fn test_unsealed_domain_cannot_carve() {
 #[test]
 fn test_unsealed_domain_cannot_send() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
-    let result = Capability::send_to(&mem, 99, 10, Attributes::NONE);
+    let caller = mem.read().owned.owner;
+    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -132,8 +133,8 @@ fn test_api_no_carve_permission() {
 fn test_api_no_send_permission() {
     let api = MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::SEND);
     let (_dom, mem) = setup_domain_with_memory(api);
-
-    let result = Capability::send_to(&mem, 99, 10, Attributes::NONE);
+    let caller = mem.read().owned.owner;
+    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
 }
 
@@ -201,8 +202,8 @@ fn test_sealed_domain_with_carve_permission_can_carve() {
 #[test]
 fn test_sealed_domain_with_send_permission_can_send() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
-
-    let result = Capability::send_to(&mem, 99, 10, Attributes::NONE);
+    let caller = mem.read().owned.owner;
+    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
     assert!(result.is_ok());
 }
 
@@ -244,9 +245,10 @@ fn test_revoked_domain_cannot_carve() {
 #[test]
 fn test_revoked_domain_cannot_send() {
     let (dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
+    let caller = mem.read().owned.owner;
     drop(dom);
 
-    let result = Capability::send_to(&mem, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::PermissionDenied)));
 }
 
@@ -255,9 +257,9 @@ fn test_revoked_domain_cannot_send() {
 #[test]
 fn test_send_clears_owner_domain() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
-
+    let caller = mem.read().owned.owner;
     // After send, the owner_domain should be cleared
-    Capability::send_to(&mem, 99, 10, Attributes::NONE).unwrap();
+    Capability::send_to(&mem, caller, 99, 10, Attributes::NONE).unwrap();
     assert!(mem.read().owned.owner_domain.is_none());
 }
 
@@ -312,7 +314,7 @@ fn test_only_carve_permission_suffices() {
 fn test_only_send_permission_suffices() {
     let api = MonitorAPI::from_bits(MonitorAPI::SEND);
     let (_dom, mem) = setup_domain_with_memory(api);
-
-    let result = Capability::send_to(&mem, 99, 10, Attributes::NONE);
+    let caller = mem.read().owned.owner;
+    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
     assert!(result.is_ok());
 }

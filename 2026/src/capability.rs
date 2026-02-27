@@ -180,7 +180,8 @@ impl MemoryCapabilityExt for CapabilityRef<MemoryRegion> {
     }
 
     fn send(&self, new_owner: DomainId, new_handle: LocalHandle, attributes: Attributes) -> Result<UpdateBatch> {
-        Capability::send_to(self, new_owner, new_handle, attributes)
+        let caller = self.read().owned.owner;
+        Capability::send_to(self, caller, new_owner, new_handle, attributes)
     }
 
     fn revoke(&self, child_handle: LocalHandle) -> Result<UpdateBatch> {
@@ -285,8 +286,15 @@ impl Capability<MemoryRegion> {
     }
 
     /// Send this capability to another domain
+    ///
+    /// `caller` is the domain ID of the entity initiating the send.  The
+    /// function verifies that `caller` is the current owner of the capability
+    /// in both phases of the two-phase protocol, ensuring linearisability:
+    /// if another concurrent send completes first, subsequent sends from the
+    /// original owner are rejected with `PermissionDenied`.
     pub fn send_to(
         capa_ref: &CapabilityRef<MemoryRegion>,
+        caller: DomainId,
         new_owner: DomainId,
         new_handle: LocalHandle,
         attributes: Attributes,
@@ -294,27 +302,37 @@ impl Capability<MemoryRegion> {
         // Phase 1 — read child + parent under read locks to determine unmap
         // behaviour.  No write locks held, so no deadlock with carve_child
         // (which holds parent write → child read).
-        let (expected_old_owner, parent_owned_by_old_owner) = {
+        let parent_owned_by_caller = {
             let capa = capa_ref.read();
+
+            // Verify the caller is the current owner.
+            if capa.owned.owner != caller {
+                return Err(CapaError::PermissionDenied);
+            }
+
             capa.owned.validate_operation(MonitorAPI::SEND)?;
-            let old = capa.owned.owner;
-            let parent_owns = if let Some(parent_ref) = capa.get_parent() {
-                parent_ref.read().owned.owner == old
+
+            if let Some(parent_ref) = capa.get_parent() {
+                parent_ref.read().owned.owner == caller
             } else {
                 false
-            };
-            (old, parent_owns)
+            }
         };
         // All read locks released.
 
         // Phase 2 — write-lock only the child.
         let mut capa = capa_ref.write();
-        let old_owner = capa.owned.owner;
 
-        // If the owner changed between phases (another concurrent send_to
-        // modified this capability), the parent-ownership check is stale.
-        // Conservatively force the unmap in that case.
-        let skip_unmap = parent_owned_by_old_owner && old_owner == expected_old_owner;
+        // Linearisability check: if another concurrent send_to transferred
+        // ownership between phase 1 and phase 2, the caller no longer owns
+        // this capability and must not be allowed to re-transfer it.
+        if capa.owned.owner != caller {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        // Parent-ownership still matches what we read in phase 1, so the
+        // unmap optimisation is valid.
+        let skip_unmap = parent_owned_by_caller;
 
         // Update ownership and set attributes
         capa.owned.owner = new_owner;
@@ -341,8 +359,8 @@ impl Capability<MemoryRegion> {
         // only check the direct parent.
 
         if !skip_unmap {
-            // Old owner loses access - unmap from their address space
-            updates.add_unmap(old_owner, capa.data.access.start, capa.data.access.size);
+            // Old owner (caller) loses access - unmap from their address space
+            updates.add_unmap(caller, capa.data.access.start, capa.data.access.size);
         }
 
         // Map to new owner's address space (identity mapping - no remapping)

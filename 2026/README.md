@@ -66,7 +66,7 @@ Trust domains with:
 // Static methods (explicit owner)
 let child = Capability::alias_child(&parent, access, owner_id, handle)?;
 let (child, updates) = Capability::carve_child(&parent, access, owner_id, handle)?;
-let updates = Capability::send_to(&region, new_owner, new_handle, attributes)?;
+let updates = Capability::send_to(&region, caller, new_owner, new_handle, attributes)?;
 let updates = Capability::revoke_child(&parent, child_handle)?;
 
 // Extension trait (MemoryCapabilityExt) — infers owner from the capability itself
@@ -163,7 +163,7 @@ pub trait Platform: Send + Sync {
 // two-barrier IPI protocol for cross-core hardware updates.
 // Pass exclusive=false for carve/alias/send, exclusive=true for any revoke.
 execute(&platform, /*exclusive=*/false, || {
-    Capability::send_to(&cap, new_owner, handle, Attributes::NONE).map(|b| ((), b))
+    Capability::send_to(&cap, caller, new_owner, handle, Attributes::NONE).map(|b| ((), b))
 });
 execute(&platform, /*exclusive=*/true, || {
     Capability::revoke_child_domain(&root, child_handle).map(|u| ((), u))

@@ -26,7 +26,8 @@ use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::thread;
 
 use capability_engine::{
-    Access, Attributes, Capability, CapabilityRef, MemoryRegion, Rights,
+    Access, Attributes, CapaError, Capability, CapabilityRef,
+    Domain, DomainPolicy, DomainStatus, MemoryRegion, RegionKind, Rights, Update,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -333,14 +334,14 @@ fn concurrent_sends() {
         let ca = child_a.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&ca, 10, 100, Attributes::NONE)
+            Capability::send_to(&ca, 0, 10, 100, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let cb = child_b.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&cb, 20, 200, Attributes::NONE)
+            Capability::send_to(&cb, 0, 20, 200, Attributes::NONE)
         });
 
         let res_a = ta.join().unwrap();
@@ -378,7 +379,7 @@ fn send_vs_carve_same_parent() {
         let c = child.clone();
         let sender = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&c, 10, 100, Attributes::NONE)
+            Capability::send_to(&c, 0, 10, 100, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
@@ -399,5 +400,524 @@ fn send_vs_carve_same_parent() {
         assert!(send_res.is_ok(), "send should succeed");
         assert!(carve_res.is_ok(), "carve should succeed");
         assert_eq!(root.read().children.len(), 2);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 1 — Alias operations
+//
+// `alias_child` acquires the parent *write* lock internally.  These tests
+// exercise alias-specific overlap rules (alias may overlap other aliases but
+// never overlaps a carved region) under all loom schedules.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── 1a  Concurrent aliases on non-overlapping regions ───────────────────────
+//
+// | Thread A (shared lock)                      | Thread B (shared lock)                      |
+// |---------------------------------------------|---------------------------------------------|
+// | alias_child(&root, [0x0000, 0x1000), …)     | alias_child(&root, [0x2000, 0x1000), …)     |
+//
+// Both operate under a shared platform lock.  Aliasing only conflicts with
+// carved regions, never with other aliases, so both must succeed regardless
+// of schedule.
+//
+// Valid outcomes (all schedules):
+// - Both succeed → root has 2 children (both Alias kind).
+
+#[test]
+fn concurrent_aliases_non_overlapping() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        let access_a = Access::new(0x0000, 0x1000, Rights::RW);
+        let access_b = Access::new(0x2000, 0x1000, Rights::RW);
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::alias_child(&r, access_a, 1, 1)
+        });
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::alias_child(&r, access_b, 2, 2)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        assert!(res_a.is_ok(), "alias A should succeed");
+        assert!(res_b.is_ok(), "alias B should succeed");
+        assert_eq!(root.read().children.len(), 2);
+
+        // Both must be Alias kind.
+        for child_ref in &root.read().children {
+            assert_eq!(child_ref.read().data.kind, RegionKind::Alias);
+        }
+    });
+}
+
+// ── 1b  Alias vs carve on overlapping region ────────────────────────────────
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | carve_child(&root, [0x0000, 0x2000), …)         | alias_child(&root, [0x1000, 0x2000), …)         |
+//
+// Both acquire the parent write lock internally.  The first to finish inserts
+// a child.  When the second runs:
+// - If carve finished first: alias sees an existing *Carve* child overlapping
+//   its range → InvalidAccess.
+// - If alias finished first: carve sees an existing *Alias* child overlapping
+//   its range → InvalidAccess.
+//
+// Valid outcomes (all schedules):
+// - Exactly one succeeds, the other returns InvalidAccess.
+// - Root has exactly 1 child.
+
+#[test]
+fn alias_vs_carve_overlapping() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        let carve_access = Access::new(0x0000, 0x2000, Rights::RW);
+        let alias_access = Access::new(0x1000, 0x2000, Rights::RW);
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let carver = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::carve_child(&r, carve_access, 1, 1)
+        });
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let aliaser = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::alias_child(&r, alias_access, 2, 2)
+        });
+
+        let carve_res = carver.join().unwrap();
+        let alias_res = aliaser.join().unwrap();
+
+        // Exactly one succeeds.
+        let successes = [carve_res.is_ok(), alias_res.is_ok()]
+            .iter()
+            .filter(|&&s| s)
+            .count();
+        assert_eq!(successes, 1, "exactly one of alias/carve must succeed");
+        assert_eq!(root.read().children.len(), 1);
+    });
+}
+
+// ── 1c  Alias while a sibling is being revoked ─────────────────────────────
+//
+// | Thread A (exclusive lock)                       | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | revoke_child_ref(&root, &carved_child)          | alias_child(&root, [0x0000, 0x1000), …)         |
+//
+// Setup: root has one carved child covering [0x0000, 0x1000).
+// Thread A revokes it (exclusive); thread B aliases the same range (shared).
+// Platform-level exclusive ↔ shared serialisation means they never overlap.
+//
+// Valid outcomes (all schedules):
+// - A then B: revoke removes the carved child.  Alias runs, sees no carved
+//   overlap → succeeds.  Root has 1 child (the alias).
+// - B then A: alias runs, sees the carved child overlapping → InvalidAccess.
+//   Then revoke succeeds, removes the carved child.  Root has 0 children.
+
+#[test]
+fn alias_while_sibling_revoked() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        // Pre-create a carved child covering [0x0000, 0x1000).
+        let (carved_child, _) = Capability::carve_child(
+            &root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+            0,
+            1,
+        )
+        .unwrap();
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let c = carved_child.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive
+            Capability::revoke_child_ref(&r, &c)
+        });
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let aliaser = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::alias_child(&r, Access::new(0x0000, 0x1000, Rights::RW), 1, 2)
+        });
+
+        let revoke_res = revoker.join().unwrap();
+        let alias_res = aliaser.join().unwrap();
+
+        // Revoke always succeeds (the child exists at the time of the call).
+        assert!(revoke_res.is_ok(), "revoke must succeed");
+
+        let children_count = root.read().children.len();
+        if alias_res.is_ok() {
+            // A-then-B: revoke first, alias found no carved overlap → 1 child (alias).
+            assert_eq!(children_count, 1);
+        } else {
+            // B-then-A: alias saw carved overlap → failed, then revoke removed it → 0.
+            assert_eq!(children_count, 0);
+        }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 2 — Double send on the same capability
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | send_to(&child, domain_B, …)                    | send_to(&child, domain_C, …)                    |
+//
+// Setup: root (owner = domain 0), child carved from root (owner = 0).
+//
+// send_to has a two-phase protocol:
+//   Phase 1: read-lock child → get expected_old_owner + validate.
+//   Phase 2: write-lock child → transfer ownership.
+//
+// Two concurrent sends both read owner = 0 in phase 1 and pass validation.
+// In phase 2, the first write-lock winner transfers the cap (owner becomes B).
+// The second acquires the write lock and sees old_owner = B ≠ expected (0).
+//
+// Expected semantic (linearisable): the second send fails because the caller
+// (domain 0) no longer owns the capability — it was already transferred.
+// Exactly one send succeeds, the other returns PermissionDenied.
+// The successful send's new_owner is the final owner.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn double_send_same_capability() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        let (child, _) = Capability::carve_child(
+            &root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+            0,
+            1,
+        )
+        .unwrap();
+
+        let pl = platform_lock.clone();
+        let c = child.clone();
+        let sender_b = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::send_to(&c, 0, 10, 100, Attributes::NONE)
+        });
+
+        let pl = platform_lock.clone();
+        let c = child.clone();
+        let sender_c = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::send_to(&c, 0, 20, 200, Attributes::NONE)
+        });
+
+        let res_b = sender_b.join().unwrap();
+        let res_c = sender_c.join().unwrap();
+
+        // Exactly one succeeds; the loser gets PermissionDenied.
+        let successes = [&res_b, &res_c]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+        assert_eq!(successes, 1, "exactly one double-send must succeed");
+
+        // The winner's target domain is the final owner.
+        let final_owner = child.read().owned.owner;
+        if res_b.is_ok() {
+            assert_eq!(final_owner, 10);
+            assert_eq!(res_c.unwrap_err(), CapaError::PermissionDenied);
+        } else {
+            assert_eq!(final_owner, 20);
+            assert_eq!(res_b.unwrap_err(), CapaError::PermissionDenied);
+        }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 3 — Revoke of a previously-sent child
+//
+// Setup:
+//   1. Root (owner = domain 0) → carve child C (owner = 0).
+//   2. send_to(&C, domain 99, …) → C now owned by 99.
+//   3. Thread A revokes C under exclusive lock.
+//
+// revoke_subtree must correctly detect that the child was sent to a different
+// domain (child.owner (99) ≠ parent.owner (0)) and emit:
+//   - Unmap(99, region) — domain 99 loses access.
+//   - Map(0, region)    — domain 0 regains access to the carved range.
+//
+// Valid outcomes (single-threaded, but loom validates lock correctness):
+//   - Revoke succeeds.
+//   - Root has 0 children.
+//   - UpdateBatch contains Unmap(99, …) + Map(0, …).
+//
+// The value of running this under loom is that revoke_subtree does a
+// write-lock → take children → drop lock → recurse → re-acquire read-lock
+// cycle.  Loom verifies no invariant violation in that pattern.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn revoke_after_send() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        // Carve a child (owner = 0).
+        let (child, _) = Capability::carve_child(
+            &root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+            0,
+            1,
+        )
+        .unwrap();
+
+        // Send child to domain 99.
+        {
+            let _guard = platform_lock.read().unwrap();
+            Capability::send_to(&child, 0, 99, 50, Attributes::NONE).unwrap();
+        }
+        assert_eq!(child.read().owned.owner, 99);
+
+        // Revoke under exclusive lock.
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let c = child.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap();
+            Capability::revoke_child_ref(&r, &c)
+        });
+
+        let updates = revoker.join().unwrap().expect("revoke must succeed");
+        assert_eq!(root.read().children.len(), 0);
+
+        // Must contain Unmap(99, …) and Map(0, …).
+        let has_unmap = updates.updates().iter().any(|u| matches!(
+            u,
+            Update::Unmap { domain: 99, address: 0x0000, size: 0x1000 }
+        ));
+        let has_map = updates.updates().iter().any(|u| matches!(
+            u,
+            Update::Map { domain: 0, address: 0x0000, size: 0x1000, .. }
+        ));
+        assert!(has_unmap, "must unmap from domain 99");
+        assert!(has_map, "must remap to domain 0 (parent)");
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 4 — Carve → revoke → re-carve (region reuse)
+//
+// | Thread A (exclusive lock)                       | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | revoke_child_ref(&root, &child_c)               | carve_child(&root, [0x0000, 0x1000), …)         |
+//
+// Setup: root → carved child C covering [0x0000, 0x1000).
+// Thread A revokes C; thread B tries to carve the same range.
+//
+// After revocation removes C from the children list, the region
+// [0x0000, 0x1000) must be available for a fresh carve.  The platform-level
+// exclusive ↔ shared lock serialises the two threads.
+//
+// Valid outcomes (all schedules):
+// - A then B: revoke removes C.  Carve sees no overlap → succeeds.
+//   Root has 1 child (the new carve).
+// - B then A: carve runs first, sees C still present → overlap →
+//   InvalidAccess.  Revoke then removes C.  Root has 0 children.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn region_reuse_after_revoke() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let root = make_root(0, 0, 0x0000, 0x4000);
+
+        // Pre-create a carved child covering [0x0000, 0x1000).
+        let (child_c, _) = Capability::carve_child(
+            &root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+            0,
+            1,
+        )
+        .unwrap();
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let c = child_c.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive
+            Capability::revoke_child_ref(&r, &c)
+        });
+
+        let pl = platform_lock.clone();
+        let r = root.clone();
+        let carver = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::carve_child(
+                &r,
+                Access::new(0x0000, 0x1000, Rights::RW),
+                1,
+                2,
+            )
+        });
+
+        let revoke_res = revoker.join().unwrap();
+        let carve_res = carver.join().unwrap();
+
+        assert!(revoke_res.is_ok(), "revoke must succeed");
+
+        let children_count = root.read().children.len();
+        if carve_res.is_ok() {
+            // A-then-B: revoke first, region freed, carve succeeds → 1 child.
+            assert_eq!(children_count, 1);
+        } else {
+            // B-then-A: carve saw overlap with C → failed, then revoke removed C → 0.
+            assert_eq!(children_count, 0);
+        }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 5 — Concurrent domain creation
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | create_child_domain(&parent, policy, …, h=1)    | create_child_domain(&parent, policy, …, h=2)    |
+//
+// Setup: sealed parent domain with MonitorAPI::ALL.
+//
+// create_child_domain has a read → drop → write gap:
+//   1. parent.read()                — validate sealed + policy.
+//   2. drop(parent)                 — release read lock.
+//   3. parent_ref.write().add_child — acquire write lock.
+//
+// Two concurrent creates both pass validation in step 1, then serialise at
+// step 3.
+//
+// Valid outcomes (all schedules):
+// - Both succeed.
+// - Parent has 2 children with handles 1 and 2.
+// - No deadlock in the read → drop → write transition.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Helper: create a sealed root domain capability suitable for loom tests.
+fn make_sealed_domain_root(owner: u64, handle: u64) -> CapabilityRef<Domain> {
+    let mut domain = Domain::new_root(1);
+    domain.seal().ok(); // root is already sealed, but be explicit
+    Capability::new_root(owner, handle, domain)
+}
+
+#[test]
+fn concurrent_domain_creation() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let parent = make_sealed_domain_root(0, 0);
+
+        let child_policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
+
+        let pl = platform_lock.clone();
+        let p = parent.clone();
+        let cp = child_policy.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::create_child_domain(&p, cp, 0, 1)
+        });
+
+        let pl = platform_lock.clone();
+        let p = parent.clone();
+        let cp = child_policy.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::create_child_domain(&p, cp, 0, 2)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        assert!(res_a.is_ok(), "domain creation A should succeed");
+        assert!(res_b.is_ok(), "domain creation B should succeed");
+        assert_eq!(parent.read().children.len(), 2);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Case 6 — Domain revoke vs domain creation
+//
+// | Thread A (exclusive lock)                       | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | revoke_child_domain(&parent, child_handle=1)    | create_child_domain(&parent, policy, …, h=2)    |
+//
+// Setup: sealed parent domain with one child (handle = 1).
+//
+// Exclusive ↔ shared platform lock serialisation for domain operations.
+// revoke_child_domain recursively drops and re-acquires locks in
+// revoke_domain_subtree.
+//
+// Valid outcomes (all schedules):
+// - A then B: child 1 revoked, then child 2 created.  Parent has 1 child
+//   (handle = 2), child 1's domain is in Revoked status.
+// - B then A: child 2 created, then child 1 revoked.  Parent has 1 child
+//   (handle = 2), child 1's domain is in Revoked status.
+// - In both orderings the final state is the same: parent has exactly
+//   child 2; child 1 is revoked.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn domain_revoke_vs_creation() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let parent = make_sealed_domain_root(0, 0);
+
+        // Pre-create child 1.
+        let child_policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
+        let child1 = Capability::create_child_domain(
+            &parent,
+            child_policy.clone(),
+            0,
+            1,
+        )
+        .unwrap();
+
+        let pl = platform_lock.clone();
+        let p = parent.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive
+            Capability::revoke_child_domain(&p, 1)
+        });
+
+        let pl = platform_lock.clone();
+        let p = parent.clone();
+        let cp = child_policy.clone();
+        let creator = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::create_child_domain(&p, cp, 0, 2)
+        });
+
+        let revoke_res = revoker.join().unwrap();
+        let create_res = creator.join().unwrap();
+
+        assert!(revoke_res.is_ok(), "revoke child 1 must succeed");
+        assert!(create_res.is_ok(), "create child 2 must succeed");
+
+        // Final state: parent has exactly child 2; child 1 is revoked.
+        assert_eq!(parent.read().children.len(), 1);
+        assert_eq!(parent.read().children[0].read().owned.handle, 2);
+        assert_eq!(child1.read().data.status, DomainStatus::Revoked);
     });
 }
