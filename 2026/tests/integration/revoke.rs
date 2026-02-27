@@ -30,9 +30,7 @@ fn test_revoke_carved_child_after_send() {
     let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
-    // Save child ref before send (send removes handle from caller's table for unsealed receivers)
-    let child_ref = root.read().data.get_memory_capability(child_h).unwrap().upgrade().unwrap();
+    let (child_h, child_sub, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain — send causes immediate transfer
     let dom5_h = Capability::create_domain(
@@ -45,8 +43,8 @@ fn test_revoke_carved_child_after_send() {
 
     let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
-    // After send to unsealed receiver, child_h was removed from root's table; revoke by Arc ref.
-    let revoke_updates = Capability::revoke_child_ref(&_r0, &child_ref).unwrap();
+    // After send to unsealed receiver, child_h was removed from root's table; revoke by handle.
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
 
     // 1. Unmap from dom5, 2. Remap to root
     assert_eq!(revoke_updates.len(), 2);
@@ -72,9 +70,7 @@ fn test_revoke_aliased_child_no_remapping() {
     let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _) = Capability::alias_memory(&root, r0_h, child_access).unwrap();
-    // Save child ref before send (send removes handle from caller's table for unsealed receivers)
-    let child_ref = root.read().data.get_memory_capability(child_h).unwrap().upgrade().unwrap();
+    let (child_h, child_sub) = Capability::alias_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
     let dom5_h = Capability::create_domain(
@@ -86,7 +82,7 @@ fn test_revoke_aliased_child_no_remapping() {
 
     let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
-    let revoke_updates = Capability::revoke_child_ref(&_r0, &child_ref).unwrap();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
 
     // Aliased children must NOT generate a remap to parent
     let root_id = root.read().data.id;
@@ -102,9 +98,7 @@ fn test_revoke_with_clean_and_remap() {
     let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
-    // Save child ref before send (send removes handle from caller's table for unsealed receivers)
-    let child_ref = root.read().data.get_memory_capability(child_h).unwrap().upgrade().unwrap();
+    let (child_h, child_sub, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
     let dom5_h = Capability::create_domain(
@@ -118,7 +112,7 @@ fn test_revoke_with_clean_and_remap() {
     let attrs = Attributes::from_bits(Attributes::CLEAN);
     let _send_updates = Capability::send_memory(&root, child_h, dom5_h, attrs).unwrap();
 
-    let revoke_updates = Capability::revoke_child_ref(&_r0, &child_ref).unwrap();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
 
     // 1. ZeroMemory (CLEAN), 2. Unmap from dom5, 3. Remap to root
     assert_eq!(revoke_updates.len(), 3);
@@ -150,9 +144,7 @@ fn test_nested_carve_revoke() {
 
     // Root carves child1
     let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
-    let (child1_h, _, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
-    // Save child1_ref before send (send removes handle from caller's table for unsealed receivers)
-    let child1_ref = root.read().data.get_memory_capability(child1_h).unwrap().upgrade().unwrap();
+    let (child1_h, child1_sub, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
 
     // Create dom5 (unsealed) to receive child1
     let dom5_h = Capability::create_domain(
@@ -190,7 +182,7 @@ fn test_nested_carve_revoke() {
         Capability::send_memory(&dom5, child2_h_in_dom5, dom10_h_in_dom5, Attributes::NONE).unwrap();
 
     // Revoke child1 from root — the entire subtree (including child2) is revoked
-    let revoke_updates = Capability::revoke_child_ref(&_r0, &child1_ref).unwrap();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_sub).unwrap();
 
     assert!(revoke_updates.len() >= 2);
 
@@ -216,9 +208,7 @@ fn test_revoke_preserves_parent_rights() {
     let root_id = root.read().data.id;
 
     let child_access = Access::new(0x1000, 0x1000, Rights::R);
-    let (child_h, _, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
-    // Save child ref before send (send removes handle from caller's table for unsealed receivers)
-    let child_ref = root.read().data.get_memory_capability(child_h).unwrap().upgrade().unwrap();
+    let (child_h, child_sub, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
     let dom5_h = Capability::create_domain(
@@ -230,7 +220,7 @@ fn test_revoke_preserves_parent_rights() {
 
     let _send = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
-    let revoke_updates = Capability::revoke_child_ref(&r0, &child_ref).unwrap();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
 
     // Remap must honour parent's R-only rights
     let has_correct_rights = revoke_updates.updates().iter().any(|u| {

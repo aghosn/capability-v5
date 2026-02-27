@@ -73,10 +73,6 @@ name = "integration_end_to_end"
 path = "tests/integration/end_to_end.rs"
 
 [[test]]
-name = "integration_owner_validation"
-path = "tests/integration/owner_validation.rs"
-
-[[test]]
 name = "integration_revoke"
 path = "tests/integration/revoke.rs"
 

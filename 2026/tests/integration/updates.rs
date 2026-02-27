@@ -112,7 +112,7 @@ fn test_complex_memory_update_scenario() {
     // r2 = r1.carve[0x1000, 0x2000) RW (reduced from RWX to RW)
     // r2_h_in_dom1 is auto-allocated in Dom1's table (r1 is at 1, so r2 gets 2).
     let r2_access = Access::new(0x1000, 0x1000, Rights::RW); // size = 0x1000
-    let (r2_h_in_dom1, _, carve2_updates) =
+    let (r2_h_in_dom1, r2_sub, carve2_updates) =
         Capability::carve_memory(&dom1, r1_h_in_dom1, r2_access).unwrap();
     println!(
         "✓ Carved r2 = [0x1000, 0x2000) RW from r1 (updates: {})",
@@ -128,7 +128,7 @@ fn test_complex_memory_update_scenario() {
     // r3_h_in_dom1 is auto-allocated (r1 at 1, r2 at 2, so r3 gets 3).
     // r3_h_in_dom1 is also r3's stable SubHandle used for revocation.
     let r3_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (r3_h_in_dom1, _) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
+    let (r3_h_in_dom1, r3_sub) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
     println!("✓ Created r3 = [0x1000, 0x2000) RW as alias of r2");
 
     // Dom1.send(Dom2, r2) — Dom2 is unsealed → immediate transfer
@@ -158,24 +158,21 @@ fn test_complex_memory_update_scenario() {
 
     // ================================================================
     // Revoke r3 from r2 (r2 is now in Dom2's table; Dom2 has REVOKE)
-    // Resolve by Arc identity since r3 is in Dom1's table (not Dom2's).
+    // Resolve by handle since r3 is in Dom1's table (not Dom2's).
     // ================================================================
     println!("\n=== Test Case 4: Revoke r3 from r2 ===");
 
-    let r2_ref = dom2.read().data.get_memory_capability(r2_h_in_dom2).unwrap().upgrade().unwrap();
-    let r3_ref = dom1.read().data.get_memory_capability(r3_h_in_dom1).unwrap().upgrade().unwrap();
-    let revoke1_updates = Capability::revoke_child_ref(&r2_ref, &r3_ref).unwrap();
+    let revoke1_updates = Capability::revoke_memory_child(&dom2, r2_h_in_dom2, r3_sub).unwrap();
     println!("✓ Revoked r3 from r2 (updates: {})", revoke1_updates.len());
     println!("✓ Dom1 access to memory unchanged after revoking r3");
 
     // ================================================================
     // Revoke r2 from r1 (r1 is in Dom1's table; r2 is in Dom2's table after send)
-    // Resolve by Arc identity since r2 was removed from Dom1's table after send.
+    // Resolve by handle since r2 was removed from Dom1's table after send.
     // ================================================================
     println!("\n=== Test Case 5: Revoke r2 from r1 ===");
 
-    let r1_ref = dom1.read().data.get_memory_capability(r1_h_in_dom1).unwrap().upgrade().unwrap();
-    let revoke2_updates = Capability::revoke_child_ref(&r1_ref, &r2_ref).unwrap();
+    let revoke2_updates = Capability::revoke_memory_child(&dom1, r1_h_in_dom1, r2_sub).unwrap();
     println!("✓ Revoked r2 from r1 (updates: {})", revoke2_updates.len());
 
     // Assert r1's own rights are still RWX (rights are on the capability itself, not affected by children)

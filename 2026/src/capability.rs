@@ -1001,3 +1001,4 @@ impl Capability<Domain> {
         Capability::revoke_child_domain(caller, child_sub)
     }
 }
+

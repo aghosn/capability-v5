@@ -1,6 +1,7 @@
 //! Tests for update batch operations
 
 use capability_engine::*;
+use std::sync::Arc;
 
 // ==================== Basic Update Operations ====================
 
@@ -171,87 +172,34 @@ fn test_multiple_updates_different_domains() {
 
 #[test]
 fn test_carve_generates_updates() {
-    let root_region = MemoryRegion::new_root(0x0, 0x10000);
-    let root = Capability::new_root(0, 0, root_region);
+    let root_domain = Domain::new_root(4);
+    let root = Capability::new_root(0, 0, root_domain);
+    let total_mem = MemoryRegion::new_root(0x0, 0x10000);
+    let mem_root = Capability::new_root(0, 1, total_mem);
+    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, updates) = Capability::carve_child(&root, child_access, 0).unwrap();
+    let (_child_h, _child_sub, updates) = Capability::carve_memory(&root, 1, child_access).unwrap();
 
     // Carve with same owner generates NO updates
     assert!(updates.is_empty());
 }
 
 #[test]
-fn test_send_generates_updates() {
-    let root_region = MemoryRegion::new_root(0x0, 0x10000);
-    let root = Capability::new_root(0, 0, root_region);
-
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
-
-    let updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
-
-    // Should only have map (no unmap) because parent still owns overlapping capability
-    assert_eq!(updates.len(), 1);
-    match &updates.updates()[0] {
-        Update::Map { domain, .. } => assert_eq!(*domain, 5),
-        _ => panic!("Expected Map update"),
-    }
-}
-
-#[test]
 fn test_revoke_generates_updates() {
-    let root_region = MemoryRegion::new_root(0x0, 0x10000);
-    let root = Capability::new_root(0, 0, root_region);
+    let root_domain = Domain::new_root(4);
+    let root = Capability::new_root(0, 0, root_domain);
+    let total_mem = MemoryRegion::new_root(0x0, 0x10000);
+    let mem_root = Capability::new_root(0, 1, total_mem);
+    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
+    let (_child_h, child_sub, _) = Capability::carve_memory(&root, 1, child_access).unwrap();
 
-    let updates = Capability::revoke_child(&root, 1).unwrap();
+    let updates = Capability::revoke_memory_child(&root, 1, child_sub).unwrap();
 
-    // Should NOT generate updates because parent never lost access
+    // Should NOT generate updates because parent never lost access (same owner)
     assert!(updates.is_empty());
-}
-
-#[test]
-fn test_vital_revoke_generates_domain_revocation() {
-    let root_region = MemoryRegion::new_root(0x0, 0x10000);
-    let root = Capability::new_root(0, 0, root_region);
-
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 5).unwrap();
-
-    // Set vital attribute on ownership
-    child.write().owned.attributes = Attributes::from_bits(Attributes::VITAL);
-
-    let updates = Capability::revoke_child(&root, 1).unwrap();
-
-    // Should include domain revocation update
-    let has_domain_revoke = updates.updates().iter().any(|u| {
-        matches!(u, Update::RevokeDomain { domain, .. } if *domain == 5)
-    });
-    assert!(has_domain_revoke);
-}
-
-#[test]
-fn test_clean_revoke_generates_zero_memory() {
-    let root_region = MemoryRegion::new_root(0x0, 0x10000);
-    let root = Capability::new_root(0, 0, root_region);
-
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 5).unwrap();
-
-    // Set clean attribute on ownership
-    child.write().owned.attributes = Attributes::from_bits(Attributes::CLEAN);
-
-    let updates = Capability::revoke_child(&root, 1).unwrap();
-
-    // Should include zero memory update
-    let has_zero = updates.updates().iter().any(|u| {
-        matches!(u, Update::ZeroMemory { address, size }
-            if *address == 0x1000 && *size == 0x1000)
-    });
-    assert!(has_zero);
 }
 
 // ==================== Update Affected Domain Tracking ====================

@@ -216,12 +216,11 @@ fn revoke_sender_domain_cancels_pending() {
     let parent   = make_sealed_domain();
     let receiver = make_sealed_domain();
 
-    // Create sender domain A as a child of P in the domain CDT.
+    // Create sender domain A as a child of P in the domain CDT via domain API.
     let policy    = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let parent_id = parent.read().data.id;
-    let child_sub = 1u64; // sub_handle we assign to A in P's children
-    let sender = Capability::create_child_domain(&parent, policy, parent_id).unwrap();
-    sender.write().data.seal().unwrap();
+    let sender_h  = Capability::create_domain(&parent, policy).unwrap();
+    let sender    = parent.read().data.domain_capabilities[&sender_h].upgrade().unwrap();
+    Capability::seal_domain_op(&parent, sender_h).unwrap();
 
     // Register a memory cap in A's table at handle 1.
     let _mem = register_root_mem(&sender, 1);
@@ -233,7 +232,7 @@ fn revoke_sender_domain_cancels_pending() {
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
     // P revokes A's domain.
-    Capability::revoke_child_domain(&parent, child_sub).unwrap();
+    Capability::revoke_domain(&parent, sender_h).unwrap();
 
     assert!(sender.read().data.is_revoked(), "sender domain must be revoked");
 

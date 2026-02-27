@@ -22,9 +22,7 @@ fn test_session() {
 
     // Carve r1 from r0 (r0.owner_domain=None → validate_operation skipped)
     let access = Access::new(0x0, 0x1000, Rights::RWX);
-    let (r1_h, _, _) = Capability::carve_memory(&root, r0_h, access).unwrap();
-    // Save r1_ref before send (send removes handle from caller's table for unsealed receivers)
-    let r1_ref = root.read().data.get_memory_capability(r1_h).unwrap().upgrade().unwrap();
+    let (r1_h, r1_sub, _) = Capability::carve_memory(&root, r0_h, access).unwrap();
 
     // Alias r1 while root still owns it (r1.owner_domain=Some(root), root sealed → OK)
     let access = Access::new(0x0, 0x1000, Rights::RWX);
@@ -47,8 +45,8 @@ fn test_session() {
     let _attestation = attest_domain(&dom1);
 
     // Revoke r1 from r0: after send to unsealed dom1, r1_h was removed from root's table;
-    // revoke by Arc identity instead.
-    let updates = Capability::revoke_child_ref(&r0, &r1_ref).unwrap();
+    // revoke by handle instead.
+    let updates = Capability::revoke_memory_child(&root, r0_h, r1_sub).unwrap();
 
     // Verify that the update batch contains a domain revocation for dom1
     let has_domain_revoke = updates.updates().iter().any(|op| {
