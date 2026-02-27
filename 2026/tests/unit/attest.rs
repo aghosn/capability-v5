@@ -15,14 +15,12 @@ fn test_attest_domain() {
 
 #[test]
 fn test_enumerate_tree() {
-    let root_policy = DomainPolicy::new_root(4);
-    let root_domain = Domain::new(root_policy);
+    let root_domain = Domain::new_root(4);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
+    // Use create_domain which requires root to be sealed (new_root is already sealed)
     let child_policy = DomainPolicy::new_root(4);
-    let child_domain = Domain::new(child_policy);
-    let child_ref = Capability::new_child(1, 1, child_domain, std::sync::Arc::downgrade(&root_ref));
-    root_ref.write().add_child(child_ref);
+    let _child_h = Capability::create_domain(&root_ref, child_policy).unwrap();
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 2);
@@ -55,26 +53,24 @@ fn test_attest_memory_region() {
 
 #[test]
 fn test_enumerate_tree_with_multiple_levels() {
-    let root_policy = DomainPolicy::new_root(4);
-    let root_domain = Domain::new(root_policy);
+    let root_domain = Domain::new_root(4);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
-    // Create first level children
-    let child1_policy = DomainPolicy::new_root(4);
-    let child1_domain = Domain::new(child1_policy);
-    let child1_ref = Capability::new_child(1, 1, child1_domain, std::sync::Arc::downgrade(&root_ref));
-    root_ref.write().add_child(child1_ref.clone());
+    // Create first level children using domain-mediated API
+    let child1_h = Capability::create_domain(&root_ref, DomainPolicy::new_root(4)).unwrap();
+    let _child2_h = Capability::create_domain(&root_ref, DomainPolicy::new_root(4)).unwrap();
 
-    let child2_policy = DomainPolicy::new_root(4);
-    let child2_domain = Domain::new(child2_policy);
-    let child2_ref = Capability::new_child(2, 2, child2_domain, std::sync::Arc::downgrade(&root_ref));
-    root_ref.write().add_child(child2_ref);
+    // Seal child1 before creating grandchild under it
+    Capability::seal_domain_op(&root_ref, child1_h).unwrap();
+    let child1_ref = root_ref
+        .read()
+        .data
+        .domain_capabilities[&child1_h]
+        .upgrade()
+        .unwrap();
 
-    // Create second level child under child1
-    let grandchild_policy = DomainPolicy::new_root(4);
-    let grandchild_domain = Domain::new(grandchild_policy);
-    let grandchild_ref = Capability::new_child(3, 3, grandchild_domain, std::sync::Arc::downgrade(&child1_ref));
-    child1_ref.write().add_child(grandchild_ref);
+    // Create grandchild under child1
+    let _grandchild_h = Capability::create_domain(&child1_ref, DomainPolicy::new_root(4)).unwrap();
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 4); // root + 2 children + 1 grandchild
