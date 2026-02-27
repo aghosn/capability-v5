@@ -609,15 +609,21 @@ impl Capability<Domain> {
         Ok(new_handle)
     }
 
-    /// Send a memory capability to another domain (freeze model).
-    /// The caller's LocalHandle is frozen; the capability is placed in the receiver's
-    /// pending queue. No MMU operation yet.
+    /// Send a memory capability to another domain.
+    ///
+    /// - If the receiver is **unsealed**, ownership is transferred immediately and
+    ///   MMU updates are returned.
+    /// - If the receiver is **sealed** with `RECEIVE_AFTER_SEAL`, the caller's
+    ///   LocalHandle is frozen and the capability is placed in the receiver's
+    ///   pending queue (no MMU operation yet).
+    /// - If the receiver is **sealed** without `RECEIVE_AFTER_SEAL`, the send is
+    ///   rejected.
     pub fn send_memory(
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
         receiver: &CapabilityRef<Domain>,
         attrs: Attributes,
-    ) -> Result<()> {
+    ) -> Result<UpdateBatch> {
         // 1. Check cap not already frozen
         if caller.read().data.is_memory_handle_frozen(cap) {
             return Err(CapaError::PermissionDenied);
@@ -639,39 +645,83 @@ impl Capability<Domain> {
         // 4. Validate operation
         cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
 
-        // 5. Check receiver can accept
-        {
-            let recv = receiver.read();
-            if !recv.data.policy.receive_after_seal() || !recv.data.is_sealed() {
+        // 5. Branch on receiver state
+        let recv_sealed = receiver.read().data.is_sealed();
+
+        if recv_sealed {
+            // Sealed receiver — must have RECEIVE_AFTER_SEAL, use pending queue
+            if !receiver.read().data.policy.receive_after_seal() {
                 return Err(CapaError::PermissionDenied);
             }
-        }
 
-        // 6. Update cap attributes
-        cap_ref.write().owned.attributes = attrs;
+            // Update cap attributes
+            cap_ref.write().owned.attributes = attrs;
 
-        // 7. Atomically freeze handle under write lock (TOCTOU prevention:
-        //    re-check frozen status after acquiring the write lock so that two
-        //    concurrent send_memory calls for the same handle cannot both slip
-        //    through the read-lock check and both freeze/enqueue the cap).
-        {
-            let mut caller_w = caller.write();
-            if caller_w.data.is_memory_handle_frozen(cap) {
-                return Err(CapaError::PermissionDenied);
+            // Atomically freeze handle under write lock (TOCTOU prevention)
+            {
+                let mut caller_w = caller.write();
+                if caller_w.data.is_memory_handle_frozen(cap) {
+                    return Err(CapaError::PermissionDenied);
+                }
+                caller_w.data.freeze_memory_handle(cap);
             }
-            caller_w.data.freeze_memory_handle(cap);
+
+            // Build PendingCapability and add to receiver
+            let pending = PendingCapability {
+                cap: Arc::downgrade(&cap_ref),
+                sender_domain_id: caller_id,
+                sender_handle: cap,
+                sender_domain: Arc::downgrade(caller),
+            };
+            receiver.write().data.add_pending_capability(pending);
+
+            Ok(UpdateBatch::new())
+        } else {
+            // Unsealed receiver — immediate transfer
+            let (skip_unmap, cap_access) = {
+                let cap = cap_ref.read();
+                let skip_unmap = if let Some(parent_ref) = cap.get_parent() {
+                    parent_ref.read().owned.owner == caller_id
+                } else {
+                    false
+                };
+                (skip_unmap, cap.data.access)
+            };
+
+            let receiver_id = receiver.read().data.id;
+            let new_handle = receiver.read().data.allocate_memory_handle();
+
+            // Remove cap from sender's table
+            caller.write().data.remove_memory_capability(cap);
+
+            // Update cap ownership
+            {
+                let mut cap = cap_ref.write();
+                cap.owned.owner = receiver_id;
+                cap.owned.attributes = attrs;
+                cap.owned.owner_domain = Some(Arc::downgrade(receiver));
+            }
+
+            // Register in receiver's table
+            receiver.write().data.add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+
+            // Build update batch
+            let mut updates = UpdateBatch::new();
+            if !skip_unmap {
+                updates.add_unmap(caller_id, cap_access.start, cap_access.size);
+            }
+            updates.add_map(
+                receiver_id,
+                cap_access.start,
+                cap_access.size,
+                cap_access.start,
+                cap_access.rights.read(),
+                cap_access.rights.write(),
+                cap_access.rights.execute(),
+            );
+
+            Ok(updates)
         }
-
-        // 8. Build PendingCapability and add to receiver
-        let pending = PendingCapability {
-            cap: Arc::downgrade(&cap_ref),
-            sender_domain_id: caller_id,
-            sender_handle: cap,
-            sender_domain: Arc::downgrade(caller),
-        };
-        receiver.write().data.add_pending_capability(pending);
-
-        Ok(())
     }
 
     /// Accept a pending memory capability. Auto-allocates a new LocalHandle in the

@@ -3,3 +3,7 @@
 # Usage: cargo coverage
 # Output: lcov report at target/tarpaulin/lcov.info, summary printed to stdout.
 coverage = "tarpaulin --lib --tests --out Lcov --output-dir target/tarpaulin --no-fail-fast"
+
+# Run loom concurrency tests (exhaustive interleaving exploration).
+# Usage: cargo loom
+loom = "test --test loom_concurrency --features loom --release"

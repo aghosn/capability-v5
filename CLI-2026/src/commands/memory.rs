@@ -1,7 +1,6 @@
 //! Memory-related commands: carve, alias, send
 
 use capability_engine::*;
-use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::sync::Arc;
 
@@ -111,7 +110,7 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     Ok(())
 }
 
-/// Send memory capability to domain (handle auto-allocated)
+/// Send memory capability to domain
 pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     if args.len() < 2 || args.len() > 3 {
         return Err("Usage: send <mem> <domain> [attrs]".to_string());
@@ -137,107 +136,57 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
         .clone();
 
-    let domain_id = domain.read().data.id;
+    // Find the sender domain
+    let sender_domain_id = mem.read().owned.owner;
+    let sender_domain = state.domains.values()
+        .find(|d| d.read().data.id == sender_domain_id)
+        .cloned()
+        .ok_or_else(|| format!("Sender domain (ID: {}) not found", sender_domain_id))?;
+
+    // Find the sender's handle for this memory capability
+    let sender_handle = {
+        let sd = sender_domain.read();
+        let mem_ptr = Arc::as_ptr(&mem);
+        sd.data.memory_capabilities.iter()
+            .find(|(_, weak)| {
+                weak.upgrade().map(|r| Arc::as_ptr(&r) == mem_ptr).unwrap_or(false)
+            })
+            .map(|(h, _)| *h)
+            .ok_or_else(|| "Memory capability not found in sender's table".to_string())?
+    };
+
     let is_sealed = domain.read().data.is_sealed();
-    let can_receive_after_seal = domain.read().data.policy.receive_after_seal();
 
-    // Always validate that the sender's domain allows SEND.
-    mem.read()
-        .owned
-        .validate_operation(MonitorAPI::SEND)
-        .map_err(|e| format!("Send not allowed: {:?}", e))?;
+    let platform = state.platform.clone();
+    let (_, batch) = execute(&*platform, !is_sealed, || {
+        let updates = Capability::send_memory(&sender_domain, sender_handle, &domain, attrs)?;
+        Ok(((), updates))
+    }).map_err(|e| format!("Failed to send: {:?}", e))?;
 
-    // Check if we need to use pending queue
-    if is_sealed && can_receive_after_seal {
-        // Domain is sealed with RECEIVE_AFTER_SEAL - use freeze-based send.
-        // Find the sender domain for this memory capability
-        let sender_domain_id = mem.read().owned.owner;
-        let sender_domain = state.domains.values()
-            .find(|d| d.read().data.id == sender_domain_id)
-            .cloned()
-            .ok_or_else(|| format!("Sender domain (ID: {}) not found", sender_domain_id))?;
+    // Process updates
+    process_updates(state, &batch);
 
-        // Find the sender's handle for this memory capability
-        let sender_handle = {
-            let sd = sender_domain.read();
-            let mem_ptr = Arc::as_ptr(&mem);
-            sd.data.memory_capabilities.iter()
-                .find(|(_, weak)| {
-                    weak.upgrade().map(|r| Arc::as_ptr(&r) == mem_ptr).unwrap_or(false)
-                })
-                .map(|(h, _)| *h)
-                .ok_or_else(|| "Memory capability not found in sender's table".to_string())?
-        };
+    // Record command
+    state.session.add_command(Command::Send {
+        mem: mem_name.to_string(),
+        domain: domain_name.to_string(),
+        handle: sender_handle,
+        attrs: format_attributes(&attrs),
+    });
 
-        // Build PendingCapability and freeze the sender's handle
-        let pending = PendingCapability {
-            cap: Arc::downgrade(&mem),
-            sender_domain_id,
-            sender_handle,
-            sender_domain: Arc::downgrade(&sender_domain),
-        };
-        sender_domain.write().data.freeze_memory_handle(sender_handle);
-        mem.write().owned.attributes = attrs;
-        let pending_id = domain.write().data.add_pending_capability(pending);
-
-        // Record command
-        state.session.add_command(Command::Send {
-            mem: mem_name.to_string(),
-            domain: domain_name.to_string(),
-            handle: pending_id,
-            attrs: format_attributes(&attrs),
-        });
-
+    if is_sealed {
         println!(
-            "{} Sent '{}' to sealed domain '{}' - pending acceptance (ID: {})",
+            "{} Sent '{}' to sealed domain '{}' - pending acceptance",
             "⏸".bright_yellow().bold(),
             mem_name.bright_white(),
             domain_name.bright_white(),
-            pending_id
         );
-    } else if is_sealed && !can_receive_after_seal {
-        // Domain is sealed and cannot receive capabilities
-        return Err(format!(
-            "Domain '{}' is sealed and does not have RECEIVE_AFTER_SEAL permission",
-            domain_name
-        ));
     } else {
-        // Domain is unsealed - proceed with direct send
-        let caller_id = mem.read().owned.owner;
-        let handle = domain.read().data.allocate_memory_handle();
-        let platform = state.platform.clone();
-        let (_, batch) = execute(&*platform, false, || {
-            let updates = Capability::send_to(&mem, caller_id, domain_id, attrs)?;
-            Ok(((), updates))
-        }).map_err(|e| format!("Failed to send: {:?}", e))?;
-
-        // Register memory capability with domain
-        domain
-            .write()
-            .data
-            .add_memory_capability(handle, Arc::downgrade(&mem));
-
-        // Set owner_domain so future operations on this capability enforce
-        // that the new owner domain is sealed with the required API permission.
-        mem.write().owned.set_owner_domain(Arc::downgrade(&domain));
-
-        // Process updates
-        process_updates(state, &batch);
-
-        // Record command
-        state.session.add_command(Command::Send {
-            mem: mem_name.to_string(),
-            domain: domain_name.to_string(),
-            handle,
-            attrs: format_attributes(&attrs),
-        });
-
         println!(
-            "{} Sent '{}' to unsealed domain '{}' with auto-allocated handle {}",
+            "{} Sent '{}' to domain '{}'",
             "✓".bright_green().bold(),
             mem_name.bright_white(),
             domain_name.bright_white(),
-            handle
         );
     }
 
