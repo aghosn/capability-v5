@@ -20,6 +20,10 @@
 //! 2. **Capability operation models** (§7.6) — real carve / revoke / send
 //!    operations under the shared/exclusive locking protocol, exercising the
 //!    internal `Arc<RwLock<Capability<T>>>` locks.
+//! 3. **Send / accept / reject / revoke-pending races** (§7.7) — domain-mediated
+//!    API exercised end-to-end with loom-tracked internal locks.
+//! 4. **Domain-mediated memory operations** (§7.8) — further domain-mediated
+//!    concurrent scenarios (concurrent sibling revokes, send-vs-revoke-sibling).
 
 use loom::sync::{Arc, RwLock};
 use loom::sync::atomic::{AtomicUsize, Ordering};
@@ -1259,5 +1263,182 @@ fn loom_revoke_domain_vs_accept() {
             assert!(matches!(accept_res, Err(CapaError::PermissionDenied)));
             assert_eq!(receiver.read().data.memory_capability_handles().len(), 0);
         }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §7.8 — Domain-mediated API concurrent memory operations
+//
+// These tests exercise the public domain-mediated API under loom.  Because the
+// `loom` feature routes `crate::sync::RwLock` to `loom::sync::RwLock`, loom
+// fully tracks every internal lock acquisition made by the domain-mediated
+// operations, exploring all valid thread schedules end-to-end.
+//
+// Unlike §7.6 (raw CapabilityRef<T> with explicit handles), §7.8 uses the
+// high-level API (carve_memory, revoke_memory_child, send_memory) throughout.
+// The root domain and root memory are bootstrapped sequentially inside the
+// loom model; only the concurrent operations are placed in spawned threads.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Bootstrap: sealed root domain (id 0) with a root memory region at handle 1.
+///
+/// The root memory's `owner_domain` is left as `None` (bootstrapping escape
+/// hatch) so that the first `carve_memory` skips `validate_operation`.
+/// Children carved via `carve_memory` get `owner_domain = Some(root_dom)`, so
+/// subsequent domain-mediated operations on them correctly check the domain.
+///
+/// Returns `(domain, handle, root_mem_arc)` — the caller must keep
+/// `root_mem_arc` alive for the duration of the test; the domain table only
+/// stores a `Weak` reference.
+fn dm_make_root(
+    size: u64,
+) -> (
+    capability_engine::CapabilityRef<Domain>,
+    capability_engine::LocalHandle,
+    capability_engine::CapabilityRef<MemoryRegion>,
+) {
+    let dom_data = Domain::new_root(1); // id = 0, already sealed
+    let dom: capability_engine::CapabilityRef<Domain> = Capability::new_root(0, 0, dom_data);
+    let owner_id = dom.read().data.id;
+    let h: capability_engine::LocalHandle = 1;
+    let mem: capability_engine::CapabilityRef<MemoryRegion> =
+        Capability::new_root(owner_id, h, MemoryRegion::new_root(0x0, size));
+    dom.write().data.add_memory_capability(h, std::sync::Arc::downgrade(&mem));
+    (dom, h, mem)
+}
+
+// ── Case 8a — Concurrent revoke of distinct siblings ────────────────────────
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | revoke_memory_child(dom, root_h, h_child1)      | revoke_memory_child(dom, root_h, h_child2)      |
+//
+// Setup: sealed root domain with root memory (handle 1) and two carved,
+// non-overlapping children (handles 2 and 3).
+//
+// Both threads concurrently revoke different children of the same parent.
+// revoke_memory_child serialises on the parent's write lock, but the two calls
+// target distinct sub_handles so both must always succeed.
+//
+// Valid outcomes (all schedules):
+// - A then B, or B then A: both revokes succeed; root_mem has 0 children.
+#[test]
+fn loom_dm_concurrent_revokes() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let (dom, h_root, _root_mem) = dm_make_root(0x4000);
+
+        // Sequential setup: carve two non-overlapping children.
+        let (h_c1, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve child1");
+        let (h_c2, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
+        ).expect("setup: carve child2");
+
+        let pl = platform_lock.clone();
+        let d  = dom.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c1)
+        });
+
+        let pl = platform_lock.clone();
+        let d  = dom.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c2)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        assert!(res_a.is_ok(), "revoke child1 must succeed");
+        assert!(res_b.is_ok(), "revoke child2 must succeed");
+
+        // Both children must be removed from root_mem's children list.
+        let root_mem = dom.read().data
+            .get_memory_capability(h_root)
+            .expect("root_mem in table")
+            .clone()
+            .upgrade()
+            .expect("root_mem alive");
+        assert_eq!(root_mem.read().children.len(), 0);
+    });
+}
+
+// ── Case 8b — Send one child while revoking a sibling ───────────────────────
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | send_memory(dom, h_child1, receiver, NONE)      | revoke_memory_child(dom, h_root, h_child2)      |
+//
+// Setup: sealed root domain with root memory (handle 1), two carved children
+// (handles 2 and 3), and a sealed receiver domain (all-permissions policy).
+//
+// Thread A sends child1 to a sealed receiver (pending-queue path).
+// Thread B revokes child2 via revoke_memory_child.
+//
+// The only shared synchronisation point is the domain lock (dom):
+//  - Thread A writes dom (atomic freeze of h_child1 under write lock).
+//  - Thread B reads dom (frozen-check and parent-ref lookup).
+// Loom explores all interleavings of these lock acquisitions.
+//
+// Both operations target different capabilities and must always succeed.
+//
+// Post-condition:
+//  - h_child1 is frozen in dom's table.
+//  - receiver has exactly 1 pending capability.
+//  - root_mem has 1 child remaining (child1 is tree-attached but frozen;
+//    child2 was revoked and removed from the tree).
+#[test]
+fn loom_dm_send_vs_revoke_sibling() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let (dom, h_root, _root_mem) = dm_make_root(0x4000);
+        let receiver = make_sealed_send_domain();
+
+        // Sequential setup: carve two non-overlapping children.
+        let (h_c1, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve child1");
+        let (h_c2, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
+        ).expect("setup: carve child2");
+
+        let pl = platform_lock.clone();
+        let d  = dom.clone();
+        let r  = receiver.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::<Domain>::send_memory(&d, h_c1, &r, Attributes::NONE)
+        });
+
+        let pl = platform_lock.clone();
+        let d  = dom.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap();
+            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c2)
+        });
+
+        let send_res   = ta.join().unwrap();
+        let revoke_res = tb.join().unwrap();
+
+        assert!(send_res.is_ok(),   "send child1 must succeed");
+        assert!(revoke_res.is_ok(), "revoke child2 must succeed");
+
+        // child1 must be frozen in dom's table.
+        assert!(dom.read().data.is_memory_handle_frozen(h_c1));
+        // receiver must have exactly 1 pending capability.
+        assert_eq!(receiver.read().data.get_pending_ids().len(), 1);
+        // root_mem has only child1 remaining (child2 was revoked from the tree;
+        // send does not detach child1 from the tree, only freezes its handle).
+        let root_mem = dom.read().data
+            .get_memory_capability(h_root)
+            .expect("root_mem in table")
+            .clone()
+            .upgrade()
+            .expect("root_mem alive");
+        assert_eq!(root_mem.read().children.len(), 1);
     });
 }
