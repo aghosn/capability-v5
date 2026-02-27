@@ -40,19 +40,20 @@ fn test_complex_memory_update_scenario() {
                 | MonitorAPI::ATTEST
         ),
     );
-    let dom1 = dom0.create_child(dom1_policy, 2).unwrap();
+    let dom0_id = dom0.read().data.id;
+    let dom1 = Capability::create_child_domain(&dom0, dom1_policy, dom0_id, 2).unwrap();
     let dom1_id = dom1.read().data.id;
     dom0.write().data.add_domain_capability(2, Arc::downgrade(&dom1));
     println!("✓ Dom1 created (ID: {})", dom1_id);
 
     // r1 = r0.carve[0x1000, 0x3000) RWX
     let r1_access = Access::new(0x1000, 0x2000, Rights::RWX); // size = 0x2000
-    let (r1, carve_updates) = r0.carve(r1_access, 3).unwrap();
+    let (r1, carve_updates) = Capability::carve_child(&r0, r1_access, 0, 3).unwrap();
     dom0.write().data.add_memory_capability(3, Arc::downgrade(&r1));
     println!("✓ Carved r1 = [0x1000, 0x3000) RWX (updates: {})", carve_updates.len());
 
     // Dom0.send(Dom1, r1)
-    let send_updates = r1.send(dom1_id, 10, Attributes::NONE).unwrap();
+    let send_updates = Capability::send_to(&r1, 0, dom1_id, Attributes::NONE).unwrap();
     dom1.write().data.add_memory_capability(10, Arc::downgrade(&r1));
     println!("✓ Sent r1 to Dom1 with handle 10 (updates: {})", send_updates.len());
 
@@ -107,14 +108,14 @@ fn test_complex_memory_update_scenario() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST),
     );
-    let dom2 = dom1.create_child(dom2_policy, 4).unwrap();
+    let dom2 = Capability::create_child_domain(&dom1, dom2_policy, dom1_id, 4).unwrap();
     let dom2_id = dom2.read().data.id;
     dom1.write().data.add_domain_capability(4, Arc::downgrade(&dom2));
     println!("✓ Dom2 created (ID: {})", dom2_id);
 
     // r2 = r1.carve[0x1000, 0x2000) RW (reduced from RWX to RW)
     let r2_access = Access::new(0x1000, 0x1000, Rights::RW); // size = 0x1000
-    let (r2, carve2_updates) = r1.carve(r2_access, 5).unwrap();
+    let (r2, carve2_updates) = Capability::carve_child(&r1, r2_access, dom1_id, 5).unwrap();
     dom1.write().data.add_memory_capability(5, Arc::downgrade(&r2));
     println!("✓ Carved r2 = [0x1000, 0x2000) RW from r1 (updates: {})", carve2_updates.len());
 
@@ -137,12 +138,12 @@ fn test_complex_memory_update_scenario() {
 
     // r3 = r2.alias[0x1000, 0x2000) RW
     let r3_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let r3 = r2.alias(r3_access, 6).unwrap();
+    let r3 = Capability::alias_child(&r2, r3_access, dom1_id, 6).unwrap();
     dom1.write().data.add_memory_capability(6, Arc::downgrade(&r3));
     println!("✓ Created r3 = [0x1000, 0x2000) RW as alias of r2");
 
     // Dom1.send(Dom2, r2)
-    let send2_updates = r2.send(dom2_id, 20, Attributes::NONE).unwrap();
+    let send2_updates = Capability::send_to(&r2, dom1_id, dom2_id, Attributes::NONE).unwrap();
     dom2.write().data.add_memory_capability(20, Arc::downgrade(&r2));
     println!("✓ Sent r2 to Dom2 with handle 20 (updates: {})", send2_updates.len());
 
@@ -163,7 +164,7 @@ fn test_complex_memory_update_scenario() {
     println!("\n=== Test Case 4: Revoke r3 from r2 ===");
 
     // Dom1.revoke(r2, r3)
-    let revoke1_updates = r2.revoke_ref(&r3).unwrap();
+    let revoke1_updates = Capability::revoke_child_ref(&r2, &r3).unwrap();
     println!("✓ Revoked r3 from r2 (updates: {})", revoke1_updates.len());
 
     // Assert this does not modify Dom1 access to memory
@@ -177,7 +178,7 @@ fn test_complex_memory_update_scenario() {
     println!("\n=== Test Case 5: Revoke r2 from r1 ===");
 
     // Dom1.revoke(r1, r2)
-    let revoke2_updates = r1.revoke_ref(&r2).unwrap();
+    let revoke2_updates = Capability::revoke_child_ref(&r1, &r2).unwrap();
     println!("✓ Revoked r2 from r1 (updates: {})", revoke2_updates.len());
 
     // Assert Dom1 now has RWX on [0x1000, 0x2000)
@@ -200,7 +201,7 @@ fn test_complex_memory_update_scenario() {
     println!("\n=== Test Case 6: Revoke Dom1 from Dom0 ===");
 
     // Dom0.revoke(Dom1)
-    let revoke_dom1_updates = dom0.revoke_child(2).unwrap();
+    let revoke_dom1_updates = Capability::revoke_child_domain(&dom0, 2).unwrap();
     println!("✓ Revoked Dom1 from Dom0 (updates: {})", revoke_dom1_updates.len());
 
     // Assert that Dom1 and Dom2 are revoked

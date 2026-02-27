@@ -334,14 +334,14 @@ fn concurrent_sends() {
         let ca = child_a.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&ca, 0, 10, 100, Attributes::NONE)
+            Capability::send_to(&ca, 0, 10, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let cb = child_b.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&cb, 0, 20, 200, Attributes::NONE)
+            Capability::send_to(&cb, 0, 20, Attributes::NONE)
         });
 
         let res_a = ta.join().unwrap();
@@ -379,7 +379,7 @@ fn send_vs_carve_same_parent() {
         let c = child.clone();
         let sender = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&c, 0, 10, 100, Attributes::NONE)
+            Capability::send_to(&c, 0, 10, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
@@ -618,14 +618,14 @@ fn double_send_same_capability() {
         let c = child.clone();
         let sender_b = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&c, 0, 10, 100, Attributes::NONE)
+            Capability::send_to(&c, 0, 10, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let c = child.clone();
         let sender_c = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::send_to(&c, 0, 20, 200, Attributes::NONE)
+            Capability::send_to(&c, 0, 20, Attributes::NONE)
         });
 
         let res_b = sender_b.join().unwrap();
@@ -691,7 +691,7 @@ fn revoke_after_send() {
         // Send child to domain 99.
         {
             let _guard = platform_lock.read().unwrap();
-            Capability::send_to(&child, 0, 99, 50, Attributes::NONE).unwrap();
+            Capability::send_to(&child, 0, 99, Attributes::NONE).unwrap();
         }
         assert_eq!(child.read().owned.owner, 99);
 
@@ -917,7 +917,347 @@ fn domain_revoke_vs_creation() {
 
         // Final state: parent has exactly child 2; child 1 is revoked.
         assert_eq!(parent.read().children.len(), 1);
-        assert_eq!(parent.read().children[0].read().owned.handle, 2);
+        assert_eq!(parent.read().children[0].read().sub_handle, 2);
         assert_eq!(child1.read().data.status, DomainStatus::Revoked);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §7.7 — Send / accept / reject / revoke pending capability races
+//
+// The following five cases verify that the freeze model is race-free:
+//  7a. loom_double_send_frozen       — concurrent sends for the same handle
+//  7b. loom_accept_vs_accept         — two threads both accept the same pending
+//  7c. loom_accept_vs_reject         — accept races with reject for same pending
+//  7d. loom_revoke_vs_accept         — parent revokes memory cap vs accept
+//  7e. loom_revoke_domain_vs_accept  — sender domain revoked vs accept
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Helper: create a sealed domain (unique ID, all permissions).
+fn make_sealed_send_domain() -> capability_engine::CapabilityRef<Domain> {
+    let mut domain = Domain::new(DomainPolicy::new_root(1));
+    domain.seal().ok();
+    Capability::new_root(0, 0, domain)
+}
+
+/// Helper: create a root memory cap owned by `domain` and register it at `h`.
+fn register_mem_send(
+    domain: &capability_engine::CapabilityRef<Domain>,
+    h: capability_engine::LocalHandle,
+) -> capability_engine::CapabilityRef<MemoryRegion> {
+    let owner_id = domain.read().data.id;
+    let cap = Capability::new_root(owner_id, h, capability_engine::MemoryRegion::new_root(0x0, 0x1000));
+    // Use std::sync::Arc::downgrade because `Arc` in this module refers to loom::sync::Arc.
+    let weak = std::sync::Arc::downgrade(&cap);
+    domain.write().data.add_memory_capability(h, weak);
+    cap
+}
+
+// ── Case 7a — Concurrent sends for the same handle (double-send race) ────────
+//
+// | Thread A (shared lock)              | Thread B (shared lock)              |
+// |-------------------------------------|-------------------------------------|
+// | send_memory(sender, 1, recv1, …)    | send_memory(sender, 1, recv2, …)    |
+//
+// Setup: sender domain has a memory cap at handle 1 (not yet frozen).
+// Both threads try to freeze the same handle simultaneously.
+//
+// The atomic re-check under write lock in send_memory ensures exactly one
+// thread wins the freeze; the other receives PermissionDenied.
+//
+// Valid outcomes (all schedules):
+// - A wins: A succeeds, B gets PermissionDenied. recv1 has 1 pending, recv2 has 0.
+// - B wins: B succeeds, A gets PermissionDenied. recv2 has 1 pending, recv1 has 0.
+#[test]
+fn loom_double_send_frozen() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        let sender = make_sealed_send_domain();
+        let recv1  = make_sealed_send_domain();
+        let recv2  = make_sealed_send_domain();
+        let _cap   = register_mem_send(&sender, 1);
+
+        let pl = platform_lock.clone();
+        let s  = sender.clone();
+        let r  = recv1.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::send_memory(&s, 1, &r, capability_engine::Attributes::NONE)
+        });
+
+        let pl = platform_lock.clone();
+        let s  = sender.clone();
+        let r  = recv2.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::send_memory(&s, 1, &r, capability_engine::Attributes::NONE)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        // Exactly one send must succeed.
+        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one send must succeed");
+
+        // Total pending entries across both receivers must be exactly 1.
+        let total_pending = recv1.read().data.get_pending_ids().len()
+            + recv2.read().data.get_pending_ids().len();
+        assert_eq!(total_pending, 1, "exactly one pending entry must exist");
+
+        // The handle must be frozen in sender's domain.
+        assert!(sender.read().data.is_memory_handle_frozen(1));
+    });
+}
+
+// ── Case 7b — Two threads both try to accept the same pending entry ───────────
+//
+// | Thread A (shared lock)              | Thread B (shared lock)              |
+// |-------------------------------------|-------------------------------------|
+// | accept_memory(receiver, pending_id) | accept_memory(receiver, pending_id) |
+//
+// Setup: sender has already sent cap to receiver; one pending entry exists.
+// Both threads race to accept the same pending_id.
+//
+// Valid outcomes (all schedules):
+// - A first: A gets (handle, updates). B gets NotFound.
+// - B first: B gets (handle, updates). A gets NotFound.
+// In both cases, exactly one LocalHandle is allocated in receiver's table.
+#[test]
+fn loom_accept_vs_accept() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        let sender   = make_sealed_send_domain();
+        let receiver = make_sealed_send_domain();
+        let _cap     = register_mem_send(&sender, 1);
+
+        // Pre-send (sequential, before threads) so both threads see a pending entry.
+        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+            .unwrap();
+        let pending_ids = receiver.read().data.get_pending_ids();
+        assert_eq!(pending_ids.len(), 1);
+        let pid = pending_ids[0];
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        // Exactly one accept must succeed.
+        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one accept must succeed");
+
+        // Exactly one handle allocated in receiver's table.
+        assert_eq!(receiver.read().data.memory_capability_handles().len(), 1);
+
+        // Pending queue must be empty.
+        assert!(receiver.read().data.get_pending_ids().is_empty());
+    });
+}
+
+// ── Case 7c — Accept races with reject for the same pending entry ─────────────
+//
+// | Thread A (shared lock)              | Thread B (shared lock)              |
+// |-------------------------------------|-------------------------------------|
+// | accept_memory(receiver, pending_id) | reject_memory(receiver, pending_id) |
+//
+// Setup: one pending entry exists in receiver.
+//
+// Valid outcomes (all schedules):
+// - A first: accept succeeds → receiver has 1 handle; reject gets NotFound.
+//   Sender's handle was already removed (accept cleaned it up).
+// - B first: reject succeeds → sender's handle is unfrozen; accept gets NotFound.
+//   Receiver has no handles.
+#[test]
+fn loom_accept_vs_reject() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        let sender   = make_sealed_send_domain();
+        let receiver = make_sealed_send_domain();
+        let _cap     = register_mem_send(&sender, 1);
+
+        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+            .unwrap();
+        let pid = receiver.read().data.get_pending_ids()[0];
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let acceptor = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let rejector = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::reject_memory(&r, pid)
+        });
+
+        let accept_res = acceptor.join().unwrap();
+        let reject_res = rejector.join().unwrap();
+
+        // Exactly one must succeed.
+        let successes = [accept_res.is_ok(), reject_res.is_ok()]
+            .iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one of accept/reject must succeed");
+
+        // Pending queue must be empty regardless of outcome.
+        assert!(receiver.read().data.get_pending_ids().is_empty());
+
+        if accept_res.is_ok() {
+            // Accept-first: receiver owns the cap.
+            assert_eq!(receiver.read().data.memory_capability_handles().len(), 1);
+            // Sender's handle was removed (not just unfrozen).
+            assert!(sender.read().data.get_memory_capability(1).is_none());
+        } else {
+            // Reject-first: cap returned to sender (unfrozen).
+            assert_eq!(receiver.read().data.memory_capability_handles().len(), 0);
+            assert!(!sender.read().data.is_memory_handle_frozen(1));
+            assert!(sender.read().data.get_memory_capability(1).is_some());
+        }
+    });
+}
+
+// ── Case 7d — Parent revokes memory cap while receiver tries to accept ────────
+//
+// | Thread A (exclusive lock)                    | Thread B (shared lock)              |
+// |----------------------------------------------|-------------------------------------|
+// | revoke_memory_child(caller, parent_h, c_sub) | accept_memory(receiver, pending_id) |
+//
+// Setup: sender has root cap (handle 1) and a carved child (handle 2, sub 2).
+// The child has been sent to receiver (handle 2 frozen, pending exists).
+// Thread A revokes the child (removes it from the tree → Arc strong count → 0).
+// Thread B accepts the pending child.
+//
+// Valid outcomes (all schedules):
+// - A then B: child Arc is dead → accept returns NotFound.
+// - B then A: accept transfers the child to receiver; revoke finds child in
+//   parent.children and proceeds (revokes the now-receiver-owned child).
+//   Both operations succeed (revoke_child does not check current owner).
+#[test]
+fn loom_revoke_vs_accept() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        let sender   = make_sealed_send_domain();
+        let receiver = make_sealed_send_domain();
+
+        // Register root cap at handle 1.
+        let _root = register_mem_send(&sender, 1);
+
+        // Carve a child [0, 0x100) — allocates handle 2, sub_handle = 2.
+        let (child_h, _) = Capability::<Domain>::carve_memory(
+            &sender,
+            1,
+            Access::new(0x0, 0x100, Rights::RW),
+        ).unwrap();
+
+        // Send the child to receiver.
+        Capability::<Domain>::send_memory(&sender, child_h, &receiver, capability_engine::Attributes::NONE)
+            .unwrap();
+        let pid = receiver.read().data.get_pending_ids()[0];
+
+        let pl = platform_lock.clone();
+        let s  = sender.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive
+            Capability::<Domain>::revoke_memory_child(&s, 1, child_h)
+        });
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let acceptor = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let revoke_res  = revoker.join().unwrap();
+        let accept_res  = acceptor.join().unwrap();
+
+        if accept_res.is_ok() {
+            // Accept-first: both succeed (revoke finds child still in parent.children).
+            assert!(revoke_res.is_ok(), "revoke must succeed after accept");
+        } else {
+            // Revoke-first: accept gets NotFound (Arc is dead).
+            assert!(revoke_res.is_ok(), "revoke must succeed");
+            assert!(matches!(accept_res, Err(CapaError::NotFound)));
+        }
+
+        // Pending queue must be empty.
+        assert!(receiver.read().data.get_pending_ids().is_empty());
+    });
+}
+
+// ── Case 7e — Sender domain revoked while receiver tries to accept ────────────
+//
+// | Thread A (exclusive lock)           | Thread B (shared lock)              |
+// |-------------------------------------|-------------------------------------|
+// | sender.write().data.revoke()        | accept_memory(receiver, pending_id) |
+//
+// Setup: sender has sent a memory cap to receiver (pending exists, handle frozen).
+// Thread A simulates domain revocation by marking the sender as Revoked.
+// Thread B tries to accept.
+//
+// Valid outcomes (all schedules):
+// - A then B: sender.is_revoked() → accept returns PermissionDenied; pending cleared.
+// - B then A: accept completes before revocation; receiver owns the cap.
+//   Revocation then runs (no interaction with the already-transferred cap).
+#[test]
+fn loom_revoke_domain_vs_accept() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        let sender   = make_sealed_send_domain();
+        let receiver = make_sealed_send_domain();
+        let _cap     = register_mem_send(&sender, 1);
+
+        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+            .unwrap();
+        let pid = receiver.read().data.get_pending_ids()[0];
+
+        let pl = platform_lock.clone();
+        let s  = sender.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive (simulates domain revocation)
+            s.write().data.revoke();
+        });
+
+        let pl = platform_lock.clone();
+        let r  = receiver.clone();
+        let acceptor = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        revoker.join().unwrap();
+        let accept_res = acceptor.join().unwrap();
+
+        // Pending queue must be empty regardless of outcome.
+        assert!(receiver.read().data.get_pending_ids().is_empty());
+
+        if accept_res.is_ok() {
+            // Accept-first: receiver owns the cap.
+            assert_eq!(receiver.read().data.memory_capability_handles().len(), 1);
+        } else {
+            // Revoke-first: accept rejected.
+            assert!(matches!(accept_res, Err(CapaError::PermissionDenied)));
+            assert_eq!(receiver.read().data.memory_capability_handles().len(), 0);
+        }
     });
 }

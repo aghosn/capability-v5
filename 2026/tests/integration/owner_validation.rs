@@ -13,7 +13,8 @@ fn setup_domain_with_memory(
     let mut domain = Domain::new(DomainPolicy::new_restricted(0b1111, api));
     domain.seal().unwrap();
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
-        owned: Ownership::new(0, 0),
+        owned: Ownership::new(0),
+        sub_handle: 0,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -21,10 +22,11 @@ fn setup_domain_with_memory(
 
     // Create a memory capability owned by this domain
     let region = MemoryRegion::new_root(0x0, 0x10000);
-    let mut ownership = Ownership::new(domain_capa.read().data.id, 1);
+    let mut ownership = Ownership::new(domain_capa.read().data.id);
     ownership.set_owner_domain(Arc::downgrade(&domain_capa));
     let mem_capa: CapabilityRef<MemoryRegion> = Arc::new(RwLock::new(Capability {
         owned: ownership,
+        sub_handle: 0,
         data: region,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -38,17 +40,19 @@ fn setup_unsealed_domain_with_memory() -> (CapabilityRef<Domain>, CapabilityRef<
     let domain = Domain::new(DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // Domain is NOT sealed
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
-        owned: Ownership::new(0, 0),
+        owned: Ownership::new(0),
+        sub_handle: 0,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
     }));
 
     let region = MemoryRegion::new_root(0x0, 0x10000);
-    let mut ownership = Ownership::new(domain_capa.read().data.id, 1);
+    let mut ownership = Ownership::new(domain_capa.read().data.id);
     ownership.set_owner_domain(Arc::downgrade(&domain_capa));
     let mem_capa: CapabilityRef<MemoryRegion> = Arc::new(RwLock::new(Capability {
         owned: ownership,
+        sub_handle: 0,
         data: region,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -79,7 +83,7 @@ fn test_unsealed_domain_cannot_carve() {
 fn test_unsealed_domain_cannot_send() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let caller = mem.read().owned.owner;
-    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -134,7 +138,7 @@ fn test_api_no_send_permission() {
     let api = MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::SEND);
     let (_dom, mem) = setup_domain_with_memory(api);
     let caller = mem.read().owned.owner;
-    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
 }
 
@@ -157,7 +161,8 @@ fn test_api_no_create_permission_for_domain() {
     let mut domain = Domain::new(DomainPolicy::new_restricted(0b1111, api));
     domain.seal().unwrap();
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
-        owned: Ownership::new(0, 0),
+        owned: Ownership::new(0),
+        sub_handle: 0,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -165,10 +170,11 @@ fn test_api_no_create_permission_for_domain() {
 
     // Create a domain capability owned by this domain
     let parent_domain = Domain::new_root(4);
-    let mut ownership = Ownership::new(domain_capa.read().data.id, 1);
+    let mut ownership = Ownership::new(domain_capa.read().data.id);
     ownership.set_owner_domain(Arc::downgrade(&domain_capa));
     let parent_dom_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
         owned: ownership,
+        sub_handle: 0,
         data: parent_domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -203,7 +209,7 @@ fn test_sealed_domain_with_carve_permission_can_carve() {
 fn test_sealed_domain_with_send_permission_can_send() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
     let caller = mem.read().owned.owner;
-    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(result.is_ok());
 }
 
@@ -248,7 +254,7 @@ fn test_revoked_domain_cannot_send() {
     let caller = mem.read().owned.owner;
     drop(dom);
 
-    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::PermissionDenied)));
 }
 
@@ -259,7 +265,7 @@ fn test_send_clears_owner_domain() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
     let caller = mem.read().owned.owner;
     // After send, the owner_domain should be cleared
-    Capability::send_to(&mem, caller, 99, 10, Attributes::NONE).unwrap();
+    Capability::send_to(&mem, caller, 99, Attributes::NONE).unwrap();
     assert!(mem.read().owned.owner_domain.is_none());
 }
 
@@ -269,7 +275,7 @@ fn test_send_clears_owner_domain() {
 fn test_extension_trait_alias_validates() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = mem.alias(access, 10);
+    let result = Capability::alias_child(&mem, access, 1, 10);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -277,14 +283,15 @@ fn test_extension_trait_alias_validates() {
 fn test_extension_trait_carve_validates() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = mem.carve(access, 10);
+    let result = Capability::carve_child(&mem, access, 1, 10);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
 #[test]
 fn test_extension_trait_send_validates() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
-    let result = mem.send(99, 10, Attributes::NONE);
+    let caller = mem.read().owned.owner;
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -315,6 +322,6 @@ fn test_only_send_permission_suffices() {
     let api = MonitorAPI::from_bits(MonitorAPI::SEND);
     let (_dom, mem) = setup_domain_with_memory(api);
     let caller = mem.read().owned.owner;
-    let result = Capability::send_to(&mem, caller, 99, 10, Attributes::NONE);
+    let result = Capability::send_to(&mem, caller, 99, Attributes::NONE);
     assert!(result.is_ok());
 }

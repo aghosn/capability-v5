@@ -36,7 +36,8 @@ fn main() {
         child_api,
     );
 
-    let child = root.create_child(child_policy, 2).unwrap();
+    let root_id = root.read().data.id;
+    let child = Capability::create_child_domain(&root, child_policy, root_id, 2).unwrap();
     let child_id = child.read().data.id;
     println!("✓ Created child domain (ID: {})", child_id);
     println!("  • Cores: 0b{:04b}", child.read().data.policy.cores);
@@ -54,7 +55,7 @@ fn main() {
     // Carve exclusive memory for child (1 MB at 0x100000)
     println!("Creating EXCLUSIVE memory for child...");
     let exclusive_access = Access::new(0x100000, 0x100000, Rights::RWX);
-    let (exclusive_mem, carve_updates) = mem_root.carve(exclusive_access, 3).unwrap();
+    let (exclusive_mem, carve_updates) = Capability::carve_child(&mem_root, exclusive_access, 0, 3).unwrap();
     println!("✓ Carved exclusive memory: {}", exclusive_mem.read().data.access);
     println!("  • Kind: {:?}", exclusive_mem.read().data.kind);
     println!("  • Updates generated: {}", carve_updates.len());
@@ -65,7 +66,7 @@ fn main() {
     // Create aliased (shared) memory for child (512 KB at 0x200000)
     println!("\nCreating SHARED memory for child...");
     let shared_access = Access::new(0x200000, 0x80000, Rights::RW);
-    let shared_mem = mem_root.alias(shared_access, 4).unwrap();
+    let shared_mem = Capability::alias_child(&mem_root, shared_access, 0, 4).unwrap();
     println!("✓ Aliased shared memory: {}", shared_mem.read().data.access);
     println!("  • Kind: {:?}", shared_mem.read().data.kind);
     println!("  • Parent retains access (aliased, not carved)");
@@ -81,7 +82,7 @@ fn main() {
 
     // Send exclusive memory to child (with CLEAN attribute)
     let clean_attrs = Attributes::from_bits(Attributes::CLEAN);
-    let send1_updates = exclusive_mem.send(child_id, 10, clean_attrs).unwrap();
+    let send1_updates = Capability::send_to(&exclusive_mem, 0, child_id, clean_attrs).unwrap();
     println!("✓ Sent exclusive memory to child");
     println!("  • Child handle: 10");
     println!("  • Attributes: CLEAN (will be zeroed on revoke)");
@@ -94,7 +95,7 @@ fn main() {
     child.write().data.add_memory_capability(10, Arc::downgrade(&exclusive_mem));
 
     // Send shared memory to child (no special attributes)
-    let send2_updates = shared_mem.send(child_id, 11, Attributes::NONE).unwrap();
+    let send2_updates = Capability::send_to(&shared_mem, 0, child_id, Attributes::NONE).unwrap();
     println!("\n✓ Sent shared memory to child");
     println!("  • Child handle: 11");
     println!("  • Updates generated: {}", send2_updates.len());
@@ -207,7 +208,7 @@ fn main() {
 
     // Revoke exclusive memory capability first
     println!("\nRevoking exclusive memory from child...");
-    let revoke1_updates = mem_root.revoke_ref(&exclusive_mem).unwrap();
+    let revoke1_updates = Capability::revoke_child_ref(&mem_root, &exclusive_mem).unwrap();
     println!("✓ Revoked exclusive memory");
     println!("  • Updates generated: {}", revoke1_updates.len());
     println!("  • Parent regains access to [0x100000..0x200000)");
@@ -217,7 +218,7 @@ fn main() {
 
     // Revoke shared memory capability
     println!("\nRevoking shared memory from child...");
-    let revoke2_updates = mem_root.revoke_ref(&shared_mem).unwrap();
+    let revoke2_updates = Capability::revoke_child_ref(&mem_root, &shared_mem).unwrap();
     println!("✓ Revoked shared memory");
     println!("  • Updates generated: {}", revoke2_updates.len());
     for (i, update) in revoke2_updates.updates().iter().enumerate() {
@@ -226,7 +227,7 @@ fn main() {
 
     // Revoke the child domain itself
     println!("\nRevoking child domain...");
-    let revoke_domain_updates = root.revoke_child(2).unwrap();
+    let revoke_domain_updates = Capability::revoke_child_domain(&root, 2).unwrap();
     println!("✓ Revoked child domain");
     println!("  • Updates generated: {}", revoke_domain_updates.len());
     for (i, update) in revoke_domain_updates.updates().iter().enumerate() {

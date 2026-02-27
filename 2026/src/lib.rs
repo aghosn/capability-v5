@@ -30,7 +30,7 @@ pub mod update;
 pub mod view;
 
 pub use attest::{attest_domain, attest_memory_region, enumerate_domain_tree, AttestationReport};
-pub use capability::{Capability, CapabilityRef, CapabilityWeak, DomainCapabilityExt, LocalHandle, MemoryCapabilityExt, Ownership};
+pub use capability::{Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership, SubHandle};
 pub use domain::{
     Domain, DomainPolicy, DomainStatus, InterruptPolicy, InterruptVisibility, MonitorAPI,
     VProcessorState, VectorPolicy,

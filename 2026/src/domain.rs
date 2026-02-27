@@ -3,7 +3,7 @@
 use crate::error::{CapaError, Result};
 use crate::capability::{CapabilityWeak, LocalHandle};
 use crate::memory::MemoryRegion;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -230,7 +230,6 @@ pub struct DomainPolicy {
 impl DomainPolicy {
     /// Create a default policy with all permissions
     pub fn new_root(num_cores: usize) -> Self {
-        // Create a bitmask for the specified number of cores
         let cores = if num_cores >= 64 {
             u64::MAX
         } else {
@@ -239,7 +238,7 @@ impl DomainPolicy {
 
         DomainPolicy {
             cores,
-            api: MonitorAPI::ALL, // ALL includes RECEIVE_AFTER_SEAL
+            api: MonitorAPI::ALL,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
             vprocessor_states: Vec::new(),
         }
@@ -249,7 +248,7 @@ impl DomainPolicy {
     pub fn new_restricted(cores: u64, api: MonitorAPI) -> Self {
         DomainPolicy {
             cores,
-            api, // Use provided API (caller must explicitly add RECEIVE_AFTER_SEAL if needed)
+            api,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
             vprocessor_states: Vec::new(),
         }
@@ -262,12 +261,10 @@ impl DomainPolicy {
 
     /// Check if this policy is a subset of another (for monotonicity)
     pub fn is_subset_of(&self, parent: &DomainPolicy) -> Result<()> {
-        // Cores must be subset
         if (self.cores & !parent.cores) != 0 {
             return Err(CapaError::MonotonicityViolation);
         }
 
-        // API must be subset
         if !self.api.is_subset_of(&parent.api) {
             return Err(CapaError::MonotonicityViolation);
         }
@@ -281,11 +278,17 @@ impl DomainPolicy {
     }
 }
 
-/// Pending capability waiting to be accepted by a sealed domain
-#[derive(Debug, Clone)]
-pub enum PendingCapability {
-    Memory(CapabilityWeak<MemoryRegion>),
-    Domain(CapabilityWeak<Domain>),
+/// A memory capability that has been sent but not yet accepted by the receiver.
+/// Domain capabilities are not sendable.
+#[derive(Debug)]
+pub struct PendingCapability {
+    pub cap: CapabilityWeak<MemoryRegion>,
+    /// Sender's domain ID (for UpdateBatch generation at accept time)
+    pub sender_domain_id: crate::update::DomainId,
+    /// Sender's LocalHandle for this cap (to unfreeze on reject, or remove on accept)
+    pub sender_handle: LocalHandle,
+    /// Weak ref to sender's domain (to unfreeze on reject)
+    pub sender_domain: CapabilityWeak<Domain>,
 }
 
 /// Domain capability data
@@ -307,8 +310,10 @@ pub struct Domain {
     pub domain_capabilities: BTreeMap<LocalHandle, CapabilityWeak<Domain>>,
 
     /// Pending capabilities that have been sent but not yet accepted (sealed domains only)
-    /// Maps a temporary pending ID to the capability
     pub pending_capabilities: BTreeMap<u64, PendingCapability>,
+
+    /// Handles that have been frozen (sent but not yet accepted/rejected)
+    pub frozen_handles: BTreeSet<LocalHandle>,
 
     /// Next pending capability ID
     next_pending_id: u64,
@@ -324,6 +329,7 @@ impl Domain {
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
+            frozen_handles: BTreeSet::new(),
             next_pending_id: 0,
         }
     }
@@ -337,6 +343,7 @@ impl Domain {
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
+            frozen_handles: BTreeSet::new(),
             next_pending_id: 0,
         }
     }
@@ -407,9 +414,8 @@ impl Domain {
 
     /// Allocate the next available handle for a memory capability
     pub fn allocate_memory_handle(&self) -> LocalHandle {
-        // Find the first unused handle starting from 1
         let mut handle: LocalHandle = 1;
-        while self.memory_capabilities.contains_key(&handle) {
+        while self.memory_capabilities.contains_key(&handle) || self.frozen_handles.contains(&handle) {
             handle += 1;
         }
         handle
@@ -417,12 +423,31 @@ impl Domain {
 
     /// Allocate the next available handle for a domain capability
     pub fn allocate_domain_handle(&self) -> LocalHandle {
-        // Find the first unused handle starting from 1
         let mut handle: LocalHandle = 1;
         while self.domain_capabilities.contains_key(&handle) {
             handle += 1;
         }
         handle
+    }
+
+    /// Freeze a memory handle (mark as sent but not yet accepted)
+    pub fn freeze_memory_handle(&mut self, handle: LocalHandle) {
+        self.frozen_handles.insert(handle);
+    }
+
+    /// Unfreeze a memory handle
+    pub fn unfreeze_memory_handle(&mut self, handle: LocalHandle) -> bool {
+        self.frozen_handles.remove(&handle)
+    }
+
+    /// Check if a memory handle is frozen
+    pub fn is_memory_handle_frozen(&self, handle: LocalHandle) -> bool {
+        self.frozen_handles.contains(&handle)
+    }
+
+    /// Check if a domain handle is frozen (currently always false — domain caps not sendable)
+    pub fn is_domain_handle_frozen(&self, _handle: LocalHandle) -> bool {
+        false
     }
 
     /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)
@@ -439,29 +464,9 @@ impl Domain {
         self.pending_capabilities.keys().copied().collect()
     }
 
-    /// Accept a pending capability and activate it with the given handle
-    /// Returns the activated capability
-    pub fn accept_pending_capability(
-        &mut self,
-        pending_id: u64,
-        handle: LocalHandle,
-    ) -> Result<PendingCapability> {
-        let capability = self
-            .pending_capabilities
-            .remove(&pending_id)
-            .ok_or(CapaError::NotFound)?;
-
-        // Add to the appropriate active capability map
-        match &capability {
-            PendingCapability::Memory(weak_ref) => {
-                self.memory_capabilities.insert(handle, weak_ref.clone());
-            }
-            PendingCapability::Domain(weak_ref) => {
-                self.domain_capabilities.insert(handle, weak_ref.clone());
-            }
-        }
-
-        Ok(capability)
+    /// Take a pending capability (remove and return it)
+    pub fn take_pending_capability(&mut self, pending_id: u64) -> Option<PendingCapability> {
+        self.pending_capabilities.remove(&pending_id)
     }
 
     /// Reject (discard) a pending capability without activating it
@@ -470,10 +475,4 @@ impl Domain {
             .remove(&pending_id)
             .ok_or(CapaError::NotFound)
     }
-
-    /// Get a pending capability by ID (for inspection)
-    pub fn get_pending_capability(&self, pending_id: u64) -> Option<&PendingCapability> {
-        self.pending_capabilities.get(&pending_id)
-    }
 }
-

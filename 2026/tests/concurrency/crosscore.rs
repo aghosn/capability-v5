@@ -298,7 +298,7 @@ fn test_crosscore_send_triggers_ipi() {
 
     // Send to receiver (should trigger cross-core path)
     let result = execute(&*platform, false, move || {
-        Capability::send_to(&child_mem, SENDER_ID, RECEIVER_ID, 2, Attributes::NONE)
+        Capability::send_to(&child_mem, SENDER_ID, RECEIVER_ID, Attributes::NONE)
             .map(|updates| ((), updates))
     });
 
@@ -390,7 +390,7 @@ fn test_barrier_calls_during_crosscore_operation() {
     let (child, _) = Capability::carve_child(&mem, access, SENDER_ID, 1).unwrap();
 
     let result = execute(&*platform, false, || {
-        Capability::send_to(&child, SENDER_ID, RECEIVER_ID, 2, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child, SENDER_ID, RECEIVER_ID, Attributes::NONE).map(|updates| ((), updates))
     });
 
     assert!(result.is_ok(), "Cross-core operation should succeed");
@@ -488,13 +488,13 @@ fn test_multiple_cores_affected_by_single_operation() {
 
     // Send to receiver 1
     execute(&*platform, false, || {
-        Capability::send_to(&child1, SENDER_ID, RECEIVER1_ID, 2, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child1, SENDER_ID, RECEIVER1_ID, Attributes::NONE).map(|updates| ((), updates))
     })
     .unwrap();
 
     // Now send from receiver1 to receiver2 (affects both receiver cores)
     let result = execute(&*platform, false, || {
-        Capability::send_to(&child1, RECEIVER1_ID, RECEIVER2_ID, 3, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child1, RECEIVER1_ID, RECEIVER2_ID, Attributes::NONE).map(|updates| ((), updates))
     });
 
     assert!(result.is_ok(), "Multi-receiver send should succeed");

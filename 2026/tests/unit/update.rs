@@ -189,7 +189,7 @@ fn test_send_generates_updates() {
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
 
-    let updates = Capability::send_to(&child, 0, 5, 10, Attributes::NONE).unwrap();
+    let updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
 
     // Should only have map (no unmap) because parent still owns overlapping capability
     assert_eq!(updates.len(), 1);

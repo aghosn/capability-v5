@@ -9,10 +9,10 @@ fn test_revoke_carved_child_never_sent() {
     let parent = Capability::new_root(0, 0, region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = parent.carve(child_access, 1).unwrap();
+    let (_child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
 
     // Revoke the child
-    let updates = parent.revoke(1).unwrap();
+    let updates = Capability::revoke_child(&parent, 1).unwrap();
 
     // Since child was never sent (owner == parent owner), no updates needed
     // Parent never lost access in the first place
@@ -26,13 +26,13 @@ fn test_revoke_carved_child_after_send() {
     let parent = Capability::new_root(0, 0, region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = parent.carve(child_access, 1).unwrap();
+    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
 
     // Send child to domain 5 (changes ownership and handle)
-    let _send_updates = child.send(5, 10, Attributes::NONE).unwrap();
+    let _send_updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
 
     // Now revoke the child using Arc reference (not handle, since handle changed)
-    let revoke_updates = parent.revoke_ref(&child).unwrap();
+    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
 
     // Should have 2 updates:
     // 1. Unmap from child's domain (5)
@@ -63,13 +63,13 @@ fn test_revoke_aliased_child_no_remapping() {
     let parent = Capability::new_root(0, 0, region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let child = parent.alias(child_access, 1).unwrap();
+    let child = Capability::alias_child(&parent, child_access, 0, 1).unwrap();
 
     // Send child to domain 5 (changes ownership and handle)
-    let _send_updates = child.send(5, 10, Attributes::NONE).unwrap();
+    let _send_updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
 
     // Revoke the child using Arc reference
-    let revoke_updates = parent.revoke_ref(&child).unwrap();
+    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
 
     // Aliased children should NOT cause remapping to parent
     // Because aliases don't remove access from parent
@@ -90,14 +90,14 @@ fn test_revoke_with_clean_and_remap() {
     let parent = Capability::new_root(0, 0, region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = parent.carve(child_access, 1).unwrap();
+    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
 
     // Send with CLEAN attribute
     let attrs = Attributes::from_bits(Attributes::CLEAN);
-    let _send_updates = child.send(5, 10, attrs).unwrap();
+    let _send_updates = Capability::send_to(&child, 0, 5, attrs).unwrap();
 
     // Revoke using Arc reference
-    let revoke_updates = parent.revoke_ref(&child).unwrap();
+    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
 
     // Should have 3 updates:
     // 1. Zero memory (CLEAN attribute)
@@ -135,21 +135,21 @@ fn test_nested_carve_revoke() {
 
     // Parent (domain 0) carves child1
     let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
-    let (child1, _) = parent.carve(c1_access, 1).unwrap();
+    let (child1, _) = Capability::carve_child(&parent, c1_access, 0, 1).unwrap();
 
     // Send child1 to domain 5
-    let _send1 = child1.send(5, 1, Attributes::NONE).unwrap();
+    let _send1 = Capability::send_to(&child1, 0, 5, Attributes::NONE).unwrap();
 
     // Child1 (now owned by domain 5) carves child2
     let c2_access = Access::new(0x3000, 0x1000, Rights::R);
-    let (child2, _) = child1.carve(c2_access, 2).unwrap();
+    let (child2, _) = Capability::carve_child(&child1, c2_access, 5, 2).unwrap();
 
     // Send child2 to domain 10
-    let _send2 = child2.send(10, 1, Attributes::NONE).unwrap();
+    let _send2 = Capability::send_to(&child2, 5, 10, Attributes::NONE).unwrap();
 
     // Now revoke child1 from parent
     // This should revoke the entire subtree including child2
-    let revoke_updates = parent.revoke(1).unwrap();
+    let revoke_updates = Capability::revoke_child(&parent, 1).unwrap();
 
     // Should have updates for:
     // - Unmapping child2 from domain 10
@@ -176,13 +176,13 @@ fn test_revoke_preserves_parent_rights() {
     let parent = Capability::new_root(0, 0, region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::R);
-    let (child, _) = parent.carve(child_access, 1).unwrap();
+    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
 
     // Send to domain 5
-    let _send = child.send(5, 10, Attributes::NONE).unwrap();
+    let _send = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
 
     // Revoke using Arc reference
-    let revoke_updates = parent.revoke_ref(&child).unwrap();
+    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
 
     let updates_list = revoke_updates.updates();
 
