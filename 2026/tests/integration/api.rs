@@ -103,6 +103,8 @@ fn test_revoke_domain() {
 
     assert!(!updates.is_empty()); // domain revocation always produces updates
     assert!(child.read().data.is_revoked()); // child domain is now revoked
+    // LocalHandle must be reclaimed — the slot should be gone from the table
+    assert!(!root.read().data.domain_capabilities.contains_key(&child_h));
 }
 
 // ==================== Migrated from unit/capability.rs ====================

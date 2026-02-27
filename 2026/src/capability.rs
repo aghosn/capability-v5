@@ -997,7 +997,11 @@ impl Capability<Domain> {
             .clone();
         let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
         let child_sub = child_ref.read().sub_handle;
-        Capability::revoke_child_domain(caller, child_sub)
+        let updates = Capability::revoke_child_domain(caller, child_sub)?;
+        // Remove the now-revoked child from caller's domain table so the
+        // LocalHandle is reclaimed by allocate_domain_handle.
+        caller.write().data.remove_domain_capability(child_handle);
+        Ok(updates)
     }
 }
 
