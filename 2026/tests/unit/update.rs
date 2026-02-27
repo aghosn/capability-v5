@@ -175,7 +175,7 @@ fn test_carve_generates_updates() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, updates) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (_child, updates) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     // Carve with same owner generates NO updates
     assert!(updates.is_empty());
@@ -187,7 +187,7 @@ fn test_send_generates_updates() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     let updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
 
@@ -205,7 +205,7 @@ fn test_revoke_generates_updates() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (_child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 
@@ -219,7 +219,7 @@ fn test_vital_revoke_generates_domain_revocation() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 5, 1).unwrap();
+    let (child, _) = Capability::carve_child(&root, child_access, 5).unwrap();
 
     // Set vital attribute on ownership
     child.write().owned.attributes = Attributes::from_bits(Attributes::VITAL);
@@ -239,7 +239,7 @@ fn test_clean_revoke_generates_zero_memory() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 5, 1).unwrap();
+    let (child, _) = Capability::carve_child(&root, child_access, 5).unwrap();
 
     // Set clean attribute on ownership
     child.write().owned.attributes = Attributes::from_bits(Attributes::CLEAN);

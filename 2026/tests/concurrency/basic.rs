@@ -58,7 +58,7 @@ fn test_concurrent_child_creation() {
             // Each thread creates 10 children
             for j in 0..10 {
                 let handle_id = (i * 10 + j) as u64;
-                match Capability::create_child_domain(&root_clone, child_policy.clone(), i as u64, handle_id) {
+                match Capability::create_child_domain(&root_clone, child_policy.clone(), i as u64) {
                     Ok(child) => {
                         let child_read = child.read();
                         assert_eq!(child_read.data.policy.cores, 0b1);
@@ -102,7 +102,7 @@ fn test_concurrent_memory_operations() {
                 let addr = base_addr + (j * 0x1000);
                 let access = Access::new(addr, 0x1000, Rights::RW);
 
-                match Capability::alias_child(&mem_clone, access, i as u64, j as u64) {
+                match Capability::alias_child(&mem_clone, access, i as u64) {
                     Ok(child) => {
                         let child_read = child.read();
                         assert_eq!(child_read.data.status, RegionStatus::Aliased);
@@ -144,7 +144,7 @@ fn test_concurrent_carve_operations() {
             let access = Access::new(base, 0x10000, Rights::RWX); // Carve 64KB
 
             // Note: owner must match parent owner (0) for carve to not generate updates
-            match Capability::carve_child(&mem_clone, access, 0, i as u64) {
+            match Capability::carve_child(&mem_clone, access, 0) {
                 Ok((child, updates)) => {
                     let child_read = child.read();
                     assert_eq!(child_read.data.status, RegionStatus::Exclusive);
@@ -197,7 +197,7 @@ fn test_concurrent_read_write_mix() {
             for j in 0..10 {
                 let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
                 let handle_id = (i * 10 + j) as u64;
-                match Capability::create_child_domain(&root_clone, child_policy, i as u64, handle_id) {
+                match Capability::create_child_domain(&root_clone, child_policy, i as u64) {
                     Ok(_) => {
                         thread::sleep(Duration::from_micros(2));
                     }
@@ -230,8 +230,8 @@ fn test_concurrent_revocation() {
     let mut child_handles = vec![];
     for i in 0..10 {
         let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
-        let _child = Capability::create_child_domain(&root_shared, child_policy, i, i).unwrap();
-        child_handles.push(i);
+        let child = Capability::create_child_domain(&root_shared, child_policy, i).unwrap();
+        child_handles.push(child.read().sub_handle);
     }
 
     println!("Created 10 children, now testing concurrent revocation");
@@ -274,8 +274,8 @@ fn test_memory_view_computation_concurrent() {
     let mem_shared = Arc::new(mem_root);
 
     // Carve some regions first
-    let _child1 = Capability::carve_child(&mem_shared, Access::new(0x1000, 0x1000, Rights::RW), 1, 1).unwrap();
-    let _child2 = Capability::carve_child(&mem_shared, Access::new(0x3000, 0x1000, Rights::RW), 1, 2).unwrap();
+    let _child1 = Capability::carve_child(&mem_shared, Access::new(0x1000, 0x1000, Rights::RW), 1).unwrap();
+    let _child2 = Capability::carve_child(&mem_shared, Access::new(0x3000, 0x1000, Rights::RW), 1).unwrap();
 
     let mut handles = vec![];
 
@@ -313,7 +313,7 @@ fn test_attestation_concurrent() {
     // Create some children
     for i in 0..5 {
         let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
-        let _child = Capability::create_child_domain(&root_shared, child_policy, i, i).unwrap();
+        let _child = Capability::create_child_domain(&root_shared, child_policy, i).unwrap();
     }
 
     let mut handles = vec![];
@@ -372,7 +372,7 @@ fn test_stress_test_mixed_operations() {
         let handle = thread::spawn(move || {
             for j in 0..20 {
                 let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-                let _ = Capability::create_child_domain(&root_clone, child_policy, i as u64, (i * 20 + j) as u64);
+                let _ = Capability::create_child_domain(&root_clone, child_policy, i as u64);
                 thread::yield_now();
             }
         });
@@ -387,7 +387,7 @@ fn test_stress_test_mixed_operations() {
             for j in 0..15 {
                 let addr = base + (j * 0x10000);
                 let access = Access::new(addr, 0x1000, Rights::RW);
-                let _ = Capability::alias_child(&mem_clone, access, i as u64, j as u64);
+                let _ = Capability::alias_child(&mem_clone, access, i as u64);
                 thread::yield_now();
             }
         });

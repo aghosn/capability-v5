@@ -37,13 +37,13 @@ fn test_cvm_with_exclusive_and_shared_memory() {
 
     // Carve exclusive memory for CVM (private memory): 512MB
     let cvm_private_access = Access::new(0x0, 0x20000000, Rights::RWX);
-    let (cvm_private_mem_h, _updates1) =
+    let (cvm_private_mem_h, _, _updates1) =
         Capability::carve_memory(&root, mem_root_h, cvm_private_access).unwrap();
     let cvm_private_mem = root.read().data.memory_capabilities[&cvm_private_mem_h].upgrade().unwrap();
 
     // Create aliased memory for virtio (shared with host): 64MB
     let virtio_access = Access::new(0x20000000, 0x4000000, Rights::RW);
-    let virtio_mem_h = Capability::alias_memory(&root, mem_root_h, virtio_access).unwrap();
+    let (virtio_mem_h, _) = Capability::alias_memory(&root, mem_root_h, virtio_access).unwrap();
     let virtio_mem = root.read().data.memory_capabilities[&virtio_mem_h].upgrade().unwrap();
 
     // Seal the CVM
@@ -121,7 +121,7 @@ fn test_enclave_inside_cvm() {
 
     // Give CVM 256MB of exclusive memory
     let cvm_mem_access = Access::new(0x0, 0x10000000, Rights::RWX);
-    let (cvm_mem_h, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
+    let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
     Capability::seal_domain_op(&root, cvm_h).unwrap();
@@ -134,7 +134,7 @@ fn test_enclave_inside_cvm() {
 
     // Carve exclusive memory for enclave from CVM's memory: 16MB
     let enclave_mem_access = Access::new(0x0, 0x1000000, Rights::RW);
-    let (enclave_mem_h, _updates) =
+    let (enclave_mem_h, _, _updates) =
         Capability::carve_memory(&root, cvm_mem_h, enclave_mem_access).unwrap();
     let enclave_mem = root.read().data.memory_capabilities[&enclave_mem_h].upgrade().unwrap();
 
@@ -197,7 +197,7 @@ fn test_sandbox_inside_cvm() {
 
     // Give CVM 128MB
     let cvm_mem_access = Access::new(0x0, 0x8000000, Rights::RWX);
-    let (cvm_mem_h, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
+    let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
     Capability::seal_domain_op(&root, cvm_h).unwrap();
@@ -210,7 +210,7 @@ fn test_sandbox_inside_cvm() {
 
     // Alias memory for sandbox: 32MB shared with CVM
     let sandbox_mem_access = Access::new(0x1000000, 0x2000000, Rights::RW); // Reduced rights
-    let sandbox_mem_h = Capability::alias_memory(&root, cvm_mem_h, sandbox_mem_access).unwrap();
+    let (sandbox_mem_h, _) = Capability::alias_memory(&root, cvm_mem_h, sandbox_mem_access).unwrap();
     let sandbox_mem = root.read().data.memory_capabilities[&sandbox_mem_h].upgrade().unwrap();
 
     // Seal sandbox
@@ -274,19 +274,19 @@ fn test_two_cvms_with_shared_memory() {
 
     // Give CVM1 exclusive memory: 512MB
     let cvm1_mem_access = Access::new(0x0, 0x20000000, Rights::RWX);
-    let (cvm1_mem_h, _) = Capability::carve_memory(&root, mem_root_h, cvm1_mem_access).unwrap();
+    let (cvm1_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm1_mem_access).unwrap();
     let cvm1_mem = root.read().data.memory_capabilities[&cvm1_mem_h].upgrade().unwrap();
 
     // Give CVM2 exclusive memory: 512MB
     let cvm2_mem_access = Access::new(0x20000000, 0x20000000, Rights::RWX);
-    let (cvm2_mem_h, _) = Capability::carve_memory(&root, mem_root_h, cvm2_mem_access).unwrap();
+    let (cvm2_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm2_mem_access).unwrap();
     let cvm2_mem = root.read().data.memory_capabilities[&cvm2_mem_h].upgrade().unwrap();
 
     // Create shared memory region (aliased to both CVMs): 64MB
     let shared_mem_access = Access::new(0x40000000, 0x4000000, Rights::RW);
-    let shared_for_cvm1_h = Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
+    let (shared_for_cvm1_h, _) = Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
     let shared_for_cvm1 = root.read().data.memory_capabilities[&shared_for_cvm1_h].upgrade().unwrap();
-    let shared_for_cvm2_h = Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
+    let (shared_for_cvm2_h, _) = Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
     let shared_for_cvm2 = root.read().data.memory_capabilities[&shared_for_cvm2_h].upgrade().unwrap();
 
     // Seal both CVMs
@@ -384,7 +384,7 @@ fn test_complex_hierarchy_with_updates() {
     .unwrap();
     let cvm = root.read().data.domain_capabilities[&cvm_h].upgrade().unwrap();
 
-    let (cvm_mem_h, _) =
+    let (cvm_mem_h, _, _) =
         Capability::carve_memory(&root, mem_root_h, Access::new(0x0, 0x8000000, Rights::RWX)).unwrap();
     Capability::seal_domain_op(&root, cvm_h).unwrap();
 
@@ -399,7 +399,7 @@ fn test_complex_hierarchy_with_updates() {
     .unwrap();
     let enclave = cvm.read().data.domain_capabilities[&enclave_h].upgrade().unwrap();
 
-    let (enclave_mem_h, _) =
+    let (enclave_mem_h, _, _) =
         Capability::carve_memory(&root, cvm_mem_h, Access::new(0x0, 0x2000000, Rights::RW)).unwrap();
     Capability::seal_domain_op(&cvm, enclave_h).unwrap();
 
@@ -412,7 +412,7 @@ fn test_complex_hierarchy_with_updates() {
     .unwrap();
     let sandbox = enclave.read().data.domain_capabilities[&sandbox_h].upgrade().unwrap();
 
-    let (_sandbox_mem_h, _) = Capability::carve_memory(
+    let (_sandbox_mem_h, _, _) = Capability::carve_memory(
         &root,
         enclave_mem_h,
         Access::new(0x0, 0x100000, Rights::R),

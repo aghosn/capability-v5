@@ -196,7 +196,7 @@ fn concurrent_carves_non_overlapping() {
         let r = root.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::carve_child(&r, access_a, 1, 1)
+            Capability::carve_child(&r, access_a, 1)
                 .expect("carve A should succeed")
         });
 
@@ -204,7 +204,7 @@ fn concurrent_carves_non_overlapping() {
         let r = root.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::carve_child(&r, access_b, 2, 2)
+            Capability::carve_child(&r, access_b, 2)
                 .expect("carve B should succeed")
         });
 
@@ -233,14 +233,14 @@ fn concurrent_carves_overlapping() {
         let r = root.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::carve_child(&r, access_a, 1, 1)
+            Capability::carve_child(&r, access_a, 1)
         });
 
         let pl = platform_lock.clone();
         let r = root.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::carve_child(&r, access_b, 2, 2)
+            Capability::carve_child(&r, access_b, 2)
         });
 
         let res_a = ta.join().unwrap();
@@ -271,9 +271,7 @@ fn revoke_vs_carve() {
         let (child, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -291,9 +289,7 @@ fn revoke_vs_carve() {
             Capability::carve_child(
                 &r,
                 Access::new(0x2000, 0x1000, Rights::RW),
-                1,
-                2,
-            )
+                1)
         });
 
         let revoke_result = revoker.join().unwrap();
@@ -322,16 +318,12 @@ fn concurrent_sends() {
         let (child_a, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
         let (child_b, _) = Capability::carve_child(
             &root,
             Access::new(0x2000, 0x1000, Rights::RW),
-            0,
-            2,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -374,9 +366,7 @@ fn send_vs_carve_same_parent() {
         let (child, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -393,9 +383,7 @@ fn send_vs_carve_same_parent() {
             Capability::carve_child(
                 &r,
                 Access::new(0x2000, 0x1000, Rights::RW),
-                0,
-                2,
-            )
+                0)
         });
 
         let send_res = sender.join().unwrap();
@@ -441,14 +429,14 @@ fn concurrent_aliases_non_overlapping() {
         let r = root.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::alias_child(&r, access_a, 1, 1)
+            Capability::alias_child(&r, access_a, 1)
         });
 
         let pl = platform_lock.clone();
         let r = root.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::alias_child(&r, access_b, 2, 2)
+            Capability::alias_child(&r, access_b, 2)
         });
 
         let res_a = ta.join().unwrap();
@@ -495,14 +483,14 @@ fn alias_vs_carve_overlapping() {
         let r = root.clone();
         let carver = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::carve_child(&r, carve_access, 1, 1)
+            Capability::carve_child(&r, carve_access, 1)
         });
 
         let pl = platform_lock.clone();
         let r = root.clone();
         let aliaser = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::alias_child(&r, alias_access, 2, 2)
+            Capability::alias_child(&r, alias_access, 2)
         });
 
         let carve_res = carver.join().unwrap();
@@ -544,9 +532,7 @@ fn alias_while_sibling_revoked() {
         let (carved_child, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -561,7 +547,7 @@ fn alias_while_sibling_revoked() {
         let r = root.clone();
         let aliaser = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::alias_child(&r, Access::new(0x0000, 0x1000, Rights::RW), 1, 2)
+            Capability::alias_child(&r, Access::new(0x0000, 0x1000, Rights::RW), 1)
         });
 
         let revoke_res = revoker.join().unwrap();
@@ -613,9 +599,7 @@ fn double_send_same_capability() {
         let (child, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -687,9 +671,7 @@ fn revoke_after_send() {
         let (child, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         // Send child to domain 99.
@@ -756,9 +738,7 @@ fn region_reuse_after_revoke() {
         let (child_c, _) = Capability::carve_child(
             &root,
             Access::new(0x0000, 0x1000, Rights::RW),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -776,9 +756,7 @@ fn region_reuse_after_revoke() {
             Capability::carve_child(
                 &r,
                 Access::new(0x0000, 0x1000, Rights::RW),
-                1,
-                2,
-            )
+                1)
         });
 
         let revoke_res = revoker.join().unwrap();
@@ -840,7 +818,7 @@ fn concurrent_domain_creation() {
         let cp = child_policy.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::create_child_domain(&p, cp, 0, 1)
+            Capability::create_child_domain(&p, cp, 0)
         });
 
         let pl = platform_lock.clone();
@@ -848,7 +826,7 @@ fn concurrent_domain_creation() {
         let cp = child_policy.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::create_child_domain(&p, cp, 0, 2)
+            Capability::create_child_domain(&p, cp, 0)
         });
 
         let res_a = ta.join().unwrap();
@@ -893,9 +871,7 @@ fn domain_revoke_vs_creation() {
         let child1 = Capability::create_child_domain(
             &parent,
             child_policy.clone(),
-            0,
-            1,
-        )
+            0)
         .unwrap();
 
         let pl = platform_lock.clone();
@@ -910,7 +886,7 @@ fn domain_revoke_vs_creation() {
         let cp = child_policy.clone();
         let creator = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::create_child_domain(&p, cp, 0, 2)
+            Capability::create_child_domain(&p, cp, 0)
         });
 
         let revoke_res = revoker.join().unwrap();
@@ -1144,18 +1120,18 @@ fn loom_accept_vs_reject() {
 //
 // | Thread A (exclusive lock)                    | Thread B (shared lock)              |
 // |----------------------------------------------|-------------------------------------|
-// | revoke_memory_child(caller, parent_h, c_sub) | accept_memory(receiver, pending_id) |
+// | revoke_memory_child(caller, parent_h, child) | accept_memory(receiver, pending_id) |
 //
-// Setup: sender has root cap (handle 1) and a carved child (handle 2, sub 2).
-// The child has been sent to receiver (handle 2 frozen, pending exists).
-// Thread A revokes the child (removes it from the tree → Arc strong count → 0).
+// Setup: sender has root cap (handle 1) and a carved child (frozen/pending to receiver).
+// Thread A revokes the child from the sender's perspective.
 // Thread B accepts the pending child.
 //
 // Valid outcomes (all schedules):
-// - A then B: child Arc is dead → accept returns NotFound.
-// - B then A: accept transfers the child to receiver; revoke finds child in
-//   parent.children and proceeds (revokes the now-receiver-owned child).
-//   Both operations succeed (revoke_child does not check current owner).
+// - A then B: revoke removes child from parent's tree (Arc dead) → accept returns NotFound.
+//   Revoke also finds and removes child from sender's frozen table via handle lookup.
+// - B then A: accept transfers the child; accept_memory removes the sender's frozen handle.
+//   revoke_memory_child then returns NotFound (child no longer in sender's table).
+//   Both outcomes are safe.
 #[test]
 fn loom_revoke_vs_accept() {
     loom::model(|| {
@@ -1167,8 +1143,8 @@ fn loom_revoke_vs_accept() {
         // Register root cap at handle 1.
         let _root = register_mem_send(&sender, 1);
 
-        // Carve a child [0, 0x100) — allocates handle 2, sub_handle = 2.
-        let (child_h, _) = Capability::<Domain>::carve_memory(
+        // Carve a child [0, 0x100).
+        let (child_h, child_sub, _) = Capability::<Domain>::carve_memory(
             &sender,
             1,
             Access::new(0x0, 0x100, Rights::RW),
@@ -1184,7 +1160,7 @@ fn loom_revoke_vs_accept() {
         let s  = sender.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::<Domain>::revoke_memory_child(&s, 1, child_h)
+            Capability::<Domain>::revoke_memory_child(&s, 1, child_sub)
         });
 
         let pl = platform_lock.clone();
@@ -1198,10 +1174,12 @@ fn loom_revoke_vs_accept() {
         let accept_res  = acceptor.join().unwrap();
 
         if accept_res.is_ok() {
-            // Accept-first: both succeed (revoke finds child still in parent.children).
-            assert!(revoke_res.is_ok(), "revoke must succeed after accept");
+            // Accept-first: sub_handle lookup finds the child in parent.children regardless
+            // of transfer. revoke_memory_child succeeds (removes from tree).
+            assert!(revoke_res.is_ok(), "revoke after accept still succeeds via sub_handle lookup");
         } else {
-            // Revoke-first: accept gets NotFound (Arc is dead).
+            // Revoke-first: child removed from parent.children → Arc dead.
+            // accept gets NotFound upgrading the dead Weak.
             assert!(revoke_res.is_ok(), "revoke must succeed");
             assert!(matches!(accept_res, Err(CapaError::NotFound)));
         }
@@ -1333,10 +1311,10 @@ fn loom_dm_concurrent_revokes() {
         let (dom, h_root, _root_mem) = dm_make_root(0x4000);
 
         // Sequential setup: carve two non-overlapping children.
-        let (h_c1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
         ).expect("setup: carve child1");
-        let (h_c2, _) = Capability::<Domain>::carve_memory(
+        let (h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
         ).expect("setup: carve child2");
 
@@ -1344,14 +1322,14 @@ fn loom_dm_concurrent_revokes() {
         let d  = dom.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c1)
+            Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)
         });
 
         let pl = platform_lock.clone();
         let d  = dom.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c2)
+            Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c2)
         });
 
         let res_a = ta.join().unwrap();
@@ -1403,10 +1381,10 @@ fn loom_dm_send_vs_revoke_sibling() {
         let receiver = make_sealed_send_domain();
 
         // Sequential setup: carve two non-overlapping children.
-        let (h_c1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
         ).expect("setup: carve child1");
-        let (h_c2, _) = Capability::<Domain>::carve_memory(
+        let (h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
         ).expect("setup: carve child2");
 
@@ -1423,7 +1401,7 @@ fn loom_dm_send_vs_revoke_sibling() {
         let d  = dom.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::revoke_memory_child(&d, h_root, h_c2)
+            Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c2)
         });
 
         let send_res   = ta.join().unwrap();

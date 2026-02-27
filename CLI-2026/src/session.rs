@@ -164,10 +164,11 @@ impl Session {
         //   handle_map: name  → Rust var name for the LocalHandle in its owner's table
         //   owner_map:  name  → owner domain name (for looking up which domain to call through)
         //   is_domain:  set of names that are domains (vs. memory regions)
-        let mut arc_map:    std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut handle_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut owner_map:  std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut is_domain:  std::collections::HashSet<String>         = std::collections::HashSet::new();
+        let mut arc_map:        std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut handle_map:     std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut sub_handle_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut owner_map:      std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut is_domain:      std::collections::HashSet<String>         = std::collections::HashSet::new();
 
         for cmd in &self.commands {
             match cmd {
@@ -235,16 +236,18 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
                     let child_var   = format!("{}_cap", sanitize_name(name));
                     let handle_var  = format!("{}_handle", sanitize_name(name));
+                    let sub_var     = format!("{}_sub_handle", sanitize_name(name));
 
                     writeln!(file, "    // Carve memory region: {name}")?;
                     writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let ({handle_var}, _) = Capability::carve_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::carve_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
 
                     arc_map.insert(name.clone(), child_var);
                     handle_map.insert(name.clone(), handle_var);
+                    sub_handle_map.insert(name.clone(), sub_var);
                     owner_map.insert(name.clone(), parent_owner);
                 }
 
@@ -257,16 +260,18 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
                     let child_var   = format!("{}_cap", sanitize_name(name));
                     let handle_var  = format!("{}_handle", sanitize_name(name));
+                    let sub_var     = format!("{}_sub_handle", sanitize_name(name));
 
                     writeln!(file, "    // Alias memory region: {name}")?;
                     writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let {handle_var} = Capability::alias_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}) = Capability::alias_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
 
                     arc_map.insert(name.clone(), child_var);
                     handle_map.insert(name.clone(), handle_var);
+                    sub_handle_map.insert(name.clone(), sub_var);
                     owner_map.insert(name.clone(), parent_owner);
                 }
 
@@ -316,8 +321,8 @@ impl Session {
                             .cloned().unwrap_or_else(|| sanitize_name(&owner_name));
                         let parent_handle = handle_map.get(parent)
                             .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
-                        let child_sub    = handle_map.get(child)
-                            .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(child)));
+                        let child_sub    = sub_handle_map.get(child)
+                            .cloned().unwrap_or_else(|| format!("{}_sub_handle", sanitize_name(child)));
 
                         writeln!(file, "    // Revoke memory {child} from {parent}")?;
                         writeln!(file, "    let _ = Capability::revoke_memory_child(&{owner_arc}, {parent_handle}, {child_sub}).unwrap();")?;

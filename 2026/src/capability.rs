@@ -19,9 +19,10 @@ pub type CapabilityWeak<T> = Weak<RwLock<Capability<T>>>;
 /// Local capability handle (index within a domain's capability store)
 pub type LocalHandle = u64;
 
-/// Stable tree identity set at creation time. Used by the parent to revoke a child
-/// even after the child has been sent away. Equals the LocalHandle the parent's domain
-/// allocated for the child at creation; never changes.
+/// Stable tree identity set at creation time, auto-allocated from the parent
+/// capability's internal counter.  Unique among siblings; used by the parent
+/// to find and remove a specific child during revocation.  Completely independent
+/// from `LocalHandle` (the domain's table key for the same capability).
 pub type SubHandle = u64;
 
 /// Ownership information for a capability
@@ -94,6 +95,9 @@ pub struct Capability<T> {
 
     /// Strong references to children (owned)
     pub children: Vec<CapabilityRef<T>>,
+    /// Per-capability counter for assigning unique SubHandles to children.
+    /// Starts at 1 and increments monotonically; never decremented on revoke.
+    pub next_child_sub: SubHandle,
 }
 
 impl<T> Capability<T> {
@@ -105,6 +109,7 @@ impl<T> Capability<T> {
             data,
             parent: Weak::new(),
             children: Vec::new(),
+            next_child_sub: 1,
         }))
     }
 
@@ -121,6 +126,7 @@ impl<T> Capability<T> {
             data,
             parent,
             children: Vec::new(),
+            next_child_sub: 1,
         }))
     }
 
@@ -159,7 +165,6 @@ impl Capability<MemoryRegion> {
         parent_ref: &CapabilityRef<MemoryRegion>,
         access: Access,
         owner: DomainId,
-        sub_handle: SubHandle,
     ) -> Result<CapabilityRef<MemoryRegion>> {
         let mut parent = parent_ref.write();
 
@@ -178,6 +183,10 @@ impl Capability<MemoryRegion> {
         // Create aliased region from parent
         let child_region = parent.data.alias(access)?;
 
+        // Auto-allocate a unique SubHandle from the parent's counter
+        let sub_handle = parent.next_child_sub;
+        parent.next_child_sub += 1;
+
         // Create child capability
         let child =
             Capability::new_child(owner, sub_handle, child_region, Arc::downgrade(parent_ref));
@@ -193,7 +202,6 @@ impl Capability<MemoryRegion> {
         parent_ref: &CapabilityRef<MemoryRegion>,
         access: Access,
         owner: DomainId,
-        sub_handle: SubHandle,
     ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
         let mut parent = parent_ref.write();
 
@@ -213,6 +221,10 @@ impl Capability<MemoryRegion> {
 
         // Create update batch for the carve operation
         let updates = UpdateBatch::new();
+
+        // Auto-allocate a unique SubHandle from the parent's counter
+        let sub_handle = parent.next_child_sub;
+        parent.next_child_sub += 1;
 
         // Create child capability
         let child =
@@ -441,7 +453,6 @@ impl Capability<Domain> {
         parent_ref: &CapabilityRef<Domain>,
         policy: DomainPolicy,
         owner: DomainId,
-        sub_handle: SubHandle,
     ) -> Result<CapabilityRef<Domain>> {
         let parent = parent_ref.read();
 
@@ -456,6 +467,14 @@ impl Capability<Domain> {
         let child_domain = Domain::new(policy);
 
         drop(parent);
+
+        // Auto-allocate a unique SubHandle from the parent's counter
+        let sub_handle = {
+            let mut parent = parent_ref.write();
+            let s = parent.next_child_sub;
+            parent.next_child_sub += 1;
+            s
+        };
 
         let child =
             Capability::new_child(owner, sub_handle, child_domain, Arc::downgrade(parent_ref));
@@ -512,14 +531,17 @@ impl Capability<Domain> {
     // Domain-mediated high-level operations
     // =========================================================================
 
-    /// Carve a memory sub-region. Resolves `parent` handle from caller's table,
-    /// auto-allocates a new LocalHandle for the child, registers it in caller's table,
-    /// and uses that handle value as the child's SubHandle.
+    /// Carve a memory sub-region.  Returns `(LocalHandle, SubHandle, UpdateBatch)`.
+    ///
+    /// - `LocalHandle`: the caller's domain-table key for the new child.
+    /// - `SubHandle`: the child's stable tree identity (auto-allocated from the
+    ///   parent capability's counter).  Pass this to [`revoke_memory_child`] to
+    ///   revoke the child even after it has been sent to another domain.
     pub fn carve_memory(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
         access: Access,
-    ) -> Result<(LocalHandle, UpdateBatch)> {
+    ) -> Result<(LocalHandle, SubHandle, UpdateBatch)> {
         // 1. Validate parent handle not frozen
         if caller.read().data.is_memory_handle_frozen(parent) {
             return Err(CapaError::PermissionDenied);
@@ -540,12 +562,15 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 4. Auto-allocate new handle
+        // 4. Auto-allocate new LocalHandle in caller's table
         let new_handle = caller.read().data.allocate_memory_handle();
 
-        // 5. Call carve_child (new_handle used as sub_handle)
+        // 5. Carve child — SubHandle auto-allocated from parent's counter
         let (child_ref, updates) =
-            Capability::carve_child(&parent_ref, access, owner_id, new_handle)?;
+            Capability::carve_child(&parent_ref, access, owner_id)?;
+
+        // Capture the auto-assigned sub_handle for the caller
+        let child_sub = child_ref.read().sub_handle;
 
         // 6. Set owner_domain on child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
@@ -556,15 +581,17 @@ impl Capability<Domain> {
             .data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
 
-        Ok((new_handle, updates))
+        Ok((new_handle, child_sub, updates))
     }
 
-    /// Alias a memory sub-region. Same handle bookkeeping as carve_memory.
+    /// Alias a memory sub-region.  Returns `(LocalHandle, SubHandle)`.
+    ///
+    /// See [`carve_memory`] for the meaning of each return value.
     pub fn alias_memory(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
         access: Access,
-    ) -> Result<LocalHandle> {
+    ) -> Result<(LocalHandle, SubHandle)> {
         // 1. Validate parent handle not frozen
         if caller.read().data.is_memory_handle_frozen(parent) {
             return Err(CapaError::PermissionDenied);
@@ -585,11 +612,14 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 4. Auto-allocate new handle
+        // 4. Auto-allocate new LocalHandle in caller's table
         let new_handle = caller.read().data.allocate_memory_handle();
 
-        // 5. Call alias_child
-        let child_ref = Capability::alias_child(&parent_ref, access, owner_id, new_handle)?;
+        // 5. Alias child — SubHandle auto-allocated from parent's counter
+        let child_ref = Capability::alias_child(&parent_ref, access, owner_id)?;
+
+        // Capture the auto-assigned sub_handle for the caller
+        let child_sub = child_ref.read().sub_handle;
 
         // 6. Set owner_domain on child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
@@ -600,7 +630,7 @@ impl Capability<Domain> {
             .data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
 
-        Ok(new_handle)
+        Ok((new_handle, child_sub))
     }
 
     /// Send a memory capability to a receiver domain.
@@ -848,7 +878,14 @@ impl Capability<Domain> {
         Ok(())
     }
 
-    /// Revoke a child memory capability using its stable SubHandle.
+    /// Revoke a direct child of the parent capability identified by `child_sub`.
+    ///
+    /// `parent` is the LocalHandle of the parent memory region in `caller`'s table.
+    /// `child_sub` is the SubHandle returned by [`carve_memory`] or [`alias_memory`]
+    /// when the child was created.  Because SubHandles are auto-allocated from the
+    /// parent's internal counter they are unique among siblings and stable across
+    /// ownership transfers — so this call succeeds even after the child has been
+    /// sent to another domain.
     pub fn revoke_memory_child(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
@@ -868,13 +905,13 @@ impl Capability<Domain> {
             .clone();
         let parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
 
-        // 3. Verify ownership
+        // 3. Verify ownership of parent
         let owner_id = caller.read().data.id;
         if parent_ref.read().owned.owner != owner_id {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 4. Call revoke_child
+        // 4. Revoke child by its SubHandle (unique, stable, tree-level identity)
         Capability::revoke_child(&parent_ref, child_sub)
     }
 
@@ -900,11 +937,12 @@ impl Capability<Domain> {
     ) -> Result<LocalHandle> {
         let owner_id = parent.read().data.id;
 
-        // 1. Auto-allocate handle
+        // 1. Auto-allocate handle (domain table key)
         let new_handle = parent.read().data.allocate_domain_handle();
 
         // 2. Create the child (validates sealed + CREATE permission + policy monotonicity)
-        let child_ref = Capability::create_child_domain(parent, policy, owner_id, new_handle)?;
+        //    sub_handle is auto-allocated from parent's next_child_sub counter
+        let child_ref = Capability::create_child_domain(parent, policy, owner_id)?;
 
         // 3. Set owner_domain so API checks work on the child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(parent));
@@ -920,21 +958,22 @@ impl Capability<Domain> {
 
     /// Revoke a child domain that `caller` holds at `child_handle` in its domain table.
     ///
-    /// `child_handle` is the LocalHandle allocated by [`create_domain`] when the
-    /// child was created — by construction it equals the child's SubHandle.
-    /// Validates the `REVOKE` permission before delegating to the low-level revoke.
+    /// Looks up the child's Arc to get its actual SubHandle, then delegates to
+    /// the low-level `revoke_child_domain`.
     pub fn revoke_domain(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
     ) -> Result<UpdateBatch> {
-        // Verify the handle exists in caller's domain table.
-        let _ = caller
+        // Look up child to get its actual sub_handle (independent of LocalHandle)
+        let child_weak = caller
             .read()
             .data
             .get_domain_capability(child_handle)
-            .ok_or(CapaError::NotFound)?;
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+        let child_sub = child_ref.read().sub_handle;
         caller.read().owned.validate_operation(MonitorAPI::REVOKE)?;
-        // child_handle == child's sub_handle by create_domain construction.
-        Capability::revoke_child_domain(caller, child_handle)
+        Capability::revoke_child_domain(caller, child_sub)
     }
 }

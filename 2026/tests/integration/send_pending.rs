@@ -32,6 +32,7 @@ fn make_sealed_domain() -> CapabilityRef<Domain> {
     Arc::new(RwLock::new(Capability {
         owned: Ownership::new(0),
         sub_handle: 0,
+        next_child_sub: 1,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -177,7 +178,7 @@ fn revoke_parent_cancels_pending() {
     let _root = register_root_mem(&sender, 1);
 
     // Carve a child [0x1000, 0x2000) — auto-allocates handle 2, sub_handle = 2.
-    let (child_handle, _) = Capability::<Domain>::carve_memory(
+    let (child_handle, child_sub, _) = Capability::<Domain>::carve_memory(
         &sender,
         1,
         Access::new(0x1000, 0x1000, Rights::RW),
@@ -190,9 +191,9 @@ fn revoke_parent_cancels_pending() {
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
-    // Revoke the child using its SubHandle (= child_handle at creation time = 2).
+    // Revoke the child using its SubHandle (= child_sub at creation time = 2).
     // The parent is at handle 1; child_sub = 2.
-    Capability::<Domain>::revoke_memory_child(&sender, 1, child_handle).unwrap();
+    Capability::<Domain>::revoke_memory_child(&sender, 1, child_sub).unwrap();
 
     // Now the cap's Arc strong count is 0 — the pending weak ref is dead.
     // accept_memory must return NotFound.
@@ -219,7 +220,7 @@ fn revoke_sender_domain_cancels_pending() {
     let policy    = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let parent_id = parent.read().data.id;
     let child_sub = 1u64; // sub_handle we assign to A in P's children
-    let sender = Capability::create_child_domain(&parent, policy, parent_id, child_sub).unwrap();
+    let sender = Capability::create_child_domain(&parent, policy, parent_id).unwrap();
     sender.write().data.seal().unwrap();
 
     // Register a memory cap in A's table at handle 1.

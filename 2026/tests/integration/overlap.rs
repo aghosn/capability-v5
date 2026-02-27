@@ -18,7 +18,7 @@ fn test_alias_cannot_overlap_carved_child() {
 
     // Carve a child region
     let access1 = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_h, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
+    let (_h, _, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
 
     // Try to alias a region that overlaps with the carved child - should fail
     let overlap_access = Access::new(0x1000, 0x1000, Rights::RWX);
@@ -33,7 +33,7 @@ fn test_alias_partial_overlap_rejected() {
 
     // Carve a child region [0x1000..0x2000)
     let access1 = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_h, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
+    let (_h, _, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
 
     // Try to alias a region [0x800..0x1800) that partially overlaps - should fail
     let overlap_access = Access::new(0x800, 0x1000, Rights::RWX);
@@ -48,7 +48,7 @@ fn test_carve_cannot_overlap_carved_child() {
 
     // Carve a child region
     let access1 = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_h1, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
+    let (_h1, _, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
 
     // Try to carve a region that overlaps with the first carved child - should fail
     let overlap_access = Access::new(0x1000, 0x1000, Rights::RWX);
@@ -63,7 +63,7 @@ fn test_non_overlapping_operations_succeed() {
 
     // Carve first child [0x0..0x1000)
     let access1 = Access::new(0x0, 0x1000, Rights::RWX);
-    let (_h1, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
+    let (_h1, _, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
 
     // Alias non-overlapping region [0x1000..0x2000) - should succeed
     let access2 = Access::new(0x1000, 0x1000, Rights::RWX);
@@ -82,7 +82,7 @@ fn test_alias_can_overlap_aliased_child() {
 
     // Alias a child region
     let access1 = Access::new(0x1000, 0x1000, Rights::RWX);
-    let _h1 = Capability::alias_memory(&root, mem_root_h, access1).unwrap();
+    let (_h1, _) = Capability::alias_memory(&root, mem_root_h, access1).unwrap();
 
     // Alias another region that overlaps with the first alias - should succeed
     // because both are aliased (shared), not carved (exclusive)
@@ -97,11 +97,11 @@ fn test_nested_carve_overlap_validation() {
 
     // Carve parent [0x0..0x4000)
     let access1 = Access::new(0x0, 0x4000, Rights::RWX);
-    let (parent_h, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
+    let (parent_h, _, _) = Capability::carve_memory(&root, mem_root_h, access1).unwrap();
 
     // Carve child from parent [0x1000..0x2000)
     let access2 = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_child_h, _) = Capability::carve_memory(&root, parent_h, access2).unwrap();
+    let (_child_h, _, _) = Capability::carve_memory(&root, parent_h, access2).unwrap();
 
     // Try to alias from parent with overlap - should fail
     let overlap_access = Access::new(0x1500, 0x1000, Rights::RWX);

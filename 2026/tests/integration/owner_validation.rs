@@ -15,6 +15,7 @@ fn setup_domain_with_memory(
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
         owned: Ownership::new(0),
         sub_handle: 0,
+        next_child_sub: 1,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -27,6 +28,7 @@ fn setup_domain_with_memory(
     let mem_capa: CapabilityRef<MemoryRegion> = Arc::new(RwLock::new(Capability {
         owned: ownership,
         sub_handle: 0,
+        next_child_sub: 1,
         data: region,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -42,6 +44,7 @@ fn setup_unsealed_domain_with_memory() -> (CapabilityRef<Domain>, CapabilityRef<
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
         owned: Ownership::new(0),
         sub_handle: 0,
+        next_child_sub: 1,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -53,6 +56,7 @@ fn setup_unsealed_domain_with_memory() -> (CapabilityRef<Domain>, CapabilityRef<
     let mem_capa: CapabilityRef<MemoryRegion> = Arc::new(RwLock::new(Capability {
         owned: ownership,
         sub_handle: 0,
+        next_child_sub: 1,
         data: region,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -67,7 +71,7 @@ fn setup_unsealed_domain_with_memory() -> (CapabilityRef<Domain>, CapabilityRef<
 fn test_unsealed_domain_cannot_alias() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -75,7 +79,7 @@ fn test_unsealed_domain_cannot_alias() {
 fn test_unsealed_domain_cannot_carve() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -94,7 +98,7 @@ fn test_unsealed_domain_cannot_revoke() {
 
     // Carve a child while sealed
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&mem, access, dom.read().data.id, 10).unwrap();
+    let (_child, _) = Capability::carve_child(&mem, access, dom.read().data.id).unwrap();
 
     // Unseal the domain by creating a new unsealed one and swapping
     // Instead, create a fresh unsealed setup with a child already present
@@ -119,7 +123,7 @@ fn test_api_no_alias_permission() {
     let (_dom, mem) = setup_domain_with_memory(api);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
 }
 
@@ -129,7 +133,7 @@ fn test_api_no_carve_permission() {
     let (_dom, mem) = setup_domain_with_memory(api);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
 }
 
@@ -149,7 +153,7 @@ fn test_api_no_revoke_permission() {
 
     // First create a child (carve is allowed)
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&mem, access, 1, 10).unwrap();
+    let (_child, _) = Capability::carve_child(&mem, access, 1).unwrap();
 
     let result = Capability::revoke_child(&mem, 10);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
@@ -163,6 +167,7 @@ fn test_api_no_create_permission_for_domain() {
     let domain_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
         owned: Ownership::new(0),
         sub_handle: 0,
+        next_child_sub: 1,
         data: domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
@@ -175,13 +180,14 @@ fn test_api_no_create_permission_for_domain() {
     let parent_dom_capa: CapabilityRef<Domain> = Arc::new(RwLock::new(Capability {
         owned: ownership,
         sub_handle: 0,
+        next_child_sub: 1,
         data: parent_domain,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
     }));
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let result = Capability::create_child_domain(&parent_dom_capa, child_policy, 1, 10);
+    let result = Capability::create_child_domain(&parent_dom_capa, child_policy, 1);
     assert!(matches!(result, Err(CapaError::ApiNotAllowed)));
 }
 
@@ -192,7 +198,7 @@ fn test_sealed_domain_with_alias_permission_can_alias() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(result.is_ok());
 }
 
@@ -201,7 +207,7 @@ fn test_sealed_domain_with_carve_permission_can_carve() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(result.is_ok());
 }
 
@@ -218,9 +224,9 @@ fn test_sealed_domain_with_revoke_permission_can_revoke() {
     let (_dom, mem) = setup_domain_with_memory(MonitorAPI::ALL);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&mem, access, 1, 10).unwrap();
+    let (_child, _) = Capability::carve_child(&mem, access, 1).unwrap();
 
-    let result = Capability::revoke_child(&mem, 10);
+    let result = Capability::revoke_child(&mem, 1);
     assert!(result.is_ok());
 }
 
@@ -234,7 +240,7 @@ fn test_revoked_domain_cannot_alias() {
     drop(dom);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::PermissionDenied)));
 }
 
@@ -244,7 +250,7 @@ fn test_revoked_domain_cannot_carve() {
     drop(dom);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::PermissionDenied)));
 }
 
@@ -275,7 +281,7 @@ fn test_send_clears_owner_domain() {
 fn test_extension_trait_alias_validates() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -283,7 +289,7 @@ fn test_extension_trait_alias_validates() {
 fn test_extension_trait_carve_validates() {
     let (_dom, mem) = setup_unsealed_domain_with_memory();
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
 }
 
@@ -303,7 +309,7 @@ fn test_only_alias_permission_suffices() {
     let (_dom, mem) = setup_domain_with_memory(api);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::alias_child(&mem, access, 1, 10);
+    let result = Capability::alias_child(&mem, access, 1);
     assert!(result.is_ok());
 }
 
@@ -313,7 +319,7 @@ fn test_only_carve_permission_suffices() {
     let (_dom, mem) = setup_domain_with_memory(api);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let result = Capability::carve_child(&mem, access, 1, 10);
+    let result = Capability::carve_child(&mem, access, 1);
     assert!(result.is_ok());
 }
 

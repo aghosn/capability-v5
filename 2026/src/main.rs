@@ -37,7 +37,7 @@ fn main() {
     );
 
     let root_id = root.read().data.id;
-    let child = Capability::create_child_domain(&root, child_policy, root_id, 2).unwrap();
+    let child = Capability::create_child_domain(&root, child_policy, root_id).unwrap();
     let child_id = child.read().data.id;
     println!("✓ Created child domain (ID: {})", child_id);
     println!("  • Cores: 0b{:04b}", child.read().data.policy.cores);
@@ -55,7 +55,7 @@ fn main() {
     // Carve exclusive memory for child (1 MB at 0x100000)
     println!("Creating EXCLUSIVE memory for child...");
     let exclusive_access = Access::new(0x100000, 0x100000, Rights::RWX);
-    let (exclusive_mem, carve_updates) = Capability::carve_child(&mem_root, exclusive_access, 0, 3).unwrap();
+    let (exclusive_mem, carve_updates) = Capability::carve_child(&mem_root, exclusive_access, 0).unwrap();
     println!("✓ Carved exclusive memory: {}", exclusive_mem.read().data.access);
     println!("  • Kind: {:?}", exclusive_mem.read().data.kind);
     println!("  • Updates generated: {}", carve_updates.len());
@@ -66,7 +66,7 @@ fn main() {
     // Create aliased (shared) memory for child (512 KB at 0x200000)
     println!("\nCreating SHARED memory for child...");
     let shared_access = Access::new(0x200000, 0x80000, Rights::RW);
-    let shared_mem = Capability::alias_child(&mem_root, shared_access, 0, 4).unwrap();
+    let shared_mem = Capability::alias_child(&mem_root, shared_access, 0).unwrap();
     println!("✓ Aliased shared memory: {}", shared_mem.read().data.access);
     println!("  • Kind: {:?}", shared_mem.read().data.kind);
     println!("  • Parent retains access (aliased, not carved)");

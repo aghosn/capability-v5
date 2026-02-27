@@ -19,7 +19,7 @@ fn test_alias_child() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let child = Capability::alias_child(&root, child_access, 1, 1).unwrap();
+    let child = Capability::alias_child(&root, child_access, 1).unwrap();
 
     assert_eq!(root.read().children.len(), 1);
     assert!(child.read().has_parent());
@@ -31,7 +31,7 @@ fn test_carve_child() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, updates) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (_child, updates) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     assert_eq!(root.read().children.len(), 1);
     // Carve should NOT generate updates because owner doesn't change (parent owner = 0, child owner = 0)
@@ -44,7 +44,7 @@ fn test_revoke_child() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (_child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     let updates = Capability::revoke_child(&root, 1).unwrap();
 
@@ -63,11 +63,11 @@ fn test_nested_carve() {
 
     // Carve a sub-region from the root
     let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
-    let (c1, _) = Capability::carve_child(&root, c1_access, 1, 1).unwrap();
+    let (c1, _) = Capability::carve_child(&root, c1_access, 1).unwrap();
 
     // Carve from the carved region
     let c2_access = Access::new(0x3000, 0x1000, Rights::R);
-    let (c2, _) = Capability::carve_child(&c1, c2_access, 2, 2).unwrap();
+    let (c2, _) = Capability::carve_child(&c1, c2_access, 2).unwrap();
 
     let c2_read = c2.read();
     assert_eq!(c2_read.data.access, c2_access);
@@ -81,10 +81,10 @@ fn test_nested_alias() {
     let root = Capability::new_root(0, 0, root_region);
 
     let c1_access = Access::new(0x1000, 0x2000, Rights::RW);
-    let (c1, _) = Capability::carve_child(&root, c1_access, 1, 1).unwrap();
+    let (c1, _) = Capability::carve_child(&root, c1_access, 1).unwrap();
 
     let a1_access = Access::new(0x1800, 0x800, Rights::R);
-    let a1 = Capability::alias_child(&c1, a1_access, 2, 2).unwrap();
+    let a1 = Capability::alias_child(&c1, a1_access, 2).unwrap();
 
     let a1_read = a1.read();
     assert_eq!(a1_read.data.kind, RegionKind::Alias);
@@ -99,11 +99,11 @@ fn test_carve_then_alias_then_carve() {
 
     // Step 1: Carve a region from the root
     let (carved, _) =
-        Capability::carve_child(&root, Access::new(0x2000, 0x2000, Rights::RW), 1, 1).unwrap();
+        Capability::carve_child(&root, Access::new(0x2000, 0x2000, Rights::RW), 1).unwrap();
 
     // Step 2: Alias the carved region
     let alias_access = Access::new(0x2000, 0x1000, Rights::R);
-    let alias = Capability::alias_child(&carved, alias_access, 2, 2).unwrap();
+    let alias = Capability::alias_child(&carved, alias_access, 2).unwrap();
 
     // Check alias kind and status
     {
@@ -115,7 +115,7 @@ fn test_carve_then_alias_then_carve() {
     // Step 3: Carve from the alias
     let carve_from_alias_access = Access::new(0x2000, 0x0800, Rights::R);
     let (carved_from_alias, _) =
-        Capability::carve_child(&alias, carve_from_alias_access, 3, 3).unwrap();
+        Capability::carve_child(&alias, carve_from_alias_access, 3).unwrap();
 
     // Check carve kind and status
     let carved_read = carved_from_alias.read();
@@ -155,7 +155,7 @@ fn test_nested_carve_invalid_due_to_rights() {
     let root = Capability::new_root(0, 0, root_region);
 
     let carve_access = Access::new(0x0, 0x4000, Rights::R);
-    let (carve, _) = Capability::carve_child(&root, carve_access, 1, 1).unwrap();
+    let (carve, _) = Capability::carve_child(&root, carve_access, 1).unwrap();
 
     // Request WRITE, which is not present in parent
     let invalid_access = Access::new(0x1000, 0x1000, Rights::RW);
@@ -172,17 +172,17 @@ fn test_revoke_complex_subtree() {
 
     // Branch 1
     let (b1, _) =
-        Capability::carve_child(&root, Access::new(0x0000, 0x4000, Rights::RW), 1, 1).unwrap();
-    let b1a = Capability::alias_child(&b1, Access::new(0x1000, 0x1000, Rights::R), 2, 2).unwrap();
+        Capability::carve_child(&root, Access::new(0x0000, 0x4000, Rights::RW), 1).unwrap();
+    let b1a = Capability::alias_child(&b1, Access::new(0x1000, 0x1000, Rights::R), 2).unwrap();
     let (_b1a1, _) =
-        Capability::carve_child(&b1a, Access::new(0x1000, 0x0800, Rights::R), 3, 3).unwrap();
+        Capability::carve_child(&b1a, Access::new(0x1000, 0x0800, Rights::R), 3).unwrap();
 
     // Branch 2 (will not be revoked)
     let (_b2, _) =
-        Capability::carve_child(&root, Access::new(0x5000, 0x1000, Rights::R), 4, 4).unwrap();
+        Capability::carve_child(&root, Access::new(0x5000, 0x1000, Rights::R), 4).unwrap();
 
-    // Revoke b1a (handle 2)
-    let result = Capability::revoke_child(&b1, 2);
+    // Revoke b1a (handle 1 - first child of b1 with auto-allocation)
+    let result = Capability::revoke_child(&b1, 1);
     assert!(result.is_ok());
 
     // b1 should still be there, but now empty
@@ -199,7 +199,7 @@ fn test_revoke_nonexistent() {
 
     // Create a valid region in the root
     let (_valid_region, _) =
-        Capability::carve_child(&root, Access::new(0x0000, 0x1000, Rights::RW), 1, 1).unwrap();
+        Capability::carve_child(&root, Access::new(0x0000, 0x1000, Rights::RW), 1).unwrap();
 
     // Try to revoke a non-existent child (handle 999)
     let result = Capability::revoke_child(&root, 999);
@@ -218,9 +218,9 @@ fn test_compute_view_with_carves() {
 
     // Carve two regions
     let (_child1, _) =
-        Capability::carve_child(&root, Access::new(0x1000, 0x1000, Rights::RW), 1, 1).unwrap();
+        Capability::carve_child(&root, Access::new(0x1000, 0x1000, Rights::RW), 1).unwrap();
     let (_child2, _) =
-        Capability::carve_child(&root, Access::new(0x3000, 0x1000, Rights::RW), 2, 2).unwrap();
+        Capability::carve_child(&root, Access::new(0x3000, 0x1000, Rights::RW), 2).unwrap();
 
     let view = root.read().compute_view();
 
@@ -235,9 +235,9 @@ fn test_view_with_aliases_unchanged() {
 
     // Create aliases (shouldn't affect view)
     let _alias1 =
-        Capability::alias_child(&root, Access::new(0x1000, 0x1000, Rights::R), 1, 1).unwrap();
+        Capability::alias_child(&root, Access::new(0x1000, 0x1000, Rights::R), 1).unwrap();
     let _alias2 =
-        Capability::alias_child(&root, Access::new(0x3000, 0x1000, Rights::R), 2, 2).unwrap();
+        Capability::alias_child(&root, Access::new(0x3000, 0x1000, Rights::R), 2).unwrap();
 
     let view = root.read().compute_view();
 
@@ -258,7 +258,7 @@ fn test_create_child_domain() {
     let _ = root.write().data.seal();
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
+    let child = Capability::create_child_domain(&root, child_policy, 1).unwrap();
 
     assert_eq!(root.read().children.len(), 1);
     assert!(child.read().has_parent());
@@ -271,7 +271,7 @@ fn test_revoke_child_domain() {
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let (_child, _) = {
-        let ch = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
+        let ch = Capability::create_child_domain(&root, child_policy, 1).unwrap();
         (ch, ())
     };
 
@@ -288,14 +288,14 @@ fn test_domain_tree_revocation() {
 
     // Create a child
     let child_policy = DomainPolicy::new_root(4);
-    let child = Capability::create_child_domain(&root, child_policy, 1, 1).unwrap();
+    let child = Capability::create_child_domain(&root, child_policy, 1).unwrap();
 
     // Seal child before creating grandchildren
     assert!(child.write().data.seal().is_ok());
 
     // Create a grandchild
     let grandchild_policy = DomainPolicy::new_root(4);
-    let _grandchild = Capability::create_child_domain(&child, grandchild_policy, 2, 2).unwrap();
+    let _grandchild = Capability::create_child_domain(&child, grandchild_policy, 2).unwrap();
 
     // Revoke child (should also revoke grandchild)
     let updates = Capability::revoke_child_domain(&root, 1).unwrap();
@@ -313,7 +313,7 @@ fn test_send_capability() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     // Send to domain 5
     let updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
@@ -337,7 +337,7 @@ fn test_send_with_attributes() {
     let root = Capability::new_root(0, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&root, child_access, 0, 1).unwrap();
+    let (child, _) = Capability::carve_child(&root, child_access, 0).unwrap();
 
     // Send with vital and clean attributes
     let attrs = Attributes::from_bits(Attributes::CLEAN | Attributes::VITAL);

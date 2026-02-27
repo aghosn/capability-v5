@@ -294,7 +294,7 @@ fn test_crosscore_send_triggers_ipi() {
     let root_mem = Capability::new_root(SENDER_ID, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_mem, _) = Capability::carve_child(&root_mem, child_access, SENDER_ID, 1).unwrap();
+    let (child_mem, _) = Capability::carve_child(&root_mem, child_access, SENDER_ID).unwrap();
 
     // Send to receiver (should trigger cross-core path)
     let result = execute(&*platform, false, move || {
@@ -332,7 +332,7 @@ fn test_crosscore_revoke_with_fallback() {
     let root = Capability::new_root(ROOT_ID, 0, root_domain);
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID, 1).unwrap();
+    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID).unwrap();
     let child_id = child.read().data.id;
 
     // Register with the actual IDs (child_id is whatever the global counter gave us).
@@ -387,7 +387,7 @@ fn test_barrier_calls_during_crosscore_operation() {
     let region = MemoryRegion::new_root(0x0, 0x10000);
     let mem = Capability::new_root(SENDER_ID, 0, region);
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&mem, access, SENDER_ID, 1).unwrap();
+    let (child, _) = Capability::carve_child(&mem, access, SENDER_ID).unwrap();
 
     let result = execute(&*platform, false, || {
         Capability::send_to(&child, SENDER_ID, RECEIVER_ID, Attributes::NONE).map(|updates| ((), updates))
@@ -437,7 +437,7 @@ fn test_concurrent_operations_with_different_cores() {
                 let addr = base + (j * 0x1000) as u64;
                 let access = Access::new(addr, 0x1000, Rights::RW);
                 let result = execute(&*p, false, || {
-                    Capability::carve_child(&cap, access, i, j as u64)
+                    Capability::carve_child(&cap, access, i)
                         .map(|(child, updates)| (child, updates))
                 });
 
@@ -484,7 +484,7 @@ fn test_multiple_cores_affected_by_single_operation() {
 
     // Carve a child
     let access = Access::new(0x1000, 0x2000, Rights::RW);
-    let (child1, _) = Capability::carve_child(&root_mem, access, SENDER_ID, 1).unwrap();
+    let (child1, _) = Capability::carve_child(&root_mem, access, SENDER_ID).unwrap();
 
     // Send to receiver 1
     execute(&*platform, false, || {
@@ -532,7 +532,7 @@ fn test_ipi_not_sent_for_local_operations() {
     // Perform operation (should use local path, no IPI)
     let access = Access::new(0x1000, 0x1000, Rights::RW);
     let result = execute(&*platform, false, || {
-        Capability::carve_child(&mem, access, DOMAIN_ID, 1).map(|(child, updates)| (child, updates))
+        Capability::carve_child(&mem, access, DOMAIN_ID).map(|(child, updates)| (child, updates))
     });
 
     assert!(result.is_ok(), "Local operation should succeed");
@@ -566,7 +566,7 @@ fn test_exclusive_lock_serializes_revoke() {
     let root = Arc::new(Capability::new_root(ROOT_ID, 0, root_domain));
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID, 1).unwrap();
+    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID).unwrap();
     let child_id = child.read().data.id;
 
     platform.register_domain(child_id, Some(ROOT_ID));

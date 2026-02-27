@@ -207,7 +207,7 @@ fn test_revoke_child_domain_carries_fallback() {
     // Create a child domain using handle 1
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::REVOKE);
     let child_policy = DomainPolicy::new_restricted(0b0001, child_api);
-    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID, CHILD_HANDLE)
+    let child = Capability::create_child_domain(&root, child_policy, ROOT_ID)
         .expect("create_child_domain should succeed");
 
     let child_id = child.read().data.id;
