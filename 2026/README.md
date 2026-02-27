@@ -266,6 +266,7 @@ backend is selected at compile time via a feature flag:
 | Feature | Lock backend | When to use |
 |---|---|---|
 | `hosted` *(default)* | `parking_lot::RwLock` | OS environments (Linux, macOS, Windows) |
+| `loom` | `loom::sync::RwLock` (wrapped) | Exhaustive concurrency testing |
 | *(none)* `--no-default-features` | `spin::RwLock` | Bare-metal, no OS, no libc |
 
 ### Adding to a bare-metal project
@@ -342,6 +343,9 @@ cargo build --lib
 
 # Run tests
 cargo test
+
+# Run loom exhaustive interleaving tests (explores all thread schedules)
+cargo test --test loom_concurrency --features loom --release
 
 # Check for no_std compatibility
 cargo check --lib --no-default-features

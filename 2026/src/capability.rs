@@ -200,7 +200,7 @@ impl Capability<MemoryRegion> {
         owner: DomainId,
         handle: LocalHandle,
     ) -> Result<CapabilityRef<MemoryRegion>> {
-        let parent = parent_ref.read();
+        let mut parent = parent_ref.write();
 
         // Validate owner domain is sealed and has ALIAS permission
         parent.owned.validate_operation(MonitorAPI::ALIAS)?;
@@ -225,11 +225,8 @@ impl Capability<MemoryRegion> {
             Arc::downgrade(parent_ref),
         );
 
-        // Drop parent read lock before acquiring write lock
-        drop(parent);
-
-        // Add child to parent's children list
-        parent_ref.write().add_child(child.clone());
+        // Add child to parent's children list (still under write lock)
+        parent.add_child(child.clone());
 
         Ok(child)
     }
@@ -241,7 +238,7 @@ impl Capability<MemoryRegion> {
         owner: DomainId,
         handle: LocalHandle,
     ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
-        let parent = parent_ref.read();
+        let mut parent = parent_ref.write();
 
         // Validate owner domain is sealed and has CARVE permission
         parent.owned.validate_operation(MonitorAPI::CARVE)?;
@@ -259,9 +256,6 @@ impl Capability<MemoryRegion> {
 
         // Create carved region from parent
         let child_region = parent.data.carve(access)?;
-
-        // Drop parent read lock
-        drop(parent);
 
         // Create update batch for the carve operation
         let updates = UpdateBatch::new();
@@ -283,8 +277,9 @@ impl Capability<MemoryRegion> {
             Arc::downgrade(parent_ref),
         );
 
-        // Add child to parent's children list
-        parent_ref.write().add_child(child.clone());
+        // Add child to parent's children list (still under write lock,
+        // ensuring the overlap check + insertion is atomic).
+        parent.add_child(child.clone());
 
         Ok((child, updates))
     }
@@ -296,19 +291,30 @@ impl Capability<MemoryRegion> {
         new_handle: LocalHandle,
         attributes: Attributes,
     ) -> Result<UpdateBatch> {
+        // Phase 1 — read child + parent under read locks to determine unmap
+        // behaviour.  No write locks held, so no deadlock with carve_child
+        // (which holds parent write → child read).
+        let (expected_old_owner, parent_owned_by_old_owner) = {
+            let capa = capa_ref.read();
+            capa.owned.validate_operation(MonitorAPI::SEND)?;
+            let old = capa.owned.owner;
+            let parent_owns = if let Some(parent_ref) = capa.get_parent() {
+                parent_ref.read().owned.owner == old
+            } else {
+                false
+            };
+            (old, parent_owns)
+        };
+        // All read locks released.
+
+        // Phase 2 — write-lock only the child.
         let mut capa = capa_ref.write();
-
-        // Validate owner domain is sealed and has SEND permission
-        capa.owned.validate_operation(MonitorAPI::SEND)?;
-
         let old_owner = capa.owned.owner;
 
-        // Check if old owner retains access via parent capability
-        let parent_owned_by_old_owner = if let Some(parent_ref) = capa.get_parent() {
-            parent_ref.read().owned.owner == old_owner
-        } else {
-            false
-        };
+        // If the owner changed between phases (another concurrent send_to
+        // modified this capability), the parent-ownership check is stale.
+        // Conservatively force the unmap in that case.
+        let skip_unmap = parent_owned_by_old_owner && old_owner == expected_old_owner;
 
         // Update ownership and set attributes
         capa.owned.owner = new_owner;
@@ -334,7 +340,7 @@ impl Capability<MemoryRegion> {
         // all ancestor capabilities and sibling capabilities for overlaps. For now, we
         // only check the direct parent.
 
-        if !parent_owned_by_old_owner {
+        if !skip_unmap {
             // Old owner loses access - unmap from their address space
             updates.add_unmap(old_owner, capa.data.access.start, capa.data.access.size);
         }

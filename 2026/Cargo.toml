@@ -17,6 +17,7 @@ path = "src/main.rs"
 # For bare-metal / no_std targets compile with --no-default-features.
 default = ["hosted"]
 hosted = ["dep:parking_lot"]
+loom = ["dep:loom"]
 
 [dependencies]
 # Hosted lock: parking_lot (OS-backed, efficient on multi-core hosted platforms).
@@ -24,6 +25,9 @@ parking_lot = { version = "0.12", features = ["arc_lock"], optional = true }
 
 # Bare-metal lock: spin (pure-Rust busy-wait, no OS, no libc, no_std compatible).
 spin = { version = "0.9", default-features = false, features = ["rwlock"] }
+
+# Deterministic concurrency testing (exhaustive interleaving exploration).
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 # Tests run on a hosted platform and may import parking_lot directly.
@@ -104,3 +108,8 @@ path = "tests/concurrency/crosscore.rs"
 [[test]]
 name = "concurrency_platform"
 path = "tests/concurrency/platform.rs"
+
+[[test]]
+name = "loom_concurrency"
+path = "tests/concurrency/loom_concurrency.rs"
+required-features = ["loom"]

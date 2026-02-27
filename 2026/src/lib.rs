@@ -14,7 +14,7 @@
 //!
 //! This crate can be used in `no_std` environments with the `alloc` crate.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "loom")), no_std)]
 
 extern crate alloc;
 
