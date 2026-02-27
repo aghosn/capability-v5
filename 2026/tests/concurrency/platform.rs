@@ -2,7 +2,7 @@
 //!
 //! Uses `TestPlatform` from `tests/common/mod.rs` as the platform under test.
 
-#[path = "common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 use capability_engine::{

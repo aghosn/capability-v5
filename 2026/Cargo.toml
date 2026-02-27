@@ -29,3 +29,78 @@ spin = { version = "0.9", default-features = false, features = ["rwlock"] }
 # Tests run on a hosted platform and may import parking_lot directly.
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 crossbeam = "0.8"
+
+# ── unit tests ────────────────────────────────────────────────────────────────
+[[test]]
+name = "unit_memory"
+path = "tests/unit/memory.rs"
+
+[[test]]
+name = "unit_domain"
+path = "tests/unit/domain.rs"
+
+[[test]]
+name = "unit_capability"
+path = "tests/unit/capability.rs"
+
+[[test]]
+name = "unit_update"
+path = "tests/unit/update.rs"
+
+[[test]]
+name = "unit_switch"
+path = "tests/unit/switch.rs"
+
+[[test]]
+name = "unit_view"
+path = "tests/unit/view.rs"
+
+[[test]]
+name = "unit_attest"
+path = "tests/unit/attest.rs"
+
+# ── integration tests ─────────────────────────────────────────────────────────
+[[test]]
+name = "integration_api"
+path = "tests/integration/api.rs"
+
+[[test]]
+name = "integration_end_to_end"
+path = "tests/integration/end_to_end.rs"
+
+[[test]]
+name = "integration_owner_validation"
+path = "tests/integration/owner_validation.rs"
+
+[[test]]
+name = "integration_revoke"
+path = "tests/integration/revoke.rs"
+
+[[test]]
+name = "integration_vital_revoke"
+path = "tests/integration/vital_revoke.rs"
+
+[[test]]
+name = "integration_overlap"
+path = "tests/integration/overlap.rs"
+
+[[test]]
+name = "integration_updates"
+path = "tests/integration/updates.rs"
+
+[[test]]
+name = "integration_interrupt"
+path = "tests/integration/interrupt.rs"
+
+# ── concurrency tests ─────────────────────────────────────────────────────────
+[[test]]
+name = "concurrency_basic"
+path = "tests/concurrency/basic.rs"
+
+[[test]]
+name = "concurrency_crosscore"
+path = "tests/concurrency/crosscore.rs"
+
+[[test]]
+name = "concurrency_platform"
+path = "tests/concurrency/platform.rs"
