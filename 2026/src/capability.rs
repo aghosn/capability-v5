@@ -958,4 +958,51 @@ impl Capability<Domain> {
         let parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
         Capability::revoke_child_domain(&parent_ref, child_sub)
     }
+
+    // =========================================================================
+    // Domain-mediated direct-parent operations
+    // (for when the caller IS the parent domain, so no handle indirection is needed)
+    // =========================================================================
+
+    /// Create a child domain directly under `parent`.
+    ///
+    /// Unlike [`create_child_domain_op`], the caller supplies `parent` directly
+    /// rather than as a LocalHandle in a caller's table.  Used by the monitor
+    /// and CLI where the operating entity *is* the parent domain.
+    ///
+    /// Performs the same bookkeeping as `create_child_domain_op`: validates
+    /// permissions, auto-allocates a LocalHandle in `parent`'s table, sets
+    /// `owner_domain` on the child, and registers the child in `parent`'s table.
+    pub fn create_direct_child_domain(
+        parent: &CapabilityRef<Domain>,
+        policy: DomainPolicy,
+    ) -> Result<LocalHandle> {
+        let owner_id = parent.read().data.id;
+
+        // 1. Auto-allocate handle
+        let new_handle = parent.read().data.allocate_domain_handle();
+
+        // 2. Create the child (validates sealed + CREATE permission + policy monotonicity)
+        let child_ref = Capability::create_child_domain(parent, policy, owner_id, new_handle)?;
+
+        // 3. Set owner_domain so API checks work on the child
+        child_ref.write().owned.owner_domain = Some(Arc::downgrade(parent));
+
+        // 4. Register child in parent's table
+        parent.write().data.add_domain_capability(new_handle, Arc::downgrade(&child_ref));
+
+        Ok(new_handle)
+    }
+
+    /// Revoke a child domain directly from `parent` by its stable SubHandle.
+    ///
+    /// Unlike [`revoke_child_domain_op`], the caller supplies `parent` directly.
+    /// Validates the `REVOKE` API permission before delegating.
+    pub fn revoke_direct_child_domain(
+        parent: &CapabilityRef<Domain>,
+        child_sub: SubHandle,
+    ) -> Result<UpdateBatch> {
+        parent.read().owned.validate_operation(MonitorAPI::REVOKE)?;
+        Capability::revoke_child_domain(parent, child_sub)
+    }
 }

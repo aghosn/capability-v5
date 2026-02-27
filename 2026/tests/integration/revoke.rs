@@ -1,195 +1,227 @@
 //! Tests for revoke logic with re-enabling parent access
 
 use capability_engine::*;
+use std::sync::Arc;
+
+fn bootstrap() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHandle) {
+    let root_domain = Domain::new_root(4); // already sealed
+    let root = Capability::new_root(0, 0, root_domain);
+    let root_region = MemoryRegion::new_root(0x0, 0x10000);
+    let r0 = Capability::new_root(0, 1, root_region);
+    root.write().data.add_memory_capability(1, Arc::downgrade(&r0));
+    let r0_h: LocalHandle = 1;
+    (root, r0, r0_h)
+}
 
 #[test]
 fn test_revoke_carved_child_never_sent() {
-    // Setup: Parent carves a child but never sends it
-    let region = MemoryRegion::new_root(0x0, 0x10000);
-    let parent = Capability::new_root(0, 0, region);
+    let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
+    let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
-    // Revoke the child
-    let updates = Capability::revoke_child(&parent, 1).unwrap();
-
-    // Since child was never sent (owner == parent owner), no updates needed
-    // Parent never lost access in the first place
+    // Revoke the child — it was never sent, so owner unchanged, no MMU updates
+    let updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
     assert!(updates.is_empty());
 }
 
 #[test]
 fn test_revoke_carved_child_after_send() {
-    // Setup: Parent carves a child and sends it to another domain
-    let region = MemoryRegion::new_root(0x0, 0x10000);
-    let parent = Capability::new_root(0, 0, region);
+    let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
+    let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
-    // Send child to domain 5 (changes ownership and handle)
-    let _send_updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
+    // Create an unsealed receiver domain — send causes immediate transfer
+    let dom5_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
+    let dom5_id = dom5.read().data.id;
 
-    // Now revoke the child using Arc reference (not handle, since handle changed)
-    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
 
-    // Should have 2 updates:
-    // 1. Unmap from child's domain (5)
-    // 2. Remap to parent's domain (0)
+    // Revoke: parent_h = r0_h, child_sub = child_h (stable sub_handle)
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
+
+    // 1. Unmap from dom5, 2. Remap to root
     assert_eq!(revoke_updates.len(), 2);
 
+    let root_id = root.read().data.id;
     let updates_list = revoke_updates.updates();
 
-    // Check for unmap from domain 5
     let has_unmap = updates_list.iter().any(|u| {
         matches!(u, Update::Unmap { domain, address, size }
-            if *domain == 5 && *address == 0x1000 && *size == 0x1000)
+            if *domain == dom5_id && *address == 0x1000 && *size == 0x1000)
     });
     assert!(has_unmap, "Should unmap from child's domain");
 
-    // Check for map to domain 0
     let has_map = updates_list.iter().any(|u| {
         matches!(u, Update::Map { domain, address, size, .. }
-            if *domain == 0 && *address == 0x1000 && *size == 0x1000)
+            if *domain == root_id && *address == 0x1000 && *size == 0x1000)
     });
     assert!(has_map, "Should remap to parent's domain");
 }
 
 #[test]
 fn test_revoke_aliased_child_no_remapping() {
-    // Setup: Parent creates an aliased child and sends it
-    let region = MemoryRegion::new_root(0x0, 0x10000);
-    let parent = Capability::new_root(0, 0, region);
+    let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let child = Capability::alias_child(&parent, child_access, 0, 1).unwrap();
+    let child_h = Capability::alias_memory(&root, r0_h, child_access).unwrap();
 
-    // Send child to domain 5 (changes ownership and handle)
-    let _send_updates = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
+    // Create an unsealed receiver domain
+    let dom5_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
-    // Revoke the child using Arc reference
-    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
 
-    // Aliased children should NOT cause remapping to parent
-    // Because aliases don't remove access from parent
-    // So we should only have cleanup, not remapping
-    let updates_list = revoke_updates.updates();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
-    // Should NOT have a map to parent's domain
-    let has_map_to_parent = updates_list.iter().any(|u| {
-        matches!(u, Update::Map { domain, .. } if *domain == 0)
-    });
+    // Aliased children must NOT generate a remap to parent
+    let root_id = root.read().data.id;
+    let has_map_to_parent = revoke_updates
+        .updates()
+        .iter()
+        .any(|u| matches!(u, Update::Map { domain, .. } if *domain == root_id));
     assert!(!has_map_to_parent, "Aliased children should not remap to parent on revoke");
 }
 
 #[test]
 fn test_revoke_with_clean_and_remap() {
-    // Setup: Carved child with CLEAN attribute, sent to another domain
-    let region = MemoryRegion::new_root(0x0, 0x10000);
-    let parent = Capability::new_root(0, 0, region);
+    let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
+    let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
-    // Send with CLEAN attribute
+    // Create an unsealed receiver domain
+    let dom5_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
+    let dom5_id = dom5.read().data.id;
+
     let attrs = Attributes::from_bits(Attributes::CLEAN);
-    let _send_updates = Capability::send_to(&child, 0, 5, attrs).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, &dom5, attrs).unwrap();
 
-    // Revoke using Arc reference
-    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
-    // Should have 3 updates:
-    // 1. Zero memory (CLEAN attribute)
-    // 2. Unmap from child's domain
-    // 3. Remap to parent's domain
+    // 1. ZeroMemory (CLEAN), 2. Unmap from dom5, 3. Remap to root
     assert_eq!(revoke_updates.len(), 3);
 
+    let root_id = root.read().data.id;
     let updates_list = revoke_updates.updates();
 
-    // Check for zero memory
     let has_zero = updates_list.iter().any(|u| {
         matches!(u, Update::ZeroMemory { address, size }
             if *address == 0x1000 && *size == 0x1000)
     });
     assert!(has_zero, "Should zero memory due to CLEAN attribute");
 
-    // Check for unmap
-    let has_unmap = updates_list.iter().any(|u| {
-        matches!(u, Update::Unmap { domain, .. } if *domain == 5)
-    });
+    let has_unmap = updates_list
+        .iter()
+        .any(|u| matches!(u, Update::Unmap { domain, .. } if *domain == dom5_id));
     assert!(has_unmap);
 
-    // Check for remap to parent
-    let has_map = updates_list.iter().any(|u| {
-        matches!(u, Update::Map { domain, .. } if *domain == 0)
-    });
+    let has_map = updates_list
+        .iter()
+        .any(|u| matches!(u, Update::Map { domain, .. } if *domain == root_id));
     assert!(has_map);
 }
 
 #[test]
 fn test_nested_carve_revoke() {
-    // Setup: Parent carves child1, child1 carves child2, both sent to different domains
-    let region = MemoryRegion::new_root(0x0, 0x10000);
-    let parent = Capability::new_root(0, 0, region);
+    let (root, _r0, r0_h) = bootstrap();
+    let root_id = root.read().data.id;
 
-    // Parent (domain 0) carves child1
+    // Root carves child1
     let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
-    let (child1, _) = Capability::carve_child(&parent, c1_access, 0, 1).unwrap();
+    let (child1_h, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
 
-    // Send child1 to domain 5
-    let _send1 = Capability::send_to(&child1, 0, 5, Attributes::NONE).unwrap();
+    // Create dom5 (unsealed) to receive child1
+    let dom5_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
-    // Child1 (now owned by domain 5) carves child2
+    // Send child1 to dom5 (immediate transfer — dom5 is unsealed)
+    let _send1 = Capability::send_memory(&root, child1_h, &dom5, Attributes::NONE).unwrap();
+
+    // Seal dom5 so it can carve from child1
+    Capability::seal_domain_op(&root, dom5_h).unwrap();
+
+    // After send, child1 is the first (and only) cap in dom5's memory table → handle 1
+    let child1_h_in_dom5: LocalHandle = 1;
     let c2_access = Access::new(0x3000, 0x1000, Rights::R);
-    let (child2, _) = Capability::carve_child(&child1, c2_access, 5, 2).unwrap();
+    let (child2_h_in_dom5, _) =
+        Capability::carve_memory(&dom5, child1_h_in_dom5, c2_access).unwrap();
 
-    // Send child2 to domain 10
-    let _send2 = Capability::send_to(&child2, 5, 10, Attributes::NONE).unwrap();
+    // Create dom10 (unsealed) to receive child2
+    let dom10_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom10 = root.read().data.domain_capabilities[&dom10_h].upgrade().unwrap();
 
-    // Now revoke child1 from parent
-    // This should revoke the entire subtree including child2
-    let revoke_updates = Capability::revoke_child(&parent, 1).unwrap();
+    let _send2 =
+        Capability::send_memory(&dom5, child2_h_in_dom5, &dom10, Attributes::NONE).unwrap();
 
-    // Should have updates for:
-    // - Unmapping child2 from domain 10
-    // - Remapping child2's region to child1's owner (domain 5)
-    // - Unmapping child1 from domain 5
-    // - Remapping child1's region to parent's owner (domain 0)
-    assert!(revoke_updates.len() >= 2); // At least unmap from 5 and map to 0
+    // Revoke child1 from root — the entire subtree (including child2) is revoked
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_h).unwrap();
 
-    let updates_list = revoke_updates.updates();
+    assert!(revoke_updates.len() >= 2);
 
-    // Check parent regains access to child1's region
-    let parent_regains = updates_list.iter().any(|u| {
+    // Root should regain access to child1's full region
+    let parent_regains = revoke_updates.updates().iter().any(|u| {
         matches!(u, Update::Map { domain, address, size, .. }
-            if *domain == 0 && *address == 0x2000 && *size == 0x4000)
+            if *domain == root_id && *address == 0x2000 && *size == 0x4000)
     });
     assert!(parent_regains, "Parent should regain access to child1's region");
 }
 
 #[test]
 fn test_revoke_preserves_parent_rights() {
-    // Setup: Parent with limited rights carves child and sends it
+    let root_domain = Domain::new_root(4); // already sealed
+    let root = Capability::new_root(0, 0, root_domain);
+
+    // Bootstrap with R-only root region
     let mut region = MemoryRegion::new_root(0x0, 0x10000);
-    region.access.rights = Rights::R; // Parent only has READ
-    let parent = Capability::new_root(0, 0, region);
+    region.access.rights = Rights::R;
+    let r0 = Capability::new_root(0, 1, region);
+    root.write().data.add_memory_capability(1, Arc::downgrade(&r0));
+    let r0_h: LocalHandle = 1;
+    let root_id = root.read().data.id;
 
     let child_access = Access::new(0x1000, 0x1000, Rights::R);
-    let (child, _) = Capability::carve_child(&parent, child_access, 0, 1).unwrap();
+    let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
-    // Send to domain 5
-    let _send = Capability::send_to(&child, 0, 5, Attributes::NONE).unwrap();
+    // Create an unsealed receiver domain
+    let dom5_h = Capability::create_direct_child_domain(
+        &root,
+        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    )
+    .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
-    // Revoke using Arc reference
-    let revoke_updates = Capability::revoke_child_ref(&parent, &child).unwrap();
+    let _send = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
 
-    let updates_list = revoke_updates.updates();
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
-    // Check that remap preserves parent's rights (READ only)
-    let has_correct_rights = updates_list.iter().any(|u| {
+    // Remap must honour parent's R-only rights
+    let has_correct_rights = revoke_updates.updates().iter().any(|u| {
         if let Update::Map { domain, read, write, execute, .. } = u {
-            *domain == 0 && *read && !*write && !*execute
+            *domain == root_id && *read && !*write && !*execute
         } else {
             false
         }
