@@ -45,22 +45,17 @@ impl Ownership {
         }
     }
 
-    pub fn with_attributes(owner: DomainId, attributes: Attributes) -> Self {
-        Ownership {
-            owner,
-            attributes,
-            owner_domain: None,
-        }
-    }
-
-    /// Set the owning domain reference
+    /// Set the owning domain reference.
+    ///
+    /// Used by the domain-mediated layer and test setup only.
+    #[doc(hidden)]
     pub fn set_owner_domain(&mut self, domain: CapabilityWeak<Domain>) {
         self.owner_domain = Some(domain);
     }
 
     /// Validate that the owning domain is sealed and allows the given API operation.
     /// If no owner domain is set (e.g., standalone test capabilities), the check is skipped.
-    pub fn validate_operation(&self, required_api: u16) -> Result<()> {
+    pub(crate) fn validate_operation(&self, required_api: u16) -> Result<()> {
         if let Some(ref weak_domain) = self.owner_domain {
             let domain_ref = weak_domain.upgrade().ok_or(CapaError::PermissionDenied)?;
             let domain = domain_ref.read();
@@ -131,12 +126,18 @@ impl<T> Capability<T> {
     }
 
     /// Add a child capability
+    /// Add a child capability.
+    ///
+    /// **Internal.** Used by the capability engine and test fixtures only.
+    #[doc(hidden)]
     pub fn add_child(&mut self, child: CapabilityRef<T>) {
         self.children.push(child);
     }
 
     /// Remove a specific child by its stable SubHandle
-    pub fn remove_child(&mut self, child_sub: SubHandle) -> Option<CapabilityRef<T>> {
+    ///
+    /// **Internal.** Used by the capability engine only.
+    pub(crate) fn remove_child(&mut self, child_sub: SubHandle) -> Option<CapabilityRef<T>> {
         if let Some(pos) = self
             .children
             .iter()
@@ -161,6 +162,9 @@ impl<T> Capability<T> {
 
 impl Capability<MemoryRegion> {
     /// Create an aliased child region (static method, explicit owner)
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`alias_memory`] instead.
+    #[doc(hidden)]
     pub fn alias_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
         access: Access,
@@ -198,6 +202,9 @@ impl Capability<MemoryRegion> {
     }
 
     /// Create a carved child region
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`carve_memory`] instead.
+    #[doc(hidden)]
     pub fn carve_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
         access: Access,
@@ -238,7 +245,10 @@ impl Capability<MemoryRegion> {
 
     /// Send this capability to another domain.
     ///
+    /// **Internal primitive.** Prefer the domain-mediated [`send_memory`] instead.
+    ///
     /// `caller` is the domain ID of the entity initiating the send.
+    #[doc(hidden)]
     pub fn send_to(
         capa_ref: &CapabilityRef<MemoryRegion>,
         caller: DomainId,
@@ -301,6 +311,9 @@ impl Capability<MemoryRegion> {
     }
 
     /// Revoke a child capability by Arc reference
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`revoke_memory_child`] instead.
+    #[doc(hidden)]
     pub fn revoke_child_ref(
         parent_ref: &CapabilityRef<MemoryRegion>,
         child_ref: &CapabilityRef<MemoryRegion>,
@@ -330,6 +343,9 @@ impl Capability<MemoryRegion> {
     }
 
     /// Revoke a child capability by its stable SubHandle
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`revoke_memory_child`] instead.
+    #[doc(hidden)]
     pub fn revoke_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
         child_sub: SubHandle,
@@ -404,6 +420,9 @@ impl Capability<MemoryRegion> {
     }
 
     /// Compute the current view of memory (considering carved children)
+    ///
+    /// **Internal.** Use [`compute_address_space`] for the full domain view.
+    #[doc(hidden)]
     pub fn compute_view(&self) -> Vec<Access> {
         let mut view = vec![self.data.access];
         let parent_owner = self.owned.owner;
@@ -449,6 +468,9 @@ fn subtract_region(regions: &[Access], to_subtract: &Access) -> Vec<Access> {
 
 impl Capability<Domain> {
     /// Create a child domain (static method, explicit owner)
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`create_domain`] instead.
+    #[doc(hidden)]
     pub fn create_child_domain(
         parent_ref: &CapabilityRef<Domain>,
         policy: DomainPolicy,
@@ -485,6 +507,9 @@ impl Capability<Domain> {
     }
 
     /// Revoke a child domain and all its descendants by SubHandle
+    ///
+    /// **Internal primitive.** Prefer the domain-mediated [`revoke_domain`] instead.
+    #[doc(hidden)]
     pub fn revoke_child_domain(
         parent_ref: &CapabilityRef<Domain>,
         child_sub: SubHandle,
@@ -959,7 +984,7 @@ impl Capability<Domain> {
     /// Revoke a child domain that `caller` holds at `child_handle` in its domain table.
     ///
     /// Looks up the child's Arc to get its actual SubHandle, then delegates to
-    /// the low-level `revoke_child_domain`.
+    /// the low-level `revoke_child_domain` (which validates the REVOKE permission).
     pub fn revoke_domain(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
@@ -973,7 +998,6 @@ impl Capability<Domain> {
             .clone();
         let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
         let child_sub = child_ref.read().sub_handle;
-        caller.read().owned.validate_operation(MonitorAPI::REVOKE)?;
         Capability::revoke_child_domain(caller, child_sub)
     }
 }

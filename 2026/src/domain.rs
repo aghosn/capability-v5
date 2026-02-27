@@ -69,16 +69,6 @@ impl MonitorAPI {
         (self.bits & flag) != 0
     }
 
-    /// Add an operation permission
-    pub fn set(&mut self, flag: u16) {
-        self.bits |= flag & 0x1FFF;
-    }
-
-    /// Remove an operation permission
-    pub fn clear(&mut self, flag: u16) {
-        self.bits &= !(flag & 0x1FFF);
-    }
-
     /// Check if self is a subset of other (for monotonicity)
     pub fn is_subset_of(&self, other: &MonitorAPI) -> bool {
         (self.bits & !other.bits) == 0
@@ -445,11 +435,6 @@ impl Domain {
         self.frozen_handles.contains(&handle)
     }
 
-    /// Check if a domain handle is frozen (currently always false — domain caps not sendable)
-    pub fn is_domain_handle_frozen(&self, _handle: LocalHandle) -> bool {
-        false
-    }
-
     /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)
     /// Returns the pending ID
     pub fn add_pending_capability(&mut self, capability: PendingCapability) -> u64 {
@@ -462,17 +447,5 @@ impl Domain {
     /// Get all pending capability IDs
     pub fn get_pending_ids(&self) -> Vec<u64> {
         self.pending_capabilities.keys().copied().collect()
-    }
-
-    /// Take a pending capability (remove and return it)
-    pub fn take_pending_capability(&mut self, pending_id: u64) -> Option<PendingCapability> {
-        self.pending_capabilities.remove(&pending_id)
-    }
-
-    /// Reject (discard) a pending capability without activating it
-    pub fn reject_pending_capability(&mut self, pending_id: u64) -> Result<PendingCapability> {
-        self.pending_capabilities
-            .remove(&pending_id)
-            .ok_or(CapaError::NotFound)
     }
 }

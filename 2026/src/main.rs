@@ -1,5 +1,4 @@
 use capability_engine::*;
-use std::sync::Arc;
 
 fn main() {
     println!("=== Capability Engine V2 - Complete Workflow Demo ===\n");
@@ -10,20 +9,24 @@ fn main() {
     println!("STEP 1: Initialize root domain and memory");
     println!("------------------------------------------");
 
-    let root_domain = Domain::new_root(4);
-    let root = Capability::new_root(0, 0, root_domain);
-    println!("✓ Created root domain (ID: 0)");
+    // Root domain: the bootstrap domain, owns everything.
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    println!("✓ Created root domain (ID: {})", root_id);
 
-    // Create root memory region (16 MB)
-    let root_region = MemoryRegion::new_root(0x0, 0x1000000); // 16 MB
-    let mem_root = Capability::new_root(0, 1, root_region);
+    // Root memory region (16 MB), registered at handle 1 in root's table.
+    let root_region = MemoryRegion::new_root(0x0, 0x1000000);
+    let mem_root = Capability::new_root(root_id, 1, root_region);
+    mem_root.write().owned.owner_domain = Some(std::sync::Arc::downgrade(&root));
+    root.write().data.add_memory_capability(1, std::sync::Arc::downgrade(&mem_root));
     println!("✓ Created root memory region: [0x0..0x1000000) (16 MB)");
 
-    // Register memory capability with root domain
-    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
+    // The root domain must be sealed before any domain-mediated API call.
+    root.write().data.seal().unwrap();
+    println!("✓ Root domain sealed (prerequisite for all API operations)");
 
     // ================================================================
-    // STEP 2: Create child domain
+    // STEP 2: Create child domain  (domain-mediated)
     // ================================================================
     println!("\nSTEP 2: Create child domain");
     println!("----------------------------");
@@ -31,92 +34,71 @@ fn main() {
     let child_api = MonitorAPI::from_bits(
         MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::ENUMERATE | MonitorAPI::SWITCH,
     );
-    let child_policy = DomainPolicy::new_restricted(
-        0b1111, // cores 0-3
-        child_api,
-    );
+    let child_policy = DomainPolicy::new_restricted(0b1111, child_api);
 
-    let root_id = root.read().data.id;
-    let child = Capability::create_child_domain(&root, child_policy, root_id).unwrap();
+    let child_h = Capability::create_domain(&root, child_policy).unwrap();
+
+    // Resolve Arc for later use (attestation, view, switch).
+    let child = root.read().data
+        .get_domain_capability(child_h).unwrap().upgrade().unwrap();
     let child_id = child.read().data.id;
-    println!("✓ Created child domain (ID: {})", child_id);
+    println!("✓ Created child domain (ID: {}, handle: {})", child_id, child_h);
     println!("  • Cores: 0b{:04b}", child.read().data.policy.cores);
     println!("  • API permissions: GET, ATTEST, ENUMERATE, SWITCH");
 
-    // Register domain capability with root
-    root.write().data.add_domain_capability(2, Arc::downgrade(&child));
-
     // ================================================================
-    // STEP 3: Create memory regions (exclusive + shared)
+    // STEP 3: Create memory regions  (domain-mediated)
     // ================================================================
     println!("\nSTEP 3: Create memory regions");
     println!("------------------------------");
 
-    // Carve exclusive memory for child (1 MB at 0x100000)
+    // Carve exclusive memory for child (1 MB at 0x100000).
     println!("Creating EXCLUSIVE memory for child...");
     let exclusive_access = Access::new(0x100000, 0x100000, Rights::RWX);
-    let (exclusive_mem, carve_updates) = Capability::carve_child(&mem_root, exclusive_access, 0).unwrap();
-    println!("✓ Carved exclusive memory: {}", exclusive_mem.read().data.access);
-    println!("  • Kind: {:?}", exclusive_mem.read().data.kind);
+    let (excl_h, excl_sub, carve_updates) =
+        Capability::carve_memory(&root, 1, exclusive_access).unwrap();
+    println!("✓ Carved exclusive memory at handle {} (sub {})", excl_h, excl_sub);
     println!("  • Updates generated: {}", carve_updates.len());
 
-    // Register with root domain
-    root.write().data.add_memory_capability(3, Arc::downgrade(&exclusive_mem));
-
-    // Create aliased (shared) memory for child (512 KB at 0x200000)
+    // Alias shared memory for child (512 KB at 0x200000).
     println!("\nCreating SHARED memory for child...");
     let shared_access = Access::new(0x200000, 0x80000, Rights::RW);
-    let shared_mem = Capability::alias_child(&mem_root, shared_access, 0).unwrap();
-    println!("✓ Aliased shared memory: {}", shared_mem.read().data.access);
-    println!("  • Kind: {:?}", shared_mem.read().data.kind);
+    let (shared_h, shared_sub) =
+        Capability::alias_memory(&root, 1, shared_access).unwrap();
+    println!("✓ Aliased shared memory at handle {} (sub {})", shared_h, shared_sub);
     println!("  • Parent retains access (aliased, not carved)");
 
-    // Register with root domain
-    root.write().data.add_memory_capability(4, Arc::downgrade(&shared_mem));
-
     // ================================================================
-    // STEP 4: Send capabilities to child
+    // STEP 4: Send capabilities to child  (domain-mediated)
     // ================================================================
     println!("\nSTEP 4: Send capabilities to child");
     println!("------------------------------------");
 
-    // Send exclusive memory to child (with CLEAN attribute)
     let clean_attrs = Attributes::from_bits(Attributes::CLEAN);
-    let send1_updates = Capability::send_to(&exclusive_mem, 0, child_id, clean_attrs).unwrap();
-    println!("✓ Sent exclusive memory to child");
-    println!("  • Child handle: 10");
-    println!("  • Attributes: CLEAN (will be zeroed on revoke)");
+    let send1_updates = Capability::send_memory(&root, excl_h, child_h, clean_attrs).unwrap();
+    println!("✓ Sent exclusive memory to child (handle {} removed from root)", excl_h);
+    println!("  • Attributes: CLEAN (zeroed on revoke)");
     println!("  • Updates generated: {}", send1_updates.len());
     for (i, update) in send1_updates.updates().iter().enumerate() {
         println!("    {}. {:?}", i + 1, update);
     }
 
-    // Register with child domain
-    child.write().data.add_memory_capability(10, Arc::downgrade(&exclusive_mem));
-
-    // Send shared memory to child (no special attributes)
-    let send2_updates = Capability::send_to(&shared_mem, 0, child_id, Attributes::NONE).unwrap();
-    println!("\n✓ Sent shared memory to child");
-    println!("  • Child handle: 11");
+    let send2_updates = Capability::send_memory(&root, shared_h, child_h, Attributes::NONE).unwrap();
+    println!("\n✓ Sent shared memory to child (handle {} removed from root)", shared_h);
     println!("  • Updates generated: {}", send2_updates.len());
     for (i, update) in send2_updates.updates().iter().enumerate() {
         println!("    {}. {:?}", i + 1, update);
     }
 
-    // Register with child domain
-    child.write().data.add_memory_capability(11, Arc::downgrade(&shared_mem));
-
     // ================================================================
-    // STEP 5: Seal the child domain
+    // STEP 5: Seal the child domain  (domain-mediated)
     // ================================================================
     println!("\nSTEP 5: Seal child domain");
     println!("--------------------------");
 
-    child.write().data.seal().unwrap();
-    println!("✓ Child domain sealed and ready for execution");
+    Capability::seal_domain_op(&root, child_h).unwrap();
+    println!("✓ Child domain sealed");
     println!("  • Status: {:?}", child.read().data.status);
-    println!("  • Can no longer receive capabilities: {}",
-             !child.read().data.policy.receive_after_seal());
 
     // ================================================================
     // STEP 6: Generate and display attestations
@@ -155,40 +137,28 @@ fn main() {
     let switch_mgr = SwitchManager::new(4);
     println!("✓ Created switch manager with 4 cores");
 
-    // Initialize core 0 as running root domain
     {
         let core = switch_mgr.get_core(0).unwrap();
         *core.state.write() = CoreState::Running(0);
         println!("✓ Core 0 initialized, running root domain");
     }
 
-    // Perform switch from root to child
     match switch_mgr.switch(0, &root, Some(&child)) {
         Ok(ctx) => {
             println!("\n✓ Switched from domain {} to domain {} on core {}",
                      ctx.from_domain, ctx.to_domain, ctx.core_id);
-            println!("  • Is return: {}", ctx.is_return);
         }
         Err(e) => println!("✗ Switch failed: {}", e),
     }
 
-    // Simulate an interrupt
     println!("\nSimulating interrupt vector 6 on child domain...");
     match switch_mgr.route_interrupt(6, &child, 0) {
         Ok((handler_id, reported_to)) => {
-            println!("✓ Interrupt routed successfully");
-            println!("  • Handler domain: {}", handler_id);
-            println!("  • Domains reported to: {:?}", reported_to);
-
+            println!("✓ Interrupt routed. Handler: {}, reported to: {:?}",
+                     handler_id, reported_to);
             if handler_id == 0 {
-                println!("  • Interrupt handled by root domain");
-
-                // Switch back to root for handling
                 match switch_mgr.switch(0, &child, None) {
-                    Ok(ctx) => {
-                        println!("✓ Switched back to root domain (ID: {}) for interrupt handling",
-                                 ctx.to_domain);
-                    }
+                    Ok(ctx) => println!("✓ Switched back to root (ID: {}) for interrupt", ctx.to_domain),
                     Err(e) => println!("✗ Switch back failed: {}", e),
                 }
             }
@@ -197,48 +167,28 @@ fn main() {
     }
 
     // ================================================================
-    // STEP 9: Revoke child to regain capabilities
+    // STEP 9: Revoke child capabilities  (domain-mediated)
     // ================================================================
     println!("\nSTEP 9: Revoke child domain");
     println!("----------------------------");
 
-    println!("Root domain before revoke:");
-    println!("  • Children count: {}", root.read().children.len());
-    println!("  • Memory capabilities: {}", root.read().data.memory_capabilities.len());
-
-    // Revoke exclusive memory capability first
-    println!("\nRevoking exclusive memory from child...");
-    let revoke1_updates = Capability::revoke_child_ref(&mem_root, &exclusive_mem).unwrap();
-    println!("✓ Revoked exclusive memory");
-    println!("  • Updates generated: {}", revoke1_updates.len());
-    println!("  • Parent regains access to [0x100000..0x200000)");
-    for (i, update) in revoke1_updates.updates().iter().enumerate() {
-        println!("    {}. {:?}", i + 1, update);
+    // Revoke exclusive and shared memory from root's parent capability (handle 1 = mem_root).
+    // sub_handles are stable even though the caps were sent away.
+    let rev1 = Capability::revoke_memory_child(&root, 1, excl_sub).unwrap();
+    println!("✓ Revoked exclusive memory (sub {}): {} updates", excl_sub, rev1.len());
+    for (i, u) in rev1.updates().iter().enumerate() {
+        println!("    {}. {:?}", i + 1, u);
     }
 
-    // Revoke shared memory capability
-    println!("\nRevoking shared memory from child...");
-    let revoke2_updates = Capability::revoke_child_ref(&mem_root, &shared_mem).unwrap();
-    println!("✓ Revoked shared memory");
-    println!("  • Updates generated: {}", revoke2_updates.len());
-    for (i, update) in revoke2_updates.updates().iter().enumerate() {
-        println!("    {}. {:?}", i + 1, update);
+    let rev2 = Capability::revoke_memory_child(&root, 1, shared_sub).unwrap();
+    println!("✓ Revoked shared memory (sub {}): {} updates", shared_sub, rev2.len());
+    for (i, u) in rev2.updates().iter().enumerate() {
+        println!("    {}. {:?}", i + 1, u);
     }
 
-    // Revoke the child domain itself
-    println!("\nRevoking child domain...");
-    let revoke_domain_updates = Capability::revoke_child_domain(&root, 2).unwrap();
-    println!("✓ Revoked child domain");
-    println!("  • Updates generated: {}", revoke_domain_updates.len());
-    for (i, update) in revoke_domain_updates.updates().iter().enumerate() {
-        println!("    {}. {:?}", i + 1, update);
-    }
-
-    println!("\nRoot domain after revoke:");
-    println!("  • Children count: {}", root.read().children.len());
-    println!("  • Back to original state (no child domains)");
-
-    // Verify child is revoked
+    // Revoke the child domain itself.
+    let rev_dom = Capability::revoke_domain(&root, child_h).unwrap();
+    println!("✓ Revoked child domain (handle {}): {} updates", child_h, rev_dom.len());
     println!("  • Child status: {:?}", child.read().data.status);
 
     // ================================================================
@@ -247,21 +197,10 @@ fn main() {
     println!("\nSTEP 10: Verify final state");
     println!("----------------------------");
 
-    let final_root_view = compute_address_space(&root);
+    let final_view = compute_address_space(&root);
     println!("Root Domain Final Address Space:");
-    println!("{}", final_root_view);
+    println!("{}", final_view);
     println!("✓ Root domain has regained all memory regions");
 
-    println!("\n=== Complete Workflow Demonstration Finished ===");
-    println!("\nThis demo showed:");
-    println!("  1. ✓ Creating root domain and memory");
-    println!("  2. ✓ Creating child domain with restricted policy");
-    println!("  3. ✓ Creating exclusive (carved) and shared (aliased) memory");
-    println!("  4. ✓ Sending capabilities to child domain");
-    println!("  5. ✓ Sealing child domain");
-    println!("  6. ✓ Generating attestation reports");
-    println!("  7. ✓ Computing address space views");
-    println!("  8. ✓ Performing domain switches and interrupt routing");
-    println!("  9. ✓ Revoking child and regaining capabilities");
-    println!(" 10. ✓ Verifying state returns to original");
+    println!("\n=== Demo finished — all operations used the domain-mediated API ===");
 }
