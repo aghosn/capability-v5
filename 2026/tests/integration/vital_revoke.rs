@@ -16,7 +16,7 @@ fn test_session() {
     // Create child domain dom1 via domain-mediated API
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0x1, api);
-    let dom1_h = Capability::create_direct_child_domain(&root, policy).unwrap();
+    let dom1_h = Capability::create_domain(&root, policy).unwrap();
     let dom1 = root.read().data.domain_capabilities[&dom1_h].upgrade().unwrap();
     let domain_id = dom1.read().data.id;
 
@@ -32,7 +32,7 @@ fn test_session() {
     let _updates = Capability::send_memory(
         &root,
         r1_h,
-        &dom1,
+        dom1_h,
         Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
     )
     .unwrap();

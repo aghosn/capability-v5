@@ -5,7 +5,7 @@ use colored::*;
 
 use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
 use crate::session::Command;
-use crate::state::{CliState, find_memory_handle};
+use crate::state::{CliState, find_domain_handle, find_memory_handle};
 use crate::update_processor::process_updates;
 
 /// Carve exclusive memory from parent
@@ -180,7 +180,9 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     let platform = state.platform.clone();
     let (_, batch) = execute(&*platform, !is_sealed, || {
-        let updates = Capability::send_memory(&sender_domain, sender_handle, &domain, attrs)?;
+        let recv_h = find_domain_handle(&sender_domain, &domain)
+            .ok_or(CapaError::NotFound)?;
+        let updates = Capability::send_memory(&sender_domain, sender_handle, recv_h, attrs)?;
         Ok(((), updates))
     }).map_err(|e| format!("Failed to send: {:?}", e))?;
 

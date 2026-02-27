@@ -202,7 +202,7 @@ impl Session {
                     writeln!(file, "    let {name}_api = MonitorAPI::from_bits({api_bits});",
                         api_bits = parse_api_bits(api))?;
                     writeln!(file, "    let {name}_policy = DomainPolicy::new_restricted(0x{cores:x}, {name}_api);")?;
-                    writeln!(file, "    let {handle_var} = Capability::create_direct_child_domain(&{parent_arc}, {name}_policy).unwrap();")?;
+                    writeln!(file, "    let {handle_var} = Capability::create_domain(&{parent_arc}, {name}_policy).unwrap();")?;
                     writeln!(file, "    let {child_var} = {parent_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -279,9 +279,17 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(mem)));
                     let recv_arc    = arc_map.get(domain)
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
+                    let recv_domain_handle_var = format!("{}_recv_dom_h", sanitize_name(domain));
 
                     writeln!(file, "    // Send {mem} to {domain}")?;
-                    writeln!(file, "    let _ = Capability::send_memory(&{sender_arc}, {mem_handle}, &{recv_arc}, {attrs}).unwrap();")?;
+                    writeln!(file, "    let {recv_domain_handle_var} = {sender_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{recv_arc}))).map(|(h, _)| *h)")?;
+                    writeln!(file, "        .unwrap_or_else(|| {{")?;
+                    writeln!(file, "            let h = {sender_arc}.read().data.allocate_domain_handle();")?;
+                    writeln!(file, "            {sender_arc}.write().data.add_domain_capability(h, std::sync::Arc::downgrade(&{recv_arc}));")?;
+                    writeln!(file, "            h")?;
+                    writeln!(file, "        }});")?;
+                    writeln!(file, "    let _ = Capability::send_memory(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}).unwrap();")?;
                     writeln!(file, "    // Note: {mem} is now owned by {domain}; handle lookup needed for further ops.")?;
                     writeln!(file)?;
 
@@ -299,7 +307,7 @@ impl Session {
                             .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(child)));
 
                         writeln!(file, "    // Revoke domain {child} from {parent}")?;
-                        writeln!(file, "    let _ = Capability::revoke_direct_child_domain(&{parent_arc}, {child_handle}).unwrap();")?;
+                        writeln!(file, "    let _ = Capability::revoke_domain(&{parent_arc}, {child_handle}).unwrap();")?;
                     } else {
                         // Memory revoke
                         let owner_name   = owner_map.get(parent)

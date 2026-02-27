@@ -63,7 +63,8 @@ fn send_then_accept() {
     let receiver_id = receiver.read().data.id;
 
     // Send: freezes handle 1 in sender, enqueues pending in receiver.
-    Capability::<Domain>::send_memory(&sender, 1, &receiver, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
 
     assert!(sender.read().data.is_memory_handle_frozen(1), "handle must be frozen after send");
     let pending_ids = receiver.read().data.get_pending_ids();
@@ -107,7 +108,8 @@ fn send_then_reject() {
 
     let sender_id = sender.read().data.id;
 
-    Capability::<Domain>::send_memory(&sender, 1, &receiver, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
@@ -137,7 +139,9 @@ fn frozen_handle_refuses_ops() {
     let receiver2 = make_sealed_domain();
     let _cap = register_root_mem(&sender, 1);
 
-    Capability::<Domain>::send_memory(&sender, 1, &receiver1, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver1));
+    sender.write().data.add_domain_capability(2, Arc::downgrade(&receiver2));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
     assert!(sender.read().data.is_memory_handle_frozen(1));
 
     // carve on frozen handle → PermissionDenied
@@ -149,7 +153,7 @@ fn frozen_handle_refuses_ops() {
     assert!(matches!(r, Err(CapaError::PermissionDenied)), "alias on frozen handle must fail");
 
     // send again (double-send) → PermissionDenied
-    let r = Capability::<Domain>::send_memory(&sender, 1, &receiver2, Attributes::NONE);
+    let r = Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::NONE);
     assert!(matches!(r, Err(CapaError::PermissionDenied)), "second send on frozen handle must fail");
 
     // Exactly one pending entry in receiver1 — no duplicates.
@@ -181,7 +185,8 @@ fn revoke_parent_cancels_pending() {
     assert_eq!(child_handle, 2);
 
     // Send the child to receiver — freezes handle 2.
-    Capability::<Domain>::send_memory(&sender, child_handle, &receiver, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_memory(&sender, child_handle, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
@@ -221,7 +226,8 @@ fn revoke_sender_domain_cancels_pending() {
     let _mem = register_root_mem(&sender, 1);
 
     // A sends the memory cap to B.
-    Capability::<Domain>::send_memory(&sender, 1, &receiver, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
@@ -254,12 +260,14 @@ fn reject_then_reuse_handle() {
     let _cap = register_root_mem(&sender, 1);
 
     // First send, then reject.
-    Capability::<Domain>::send_memory(&sender, 1, &receiver1, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver1));
+    sender.write().data.add_domain_capability(2, Arc::downgrade(&receiver2));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
     let pending_id = receiver1.read().data.get_pending_ids()[0];
     Capability::<Domain>::reject_memory(&receiver1, pending_id).unwrap();
 
     // Handle 1 is unfrozen — second send must succeed.
-    Capability::<Domain>::send_memory(&sender, 1, &receiver2, Attributes::NONE)
+    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::NONE)
         .expect("send after reject must succeed");
 
     // receiver2 has a pending entry; receiver1 has none.
@@ -289,8 +297,9 @@ fn accept_gives_independent_handles() {
     sender.write().data.add_memory_capability(2, Arc::downgrade(&cap2));
 
     // Send both to the same receiver.
-    Capability::<Domain>::send_memory(&sender, 1, &receiver, Attributes::NONE).unwrap();
-    Capability::<Domain>::send_memory(&sender, 2, &receiver, Attributes::NONE).unwrap();
+    sender.write().data.add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send_memory(&sender, 2, 1, Attributes::NONE).unwrap();
 
     let pending_ids = receiver.read().data.get_pending_ids();
     assert_eq!(pending_ids.len(), 2);

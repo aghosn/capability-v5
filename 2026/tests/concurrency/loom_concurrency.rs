@@ -981,21 +981,21 @@ fn loom_double_send_frozen() {
         let recv1  = make_sealed_send_domain();
         let recv2  = make_sealed_send_domain();
         let _cap   = register_mem_send(&sender, 1);
+        sender.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&recv1));
+        sender.write().data.add_domain_capability(2, std::sync::Arc::downgrade(&recv2));
 
         let pl = platform_lock.clone();
         let s  = sender.clone();
-        let r  = recv1.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::<Domain>::send_memory(&s, 1, &r, capability_engine::Attributes::NONE)
+            Capability::<Domain>::send_memory(&s, 1, 1, capability_engine::Attributes::NONE)
         });
 
         let pl = platform_lock.clone();
         let s  = sender.clone();
-        let r  = recv2.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::<Domain>::send_memory(&s, 1, &r, capability_engine::Attributes::NONE)
+            Capability::<Domain>::send_memory(&s, 1, 2, capability_engine::Attributes::NONE)
         });
 
         let res_a = ta.join().unwrap();
@@ -1038,7 +1038,8 @@ fn loom_accept_vs_accept() {
         let _cap     = register_mem_send(&sender, 1);
 
         // Pre-send (sequential, before threads) so both threads see a pending entry.
-        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+        sender.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
+        Capability::<Domain>::send_memory(&sender, 1, 1, capability_engine::Attributes::NONE)
             .unwrap();
         let pending_ids = receiver.read().data.get_pending_ids();
         assert_eq!(pending_ids.len(), 1);
@@ -1095,7 +1096,8 @@ fn loom_accept_vs_reject() {
         let receiver = make_sealed_send_domain();
         let _cap     = register_mem_send(&sender, 1);
 
-        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+        sender.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
+        Capability::<Domain>::send_memory(&sender, 1, 1, capability_engine::Attributes::NONE)
             .unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
@@ -1173,7 +1175,8 @@ fn loom_revoke_vs_accept() {
         ).unwrap();
 
         // Send the child to receiver.
-        Capability::<Domain>::send_memory(&sender, child_h, &receiver, capability_engine::Attributes::NONE)
+        sender.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
+        Capability::<Domain>::send_memory(&sender, child_h, 1, capability_engine::Attributes::NONE)
             .unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
@@ -1231,7 +1234,8 @@ fn loom_revoke_domain_vs_accept() {
         let receiver = make_sealed_send_domain();
         let _cap     = register_mem_send(&sender, 1);
 
-        Capability::<Domain>::send_memory(&sender, 1, &receiver, capability_engine::Attributes::NONE)
+        sender.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
+        Capability::<Domain>::send_memory(&sender, 1, 1, capability_engine::Attributes::NONE)
             .unwrap();
         let pid = receiver.read().data.get_pending_ids()[0];
 
@@ -1406,12 +1410,13 @@ fn loom_dm_send_vs_revoke_sibling() {
             &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
         ).expect("setup: carve child2");
 
+        dom.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&receiver));
+
         let pl = platform_lock.clone();
         let d  = dom.clone();
-        let r  = receiver.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send_memory(&d, h_c1, &r, Attributes::NONE)
+            Capability::<Domain>::send_memory(&d, h_c1, 1, Attributes::NONE)
         });
 
         let pl = platform_lock.clone();

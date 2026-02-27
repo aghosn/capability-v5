@@ -3,12 +3,12 @@
 use crate::domain::{Domain, DomainPolicy, MonitorAPI, PendingCapability};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
+use crate::sync::RwLock;
 use crate::update::{DomainId, UpdateBatch};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
-use crate::sync::RwLock;
 
 /// Thread-safe reference to a capability (strong reference, owned)
 pub type CapabilityRef<T> = Arc<RwLock<Capability<T>>>;
@@ -61,8 +61,7 @@ impl Ownership {
     /// If no owner domain is set (e.g., standalone test capabilities), the check is skipped.
     pub fn validate_operation(&self, required_api: u16) -> Result<()> {
         if let Some(ref weak_domain) = self.owner_domain {
-            let domain_ref = weak_domain.upgrade()
-                .ok_or(CapaError::PermissionDenied)?;
+            let domain_ref = weak_domain.upgrade().ok_or(CapaError::PermissionDenied)?;
             let domain = domain_ref.read();
             if !domain.data.is_sealed() {
                 return Err(CapaError::DomainNotSealed);
@@ -180,12 +179,8 @@ impl Capability<MemoryRegion> {
         let child_region = parent.data.alias(access)?;
 
         // Create child capability
-        let child = Capability::new_child(
-            owner,
-            sub_handle,
-            child_region,
-            Arc::downgrade(parent_ref),
-        );
+        let child =
+            Capability::new_child(owner, sub_handle, child_region, Arc::downgrade(parent_ref));
 
         // Add child to parent's children list (still under write lock)
         parent.add_child(child.clone());
@@ -220,12 +215,8 @@ impl Capability<MemoryRegion> {
         let updates = UpdateBatch::new();
 
         // Create child capability
-        let child = Capability::new_child(
-            owner,
-            sub_handle,
-            child_region,
-            Arc::downgrade(parent_ref),
-        );
+        let child =
+            Capability::new_child(owner, sub_handle, child_region, Arc::downgrade(parent_ref));
 
         // Add child to parent's children list
         parent.add_child(child.clone());
@@ -337,9 +328,7 @@ impl Capability<MemoryRegion> {
         parent.owned.validate_operation(MonitorAPI::REVOKE)?;
 
         // Remove child from parent's children list by sub_handle
-        let child_ref = parent
-            .remove_child(child_sub)
-            .ok_or(CapaError::NotFound)?;
+        let child_ref = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
 
         // Drop parent lock before recursing
         drop(parent);
@@ -468,12 +457,8 @@ impl Capability<Domain> {
 
         drop(parent);
 
-        let child = Capability::new_child(
-            owner,
-            sub_handle,
-            child_domain,
-            Arc::downgrade(parent_ref),
-        );
+        let child =
+            Capability::new_child(owner, sub_handle, child_domain, Arc::downgrade(parent_ref));
 
         parent_ref.write().add_child(child.clone());
 
@@ -489,9 +474,7 @@ impl Capability<Domain> {
 
         parent.owned.validate_operation(MonitorAPI::REVOKE)?;
 
-        let child_ref = parent
-            .remove_child(child_sub)
-            .ok_or(CapaError::NotFound)?;
+        let child_ref = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
 
         let parent_id = parent.data.id;
         drop(parent);
@@ -543,7 +526,9 @@ impl Capability<Domain> {
         }
 
         // 2. Resolve parent ref
-        let parent_weak = caller.read().data
+        let parent_weak = caller
+            .read()
+            .data
             .get_memory_capability(parent)
             .ok_or(CapaError::NotFound)?
             .clone();
@@ -559,13 +544,17 @@ impl Capability<Domain> {
         let new_handle = caller.read().data.allocate_memory_handle();
 
         // 5. Call carve_child (new_handle used as sub_handle)
-        let (child_ref, updates) = Capability::carve_child(&parent_ref, access, owner_id, new_handle)?;
+        let (child_ref, updates) =
+            Capability::carve_child(&parent_ref, access, owner_id, new_handle)?;
 
         // 6. Set owner_domain on child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
 
         // 7. Register child in caller's table
-        caller.write().data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        caller
+            .write()
+            .data
+            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
 
         Ok((new_handle, updates))
     }
@@ -582,7 +571,9 @@ impl Capability<Domain> {
         }
 
         // 2. Resolve parent ref
-        let parent_weak = caller.read().data
+        let parent_weak = caller
+            .read()
+            .data
             .get_memory_capability(parent)
             .ok_or(CapaError::NotFound)?
             .clone();
@@ -604,12 +595,20 @@ impl Capability<Domain> {
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
 
         // 7. Register child in caller's table
-        caller.write().data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        caller
+            .write()
+            .data
+            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
 
         Ok(new_handle)
     }
 
-    /// Send a memory capability to another domain.
+    /// Send a memory capability to a receiver domain.
+    ///
+    /// `receiver` is a LocalHandle identifying the target domain in `caller`'s
+    /// domain table.  By construction, a domain you send to is a child you
+    /// created (or at least a domain reference you hold), so the handle must
+    /// already exist in `caller`'s domain_capabilities table.
     ///
     /// - If the receiver is **unsealed**, ownership is transferred immediately and
     ///   MMU updates are returned.
@@ -621,7 +620,7 @@ impl Capability<Domain> {
     pub fn send_memory(
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
-        receiver: &CapabilityRef<Domain>,
+        receiver: LocalHandle,
         attrs: Attributes,
     ) -> Result<UpdateBatch> {
         // 1. Check cap not already frozen
@@ -630,7 +629,9 @@ impl Capability<Domain> {
         }
 
         // 2. Resolve cap ref
-        let cap_weak = caller.read().data
+        let cap_weak = caller
+            .read()
+            .data
             .get_memory_capability(cap)
             .ok_or(CapaError::NotFound)?
             .clone();
@@ -645,7 +646,16 @@ impl Capability<Domain> {
         // 4. Validate operation
         cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
 
-        // 5. Branch on receiver state
+        // 5. Resolve receiver from caller's domain table
+        let recv_weak = caller
+            .read()
+            .data
+            .get_domain_capability(receiver)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let receiver = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // 6. Branch on receiver state
         let recv_sealed = receiver.read().data.is_sealed();
 
         if recv_sealed {
@@ -699,11 +709,14 @@ impl Capability<Domain> {
                 let mut cap = cap_ref.write();
                 cap.owned.owner = receiver_id;
                 cap.owned.attributes = attrs;
-                cap.owned.owner_domain = Some(Arc::downgrade(receiver));
+                cap.owned.owner_domain = Some(Arc::downgrade(&receiver));
             }
 
             // Register in receiver's table
-            receiver.write().data.add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+            receiver
+                .write()
+                .data
+                .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
 
             // Build update batch
             let mut updates = UpdateBatch::new();
@@ -735,7 +748,10 @@ impl Capability<Domain> {
         //    cannot both find the entry — only one proceeds, the other gets NotFound.
         let (sender_domain_id, sender_handle, cap_weak, sender_domain_weak) = {
             let mut recv = receiver.write();
-            let pending = recv.data.pending_capabilities.remove(&pending_id)
+            let pending = recv
+                .data
+                .pending_capabilities
+                .remove(&pending_id)
                 .ok_or(CapaError::NotFound)?;
             (
                 pending.sender_domain_id,
@@ -747,7 +763,9 @@ impl Capability<Domain> {
 
         // 2. Upgrade weak refs
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-        let sender_ref = sender_domain_weak.upgrade().ok_or(CapaError::PermissionDenied)?;
+        let sender_ref = sender_domain_weak
+            .upgrade()
+            .ok_or(CapaError::PermissionDenied)?;
 
         // Check sender domain not revoked — domain revocation cancels pending transfers.
         // If the sending domain was revoked after the transfer was initiated, the
@@ -785,7 +803,10 @@ impl Capability<Domain> {
         }
 
         // 7. Register in receiver's table
-        receiver.write().data.add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+        receiver
+            .write()
+            .data
+            .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
 
         // 8. Build update batch
         let mut updates = UpdateBatch::new();
@@ -806,20 +827,22 @@ impl Capability<Domain> {
     }
 
     /// Reject a pending memory capability. Unfreezes the sender's LocalHandle.
-    pub fn reject_memory(
-        receiver: &CapabilityRef<Domain>,
-        pending_id: u64,
-    ) -> Result<()> {
+    pub fn reject_memory(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
         // 1. Remove pending from receiver
         let pending = {
             let mut recv = receiver.write();
-            recv.data.pending_capabilities.remove(&pending_id)
+            recv.data
+                .pending_capabilities
+                .remove(&pending_id)
                 .ok_or(CapaError::NotFound)?
         };
 
         // 2. Unfreeze sender's handle
         if let Some(sender_ref) = pending.sender_domain.upgrade() {
-            sender_ref.write().data.unfreeze_memory_handle(pending.sender_handle);
+            sender_ref
+                .write()
+                .data
+                .unfreeze_memory_handle(pending.sender_handle);
         }
 
         Ok(())
@@ -837,7 +860,9 @@ impl Capability<Domain> {
         }
 
         // 2. Resolve parent ref
-        let parent_weak = caller.read().data
+        let parent_weak = caller
+            .read()
+            .data
             .get_memory_capability(parent)
             .ok_or(CapaError::NotFound)?
             .clone();
@@ -853,90 +878,11 @@ impl Capability<Domain> {
         Capability::revoke_child(&parent_ref, child_sub)
     }
 
-    /// Voluntarily release a leaf memory capability.
-    pub fn release_memory(
-        caller: &CapabilityRef<Domain>,
-        cap: LocalHandle,
-    ) -> Result<()> {
-        // 1. Validate handle not frozen
-        if caller.read().data.is_memory_handle_frozen(cap) {
-            return Err(CapaError::PermissionDenied);
-        }
-
-        // 2. Resolve cap ref
-        let cap_weak = caller.read().data
-            .get_memory_capability(cap)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        // 3. Verify ownership, verify no children
-        let caller_id = caller.read().data.id;
-        {
-            let cap_read = cap_ref.read();
-            if cap_read.owned.owner != caller_id {
-                return Err(CapaError::PermissionDenied);
-            }
-            if !cap_read.children.is_empty() {
-                return Err(CapaError::PermissionDenied);
-            }
-        }
-
-        // 4. Remove from parent's children
-        let child_sub = cap_ref.read().sub_handle;
-        let parent_opt = cap_ref.read().get_parent();
-        if let Some(parent_ref) = parent_opt {
-            parent_ref.write().remove_child(child_sub);
-        }
-
-        // 5. Remove from caller's table
-        caller.write().data.remove_memory_capability(cap);
-
-        Ok(())
-    }
-
-    /// Create a child domain under the domain identified by parent handle.
-    pub fn create_child_domain_op(
-        caller: &CapabilityRef<Domain>,
-        parent: LocalHandle,
-        policy: DomainPolicy,
-    ) -> Result<LocalHandle> {
-        // 1. Validate parent handle not frozen
-        if caller.read().data.is_domain_handle_frozen(parent) {
-            return Err(CapaError::PermissionDenied);
-        }
-
-        // 2. Resolve parent domain ref
-        let parent_weak = caller.read().data
-            .get_domain_capability(parent)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        // 3. Auto-allocate new handle
-        let new_handle = caller.read().data.allocate_domain_handle();
-
-        // 4. Get owner id
-        let owner_id = caller.read().data.id;
-
-        // 5. Call create_child_domain
-        let child_ref = Capability::create_child_domain(&parent_ref, policy, owner_id, new_handle)?;
-
-        // 6. Set owner_domain on child
-        child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
-
-        // 7. Register in caller's table
-        caller.write().data.add_domain_capability(new_handle, Arc::downgrade(&child_ref));
-
-        Ok(new_handle)
-    }
-
     /// Seal the domain identified by cap handle.
-    pub fn seal_domain_op(
-        caller: &CapabilityRef<Domain>,
-        cap: LocalHandle,
-    ) -> Result<()> {
-        let cap_weak = caller.read().data
+    pub fn seal_domain_op(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
+        let cap_weak = caller
+            .read()
+            .data
             .get_domain_capability(cap)
             .ok_or(CapaError::NotFound)?
             .clone();
@@ -945,35 +891,10 @@ impl Capability<Domain> {
         result
     }
 
-    /// Revoke a child domain using its stable SubHandle.
-    pub fn revoke_child_domain_op(
-        caller: &CapabilityRef<Domain>,
-        parent: LocalHandle,
-        child_sub: SubHandle,
-    ) -> Result<UpdateBatch> {
-        let parent_weak = caller.read().data
-            .get_domain_capability(parent)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
-        Capability::revoke_child_domain(&parent_ref, child_sub)
-    }
-
-    // =========================================================================
-    // Domain-mediated direct-parent operations
-    // (for when the caller IS the parent domain, so no handle indirection is needed)
-    // =========================================================================
-
-    /// Create a child domain directly under `parent`.
-    ///
-    /// Unlike [`create_child_domain_op`], the caller supplies `parent` directly
-    /// rather than as a LocalHandle in a caller's table.  Used by the monitor
-    /// and CLI where the operating entity *is* the parent domain.
-    ///
-    /// Performs the same bookkeeping as `create_child_domain_op`: validates
-    /// permissions, auto-allocates a LocalHandle in `parent`'s table, sets
-    /// `owner_domain` on the child, and registers the child in `parent`'s table.
-    pub fn create_direct_child_domain(
+    /// Create a child domain under `parent`, auto-allocating a LocalHandle in
+    /// `parent`'s domain table.  Sets `owner_domain` on the child so subsequent
+    /// domain-mediated operations on it are properly validated.
+    pub fn create_domain(
         parent: &CapabilityRef<Domain>,
         policy: DomainPolicy,
     ) -> Result<LocalHandle> {
@@ -989,20 +910,31 @@ impl Capability<Domain> {
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(parent));
 
         // 4. Register child in parent's table
-        parent.write().data.add_domain_capability(new_handle, Arc::downgrade(&child_ref));
+        parent
+            .write()
+            .data
+            .add_domain_capability(new_handle, Arc::downgrade(&child_ref));
 
         Ok(new_handle)
     }
 
-    /// Revoke a child domain directly from `parent` by its stable SubHandle.
+    /// Revoke a child domain that `caller` holds at `child_handle` in its domain table.
     ///
-    /// Unlike [`revoke_child_domain_op`], the caller supplies `parent` directly.
-    /// Validates the `REVOKE` API permission before delegating.
-    pub fn revoke_direct_child_domain(
-        parent: &CapabilityRef<Domain>,
-        child_sub: SubHandle,
+    /// `child_handle` is the LocalHandle allocated by [`create_domain`] when the
+    /// child was created — by construction it equals the child's SubHandle.
+    /// Validates the `REVOKE` permission before delegating to the low-level revoke.
+    pub fn revoke_domain(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
     ) -> Result<UpdateBatch> {
-        parent.read().owned.validate_operation(MonitorAPI::REVOKE)?;
-        Capability::revoke_child_domain(parent, child_sub)
+        // Verify the handle exists in caller's domain table.
+        let _ = caller
+            .read()
+            .data
+            .get_domain_capability(child_handle)
+            .ok_or(CapaError::NotFound)?;
+        caller.read().owned.validate_operation(MonitorAPI::REVOKE)?;
+        // child_handle == child's sub_handle by create_domain construction.
+        Capability::revoke_child_domain(caller, child_handle)
     }
 }

@@ -92,7 +92,7 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
 
     // Use the domain-mediated interface: allocates handle, sets owner_domain, registers in table.
     let child_handle =
-        Capability::create_direct_child_domain(&parent, child_policy)
+        Capability::create_domain(&parent, child_policy)
             .map_err(|e| format!("Failed to create child: {:?}", e))?;
 
     // Retrieve the new child Arc from parent's table.
@@ -230,7 +230,7 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         let platform = state.platform.clone();
         let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_direct_child_domain(&parent, child_sub)?;
+            let updates = Capability::revoke_domain(&parent, child_sub)?;
             Ok(((), updates))
         })
         .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;

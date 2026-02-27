@@ -43,7 +43,7 @@ fn test_complex_memory_update_scenario() {
                 | MonitorAPI::ATTEST,
         ),
     );
-    let dom1_h = Capability::create_direct_child_domain(&dom0, dom1_policy).unwrap();
+    let dom1_h = Capability::create_domain(&dom0, dom1_policy).unwrap();
     let dom1 = dom0.read().data.domain_capabilities[&dom1_h].upgrade().unwrap();
     let dom1_id = dom1.read().data.id;
     println!("✓ Dom1 created (ID: {})", dom1_id);
@@ -56,7 +56,7 @@ fn test_complex_memory_update_scenario() {
 
     // Dom0.send(Dom1, r1) — Dom1 is unsealed → immediate transfer
     // After send, r1 is removed from Dom0's table; Dom1 (fresh) assigns it handle 1.
-    let send_updates = Capability::send_memory(&dom0, r1_h, &dom1, Attributes::NONE).unwrap();
+    let send_updates = Capability::send_memory(&dom0, r1_h, dom1_h, Attributes::NONE).unwrap();
     let r1_h_in_dom1: LocalHandle = 1;
     println!("✓ Sent r1 to Dom1 (updates: {})", send_updates.len());
 
@@ -104,7 +104,7 @@ fn test_complex_memory_update_scenario() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::REVOKE),
     );
-    let dom2_h = Capability::create_direct_child_domain(&dom1, dom2_policy).unwrap();
+    let dom2_h = Capability::create_domain(&dom1, dom2_policy).unwrap();
     let dom2 = dom1.read().data.domain_capabilities[&dom2_h].upgrade().unwrap();
     let dom2_id = dom2.read().data.id;
     println!("✓ Dom2 created (ID: {})", dom2_id);
@@ -134,7 +134,7 @@ fn test_complex_memory_update_scenario() {
     // Dom1.send(Dom2, r2) — Dom2 is unsealed → immediate transfer
     // After send, r2 is removed from Dom1's table; Dom2 (fresh) assigns it handle 1.
     let send2_updates =
-        Capability::send_memory(&dom1, r2_h_in_dom1, &dom2, Attributes::NONE).unwrap();
+        Capability::send_memory(&dom1, r2_h_in_dom1, dom2_h, Attributes::NONE).unwrap();
     let r2_h_in_dom2: LocalHandle = 1;
     println!("✓ Sent r2 to Dom2 (updates: {})", send2_updates.len());
 
@@ -193,7 +193,7 @@ fn test_complex_memory_update_scenario() {
     // ================================================================
     println!("\n=== Test Case 6: Revoke Dom1 from Dom0 ===");
 
-    let revoke_dom1_updates = Capability::revoke_direct_child_domain(&dom0, dom1_h).unwrap();
+    let revoke_dom1_updates = Capability::revoke_domain(&dom0, dom1_h).unwrap();
     println!(
         "✓ Revoked Dom1 from Dom0 (updates: {})",
         revoke_dom1_updates.len()

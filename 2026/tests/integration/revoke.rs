@@ -33,7 +33,7 @@ fn test_revoke_carved_child_after_send() {
     let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain — send causes immediate transfer
-    let dom5_h = Capability::create_direct_child_domain(
+    let dom5_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
@@ -41,7 +41,7 @@ fn test_revoke_carved_child_after_send() {
     let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
     let dom5_id = dom5.read().data.id;
 
-    let _send_updates = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
     // Revoke: parent_h = r0_h, child_sub = child_h (stable sub_handle)
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
@@ -73,14 +73,14 @@ fn test_revoke_aliased_child_no_remapping() {
     let child_h = Capability::alias_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
-    let dom5_h = Capability::create_direct_child_domain(
+    let dom5_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
     .unwrap();
     let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
-    let _send_updates = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
@@ -101,7 +101,7 @@ fn test_revoke_with_clean_and_remap() {
     let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
-    let dom5_h = Capability::create_direct_child_domain(
+    let dom5_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
@@ -110,7 +110,7 @@ fn test_revoke_with_clean_and_remap() {
     let dom5_id = dom5.read().data.id;
 
     let attrs = Attributes::from_bits(Attributes::CLEAN);
-    let _send_updates = Capability::send_memory(&root, child_h, &dom5, attrs).unwrap();
+    let _send_updates = Capability::send_memory(&root, child_h, dom5_h, attrs).unwrap();
 
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
@@ -147,7 +147,7 @@ fn test_nested_carve_revoke() {
     let (child1_h, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
 
     // Create dom5 (unsealed) to receive child1
-    let dom5_h = Capability::create_direct_child_domain(
+    let dom5_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
@@ -155,7 +155,7 @@ fn test_nested_carve_revoke() {
     let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
     // Send child1 to dom5 (immediate transfer — dom5 is unsealed)
-    let _send1 = Capability::send_memory(&root, child1_h, &dom5, Attributes::NONE).unwrap();
+    let _send1 = Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
 
     // Seal dom5 so it can carve from child1
     Capability::seal_domain_op(&root, dom5_h).unwrap();
@@ -167,15 +167,19 @@ fn test_nested_carve_revoke() {
         Capability::carve_memory(&dom5, child1_h_in_dom5, c2_access).unwrap();
 
     // Create dom10 (unsealed) to receive child2
-    let dom10_h = Capability::create_direct_child_domain(
+    let dom10_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
     .unwrap();
     let dom10 = root.read().data.domain_capabilities[&dom10_h].upgrade().unwrap();
 
+    // Register dom10 in dom5's domain table so dom5 can send to it.
+    let dom10_h_in_dom5: LocalHandle = 1;
+    dom5.write().data.add_domain_capability(dom10_h_in_dom5, Arc::downgrade(&dom10));
+
     let _send2 =
-        Capability::send_memory(&dom5, child2_h_in_dom5, &dom10, Attributes::NONE).unwrap();
+        Capability::send_memory(&dom5, child2_h_in_dom5, dom10_h_in_dom5, Attributes::NONE).unwrap();
 
     // Revoke child1 from root — the entire subtree (including child2) is revoked
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_h).unwrap();
@@ -207,14 +211,14 @@ fn test_revoke_preserves_parent_rights() {
     let (child_h, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Create an unsealed receiver domain
-    let dom5_h = Capability::create_direct_child_domain(
+    let dom5_h = Capability::create_domain(
         &root,
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
     .unwrap();
     let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
-    let _send = Capability::send_memory(&root, child_h, &dom5, Attributes::NONE).unwrap();
+    let _send = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_h).unwrap();
 
