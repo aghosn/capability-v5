@@ -24,9 +24,14 @@
 //!    API exercised end-to-end with loom-tracked internal locks.
 //! 4. **Domain-mediated memory operations** (§7.8) — further domain-mediated
 //!    concurrent scenarios (concurrent sibling revokes, send-vs-revoke-sibling).
+//! 5. **UpdateBatch content verification** (§7.9) — verifies that the correct
+//!    MMU update entries (`Map`/`Unmap`) are emitted under all interleavings.
+//! 6. **Update-application lock protocol** (§7.10) — verifies the
+//!    `try_acquire_update_lock` / `poll_and_respond_cross_core` protocol:
+//!    batch atomicity, IPI deadlock prevention, exclusive-lock consistency.
 
-use loom::sync::{Arc, RwLock};
-use loom::sync::atomic::{AtomicUsize, Ordering};
+use loom::sync::{Arc, Mutex, RwLock};
+use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use loom::thread;
 
 use capability_engine::{
@@ -1704,5 +1709,242 @@ fn loom_revoke_memory_child_after_send_dm() {
             .upgrade()
             .expect("root_mem alive");
         assert_eq!(root_mem.read().children.len(), 0);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §7.10 — Update-application lock protocol correctness
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Tests for the `try_acquire_update_lock` / `release_update_lock` /
+// `poll_and_respond_cross_core` protocol added to `Platform::execute()`.
+//
+//  10a. loom_update_lock_serializes_apply       — two concurrent shared-op
+//                                                initiators; their update
+//                                                batches must appear in total
+//                                                order, never interleaved.
+//  10b. loom_update_lock_ipi_response           — A holds update_lock, sends
+//                                                IPI to B; B's poll_and_respond
+//                                                signals A's barrier, avoiding
+//                                                deadlock. Requires b_in_exec
+//                                                cleared BEFORE releasing lock.
+//  10c. loom_exclusive_cap_lock_sees_complete_updates
+//                                               — exclusive cap-lock holder
+//                                                always sees a complete batch
+//                                                ([] or [1,2]), never partial.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Case 10a — update_lock serialises concurrent batch application ─────────
+//
+// Two threads each acquire an AtomicBool CAS spinlock (modelling
+// `try_acquire_update_lock`), apply a two-item batch, and release.
+//
+// Invariant: the final applied log must be one of:
+//   [1, 2, 3, 4]  — A applied before B
+//   [3, 4, 1, 2]  — B applied before A
+// The interleaved orderings [1, 3, 2, 4], [3, 1, 4, 2], … are forbidden.
+// Loom explores every valid schedule and checks the assertion in each one.
+#[test]
+fn loom_update_lock_serializes_apply() {
+    loom::model(|| {
+        let update_lock = Arc::new(AtomicBool::new(false));
+        let applied     = Arc::new(Mutex::new(Vec::<u32>::new()));
+
+        // Thread A: acquire update_lock, apply batch [1, 2], release.
+        let (ul, ap) = (update_lock.clone(), applied.clone());
+        let t_a = thread::spawn(move || {
+            while ul.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                thread::yield_now();
+            }
+            {
+                let mut v = ap.lock().unwrap();
+                v.push(1u32);
+                v.push(2u32);
+            }
+            ul.store(false, Ordering::Release);
+        });
+
+        // Thread B: acquire update_lock, apply batch [3, 4], release.
+        let (ul, ap) = (update_lock.clone(), applied.clone());
+        let t_b = thread::spawn(move || {
+            while ul.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                thread::yield_now();
+            }
+            {
+                let mut v = ap.lock().unwrap();
+                v.push(3u32);
+                v.push(4u32);
+            }
+            ul.store(false, Ordering::Release);
+        });
+
+        t_a.join().unwrap();
+        t_b.join().unwrap();
+
+        let v = applied.lock().unwrap();
+        assert_eq!(v.len(), 4, "all 4 updates must be applied");
+        // Only total-order interleavings are valid — no mixing of the two batches.
+        assert!(
+            (*v == [1u32, 2, 3, 4]) || (*v == [3u32, 4, 1, 2]),
+            "update batches must appear in total order; got {:?}", *v
+        );
+    });
+}
+
+// ── Case 10b — poll_and_respond_cross_core prevents the A↔B IPI deadlock ────
+//
+// Scenario (A acquires update_lock first):
+//
+//   A: CAS succeeds → reads b_in_exec=true → stores ipi_to_b=true →
+//      spins at barrier_0 waiting for b_responded
+//   B: CAS fails → poll_and_respond: loads ipi_to_b=true →
+//      stores b_responded=true → (continues spinning)
+//   A: sees b_responded=true → releases update_lock
+//   B: CAS succeeds → stores b_in_exec=false (BEFORE release) →
+//      releases update_lock
+//
+// Scenario (B acquires update_lock first):
+//
+//   B: CAS succeeds → stores b_in_exec=false (BEFORE release) →
+//      releases update_lock
+//   A: CAS succeeds (Acquire sees b_in_exec=false) → skips IPI →
+//      releases update_lock
+//
+// In both scenarios no deadlock occurs.  loom verifies every interleaving.
+//
+// Key correctness condition: b_in_exec must be cleared with SeqCst ordering
+// BEFORE ul is released with Release ordering. The Release–Acquire edge on ul
+// then propagates b_in_exec=false to any core that subsequently acquires ul,
+// so that core never tries to IPI a core that has already left execute().
+#[test]
+fn loom_update_lock_ipi_response() {
+    loom::model(|| {
+        let ul          = Arc::new(AtomicBool::new(false));
+        // B signals "I am inside execute()" at the start of each model run.
+        let b_in_exec   = Arc::new(AtomicBool::new(true));
+        let ipi_to_b    = Arc::new(AtomicBool::new(false));
+        let b_responded = Arc::new(AtomicBool::new(false));
+
+        // Thread B — simulate core B inside execute():
+        //   spin for update_lock while calling poll_and_respond;
+        //   clear b_in_exec BEFORE releasing the lock (critical ordering).
+        let (ul_b, bie, ipi, resp) = (
+            ul.clone(), b_in_exec.clone(), ipi_to_b.clone(), b_responded.clone(),
+        );
+        let t_b = thread::spawn(move || {
+            loop {
+                match ul_b.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+                    Ok(_) => {
+                        // Acquired the update_lock.  Apply B's updates (omitted here).
+                        // CRITICAL: clear b_in_exec BEFORE releasing ul so that
+                        // the Release–Acquire pair on ul propagates this to A.
+                        bie.store(false, Ordering::SeqCst);
+                        ul_b.store(false, Ordering::Release);
+                        break;
+                    }
+                    Err(_) => {
+                        // poll_and_respond_cross_core: if A sent us an IPI,
+                        // acknowledge it so A can proceed past barrier_0.
+                        if ipi.load(Ordering::SeqCst) {
+                            resp.store(true, Ordering::SeqCst);
+                        }
+                        thread::yield_now();
+                    }
+                }
+            }
+        });
+
+        // Thread A — simulate core A inside execute():
+        //   acquire update_lock, check whether B is still in execute;
+        //   if so, send IPI and wait for B's barrier acknowledgement.
+        let (ul_a, bie, ipi, resp) = (
+            ul.clone(), b_in_exec.clone(), ipi_to_b.clone(), b_responded.clone(),
+        );
+        let t_a = thread::spawn(move || {
+            loop {
+                if ul_a.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                    break;
+                }
+                thread::yield_now();
+            }
+            // The Acquire CAS guarantees visibility of anything B stored before
+            // its Release.  If B already finished (b_in_exec==false), skip IPI.
+            if bie.load(Ordering::SeqCst) {
+                // B is still spinning — send IPI and wait for its acknowledgement.
+                ipi.store(true, Ordering::SeqCst);
+                while !resp.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
+            // Apply A's updates (omitted) then release the update_lock.
+            ul_a.store(false, Ordering::Release);
+        });
+
+        t_a.join().unwrap();
+        t_b.join().unwrap();
+        // Reaching here in every explored schedule means no deadlock occurred.
+    });
+}
+
+// ── Case 10c — Exclusive cap lock sees a complete update batch ────────────────
+//
+// Invariant: an exclusive cap-lock holder (Thread B) observes either an empty
+// log or the fully applied batch [1, 2] — never the partial view [1].
+//
+// Why this holds:
+//   1. Thread A holds the update_lock while pushing both items; the inner
+//      Mutex<Vec> is locked for the entire push, making the two writes atomic
+//      with respect to any concurrent reader.
+//   2. Thread A releases the update_lock BEFORE releasing the shared cap lock.
+//   3. Thread B's exclusive cap lock (write lock) blocks until A releases its
+//      shared cap lock (read lock), establishing a happens-before edge that
+//      covers the entire update application of A.
+//
+// The only alternative is B acquiring the write lock before A acquires the read
+// lock — in that case B reads [] and A applies [1,2] afterward.
+#[test]
+fn loom_exclusive_cap_lock_sees_complete_updates() {
+    loom::model(|| {
+        let cap_lock    = Arc::new(RwLock::new(()));
+        let update_lock = Arc::new(AtomicBool::new(false));
+        let applied     = Arc::new(Mutex::new(Vec::<u32>::new()));
+
+        // Thread A: shared cap lock; applies 2-item batch [1, 2] atomically
+        // under the update_lock, then releases the update_lock and the cap lock.
+        let (cl, ul, ap) = (cap_lock.clone(), update_lock.clone(), applied.clone());
+        let t_a = thread::spawn(move || {
+            let _shared = cl.read().unwrap();
+            while ul.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                thread::yield_now();
+            }
+            {
+                let mut v = ap.lock().unwrap();
+                v.push(1u32);
+                v.push(2u32);
+            }
+            ul.store(false, Ordering::Release);
+            // _shared dropped here — releases the shared cap lock.
+        });
+
+        // Thread B: exclusive cap lock — waits until all shared holders finish.
+        // After acquiring the write lock, reads the applied log.
+        let (cl, ap) = (cap_lock.clone(), applied.clone());
+        let t_b = thread::spawn(move || {
+            let _excl = cl.write().unwrap();
+            ap.lock().unwrap().clone()
+        });
+
+        t_a.join().unwrap();
+        let v = t_b.join().unwrap();
+
+        // B must see either [] (B ran before A acquired the read lock)
+        // or the complete batch [1, 2] (B ran after A released the read lock).
+        // The partial state [1] is impossible because the update_lock keeps
+        // both pushes atomic and the exclusive cap lock provides the
+        // happens-before edge covering A's full application.
+        assert!(
+            v.is_empty() || v == vec![1u32, 2u32],
+            "exclusive cap-lock holder must see complete batch or nothing; got {:?}", v
+        );
     });
 }
