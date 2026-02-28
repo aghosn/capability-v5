@@ -1422,3 +1422,287 @@ fn loom_dm_send_vs_revoke_sibling() {
         assert_eq!(root_mem.read().children.len(), 1);
     });
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §7.9 — UpdateBatch content verification under loom
+//
+// Earlier sections (§7.7, §7.8) checked operation success/failure and
+// capability tree structure.  This section checks that the *correct MMU update
+// entries* are emitted, regardless of thread interleaving.
+//
+//  9a. loom_send_memory_immediate_updates     — concurrent immediate sends;
+//                                               each batch = [Map(recv_id)]
+//  9b. loom_accept_memory_updates             — race to accept the same pending
+//                                               entry; winner's batch =
+//                                               [Unmap(sender_id), Map(recv_id)]
+//  9c. loom_revoke_memory_child_after_send_dm — revoke via sub_handle after a
+//                                               domain-mediated send; batch =
+//                                               [Unmap(new_owner), Map(orig_owner)]
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Helper: create an unsealed domain with all permissions (MonitorAPI::ALL).
+fn make_unsealed_domain() -> capability_engine::CapabilityRef<Domain> {
+    let domain = Domain::new(DomainPolicy::new_root(1));
+    Capability::new_root(0, 0, domain)
+}
+
+// ── Case 9a — Concurrent immediate sends to distinct unsealed receivers ───────
+//
+// | Thread A (shared lock)                          | Thread B (shared lock)                          |
+// |-------------------------------------------------|-------------------------------------------------|
+// | send_memory(dom_a, h_c1, h_db, NONE)           | send_memory(dom_a, h_c2, h_dc, NONE)           |
+//
+// Setup: sealed root domain dom_a with root_mem (handle 1) and two carved,
+// non-overlapping children c1 at [0x0000, 0x1000) and c2 at [0x2000, 0x1000).
+// Two distinct unsealed receivers dom_b and dom_c.
+//
+// Both sends follow the immediate transfer path (unsealed receiver).
+// skip_unmap = true for both: parent root_mem is owned by dom_a (= caller).
+// Therefore each batch = [Map { domain: recv_id, ... }] with no Unmap.
+//
+// Loom explores all interleavings of the concurrent write-lock acquisitions on
+// dom_a (both threads call remove_memory_capability under dom_a's write lock).
+//
+// Valid outcomes (all schedules):
+//  - Both sends succeed (distinct capabilities, distinct receivers).
+//  - Batch A = [Map(dom_b_id, 0x0000, 0x1000)], no Unmap.
+//  - Batch B = [Map(dom_c_id, 0x2000, 0x1000)], no Unmap.
+#[test]
+fn loom_send_memory_immediate_updates() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let (dom_a, h_root, _root_mem) = dm_make_root(0x4000);
+
+        // Carve two non-overlapping children.
+        let (h_c1, _, _) = Capability::<Domain>::carve_memory(
+            &dom_a, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve child1");
+        let (h_c2, _, _) = Capability::<Domain>::carve_memory(
+            &dom_a, h_root, Access::new(0x2000, 0x1000, Rights::RW),
+        ).expect("setup: carve child2");
+
+        // Two distinct unsealed receivers.
+        let dom_b    = make_unsealed_domain();
+        let dom_c    = make_unsealed_domain();
+        let dom_b_id = dom_b.read().data.id;
+        let dom_c_id = dom_c.read().data.id;
+
+        // Register in dom_a's domain table.
+        let h_db: capability_engine::LocalHandle = 1;
+        let h_dc: capability_engine::LocalHandle = 2;
+        dom_a.write().data.add_domain_capability(h_db, std::sync::Arc::downgrade(&dom_b));
+        dom_a.write().data.add_domain_capability(h_dc, std::sync::Arc::downgrade(&dom_c));
+
+        let pl = platform_lock.clone();
+        let d  = dom_a.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::send_memory(&d, h_c1, h_db, Attributes::NONE)
+        });
+
+        let pl = platform_lock.clone();
+        let d  = dom_a.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::send_memory(&d, h_c2, h_dc, Attributes::NONE)
+        });
+
+        let batch_a = ta.join().unwrap().expect("send c1 must succeed");
+        let batch_b = tb.join().unwrap().expect("send c2 must succeed");
+
+        // skip_unmap = true → no Unmap in either batch.
+        assert!(
+            !batch_a.updates().iter().any(|u| matches!(u, Update::Unmap { .. })),
+            "send c1: no Unmap expected (parent owned by same caller)"
+        );
+        assert!(
+            !batch_b.updates().iter().any(|u| matches!(u, Update::Unmap { .. })),
+            "send c2: no Unmap expected (parent owned by same caller)"
+        );
+
+        // Batch A: exactly one Map for dom_b at [0x0000, 0x1000).
+        let a_has_map = batch_a.updates().iter().any(|u| matches!(
+            u,
+            Update::Map { domain, address: 0x0000, size: 0x1000, .. }
+                if *domain == dom_b_id
+        ));
+        assert!(a_has_map, "send c1 must emit Map for dom_b");
+
+        // Batch B: exactly one Map for dom_c at [0x2000, 0x1000).
+        let b_has_map = batch_b.updates().iter().any(|u| matches!(
+            u,
+            Update::Map { domain, address: 0x2000, size: 0x1000, .. }
+                if *domain == dom_c_id
+        ));
+        assert!(b_has_map, "send c2 must emit Map for dom_c");
+    });
+}
+
+// ── Case 9b — Race to accept; winner gets [Unmap(sender), Map(receiver)] ─────
+//
+// | Thread A (shared lock)              | Thread B (shared lock)              |
+// |-------------------------------------|-------------------------------------|
+// | accept_memory(dom_c, pid)           | accept_memory(dom_c, pid)           |
+//
+// Setup:
+//   - dom_b (sealed) holds a root memory cap at handle 1.
+//     Root cap has no parent → skip_unmap = false in accept_memory.
+//   - dom_c (sealed, RECEIVE_AFTER_SEAL) is the receiver.
+//   - dom_b sends cap to dom_c → pending queue entry.
+//   - Both threads race to accept the same pending_id.
+//
+// Because the cap has no parent, skip_unmap = false unconditionally, so the
+// winner's batch always contains Unmap(dom_b_id) + Map(dom_c_id).
+//
+// Valid outcomes (all schedules):
+//  - Exactly one accept succeeds; the other gets NotFound.
+//  - Winner's batch = [Unmap(dom_b_id, 0x0, 0x1000), Map(dom_c_id, 0x0, 0x1000)].
+//  - dom_c holds the cap at exactly one handle; pending queue is empty.
+#[test]
+fn loom_accept_memory_updates() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+
+        // dom_b: sealed sender with a root cap (no parent → skip_unmap = false).
+        let dom_b    = make_sealed_send_domain();
+        let dom_b_id = dom_b.read().data.id;
+        let _cap     = register_mem_send(&dom_b, 1);
+
+        // dom_c: sealed receiver with RECEIVE_AFTER_SEAL.
+        let dom_c    = make_sealed_send_domain();
+        let dom_c_id = dom_c.read().data.id;
+
+        // dom_b sends to dom_c → pending queue (dom_c is sealed).
+        dom_b.write().data.add_domain_capability(1, std::sync::Arc::downgrade(&dom_c));
+        Capability::<Domain>::send_memory(&dom_b, 1, 1, Attributes::NONE)
+            .expect("setup: send to pending queue");
+
+        let pid = dom_c.read().data.get_pending_ids()[0];
+
+        let pl = platform_lock.clone();
+        let r  = dom_c.clone();
+        let ta = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let pl = platform_lock.clone();
+        let r  = dom_c.clone();
+        let tb = thread::spawn(move || {
+            let _guard = pl.read().unwrap(); // shared
+            Capability::<Domain>::accept_memory(&r, pid)
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        // Exactly one accept must succeed.
+        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one accept must succeed");
+
+        // Pending queue must be empty.
+        assert!(dom_c.read().data.get_pending_ids().is_empty());
+
+        // dom_c holds the cap at exactly one handle.
+        assert_eq!(dom_c.read().data.memory_capability_handles().len(), 1);
+
+        // Winner's batch: Unmap(dom_b_id) + Map(dom_c_id).
+        let (_, winner_batch) = if res_a.is_ok() { res_a.unwrap() } else { res_b.unwrap() };
+        let has_unmap = winner_batch.updates().iter().any(|u| matches!(
+            u,
+            Update::Unmap { domain, address: 0x0, size: 0x1000 }
+                if *domain == dom_b_id
+        ));
+        let has_map = winner_batch.updates().iter().any(|u| matches!(
+            u,
+            Update::Map { domain, address: 0x0, size: 0x1000, .. }
+                if *domain == dom_c_id
+        ));
+        assert!(has_unmap, "accept winner must emit Unmap for dom_b (sender)");
+        assert!(has_map,   "accept winner must emit Map for dom_c (receiver)");
+    });
+}
+
+// ── Case 9c — Revoke via sub_handle after domain-mediated immediate send ──────
+//
+// | Thread A (exclusive lock)                              |
+// |--------------------------------------------------------|
+// | revoke_memory_child(dom_a, h_root, sub_c1)             |
+//
+// Setup:
+//   1. dom_a (sealed root domain) carves c1 from root_mem.
+//   2. dom_a immediately sends c1 to unsealed dom_b
+//      → c1.owner becomes dom_b_id; h_c1 removed from dom_a's table;
+//        root_mem.children still contains c1 (send does not detach from tree).
+//   3. Thread A revokes c1 from the tree by its stable sub_handle.
+//
+// In revoke_subtree for c1:
+//   parent = root_mem,  root_mem.owned.owner = dom_a_id
+//   c1.owned.owner    = dom_b_id   (changed by the send)
+//   dom_a_id ≠ dom_b_id  →  Unmap(dom_b_id) + Map(dom_a_id)
+//
+// This is the domain-mediated analogue of §7.6 Case 3 (revoke_after_send).
+// Loom verifies the write → drop → read lock cycle in revoke_subtree produces
+// the correct batch in all explored schedules.
+//
+// Valid outcomes (all schedules):
+//  - Revoke succeeds; root_mem has 0 children.
+//  - batch = [Unmap(dom_b_id, 0x0000, 0x1000), Map(dom_a_id, 0x0000, 0x1000)].
+#[test]
+fn loom_revoke_memory_child_after_send_dm() {
+    loom::model(|| {
+        let platform_lock = Arc::new(RwLock::new(()));
+        let (dom_a, h_root, _root_mem) = dm_make_root(0x4000);
+        let dom_a_id = dom_a.read().data.id;
+
+        // Carve c1 from root_mem; capture its stable sub_handle.
+        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+            &dom_a, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve child");
+
+        // Create unsealed receiver dom_b and immediately transfer c1.
+        let dom_b    = make_unsealed_domain();
+        let dom_b_id = dom_b.read().data.id;
+        let h_db: capability_engine::LocalHandle = 1;
+        dom_a.write().data.add_domain_capability(h_db, std::sync::Arc::downgrade(&dom_b));
+        Capability::<Domain>::send_memory(&dom_a, h_c1, h_db, Attributes::NONE)
+            .expect("setup: send c1 to dom_b");
+
+        // After the send:
+        //   - h_c1 removed from dom_a's memory table.
+        //   - root_mem.children still contains c1 (tree attachment unchanged).
+        //   - c1.owned.owner = dom_b_id.
+        let pl = platform_lock.clone();
+        let d  = dom_a.clone();
+        let revoker = thread::spawn(move || {
+            let _guard = pl.write().unwrap(); // exclusive
+            Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)
+        });
+
+        let updates = revoker.join().unwrap().expect("revoke must succeed");
+
+        // revoke_subtree: parent_owner (dom_a_id) ≠ child_owner (dom_b_id)
+        //   → Unmap the child from dom_b, Map the region back to dom_a.
+        let has_unmap = updates.updates().iter().any(|u| matches!(
+            u,
+            Update::Unmap { domain, address: 0x0000, size: 0x1000 }
+                if *domain == dom_b_id
+        ));
+        let has_map = updates.updates().iter().any(|u| matches!(
+            u,
+            Update::Map { domain, address: 0x0000, size: 0x1000, .. }
+                if *domain == dom_a_id
+        ));
+        assert!(has_unmap, "revoke must emit Unmap for dom_b (child owner after send)");
+        assert!(has_map,   "revoke must emit Map for dom_a (parent owner)");
+
+        // root_mem has no more children.
+        let root_mem = dom_a.read().data
+            .get_memory_capability(h_root)
+            .expect("h_root still in dom_a table")
+            .clone()
+            .upgrade()
+            .expect("root_mem alive");
+        assert_eq!(root_mem.read().children.len(), 0);
+    });
+}
