@@ -35,6 +35,22 @@
 //!                                             A wins: NotFound for B, only
 //!                                             RevokeDomain applied).
 //!
+//! # Same-domain conflicting operations (multiple "cores" on same domain object)
+//!
+//! E6. `loom_e2e_two_cores_race_send_same_cap`   — two shared-lock threads both try
+//!                                            to send the *same* handle from the
+//!                                            same domain to different receivers;
+//!                                            exactly one Map applied, loser gets
+//!                                            NotFound.
+//! E7. `loom_e2e_send_vs_revoke_same_cap`    — one core sends h_c1 (shared), another
+//!                                            revokes it by sub_handle (exclusive);
+//!                                            A-first: Map+Unmap+Map (3 updates);
+//!                                            B-first: 0 updates, A gets NotFound.
+//! E8. `loom_e2e_two_cores_double_revoke_same_child` — both cores hold the exclusive
+//!                                            lock and try to revoke the same memory
+//!                                            child; one gets NotFound, 0 hardware
+//!                                            updates in every ordering.
+//!
 //! # Running
 //!
 //! ```sh
@@ -697,5 +713,296 @@ fn loom_e2e_send_to_domain_being_revoked() {
             dom.read().data.get_domain_capability(h_child).is_none(),
             "h_child must not remain in dom's domain table after revoke"
         );
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E6 — Two cores of the same domain race to send the same cap
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// | Thread A (shared cap lock)                       | Thread B (shared cap lock)                       |
+// |--------------------------------------------------|--------------------------------------------------|
+// | execute_shared → send_memory(dom, h_c1, dh_a)   | execute_shared → send_memory(dom, h_c1, dh_b)   |
+//
+// Both threads target the *same* LocalHandle (h_c1) in dom's memory table.
+// Since both hold shared cap locks they can truly interleave; the inner
+// per-capability write lock on dom's data serialises the actual removal of
+// h_c1 — only one thread wins the slot.
+//
+// Setup: dom (sealed root) with root_mem; one carved child c1; two unsealed
+// receivers recv_a and recv_b registered as domain caps at dh_a / dh_b.
+//
+// Valid outcomes (all schedules):
+//  - Exactly one send succeeds → one Map update applied.
+//  - Loser's send_memory returns NotFound (h_c1 already consumed).
+//  - The winning receiver holds c1; the losing receiver holds nothing.
+#[test]
+fn loom_e2e_two_cores_race_send_same_cap() {
+    loom::model(|| {
+        let (op_lock, ul, state) = new_exec_state();
+        let (dom, h_root, _root_mem) = make_root(0x2000);
+
+        // One cap that both threads will race to send.
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve c1");
+
+        // Two distinct unsealed receivers.
+        let recv_a    = make_unsealed();
+        let recv_b    = make_unsealed();
+        let recv_a_id = recv_a.read().data.id;
+        let recv_b_id = recv_b.read().data.id;
+        let dh_a: LocalHandle = 2;
+        let dh_b: LocalHandle = 3;
+        dom.write().data.add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
+        dom.write().data.add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
+
+        // Thread A: send h_c1 → recv_a.
+        let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let ta = thread::spawn(move || {
+            execute_shared(&opl, &ul_a, &st, || {
+                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_a, Attributes::NONE)?;
+                Ok(((), batch))
+            })
+        });
+
+        // Thread B: send h_c1 → recv_b (same source handle).
+        let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let tb = thread::spawn(move || {
+            execute_shared(&opl, &ul_b, &st, || {
+                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_b, Attributes::NONE)?;
+                Ok(((), batch))
+            })
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        // Exactly one send must succeed.
+        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one send must succeed");
+
+        // Loser gets NotFound — h_c1 was consumed by the winner.
+        let loser = if res_a.is_err() { &res_a } else { &res_b };
+        assert_eq!(*loser.as_ref().unwrap_err(), CapaError::NotFound);
+
+        // Exactly one Map update (skip_unmap=true, single winner).
+        let applied = state.lock().unwrap().applied.clone();
+        assert_eq!(applied.len(), 1, "exactly one Map update");
+
+        // The Map is for exactly one of the two receivers (XOR).
+        let map_a = applied.iter().any(|u| matches!(
+            u, Update::Map { domain, .. } if *domain == recv_a_id
+        ));
+        let map_b = applied.iter().any(|u| matches!(
+            u, Update::Map { domain, .. } if *domain == recv_b_id
+        ));
+        assert!(map_a ^ map_b, "Map for exactly one receiver");
+
+        // The winning receiver holds the cap; the other is empty.
+        let a_count = recv_a.read().data.memory_capability_handles().len();
+        let b_count = recv_b.read().data.memory_capability_handles().len();
+        assert_eq!(a_count + b_count, 1, "exactly one receiver holds the cap");
+        assert!(
+            (map_a && a_count == 1) || (map_b && b_count == 1),
+            "Map and receiver ownership agree"
+        );
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E7 — One core sends a cap while another revokes it via its sub_handle
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// | Thread A (shared cap lock)                       | Thread B (exclusive cap lock)                    |
+// |--------------------------------------------------|--------------------------------------------------|
+// | execute_shared → send_memory(dom, h_c1, dh_recv) | execute_exclusive → revoke_memory_child(h_root, sub_c1) |
+//
+// The same capability node is reachable via two independent "addresses":
+//   h_c1   — LocalHandle in dom's memory-capability table (used by send).
+//   sub_c1 — SubHandle in root_mem's children tree (used by revoke).
+//
+// Loom explores both orderings:
+//
+//  A-first (send wins):
+//    c1.owner → recv_id, h_c1 removed from dom.
+//    B's revoke finds c1 via sub_c1; c1.owner=recv_id ≠ root_mem.owner=dom_id
+//    → skip_unmap=false → Unmap(recv_id) + Map(dom_id).
+//    Applied: [Map(recv_id, 0x0, 0x1000),
+//              Unmap(recv_id, 0x0, 0x1000), Map(dom_id, 0x0, 0x1000)].
+//    Map(recv_id) precedes Unmap(recv_id) in the log (A's batch before B's).
+//    Unmap and its companion Map are consecutive (B's batch is atomic).
+//
+//  B-first (revoke wins):
+//    c1.owner=dom_id == root_mem.owner=dom_id → skip_unmap=true → empty batch.
+//    h_c1 removed from dom's memory table by the revoke.
+//    A's send finds no h_c1 in dom → NotFound.
+//    Applied: [].
+//
+//  Thread B (revoke by sub_handle) succeeds in every ordering because
+//  sub_c1 is a tree-level address independent of dom's local handle table.
+#[test]
+fn loom_e2e_send_vs_revoke_same_cap() {
+    loom::model(|| {
+        let (op_lock, ul, state) = new_exec_state();
+        let (dom, h_root, _root_mem) = make_root(0x2000);
+        let dom_id = dom.read().data.id;
+
+        // Carve c1; keep both the LocalHandle and the SubHandle.
+        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve c1");
+
+        // Unsealed receiver for Thread A's immediate send.
+        let recv    = make_unsealed();
+        let recv_id = recv.read().data.id;
+        let dh_recv: LocalHandle = 2;
+        dom.write().data.add_domain_capability(dh_recv, std::sync::Arc::downgrade(&recv));
+
+        // Thread A (shared): send h_c1 to recv.
+        let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let ta = thread::spawn(move || {
+            execute_shared(&opl, &ul_a, &st, || {
+                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_recv, Attributes::NONE)?;
+                Ok(((), batch))
+            })
+        });
+
+        // Thread B (exclusive): revoke c1 by sub_handle — always succeeds.
+        let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let tb = thread::spawn(move || {
+            execute_exclusive(&opl, &ul_b, &st, || {
+                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                Ok(((), batch))
+            })
+        });
+
+        let res_a = ta.join().unwrap();
+        tb.join().unwrap().expect("B: revoke_memory_child must always succeed");
+
+        let applied = state.lock().unwrap().applied.clone();
+
+        match res_a {
+            Ok(()) => {
+                // A-first: send succeeded; B then revoked c1 from recv.
+                // Three updates: Map(recv_id), Unmap(recv_id), Map(dom_id).
+                assert_eq!(applied.len(), 3, "A-first: 3 updates");
+                assert!(applied.iter().any(|u| matches!(
+                    u, Update::Map { domain, address: 0x0000, size: 0x1000, .. }
+                    if *domain == recv_id
+                )), "A-first: Map(recv_id) from send");
+                assert!(applied.iter().any(|u| matches!(
+                    u, Update::Unmap { domain, address: 0x0000, size: 0x1000 }
+                    if *domain == recv_id
+                )), "A-first: Unmap(recv_id) from revoke");
+                assert!(applied.iter().any(|u| matches!(
+                    u, Update::Map { domain, address: 0x0000, size: 0x1000, .. }
+                    if *domain == dom_id
+                )), "A-first: Map(dom_id) reclaim from revoke");
+
+                // A's Map(recv_id) must come before B's Unmap(recv_id).
+                let map_recv_pos = applied.iter().position(|u| matches!(
+                    u, Update::Map { domain, .. } if *domain == recv_id
+                )).unwrap();
+                let unmap_pos = applied.iter().position(|u| matches!(
+                    u, Update::Unmap { domain, .. } if *domain == recv_id
+                )).unwrap();
+                assert!(map_recv_pos < unmap_pos, "A-first: Map(recv) precedes Unmap(recv)");
+
+                // B's Unmap and Map(dom_id) must be consecutive (atomic batch).
+                let map_dom_pos = applied.iter().position(|u| matches!(
+                    u, Update::Map { domain, address: 0x0000, .. } if *domain == dom_id
+                )).unwrap();
+                assert_eq!(
+                    map_dom_pos, unmap_pos + 1,
+                    "A-first: Unmap and reclaim Map must be consecutive"
+                );
+
+                // revoke_subtree emits hardware updates (Unmap/Map) but does NOT
+                // remove the stale handle entry from the new owner's local table.
+                // recv's table still holds a dead Weak — upgrading it returns None.
+                // This is intentional: the hardware-level Unmap is what matters.
+                assert_eq!(recv.read().data.memory_capability_handles().len(), 1,
+                    "A-first: stale dead-Weak entry remains in recv's table after revoke");
+            }
+            Err(e) => {
+                // B-first: revoke ran first (same-owner → empty batch);
+                // dom's memory table still has h_c1 but the Weak is dead (c1
+                // deallocated when revoke_child dropped its Arc); send gets NotFound.
+                assert_eq!(e, CapaError::NotFound, "B-first: send must get NotFound");
+                assert_eq!(applied.len(), 0, "B-first: no hardware updates");
+                // recv was never sent to; its table is empty.
+                assert_eq!(recv.read().data.memory_capability_handles().len(), 0,
+                    "B-first: recv never received anything");
+            }
+        }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E8 — Two cores both try to revoke the same memory child (exclusive vs exclusive)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// | Thread A (exclusive cap lock)                           | Thread B (exclusive cap lock)                           |
+// |---------------------------------------------------------|---------------------------------------------------------|
+// | execute_exclusive → revoke_memory_child(h_root, sub_c1) | execute_exclusive → revoke_memory_child(h_root, sub_c1) |
+//
+// Both cores hold references to the same domain and race to revoke the
+// same child node (same sub_c1).  The exclusive lock serialises them;
+// loom explores A-first and B-first.
+//
+// Since c1.owner == dom_id == root_mem.owner (c1 has never been sent),
+// skip_unmap=true in both cases → the winner's batch is empty.  The
+// update_lock is never acquired.
+//
+// Valid outcomes (all schedules):
+//  - Winner: revoke_memory_child succeeds, batch = [].
+//  - Loser:  revoke_memory_child returns NotFound (sub_c1 already gone).
+//  - Applied updates: [] in every ordering.
+//  - h_c1 is absent from dom's memory table after both threads complete.
+#[test]
+fn loom_e2e_two_cores_double_revoke_same_child() {
+    loom::model(|| {
+        let (op_lock, ul, state) = new_exec_state();
+        let (dom, h_root, _root_mem) = make_root(0x2000);
+
+        // Carve c1 — both threads will race to revoke it.
+        let (_h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
+        ).expect("setup: carve c1");
+
+        // Thread A (exclusive): revoke c1 by sub_handle.
+        let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let ta = thread::spawn(move || {
+            execute_exclusive(&opl, &ul_a, &st, || {
+                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                Ok(((), batch))
+            })
+        });
+
+        // Thread B (exclusive): also revoke c1 by the same sub_handle.
+        let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let tb = thread::spawn(move || {
+            execute_exclusive(&opl, &ul_b, &st, || {
+                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                Ok(((), batch))
+            })
+        });
+
+        let res_a = ta.join().unwrap();
+        let res_b = tb.join().unwrap();
+
+        // Exactly one revoke must succeed.
+        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        assert_eq!(successes, 1, "exactly one revoke must succeed");
+
+        // Loser gets NotFound — c1 already removed from the tree.
+        let loser = if res_a.is_err() { &res_a } else { &res_b };
+        assert_eq!(*loser.as_ref().unwrap_err(), CapaError::NotFound);
+
+        // Both orderings: same-owner revoke → skip_unmap=true → empty batch.
+        // The update_lock is never contended; applied log stays empty.
+        let applied = state.lock().unwrap().applied.clone();
+        assert_eq!(applied.len(), 0, "no hardware updates for same-owner revoke");
     });
 }

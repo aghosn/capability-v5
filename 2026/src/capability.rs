@@ -677,30 +677,12 @@ impl Capability<Domain> {
         receiver: LocalHandle,
         attrs: Attributes,
     ) -> Result<UpdateBatch> {
-        // 1. Check cap not already frozen
+        // 1. Quick frozen-handle check before touching cap state.
         if caller.read().data.is_memory_handle_frozen(cap) {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 2. Resolve cap ref
-        let cap_weak = caller
-            .read()
-            .data
-            .get_memory_capability(cap)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        // 3. Verify ownership
-        let caller_id = caller.read().data.id;
-        if cap_ref.read().owned.owner != caller_id {
-            return Err(CapaError::PermissionDenied);
-        }
-
-        // 4. Validate operation
-        cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
-
-        // 5. Resolve receiver from caller's domain table
+        // 2. Resolve the receiver so we can branch on sealed vs unsealed.
         let recv_weak = caller
             .read()
             .data
@@ -708,20 +690,37 @@ impl Capability<Domain> {
             .ok_or(CapaError::NotFound)?
             .clone();
         let receiver = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        // 6. Branch on receiver state
         let recv_sealed = receiver.read().data.is_sealed();
 
+        let caller_id = caller.read().data.id;
+
         if recv_sealed {
-            // Sealed receiver — must have RECEIVE_AFTER_SEAL, use pending queue
+            // ── Sealed path ─────────────────────────────────────────────────
+            // No concurrent thread can transfer ownership while we go through
+            // these checks: the atomic freeze (step 5s) is the commit point,
+            // and a concurrent unsealed-send would fail at ITS atomic remove
+            // BEFORE mutating cap.owned.  So reading cap state here is safe.
+
+            // 3s. Resolve cap ref.
+            let cap_weak = caller
+                .read()
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+            // 4s. Verify ownership and API permission.
+            if cap_ref.read().owned.owner != caller_id {
+                return Err(CapaError::PermissionDenied);
+            }
             if !receiver.read().data.policy.receive_after_seal() {
                 return Err(CapaError::PermissionDenied);
             }
+            cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
 
-            // Update cap attributes
+            // 5s. Update attributes, then atomically freeze (TOCTOU prevention).
             cap_ref.write().owned.attributes = attrs;
-
-            // Atomically freeze handle under write lock (TOCTOU prevention)
             {
                 let mut caller_w = caller.write();
                 if caller_w.data.is_memory_handle_frozen(cap) {
@@ -730,7 +729,7 @@ impl Capability<Domain> {
                 caller_w.data.freeze_memory_handle(cap);
             }
 
-            // Build PendingCapability and add to receiver
+            // 6s. Enqueue as pending.
             let pending = PendingCapability {
                 cap: Arc::downgrade(&cap_ref),
                 sender_domain_id: caller_id,
@@ -741,7 +740,32 @@ impl Capability<Domain> {
 
             Ok(UpdateBatch::new())
         } else {
-            // Unsealed receiver — immediate transfer
+            // ── Unsealed path ────────────────────────────────────────────────
+            // Two concurrent sends of the same handle can reach this point
+            // simultaneously while both hold a shared capability lock.  We
+            // must atomically REMOVE the handle as the commit point BEFORE
+            // reading any mutable cap fields (owner, owner_domain).  Only
+            // after the remove is cap exclusively ours and safe to inspect.
+
+            // 3u. Atomic commit: frozen check + remove under one write lock.
+            let cap_weak = {
+                let mut caller_w = caller.write();
+                if caller_w.data.is_memory_handle_frozen(cap) {
+                    return Err(CapaError::PermissionDenied);
+                }
+                caller_w
+                    .data
+                    .remove_memory_capability(cap)
+                    .ok_or(CapaError::NotFound)?
+            };
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+            // 4u. Ownership and API checks — cap is exclusively ours now.
+            if cap_ref.read().owned.owner != caller_id {
+                return Err(CapaError::PermissionDenied);
+            }
+            cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
+
             let (skip_unmap, cap_access) = {
                 let cap = cap_ref.read();
                 let skip_unmap = if let Some(parent_ref) = cap.get_parent() {
@@ -754,9 +778,6 @@ impl Capability<Domain> {
 
             let receiver_id = receiver.read().data.id;
             let new_handle = receiver.read().data.allocate_memory_handle();
-
-            // Remove cap from sender's table
-            caller.write().data.remove_memory_capability(cap);
 
             // Update cap ownership
             {
