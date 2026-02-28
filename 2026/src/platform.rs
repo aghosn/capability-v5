@@ -102,6 +102,63 @@ pub trait Platform: Send + Sync {
     fn sync_barrier(&self, id: u8, participants: usize);
 
     // -----------------------------------------------------------------------
+    // Update-application serialisation
+    // -----------------------------------------------------------------------
+
+    /// Attempt to acquire the **update-application lock** without blocking.
+    ///
+    /// Only one initiating core at a time may run the IPI / barrier /
+    /// `apply_update` sequence.  This serialises concurrent shared-operation
+    /// initiators, preventing two problems:
+    ///
+    /// 1. **Deadlock** — if core A and core B both hold a shared capability
+    ///    lock and send IPIs to each other, they would each block at their own
+    ///    `sync_barrier(0)` waiting for the other to acknowledge, with neither
+    ///    able to proceed.  With the update lock, only one core enters the IPI
+    ///    protocol at a time; the other spins and responds to incoming IPIs via
+    ///    [`poll_and_respond_cross_core`].
+    ///
+    /// 2. **Non-atomic interleaving** — two concurrent `apply_update` streams
+    ///    for different batches can produce an inconsistent hardware state if
+    ///    they target overlapping domains.  The lock gives a total order on
+    ///    all UpdateBatch applications.
+    ///
+    /// **Returns** `true` if the lock was acquired, `false` if another core
+    /// holds it.  The caller **must** release it with [`release_update_lock`]
+    /// after the full update-application phase (including `on_domain_revoked`
+    /// calls) completes.
+    ///
+    /// **Default implementation** always returns `true` (no contention),
+    /// suitable for single-core and simulation platforms.
+    fn try_acquire_update_lock(&self) -> bool {
+        true
+    }
+
+    /// Release the update-application lock acquired by
+    /// [`try_acquire_update_lock`].
+    ///
+    /// **Default implementation** is a no-op.
+    fn release_update_lock(&self) {}
+
+    /// Poll for and respond to any pending cross-core synchronisation requests.
+    ///
+    /// Called in the spin loop while waiting for the update-application lock.
+    /// On bare metal, this checks whether a cross-core IPI from another
+    /// initiating core is pending and, if so, executes the IPI-handler path
+    /// (i.e. signals that core's `sync_barrier(0, …)` so it can proceed with
+    /// its own update application).
+    ///
+    /// A core running a capability operation in the monitor will have
+    /// interrupts disabled and therefore cannot be preempted by an IPI in the
+    /// usual way.  By calling this inside the spin loop the core still
+    /// participates in the cross-core protocol without having to reload the
+    /// domain context on every monitor entry/exit — the response is just a
+    /// barrier signal, not a context switch.
+    ///
+    /// **Default implementation** is a no-op (single-core / test platforms).
+    fn poll_and_respond_cross_core(&self) {}
+
+    // -----------------------------------------------------------------------
     // Hardware state
     // -----------------------------------------------------------------------
 
@@ -170,16 +227,22 @@ pub trait Platform: Send + Sync {
 /// 1. **Lock**: acquire shared or exclusive lock via the platform.
 /// 2. **Operate**: call `op()`, which performs the pure capability tree
 ///    mutation and returns `(R, UpdateBatch)`.
-/// 3. **Synchronise** (cross-core path — only if affected domains are running
+/// 3. **Update-application lock**: spin to acquire the update-application
+///    serialisation lock, responding to cross-core sync requests while
+///    waiting (see [`Platform::try_acquire_update_lock`]).
+/// 4. **Synchronise** (cross-core path — only if affected domains are running
 ///    on remote cores):
 ///    - Send IPIs to preempt every affected core.
 ///    - Wait at barrier 0 (all affected cores have stopped).
 ///    - Apply hardware updates (EPT, zero memory…).
 ///    - Wait at barrier 1 (cores apply local state: TLB flush…).
-/// 4. **Local path**: if no remote cores are affected, apply updates directly.
-/// 5. **Revocations**: for each `RevokeDomain` update, call
+/// 5. **Local path**: if no remote cores are affected, apply updates directly.
+/// 6. **Revocations**: for each `RevokeDomain` update, call
 ///    [`Platform::on_domain_revoked`] so the platform can redirect cores.
-/// 6. **Unlock**: the `OpLockGuard` is dropped, releasing the lock.
+///    This is done inside the update-application lock so that
+///    `domain_core` queries from concurrent initiators see a consistent
+///    core-to-domain mapping.
+/// 7. **Release update lock**, then drop the capability lock guard.
 ///
 /// Returns `(R, UpdateBatch)` so callers can inspect the updates.
 pub fn execute<F, R>(
@@ -190,7 +253,7 @@ pub fn execute<F, R>(
 where
     F: FnOnce() -> Result<(R, UpdateBatch)>,
 {
-    // Step 1 — acquire shared or exclusive lock
+    // Step 1 — acquire shared or exclusive capability lock
     let _guard = if exclusive {
         platform.acquire_exclusive_lock()?
     } else {
@@ -200,42 +263,68 @@ where
     // Step 2 — run the pure capability tree mutation
     let (result, batch) = op()?;
 
-    // Step 3/4 — determine affected cores and choose local vs cross-core path
-    let affected_cores: BTreeSet<CoreId> = batch
-        .affected_domains()
-        .iter()
-        .filter_map(|&d| platform.domain_core(d))
-        .collect();
-
-    if !affected_cores.is_empty() {
-        // Cross-core path: preempt affected cores, apply updates, release them
-        for &core_id in &affected_cores {
-            platform.send_ipi(core_id);
+    // Steps 3–6 — update-application phase (skipped entirely for empty batches)
+    if !batch.updates().is_empty() {
+        // Step 3 — acquire the update-application serialisation lock.
+        //
+        // Only one initiating core at a time runs the IPI/barrier/apply
+        // sequence.  While spinning, we call poll_and_respond_cross_core()
+        // so that if another core has already acquired this lock and sent us
+        // an IPI (waiting at its own barrier_0 for our acknowledgement), we
+        // signal back before we proceed.  This breaks the A↔B deadlock:
+        //
+        //   A holds update_lock → sends IPI to B → blocks at sync_barrier(0)
+        //   B spins here → poll detects A's IPI → B signals barrier_A(0)
+        //   A applies updates → releases update_lock
+        //   B acquires update_lock → runs its own IPI/barrier/apply
+        while !platform.try_acquire_update_lock() {
+            platform.poll_and_respond_cross_core();
         }
-        // Barrier 0: initiating core waits until all affected cores are stopped
-        platform.sync_barrier(0, affected_cores.len() + 1);
 
-        // Apply hardware updates while other cores are paused
+        // Step 4/5 — determine affected cores and choose path.
+        // domain_core is queried inside the update lock so that concurrent
+        // on_domain_revoked calls (also inside the lock) cannot race here.
+        let affected_cores: BTreeSet<CoreId> = batch
+            .affected_domains()
+            .iter()
+            .filter_map(|&d| platform.domain_core(d))
+            .collect();
+
+        if !affected_cores.is_empty() {
+            // Cross-core path: preempt affected cores, apply updates, release them
+            for &core_id in &affected_cores {
+                platform.send_ipi(core_id);
+            }
+            // Barrier 0: wait until all affected cores have stopped executing
+            platform.sync_barrier(0, affected_cores.len() + 1);
+
+            // Apply hardware updates while other cores are paused
+            for update in batch.updates() {
+                platform.apply_update(update);
+            }
+
+            // Barrier 1: release cores to apply their local state (TLB flush…)
+            platform.sync_barrier(1, affected_cores.len() + 1);
+        } else {
+            // Local path: no remote core is running an affected domain
+            for update in batch.updates() {
+                platform.apply_update(update);
+            }
+        }
+
+        // Step 6 — notify platform about domain revocations.
+        // Inside the update lock: modifying core↔domain mappings here keeps
+        // them consistent with the domain_core queries above.
         for update in batch.updates() {
-            platform.apply_update(update);
+            if let Update::RevokeDomain { domain, fallback } = update {
+                platform.on_domain_revoked(*domain, *fallback);
+            }
         }
 
-        // Barrier 1: release cores to apply their local hardware state
-        platform.sync_barrier(1, affected_cores.len() + 1);
-    } else {
-        // Local path: no other core is running an affected domain
-        for update in batch.updates() {
-            platform.apply_update(update);
-        }
-    }
-
-    // Step 5 — notify platform about domain revocations (update core state)
-    for update in batch.updates() {
-        if let Update::RevokeDomain { domain, fallback } = update {
-            platform.on_domain_revoked(*domain, *fallback);
-        }
+        // Step 7 — release update-application lock
+        platform.release_update_lock();
     }
 
     Ok((result, batch))
-    // Step 6 — _guard dropped here: all operation locks released
+    // Capability lock (_guard) dropped here
 }

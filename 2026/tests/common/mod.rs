@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{
@@ -118,6 +119,9 @@ pub struct TestPlatform {
     op_lock: Arc<RwLock<()>>,
     /// Platform state — locked briefly for individual reads/writes.
     inner: Arc<parking_lot::Mutex<TestPlatformInner>>,
+    /// Update-application serialisation lock (see Platform::try_acquire_update_lock).
+    /// An AtomicBool CAS spinlock: false = unlocked, true = locked.
+    update_lock: Arc<AtomicBool>,
 }
 
 impl Default for TestPlatform {
@@ -125,6 +129,7 @@ impl Default for TestPlatform {
         TestPlatform {
             op_lock: Arc::new(RwLock::new(())),
             inner: Arc::new(parking_lot::Mutex::new(TestPlatformInner::default())),
+            update_lock: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -208,4 +213,18 @@ impl Platform for TestPlatform {
     fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
         self.inner.lock().domain_to_core.get(&domain_id).copied()
     }
+
+    fn try_acquire_update_lock(&self) -> bool {
+        // CAS false → true: succeeds only if the lock was free.
+        self.update_lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn release_update_lock(&self) {
+        self.update_lock.store(false, Ordering::Release);
+    }
+
+    // poll_and_respond_cross_core: default no-op is correct for TestPlatform
+    // (no real cross-core IPI delivery in tests).
 }
