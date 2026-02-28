@@ -113,3 +113,8 @@ path = "tests/concurrency/platform.rs"
 name = "loom_concurrency"
 path = "tests/concurrency/loom_concurrency.rs"
 required-features = ["loom"]
+
+[[test]]
+name = "loom_e2e"
+path = "tests/concurrency/loom_e2e.rs"
+required-features = ["loom"]
