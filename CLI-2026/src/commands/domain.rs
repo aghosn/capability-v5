@@ -226,11 +226,12 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         state.domains.get(parent_name).cloned(),
         state.domains.get(child_name).cloned(),
     ) {
-        let child_sub = child.read().sub_handle;
+        let child_handle = find_domain_handle(&parent, &child)
+            .ok_or_else(|| format!("Domain '{}' not found in parent '{}' capability table", child_name, parent_name))?;
 
         let platform = state.platform.clone();
         let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_domain(&parent, child_sub)?;
+            let updates = Capability::revoke_domain(&parent, child_handle)?;
             Ok(((), updates))
         })
         .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
