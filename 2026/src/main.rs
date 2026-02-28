@@ -21,9 +21,8 @@ fn main() {
     root.write().data.add_memory_capability(1, std::sync::Arc::downgrade(&mem_root));
     println!("✓ Created root memory region: [0x0..0x1000000) (16 MB)");
 
-    // The root domain must be sealed before any domain-mediated API call.
-    root.write().data.seal().unwrap();
-    println!("✓ Root domain sealed (prerequisite for all API operations)");
+    // Domain::new_root creates the domain already sealed.
+    println!("✓ Root domain sealed (Domain::new_root seals on creation)");
 
     // ================================================================
     // STEP 2: Create child domain  (domain-mediated)
