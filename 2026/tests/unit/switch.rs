@@ -676,3 +676,52 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
     let result = Capability::<Domain>::deliver_interrupt_vp(&root, root_id, 0, &platform);
     assert!(result.is_err(), "expected error when no VP is running on core");
 }
+
+/// The key invariant: after interrupt delivery, a *second* VP of the intermediate
+/// domain (dom1.vp1) cannot claim dom2.vp0 via `switch_domain`.
+///
+/// After `deliver_interrupt_vp`, dom2.vp0 is `Interrupted`.  The forward switch
+/// path only accepts `Available` or `Suspended`; `Interrupted` is rejected.
+/// This prevents any VP from stealing the interrupted execution context.
+#[test]
+fn test_interrupted_vp_not_claimable_by_other_vp() {
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    let dom0_id = dom0.read().data.id;
+    let dom2_id = dom2.read().data.id;
+
+    // Deliver interrupt: dom0 is handler, dom2.vp0 → Interrupted.
+    Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, &platform).unwrap();
+
+    // Sanity-check: dom2.vp0 is Interrupted.
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(matches!(*dom2_vp0.run_state.read(), VpRunState::Interrupted));
+
+    // Set dom1.vp1 to Running on core 1 — simulates a second concurrent VP of dom1.
+    {
+        let d = dom1.read();
+        let vp1 = d.data.policy.vprocessor_states[1].clone();
+        drop(d);
+        *vp1.run_state.write() = VpRunState::Running { core: 1, caller: None };
+    }
+    platform.set_current_core(Some(1));
+
+    // Find dom2's handle in dom1's capability table.
+    let dom2_h_in_dom1 = dom1
+        .read()
+        .data
+        .domain_capability_handles()
+        .into_iter()
+        .find(|&h| {
+            dom1.read()
+                .data
+                .get_domain_capability(h)
+                .and_then(|w| w.upgrade())
+                .map(|c| c.read().data.id == dom2_id)
+                .unwrap_or(false)
+        })
+        .expect("dom1 should hold a handle to dom2");
+
+    // Attempt to claim dom2.vp0 from dom1.vp1 — must be rejected.
+    let result = Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &platform);
+    assert!(result.is_err(), "Interrupted VP must not be claimable via switch_domain");
+}

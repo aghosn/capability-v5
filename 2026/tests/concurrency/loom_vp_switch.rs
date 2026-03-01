@@ -17,13 +17,18 @@
 //!
 //! # Tests
 //!
-//! V1. `vp_race_two_cores_same_vp`       — two cores race to claim VP[0] of a
-//!                                         target domain; exactly one wins.
-//! V2. `vp_two_cores_different_vps`      — two cores claim VP[0] and VP[1] of
-//!                                         the same target; both must win.
-//! V3. `vp_concurrent_return_and_claim`  — core 0 returns from domain B while
-//!                                         core 1 tries to claim B's VP; VP state
-//!                                         is verified consistent in all orderings.
+//! V1. `vp_race_two_cores_same_vp`           — two cores race to claim VP[0] of a
+//!                                             target domain; exactly one wins.
+//! V2. `vp_two_cores_different_vps`          — two cores claim VP[0] and VP[1] of
+//!                                             the same target; both must win.
+//! V3. `vp_concurrent_return_and_claim`      — core 0 returns from domain B while
+//!                                             core 1 tries to claim B's VP; VP state
+//!                                             is verified consistent in all orderings.
+//! V4. `vp_interrupt_delivery_vs_claim_race` — core 0 delivers an interrupt (setting
+//!                                             dom2.vp0 Running→Interrupted) while
+//!                                             core 1 tries to claim dom2.vp0; the
+//!                                             claim must always fail regardless of
+//!                                             scheduling order.
 //!
 //! # Running
 //!
@@ -394,5 +399,104 @@ fn vp_concurrent_return_and_claim() {
             );
             assert!(root_vp0_state_is_running, "root.VP[0] must be Running (Thread 0 returned)");
         }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// V4 — Interrupted VP cannot be claimed during or after interrupt delivery
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Pre-state: 3-domain call chain on core 0.
+///   dom0.vp0 (Locked) → dom1.vp0 (Locked) → dom2.vp0 (Running on core 0)
+/// dom1.vp1 is Running on core 1.
+///
+/// Concurrently:
+/// * Thread 0 (core 0): `deliver_interrupt_vp(&dom2, dom0_id, 0)` —
+///                       sets dom2.vp0 Running→Interrupted, dom1.vp0 Locked→Suspended,
+///                       dom0.vp0 Locked→Running.
+/// * Thread 1 (core 1): `switch_domain(&dom1, dom2_h, 0)` —
+///                       dom1.vp1 tries to forward-switch to dom2.vp0.
+///
+/// Invariants in **all** loom-explored orderings:
+/// * Thread 0 always succeeds — the chain is well-formed throughout.
+/// * Thread 1 always fails — dom2.vp0 is either `Running` or `Interrupted`,
+///   never `Available` or `Suspended`, so the forward-switch rejects it.
+///
+/// This is the key safety property of the lazy-unwind interrupt model:
+/// the interrupted VP cannot be stolen by any concurrent claim, regardless
+/// of how `deliver_interrupt_vp` and `switch_domain` interleave.
+#[test]
+fn vp_interrupt_delivery_vs_claim_race() {
+    loom::model(|| {
+        // ── Sequential setup ────────────────────────────────────────────────
+        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let plat_setup = LoomPlatform::new(0, shared.clone());
+
+        // dom0: root with 4 VPs — will be the DELIVER handler.
+        let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
+        let dom0_id = dom0.read().data.id;
+
+        // dom1: child of dom0 with 4 VPs — intermediate (REPORT) domain.
+        let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
+
+        // dom2: child of dom0 with 4 VPs — the domain running when interrupt fires.
+        let (dom2, _) = make_sealed_child(&dom0);
+
+        // Give dom1 a handle to dom2 so it can switch to dom2.
+        let dom2_h_in_dom1: LocalHandle = {
+            let dom2_weak = std::sync::Arc::downgrade(&dom2);
+            let mut d1 = dom1.write();
+            let h = d1.data.allocate_domain_handle();
+            d1.data.add_domain_capability(h, dom2_weak);
+            h
+        };
+
+        // Build call chain on core 0: dom0.vp0 → dom1.vp0 → dom2.vp0.
+        //   dom0.vp0 = Running{core:0}
+        init_vp_running(&dom0, 0, 0);
+        //   dom0 switches to dom1.vp0 → dom0.vp0=Locked, dom1.vp0=Running{core:0}
+        Capability::switch_domain(&dom0, dom1_h_in_dom0, 0, &plat_setup).unwrap();
+        //   dom1 switches to dom2.vp0 → dom1.vp0=Locked, dom2.vp0=Running{core:0}
+        Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &plat_setup).unwrap();
+
+        // dom1.vp1 = Running on core 1: the "attacker" VP that will try to steal dom2.vp0.
+        init_vp_running(&dom1, 1, 1);
+
+        // ── Arcs for threads ─────────────────────────────────────────────────
+        let dom2_t0   = dom2.clone();
+        let dom1_t1   = dom1.clone();
+        let state_t0  = shared.clone();
+        let state_t1  = shared.clone();
+
+        // ── Concurrent phase ─────────────────────────────────────────────────
+
+        // Thread 0 (core 0): deliver interrupt — dom0 is the DELIVER handler.
+        // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
+        let t0 = thread::spawn(move || {
+            let plat = LoomPlatform::new(0, state_t0);
+            Capability::<Domain>::deliver_interrupt_vp(&dom2_t0, dom0_id, 0, &plat)
+        });
+
+        // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.
+        // dom2.vp0 is either Running (before Thread 0's write) or Interrupted
+        // (after Thread 0's write) — neither is Available or Suspended — always fails.
+        let t1 = thread::spawn(move || {
+            let plat = LoomPlatform::new(1, state_t1);
+            Capability::switch_domain(&dom1_t1, dom2_h_in_dom1, 0, &plat)
+        });
+
+        let r0 = t0.join().unwrap();
+        let r1 = t1.join().unwrap();
+
+        // ── Invariants ───────────────────────────────────────────────────────
+
+        // Interrupt delivery must always succeed.
+        assert!(r0.is_ok(), "deliver_interrupt_vp must succeed in all orderings: {:?}", r0.err());
+
+        // The claim attempt must always fail — dom2.vp0 is never Available or Suspended.
+        assert!(
+            r1.is_err(),
+            "switch_domain to a Running/Interrupted VP must always fail"
+        );
     });
 }
