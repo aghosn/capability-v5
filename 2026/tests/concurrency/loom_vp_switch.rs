@@ -29,6 +29,10 @@
 //!                                             core 1 tries to claim dom2.vp0; the
 //!                                             claim must always fail regardless of
 //!                                             scheduling order.
+//! V5. `vp_two_cores_race_suspended_vp`      — two cores concurrently try to claim
+//!                                             the same Suspended VP; exactly one wins
+//!                                             and the Interrupted callee is freed
+//!                                             exactly once.
 //!
 //! # Running
 //!
@@ -498,5 +502,117 @@ fn vp_interrupt_delivery_vs_claim_race() {
             r1.is_err(),
             "switch_domain to a Running/Interrupted VP must always fail"
         );
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// V5 — Two cores race to claim the same Suspended VP
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Pre-state (after an interrupt has been delivered to a 3-domain chain):
+///   dom0.vp0  Running  { core: 0 }   — handler VP; first to try to resume
+///   dom0.vp1  Running  { core: 1 }   — second VP; also wants dom1.vp0
+///   dom1.vp0  Suspended{ callee = dom2.vp0 }
+///   dom2.vp0  Interrupted
+///
+/// Concurrently:
+/// * Thread 0 (core 0, dom0.vp0): `switch_domain(&dom0, dom1_h, 0)` — claim dom1.vp0.
+/// * Thread 1 (core 1, dom0.vp1): `switch_domain(&dom0, dom1_h, 0)` — same target.
+///
+/// Invariants in **all** loom-explored orderings:
+/// * Exactly one core wins the write-lock on dom1.vp0's run_state.
+/// * dom1.vp0 ends up `Running` (claimed by the winner).
+/// * dom2.vp0 ends up `Available` — the winner's `Suspended → Running` path frees
+///   the `Interrupted` callee exactly once (inside the same write-lock block, so the
+///   loser never reaches the callee-freeing code).
+/// * The losing thread returns an error.
+#[test]
+fn vp_two_cores_race_suspended_vp() {
+    loom::model(|| {
+        // ── Sequential setup ────────────────────────────────────────────────
+        let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
+        let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
+        let (dom2, _) = make_sealed_child(&dom0);
+        let dom2_id = dom2.read().data.id;
+
+        // dom0 has two Running VPs: one on core 0, one on core 1.
+        init_vp_running(&dom0, 0, 0);
+        init_vp_running(&dom0, 1, 1);
+
+        // Manually construct the post-interrupt VP states (avoids depending on
+        // deliver_interrupt_vp correctness, which is already covered by V4).
+        {
+            let dom2_weak = std::sync::Arc::downgrade(&dom2);
+            let d = dom1.read();
+            let vp0 = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            *vp0.run_state.write() = VpRunState::Suspended {
+                callee_domain: dom2_weak,
+                callee_domain_id: dom2_id,
+                callee_vp_id: 0,
+            };
+        }
+        {
+            let d = dom2.read();
+            let vp0 = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            *vp0.run_state.write() = VpRunState::Interrupted;
+        }
+
+        // ── Arcs for threads ─────────────────────────────────────────────────
+        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let dom0_t0  = dom0.clone();
+        let dom0_t1  = dom0.clone();
+        let state_t0 = shared.clone();
+        let state_t1 = shared.clone();
+
+        // ── Concurrent phase ─────────────────────────────────────────────────
+
+        // Thread 0 (core 0, dom0.vp0): try to claim dom1.vp0.
+        let t0 = thread::spawn(move || {
+            let plat = LoomPlatform::new(0, state_t0);
+            Capability::switch_domain(&dom0_t0, dom1_h_in_dom0, 0, &plat)
+        });
+
+        // Thread 1 (core 1, dom0.vp1): same target.
+        let t1 = thread::spawn(move || {
+            let plat = LoomPlatform::new(1, state_t1);
+            Capability::switch_domain(&dom0_t1, dom1_h_in_dom0, 0, &plat)
+        });
+
+        let r0 = t0.join().unwrap();
+        let r1 = t1.join().unwrap();
+
+        // ── Invariants ───────────────────────────────────────────────────────
+
+        // Exactly one core wins the Suspended → Running transition.
+        assert!(
+            r0.is_ok() ^ r1.is_ok(),
+            "exactly one core should claim the Suspended VP: r0={} r1={}",
+            r0.is_ok(), r1.is_ok()
+        );
+
+        // dom1.vp0 must be Running (held by the winner).
+        {
+            let d = dom1.read();
+            let vp = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            assert!(
+                matches!(*vp.run_state.read(), VpRunState::Running { .. }),
+                "dom1.vp0 must be Running after one winner"
+            );
+        }
+
+        // dom2.vp0 must be Available — freed exactly once by the winner.
+        // The loser never reaches the callee-free path because it sees Running and returns early.
+        {
+            let d = dom2.read();
+            let vp = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            assert!(
+                matches!(*vp.run_state.read(), VpRunState::Available),
+                "dom2.vp0 must be Available after its Suspended parent was claimed"
+            );
+        }
     });
 }
