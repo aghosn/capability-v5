@@ -22,6 +22,8 @@ struct CliPlatformInner {
     domains: BTreeMap<DomainId, CliDomainEntry>,
     switch_manager: SwitchManager,
     num_cores: usize,
+    /// The core ID "currently executing" (set by the CLI before VP-aware calls).
+    current_core: Option<CoreId>,
 }
 
 impl CliPlatformInner {
@@ -56,8 +58,14 @@ impl CliPlatform {
                 domains: BTreeMap::new(),
                 switch_manager: SwitchManager::new(num_cores),
                 num_cores,
+                current_core: None,
             })),
         }
+    }
+
+    /// Set the "currently executing" core ID used by VP-aware calls.
+    pub fn set_current_core(&self, core: Option<CoreId>) {
+        self.inner.lock().current_core = core;
     }
 
     pub fn switch(
@@ -168,5 +176,16 @@ impl Platform for CliPlatform {
     fn domain_core(&self, _domain_id: DomainId) -> Option<CoreId> {
         // Always return None so execute() uses the local path (no IPI/barriers needed in CLI)
         None
+    }
+
+    fn get_current_core(&self) -> Option<CoreId> {
+        self.inner.lock().current_core
+    }
+
+    fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
+        let inner = self.inner.lock();
+        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
+            *core_ref.running_vp.write() = vp_id;
+        }
     }
 }

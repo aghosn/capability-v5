@@ -33,11 +33,11 @@ pub use attest::{attest_domain, attest_memory_region, enumerate_domain_tree, Att
 pub use capability::{Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership, SubHandle};
 pub use domain::{
     Domain, DomainPolicy, DomainStatus, InterruptPolicy, InterruptVisibility, MonitorAPI,
-    VProcessorState, VectorPolicy,
+    VpCallContext, VpRunState, VProcessorRef, VProcessorState, VectorPolicy,
 };
 pub use error::{CapaError, Result};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
 pub use platform::{execute, OpLockGuard, Platform};
-pub use switch::{CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager};
+pub use switch::{CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext};
 pub use update::{CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus};
 pub use view::{AddressSpaceView, ViewRegion, compute_address_space, compute_view_from_capabilities};

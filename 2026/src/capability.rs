@@ -1,10 +1,13 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy, MonitorAPI, PendingCapability};
+use crate::domain::{Domain, DomainPolicy, MonitorAPI, PendingCapability, VpCallContext, VpRunState, VProcessorRef};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
+use crate::platform::Platform;
 use crate::sync::RwLock;
-use crate::update::{DomainId, UpdateBatch};
+use crate::switch::{SwitchContext, VpInterruptContext};
+use crate::update::{CoreId, DomainId, UpdateBatch};
+use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1023,6 +1026,438 @@ impl Capability<Domain> {
         // LocalHandle is reclaimed by allocate_domain_handle.
         caller.write().data.remove_domain_capability(child_handle);
         Ok(updates)
+    }
+
+    // =========================================================================
+    // VP-aware domain switching
+    // =========================================================================
+
+    /// Unified VP-aware domain switch.
+    ///
+    /// **Forward switch** (`to_handle != 0`): claim VP `to_vp_id` of the domain
+    /// identified by `to_handle` in `caller`'s domain table, atomically locking
+    /// the caller VP in the process.
+    ///
+    /// **Return** (`to_handle == 0`): unwind the VP call chain — restore the VP
+    /// that originally called into `caller` and mark `caller`'s VP as Available.
+    /// `to_vp_id` is ignored for returns; the target VP is determined from the
+    /// saved call context.
+    ///
+    /// # Forward switch protocol
+    /// 1. `platform.get_current_core()` — fails if None.
+    /// 2. Validate `caller` sealed + SWITCH permission.
+    /// 3. Find caller VP running on that core.
+    /// 4. Resolve `to_handle` → target domain; validate sealed + core bit.
+    /// 5. Atomically claim target VP (`Available → Running`).
+    /// 6. Transition caller VP (`Running → Locked`).
+    /// 7. Update platform core tracking.
+    ///
+    /// # Return protocol (to_handle == 0)
+    /// 1. `platform.get_current_core()`.
+    /// 2. Find caller VP running on that core.
+    /// 3. Read `Running.caller` → previous VP context (err if None).
+    /// 4. Verify previous VP is `Locked { callee == caller }`.
+    /// 5. Restore previous VP (`Locked → Running`); mark caller VP `Available`.
+    /// 6. Update platform core tracking.
+    pub fn switch_domain(
+        caller: &CapabilityRef<Domain>,
+        to_handle: LocalHandle,
+        to_vp_id: u64,
+        platform: &dyn Platform,
+    ) -> Result<SwitchContext> {
+        // Step 1: determine current core (common to both paths).
+        let core_id = platform
+            .get_current_core()
+            .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
+
+        if to_handle == 0 {
+            // ── RETURN: unwind VP call chain ─────────────────────────────────
+
+            // Caller must be sealed (it is running, so it should always be).
+            if !caller.read().data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+
+            let caller_id = caller.read().data.id;
+
+            // Find caller VP running on this core.
+            let caller_vp_arc = {
+                let c = caller.read();
+                c.data
+                    .find_vp_on_core(core_id)
+                    .ok_or_else(|| CapaError::InvalidOperation("no VP running on this core".to_string()))?
+            };
+            let caller_vp_id = caller_vp_arc.id;
+
+            // Read caller VP's saved caller context.
+            let prev_ctx = {
+                match &*caller_vp_arc.run_state.read() {
+                    VpRunState::Running { caller: Some(ctx), .. } => ctx.clone(),
+                    VpRunState::Running { caller: None, .. } => {
+                        return Err(CapaError::InvalidOperation("no caller to return to".to_string()));
+                    }
+                    _ => return Err(CapaError::InvalidOperation("caller VP not in Running state".to_string())),
+                }
+            };
+
+            let prev_domain_id = prev_ctx.domain_id;
+            let prev_vp_id = prev_ctx.vp_id;
+            let prev_domain_ref = prev_ctx.domain.upgrade().ok_or(CapaError::PermissionDenied)?;
+
+            // Clone previous VP Arc (brief read lock on domain).
+            let prev_vp_arc = {
+                let pd = prev_domain_ref.read();
+                pd.data
+                    .policy
+                    .vprocessor_states
+                    .get(prev_vp_id as usize)
+                    .ok_or(CapaError::NotFound)?
+                    .clone()
+            };
+
+            // Verify previous VP is Locked waiting for this callee, extract its caller.
+            let prev_prev_caller = {
+                match &*prev_vp_arc.run_state.read() {
+                    VpRunState::Locked { callee_domain_id, callee_vp_id, prev_caller }
+                        if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id =>
+                    {
+                        prev_caller.clone()
+                    }
+                    _ => return Err(CapaError::InvalidOperation(
+                        "previous VP is not locked waiting for this callee".to_string(),
+                    )),
+                }
+            };
+
+            // Restore previous VP: Locked → Running.
+            *prev_vp_arc.run_state.write() = VpRunState::Running {
+                core: core_id,
+                caller: prev_prev_caller,
+            };
+            // Mark caller VP: Running → Available.
+            *caller_vp_arc.run_state.write() = VpRunState::Available;
+
+            // Update platform.
+            platform.set_core_domain(core_id, prev_domain_id);
+            platform.set_core_vp(core_id, Some(prev_vp_id));
+
+            Ok(SwitchContext {
+                from_domain: caller_id,
+                to_domain: prev_domain_id,
+                core_id,
+                is_return: true,
+                from_vp_id: Some(caller_vp_id),
+                to_vp_id: Some(prev_vp_id),
+            })
+        } else {
+            // ── FORWARD SWITCH: claim target VP ──────────────────────────────
+
+            // Validate caller: sealed + SWITCH permission.
+            {
+                let c = caller.read();
+                if !c.data.is_sealed() {
+                    return Err(CapaError::DomainNotSealed);
+                }
+                if !c.data.policy.api.has(MonitorAPI::SWITCH) {
+                    return Err(CapaError::ApiNotAllowed);
+                }
+            }
+
+            // Find caller VP running on this core.
+            let caller_vp_arc = {
+                let c = caller.read();
+                c.data
+                    .find_vp_on_core(core_id)
+                    .ok_or_else(|| CapaError::InvalidOperation("no VP running on this core".to_string()))?
+            };
+            let caller_vp_id = caller_vp_arc.id;
+            let caller_id = caller.read().data.id;
+
+            // Resolve target domain.
+            let to_domain_weak = caller
+                .read()
+                .data
+                .get_domain_capability(to_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+            let (to_domain_id, core_allowed) = {
+                let td = to_domain_ref.read();
+                if !td.data.is_sealed() {
+                    return Err(CapaError::DomainNotSealed);
+                }
+                let core_bit = 1u64 << core_id;
+                (td.data.id, (td.data.policy.cores & core_bit) != 0)
+            };
+            if !core_allowed {
+                return Err(CapaError::PermissionDenied);
+            }
+
+            // Clone target VP Arc (brief read lock on target domain).
+            let to_vp_arc = {
+                let td = to_domain_ref.read();
+                td.data
+                    .policy
+                    .vprocessor_states
+                    .get(to_vp_id as usize)
+                    .ok_or(CapaError::NotFound)?
+                    .clone()
+            };
+
+            // Capture caller's saved caller before mutating anything.
+            let caller_prev_caller = {
+                match &*caller_vp_arc.run_state.read() {
+                    VpRunState::Running { caller: prev, .. } => prev.clone(),
+                    _ => return Err(CapaError::InvalidOperation("caller VP not in Running state".to_string())),
+                }
+            };
+
+            // Claim target VP: Available → Running, or Suspended → Running
+            // (interrupt-resume path).  If Suspended, record callee info so the
+            // Interrupted callee can be freed after the lock is released.
+            let suspended_callee: Option<(CapabilityWeak<Domain>, u64)> = {
+                let mut state = to_vp_arc.run_state.write();
+
+                // Extract callee info before overwriting state (borrow ends here).
+                let callee_info =
+                    if let VpRunState::Suspended { callee_domain, callee_vp_id, .. } = &*state {
+                        Some((callee_domain.clone(), *callee_vp_id))
+                    } else {
+                        None
+                    };
+
+                // Verify the VP is claimable.
+                match &*state {
+                    VpRunState::Available | VpRunState::Suspended { .. } => {}
+                    _ => return Err(CapaError::InvalidOperation(
+                        "target VP is not available".to_string(),
+                    )),
+                }
+
+                *state = VpRunState::Running {
+                    core: core_id,
+                    caller: Some(VpCallContext {
+                        domain: Arc::downgrade(caller),
+                        domain_id: caller_id,
+                        vp_id: caller_vp_id,
+                    }),
+                };
+                callee_info
+            };
+
+            // If the target VP was Suspended, free its Interrupted callee.
+            if let Some((callee_weak, callee_vp_id)) = suspended_callee {
+                if let Some(callee_cap) = callee_weak.upgrade() {
+                    let vp_opt = callee_cap
+                        .read()
+                        .data
+                        .policy
+                        .vprocessor_states
+                        .get(callee_vp_id as usize)
+                        .cloned();
+                    if let Some(vp) = vp_opt {
+                        let mut s = vp.run_state.write();
+                        if matches!(*s, VpRunState::Interrupted) {
+                            *s = VpRunState::Available;
+                        }
+                    }
+                }
+            }
+
+            // Transition caller VP: Running → Locked.
+            *caller_vp_arc.run_state.write() = VpRunState::Locked {
+                callee_domain_id: to_domain_id,
+                callee_vp_id: to_vp_id,
+                prev_caller: caller_prev_caller,
+            };
+
+            // Update platform.
+            platform.set_core_domain(core_id, to_domain_id);
+            platform.set_core_vp(core_id, Some(to_vp_id));
+
+            Ok(SwitchContext {
+                from_domain: caller_id,
+                to_domain: to_domain_id,
+                core_id,
+                is_return: false,
+                from_vp_id: Some(caller_vp_id),
+                to_vp_id: Some(to_vp_id),
+            })
+        }
+    }
+
+    /// Deliver an interrupt via the VP call-chain **lazy-unwind** model.
+    ///
+    /// Walks from the currently-running VP on `core_id` (which must belong to
+    /// `interrupted_cap`) up the VP call chain to the DELIVER handler domain
+    /// (`handler_domain_id`), applying the following state changes:
+    ///
+    /// ```text
+    /// handler.vp  (Locked)  → Running { core, caller: handler's prev_caller }
+    /// ...report.vp(Locked)  → Suspended { callee = next VP down the chain }
+    /// interrupted.vp(Running)→ Interrupted
+    /// ```
+    ///
+    /// This preserves the synchronous call chain: intermediate VPs stay frozen
+    /// (`Suspended`) so no other VP can claim the interrupted leaf prematurely.
+    /// The leaf is only freed (`Available`) when its direct `Suspended` parent
+    /// is later claimed via a forward `switch_domain`.
+    ///
+    /// # Special case
+    ///
+    /// If `handler_domain_id == interrupted_cap.id` (the interrupted domain IS
+    /// the handler), no VP state changes are made — the VP stays `Running`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no VP is `Running` on `core_id` in `interrupted_cap`
+    /// (e.g. when using the non-VP `SwitchManager::switch` path), or if the
+    /// handler domain is not reachable via the VP call chain.
+    pub fn deliver_interrupt_vp(
+        interrupted_cap: &CapabilityRef<Domain>,
+        handler_domain_id: u64,
+        core_id: CoreId,
+        platform: &dyn Platform,
+    ) -> Result<VpInterruptContext> {
+        let interrupted_domain_id = interrupted_cap.read().data.id;
+
+        // Find the VP currently running on core_id in the interrupted domain.
+        let leaf_vp_arc: VProcessorRef = {
+            let d = interrupted_cap.read();
+            d.data.find_vp_on_core(core_id).ok_or_else(|| {
+                CapaError::InvalidOperation(
+                    "no VP running on core for interrupt delivery".to_string(),
+                )
+            })?
+        };
+        let leaf_vp_id = leaf_vp_arc.id;
+
+        // Short-circuit: handler is the interrupted domain itself.
+        if interrupted_domain_id == handler_domain_id {
+            return Ok(VpInterruptContext {
+                interrupted_domain_id,
+                interrupted_vp_id: leaf_vp_id,
+                handler_domain_id,
+                handler_vp_id: leaf_vp_id,
+                core_id,
+            });
+        }
+
+        // Build call chain: chain[0] = leaf (Running), chain[n-1] = handler (Locked).
+        // Each element: (domain_cap, domain_id, vp_arc).
+        let mut chain: Vec<(CapabilityRef<Domain>, u64, VProcessorRef)> = vec![
+            (interrupted_cap.clone(), interrupted_domain_id, leaf_vp_arc.clone()),
+        ];
+
+        // Seed: read caller context from leaf VP.
+        let mut next_ctx: Option<VpCallContext> = {
+            match &*leaf_vp_arc.run_state.read() {
+                VpRunState::Running { caller, .. } => caller.clone(),
+                _ => return Err(CapaError::InvalidOperation(
+                    "leaf VP not Running during interrupt delivery".to_string(),
+                )),
+            }
+        };
+
+        loop {
+            let ctx = next_ctx.ok_or_else(|| {
+                CapaError::InvalidOperation(
+                    "VP chain exhausted before reaching handler domain".to_string(),
+                )
+            })?;
+
+            let domain_cap = ctx.domain.upgrade().ok_or_else(|| {
+                CapaError::InvalidOperation(
+                    "domain capability dropped during interrupt chain walk".to_string(),
+                )
+            })?;
+            let domain_id = ctx.domain_id;
+
+            let vp_arc: VProcessorRef = {
+                let d = domain_cap.read();
+                d.data
+                    .policy
+                    .vprocessor_states
+                    .get(ctx.vp_id as usize)
+                    .ok_or(CapaError::NotFound)?
+                    .clone()
+            };
+
+            chain.push((domain_cap, domain_id, vp_arc.clone()));
+
+            if domain_id == handler_domain_id {
+                break;
+            }
+
+            // Walk further up via the Locked VP's prev_caller.
+            next_ctx = {
+                match &*vp_arc.run_state.read() {
+                    VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
+                    _ => return Err(CapaError::InvalidOperation(
+                        "expected Locked VP in interrupt call chain".to_string(),
+                    )),
+                }
+            };
+        }
+
+        // Verify handler was reached.
+        let last_domain_id = chain.last().unwrap().1;
+        if last_domain_id != handler_domain_id {
+            return Err(CapaError::InvalidOperation(
+                "interrupt handler domain not found in VP call chain".to_string(),
+            ));
+        }
+
+        let n = chain.len();
+        let handler_vp_id = chain[n - 1].2.id;
+
+        // Apply state changes (all VP locks are independent — no deadlock risk).
+        //
+        // chain[0]:     Running  → Interrupted
+        // chain[1..n-2]: Locked  → Suspended { callee = chain[i-1] }
+        // chain[n-1]:   Locked   → Running { core, caller: handler's prev_caller }
+
+        // Leaf: Running → Interrupted.
+        *chain[0].2.run_state.write() = VpRunState::Interrupted;
+
+        // Intermediate VPs: Locked → Suspended.
+        for i in 1..n - 1 {
+            let callee_domain = Arc::downgrade(&chain[i - 1].0);
+            let callee_domain_id = chain[i - 1].1;
+            let callee_vp_id = chain[i - 1].2.id;
+            *chain[i].2.run_state.write() = VpRunState::Suspended {
+                callee_domain,
+                callee_domain_id,
+                callee_vp_id,
+            };
+        }
+
+        // Handler: Locked → Running (restoring its own prev_caller).
+        let handler_prev_caller = {
+            match &*chain[n - 1].2.run_state.read() {
+                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
+                _ => return Err(CapaError::InvalidOperation(
+                    "handler VP not in Locked state".to_string(),
+                )),
+            }
+        };
+        *chain[n - 1].2.run_state.write() = VpRunState::Running {
+            core: core_id,
+            caller: handler_prev_caller,
+        };
+
+        // Update platform core tracking.
+        platform.set_core_domain(core_id, handler_domain_id);
+        platform.set_core_vp(core_id, Some(handler_vp_id));
+
+        Ok(VpInterruptContext {
+            interrupted_domain_id,
+            interrupted_vp_id: leaf_vp_id,
+            handler_domain_id,
+            handler_vp_id,
+            core_id,
+        })
     }
 }
 

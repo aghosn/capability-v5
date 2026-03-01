@@ -49,8 +49,13 @@ pub struct TestPlatformInner {
     core_to_domain: BTreeMap<CoreId, DomainId>,
     /// Domain → core (reverse index)
     domain_to_core: BTreeMap<DomainId, CoreId>,
+    /// Core → VP currently executing on that core
+    core_to_vp: BTreeMap<CoreId, u64>,
     /// All updates applied since the last call to `drain_updates`
     pub applied_updates: Vec<Update>,
+    /// The "current core" returned by get_current_core().
+    /// Set via set_current_core() before VP-aware operations.
+    pub current_core: Option<CoreId>,
 }
 
 struct DomainEntry {
@@ -153,6 +158,11 @@ impl TestPlatform {
     pub fn is_domain_revoked(&self, domain_id: DomainId) -> bool {
         self.inner.lock().is_revoked(domain_id)
     }
+
+    /// Set the "currently executing" core ID for VP-aware operations.
+    pub fn set_current_core(&self, core: Option<CoreId>) {
+        self.inner.lock().current_core = core;
+    }
 }
 
 impl Platform for TestPlatform {
@@ -223,6 +233,19 @@ impl Platform for TestPlatform {
 
     fn release_update_lock(&self) {
         self.update_lock.store(false, Ordering::Release);
+    }
+
+    fn get_current_core(&self) -> Option<CoreId> {
+        self.inner.lock().current_core
+    }
+
+    fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
+        let mut inner = self.inner.lock();
+        if let Some(id) = vp_id {
+            inner.core_to_vp.insert(core_id, id);
+        } else {
+            inner.core_to_vp.remove(&core_id);
+        }
     }
 
     // poll_and_respond_cross_core: default no-op is correct for TestPlatform

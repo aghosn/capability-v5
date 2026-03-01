@@ -145,10 +145,11 @@ fn test_vprocessor_state_creation() {
 
 #[test]
 fn test_add_vprocessor_state() {
+    use std::sync::Arc;
     let mut policy = DomainPolicy::new_root(4);
     assert_eq!(policy.vprocessor_states.len(), 0);
 
-    let vproc = VProcessorState::new(1);
+    let vproc = Arc::new(VProcessorState::new(1));
     policy.add_vprocessor_state(vproc);
 
     assert_eq!(policy.vprocessor_states.len(), 1);

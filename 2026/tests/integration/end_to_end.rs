@@ -16,6 +16,9 @@ use capability_engine::*;
 use std::sync::Arc;
 use std::thread;
 
+#[path = "../common/mod.rs"]
+mod common;
+
 /// Test 1: Confidential VM with exclusive and shared (virtio) memory
 #[test]
 fn test_cvm_with_exclusive_and_shared_memory() {
@@ -231,22 +234,39 @@ fn test_sandbox_inside_cvm() {
     assert!(sandbox_view.is_accessible(0x1500000)); // Within aliased range
     assert_eq!(sandbox_view.regions[0].rights(), Rights::RW);
 
-    // Simulate switching between CVM and sandbox
-    let switch_mgr = SwitchManager::new(4);
-    let core0 = switch_mgr.get_core(0).unwrap();
+    // Simulate VP-aware switching between CVM and sandbox.
+    let platform = common::TestPlatform::new();
+    platform.register_domain(cvm_id, None);
+    platform.register_domain(sandbox_id, Some(cvm_id));
+    platform.set_core_domain(0, cvm_id);
+    platform.set_current_core(Some(0));
 
-    // Set core 0 to running CVM
-    *core0.state.write() = CoreState::Running(cvm_id);
+    // Initialise CVM VP[0] as Running on core 0
+    {
+        let c = cvm.read();
+        let vp0 = c.data.policy.vprocessor_states[0].clone();
+        drop(c);
+        *vp0.run_state.write() = VpRunState::Running { core: 0, caller: None };
+    }
+    platform.set_core_vp(0, Some(0));
 
-    // Switch from CVM to sandbox
-    let switch_ctx = switch_mgr.switch(0, &cvm, Some(&sandbox)).unwrap();
+    // VP-aware switch from CVM to sandbox (sandbox VP[0])
+    let switch_ctx = Capability::switch_domain(&cvm, sandbox_h, 0, &platform).unwrap();
     assert_eq!(switch_ctx.from_domain, cvm_id);
     assert_eq!(switch_ctx.to_domain, sandbox_id);
     assert_eq!(switch_ctx.core_id, 0);
     assert!(!switch_ctx.is_return);
+    assert_eq!(switch_ctx.from_vp_id, Some(0));
+    assert_eq!(switch_ctx.to_vp_id, Some(0));
 
-    // Verify core is now running sandbox
-    assert_eq!(core0.current_domain(), Some(sandbox_id));
+    // Platform tracking updated — core 0 now runs sandbox
+    assert_eq!(platform.get_core_domain(0), Some(sandbox_id));
+
+    // VP-aware return from sandbox back to CVM
+    let ret_ctx = Capability::switch_domain(&sandbox, 0, 0, &platform).unwrap();
+    assert_eq!(ret_ctx.from_domain, sandbox_id);
+    assert_eq!(ret_ctx.to_domain, cvm_id);
+    assert!(ret_ctx.is_return);
 }
 
 /// Test 4: Two CVMs communicating with private shared memory

@@ -3,7 +3,10 @@
 use crate::error::{CapaError, Result};
 use crate::capability::{CapabilityWeak, LocalHandle};
 use crate::memory::MemoryRegion;
+use crate::sync::RwLock;
+use crate::update::CoreId;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -181,14 +184,74 @@ impl InterruptPolicy {
     }
 }
 
-/// Virtual processor state (platform-specific)
+/// Call-chain context saved when a VP does a switch_domain call.
 #[derive(Debug, Clone)]
+pub struct VpCallContext {
+    /// Weak reference to the calling domain's capability (no ownership cycle)
+    pub domain: CapabilityWeak<crate::domain::Domain>,
+    /// Domain ID of the caller
+    pub domain_id: u64,
+    /// VP id of the caller
+    pub vp_id: u64,
+}
+
+/// Scheduling state of a virtual processor.
+#[derive(Debug, Clone)]
+pub enum VpRunState {
+    /// VP is available and not executing anywhere.
+    Available,
+    /// VP is currently executing on the given core.
+    Running {
+        core: CoreId,
+        /// The VP context that switched to us (None = no call-chain predecessor).
+        caller: Option<VpCallContext>,
+    },
+    /// VP is blocked because it called switch_domain; waiting for the callee to return.
+    Locked {
+        callee_domain_id: u64,
+        callee_vp_id: u64,
+        /// This VP's own caller context (restored when the callee returns).
+        prev_caller: Option<VpCallContext>,
+    },
+    /// VP was preempted by an interrupt while Locked on a callee.
+    ///
+    /// The callee VP is now `Interrupted` (or also `Suspended` for deeper chains).
+    /// This VP is claimable by a forward `switch_domain` (same as `Available`).
+    /// When claimed, its direct callee is freed to `Available` if it is `Interrupted`.
+    Suspended {
+        /// Weak reference to the callee domain's capability.
+        callee_domain: CapabilityWeak<Domain>,
+        /// Domain ID of the callee.
+        callee_domain_id: u64,
+        /// VP ID of the callee within its domain.
+        callee_vp_id: u64,
+    },
+    /// VP was Running when an interrupt fired and preempted it.
+    ///
+    /// Cannot be claimed by normal `switch_domain` (forward or return).
+    /// Freed to `Available` when its `Suspended` parent is claimed via `switch_domain`.
+    Interrupted,
+}
+
+/// Virtual processor state (platform-specific)
 pub struct VProcessorState {
     pub id: u64,
     /// General-purpose registers
     pub registers: BTreeMap<alloc::string::String, u64>,
     /// Platform-specific state
     pub platform_data: Vec<u8>,
+    /// Scheduling / call-chain state
+    pub run_state: RwLock<VpRunState>,
+}
+
+impl core::fmt::Debug for VProcessorState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VProcessorState")
+            .field("id", &self.id)
+            .field("registers", &self.registers)
+            .field("platform_data_len", &self.platform_data.len())
+            .finish()
+    }
 }
 
 impl VProcessorState {
@@ -197,9 +260,13 @@ impl VProcessorState {
             id,
             registers: BTreeMap::new(),
             platform_data: Vec::new(),
+            run_state: RwLock::new(VpRunState::Available),
         }
     }
 }
+
+/// Reference-counted virtual processor handle.
+pub type VProcessorRef = Arc<VProcessorState>;
 
 /// Domain policies
 #[derive(Debug, Clone)]
@@ -214,11 +281,17 @@ pub struct DomainPolicy {
     pub interrupts: InterruptPolicy,
 
     /// List of valid virtual processor states
-    pub vprocessor_states: Vec<VProcessorState>,
+    pub vprocessor_states: Vec<VProcessorRef>,
+
+    /// Number of virtual processors to create when the domain is sealed.
+    /// Set at policy construction time; VP `Arc`s are populated in `Domain::seal()`.
+    pub num_vprocessors: usize,
 }
 
 impl DomainPolicy {
-    /// Create a default policy with all permissions
+    /// Create a default policy with all permissions.
+    ///
+    /// `num_vprocessors` defaults to `num_cores`.
     pub fn new_root(num_cores: usize) -> Self {
         let cores = if num_cores >= 64 {
             u64::MAX
@@ -231,17 +304,27 @@ impl DomainPolicy {
             api: MonitorAPI::ALL,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
             vprocessor_states: Vec::new(),
+            num_vprocessors: num_cores,
         }
     }
 
-    /// Create a restricted policy
+    /// Create a restricted policy.
+    ///
+    /// `num_vprocessors` defaults to the popcount of the `cores` bitmask.
     pub fn new_restricted(cores: u64, api: MonitorAPI) -> Self {
         DomainPolicy {
             cores,
             api,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
             vprocessor_states: Vec::new(),
+            num_vprocessors: cores.count_ones() as usize,
         }
+    }
+
+    /// Override the number of virtual processors created at seal time.
+    pub fn with_vp_count(mut self, n: usize) -> Self {
+        self.num_vprocessors = n;
+        self
     }
 
     /// Check if domain can receive capabilities after sealing
@@ -262,8 +345,8 @@ impl DomainPolicy {
         Ok(())
     }
 
-    /// Add a virtual processor state
-    pub fn add_vprocessor_state(&mut self, state: VProcessorState) {
+    /// Add a virtual processor reference (for manual setup in tests)
+    pub fn add_vprocessor_state(&mut self, state: VProcessorRef) {
         self.vprocessor_states.push(state);
     }
 }
@@ -324,9 +407,9 @@ impl Domain {
         }
     }
 
-    /// Create the root domain
+    /// Create the root domain (born Sealed with VPs already allocated)
     pub fn new_root(num_cores: usize) -> Self {
-        Domain {
+        let mut d = Domain {
             id: 0,
             status: DomainStatus::Sealed,
             policy: DomainPolicy::new_root(num_cores),
@@ -335,16 +418,33 @@ impl Domain {
             pending_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             next_pending_id: 0,
-        }
+        };
+        d.create_vprocessors();
+        d
     }
 
-    /// Seal the domain
+    /// Seal the domain and auto-create its virtual processors.
     pub fn seal(&mut self) -> Result<()> {
         if self.status != DomainStatus::Unsealed {
             return Err(CapaError::DomainSealed);
         }
         self.status = DomainStatus::Sealed;
+        self.create_vprocessors();
         Ok(())
+    }
+
+    /// Allocate VP Arc objects according to `policy.num_vprocessors`.
+    fn create_vprocessors(&mut self) {
+        for id in 0..self.policy.num_vprocessors as u64 {
+            self.policy.vprocessor_states.push(Arc::new(VProcessorState::new(id)));
+        }
+    }
+
+    /// Find the VP currently executing on the given core, if any.
+    pub fn find_vp_on_core(&self, core_id: CoreId) -> Option<VProcessorRef> {
+        self.policy.vprocessor_states.iter()
+            .find(|vp| matches!(*vp.run_state.read(), VpRunState::Running { core, .. } if core == core_id))
+            .cloned()
     }
 
     /// Check if domain is sealed

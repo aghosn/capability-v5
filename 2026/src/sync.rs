@@ -27,6 +27,12 @@ mod loom_rwlock {
     /// loom's deterministic model — poison means a previous iteration panicked).
     pub struct RwLock<T>(loom::sync::RwLock<T>);
 
+    impl<T: core::fmt::Debug> core::fmt::Debug for RwLock<T> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_tuple("RwLock").field(&"<loom>").finish()
+        }
+    }
+
     impl<T> RwLock<T> {
         pub fn new(val: T) -> Self {
             RwLock(loom::sync::RwLock::new(val))

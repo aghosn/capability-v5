@@ -118,3 +118,8 @@ required-features = ["loom"]
 name = "loom_e2e"
 path = "tests/concurrency/loom_e2e.rs"
 required-features = ["loom"]
+
+[[test]]
+name = "loom_vp_switch"
+path = "tests/concurrency/loom_vp_switch.rs"
+required-features = ["loom"]

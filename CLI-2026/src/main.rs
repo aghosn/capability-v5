@@ -176,12 +176,14 @@ fn show_help() {
     println!();
 
     println!("{}", "Execution:".bright_yellow());
-    println!("  {} <domain> <core>", "switch".bright_white().bold());
-    println!("    Switch to a domain on a core (auto-detects current domain)");
-    println!("    Example: switch child1 0");
-    println!("  {} <core> <from> <to>", "switch".bright_white().bold());
-    println!("    Switch between domains on a core (legacy format)");
-    println!("    Example: switch 0 root child1");
+    println!("  {} <domain> <core> <vp_id>", "switch".bright_white().bold());
+    println!("    Enter domain: claim VP <vp_id> in <domain> from the current VP on <core>");
+    println!("    All capability checks (sealed, SWITCH permission, VP availability) are");
+    println!("    enforced transparently by the library.");
+    println!("    Example: switch child1 0 0");
+    println!("  {} <core>", "switch".bright_white().bold());
+    println!("    Return: unwind the VP call chain on <core> back to the calling VP");
+    println!("    Example: switch 0");
     println!("  {} <vector> <core>", "interrupt".bright_white().bold());
     println!("    Deliver interrupt to current domain on core");
     println!("    Example: interrupt 55 2");

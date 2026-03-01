@@ -208,6 +208,28 @@ pub trait Platform: Send + Sync {
 
     /// Return the core ID that `domain_id` is currently running on, if any.
     fn domain_core(&self, domain_id: DomainId) -> Option<CoreId>;
+
+    // -----------------------------------------------------------------------
+    // Virtual processor tracking
+    // -----------------------------------------------------------------------
+
+    /// Return the ID of the physical core currently executing this call.
+    ///
+    /// Returns `None` on platforms where the calling core cannot be determined
+    /// (e.g. single-core simulators). VP-aware operations require a `Some` value.
+    ///
+    /// **Default implementation** returns `None`.
+    fn get_current_core(&self) -> Option<CoreId> {
+        None
+    }
+
+    /// Update the VP currently executing on `core_id`.
+    ///
+    /// Called by [`Capability::switch_domain`] (both forward and return paths) after
+    /// every VP-level context switch so that `CoreContext::running_vp` stays consistent.
+    ///
+    /// **Default implementation** is a no-op.
+    fn set_core_vp(&self, _core_id: CoreId, _vp_id: Option<u64>) {}
 }
 
 /// Execute a capability operation atomically using the given platform.

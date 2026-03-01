@@ -24,6 +24,8 @@ pub struct CoreContext {
     pub state: RwLock<CoreState>,
     /// Core ID
     pub core_id: u64,
+    /// Which VP (by ID) is currently executing on this core, if any.
+    pub running_vp: RwLock<Option<u64>>,
 }
 
 impl CoreContext {
@@ -31,6 +33,7 @@ impl CoreContext {
         CoreContext {
             state: RwLock::new(CoreState::Idle),
             core_id,
+            running_vp: RwLock::new(None),
         }
     }
 
@@ -60,6 +63,10 @@ pub struct SwitchContext {
     pub core_id: u64,
     /// Whether this is a return (switch with no target)
     pub is_return: bool,
+    /// VP ID of the source domain (None for non-VP switches)
+    pub from_vp_id: Option<u64>,
+    /// VP ID of the target domain (None for non-VP switches)
+    pub to_vp_id: Option<u64>,
 }
 
 /// Interrupt context
@@ -70,6 +77,26 @@ pub struct InterruptContext {
     /// Domain that was interrupted
     pub interrupted_domain: u64,
     /// Core that received the interrupt
+    pub core_id: u64,
+}
+
+/// VP state context returned by [`Capability::deliver_interrupt_vp`].
+///
+/// Describes the outcome of a VP-aware interrupt delivery using the
+/// lazy-unwind model: the interrupted VP is frozen (`Interrupted`), all
+/// intermediate VPs are frozen (`Suspended`), and the handler VP is woken
+/// to `Running`.
+#[derive(Debug, Clone)]
+pub struct VpInterruptContext {
+    /// Domain ID of the VP that was preempted (leaf of the call chain).
+    pub interrupted_domain_id: u64,
+    /// VP ID within the interrupted domain.
+    pub interrupted_vp_id: u64,
+    /// Domain ID of the interrupt handler (DELIVER policy ancestor).
+    pub handler_domain_id: u64,
+    /// VP ID within the handler domain that is now Running.
+    pub handler_vp_id: u64,
+    /// Core on which the interrupt was delivered.
     pub core_id: u64,
 }
 
@@ -177,6 +204,8 @@ impl SwitchManager {
             to_domain: to_id,
             core_id,
             is_return,
+            from_vp_id: None,
+            to_vp_id: None,
         })
     }
 
