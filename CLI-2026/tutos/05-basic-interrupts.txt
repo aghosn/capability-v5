@@ -20,18 +20,16 @@ create-domain root parent 0b1111 GET,ATTEST,SWITCH
 # Give parent memory and seal it
 @msg 📋 Step 2: Allocate memory to parent and seal
 carve r0 parent_mem 0x80000 0x60000 RWX
-carve parent_mem child_mem 0x80000 0x20000 RWX
 send parent_mem parent
 seal parent
 
 @msg
-@msg ✓ Parent sealed with 384KB memory (child region carved from it)
+@msg ✓ Parent sealed with 384KB memory
 @msg
 
-# Create child domain and give it memory
-@msg 📋 Step 3: Create child domain (parent must be sealed first!)
+# Create child domain (parent must be sealed first so parent creates it)
+@msg 📋 Step 3: Create child domain and seal it
 create-domain parent child 0b1111 GET,ATTEST,SWITCH
-send child_mem child
 seal child
 
 @msg
@@ -49,10 +47,10 @@ set-interrupt-policy parent 55 DELIVER
 @msg ✓ Configured: child ignores interrupt 55, parent handles it
 @msg
 
-# Switch to child on core 0
-@msg 📋 Step 5: Switch to child domain on core 0 (must go through parent)
-switch parent 0
-switch child 0
+# Switch to child on core 0 via parent (VP-aware: switch <domain> <core> <vp_id>)
+@msg 📋 Step 5: Switch to child domain on core 0 (root → parent → child)
+switch parent 0 0
+switch child 0 0
 
 @msg
 @msg ✓ Core 0 now running child (switched via parent)
@@ -83,15 +81,6 @@ set-default-interrupt-policy child REPORT
 @msg ✓ Child will be notified of other interrupts but routing continues
 @msg
 
-# Demonstrate REPORT policy
-@msg 📋 Step 9: Switch back to child and try interrupt 42
-switch child 0
-interrupt 42 0
-
-@msg
-@msg ✓ Interrupt 42 reported to child, then routed to parent
-@msg
-
 @msg 📖 Key Takeaways:
 @msg   • DELIVER: Domain handles the interrupt (routing stops)
 @msg   • REPORT: Domain is notified but routing continues to parent
@@ -99,4 +88,5 @@ interrupt 42 0
 @msg   • Interrupt routing is hierarchical (up the domain tree)
 @msg   • Core automatically switches to the handler domain
 @msg   • Per-vector and default policies provide fine-grained control
+@msg   • switch <domain> <core> <vp_id> is the VP-aware form
 @msg

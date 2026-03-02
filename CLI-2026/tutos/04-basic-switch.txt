@@ -50,7 +50,7 @@ list
 
 # Switch to app1 on core 0
 @msg 📋 Step 5: Switch core 0 from root to app1
-switch app1 0
+switch app1 0 0
 
 @msg
 @msg ✓ Core 0 now executing app1
@@ -58,7 +58,7 @@ switch app1 0
 
 # Switch to app1 on core 1
 @msg 📋 Step 6: Switch core 1 to app1 as well
-switch app1 1
+switch app1 1 1
 
 @msg
 @msg ✓ Cores 0-1 now executing app1
@@ -66,8 +66,8 @@ switch app1 1
 
 # Switch to app2 on cores 2-3
 @msg 📋 Step 7: Switch cores 2-3 to app2
-switch app2 2
-switch app2 3
+switch app2 2 0
+switch app2 3 1
 
 @msg
 @msg ✓ Cores 2-3 now executing app2
@@ -80,8 +80,10 @@ list
 @msg
 @msg 📖 Key Takeaways:
 @msg   • Domains must be sealed before switching to them
-@msg   • switch command updates core execution context
+@msg   • switch <domain> <core> <vp_id>: VP-aware forward switch
+@msg   • Each VP can run on at most one core at a time
+@msg   • Use a distinct VP ID per core when a domain runs on multiple cores
 @msg   • Domains can specify which cores they're allowed to run on
-@msg   • Multiple cores can run the same domain
+@msg   • Multiple cores can run the same domain (one VP per core)
 @msg   • Context switches are explicit in the capability model
 @msg

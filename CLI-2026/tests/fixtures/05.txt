@@ -1,0 +1,14 @@
+init root 0x200000
+create-domain root parent 0b1111 GET,ATTEST,SWITCH
+carve r0 parent_mem 0x80000 0x60000 RWX
+send parent_mem parent
+seal parent
+create-domain parent child 0b1111 GET,ATTEST,SWITCH
+seal child
+set-interrupt-policy child 55 NOTREPORT
+set-interrupt-policy parent 55 DELIVER
+switch parent 0 0
+switch child 0 0
+interrupt 55 0
+list
+set-default-interrupt-policy child REPORT

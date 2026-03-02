@@ -1,0 +1,15 @@
+init root 0x200000
+create-domain root app1 0b0011 GET,ATTEST,SWITCH
+create-domain root app2 0b1100 GET,ATTEST,SWITCH
+carve r0 app1_mem 0x80000 0x40000 RWX
+carve r0 app2_mem 0x100000 0x40000 RWX
+send app1_mem app1
+send app2_mem app2
+seal app1
+seal app2
+list
+switch app1 0 0
+switch app1 1 1
+switch app2 2 0
+switch app2 3 1
+list

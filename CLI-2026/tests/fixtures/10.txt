@@ -1,0 +1,20 @@
+init root 0x10000000
+create-domain root receiver 0b1111 GET,ATTEST,SWITCH,RECEIVE_AFTER_SEAL
+carve r0 base_mem 0x1000000 0x100000 RWX
+send base_mem receiver
+seal receiver
+create-domain root strict 0b1111 GET,ATTEST,SWITCH
+carve r0 strict_mem 0x2000000 0x100000 RWX
+send strict_mem strict
+seal strict
+carve r0 extra1 0x3000000 0x10000 RW
+carve r0 pending_mem1 0x4000000 0x10000 RW
+carve r0 pending_mem2 0x5000000 0x20000 RWX
+send pending_mem1 receiver
+send pending_mem2 receiver
+list
+enumerate-pending receiver
+accept-capability receiver 0
+reject-capability receiver 1
+enumerate-pending receiver
+view receiver

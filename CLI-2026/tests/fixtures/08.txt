@@ -1,0 +1,16 @@
+init host 0x40000000
+create-domain host sandbox1 0b0001 GET,SWITCH
+alias r0 sandbox_code 0x1000000 0x100000 RX
+alias r0 sandbox_data 0x2000000 0x100000 RW
+alias r0 shared_lib 0x3000000 0x50000 R
+send sandbox_code sandbox1
+send sandbox_data sandbox1
+send shared_lib sandbox1
+seal sandbox1
+alias r0 extra_mem 0x4000000 0x10000 RW
+view sandbox1
+create-domain host sandbox2 0b0001 GET
+alias r0 sandbox2_mem 0x5000000 0x50000 R
+send sandbox2_mem sandbox2
+seal sandbox2
+list

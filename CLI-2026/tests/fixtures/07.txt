@@ -1,0 +1,15 @@
+init hypervisor 0x80000000
+create-domain hypervisor cvm1 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND
+carve r0 cvm1_mem 0x10000000 0x20000000 RWX
+send cvm1_mem cvm1
+alias r0 hv_cvm_shared 0x1000000 0x10000 RW
+send hv_cvm_shared cvm1
+seal cvm1
+create-domain cvm1 enclave1 0b0011 GET,ATTEST
+carve cvm1_mem enclave_private 0x10000000 0x1000000 RWX
+alias cvm1_mem enclave_shared 0x11000000 0x10000 RW
+send enclave_private enclave1
+send enclave_shared enclave1
+seal enclave1
+attest enclave1
+list

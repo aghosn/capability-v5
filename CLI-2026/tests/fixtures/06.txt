@@ -1,0 +1,9 @@
+init hypervisor 0x40000000
+create-domain hypervisor cvm1 0b0011 GET,ATTEST,SWITCH
+carve r0 cvm1_private 0x1000000 0x8000000 RWX
+alias r0 virtio_ring 0x10000000 0x10000 RW
+send cvm1_private cvm1
+send virtio_ring cvm1
+seal cvm1
+attest cvm1
+view cvm1

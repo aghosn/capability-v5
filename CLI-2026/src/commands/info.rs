@@ -21,6 +21,17 @@ pub fn cmd_attest(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
+    // Sealed domains must have ATTEST permission to produce an attestation report.
+    {
+        let d = domain.read();
+        if d.data.is_sealed() && !d.data.policy.api.attest() {
+            return Err(format!(
+                "Domain '{}' does not have ATTEST permission",
+                domain_name
+            ));
+        }
+    }
+
     let attestation = attest_domain(domain);
 
     // Record command
