@@ -1,11 +1,17 @@
 //! Domain capabilities and policies
 
-use crate::capability::{CapabilityRef, CapabilityWeak, LocalHandle};
+use crate::capability::{CapabilityWeak, LocalHandle};
 use crate::error::{CapaError, Result};
 use crate::memory::MemoryRegion;
 use crate::sync::RwLock;
 use crate::update::CoreId;
-use crate::view::{compute_view_from_cap_arcs, AddressSpaceView};
+use crate::view::AddressSpaceView;
+// CapabilityRef and compute_view_from_cap_arcs are only used in refresh_view,
+// which is compiled out under loom to avoid O(N) lock acquisitions.
+#[cfg(not(feature = "loom"))]
+use crate::capability::CapabilityRef;
+#[cfg(not(feature = "loom"))]
+use crate::view::compute_view_from_cap_arcs;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -568,7 +574,7 @@ impl Domain {
     fn refresh_view(&mut self) {
         // Under loom, skip the O(N) lock-acquisition walk — view correctness is
         // covered by integration tests; loom only checks concurrency invariants.
-        #[cfg(not(loom))]
+        #[cfg(not(feature = "loom"))]
         {
             let cap_arcs: alloc::vec::Vec<CapabilityRef<MemoryRegion>> = self
                 .memory_capabilities

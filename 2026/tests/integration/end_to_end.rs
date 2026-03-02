@@ -551,3 +551,103 @@ fn test_complex_hierarchy_with_updates() {
     assert!(cores.contains(&0));
     assert!(proc.has_pending_updates(0));
 }
+
+#[test]
+fn test_complex_memory_update_scenario() {
+    // ================================================================
+    // Initial setup: Dom0 with r0 = [0x0, 0x10000) RWX
+    // Domain::new_root creates a sealed domain (id=0, status=Sealed).
+    // ================================================================
+    let root_domain = Domain::new_root(4);
+    let dom0 = Capability::new_root(0, 0, root_domain);
+
+    let root_region = MemoryRegion::new_root(0x0, 0x10000);
+    let r0 = Capability::new_root(0, 1, root_region);
+    dom0.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&r0));
+    let r0_h: LocalHandle = 1;
+
+    // ── Create Dom1, carve r1, send to Dom1, seal ─────────────────────
+    let dom1_policy = DomainPolicy::new_restricted(
+        0b1111,
+        MonitorAPI::from_bits(
+            MonitorAPI::CREATE
+                | MonitorAPI::SEAL
+                | MonitorAPI::ALIAS
+                | MonitorAPI::CARVE
+                | MonitorAPI::SEND
+                | MonitorAPI::REVOKE
+                | MonitorAPI::GET
+                | MonitorAPI::ATTEST,
+        ),
+    );
+    let dom1_h = Capability::create_domain(&dom0, dom1_policy).unwrap();
+    let dom1 = dom0.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
+
+    let r1_access = Access::new(0x1000, 0x2000, Rights::RWX);
+    let (r1_h, _, _) = Capability::carve_memory(&dom0, r0_h, r1_access).unwrap();
+    Capability::send_memory(&dom0, r1_h, dom1_h, Attributes::NONE).unwrap();
+    let r1_h_in_dom1: LocalHandle = 1;
+    Capability::seal_domain_op(&dom0, dom1_h).unwrap();
+
+    let dom1_view = compute_address_space(&dom1);
+    assert!(dom1_view.is_accessible(0x1000));
+    assert!(dom1_view.is_accessible(0x2FFF));
+    let r1_arc = dom1.read().data.memory_capabilities[&r1_h_in_dom1]
+        .upgrade()
+        .unwrap();
+    assert_eq!(r1_arc.read().data.kind, RegionKind::Carve);
+
+    // ── Create Dom2, carve r2 (reduced rights), alias r3, send r2 ────
+    let dom2_policy = DomainPolicy::new_restricted(
+        0b1111,
+        MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::REVOKE),
+    );
+    let dom2_h = Capability::create_domain(&dom1, dom2_policy).unwrap();
+    let dom2 = dom1.read().data.domain_capabilities[&dom2_h]
+        .upgrade()
+        .unwrap();
+
+    let r2_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (r2_h_in_dom1, r2_sub, _) =
+        Capability::carve_memory(&dom1, r1_h_in_dom1, r2_access).unwrap();
+
+    let r3_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (_, r3_sub) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
+
+    Capability::send_memory(&dom1, r2_h_in_dom1, dom2_h, Attributes::NONE).unwrap();
+    let r2_h_in_dom2: LocalHandle = 1;
+
+    let r2_arc = dom2.read().data.memory_capabilities[&r2_h_in_dom2]
+        .upgrade()
+        .unwrap();
+    let r2_rights = r2_arc.read().data.access.rights;
+    assert!(r2_rights.read() && r2_rights.write() && !r2_rights.execute());
+
+    Capability::seal_domain_op(&dom1, dom2_h).unwrap();
+
+    let dom1_view_after = compute_address_space(&dom1);
+    assert!(dom1_view_after.is_accessible(0x1000));
+    assert!(dom1_view_after.is_accessible(0x1FFF));
+
+    // ── Revoke r3 from r2, then r2 from r1 ───────────────────────────
+    Capability::revoke_memory_child(&dom2, r2_h_in_dom2, r3_sub).unwrap();
+    Capability::revoke_memory_child(&dom1, r1_h_in_dom1, r2_sub).unwrap();
+
+    let r1_rights_after = r1_arc.read().data.access.rights;
+    assert!(r1_rights_after.read() && r1_rights_after.write() && r1_rights_after.execute());
+
+    // ── Revoke Dom1 (and transitively Dom2) from Dom0 ─────────────────
+    Capability::revoke_domain(&dom0, dom1_h).unwrap();
+
+    assert_eq!(dom1.read().data.status, DomainStatus::Revoked);
+    assert_eq!(dom2.read().data.status, DomainStatus::Revoked);
+    assert_eq!(dom0.read().children.len(), 0);
+
+    let dom0_final_view = compute_address_space(&dom0);
+    assert!(dom0_final_view.is_accessible(0x0));
+    assert!(dom0_final_view.is_accessible(0xFFFF));
+}

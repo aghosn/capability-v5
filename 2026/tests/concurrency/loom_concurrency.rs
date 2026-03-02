@@ -1526,7 +1526,7 @@ fn loom_send_memory_immediate_updates() {
         let dom_c = make_unsealed_domain();
         let dom_b_id = dom_b.read().data.id;
         let dom_c_id = dom_c.read().data.id;
-        let dom_a_id = dom_a.read().data.id;
+        let _dom_a_id = dom_a.read().data.id;
 
         // Register dom_b and dom_c as domain capabilities of dom_a.
         let h_db: capability_engine::LocalHandle = 1;
@@ -1556,9 +1556,10 @@ fn loom_send_memory_immediate_updates() {
         tb.join().unwrap().expect("send c2 must succeed");
 
         // Batch content (Unmap/Map) is verified by integration_send_bugs and
-        // integration_api.  Under loom, refresh_view is a no-op (cfg(not(loom)))
-        // so the cached view is stale; batch assertions would always fail.
-        // Only the concurrency/ownership invariants are checked here.
+        // integration_api.  Under loom, Domain::refresh_view is a no-op
+        // (cfg(not(feature = "loom"))) to avoid O(N) lock acquisitions during
+        // exhaustive schedule exploration; cached_view may be stale so batch
+        // assertions are not checked here.
 
         // Invariant: dom_b owns c1, dom_c owns c2, dom_a retains only root.
         assert_eq!(dom_a.read().data.memory_capabilities.len(), 1, "dom_a retains only root");
@@ -1583,7 +1584,7 @@ fn loom_send_memory_immediate_updates() {
     });
 }
 
-// ── Case 9b — Race to accept; winner gets [Unmap(sender), Map(receiver)] ─────
+// ── Case 9b — Race to accept the same pending capability ──────────────────────
 //
 // | Thread A (shared lock)              | Thread B (shared lock)              |
 // |-------------------------------------|-------------------------------------|
@@ -1591,26 +1592,27 @@ fn loom_send_memory_immediate_updates() {
 //
 // Setup:
 //   - dom_b (sealed) holds a root memory cap at handle 1.
-//     Root cap has no parent → skip_unmap = false in accept_memory.
 //   - dom_c (sealed, RECEIVE_AFTER_SEAL) is the receiver.
 //   - dom_b sends cap to dom_c → pending queue entry.
 //   - Both threads race to accept the same pending_id.
 //
-// Because the cap has no parent, skip_unmap = false unconditionally, so the
-// winner's batch always contains Unmap(dom_b_id) + Map(dom_c_id).
-//
 // Valid outcomes (all schedules):
 //  - Exactly one accept succeeds; the other gets NotFound.
-//  - Winner's batch = [Unmap(dom_b_id, 0x0, 0x1000), Map(dom_c_id, 0x0, 0x1000)].
 //  - dom_c holds the cap at exactly one handle; pending queue is empty.
+//  - Winner is the sole owner of the cap.
+//
+// Note: batch content (Unmap/Map) is verified by integration_revoke and
+// integration_send_bugs. Under loom, Domain::refresh_view is a no-op
+// (cfg(not(feature = "loom"))) to avoid O(N) lock acquisitions during
+// exhaustive schedule exploration, so cached_view may be stale and batch
+// assertions would be unreliable here.
 #[test]
 fn loom_accept_memory_updates() {
     loom::model(|| {
         let platform_lock = Arc::new(RwLock::new(()));
 
-        // dom_b: sealed sender with a root cap (no parent → skip_unmap = false).
+        // dom_b: sealed sender with a root cap.
         let dom_b = make_sealed_send_domain();
-        let dom_b_id = dom_b.read().data.id;
         let _cap = register_mem_send(&dom_b, 1);
 
         // dom_c: sealed receiver with RECEIVE_AFTER_SEAL.
@@ -1657,31 +1659,18 @@ fn loom_accept_memory_updates() {
         // dom_c holds the cap at exactly one handle.
         assert_eq!(dom_c.read().data.memory_capability_handles().len(), 1);
 
-        // Winner's batch: Unmap(dom_b_id) + Map(dom_c_id).
-        let (_, winner_batch) = if res_a.is_ok() {
-            res_a.unwrap()
-        } else {
-            res_b.unwrap()
-        };
-        let has_unmap = winner_batch.updates().iter().any(|u| {
-            matches!(
-                u,
-                Update::ChangeRights { domain, address: 0x0, size: 0x1000, rights, .. }
-                    if *domain == dom_b_id && *rights == Rights::NONE
-            )
-        });
-        let has_map = winner_batch.updates().iter().any(|u| {
-            matches!(
-                u,
-                Update::ChangeRights { domain, address: 0x0, size: 0x1000, shootdown_required: false, .. }
-                    if *domain == dom_c_id
-            )
-        });
-        assert!(
-            has_unmap,
-            "accept winner must emit Unmap for dom_b (sender)"
-        );
-        assert!(has_map, "accept winner must emit Map for dom_c (receiver)");
+        // Winner is the sole owner.
+        let winner_handle = dom_c.read().data.memory_capability_handles()[0];
+        let owner = dom_c
+            .read()
+            .data
+            .memory_capabilities[&winner_handle]
+            .upgrade()
+            .unwrap()
+            .read()
+            .owned
+            .owner;
+        assert_eq!(owner, dom_c_id, "cap must be owned by dom_c");
     });
 }
 

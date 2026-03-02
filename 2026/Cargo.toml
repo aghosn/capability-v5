@@ -85,10 +85,6 @@ name = "integration_overlap"
 path = "tests/integration/overlap.rs"
 
 [[test]]
-name = "integration_updates"
-path = "tests/integration/updates.rs"
-
-[[test]]
 name = "integration_send_pending"
 path = "tests/integration/send_pending.rs"
 

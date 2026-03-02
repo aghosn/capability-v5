@@ -396,11 +396,13 @@ impl Capability<MemoryRegion> {
         Ok(updates)
     }
 
-    ///TODO(aghosn): We need to stress test this. What happens if we have partially overlapping
-    ///capabilities with distinct access rights? Is this handled correctly? For example one that
-    ///has r1: [0x0..0x2000) RW and one r2: [0x1000...0x3000) RX, then we need to make sure the
-    ///view is [0x0..0x1000) RW union [0x1000...0x2000) RWX union [0x2000...0x3000) RX.
-    /// Compute the current view of memory (considering carved children)
+    /// Compute the current view of memory (considering carved children).
+    ///
+    /// Carved and aliased children cannot overlap each other — enforced at creation time
+    /// in `carve_child` / `alias_child`. Each carved child's region is subtracted from the
+    /// parent view; aliased children share the parent's region and are never subtracted.
+    /// Because two children with the same address range and distinct rights cannot coexist,
+    /// this subtraction-based computation is correct.
     ///
     /// **Internal.** Use [`compute_address_space`] for the full domain view.
     #[doc(hidden)]
@@ -516,8 +518,14 @@ impl Capability<Domain> {
     }
 
     /// Recursively revoke a domain capability subtree.
-    /// TODO(aghosn): Does this correctly revoke the memory capabilities owned by the domains?
-    /// Or is this done elsewhere?
+    ///
+    /// Memory capabilities owned by a revoked domain are NOT automatically removed from the
+    /// capability tree. Their `owner_domain` Weak pointer becomes stale; future operations on
+    /// them return `PermissionDenied`. The parent memory capability retains these as children
+    /// in the tree until an ancestor domain explicitly calls `revoke_memory_child`.
+    /// Walking memory trees during domain revocation would require holding memory and domain
+    /// locks simultaneously, violating the lock-ordering discipline — so cleanup is left to
+    /// the caller.
     fn revoke_domain_subtree(
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
@@ -721,9 +729,8 @@ impl Capability<Domain> {
         receiver: LocalHandle,
         attrs: Attributes,
     ) -> Result<UpdateBatch> {
-        // Pre-flight: one read block to resolve receiver and get caller_id.
-        // The frozen check here is a fast-fail; the authoritative check happens
-        // inside the write lock below.
+        // Pre-flight: fast-fail frozen check, resolve caller_id and receiver Arc.
+        // The frozen check here is non-authoritative; the write-lock commit below is.
         let caller_id;
         let receiver_ref: CapabilityRef<Domain>;
         let recv_sealed;
@@ -744,146 +751,160 @@ impl Capability<Domain> {
         }
 
         if recv_sealed {
-            // ── Sealed path ─────────────────────────────────────────────────
-            // Pre-flight: resolve cap, check ownership, validate SEND — all under
-            // read locks only so validate_operation can safely read owner_domain.
-            let cap_ref = {
-                let r = caller.read();
-                let cap_weak = r
-                    .data
-                    .get_memory_capability(cap)
-                    .ok_or(CapaError::NotFound)?
-                    .clone();
-                drop(r);
-                let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-                if cap_ref.read().owned.owner != caller_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                if !receiver_ref.read().data.policy.receive_after_seal() {
-                    return Err(CapaError::PermissionDenied);
-                }
-                let cap_owned = cap_ref.read().owned.clone();
-                // cap_ref.read() released here; validate_operation acquires dom.read()
-                // separately, so no cap.read() + dom.read() overlap.
-                cap_owned.validate_operation(MonitorAPI::SEND)?;
-                cap_ref.write().owned.attributes = attrs;
-                cap_ref
-            };
-
-            // Mutation: freeze under caller.write() — the authoritative commit point.
-            {
-                let mut caller_w = caller.write();
-                if caller_w.data.is_memory_handle_frozen(cap) {
-                    return Err(CapaError::PermissionDenied);
-                }
-                caller_w.data.freeze_memory_handle(cap);
-            }
-
-            let pending = PendingCapability {
-                cap: Arc::downgrade(&cap_ref),
-                sender_domain_id: caller_id,
-                sender_handle: cap,
-                sender_domain: Arc::downgrade(caller),
-            };
-            receiver_ref.write().data.add_pending_capability(pending);
-
-            Ok(UpdateBatch::new())
+            Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs)
         } else {
-            // ── Unsealed path ────────────────────────────────────────────────
-            // Pre-flight: validate SEND permission before acquiring write locks.
-            // validate_operation reads owner_domain (= caller) — safe here since
-            // we only hold a read lock on cap_ref, not caller.write().
-            let receiver_id = receiver_ref.read().data.id;
-            {
-                let r = caller.read();
-                let cap_weak = r
-                    .data
-                    .get_memory_capability(cap)
-                    .ok_or(CapaError::NotFound)?
-                    .clone();
-                drop(r);
-                let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-                // Capture ownership in a single read-lock scope so that the owner
-                // check and owner_domain are read atomically.  A concurrent thread
-                // that transfers this cap will change both owner and owner_domain
-                // under its write lock; if we see the new owner here we return
-                // PermissionDenied, and if we see the old owner (dom) our clone of
-                // owner_domain still points to the sealed caller — in neither case
-                // can we read a partially-updated ownership (owner=recv but
-                // owner_domain still pointing to an unsealed domain, which would
-                // incorrectly surface as DomainNotSealed).
-                let cap_owned = {
-                    let cr = cap_ref.read();
-                    if cr.owned.owner != caller_id {
-                        return Err(CapaError::PermissionDenied);
-                    }
-                    cr.owned.clone()
-                };
-                cap_owned.validate_operation(MonitorAPI::SEND)?;
+            Self::send_memory_unsealed(caller, cap, &receiver_ref, caller_id, attrs)
+        }
+    }
+
+    /// Sealed send: freeze the caller's handle and enqueue in the receiver's pending table.
+    /// No MMU updates are emitted — those are deferred to `accept_memory`.
+    fn send_memory_sealed(
+        caller: &CapabilityRef<Domain>,
+        cap: LocalHandle,
+        receiver_ref: &CapabilityRef<Domain>,
+        caller_id: DomainId,
+        attrs: Attributes,
+    ) -> Result<UpdateBatch> {
+        // Pre-flight: resolve cap, check ownership, validate SEND — all under read
+        // locks so validate_operation can safely upgrade owner_domain.
+        let cap_ref = {
+            let r = caller.read();
+            let cap_weak = r
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            if cap_ref.read().owned.owner != caller_id {
+                return Err(CapaError::PermissionDenied);
             }
+            if !receiver_ref.read().data.policy.receive_after_seal() {
+                return Err(CapaError::PermissionDenied);
+            }
+            // cap_ref.read() released here; validate_operation acquires dom.read()
+            // separately, so no cap.read() + dom.read() overlap.
+            let cap_owned = cap_ref.read().owned.clone();
+            cap_owned.validate_operation(MonitorAPI::SEND)?;
+            cap_ref.write().owned.attributes = attrs;
+            cap_ref
+        };
 
-            // Acquire both domain write locks in domain-ID order to prevent
-            // ABBA deadlock when concurrent sends touch the same pair of domains
-            // in opposite directions.  Holding both locks throughout ensures the
-            // view snapshots (before and after) are fully atomic with the mutation.
-            let (mut caller_w, mut recv_w) = if caller_id < receiver_id {
-                let c = caller.write();
-                let r = receiver_ref.write();
-                (c, r)
-            } else {
-                let r = receiver_ref.write();
-                let c = caller.write();
-                (c, r)
-            };
-
-            // Authoritative frozen check and atomic remove (commit point).
+        // Mutation: freeze under caller.write() — the authoritative commit point.
+        {
+            let mut caller_w = caller.write();
             if caller_w.data.is_memory_handle_frozen(cap) {
                 return Err(CapaError::PermissionDenied);
             }
-
-            // Snapshot views BEFORE mutation.
-            let view_caller_before = caller_w.data.cached_view.clone();
-            let view_receiver_before = recv_w.data.cached_view.clone();
-
-            let cap_weak = caller_w
-                .data
-                .remove_memory_capability(cap)
-                .ok_or(CapaError::NotFound)?;
-            refresh_domain_view(&mut *caller_w);
-
-            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-            let new_handle = recv_w.data.allocate_memory_handle();
-
-            // Transfer ownership (cap_ref is a separate arc — safe).
-            {
-                let mut c = cap_ref.write();
-                c.owned.owner = receiver_id;
-                c.owned.attributes = attrs;
-                c.owned.owner_domain = Some(Arc::downgrade(&receiver_ref));
-            }
-
-            recv_w
-                .data
-                .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
-            refresh_domain_view(&mut *recv_w);
-
-            // Snapshot views AFTER mutation.
-            let view_caller_after = caller_w.data.cached_view.clone();
-            let view_receiver_after = recv_w.data.cached_view.clone();
-
-            drop(caller_w);
-            drop(recv_w);
-
-            let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
-            updates.merge(view_diff(
-                receiver_id,
-                &view_receiver_before,
-                &view_receiver_after,
-            ));
-
-            Ok(updates)
+            caller_w.data.freeze_memory_handle(cap);
         }
+
+        let pending = PendingCapability {
+            cap: Arc::downgrade(&cap_ref),
+            sender_domain_id: caller_id,
+            sender_handle: cap,
+            sender_domain: Arc::downgrade(caller),
+        };
+        receiver_ref.write().data.add_pending_capability(pending);
+
+        Ok(UpdateBatch::new())
+    }
+
+    /// Unsealed send: immediately transfer ownership and emit MMU updates.
+    ///
+    /// Acquires both domain write locks in domain-ID order (ABBA-safe). The
+    /// ownership change and view refresh happen atomically under both locks.
+    ///
+    /// Owner check and `owner_domain` clone are captured in a single read-lock
+    /// scope to prevent a TOCTOU where a concurrent transfer changes `owner_domain`
+    /// between an ownership check and a later read (which would erroneously surface
+    /// as `DomainNotSealed` from `validate_operation`).
+    fn send_memory_unsealed(
+        caller: &CapabilityRef<Domain>,
+        cap: LocalHandle,
+        receiver_ref: &CapabilityRef<Domain>,
+        caller_id: DomainId,
+        attrs: Attributes,
+    ) -> Result<UpdateBatch> {
+        let receiver_id = receiver_ref.read().data.id;
+
+        // Pre-flight: validate SEND permission before acquiring write locks.
+        {
+            let r = caller.read();
+            let cap_weak = r
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            let cap_owned = {
+                let cr = cap_ref.read();
+                if cr.owned.owner != caller_id {
+                    return Err(CapaError::PermissionDenied);
+                }
+                cr.owned.clone()
+            };
+            cap_owned.validate_operation(MonitorAPI::SEND)?;
+        }
+
+        // Acquire both write locks in domain-ID order.
+        let (mut caller_w, mut recv_w) = if caller_id < receiver_id {
+            let c = caller.write();
+            let r = receiver_ref.write();
+            (c, r)
+        } else {
+            let r = receiver_ref.write();
+            let c = caller.write();
+            (c, r)
+        };
+
+        // Authoritative frozen check (commit point).
+        if caller_w.data.is_memory_handle_frozen(cap) {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        let view_caller_before = caller_w.data.cached_view.clone();
+        let view_receiver_before = recv_w.data.cached_view.clone();
+
+        let cap_weak = caller_w
+            .data
+            .remove_memory_capability(cap)
+            .ok_or(CapaError::NotFound)?;
+        refresh_domain_view(&mut *caller_w);
+
+        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        let new_handle = recv_w.data.allocate_memory_handle();
+
+        // Transfer ownership (cap_ref is a separate arc — safe to write while
+        // holding domain write locks).
+        {
+            let mut c = cap_ref.write();
+            c.owned.owner = receiver_id;
+            c.owned.attributes = attrs;
+            c.owned.owner_domain = Some(Arc::downgrade(receiver_ref));
+        }
+
+        recv_w
+            .data
+            .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+        refresh_domain_view(&mut *recv_w);
+
+        let view_caller_after = caller_w.data.cached_view.clone();
+        let view_receiver_after = recv_w.data.cached_view.clone();
+
+        drop(caller_w);
+        drop(recv_w);
+
+        let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
+        updates.merge(view_diff(
+            receiver_id,
+            &view_receiver_before,
+            &view_receiver_after,
+        ));
+
+        Ok(updates)
     }
 
     /// Accept a pending memory capability. Auto-allocates a new LocalHandle in the
@@ -1155,251 +1176,260 @@ impl Capability<Domain> {
         to_vp_id: u64,
         platform: &dyn Platform,
     ) -> Result<SwitchContext> {
-        // Step 1: determine current core (common to both paths).
         let core_id = platform
             .get_current_core()
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
 
         if to_handle == 0 {
-            // ── RETURN: unwind VP call chain ─────────────────────────────────
+            Self::switch_domain_return(caller, core_id, platform)
+        } else {
+            Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)
+        }
+    }
 
-            // Caller must be sealed (it is running, so it should always be).
-            if !caller.read().data.is_sealed() {
+    /// Return path: unwind the VP call chain one step.
+    ///
+    /// Transitions:
+    /// - Caller VP: `Running → Available`
+    /// - Previous (Locked) VP: `Locked → Running { core, caller: prev_prev_caller }`
+    fn switch_domain_return(
+        caller: &CapabilityRef<Domain>,
+        core_id: CoreId,
+        platform: &dyn Platform,
+    ) -> Result<SwitchContext> {
+        if !caller.read().data.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+        let caller_id = caller.read().data.id;
+
+        let caller_vp_arc = {
+            let c = caller.read();
+            c.data.find_vp_on_core(core_id).ok_or_else(|| {
+                CapaError::InvalidOperation("no VP running on this core".to_string())
+            })?
+        };
+        let caller_vp_id = caller_vp_arc.id;
+
+        let prev_ctx = {
+            match &*caller_vp_arc.run_state.read() {
+                VpRunState::Running {
+                    caller: Some(ctx), ..
+                } => ctx.clone(),
+                VpRunState::Running { caller: None, .. } => {
+                    return Err(CapaError::InvalidOperation(
+                        "no caller to return to".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "caller VP not in Running state".to_string(),
+                    ))
+                }
+            }
+        };
+
+        let prev_domain_id = prev_ctx.domain_id;
+        let prev_vp_id = prev_ctx.vp_id;
+        let prev_domain_ref = prev_ctx
+            .domain
+            .upgrade()
+            .ok_or(CapaError::PermissionDenied)?;
+
+        let prev_vp_arc = {
+            let pd = prev_domain_ref.read();
+            pd.data
+                .policy
+                .vprocessor_states
+                .get(prev_vp_id as usize)
+                .ok_or(CapaError::NotFound)?
+                .clone()
+        };
+
+        // Verify previous VP is Locked waiting for this callee and extract its saved caller.
+        let prev_prev_caller = {
+            match &*prev_vp_arc.run_state.read() {
+                VpRunState::Locked {
+                    callee_domain_id,
+                    callee_vp_id,
+                    prev_caller,
+                } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {
+                    prev_caller.clone()
+                }
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "previous VP is not locked waiting for this callee".to_string(),
+                    ))
+                }
+            }
+        };
+
+        *prev_vp_arc.run_state.write() = VpRunState::Running {
+            core: core_id,
+            caller: prev_prev_caller,
+        };
+        *caller_vp_arc.run_state.write() = VpRunState::Available;
+
+        platform.set_core_domain(core_id, prev_domain_id);
+        platform.set_core_vp(core_id, Some(prev_vp_id));
+
+        Ok(SwitchContext {
+            from_domain: caller_id,
+            to_domain: prev_domain_id,
+            core_id,
+            is_return: true,
+            from_vp_id: Some(caller_vp_id),
+            to_vp_id: Some(prev_vp_id),
+        })
+    }
+
+    /// Forward switch: claim the target VP and lock the caller VP.
+    ///
+    /// Transitions:
+    /// - Target VP: `Available → Running` or `Suspended → Running` (interrupt-resume)
+    /// - Caller VP: `Running → Locked { callee: target }`
+    ///
+    /// If the target VP was `Suspended`, its `Interrupted` callee is freed (`→ Available`)
+    /// after the target VP's lock is released.
+    fn switch_domain_forward(
+        caller: &CapabilityRef<Domain>,
+        to_handle: LocalHandle,
+        to_vp_id: u64,
+        core_id: CoreId,
+        platform: &dyn Platform,
+    ) -> Result<SwitchContext> {
+        {
+            let c = caller.read();
+            if !c.data.is_sealed() {
                 return Err(CapaError::DomainNotSealed);
             }
-
-            let caller_id = caller.read().data.id;
-
-            // Find caller VP running on this core.
-            let caller_vp_arc = {
-                let c = caller.read();
-                c.data.find_vp_on_core(core_id).ok_or_else(|| {
-                    CapaError::InvalidOperation("no VP running on this core".to_string())
-                })?
-            };
-            let caller_vp_id = caller_vp_arc.id;
-
-            // Read caller VP's saved caller context.
-            let prev_ctx = {
-                match &*caller_vp_arc.run_state.read() {
-                    VpRunState::Running {
-                        caller: Some(ctx), ..
-                    } => ctx.clone(),
-                    VpRunState::Running { caller: None, .. } => {
-                        return Err(CapaError::InvalidOperation(
-                            "no caller to return to".to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(CapaError::InvalidOperation(
-                            "caller VP not in Running state".to_string(),
-                        ))
-                    }
-                }
-            };
-
-            let prev_domain_id = prev_ctx.domain_id;
-            let prev_vp_id = prev_ctx.vp_id;
-            let prev_domain_ref = prev_ctx
-                .domain
-                .upgrade()
-                .ok_or(CapaError::PermissionDenied)?;
-
-            // Clone previous VP Arc (brief read lock on domain).
-            let prev_vp_arc = {
-                let pd = prev_domain_ref.read();
-                pd.data
-                    .policy
-                    .vprocessor_states
-                    .get(prev_vp_id as usize)
-                    .ok_or(CapaError::NotFound)?
-                    .clone()
-            };
-
-            // Verify previous VP is Locked waiting for this callee, extract its caller.
-            let prev_prev_caller = {
-                match &*prev_vp_arc.run_state.read() {
-                    VpRunState::Locked {
-                        callee_domain_id,
-                        callee_vp_id,
-                        prev_caller,
-                    } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {
-                        prev_caller.clone()
-                    }
-                    _ => {
-                        return Err(CapaError::InvalidOperation(
-                            "previous VP is not locked waiting for this callee".to_string(),
-                        ))
-                    }
-                }
-            };
-
-            // Restore previous VP: Locked → Running.
-            *prev_vp_arc.run_state.write() = VpRunState::Running {
-                core: core_id,
-                caller: prev_prev_caller,
-            };
-            // Mark caller VP: Running → Available.
-            *caller_vp_arc.run_state.write() = VpRunState::Available;
-
-            // Update platform.
-            platform.set_core_domain(core_id, prev_domain_id);
-            platform.set_core_vp(core_id, Some(prev_vp_id));
-
-            Ok(SwitchContext {
-                from_domain: caller_id,
-                to_domain: prev_domain_id,
-                core_id,
-                is_return: true,
-                from_vp_id: Some(caller_vp_id),
-                to_vp_id: Some(prev_vp_id),
-            })
-        } else {
-            // ── FORWARD SWITCH: claim target VP ──────────────────────────────
-
-            // Validate caller: sealed + SWITCH permission.
-            {
-                let c = caller.read();
-                if !c.data.is_sealed() {
-                    return Err(CapaError::DomainNotSealed);
-                }
-                if !c.data.policy.api.has(MonitorAPI::SWITCH) {
-                    return Err(CapaError::ApiNotAllowed);
-                }
+            if !c.data.policy.api.has(MonitorAPI::SWITCH) {
+                return Err(CapaError::ApiNotAllowed);
             }
-
-            // Find caller VP running on this core.
-            let caller_vp_arc = {
-                let c = caller.read();
-                c.data.find_vp_on_core(core_id).ok_or_else(|| {
-                    CapaError::InvalidOperation("no VP running on this core".to_string())
-                })?
-            };
-            let caller_vp_id = caller_vp_arc.id;
-            let caller_id = caller.read().data.id;
-
-            // Resolve target domain.
-            let to_domain_weak = caller
-                .read()
-                .data
-                .get_domain_capability(to_handle)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-            let (to_domain_id, core_allowed) = {
-                let td = to_domain_ref.read();
-                if !td.data.is_sealed() {
-                    return Err(CapaError::DomainNotSealed);
-                }
-                let core_bit = 1u64 << core_id;
-                (td.data.id, (td.data.policy.cores & core_bit) != 0)
-            };
-            if !core_allowed {
-                return Err(CapaError::PermissionDenied);
-            }
-
-            // Clone target VP Arc (brief read lock on target domain).
-            let to_vp_arc = {
-                let td = to_domain_ref.read();
-                td.data
-                    .policy
-                    .vprocessor_states
-                    .get(to_vp_id as usize)
-                    .ok_or(CapaError::NotFound)?
-                    .clone()
-            };
-
-            // Capture caller's saved caller before mutating anything.
-            let caller_prev_caller = {
-                match &*caller_vp_arc.run_state.read() {
-                    VpRunState::Running { caller: prev, .. } => prev.clone(),
-                    _ => {
-                        return Err(CapaError::InvalidOperation(
-                            "caller VP not in Running state".to_string(),
-                        ))
-                    }
-                }
-            };
-
-            // Claim target VP: Available → Running, or Suspended → Running
-            // (interrupt-resume path).  If Suspended, record callee info so the
-            // Interrupted callee can be freed after the lock is released.
-            let suspended_callee: Option<(CapabilityWeak<Domain>, u64)> = {
-                let mut state = to_vp_arc.run_state.write();
-
-                // Extract callee info before overwriting state (borrow ends here).
-                let callee_info = if let VpRunState::Suspended {
-                    callee_domain,
-                    callee_vp_id,
-                    ..
-                } = &*state
-                {
-                    Some((callee_domain.clone(), *callee_vp_id))
-                } else {
-                    None
-                };
-
-                // Verify the VP is claimable.
-                match &*state {
-                    VpRunState::Available | VpRunState::Suspended { .. } => {}
-                    _ => {
-                        return Err(CapaError::InvalidOperation(
-                            "target VP is not available".to_string(),
-                        ))
-                    }
-                }
-
-                *state = VpRunState::Running {
-                    core: core_id,
-                    caller: Some(VpCallContext {
-                        domain: Arc::downgrade(caller),
-                        domain_id: caller_id,
-                        vp_id: caller_vp_id,
-                    }),
-                };
-                callee_info
-            };
-
-            // If the target VP was Suspended, free its Interrupted callee.
-            if let Some((callee_weak, callee_vp_id)) = suspended_callee {
-                if let Some(callee_cap) = callee_weak.upgrade() {
-                    let vp_opt = callee_cap
-                        .read()
-                        .data
-                        .policy
-                        .vprocessor_states
-                        .get(callee_vp_id as usize)
-                        .cloned();
-                    if let Some(vp) = vp_opt {
-                        let mut s = vp.run_state.write();
-                        if matches!(*s, VpRunState::Interrupted) {
-                            *s = VpRunState::Available;
-                        }
-                    }
-                }
-            }
-
-            // Transition caller VP: Running → Locked.
-            *caller_vp_arc.run_state.write() = VpRunState::Locked {
-                callee_domain_id: to_domain_id,
-                callee_vp_id: to_vp_id,
-                prev_caller: caller_prev_caller,
-            };
-
-            // Update platform.
-            platform.set_core_domain(core_id, to_domain_id);
-            platform.set_core_vp(core_id, Some(to_vp_id));
-
-            Ok(SwitchContext {
-                from_domain: caller_id,
-                to_domain: to_domain_id,
-                core_id,
-                is_return: false,
-                from_vp_id: Some(caller_vp_id),
-                to_vp_id: Some(to_vp_id),
-            })
         }
+
+        let caller_vp_arc = {
+            let c = caller.read();
+            c.data.find_vp_on_core(core_id).ok_or_else(|| {
+                CapaError::InvalidOperation("no VP running on this core".to_string())
+            })?
+        };
+        let caller_vp_id = caller_vp_arc.id;
+        let caller_id = caller.read().data.id;
+
+        let to_domain_weak = caller
+            .read()
+            .data
+            .get_domain_capability(to_handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        let (to_domain_id, core_allowed) = {
+            let td = to_domain_ref.read();
+            if !td.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            let core_bit = 1u64 << core_id;
+            (td.data.id, (td.data.policy.cores & core_bit) != 0)
+        };
+        if !core_allowed {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        let to_vp_arc = {
+            let td = to_domain_ref.read();
+            td.data
+                .policy
+                .vprocessor_states
+                .get(to_vp_id as usize)
+                .ok_or(CapaError::NotFound)?
+                .clone()
+        };
+
+        // Capture caller's saved-caller context before mutating anything.
+        let caller_prev_caller = {
+            match &*caller_vp_arc.run_state.read() {
+                VpRunState::Running { caller: prev, .. } => prev.clone(),
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "caller VP not in Running state".to_string(),
+                    ))
+                }
+            }
+        };
+
+        // Claim target VP: Available → Running, or Suspended → Running.
+        // If Suspended, record callee info so the Interrupted callee can be freed.
+        let suspended_callee: Option<(CapabilityWeak<Domain>, u64)> = {
+            let mut state = to_vp_arc.run_state.write();
+
+            let callee_info = if let VpRunState::Suspended {
+                callee_domain,
+                callee_vp_id,
+                ..
+            } = &*state
+            {
+                Some((callee_domain.clone(), *callee_vp_id))
+            } else {
+                None
+            };
+
+            match &*state {
+                VpRunState::Available | VpRunState::Suspended { .. } => {}
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "target VP is not available".to_string(),
+                    ))
+                }
+            }
+
+            *state = VpRunState::Running {
+                core: core_id,
+                caller: Some(VpCallContext {
+                    domain: Arc::downgrade(caller),
+                    domain_id: caller_id,
+                    vp_id: caller_vp_id,
+                }),
+            };
+            callee_info
+        };
+
+        // If the target VP was Suspended, free its Interrupted callee.
+        if let Some((callee_weak, callee_vp_id)) = suspended_callee {
+            if let Some(callee_cap) = callee_weak.upgrade() {
+                let vp_opt = callee_cap
+                    .read()
+                    .data
+                    .policy
+                    .vprocessor_states
+                    .get(callee_vp_id as usize)
+                    .cloned();
+                if let Some(vp) = vp_opt {
+                    let mut s = vp.run_state.write();
+                    if matches!(*s, VpRunState::Interrupted) {
+                        *s = VpRunState::Available;
+                    }
+                }
+            }
+        }
+
+        *caller_vp_arc.run_state.write() = VpRunState::Locked {
+            callee_domain_id: to_domain_id,
+            callee_vp_id: to_vp_id,
+            prev_caller: caller_prev_caller,
+        };
+
+        platform.set_core_domain(core_id, to_domain_id);
+        platform.set_core_vp(core_id, Some(to_vp_id));
+
+        Ok(SwitchContext {
+            from_domain: caller_id,
+            to_domain: to_domain_id,
+            core_id,
+            is_return: false,
+            from_vp_id: Some(caller_vp_id),
+            to_vp_id: Some(to_vp_id),
+        })
     }
 
     /// Deliver an interrupt via the VP call-chain **lazy-unwind** model.
