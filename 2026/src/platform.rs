@@ -42,10 +42,10 @@
 //! ensures that by the time a revoke operation completes and releases the lock,
 //! no other thread is accessing the revoked domains.
 
-use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
 use crate::error::Result;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 
 /// A RAII guard that holds a platform operation lock (shared or exclusive).
 ///
@@ -267,11 +267,7 @@ pub trait Platform: Send + Sync {
 /// 7. **Release update lock**, then drop the capability lock guard.
 ///
 /// Returns `(R, UpdateBatch)` so callers can inspect the updates.
-pub fn execute<F, R>(
-    platform: &dyn Platform,
-    exclusive: bool,
-    op: F,
-) -> Result<(R, UpdateBatch)>
+pub fn execute<F, R>(platform: &dyn Platform, exclusive: bool, op: F) -> Result<(R, UpdateBatch)>
 where
     F: FnOnce() -> Result<(R, UpdateBatch)>,
 {

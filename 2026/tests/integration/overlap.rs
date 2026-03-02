@@ -3,12 +3,18 @@
 use capability_engine::*;
 use std::sync::Arc;
 
-fn setup() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHandle) {
+fn setup() -> (
+    CapabilityRef<Domain>,
+    CapabilityRef<MemoryRegion>,
+    LocalHandle,
+) {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 1, root_region);
-    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
+    root.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&mem_root));
     (root, mem_root, 1)
 }
 

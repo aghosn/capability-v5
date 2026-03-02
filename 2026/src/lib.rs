@@ -24,20 +24,29 @@ pub mod domain;
 pub mod error;
 pub mod memory;
 pub mod platform;
-pub(crate) mod sync;
 pub mod switch;
+pub(crate) mod sync;
 pub mod update;
 pub mod view;
 
 pub use attest::{attest_domain, attest_memory_region, enumerate_domain_tree, AttestationReport};
-pub use capability::{Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership, SubHandle};
+pub use capability::{
+    compute_address_space, Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership,
+    SubHandle,
+};
 pub use domain::{
     Domain, DomainPolicy, DomainStatus, InterruptPolicy, InterruptVisibility, MonitorAPI,
-    VpCallContext, VpRunState, VProcessorRef, VProcessorState, VectorPolicy,
+    VProcessorRef, VProcessorState, VectorPolicy, VpCallContext, VpRunState,
 };
 pub use error::{CapaError, Result};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
 pub use platform::{execute, OpLockGuard, Platform};
-pub use switch::{CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext};
-pub use update::{CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus};
-pub use view::{AddressSpaceView, ViewRegion, compute_address_space, compute_view_from_capabilities};
+pub use switch::{
+    CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext,
+};
+pub use update::{
+    CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus,
+};
+pub use view::{
+    compute_view_from_capabilities, view_diff, AddressSpaceView, ViewRegion,
+};

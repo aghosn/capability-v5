@@ -79,9 +79,16 @@ fn test_concurrent_child_creation() {
 
     // Verify all children were created
     let children_count = root_shared.read().children.len();
-    assert_eq!(children_count, 50, "Expected 50 children, got {}", children_count);
+    assert_eq!(
+        children_count, 50,
+        "Expected 50 children, got {}",
+        children_count
+    );
 
-    println!("Concurrent child creation test passed! Created {} children", children_count);
+    println!(
+        "Concurrent child creation test passed! Created {} children",
+        children_count
+    );
 }
 
 #[test]
@@ -121,9 +128,16 @@ fn test_concurrent_memory_operations() {
     }
 
     let children_count = mem_shared.read().children.len();
-    assert_eq!(children_count, 80, "Expected 80 aliased children, got {}", children_count);
+    assert_eq!(
+        children_count, 80,
+        "Expected 80 aliased children, got {}",
+        children_count
+    );
 
-    println!("Concurrent memory operations test passed! Created {} aliases", children_count);
+    println!(
+        "Concurrent memory operations test passed! Created {} aliases",
+        children_count
+    );
 }
 
 #[test]
@@ -143,13 +157,10 @@ fn test_concurrent_carve_operations() {
             let base = (i as u64) * 0x40000; // 256KB sections
             let access = Access::new(base, 0x10000, Rights::RWX); // Carve 64KB
 
-            // Note: owner must match parent owner (0) for carve to not generate updates
             match Capability::carve_child(&mem_clone, access, 0) {
-                Ok((child, updates)) => {
+                Ok(child) => {
                     let child_read = child.read();
                     assert_eq!(child_read.data.status, RegionStatus::Exclusive);
-                    // Carve with same owner generates no updates
-                    assert!(updates.is_empty());
                     println!("Thread {} carved region at {:#x}", i, base);
                 }
                 Err(e) => panic!("Thread {} failed to carve: {}", i, e),
@@ -242,16 +253,25 @@ fn test_concurrent_revocation() {
     for i in 0..5 {
         let root_clone = Arc::clone(&root_shared);
         let child_handle = child_handles[i];
-        let handle = thread::spawn(move || {
-            match Capability::revoke_domain(&root_clone, child_handle) {
-                Ok(updates) => {
-                    println!("Thread {} successfully revoked child {}, updates: {}", i, child_handle, updates.len());
-                }
-                Err(e) => {
-                    println!("Thread {} failed to revoke child {}: {}", i, child_handle, e);
-                }
-            }
-        });
+        let handle =
+            thread::spawn(
+                move || match Capability::revoke_domain(&root_clone, child_handle) {
+                    Ok(updates) => {
+                        println!(
+                            "Thread {} successfully revoked child {}, updates: {}",
+                            i,
+                            child_handle,
+                            updates.len()
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "Thread {} failed to revoke child {}: {}",
+                            i, child_handle, e
+                        );
+                    }
+                },
+            );
         handles.push(handle);
     }
 
@@ -261,9 +281,16 @@ fn test_concurrent_revocation() {
 
     // Verify that 5 children were revoked
     let remaining = root_shared.read().children.len();
-    assert_eq!(remaining, 5, "Expected 5 remaining children, got {}", remaining);
+    assert_eq!(
+        remaining, 5,
+        "Expected 5 remaining children, got {}",
+        remaining
+    );
 
-    println!("Concurrent revocation test passed! {} children remaining", remaining);
+    println!(
+        "Concurrent revocation test passed! {} children remaining",
+        remaining
+    );
 }
 
 #[test]
@@ -274,8 +301,10 @@ fn test_memory_view_computation_concurrent() {
     let mem_shared = Arc::new(mem_root);
 
     // Carve some regions first
-    let _child1 = Capability::carve_child(&mem_shared, Access::new(0x1000, 0x1000, Rights::RW), 1).unwrap();
-    let _child2 = Capability::carve_child(&mem_shared, Access::new(0x3000, 0x1000, Rights::RW), 1).unwrap();
+    let _child1 =
+        Capability::carve_child(&mem_shared, Access::new(0x1000, 0x1000, Rights::RW), 1).unwrap();
+    let _child2 =
+        Capability::carve_child(&mem_shared, Access::new(0x3000, 0x1000, Rights::RW), 1).unwrap();
 
     let mut handles = vec![];
 

@@ -1,8 +1,10 @@
-//! Address space visualization and memory view computation
+//! Address space view computation and diff generation.
 
 use crate::capability::CapabilityRef;
-use crate::domain::Domain;
-use crate::memory::{Access, MemoryRegion, Rights};
+use crate::memory::{Access, MemoryRegion, RegionKind, Rights};
+use crate::update::{DomainId, UpdateBatch};
+use alloc::collections::BTreeSet;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -18,22 +20,15 @@ impl ViewRegion {
         ViewRegion { access }
     }
 
-    /// Get the start address
     pub fn start(&self) -> u64 {
         self.access.start
     }
-
-    /// Get the end address (exclusive)
     pub fn end(&self) -> u64 {
         self.access.end()
     }
-
-    /// Get access rights
     pub fn rights(&self) -> Rights {
         self.access.rights
     }
-
-    /// Get size
     pub fn size(&self) -> u64 {
         self.access.size
     }
@@ -48,9 +43,7 @@ impl fmt::Display for ViewRegion {
 /// Address space view for a domain
 #[derive(Debug, Clone)]
 pub struct AddressSpaceView {
-    /// Domain ID
     pub domain_id: u64,
-    /// Sorted list of accessible regions
     pub regions: Vec<ViewRegion>,
 }
 
@@ -62,50 +55,33 @@ impl AddressSpaceView {
         }
     }
 
-    /// Add a region to the view
     pub fn add_region(&mut self, region: ViewRegion) {
         self.regions.push(region);
         self.regions.sort();
     }
 
-    /// Coalesce adjacent regions with same rights
+    /// Coalesce regions.
+    ///
+    /// Handles both adjacent regions (same rights) and *overlapping* regions
+    /// (which arise when a domain owns two aliases with overlapping ranges).
+    /// Overlapping segments are merged by taking the **union of rights**.
     pub fn coalesce(&mut self) {
         if self.regions.len() <= 1 {
             return;
         }
-
-        let mut coalesced = Vec::new();
-        let mut current = self.regions[0].clone();
-
-        for next in self.regions.iter().skip(1) {
-            // Check if regions can be coalesced
-            if current.end() == next.start() && current.rights() == next.rights() {
-                // Extend current region
-                let new_size = current.access.size + next.access.size;
-                current.access.size = new_size;
-            } else {
-                // Cannot coalesce, save current and move to next
-                coalesced.push(current);
-                current = next.clone();
-            }
-        }
-        coalesced.push(current);
-        self.regions = coalesced;
+        coalesce_regions(&mut self.regions);
     }
 
-    /// Get total accessible memory size
     pub fn total_size(&self) -> u64 {
-        self.regions.iter().map(|r| r.access.size).sum()
+        self.regions.iter().map(|r| r.size()).sum()
     }
 
-    /// Check if an address is accessible
     pub fn is_accessible(&self, addr: u64) -> bool {
         self.regions
             .iter()
             .any(|r| addr >= r.start() && addr < r.end())
     }
 
-    /// Get the region containing an address (if any)
     pub fn get_region_at(&self, addr: u64) -> Option<&ViewRegion> {
         self.regions
             .iter()
@@ -125,79 +101,243 @@ impl fmt::Display for AddressSpaceView {
     }
 }
 
-/// Compute the address space view for a domain
-/// This walks all memory capabilities owned by the domain
-pub fn compute_address_space(domain_ref: &CapabilityRef<Domain>) -> AddressSpaceView {
-    let domain = domain_ref.read();
-    let mut view = AddressSpaceView::new(domain.data.id);
+// ── Coalesce implementation ────────────────────────────────────────────────
 
-    // Collect all memory capabilities owned by this domain
-    for (_handle, weak_ref) in &domain.data.memory_capabilities {
-        if let Some(mem_ref) = weak_ref.upgrade() {
-            add_capability_to_view(&mut view, &mem_ref);
+/// Coalesce a sorted list of ViewRegions in-place.
+///
+/// Uses a sweep-line over all boundary points:
+/// for each sub-interval between adjacent boundaries, compute the union of
+/// rights from all regions that cover it.  Then merge adjacent same-rights
+/// sub-intervals in a final pass.
+fn coalesce_regions(regions: &mut Vec<ViewRegion>) {
+    // Collect all boundary points.
+    let mut points: Vec<u64> = Vec::new();
+    for r in regions.iter() {
+        points.push(r.start());
+        points.push(r.end());
+    }
+    points.sort_unstable();
+    points.dedup();
+
+    let mut result: Vec<ViewRegion> = Vec::new();
+    for w in points.windows(2) {
+        let seg_start = w[0];
+        let seg_end = w[1];
+
+        // Union of rights from every region that fully covers [seg_start, seg_end).
+        let mut combined: Option<Rights> = None;
+        for r in regions.iter() {
+            if r.start() <= seg_start && r.end() >= seg_end {
+                combined = Some(match combined {
+                    None => r.rights(),
+                    Some(e) => e.union(&r.rights()),
+                });
+            }
+        }
+        if let Some(rights) = combined {
+            result.push(ViewRegion::new(Access::new(
+                seg_start,
+                seg_end - seg_start,
+                rights,
+            )));
         }
     }
 
-    view.coalesce();
-    view
+    // Merge adjacent sub-intervals with identical rights.
+    if result.is_empty() {
+        *regions = result;
+        return;
+    }
+    let mut merged: Vec<ViewRegion> = Vec::new();
+    let mut cur = result[0].clone();
+    for next in result.into_iter().skip(1) {
+        if cur.end() == next.start() && cur.rights() == next.rights() {
+            cur.access.size += next.size();
+        } else {
+            merged.push(cur);
+            cur = next;
+        }
+    }
+    merged.push(cur);
+    *regions = merged;
 }
 
-/// Compute view from explicitly provided memory capabilities
-/// This function trusts that the caller has provided the correct set of capabilities
-/// for the domain, so it doesn't filter by ownership
-pub fn compute_view_from_capabilities(
-    domain_id: u64,
-    memory_caps: &[CapabilityRef<MemoryRegion>],
+// ── compute_view_from_cap_arcs ─────────────────────────────────────────────
+
+/// Core view computation from a list of capability Arcs.
+/// Acquires read locks on each cap and its children.
+/// Does NOT require a domain lock — caller is responsible for providing
+/// a stable cap list (e.g. while holding the domain write lock).
+pub fn compute_view_from_cap_arcs(
+    domain_id: DomainId,
+    cap_arcs: &[CapabilityRef<MemoryRegion>],
 ) -> AddressSpaceView {
     let mut view = AddressSpaceView::new(domain_id);
+    if cap_arcs.is_empty() {
+        return view;
+    }
 
-    for mem_ref in memory_caps {
-        add_capability_to_view_no_filter(&mut view, mem_ref);
+    // Sort by depth (ascending) so parents are processed before children.
+    let mut sorted: Vec<CapabilityRef<MemoryRegion>> = cap_arcs.to_vec();
+    sorted.sort_by_key(|c| c.read().depth);
+
+    // Iterate, skipping dominated alias children.
+    // The skip set holds Arc pointer addresses (usize) for caps to skip.
+    let mut skip: BTreeSet<usize> = BTreeSet::new();
+
+    for cap_arc in &sorted {
+        let ptr = Arc::as_ptr(cap_arc) as usize;
+        if skip.contains(&ptr) {
+            continue;
+        }
+
+        let cap = cap_arc.read();
+
+        // Mark alias children owned by this domain for skipping.
+        for child_arc in &cap.children {
+            let child = child_arc.read();
+            if child.data.kind == RegionKind::Alias && child.owned.owner == domain_id {
+                skip.insert(Arc::as_ptr(child_arc) as usize);
+            }
+        }
+
+        // Contribution: cap's access minus all directly carved children.
+        let mut contribution = alloc::vec![cap.data.access];
+        for child_arc in &cap.children {
+            let child = child_arc.read();
+            if child.data.kind == RegionKind::Carve {
+                contribution = subtract_access_list(contribution, child.data.access);
+            }
+        }
+
+        for access in contribution {
+            view.add_region(ViewRegion::new(access));
+        }
     }
 
     view.coalesce();
     view
 }
 
-/// Add capability to view without ownership filtering
-/// Used when the caller explicitly provides the capabilities to include
-fn add_capability_to_view_no_filter(view: &mut AddressSpaceView, mem_ref: &CapabilityRef<MemoryRegion>) {
-    let mem = mem_ref.read();
+// ── view_diff ──────────────────────────────────────────────────────────────
 
-    // Use compute_view() to get the actual accessible regions
-    // This subtracts carved children that were sent to other domains
-    let accessible_regions = mem.compute_view();
-    for access in accessible_regions {
-        let region = ViewRegion::new(access);
-        view.add_region(region);
+/// Compute the `UpdateBatch` that reflects the diff from `before` to `after`
+/// for `domain_id`.
+///
+/// Both views must be in canonical (coalesced, non-overlapping, sorted) form.
+/// Uses a sweep-line over all boundary points from both views.
+pub fn view_diff(
+    domain_id: DomainId,
+    before: &AddressSpaceView,
+    after: &AddressSpaceView,
+) -> UpdateBatch {
+    let mut updates = UpdateBatch::new();
+
+    let mut points: Vec<u64> = Vec::new();
+    for r in &before.regions {
+        points.push(r.start());
+        points.push(r.end());
     }
-
-    // Process children
-    for child_ref in &mem.children {
-        add_capability_to_view_no_filter(view, child_ref);
+    for r in &after.regions {
+        points.push(r.start());
+        points.push(r.end());
     }
-}
+    points.sort_unstable();
+    points.dedup();
 
-/// Recursively add a memory capability and its accessible children to the view
-fn add_capability_to_view(view: &mut AddressSpaceView, mem_ref: &CapabilityRef<MemoryRegion>) {
-    let mem = mem_ref.read();
+    for w in points.windows(2) {
+        let seg_start = w[0];
+        let seg_end = w[1];
+        let seg_size = seg_end - seg_start;
 
-    // IMPORTANT: Only add regions that are actually accessible by this domain
-    // For carved children sent to other domains, they should NOT appear in the parent's view
+        let before_rights = before
+            .regions
+            .iter()
+            .find(|r| r.start() <= seg_start && r.end() >= seg_end)
+            .map(|r| r.rights());
+        let after_rights = after
+            .regions
+            .iter()
+            .find(|r| r.start() <= seg_start && r.end() >= seg_end)
+            .map(|r| r.rights());
 
-    // Check if this capability is owned by the domain we're viewing
-    if mem.owned.owner == view.domain_id {
-        // Use compute_view() to get the actual accessible regions
-        // This subtracts carved children that were sent to other domains
-        let accessible_regions = mem.compute_view();
-        for access in accessible_regions {
-            let region = ViewRegion::new(access);
-            view.add_region(region);
+        match (before_rights, after_rights) {
+            (None, None) => {}
+            (Some(_), None) => {
+                updates.add_change_rights(domain_id, seg_start, seg_size, seg_start, Rights::NONE, true);
+            }
+            (None, Some(r)) => {
+                updates.add_change_rights(domain_id, seg_start, seg_size, seg_start, r, false);
+            }
+            (Some(b), Some(a)) if b == a => {}
+            (Some(b), Some(a)) => {
+                if a.is_subset_of(&b) {
+                    // Rights reduced.
+                    updates.add_change_rights(domain_id, seg_start, seg_size, seg_start, a, true);
+                } else {
+                    // Rights expanded or changed — remap with new rights.
+                    updates.add_change_rights(domain_id, seg_start, seg_size, seg_start, a, false);
+                }
+            }
         }
     }
 
-    // Process children - they may be owned by this domain even if parent isn't
-    for child_ref in &mem.children {
-        add_capability_to_view(view, child_ref);
+    updates
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+/// Compute the address-space view for a domain from a given list of capabilities.
+///
+/// This is a compatibility helper for tests that construct a capability list directly
+/// rather than using a domain table.  Uses the same correct algorithm as
+/// `compute_address_space`: depth-sort, subtract carved children, coalesce.
+pub fn compute_view_from_capabilities(
+    domain_id: DomainId,
+    caps: &[CapabilityRef<MemoryRegion>],
+) -> AddressSpaceView {
+    let mut view = AddressSpaceView::new(domain_id);
+    if caps.is_empty() {
+        return view;
     }
+
+    // Sort by depth ascending (parents before children).
+    let mut sorted: Vec<&CapabilityRef<MemoryRegion>> = caps.iter().collect();
+    sorted.sort_by_key(|c| c.read().depth);
+
+    for cap_arc in &sorted {
+        let cap = cap_arc.read();
+
+        // Contribution: cap's access minus all directly carved children.
+        let mut contribution = alloc::vec![cap.data.access];
+        for child_arc in &cap.children {
+            let child = child_arc.read();
+            if child.data.kind == RegionKind::Carve {
+                contribution = subtract_access_list(contribution, child.data.access);
+            }
+        }
+
+        for access in contribution {
+            view.add_region(ViewRegion::new(access));
+        }
+    }
+
+    view.coalesce();
+    view
+}
+pub(crate) fn subtract_access_list(regions: Vec<Access>, to_sub: Access) -> Vec<Access> {
+    let mut result = Vec::new();
+    for r in regions {
+        if !r.overlaps(&to_sub) {
+            result.push(r);
+        } else {
+            if r.start < to_sub.start {
+                result.push(Access::new(r.start, to_sub.start - r.start, r.rights));
+            }
+            if r.end() > to_sub.end() {
+                result.push(Access::new(to_sub.end(), r.end() - to_sub.end(), r.rights));
+            }
+        }
+    }
+    result
 }

@@ -3,11 +3,11 @@
 use crate::capability::CapabilityRef;
 use crate::domain::{Domain, InterruptVisibility};
 use crate::error::{CapaError, Result};
+use crate::sync::RwLock;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::RwLock;
 
 /// Core state tracking which domain is running
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,9 +163,10 @@ impl SwitchManager {
             // Verify target is a direct child or parent of from domain (CDT hierarchy check)
             let is_direct_relationship = {
                 // Check if to_domain is a child of from_domain
-                let is_child = from_domain.children.iter().any(|child| {
-                    Arc::ptr_eq(child, to_ref)
-                });
+                let is_child = from_domain
+                    .children
+                    .iter()
+                    .any(|child| Arc::ptr_eq(child, to_ref));
 
                 // Check if to_domain is the parent of from_domain
                 let is_parent = from_domain
@@ -178,18 +179,17 @@ impl SwitchManager {
 
             if !is_direct_relationship {
                 return Err(CapaError::InvalidOperation(
-                    "Target domain must be a direct child or parent of the current domain".to_string()
+                    "Target domain must be a direct child or parent of the current domain"
+                        .to_string(),
                 ));
             }
 
             (to_domain.data.id, false)
         } else {
             // Returning to parent
-            let parent_ref = from_domain
-                .get_parent()
-                .ok_or(CapaError::InvalidOperation(
-                    "No parent to return to".to_string(),
-                ))?;
+            let parent_ref = from_domain.get_parent().ok_or(CapaError::InvalidOperation(
+                "No parent to return to".to_string(),
+            ))?;
             let parent_id = parent_ref.read().data.id;
             (parent_id, true)
         };
@@ -302,4 +302,3 @@ impl SwitchManager {
         Ok(notified)
     }
 }
-

@@ -45,7 +45,7 @@ fn test_nested_carve_invalid_due_to_rights() {
     let root = Capability::new_root(0, 0, root_region);
 
     let carve_access = Access::new(0x0, 0x4000, Rights::R);
-    let (carve, _) = Capability::carve_child(&root, carve_access, 1).unwrap();
+    let carve = Capability::carve_child(&root, carve_access, 1).unwrap();
 
     // Request WRITE, which is not present in parent
     let invalid_access = Access::new(0x1000, 0x1000, Rights::RW);
@@ -61,9 +61,9 @@ fn test_compute_view_with_carves() {
     let root = Capability::new_root(0, 0, root_region);
 
     // Carve two regions
-    let (_child1, _) =
+    let _child1 =
         Capability::carve_child(&root, Access::new(0x1000, 0x1000, Rights::RW), 1).unwrap();
-    let (_child2, _) =
+    let _child2 =
         Capability::carve_child(&root, Access::new(0x3000, 0x1000, Rights::RW), 2).unwrap();
 
     let view = root.read().compute_view();

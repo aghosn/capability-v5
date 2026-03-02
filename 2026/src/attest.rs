@@ -40,10 +40,7 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
     let domain = domain_ref.read();
     let mut report = format!("Domain ID: {}\n", domain.data.id);
     report.push_str(&format!("Status: {:?}\n", domain.data.status));
-    report.push_str(&format!(
-        "Cores: {:#b}\n",
-        domain.data.policy.cores
-    ));
+    report.push_str(&format!("Cores: {:#b}\n", domain.data.policy.cores));
     report.push_str("API:\n");
     report.push_str(&format!("  CREATE: {}\n", domain.data.policy.api.create()));
     report.push_str(&format!("  SET: {}\n", domain.data.policy.api.set_perm()));
@@ -51,13 +48,22 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
     report.push_str(&format!("  SEND: {}\n", domain.data.policy.api.send()));
     report.push_str(&format!("  SEAL: {}\n", domain.data.policy.api.seal()));
     report.push_str(&format!("  ATTEST: {}\n", domain.data.policy.api.attest()));
-    report.push_str(&format!("  ENUMERATE: {}\n", domain.data.policy.api.enumerate()));
+    report.push_str(&format!(
+        "  ENUMERATE: {}\n",
+        domain.data.policy.api.enumerate()
+    ));
     report.push_str(&format!("  SWITCH: {}\n", domain.data.policy.api.switch()));
     report.push_str(&format!("  ALIAS: {}\n", domain.data.policy.api.alias()));
     report.push_str(&format!("  CARVE: {}\n", domain.data.policy.api.carve()));
     report.push_str(&format!("  REVOKE: {}\n", domain.data.policy.api.revoke()));
-    report.push_str(&format!("  GETCHAN: {}\n", domain.data.policy.api.getchan()));
-    report.push_str(&format!("  RECEIVE_AFTER_SEAL: {}\n", domain.data.policy.api.receive_after_seal()));
+    report.push_str(&format!(
+        "  GETCHAN: {}\n",
+        domain.data.policy.api.getchan()
+    ));
+    report.push_str(&format!(
+        "  RECEIVE_AFTER_SEAL: {}\n",
+        domain.data.policy.api.receive_after_seal()
+    ));
 
     // Interrupt configuration
     report.push_str("Interrupts:\n");
@@ -88,10 +94,7 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
         }
     }
 
-    report.push_str(&format!(
-        "Children: {}\n",
-        domain.children.len()
-    ));
+    report.push_str(&format!("Children: {}\n", domain.children.len()));
 
     // Include parent info if exists
     if let Some(parent) = domain.get_parent() {

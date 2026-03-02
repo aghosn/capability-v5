@@ -19,7 +19,9 @@ fn test_complex_memory_update_scenario() {
 
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let r0 = Capability::new_root(0, 1, root_region);
-    dom0.write().data.add_memory_capability(1, Arc::downgrade(&r0));
+    dom0.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&r0));
     let r0_h: LocalHandle = 1;
 
     println!("✓ Dom0 created with r0 = [0x0, 0x10000) RWX");
@@ -44,7 +46,9 @@ fn test_complex_memory_update_scenario() {
         ),
     );
     let dom1_h = Capability::create_domain(&dom0, dom1_policy).unwrap();
-    let dom1 = dom0.read().data.domain_capabilities[&dom1_h].upgrade().unwrap();
+    let dom1 = dom0.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
     let dom1_id = dom1.read().data.id;
     println!("✓ Dom1 created (ID: {})", dom1_id);
 
@@ -52,7 +56,10 @@ fn test_complex_memory_update_scenario() {
     // r1_h is auto-allocated in dom0's table and equals r1's stable SubHandle.
     let r1_access = Access::new(0x1000, 0x2000, Rights::RWX); // size = 0x2000
     let (r1_h, _, carve_updates) = Capability::carve_memory(&dom0, r0_h, r1_access).unwrap();
-    println!("✓ Carved r1 = [0x1000, 0x3000) RWX (updates: {})", carve_updates.len());
+    println!(
+        "✓ Carved r1 = [0x1000, 0x3000) RWX (updates: {})",
+        carve_updates.len()
+    );
 
     // Dom0.send(Dom1, r1) — Dom1 is unsealed → immediate transfer
     // After send, r1 is removed from Dom0's table; Dom1 (fresh) assigns it handle 1.
@@ -90,7 +97,9 @@ fn test_complex_memory_update_scenario() {
     // Dom1 owns r1 (received from Dom0)
     assert!(dom1_view.is_accessible(0x1000));
     assert!(dom1_view.is_accessible(0x2FFF));
-    let r1_arc = dom1.read().data.memory_capabilities[&r1_h_in_dom1].upgrade().unwrap();
+    let r1_arc = dom1.read().data.memory_capabilities[&r1_h_in_dom1]
+        .upgrade()
+        .unwrap();
     assert_eq!(r1_arc.read().data.kind, RegionKind::Carve);
     println!("✓ Dom1 has access to [0x1000, 0x3000) as Carve");
 
@@ -105,7 +114,9 @@ fn test_complex_memory_update_scenario() {
         MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::REVOKE),
     );
     let dom2_h = Capability::create_domain(&dom1, dom2_policy).unwrap();
-    let dom2 = dom1.read().data.domain_capabilities[&dom2_h].upgrade().unwrap();
+    let dom2 = dom1.read().data.domain_capabilities[&dom2_h]
+        .upgrade()
+        .unwrap();
     let dom2_id = dom2.read().data.id;
     println!("✓ Dom2 created (ID: {})", dom2_id);
 
@@ -139,11 +150,16 @@ fn test_complex_memory_update_scenario() {
     println!("✓ Sent r2 to Dom2 (updates: {})", send2_updates.len());
 
     // Verify r2 rights via Dom2's table
-    let r2_arc = dom2.read().data.memory_capabilities[&r2_h_in_dom2].upgrade().unwrap();
+    let r2_arc = dom2.read().data.memory_capabilities[&r2_h_in_dom2]
+        .upgrade()
+        .unwrap();
     let r2_rights = r2_arc.read().data.access.rights;
     assert!(r2_rights.read());
     assert!(r2_rights.write());
-    assert!(!r2_rights.execute(), "r2 should not have execute permission");
+    assert!(
+        !r2_rights.execute(),
+        "r2 should not have execute permission"
+    );
     println!("✓ r2 has correct rights: RW (no X)");
 
     // Seal Dom2 after the send
@@ -177,7 +193,10 @@ fn test_complex_memory_update_scenario() {
 
     // Assert r1's own rights are still RWX (rights are on the capability itself, not affected by children)
     let dom1_view_final = compute_address_space(&dom1);
-    println!("Dom1 final address space: {} bytes", dom1_view_final.total_size());
+    println!(
+        "Dom1 final address space: {} bytes",
+        dom1_view_final.total_size()
+    );
 
     let r1_rights_after = r1_arc.read().data.access.rights;
     assert!(r1_rights_after.read());

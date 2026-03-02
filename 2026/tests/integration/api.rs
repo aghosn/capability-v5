@@ -1,28 +1,35 @@
 //! Tests for the domain-mediated API (carve, alias, send, revoke, create_domain, etc.)
 
+use capability_engine::memory::Rights;
 use capability_engine::*;
 use std::sync::Arc;
 
 /// Helper: sealed root domain with a memory root at local handle 1.
 /// Returns (root, mem_root_h, _mem_root) — caller must keep `_mem_root` alive.
-fn setup_root() -> (CapabilityRef<Domain>, LocalHandle, CapabilityRef<MemoryRegion>) {
+fn setup_root() -> (
+    CapabilityRef<Domain>,
+    LocalHandle,
+    CapabilityRef<MemoryRegion>,
+) {
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let total_mem = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 1, total_mem);
-    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
+    root.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&mem_root));
     (root, 1, mem_root)
 }
 
 #[test]
 fn test_carve_memory() {
     let (root, mem_root_h, _mem_root) = setup_root();
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let child_access = Access::new(0x1000, 0x1000, Rights::RWX);
     let (child_h, child_sub, updates) =
         Capability::carve_memory(&root, mem_root_h, child_access).unwrap();
 
     assert_eq!(child_sub, 1); // first child gets sub_handle = 1
-    assert!(updates.is_empty()); // same owner — no MMU updates
+    assert!(updates.is_empty()); // same rights as parent — no MMU updates (fast path)
     assert!(root.read().data.memory_capabilities.contains_key(&child_h));
 }
 
@@ -30,8 +37,7 @@ fn test_carve_memory() {
 fn test_alias_memory() {
     let (root, mem_root_h, _mem_root) = setup_root();
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, child_sub) =
-        Capability::alias_memory(&root, mem_root_h, child_access).unwrap();
+    let (child_h, child_sub) = Capability::alias_memory(&root, mem_root_h, child_access).unwrap();
 
     assert_eq!(child_sub, 1);
     assert!(root.read().data.memory_capabilities.contains_key(&child_h));
@@ -77,7 +83,9 @@ fn test_nested_carve_memory() {
 
     assert!(root.read().data.memory_capabilities.contains_key(&c1_h));
     assert!(root.read().data.memory_capabilities.contains_key(&c2_h));
-    let c2 = root.read().data.memory_capabilities[&c2_h].upgrade().unwrap();
+    let c2 = root.read().data.memory_capabilities[&c2_h]
+        .upgrade()
+        .unwrap();
     assert_eq!(c2.read().data.kind, RegionKind::Carve);
 }
 
@@ -88,7 +96,9 @@ fn test_create_domain() {
     let child_h = Capability::create_domain(&root, child_policy).unwrap();
 
     assert!(root.read().data.domain_capabilities.contains_key(&child_h));
-    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
     assert_eq!(child.read().sub_handle, 1); // first domain child gets sub_handle = 1
 }
 
@@ -97,13 +107,15 @@ fn test_revoke_domain() {
     let (root, _, _mem_root) = setup_root();
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let child_h = Capability::create_domain(&root, child_policy).unwrap();
-    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
 
     let updates = Capability::revoke_domain(&root, child_h).unwrap();
 
     assert!(!updates.is_empty()); // domain revocation always produces updates
     assert!(child.read().data.is_revoked()); // child domain is now revoked
-    // LocalHandle must be reclaimed — the slot should be gone from the table
+                                             // LocalHandle must be reclaimed — the slot should be gone from the table
     assert!(!root.read().data.domain_capabilities.contains_key(&child_h));
 }
 
@@ -120,7 +132,9 @@ fn test_nested_alias_memory() {
     let a1_access = Access::new(0x1800, 0x800, Rights::R);
     let (a1_h, _) = Capability::alias_memory(&root, c1_h, a1_access).unwrap();
 
-    let a1 = root.read().data.memory_capabilities[&a1_h].upgrade().unwrap();
+    let a1 = root.read().data.memory_capabilities[&a1_h]
+        .upgrade()
+        .unwrap();
     assert_eq!(a1.read().data.kind, RegionKind::Alias);
     assert_eq!(a1.read().data.status, RegionStatus::Aliased);
 }
@@ -136,15 +150,15 @@ fn test_carve_then_alias_then_carve_memory() {
 
     // Step 2: alias from carved
     let (alias_h, _) =
-        Capability::alias_memory(&root, carved_h, Access::new(0x2000, 0x1000, Rights::R))
-            .unwrap();
+        Capability::alias_memory(&root, carved_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
 
     // Step 3: carve from alias
     let (cfa_h, _, _) =
-        Capability::carve_memory(&root, alias_h, Access::new(0x2000, 0x0800, Rights::R))
-            .unwrap();
+        Capability::carve_memory(&root, alias_h, Access::new(0x2000, 0x0800, Rights::R)).unwrap();
 
-    let cfa = root.read().data.memory_capabilities[&cfa_h].upgrade().unwrap();
+    let cfa = root.read().data.memory_capabilities[&cfa_h]
+        .upgrade()
+        .unwrap();
     assert_eq!(cfa.read().data.kind, RegionKind::Carve);
     assert_eq!(cfa.read().data.status, RegionStatus::Aliased); // inherits from aliased parent
 }
@@ -171,7 +185,9 @@ fn test_revoke_complex_subtree_memory() {
     Capability::revoke_memory_child(&root, b1_h, b1a_sub).unwrap();
 
     // b1's children are now empty
-    let b1_ref = root.read().data.memory_capabilities[&b1_h].upgrade().unwrap();
+    let b1_ref = root.read().data.memory_capabilities[&b1_h]
+        .upgrade()
+        .unwrap();
     assert_eq!(b1_ref.read().children.len(), 0);
 
     // Branch 2 is unaffected — root still tracks it
@@ -190,10 +206,7 @@ fn test_revoke_memory_child_nonexistent() {
     assert!(matches!(result, Err(CapaError::NotFound)));
 
     // Valid child is untouched
-    let mem_root_ref = root
-        .read()
-        .data
-        .memory_capabilities[&mem_root_h]
+    let mem_root_ref = root.read().data.memory_capabilities[&mem_root_h]
         .upgrade()
         .unwrap();
     assert_eq!(mem_root_ref.read().children.len(), 1);
@@ -219,7 +232,8 @@ fn test_send_memory_immediate() {
         .add_domain_capability(domain_recv_h, Arc::downgrade(&receiver));
 
     // Send — receiver is unsealed → immediate transfer
-    let updates = Capability::send_memory(&root, carved_h, domain_recv_h, Attributes::NONE).unwrap();
+    let updates =
+        Capability::send_memory(&root, carved_h, domain_recv_h, Attributes::NONE).unwrap();
 
     // Root no longer holds the handle
     assert!(!root.read().data.memory_capabilities.contains_key(&carved_h));
@@ -237,12 +251,19 @@ fn test_send_memory_immediate() {
         .unwrap();
     assert_eq!(recv_cap.read().owned.owner, receiver_id);
 
-    // Parent (mem_root) still owned by root → skip_unmap → only 1 Map update
-    assert_eq!(updates.len(), 1);
-    match &updates.updates()[0] {
-        Update::Map { domain, .. } => assert_eq!(*domain, receiver_id),
-        _ => panic!("Expected Map update"),
-    }
+    // With view-diff semantics, root loses access to the carved range (Unmap)
+    // and receiver gains it (Map) — both updates are emitted correctly.
+    assert_eq!(updates.len(), 2);
+    let has_unmap = updates
+        .updates()
+        .iter()
+        .any(|u| matches!(u, Update::ChangeRights { rights, .. } if *rights == Rights::NONE));
+    let has_map_for_receiver = updates
+        .updates()
+        .iter()
+        .any(|u| matches!(u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == receiver_id));
+    assert!(has_unmap, "Expected Unmap update for caller");
+    assert!(has_map_for_receiver, "Expected Map update for receiver");
 }
 
 #[test]
@@ -284,14 +305,13 @@ fn test_revoke_domain_tree() {
     // Create child and seal it
     let child_h = Capability::create_domain(&root, DomainPolicy::new_root(4)).unwrap();
     Capability::seal_domain_op(&root, child_h).unwrap();
-    let child_ref = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child_ref = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
 
     // Create grandchild under child (child must be sealed)
     let grandchild_h = Capability::create_domain(&child_ref, DomainPolicy::new_root(4)).unwrap();
-    let grandchild_ref = child_ref
-        .read()
-        .data
-        .domain_capabilities[&grandchild_h]
+    let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
 

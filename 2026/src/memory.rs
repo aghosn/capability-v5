@@ -20,9 +20,15 @@ impl Rights {
 
     pub const NONE: Self = Rights { bits: 0 };
     pub const R: Self = Rights { bits: Self::READ };
-    pub const RW: Self = Rights { bits: Self::READ | Self::WRITE };
-    pub const RX: Self = Rights { bits: Self::READ | Self::EXECUTE };
-    pub const RWX: Self = Rights { bits: Self::READ | Self::WRITE | Self::EXECUTE };
+    pub const RW: Self = Rights {
+        bits: Self::READ | Self::WRITE,
+    };
+    pub const RX: Self = Rights {
+        bits: Self::READ | Self::EXECUTE,
+    };
+    pub const RWX: Self = Rights {
+        bits: Self::READ | Self::WRITE | Self::EXECUTE,
+    };
 
     /// Create Rights from raw bits
     pub const fn from_bits(bits: u8) -> Self {
@@ -46,7 +52,16 @@ impl Rights {
 
     /// Compute intersection of rights
     pub fn intersect(&self, other: &Rights) -> Rights {
-        Rights { bits: self.bits & other.bits }
+        Rights {
+            bits: self.bits & other.bits,
+        }
+    }
+
+    /// Compute union of rights
+    pub fn union(&self, other: &Rights) -> Rights {
+        Rights {
+            bits: self.bits | other.bits,
+        }
     }
 
     // Convenience methods for compatibility with existing code
@@ -183,7 +198,11 @@ pub struct Access {
 impl Access {
     /// Create a new access descriptor
     pub fn new(start: u64, size: u64, rights: Rights) -> Self {
-        Access { start, size, rights }
+        Access {
+            start,
+            size,
+            rights,
+        }
     }
 
     /// Get end address (exclusive)
@@ -209,13 +228,7 @@ impl Access {
 
 impl fmt::Display for Access {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[{:#x}..{:#x}) {}",
-            self.start,
-            self.end(),
-            self.rights
-        )
+        write!(f, "[{:#x}..{:#x}) {}", self.start, self.end(), self.rights)
     }
 }
 
@@ -300,4 +313,3 @@ impl fmt::Display for MemoryRegion {
         )
     }
 }
-

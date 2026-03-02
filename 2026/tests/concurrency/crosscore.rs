@@ -14,6 +14,7 @@ use parking_lot::{
     RawRwLock, RwLock,
 };
 
+use capability_engine::memory::Rights;
 use capability_engine::*;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -186,15 +187,8 @@ impl Platform for MultiCorePlatform {
 
         // Simulate hardware update application
         match update {
-            Update::Map { domain, .. } => {
+            Update::ChangeRights { domain, .. } => {
                 // In real system: modify EPT/page tables
-                if let Some(&core_id) = inner.domain_to_core.get(domain) {
-                    inner.cores[core_id as usize]
-                        .update_count
-                        .fetch_add(1, Ordering::SeqCst);
-                }
-            }
-            Update::Unmap { domain, .. } => {
                 if let Some(&core_id) = inner.domain_to_core.get(domain) {
                     inner.cores[core_id as usize]
                         .update_count
@@ -294,12 +288,22 @@ fn test_crosscore_send_triggers_ipi() {
     let root_mem = Capability::new_root(SENDER_ID, 0, root_region);
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_mem, _) = Capability::carve_child(&root_mem, child_access, SENDER_ID).unwrap();
+    let child_mem = Capability::carve_child(&root_mem, child_access, SENDER_ID).unwrap();
 
     // Send to receiver (should trigger cross-core path)
     let result = execute(&*platform, false, move || {
-        Capability::send_to(&child_mem, SENDER_ID, RECEIVER_ID, Attributes::NONE)
-            .map(|updates| ((), updates))
+        Capability::send_to(&child_mem, SENDER_ID, RECEIVER_ID, Attributes::NONE).map(|()| {
+            let mut batch = UpdateBatch::new();
+            batch.add_change_rights(
+                RECEIVER_ID,
+                child_access.start,
+                child_access.size,
+                child_access.start,
+                child_access.rights,
+                false,
+            );
+            ((), batch)
+        })
     });
 
     assert!(result.is_ok(), "Send operation should succeed");
@@ -315,7 +319,7 @@ fn test_crosscore_send_triggers_ipi() {
     // Verify receiver domain got the map update
     let has_map_for_receiver = updates
         .iter()
-        .any(|u| matches!(u, Update::Map { domain, .. } if *domain == RECEIVER_ID));
+        .any(|u| matches!(u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == RECEIVER_ID));
     assert!(has_map_for_receiver, "Receiver should have Map update");
 
     println!("✓ Cross-core send triggered IPI and applied updates");
@@ -333,7 +337,9 @@ fn test_crosscore_revoke_with_fallback() {
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
     let child_h = Capability::create_domain(&root, child_policy).unwrap();
-    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
     let child_id = child.read().data.id;
 
     // Register with the actual IDs (child_id is whatever the global counter gave us).
@@ -388,10 +394,21 @@ fn test_barrier_calls_during_crosscore_operation() {
     let region = MemoryRegion::new_root(0x0, 0x10000);
     let mem = Capability::new_root(SENDER_ID, 0, region);
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child, _) = Capability::carve_child(&mem, access, SENDER_ID).unwrap();
+    let child = Capability::carve_child(&mem, access, SENDER_ID).unwrap();
 
     let result = execute(&*platform, false, || {
-        Capability::send_to(&child, SENDER_ID, RECEIVER_ID, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child, SENDER_ID, RECEIVER_ID, Attributes::NONE).map(|()| {
+            let mut batch = UpdateBatch::new();
+            batch.add_change_rights(
+                RECEIVER_ID,
+                access.start,
+                access.size,
+                access.start,
+                access.rights,
+                false,
+            );
+            ((), batch)
+        })
     });
 
     assert!(result.is_ok(), "Cross-core operation should succeed");
@@ -439,7 +456,7 @@ fn test_concurrent_operations_with_different_cores() {
                 let access = Access::new(addr, 0x1000, Rights::RW);
                 let result = execute(&*p, false, || {
                     Capability::carve_child(&cap, access, i)
-                        .map(|(child, updates)| (child, updates))
+                        .map(|child| (child, UpdateBatch::new()))
                 });
 
                 if let Err(e) = result {
@@ -485,17 +502,39 @@ fn test_multiple_cores_affected_by_single_operation() {
 
     // Carve a child
     let access = Access::new(0x1000, 0x2000, Rights::RW);
-    let (child1, _) = Capability::carve_child(&root_mem, access, SENDER_ID).unwrap();
+    let child1 = Capability::carve_child(&root_mem, access, SENDER_ID).unwrap();
 
     // Send to receiver 1
     execute(&*platform, false, || {
-        Capability::send_to(&child1, SENDER_ID, RECEIVER1_ID, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child1, SENDER_ID, RECEIVER1_ID, Attributes::NONE).map(|()| {
+            let mut batch = UpdateBatch::new();
+            batch.add_change_rights(
+                RECEIVER1_ID,
+                access.start,
+                access.size,
+                access.start,
+                access.rights,
+                false,
+            );
+            ((), batch)
+        })
     })
     .unwrap();
 
     // Now send from receiver1 to receiver2 (affects both receiver cores)
     let result = execute(&*platform, false, || {
-        Capability::send_to(&child1, RECEIVER1_ID, RECEIVER2_ID, Attributes::NONE).map(|updates| ((), updates))
+        Capability::send_to(&child1, RECEIVER1_ID, RECEIVER2_ID, Attributes::NONE).map(|()| {
+            let mut batch = UpdateBatch::new();
+            batch.add_change_rights(
+                RECEIVER2_ID,
+                access.start,
+                access.size,
+                access.start,
+                access.rights,
+                false,
+            );
+            ((), batch)
+        })
     });
 
     assert!(result.is_ok(), "Multi-receiver send should succeed");
@@ -505,7 +544,7 @@ fn test_multiple_cores_affected_by_single_operation() {
     let receivers_updated: BTreeSet<DomainId> = updates
         .iter()
         .filter_map(|u| match u {
-            Update::Map { domain, .. } => Some(*domain),
+            Update::ChangeRights { domain, .. } => Some(*domain),
             _ => None,
         })
         .collect();
@@ -533,7 +572,7 @@ fn test_ipi_not_sent_for_local_operations() {
     // Perform operation (should use local path, no IPI)
     let access = Access::new(0x1000, 0x1000, Rights::RW);
     let result = execute(&*platform, false, || {
-        Capability::carve_child(&mem, access, DOMAIN_ID).map(|(child, updates)| (child, updates))
+        Capability::carve_child(&mem, access, DOMAIN_ID).map(|child| (child, UpdateBatch::new()))
     });
 
     assert!(result.is_ok(), "Local operation should succeed");
@@ -568,7 +607,9 @@ fn test_exclusive_lock_serializes_revoke() {
 
     let child_policy = DomainPolicy::new_restricted(0b11, MonitorAPI::NONE);
     let child_h = Capability::create_domain(&root, child_policy).unwrap();
-    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
     let child_id = child.read().data.id;
 
     platform.register_domain(child_id, Some(ROOT_ID));

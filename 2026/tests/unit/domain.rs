@@ -81,14 +81,20 @@ fn test_policy_subset_cores() {
 fn test_policy_not_subset_cores() {
     let parent = DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    assert_eq!(child.is_subset_of(&parent), Err(CapaError::MonotonicityViolation));
+    assert_eq!(
+        child.is_subset_of(&parent),
+        Err(CapaError::MonotonicityViolation)
+    );
 }
 
 #[test]
 fn test_policy_not_subset_api() {
     let parent = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    assert_eq!(child.is_subset_of(&parent), Err(CapaError::MonotonicityViolation));
+    assert_eq!(
+        child.is_subset_of(&parent),
+        Err(CapaError::MonotonicityViolation)
+    );
 }
 
 // ==================== Domain Revocation ====================
@@ -113,7 +119,10 @@ fn test_interrupt_policy_default() {
     // All vectors should use the default policy
     for i in 0..=255u8 {
         let vec_policy = policy.get_policy(i);
-        assert!(matches!(vec_policy.visibility, InterruptVisibility::Deliver));
+        assert!(matches!(
+            vec_policy.visibility,
+            InterruptVisibility::Deliver
+        ));
     }
 }
 
@@ -126,11 +135,17 @@ fn test_interrupt_policy_override() {
 
     // Vector 32 should have Report visibility
     let vec32_policy = policy.get_policy(32);
-    assert!(matches!(vec32_policy.visibility, InterruptVisibility::Report));
+    assert!(matches!(
+        vec32_policy.visibility,
+        InterruptVisibility::Report
+    ));
 
     // Other vectors should still have Deliver
     let vec10_policy = policy.get_policy(10);
-    assert!(matches!(vec10_policy.visibility, InterruptVisibility::Deliver));
+    assert!(matches!(
+        vec10_policy.visibility,
+        InterruptVisibility::Deliver
+    ));
 }
 
 // ==================== Virtual Processor State Tests ====================
@@ -195,7 +210,8 @@ fn test_policy_with_limited_cores_and_api() {
 fn test_complex_policy_hierarchy() {
     let root_policy = DomainPolicy::new_root(4);
 
-    let level1_api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST);
+    let level1_api =
+        MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST);
     let level1_policy = DomainPolicy::new_restricted(
         0b1111, // Cores 0-3
         level1_api,
@@ -282,7 +298,10 @@ fn test_receive_after_seal_in_api_bitmap() {
 fn test_receive_after_seal_in_all_permissions() {
     // ALL should include RECEIVE_AFTER_SEAL
     assert!(MonitorAPI::ALL.receive_after_seal());
-    assert_eq!(MonitorAPI::ALL.bits() & MonitorAPI::RECEIVE_AFTER_SEAL, MonitorAPI::RECEIVE_AFTER_SEAL);
+    assert_eq!(
+        MonitorAPI::ALL.bits() & MonitorAPI::RECEIVE_AFTER_SEAL,
+        MonitorAPI::RECEIVE_AFTER_SEAL
+    );
 }
 
 #[test]
@@ -317,7 +336,10 @@ fn test_receive_after_seal_monotonicity() {
     let child_with_api = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
     let child_with = DomainPolicy::new_restricted(0b1, child_with_api);
 
-    assert_eq!(child_with.is_subset_of(&parent_without), Err(CapaError::MonotonicityViolation));
+    assert_eq!(
+        child_with.is_subset_of(&parent_without),
+        Err(CapaError::MonotonicityViolation)
+    );
 }
 
 #[test]
@@ -341,9 +363,7 @@ fn test_receive_after_seal_default_values() {
     assert!(!restricted.receive_after_seal());
 
     // Can be explicitly added
-    let with_receive = DomainPolicy::new_restricted(
-        0b1,
-        MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL),
-    );
+    let with_receive =
+        DomainPolicy::new_restricted(0b1, MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL));
     assert!(with_receive.receive_after_seal());
 }

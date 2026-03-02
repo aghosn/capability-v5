@@ -10,14 +10,18 @@ fn test_session() {
     let root = Capability::new_root(0, 0, root_domain);
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let r0 = Capability::new_root(0, 1, root_region);
-    root.write().data.add_memory_capability(1, Arc::downgrade(&r0));
+    root.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&r0));
     let r0_h: LocalHandle = 1;
 
     // Create child domain dom1 via domain-mediated API
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0x1, api);
     let dom1_h = Capability::create_domain(&root, policy).unwrap();
-    let dom1 = root.read().data.domain_capabilities[&dom1_h].upgrade().unwrap();
+    let dom1 = root.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
     let domain_id = dom1.read().data.id;
 
     // Carve r1 from r0 (r0.owner_domain=None → validate_operation skipped)
@@ -49,9 +53,10 @@ fn test_session() {
     let updates = Capability::revoke_memory_child(&root, r0_h, r1_sub).unwrap();
 
     // Verify that the update batch contains a domain revocation for dom1
-    let has_domain_revoke = updates.updates().iter().any(|op| {
-        matches!(op, Update::RevokeDomain { domain, .. } if *domain == domain_id)
-    });
+    let has_domain_revoke = updates
+        .updates()
+        .iter()
+        .any(|op| matches!(op, Update::RevokeDomain { domain, .. } if *domain == domain_id));
 
     assert!(
         has_domain_revoke,

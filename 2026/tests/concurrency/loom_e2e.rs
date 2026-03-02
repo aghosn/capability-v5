@@ -59,13 +59,12 @@
 
 #![allow(dead_code)]
 
-use loom::sync::{Arc, Mutex, RwLock};
 use loom::sync::atomic::{AtomicBool, Ordering};
+use loom::sync::{Arc, Mutex, RwLock};
 use loom::thread;
 
 use capability_engine::{
-    Access, Attributes, Capability, CapaError,
-    Domain, DomainId, DomainPolicy, LocalHandle,
+    Access, Attributes, CapaError, Capability, Domain, DomainId, DomainPolicy, LocalHandle,
     MemoryRegion, Rights, Update, UpdateBatch,
 };
 
@@ -80,7 +79,9 @@ struct E2EState {
 
 impl E2EState {
     fn new() -> Self {
-        E2EState { applied: Vec::new() }
+        E2EState {
+            applied: Vec::new(),
+        }
     }
 }
 
@@ -92,9 +93,9 @@ impl E2EState {
 /// Models the shared-op (carve / alias / send) path of `Platform::execute()`.
 fn execute_shared<F, R>(
     op_lock: &Arc<RwLock<()>>,
-    ul:      &Arc<AtomicBool>,
-    state:   &Arc<Mutex<E2EState>>,
-    op:       F,
+    ul: &Arc<AtomicBool>,
+    state: &Arc<Mutex<E2EState>>,
+    op: F,
 ) -> capability_engine::Result<R>
 where
     F: FnOnce() -> capability_engine::Result<(R, UpdateBatch)>,
@@ -114,9 +115,9 @@ where
 /// Models the exclusive-op (revoke) path of `Platform::execute()`.
 fn execute_exclusive<F, R>(
     op_lock: &Arc<RwLock<()>>,
-    ul:      &Arc<AtomicBool>,
-    state:   &Arc<Mutex<E2EState>>,
-    op:       F,
+    ul: &Arc<AtomicBool>,
+    state: &Arc<Mutex<E2EState>>,
+    op: F,
 ) -> capability_engine::Result<R>
 where
     F: FnOnce() -> capability_engine::Result<(R, UpdateBatch)>,
@@ -134,7 +135,10 @@ fn apply_batch(ul: &Arc<AtomicBool>, state: &Arc<Mutex<E2EState>>, batch: &Updat
         return;
     }
     // Acquire the update-application lock (CAS spinlock).
-    while ul.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    while ul
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
         loom::thread::yield_now();
     }
     {
@@ -167,7 +171,9 @@ fn make_root(
     let mem = Capability::new_root(owner_id, h, MemoryRegion::new_root(0x0, size));
     // std::sync::Arc::downgrade: CapabilityRef<T> is std::sync::Arc under the hood
     // (only the inner RwLock is swapped to loom via --features loom).
-    dom.write().data.add_memory_capability(h, std::sync::Arc::downgrade(&mem));
+    dom.write()
+        .data
+        .add_memory_capability(h, std::sync::Arc::downgrade(&mem));
     (dom, h, mem)
 }
 
@@ -224,21 +230,31 @@ fn loom_e2e_concurrent_sends() {
 
         // Sequential setup: carve two non-overlapping children.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
         let (h_c2, _sub2, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
-        ).expect("setup: carve c2");
+            &dom,
+            h_root,
+            Access::new(0x2000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c2");
 
         // Create unsealed receivers and register them in dom's domain table.
-        let recv_a    = make_unsealed();
-        let recv_b    = make_unsealed();
+        let recv_a = make_unsealed();
+        let recv_b = make_unsealed();
         let recv_a_id = recv_a.read().data.id;
         let recv_b_id = recv_b.read().data.id;
         let dh_a: LocalHandle = 2;
         let dh_b: LocalHandle = 3;
-        dom.write().data.add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
-        dom.write().data.add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
+        dom.write()
+            .data
+            .add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
+        dom.write()
+            .data
+            .add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
 
         // Thread A: send c1 → recv_a.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -262,14 +278,22 @@ fn loom_e2e_concurrent_sends() {
         tb.join().unwrap().expect("B: send c2 to recv_b");
 
         let applied = state.lock().unwrap().applied.clone();
-        assert_eq!(applied.len(), 2, "exactly 2 Map updates (one per immediate send)");
+        assert_eq!(
+            applied.len(),
+            2,
+            "exactly 2 Map updates (one per immediate send)"
+        );
 
-        let has_map_a = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, address: 0x0000, size: 0x1000, .. } if *domain == recv_a_id
-        ));
-        let has_map_b = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, address: 0x2000, size: 0x1000, .. } if *domain == recv_b_id
-        ));
+        let has_map_a = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. } if *domain == recv_a_id
+            )
+        });
+        let has_map_b = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x2000, size: 0x1000, shootdown_required: false, .. } if *domain == recv_b_id
+            )
+        });
         assert!(has_map_a, "Map for recv_a must be applied");
         assert!(has_map_b, "Map for recv_b must be applied");
 
@@ -309,15 +333,21 @@ fn loom_e2e_accept_race() {
         let (sender, h_root, _root_mem) = make_root(0x2000);
 
         // Sealed receiver (supports receive_after_seal).
-        let recv    = make_sealed_recv();
+        let recv = make_sealed_recv();
         let recv_id = recv.read().data.id;
         let dh_recv: LocalHandle = 2;
-        sender.write().data.add_domain_capability(dh_recv, std::sync::Arc::downgrade(&recv));
+        sender
+            .write()
+            .data
+            .add_domain_capability(dh_recv, std::sync::Arc::downgrade(&recv));
 
         // Carve c1 and send to the sealed receiver → pending queue path.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
-            &sender, h_root, Access::new(0x0, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &sender,
+            h_root,
+            Access::new(0x0, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
         Capability::<Domain>::send_memory(&sender, h_c1, dh_recv, Attributes::NONE)
             .expect("setup: send to sealed receiver");
 
@@ -348,7 +378,10 @@ fn loom_e2e_accept_race() {
         let res_b = tb.join().unwrap();
 
         // Exactly one accept must succeed.
-        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        let successes = [res_a.is_ok(), res_b.is_ok()]
+            .iter()
+            .filter(|&&x| x)
+            .count();
         assert_eq!(successes, 1, "exactly one accept must succeed");
 
         // Loser must get NotFound.
@@ -358,9 +391,12 @@ fn loom_e2e_accept_race() {
         // Exactly one Map update applied (skip_unmap = true → no Unmap).
         let applied = state.lock().unwrap().applied.clone();
         assert_eq!(applied.len(), 1, "exactly one Map update");
-        assert!(applied.iter().any(|u| matches!(
-            u, Update::Map { domain, .. } if *domain == recv_id
-        )), "Map for recv_id must be applied");
+        assert!(
+            applied.iter().any(|u| matches!(
+                u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == recv_id
+            )),
+            "Map for recv_id must be applied"
+        );
 
         // Pending queue must be empty; recv holds exactly one cap.
         assert!(recv.read().data.get_pending_ids().is_empty());
@@ -408,26 +444,36 @@ fn loom_e2e_revoke_child_vs_send() {
 
         // Carve c1 and c2.
         let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
         let (h_c2, _sub2, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
-        ).expect("setup: carve c2");
+            &dom,
+            h_root,
+            Access::new(0x2000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c2");
 
         // Immediately send c1 to unsealed recv_a (updates discarded — setup only).
-        let recv_a    = make_unsealed();
+        let recv_a = make_unsealed();
         let recv_a_id = recv_a.read().data.id;
         let dh_a: LocalHandle = 2;
-        dom.write().data.add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
+        dom.write()
+            .data
+            .add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
         Capability::<Domain>::send_memory(&dom, h_c1, dh_a, Attributes::NONE)
             .expect("setup: send c1 to recv_a");
         // After send: h_c1 removed from dom's table; c1.owner = recv_a_id.
 
         // Register recv_b for Thread B's send.
-        let recv_b    = make_unsealed();
+        let recv_b = make_unsealed();
         let recv_b_id = recv_b.read().data.id;
         let dh_b: LocalHandle = 3;
-        dom.write().data.add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
+        dom.write()
+            .data
+            .add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
 
         // Thread A (exclusive): revoke c1 by its stable sub_handle.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -454,29 +500,46 @@ fn loom_e2e_revoke_child_vs_send() {
         // 3 updates: Unmap(recv_a) + Map(dom) from revoke, Map(recv_b) from send.
         assert_eq!(applied.len(), 3, "3 updates total");
 
-        let has_unmap_a = applied.iter().any(|u| matches!(
-            u, Update::Unmap { domain, address: 0x0000, size: 0x1000 } if *domain == recv_a_id
-        ));
-        let has_map_dom = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, address: 0x0000, size: 0x1000, .. } if *domain == dom_id
-        ));
-        let has_map_b = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, address: 0x2000, size: 0x1000, .. } if *domain == recv_b_id
-        ));
+        let has_unmap_a = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. } if *domain == recv_a_id && *rights == Rights::NONE
+            )
+        });
+        let has_map_dom = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. } if *domain == dom_id
+            )
+        });
+        let has_map_b = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x2000, size: 0x1000, shootdown_required: false, .. } if *domain == recv_b_id
+            )
+        });
         assert!(has_unmap_a, "Unmap(recv_a) must be applied");
         assert!(has_map_dom, "Map(dom, reclaim c1) must be applied");
-        assert!(has_map_b,   "Map(recv_b) from send must be applied");
+        assert!(has_map_b, "Map(recv_b) from send must be applied");
 
         // The two revoke updates (Unmap + Map) must be adjacent in the log —
         // the update_lock guarantees the batch is applied atomically.
-        let unmap_pos = applied.iter().position(|u| matches!(
-            u, Update::Unmap { domain, .. } if *domain == recv_a_id
-        )).unwrap();
-        let map_dom_pos = applied.iter().position(|u| matches!(
-            u, Update::Map { domain, address: 0x0000, .. } if *domain == dom_id
-        )).unwrap();
+        let unmap_pos = applied
+            .iter()
+            .position(|u| {
+                matches!(
+                    u, Update::ChangeRights { domain, rights, .. } if *domain == recv_a_id && *rights == Rights::NONE
+                )
+            })
+            .unwrap();
+        let map_dom_pos = applied
+            .iter()
+            .position(|u| {
+                matches!(
+                    u, Update::ChangeRights { domain, address: 0x0000, shootdown_required: false, .. } if *domain == dom_id
+                )
+            })
+            .unwrap();
         assert_eq!(
-            map_dom_pos, unmap_pos + 1,
+            map_dom_pos,
+            unmap_pos + 1,
             "Unmap(recv_a) and Map(dom) must be consecutive (atomic batch)"
         );
     });
@@ -519,14 +582,15 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 
         // Carve c1 for Thread B to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
 
         // Create child domain ch1 under dom.
-        let h_child = Capability::<Domain>::create_domain(
-            &dom,
-            DomainPolicy::new_root(1),
-        ).expect("setup: create child domain");
+        let h_child = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+            .expect("setup: create child domain");
         let ch1_id: DomainId = dom
             .read()
             .data
@@ -539,10 +603,12 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
             .id;
 
         // Create unsealed memory receiver and register in dom's domain table.
-        let recv_m    = make_unsealed();
+        let recv_m = make_unsealed();
         let recv_m_id = recv_m.read().data.id;
         let dh_r: LocalHandle = 2;
-        dom.write().data.add_domain_capability(dh_r, std::sync::Arc::downgrade(&recv_m));
+        dom.write()
+            .data
+            .add_domain_capability(dh_r, std::sync::Arc::downgrade(&recv_m));
 
         // Thread A (exclusive): revoke the child domain.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -569,14 +635,18 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         // 2 updates: RevokeDomain(ch1_id) from A, Map(recv_m_id) from B.
         assert_eq!(applied.len(), 2, "2 updates total");
 
-        let has_revoke = applied.iter().any(|u| matches!(
-            u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
-        ));
-        let has_map = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, address: 0x0000, size: 0x1000, .. } if *domain == recv_m_id
-        ));
+        let has_revoke = applied.iter().any(|u| {
+            matches!(
+                u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
+            )
+        });
+        let has_map = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. } if *domain == recv_m_id
+            )
+        });
         assert!(has_revoke, "RevokeDomain(ch1_id) must be applied");
-        assert!(has_map,    "Map(recv_m_id) from send must be applied");
+        assert!(has_map, "Map(recv_m_id) from send must be applied");
 
         // ch1 revoke confirmed by RevokeDomain update above.
         // recv_m must hold c1.
@@ -632,14 +702,15 @@ fn loom_e2e_send_to_domain_being_revoked() {
 
         // Carve c1 for Thread B to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
 
         // Create child domain ch1 under dom (unsealed — supports immediate send).
-        let h_child = Capability::<Domain>::create_domain(
-            &dom,
-            DomainPolicy::new_root(1),
-        ).expect("setup: create ch1");
+        let h_child = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+            .expect("setup: create ch1");
         let ch1_id: DomainId = dom
             .read()
             .data
@@ -669,7 +740,9 @@ fn loom_e2e_send_to_domain_being_revoked() {
             })
         });
 
-        ta.join().unwrap().expect("A: revoke_domain must always succeed");
+        ta.join()
+            .unwrap()
+            .expect("A: revoke_domain must always succeed");
         let res_b = tb.join().unwrap();
 
         let applied = state.lock().unwrap().applied.clone();
@@ -678,20 +751,36 @@ fn loom_e2e_send_to_domain_being_revoked() {
             Ok(()) => {
                 // B-first ordering: send succeeded → Map(ch1_id) then RevokeDomain(ch1_id).
                 assert_eq!(applied.len(), 2, "B-first: exactly 2 updates");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::Map { domain, address: 0x0000, size: 0x1000, .. }
-                    if *domain == ch1_id
-                )), "B-first: Map(ch1_id) must be present");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
-                )), "B-first: RevokeDomain(ch1_id) must be present");
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
+                        if *domain == ch1_id
+                    )),
+                    "B-first: Map(ch1_id) must be present"
+                );
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
+                    )),
+                    "B-first: RevokeDomain(ch1_id) must be present"
+                );
                 // B ran before A: Map must appear before RevokeDomain.
-                let map_pos = applied.iter().position(|u| matches!(
-                    u, Update::Map { domain, .. } if *domain == ch1_id
-                )).unwrap();
-                let revoke_pos = applied.iter().position(|u| matches!(
-                    u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
-                )).unwrap();
+                let map_pos = applied
+                    .iter()
+                    .position(|u| {
+                        matches!(
+                            u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == ch1_id
+                        )
+                    })
+                    .unwrap();
+                let revoke_pos = applied
+                    .iter()
+                    .position(|u| {
+                        matches!(
+                            u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
+                        )
+                    })
+                    .unwrap();
                 assert!(
                     map_pos < revoke_pos,
                     "B-first: Map(ch1_id) must precede RevokeDomain(ch1_id)"
@@ -702,9 +791,12 @@ fn loom_e2e_send_to_domain_being_revoked() {
                 // B could look it up → B gets NotFound.
                 assert_eq!(e, CapaError::NotFound, "A-first: B must get NotFound");
                 assert_eq!(applied.len(), 1, "A-first: only RevokeDomain applied");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
-                )), "A-first: RevokeDomain(ch1_id) must be applied");
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
+                    )),
+                    "A-first: RevokeDomain(ch1_id) must be applied"
+                );
             }
         }
 
@@ -744,18 +836,25 @@ fn loom_e2e_two_cores_race_send_same_cap() {
 
         // One cap that both threads will race to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
 
         // Two distinct unsealed receivers.
-        let recv_a    = make_unsealed();
-        let recv_b    = make_unsealed();
+        let recv_a = make_unsealed();
+        let recv_b = make_unsealed();
         let recv_a_id = recv_a.read().data.id;
         let recv_b_id = recv_b.read().data.id;
         let dh_a: LocalHandle = 2;
         let dh_b: LocalHandle = 3;
-        dom.write().data.add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
-        dom.write().data.add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
+        dom.write()
+            .data
+            .add_domain_capability(dh_a, std::sync::Arc::downgrade(&recv_a));
+        dom.write()
+            .data
+            .add_domain_capability(dh_b, std::sync::Arc::downgrade(&recv_b));
 
         // Thread A: send h_c1 → recv_a.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -779,7 +878,10 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let res_b = tb.join().unwrap();
 
         // Exactly one send must succeed.
-        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        let successes = [res_a.is_ok(), res_b.is_ok()]
+            .iter()
+            .filter(|&&x| x)
+            .count();
         assert_eq!(successes, 1, "exactly one send must succeed");
 
         // Loser gets NotFound — h_c1 was consumed by the winner.
@@ -791,12 +893,16 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         assert_eq!(applied.len(), 1, "exactly one Map update");
 
         // The Map is for exactly one of the two receivers (XOR).
-        let map_a = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, .. } if *domain == recv_a_id
-        ));
-        let map_b = applied.iter().any(|u| matches!(
-            u, Update::Map { domain, .. } if *domain == recv_b_id
-        ));
+        let map_a = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == recv_a_id
+            )
+        });
+        let map_b = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == recv_b_id
+            )
+        });
         assert!(map_a ^ map_b, "Map for exactly one receiver");
 
         // The winning receiver holds the cap; the other is empty.
@@ -850,14 +956,19 @@ fn loom_e2e_send_vs_revoke_same_cap() {
 
         // Carve c1; keep both the LocalHandle and the SubHandle.
         let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
 
         // Unsealed receiver for Thread A's immediate send.
-        let recv    = make_unsealed();
+        let recv = make_unsealed();
         let recv_id = recv.read().data.id;
         let dh_recv: LocalHandle = 2;
-        dom.write().data.add_domain_capability(dh_recv, std::sync::Arc::downgrade(&recv));
+        dom.write()
+            .data
+            .add_domain_capability(dh_recv, std::sync::Arc::downgrade(&recv));
 
         // Thread A (shared): send h_c1 to recv.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -878,7 +989,9 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         });
 
         let res_a = ta.join().unwrap();
-        tb.join().unwrap().expect("B: revoke_memory_child must always succeed");
+        tb.join()
+            .unwrap()
+            .expect("B: revoke_memory_child must always succeed");
 
         let applied = state.lock().unwrap().applied.clone();
 
@@ -887,34 +1000,62 @@ fn loom_e2e_send_vs_revoke_same_cap() {
                 // A-first: send succeeded; B then revoked c1 from recv.
                 // Three updates: Map(recv_id), Unmap(recv_id), Map(dom_id).
                 assert_eq!(applied.len(), 3, "A-first: 3 updates");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::Map { domain, address: 0x0000, size: 0x1000, .. }
-                    if *domain == recv_id
-                )), "A-first: Map(recv_id) from send");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::Unmap { domain, address: 0x0000, size: 0x1000 }
-                    if *domain == recv_id
-                )), "A-first: Unmap(recv_id) from revoke");
-                assert!(applied.iter().any(|u| matches!(
-                    u, Update::Map { domain, address: 0x0000, size: 0x1000, .. }
-                    if *domain == dom_id
-                )), "A-first: Map(dom_id) reclaim from revoke");
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
+                        if *domain == recv_id
+                    )),
+                    "A-first: Map(recv_id) from send"
+                );
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. }
+                        if *domain == recv_id && *rights == Rights::NONE
+                    )),
+                    "A-first: Unmap(recv_id) from revoke"
+                );
+                assert!(
+                    applied.iter().any(|u| matches!(
+                        u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
+                        if *domain == dom_id
+                    )),
+                    "A-first: Map(dom_id) reclaim from revoke"
+                );
 
                 // A's Map(recv_id) must come before B's Unmap(recv_id).
-                let map_recv_pos = applied.iter().position(|u| matches!(
-                    u, Update::Map { domain, .. } if *domain == recv_id
-                )).unwrap();
-                let unmap_pos = applied.iter().position(|u| matches!(
-                    u, Update::Unmap { domain, .. } if *domain == recv_id
-                )).unwrap();
-                assert!(map_recv_pos < unmap_pos, "A-first: Map(recv) precedes Unmap(recv)");
+                let map_recv_pos = applied
+                    .iter()
+                    .position(|u| {
+                        matches!(
+                            u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == recv_id
+                        )
+                    })
+                    .unwrap();
+                let unmap_pos = applied
+                    .iter()
+                    .position(|u| {
+                        matches!(
+                            u, Update::ChangeRights { domain, rights, .. } if *domain == recv_id && *rights == Rights::NONE
+                        )
+                    })
+                    .unwrap();
+                assert!(
+                    map_recv_pos < unmap_pos,
+                    "A-first: Map(recv) precedes Unmap(recv)"
+                );
 
                 // B's Unmap and Map(dom_id) must be consecutive (atomic batch).
-                let map_dom_pos = applied.iter().position(|u| matches!(
-                    u, Update::Map { domain, address: 0x0000, .. } if *domain == dom_id
-                )).unwrap();
+                let map_dom_pos = applied
+                    .iter()
+                    .position(|u| {
+                        matches!(
+                            u, Update::ChangeRights { domain, address: 0x0000, shootdown_required: false, .. } if *domain == dom_id
+                        )
+                    })
+                    .unwrap();
                 assert_eq!(
-                    map_dom_pos, unmap_pos + 1,
+                    map_dom_pos,
+                    unmap_pos + 1,
                     "A-first: Unmap and reclaim Map must be consecutive"
                 );
 
@@ -922,8 +1063,11 @@ fn loom_e2e_send_vs_revoke_same_cap() {
                 // remove the stale handle entry from the new owner's local table.
                 // recv's table still holds a dead Weak — upgrading it returns None.
                 // This is intentional: the hardware-level Unmap is what matters.
-                assert_eq!(recv.read().data.memory_capability_handles().len(), 1,
-                    "A-first: stale dead-Weak entry remains in recv's table after revoke");
+                assert_eq!(
+                    recv.read().data.memory_capability_handles().len(),
+                    1,
+                    "A-first: stale dead-Weak entry remains in recv's table after revoke"
+                );
             }
             Err(e) => {
                 // B-first: revoke ran first (same-owner → empty batch);
@@ -932,8 +1076,11 @@ fn loom_e2e_send_vs_revoke_same_cap() {
                 assert_eq!(e, CapaError::NotFound, "B-first: send must get NotFound");
                 assert_eq!(applied.len(), 0, "B-first: no hardware updates");
                 // recv was never sent to; its table is empty.
-                assert_eq!(recv.read().data.memory_capability_handles().len(), 0,
-                    "B-first: recv never received anything");
+                assert_eq!(
+                    recv.read().data.memory_capability_handles().len(),
+                    0,
+                    "B-first: recv never received anything"
+                );
             }
         }
     });
@@ -968,8 +1115,11 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
 
         // Carve c1 — both threads will race to revoke it.
         let (_h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
-            &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
-        ).expect("setup: carve c1");
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
 
         // Thread A (exclusive): revoke c1 by sub_handle.
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
@@ -993,7 +1143,10 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let res_b = tb.join().unwrap();
 
         // Exactly one revoke must succeed.
-        let successes = [res_a.is_ok(), res_b.is_ok()].iter().filter(|&&x| x).count();
+        let successes = [res_a.is_ok(), res_b.is_ok()]
+            .iter()
+            .filter(|&&x| x)
+            .count();
         assert_eq!(successes, 1, "exactly one revoke must succeed");
 
         // Loser gets NotFound — c1 already removed from the tree.
@@ -1003,6 +1156,10 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         // Both orderings: same-owner revoke → skip_unmap=true → empty batch.
         // The update_lock is never contended; applied log stays empty.
         let applied = state.lock().unwrap().applied.clone();
-        assert_eq!(applied.len(), 0, "no hardware updates for same-owner revoke");
+        assert_eq!(
+            applied.len(),
+            0,
+            "no hardware updates for same-owner revoke"
+        );
     });
 }

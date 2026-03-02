@@ -6,9 +6,10 @@
 mod common;
 
 use capability_engine::{
-    execute, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform,
-    Update,
+    execute, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform, Update,
+    UpdateBatch,
 };
+use capability_engine::memory::Rights;
 use common::TestPlatform;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ fn test_execute_apply_update_is_called() {
 
     execute(&platform, false, || {
         let mut batch = capability_engine::UpdateBatch::new();
-        batch.add_map(0, 0x1000, 0x1000, 0x1000, true, true, false);
+        batch.add_change_rights(0, 0x1000, 0x1000, 0x1000, Rights::RW, false);
         Ok(((), batch))
     })
     .expect("should succeed");
@@ -58,7 +59,7 @@ fn test_execute_apply_update_is_called() {
     assert_eq!(updates.len(), 1);
     assert!(matches!(
         &updates[0],
-        Update::Map { domain, address, size, .. }
+        Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
             if *domain == 0 && *address == 0x1000 && *size == 0x1000
     ));
 }
@@ -205,10 +206,12 @@ fn test_revoke_domain_carries_fallback() {
 
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::REVOKE);
     let child_policy = DomainPolicy::new_restricted(0b0001, child_api);
-    let child_h = Capability::create_domain(&root, child_policy)
-        .expect("create_domain should succeed");
+    let child_h =
+        Capability::create_domain(&root, child_policy).expect("create_domain should succeed");
 
-    let child = root.read().data.domain_capabilities[&child_h].upgrade().unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
     let child_id = child.read().data.id;
     reg(&platform, child_id, Some(ROOT_ID));
 
@@ -216,8 +219,8 @@ fn test_revoke_domain_carries_fallback() {
     Capability::seal_domain_op(&root, child_h).unwrap();
 
     let (_, batch) = execute(&platform, true, || {
-        let updates = Capability::revoke_domain(&root, child_h)
-            .expect("revoke_domain should succeed");
+        let updates =
+            Capability::revoke_domain(&root, child_h).expect("revoke_domain should succeed");
         Ok(((), updates))
     })
     .expect("execute should succeed");

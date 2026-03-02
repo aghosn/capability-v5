@@ -33,9 +33,7 @@ use parking_lot::{
     RawRwLock, RwLock,
 };
 
-use capability_engine::{
-    CoreId, DomainId, OpLockGuard, Platform, Result, Update,
-};
+use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal state

@@ -48,9 +48,8 @@ use loom::thread;
 use std::collections::BTreeMap;
 
 use capability_engine::{
-    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy,
-    LocalHandle, MonitorAPI, OpLockGuard, Platform, Result, Update, VpCallContext,
-    VpRunState,
+    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy, LocalHandle, MonitorAPI,
+    OpLockGuard, Platform, Result, Update, VpCallContext, VpRunState,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -61,7 +60,7 @@ use capability_engine::{
 #[derive(Default)]
 struct LoomPlatformState {
     core_to_domain: BTreeMap<CoreId, DomainId>,
-    core_to_vp:     BTreeMap<CoreId, u64>,
+    core_to_vp: BTreeMap<CoreId, u64>,
 }
 
 /// Per-core platform instance.  Each "core" (thread) creates its own
@@ -69,12 +68,15 @@ struct LoomPlatformState {
 /// `Arc<Mutex<LoomPlatformState>>` with other cores.
 struct LoomPlatform {
     current_core: CoreId,
-    state:        Arc<Mutex<LoomPlatformState>>,
+    state: Arc<Mutex<LoomPlatformState>>,
 }
 
 impl LoomPlatform {
     fn new(current_core: CoreId, state: Arc<Mutex<LoomPlatformState>>) -> Self {
-        LoomPlatform { current_core, state }
+        LoomPlatform {
+            current_core,
+            state,
+        }
     }
 }
 
@@ -103,7 +105,11 @@ impl Platform for LoomPlatform {
     fn register_domain(&self, _: DomainId, _: Option<DomainId>) {}
 
     fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
-        self.state.lock().unwrap().core_to_domain.insert(core_id, domain_id);
+        self.state
+            .lock()
+            .unwrap()
+            .core_to_domain
+            .insert(core_id, domain_id);
     }
     fn clear_core_domain(&self, core_id: CoreId) {
         self.state.lock().unwrap().core_to_domain.remove(&core_id);
@@ -115,14 +121,22 @@ impl Platform for LoomPlatform {
             .find(|(_, &did)| did == domain_id)
             .map(|(&cid, _)| cid)
     }
-    fn try_acquire_update_lock(&self) -> bool { true }
+    fn try_acquire_update_lock(&self) -> bool {
+        true
+    }
     fn release_update_lock(&self) {}
-    fn get_current_core(&self) -> Option<CoreId> { Some(self.current_core) }
+    fn get_current_core(&self) -> Option<CoreId> {
+        Some(self.current_core)
+    }
     fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
         let mut st = self.state.lock().unwrap();
         match vp_id {
-            Some(id) => { st.core_to_vp.insert(core_id, id); }
-            None     => { st.core_to_vp.remove(&core_id); }
+            Some(id) => {
+                st.core_to_vp.insert(core_id, id);
+            }
+            None => {
+                st.core_to_vp.remove(&core_id);
+            }
         }
     }
 }
@@ -146,7 +160,9 @@ fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, 
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let h = Capability::create_domain(parent, policy).unwrap();
     Capability::seal_domain_op(parent, h).unwrap();
-    let child = parent.read().data.domain_capabilities[&h].upgrade().unwrap();
+    let child = parent.read().data.domain_capabilities[&h]
+        .upgrade()
+        .unwrap();
     (child, h)
 }
 
@@ -161,7 +177,7 @@ fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, 
 fn vp_race_two_cores_same_vp() {
     loom::model(|| {
         // ── Setup (sequential) ──────────────────────────────────────────────
-        let root  = Capability::new_root(0, 0, Domain::new_root(4));
+        let root = Capability::new_root(0, 0, Domain::new_root(4));
         let (target, target_h) = make_sealed_child(&root);
 
         // VP[0] and VP[1] of root are Running on cores 0 and 1 respectively.
@@ -173,11 +189,11 @@ fn vp_race_two_cores_same_vp() {
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
 
         // Clone Arcs for each thread.
-        let root_t0   = root.clone();
-        let root_t1   = root.clone();
+        let root_t0 = root.clone();
+        let root_t1 = root.clone();
         let target_t0 = target.clone();
-        let state_t0  = shared.clone();
-        let state_t1  = shared.clone();
+        let state_t0 = shared.clone();
+        let state_t1 = shared.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
@@ -200,7 +216,8 @@ fn vp_race_two_cores_same_vp() {
         assert!(
             r0.is_ok() ^ r1.is_ok(),
             "exactly one core should claim the VP, got r0={} r1={}",
-            r0.is_ok(), r1.is_ok()
+            r0.is_ok(),
+            r1.is_ok()
         );
 
         // Target VP[0] must be in Running state.
@@ -226,20 +243,20 @@ fn vp_race_two_cores_same_vp() {
 fn vp_two_cores_different_vps() {
     loom::model(|| {
         // ── Setup ───────────────────────────────────────────────────────────
-        let root  = Capability::new_root(0, 0, Domain::new_root(4));
+        let root = Capability::new_root(0, 0, Domain::new_root(4));
         let (target, target_h) = make_sealed_child(&root);
 
         init_vp_running(&root, 0, 0); // core 0 runs root VP[0]
         init_vp_running(&root, 1, 1); // core 1 runs root VP[1]
-        // target VP[0] and VP[1] start Available.
+                                      // target VP[0] and VP[1] start Available.
 
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
 
-        let root_t0   = root.clone();
-        let root_t1   = root.clone();
+        let root_t0 = root.clone();
+        let root_t1 = root.clone();
         let target_t0 = target.clone();
-        let state_t0  = shared.clone();
-        let state_t1  = shared.clone();
+        let state_t0 = shared.clone();
+        let state_t1 = shared.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
@@ -267,8 +284,14 @@ fn vp_two_cores_different_vps() {
         let vp0_arc = t.data.policy.vprocessor_states[0].clone();
         let vp1_arc = t.data.policy.vprocessor_states[1].clone();
         drop(t);
-        let vp0_running = { let g = vp0_arc.run_state.read(); matches!(*g, VpRunState::Running { core: 0, .. }) };
-        let vp1_running = { let g = vp1_arc.run_state.read(); matches!(*g, VpRunState::Running { core: 1, .. }) };
+        let vp0_running = {
+            let g = vp0_arc.run_state.read();
+            matches!(*g, VpRunState::Running { core: 0, .. })
+        };
+        let vp1_running = {
+            let g = vp1_arc.run_state.read();
+            matches!(*g, VpRunState::Running { core: 1, .. })
+        };
         assert!(vp0_running, "target VP[0] must be Running on core 0");
         assert!(vp1_running, "target VP[1] must be Running on core 1");
     });
@@ -316,11 +339,14 @@ fn vp_concurrent_return_and_claim() {
             // root.VP[0]: Locked (waiting for B.VP[0] to return)
             *vp0.run_state.write() = VpRunState::Locked {
                 callee_domain_id: b_domain.read().data.id,
-                callee_vp_id:     0,
-                prev_caller:      None,
+                callee_vp_id: 0,
+                prev_caller: None,
             };
             // root.VP[1]: Running on core 1
-            *vp1.run_state.write() = VpRunState::Running { core: 1, caller: None };
+            *vp1.run_state.write() = VpRunState::Running {
+                core: 1,
+                caller: None,
+            };
         }
         {
             let bd = b_domain.read();
@@ -331,21 +357,21 @@ fn vp_concurrent_return_and_claim() {
             let root_vp0_weak = std::sync::Arc::downgrade(&root);
 
             *bvp0.run_state.write() = VpRunState::Running {
-                core:   0,
+                core: 0,
                 caller: Some(VpCallContext {
-                    domain:    root_vp0_weak,
+                    domain: root_vp0_weak,
                     domain_id: root_id,
-                    vp_id:     0,
+                    vp_id: 0,
                 }),
             };
         }
 
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
 
-        let root_t1   = root.clone();
-        let b_t0      = b_domain.clone();
-        let state_t0  = shared.clone();
-        let state_t1  = shared.clone();
+        let root_t1 = root.clone();
+        let b_t0 = b_domain.clone();
+        let state_t0 = shared.clone();
+        let state_t1 = shared.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
 
@@ -392,16 +418,25 @@ fn vp_concurrent_return_and_claim() {
         if r1.is_ok() {
             // Thread 1 claimed B.VP[0] after Thread 0 freed it.
             // B.VP[0] must be Running (claimed by core 1).
-            assert!(b_vp0_state_is_running, "B.VP[0] must be Running (Thread 1 claimed it)");
+            assert!(
+                b_vp0_state_is_running,
+                "B.VP[0] must be Running (Thread 1 claimed it)"
+            );
             // root.VP[0] must be Running (Thread 0 restored it).
-            assert!(root_vp0_state_is_running, "root.VP[0] must be Running (Thread 0 returned)");
+            assert!(
+                root_vp0_state_is_running,
+                "root.VP[0] must be Running (Thread 0 returned)"
+            );
         } else {
             // Thread 1 failed — B.VP[0] must be Available (Thread 0 freed it).
             assert!(
                 !b_vp0_state_is_running,
                 "B.VP[0] must be Available (Thread 0 returned, Thread 1 failed)"
             );
-            assert!(root_vp0_state_is_running, "root.VP[0] must be Running (Thread 0 returned)");
+            assert!(
+                root_vp0_state_is_running,
+                "root.VP[0] must be Running (Thread 0 returned)"
+            );
         }
     });
 }
@@ -467,10 +502,10 @@ fn vp_interrupt_delivery_vs_claim_race() {
         init_vp_running(&dom1, 1, 1);
 
         // ── Arcs for threads ─────────────────────────────────────────────────
-        let dom2_t0   = dom2.clone();
-        let dom1_t1   = dom1.clone();
-        let state_t0  = shared.clone();
-        let state_t1  = shared.clone();
+        let dom2_t0 = dom2.clone();
+        let dom1_t1 = dom1.clone();
+        let state_t0 = shared.clone();
+        let state_t1 = shared.clone();
 
         // ── Concurrent phase ─────────────────────────────────────────────────
 
@@ -495,7 +530,11 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // ── Invariants ───────────────────────────────────────────────────────
 
         // Interrupt delivery must always succeed.
-        assert!(r0.is_ok(), "deliver_interrupt_vp must succeed in all orderings: {:?}", r0.err());
+        assert!(
+            r0.is_ok(),
+            "deliver_interrupt_vp must succeed in all orderings: {:?}",
+            r0.err()
+        );
 
         // The claim attempt must always fail — dom2.vp0 is never Available or Suspended.
         assert!(
@@ -561,8 +600,8 @@ fn vp_two_cores_race_suspended_vp() {
 
         // ── Arcs for threads ─────────────────────────────────────────────────
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
-        let dom0_t0  = dom0.clone();
-        let dom0_t1  = dom0.clone();
+        let dom0_t0 = dom0.clone();
+        let dom0_t1 = dom0.clone();
         let state_t0 = shared.clone();
         let state_t1 = shared.clone();
 
@@ -589,7 +628,8 @@ fn vp_two_cores_race_suspended_vp() {
         assert!(
             r0.is_ok() ^ r1.is_ok(),
             "exactly one core should claim the Suspended VP: r0={} r1={}",
-            r0.is_ok(), r1.is_ok()
+            r0.is_ok(),
+            r1.is_ok()
         );
 
         // dom1.vp0 must be Running (held by the winner).

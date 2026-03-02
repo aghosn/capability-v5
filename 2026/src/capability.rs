@@ -1,12 +1,15 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy, MonitorAPI, PendingCapability, VpCallContext, VpRunState, VProcessorRef};
+use crate::domain::{
+    Domain, DomainPolicy, MonitorAPI, PendingCapability, VProcessorRef, VpCallContext, VpRunState,
+};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
 use crate::platform::Platform;
-use crate::sync::RwLock;
 use crate::switch::{SwitchContext, VpInterruptContext};
+use crate::sync::RwLock;
 use crate::update::{CoreId, DomainId, UpdateBatch};
+use crate::view::{compute_view_from_cap_arcs, view_diff, AddressSpaceView};
 use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -85,6 +88,10 @@ pub struct Capability<T> {
     /// Stable tree identity; set at creation time; never changes
     pub sub_handle: SubHandle,
 
+    /// Distance from the root capability (0 for roots, parent.depth + 1 for children).
+    /// Used to sort capabilities for view computation without dereferencing cross-domain pointers.
+    pub depth: u64,
+
     /// Capability data (Domain or MemoryRegion)
     pub data: T,
 
@@ -104,6 +111,7 @@ impl<T> Capability<T> {
         Arc::new(RwLock::new(Capability {
             owned: Ownership::new(owner),
             sub_handle,
+            depth: 0,
             data,
             parent: Weak::new(),
             children: Vec::new(),
@@ -115,12 +123,14 @@ impl<T> Capability<T> {
     pub fn new_child(
         owner: DomainId,
         sub_handle: SubHandle,
+        depth: u64,
         data: T,
         parent: CapabilityWeak<T>,
     ) -> CapabilityRef<T> {
         Arc::new(RwLock::new(Capability {
             owned: Ownership::new(owner),
             sub_handle,
+            depth,
             data,
             parent,
             children: Vec::new(),
@@ -128,10 +138,9 @@ impl<T> Capability<T> {
         }))
     }
 
-    /// Add a child capability
     /// Add a child capability.
     ///
-    /// **Internal.** Used by the capability engine and test fixtures only.
+    /// **Internal.** Used by the capability engine and tests only.
     #[doc(hidden)]
     pub fn add_child(&mut self, child: CapabilityRef<T>) {
         self.children.push(child);
@@ -189,14 +198,20 @@ impl Capability<MemoryRegion> {
 
         // Create aliased region from parent
         let child_region = parent.data.alias(access)?;
+        let child_depth = parent.depth + 1;
 
         // Auto-allocate a unique SubHandle from the parent's counter
         let sub_handle = parent.next_child_sub;
         parent.next_child_sub += 1;
 
         // Create child capability
-        let child =
-            Capability::new_child(owner, sub_handle, child_region, Arc::downgrade(parent_ref));
+        let child = Capability::new_child(
+            owner,
+            sub_handle,
+            child_depth,
+            child_region,
+            Arc::downgrade(parent_ref),
+        );
 
         // Add child to parent's children list (still under write lock)
         parent.add_child(child.clone());
@@ -207,12 +222,14 @@ impl Capability<MemoryRegion> {
     /// Create a carved child region
     ///
     /// **Internal primitive.** Prefer the domain-mediated [`carve_memory`] instead.
+    /// Returns only the child capability ref; update generation is handled by the
+    /// domain-mediated layer via view-diff.
     #[doc(hidden)]
     pub fn carve_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
         access: Access,
         owner: DomainId,
-    ) -> Result<(CapabilityRef<MemoryRegion>, UpdateBatch)> {
+    ) -> Result<CapabilityRef<MemoryRegion>> {
         let mut parent = parent_ref.write();
 
         // Validate owner domain is sealed and has CARVE permission
@@ -228,54 +245,47 @@ impl Capability<MemoryRegion> {
 
         // Create carved region from parent
         let child_region = parent.data.carve(access)?;
-
-        // Create update batch for the carve operation
-        let updates = UpdateBatch::new();
+        let child_depth = parent.depth + 1;
 
         // Auto-allocate a unique SubHandle from the parent's counter
         let sub_handle = parent.next_child_sub;
         parent.next_child_sub += 1;
 
         // Create child capability
-        let child =
-            Capability::new_child(owner, sub_handle, child_region, Arc::downgrade(parent_ref));
+        let child = Capability::new_child(
+            owner,
+            sub_handle,
+            child_depth,
+            child_region,
+            Arc::downgrade(parent_ref),
+        );
 
         // Add child to parent's children list
         parent.add_child(child.clone());
 
-        Ok((child, updates))
+        Ok(child)
     }
 
     /// Send this capability to another domain.
     ///
     /// **Internal primitive.** Prefer the domain-mediated [`send_memory`] instead.
-    ///
-    /// `caller` is the domain ID of the entity initiating the send.
+    /// Transfers ownership only; callers are responsible for generating MMU updates
+    /// via view-diff at the domain-mediated layer.
     #[doc(hidden)]
     pub fn send_to(
         capa_ref: &CapabilityRef<MemoryRegion>,
         caller: DomainId,
         new_owner: DomainId,
         attributes: Attributes,
-    ) -> Result<UpdateBatch> {
-        // Phase 1 — read child + parent under read locks to determine unmap behaviour.
-        let parent_owned_by_caller = {
+    ) -> Result<()> {
+        // Phase 1 — verify ownership under a read lock.
+        {
             let capa = capa_ref.read();
-
-            // Verify the caller is the current owner.
             if capa.owned.owner != caller {
                 return Err(CapaError::PermissionDenied);
             }
-
             capa.owned.validate_operation(MonitorAPI::SEND)?;
-
-            if let Some(parent_ref) = capa.get_parent() {
-                parent_ref.read().owned.owner == caller
-            } else {
-                false
-            }
-        };
-        // All read locks released.
+        }
 
         // Phase 2 — write-lock only the child.
         let mut capa = capa_ref.write();
@@ -285,35 +295,17 @@ impl Capability<MemoryRegion> {
             return Err(CapaError::PermissionDenied);
         }
 
-        let skip_unmap = parent_owned_by_caller;
-
-        // Update ownership and set attributes
         capa.owned.owner = new_owner;
         capa.owned.attributes = attributes;
-        // Clear owner_domain since the capability now belongs to a new domain
         capa.owned.owner_domain = None;
 
-        // Create updates
-        let mut updates = UpdateBatch::new();
-
-        if !skip_unmap {
-            updates.add_unmap(caller, capa.data.access.start, capa.data.access.size);
-        }
-
-        updates.add_map(
-            new_owner,
-            capa.data.access.start,
-            capa.data.access.size,
-            capa.data.access.start,
-            capa.data.access.rights.read(),
-            capa.data.access.rights.write(),
-            capa.data.access.rights.execute(),
-        );
-
-        Ok(updates)
+        Ok(())
     }
 
-    /// Revoke a child capability by Arc reference
+    /// Revoke a child capability by Arc reference.
+    ///
+    /// Prefer this over [`revoke_child`] when the capability may have been `send`-ed
+    /// (its `LocalHandle` changes on transfer but the `Arc` identity is stable).
     ///
     /// **Internal primitive.** Prefer the domain-mediated [`revoke_memory_child`] instead.
     #[doc(hidden)]
@@ -321,20 +313,15 @@ impl Capability<MemoryRegion> {
         parent_ref: &CapabilityRef<MemoryRegion>,
         child_ref: &CapabilityRef<MemoryRegion>,
     ) -> Result<UpdateBatch> {
+        // Read sub_handle before acquiring the parent write lock to avoid nested locking.
+        let child_sub = child_ref.read().sub_handle;
+
         let mut parent = parent_ref.write();
 
         // Validate owner domain is sealed and has REVOKE permission
         parent.owned.validate_operation(MonitorAPI::REVOKE)?;
 
-        // Find and remove child by Arc pointer equality
-        let child_arc_ptr = Arc::as_ptr(child_ref);
-        let pos = parent
-            .children
-            .iter()
-            .position(|c| Arc::as_ptr(c) == child_arc_ptr)
-            .ok_or(CapaError::NotFound)?;
-
-        let child = parent.children.remove(pos);
+        let child = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
 
         // Drop parent lock before recursing
         drop(parent);
@@ -400,16 +387,15 @@ impl Capability<MemoryRegion> {
                 let child_owner = capa.owned.owner;
 
                 if parent_owner != child_owner {
-                    updates.add_unmap(child_owner, capa.data.access.start, capa.data.access.size);
+                    updates.add_change_rights(child_owner, capa.data.access.start, capa.data.access.size, capa.data.access.start, crate::memory::Rights::NONE, true);
 
-                    updates.add_map(
+                    updates.add_change_rights(
                         parent_owner,
                         capa.data.access.start,
                         capa.data.access.size,
                         capa.data.access.start,
-                        parent.data.access.rights.read(),
-                        parent.data.access.rights.write(),
-                        parent.data.access.rights.execute(),
+                        parent.data.access.rights,
+                        false,
                     );
                 }
             }
@@ -422,17 +408,20 @@ impl Capability<MemoryRegion> {
         Ok(updates)
     }
 
+    ///TODO(aghosn): We need to stress test this. What happens if we have partially overlapping
+    ///capabilities with distinct access rights? Is this handled correctly? For example one that
+    ///has r1: [0x0..0x2000) RW and one r2: [0x1000...0x3000) RX, then we need to make sure the
+    ///view is [0x0..0x1000) RW union [0x1000...0x2000) RWX union [0x2000...0x3000) RX.
     /// Compute the current view of memory (considering carved children)
     ///
     /// **Internal.** Use [`compute_address_space`] for the full domain view.
     #[doc(hidden)]
     pub fn compute_view(&self) -> Vec<Access> {
         let mut view = vec![self.data.access];
-        let parent_owner = self.owned.owner;
 
         for child_ref in &self.children {
             let child = child_ref.read();
-            if child.data.kind == RegionKind::Carve && child.owned.owner != parent_owner {
+            if child.data.kind == RegionKind::Carve {
                 view = subtract_region(&view, &child.data.access);
             }
         }
@@ -470,7 +459,10 @@ fn subtract_region(regions: &[Access], to_subtract: &Access) -> Vec<Access> {
 }
 
 impl Capability<Domain> {
-    /// Create a child domain (static method, explicit owner)
+    /// Create a child domain (static method, explicit owner).
+    ///
+    /// The `owner` parameter allows tests and low-level callers to assign an explicit
+    /// owner domain ID. The high-level [`create_domain`] always uses the parent's own ID.
     ///
     /// **Internal primitive.** Prefer the domain-mediated [`create_domain`] instead.
     #[doc(hidden)]
@@ -493,16 +485,21 @@ impl Capability<Domain> {
 
         drop(parent);
 
-        // Auto-allocate a unique SubHandle from the parent's counter
-        let sub_handle = {
+        // Auto-allocate a unique SubHandle from the parent's counter; capture depth too.
+        let (sub_handle, child_depth) = {
             let mut parent = parent_ref.write();
             let s = parent.next_child_sub;
             parent.next_child_sub += 1;
-            s
+            (s, parent.depth + 1)
         };
 
-        let child =
-            Capability::new_child(owner, sub_handle, child_domain, Arc::downgrade(parent_ref));
+        let child = Capability::new_child(
+            owner,
+            sub_handle,
+            child_depth,
+            child_domain,
+            Arc::downgrade(parent_ref),
+        );
 
         parent_ref.write().add_child(child.clone());
 
@@ -531,6 +528,8 @@ impl Capability<Domain> {
     }
 
     /// Recursively revoke a domain capability subtree.
+    /// TODO(aghosn): Does this correctly revoke the memory capabilities owned by the domains?
+    /// Or is this done elsewhere?
     fn revoke_domain_subtree(
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
@@ -557,6 +556,36 @@ impl Capability<Domain> {
     // =========================================================================
     // Domain-mediated high-level operations
     // =========================================================================
+}
+
+/// Read the cached address-space view for a domain.  O(1).
+///
+/// Recompute and store the domain's cached address-space view.
+/// Must be called while the caller holds the domain write lock
+/// (passed as `&mut Capability<Domain>`).  Acquiring cap read locks inside
+/// is safe because the domain write lock prevents concurrent table mutations.
+fn refresh_domain_view(cap: &mut Capability<Domain>) {
+    let domain_id = cap.data.id;
+    let cap_arcs: alloc::vec::Vec<Arc<RwLock<Capability<MemoryRegion>>>> = cap
+        .data
+        .memory_capabilities
+        .values()
+        .filter_map(|w| w.upgrade())
+        .collect();
+    cap.data.cached_view = compute_view_from_cap_arcs(domain_id, &cap_arcs);
+}
+
+
+/// (carve, send, accept, revoke).  Callers get a consistent snapshot
+/// by reading under a single domain read lock.
+pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView {
+    domain.read().data.cached_view.clone()
+}
+
+impl Capability<Domain> {
+    // =========================================================================
+    // Domain-mediated high-level operations (continued)
+    // =========================================================================
 
     /// Carve a memory sub-region.  Returns `(LocalHandle, SubHandle, UpdateBatch)`.
     ///
@@ -564,6 +593,10 @@ impl Capability<Domain> {
     /// - `SubHandle`: the child's stable tree identity (auto-allocated from the
     ///   parent capability's counter).  Pass this to [`revoke_memory_child`] to
     ///   revoke the child even after it has been sent to another domain.
+    ///
+    ///
+    /// The domain-level checks (frozen handle, ownership) are performed here before
+    /// delegating to the low-level primitive, keeping domain logic in the domain-mediated layer.
     pub fn carve_memory(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
@@ -589,24 +622,44 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 4. Auto-allocate new LocalHandle in caller's table
-        let new_handle = caller.read().data.allocate_memory_handle();
+        // Optimization: if carved rights == parent rights, the view cannot change.
+        // The parent subtracts the carved range; the child adds it back at the same rights.
+        // Net contribution to the domain's view is zero regardless of other caps.
+        let parent_rights = parent_ref.read().data.access.rights;
+        let same_rights = access.rights == parent_rights;
 
-        // 5. Carve child — SubHandle auto-allocated from parent's counter
-        let (child_ref, updates) =
-            Capability::carve_child(&parent_ref, access, owner_id)?;
+        // Snapshot the view BEFORE the mutation (only needed when rights differ).
+        let view_before = if !same_rights {
+            Some(compute_address_space(caller))
+        } else {
+            None
+        };
+
+        // 4. Carve child — SubHandle auto-allocated from parent's counter.
+        // LocalHandle is only allocated after this succeeds to avoid gaps on error.
+        let child_ref = Capability::carve_child(&parent_ref, access, owner_id)?;
 
         // Capture the auto-assigned sub_handle for the caller
         let child_sub = child_ref.read().sub_handle;
 
+        // 5. Auto-allocate new LocalHandle in caller's table
+        let new_handle = caller.read().data.allocate_memory_handle();
+
         // 6. Set owner_domain on child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
 
-        // 7. Register child in caller's table
-        caller
-            .write()
-            .data
-            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        // 7. Register child in caller's table + refresh cache.
+        {
+            let mut w = caller.write();
+            w.data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+            refresh_domain_view(&mut *w);
+        }
+        let updates = if let Some(before) = view_before {
+            let after = compute_address_space(caller);
+            view_diff(owner_id, &before, &after)
+        } else {
+            UpdateBatch::new()
+        };
 
         Ok((new_handle, child_sub, updates))
     }
@@ -614,6 +667,8 @@ impl Capability<Domain> {
     /// Alias a memory sub-region.  Returns `(LocalHandle, SubHandle)`.
     ///
     /// See [`carve_memory`] for the meaning of each return value.
+    /// The domain-level checks (frozen handle, ownership) are performed here before
+    /// delegating to the low-level primitive, keeping domain logic in the domain-mediated layer.
     pub fn alias_memory(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
@@ -639,23 +694,25 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 4. Auto-allocate new LocalHandle in caller's table
-        let new_handle = caller.read().data.allocate_memory_handle();
-
-        // 5. Alias child — SubHandle auto-allocated from parent's counter
+        // 4. Alias child — SubHandle auto-allocated from parent's counter.
+        // LocalHandle is only allocated after this succeeds to avoid gaps on error.
         let child_ref = Capability::alias_child(&parent_ref, access, owner_id)?;
 
         // Capture the auto-assigned sub_handle for the caller
         let child_sub = child_ref.read().sub_handle;
 
+        // 5. Auto-allocate new LocalHandle in caller's table
+        let new_handle = caller.read().data.allocate_memory_handle();
+
         // 6. Set owner_domain on child
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
 
-        // 7. Register child in caller's table
-        caller
-            .write()
-            .data
-            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        // 7. Register child in caller's table + refresh cache.
+        {
+            let mut w = caller.write();
+            w.data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+            refresh_domain_view(&mut *w);
+        }
 
         Ok((new_handle, child_sub))
     }
@@ -750,39 +807,41 @@ impl Capability<Domain> {
             // reading any mutable cap fields (owner, owner_domain).  Only
             // after the remove is cap exclusively ours and safe to inspect.
 
-            // 3u. Atomic commit: frozen check + remove under one write lock.
+            // 3u. Snapshot caller view BEFORE the atomic remove.
+            // Must happen before we hold the write lock (read + write is a deadlock
+            // with non-reentrant RwLocks).
+            let view_caller_before = compute_address_space(caller);
+
+            // 4u. Atomic commit: frozen check + remove + cache refresh under one write lock.
             let cap_weak = {
                 let mut caller_w = caller.write();
                 if caller_w.data.is_memory_handle_frozen(cap) {
                     return Err(CapaError::PermissionDenied);
                 }
-                caller_w
+                let weak = caller_w
                     .data
                     .remove_memory_capability(cap)
-                    .ok_or(CapaError::NotFound)?
+                    .ok_or(CapaError::NotFound)?;
+                refresh_domain_view(&mut *caller_w);
+                weak
             };
             let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
 
-            // 4u. Ownership and API checks — cap is exclusively ours now.
+            // 5u. Ownership and API checks — cap is exclusively ours now.
             if cap_ref.read().owned.owner != caller_id {
                 return Err(CapaError::PermissionDenied);
             }
             cap_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
 
-            let (skip_unmap, cap_access) = {
-                let cap = cap_ref.read();
-                let skip_unmap = if let Some(parent_ref) = cap.get_parent() {
-                    parent_ref.read().owned.owner == caller_id
-                } else {
-                    false
-                };
-                (skip_unmap, cap.data.access)
-            };
+            let cap_access = cap_ref.read().data.access;
 
             let receiver_id = receiver.read().data.id;
             let new_handle = receiver.read().data.allocate_memory_handle();
 
-            // Update cap ownership
+            // Snapshot receiver view BEFORE the cap is registered.
+            let view_receiver_before = compute_address_space(&receiver);
+
+            // 6u. Update cap ownership.
             {
                 let mut cap = cap_ref.write();
                 cap.owned.owner = receiver_id;
@@ -790,26 +849,24 @@ impl Capability<Domain> {
                 cap.owned.owner_domain = Some(Arc::downgrade(&receiver));
             }
 
-            // Register in receiver's table
-            receiver
-                .write()
-                .data
-                .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
-
-            // Build update batch
-            let mut updates = UpdateBatch::new();
-            if !skip_unmap {
-                updates.add_unmap(caller_id, cap_access.start, cap_access.size);
+            // 7u. Register in receiver's table + refresh cache.
+            {
+                let mut recv_w = receiver.write();
+                recv_w.data.add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+                refresh_domain_view(&mut *recv_w);
             }
-            updates.add_map(
+
+            // 8u. Build update batch via view diff.
+            let view_caller_after = compute_address_space(caller);
+            let view_receiver_after = compute_address_space(&receiver);
+
+            let _ = cap_access; // suppress unused warning — kept for context
+            let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
+            updates.merge(view_diff(
                 receiver_id,
-                cap_access.start,
-                cap_access.size,
-                cap_access.start,
-                cap_access.rights.read(),
-                cap_access.rights.write(),
-                cap_access.rights.execute(),
-            );
+                &view_receiver_before,
+                &view_receiver_after,
+            ));
 
             Ok(updates)
         }
@@ -852,25 +909,19 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        // 3. Collect cap info before modification (skip_unmap logic)
-        let (skip_unmap, cap_access) = {
-            let cap = cap_ref.read();
-            let skip_unmap = if let Some(parent_ref) = cap.get_parent() {
-                parent_ref.read().owned.owner == sender_domain_id
-            } else {
-                false
-            };
-            (skip_unmap, cap.data.access)
-        };
+        // 3. Snapshot views BEFORE any mutation.
+        let view_sender_before = compute_address_space(&sender_ref);
+        let view_receiver_before = compute_address_space(receiver);
 
         let receiver_id = receiver.read().data.id;
         let new_handle = receiver.read().data.allocate_memory_handle();
 
-        // 4. Remove cap from sender's tables
+        // 4. Remove cap from sender's tables + refresh sender cache.
         {
             let mut s = sender_ref.write();
             s.data.remove_memory_capability(sender_handle);
             s.data.unfreeze_memory_handle(sender_handle);
+            refresh_domain_view(&mut *s);
         }
 
         // 6. Update cap ownership
@@ -880,26 +931,23 @@ impl Capability<Domain> {
             cap.owned.owner_domain = Some(Arc::downgrade(receiver));
         }
 
-        // 7. Register in receiver's table
-        receiver
-            .write()
-            .data
-            .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
-
-        // 8. Build update batch
-        let mut updates = UpdateBatch::new();
-        if !skip_unmap {
-            updates.add_unmap(sender_domain_id, cap_access.start, cap_access.size);
+        // 7. Register in receiver's table + refresh cache.
+        {
+            let mut recv_w = receiver.write();
+            recv_w.data.add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
+            refresh_domain_view(&mut *recv_w);
         }
-        updates.add_map(
+
+        // 8. Build update batch via view diff.
+        let view_sender_after = compute_address_space(&sender_ref);
+        let view_receiver_after = compute_address_space(receiver);
+
+        let mut updates = view_diff(sender_domain_id, &view_sender_before, &view_sender_after);
+        updates.merge(view_diff(
             receiver_id,
-            cap_access.start,
-            cap_access.size,
-            cap_access.start,
-            cap_access.rights.read(),
-            cap_access.rights.write(),
-            cap_access.rights.execute(),
-        );
+            &view_receiver_before,
+            &view_receiver_after,
+        ));
 
         Ok((new_handle, updates))
     }
@@ -960,7 +1008,15 @@ impl Capability<Domain> {
         }
 
         // 4. Revoke child by its SubHandle (unique, stable, tree-level identity)
-        Capability::revoke_child(&parent_ref, child_sub)
+        let updates = Capability::revoke_child(&parent_ref, child_sub)?;
+
+        // Refresh caller's cache — the revoked cap's weak ref is now dead.
+        {
+            let mut w = caller.write();
+            refresh_domain_view(&mut *w);
+        }
+
+        Ok(updates)
     }
 
     /// Seal the domain identified by cap handle.
@@ -1083,26 +1139,37 @@ impl Capability<Domain> {
             // Find caller VP running on this core.
             let caller_vp_arc = {
                 let c = caller.read();
-                c.data
-                    .find_vp_on_core(core_id)
-                    .ok_or_else(|| CapaError::InvalidOperation("no VP running on this core".to_string()))?
+                c.data.find_vp_on_core(core_id).ok_or_else(|| {
+                    CapaError::InvalidOperation("no VP running on this core".to_string())
+                })?
             };
             let caller_vp_id = caller_vp_arc.id;
 
             // Read caller VP's saved caller context.
             let prev_ctx = {
                 match &*caller_vp_arc.run_state.read() {
-                    VpRunState::Running { caller: Some(ctx), .. } => ctx.clone(),
+                    VpRunState::Running {
+                        caller: Some(ctx), ..
+                    } => ctx.clone(),
                     VpRunState::Running { caller: None, .. } => {
-                        return Err(CapaError::InvalidOperation("no caller to return to".to_string()));
+                        return Err(CapaError::InvalidOperation(
+                            "no caller to return to".to_string(),
+                        ));
                     }
-                    _ => return Err(CapaError::InvalidOperation("caller VP not in Running state".to_string())),
+                    _ => {
+                        return Err(CapaError::InvalidOperation(
+                            "caller VP not in Running state".to_string(),
+                        ))
+                    }
                 }
             };
 
             let prev_domain_id = prev_ctx.domain_id;
             let prev_vp_id = prev_ctx.vp_id;
-            let prev_domain_ref = prev_ctx.domain.upgrade().ok_or(CapaError::PermissionDenied)?;
+            let prev_domain_ref = prev_ctx
+                .domain
+                .upgrade()
+                .ok_or(CapaError::PermissionDenied)?;
 
             // Clone previous VP Arc (brief read lock on domain).
             let prev_vp_arc = {
@@ -1118,14 +1185,18 @@ impl Capability<Domain> {
             // Verify previous VP is Locked waiting for this callee, extract its caller.
             let prev_prev_caller = {
                 match &*prev_vp_arc.run_state.read() {
-                    VpRunState::Locked { callee_domain_id, callee_vp_id, prev_caller }
-                        if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id =>
-                    {
+                    VpRunState::Locked {
+                        callee_domain_id,
+                        callee_vp_id,
+                        prev_caller,
+                    } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {
                         prev_caller.clone()
                     }
-                    _ => return Err(CapaError::InvalidOperation(
-                        "previous VP is not locked waiting for this callee".to_string(),
-                    )),
+                    _ => {
+                        return Err(CapaError::InvalidOperation(
+                            "previous VP is not locked waiting for this callee".to_string(),
+                        ))
+                    }
                 }
             };
 
@@ -1166,9 +1237,9 @@ impl Capability<Domain> {
             // Find caller VP running on this core.
             let caller_vp_arc = {
                 let c = caller.read();
-                c.data
-                    .find_vp_on_core(core_id)
-                    .ok_or_else(|| CapaError::InvalidOperation("no VP running on this core".to_string()))?
+                c.data.find_vp_on_core(core_id).ok_or_else(|| {
+                    CapaError::InvalidOperation("no VP running on this core".to_string())
+                })?
             };
             let caller_vp_id = caller_vp_arc.id;
             let caller_id = caller.read().data.id;
@@ -1209,7 +1280,11 @@ impl Capability<Domain> {
             let caller_prev_caller = {
                 match &*caller_vp_arc.run_state.read() {
                     VpRunState::Running { caller: prev, .. } => prev.clone(),
-                    _ => return Err(CapaError::InvalidOperation("caller VP not in Running state".to_string())),
+                    _ => {
+                        return Err(CapaError::InvalidOperation(
+                            "caller VP not in Running state".to_string(),
+                        ))
+                    }
                 }
             };
 
@@ -1220,19 +1295,25 @@ impl Capability<Domain> {
                 let mut state = to_vp_arc.run_state.write();
 
                 // Extract callee info before overwriting state (borrow ends here).
-                let callee_info =
-                    if let VpRunState::Suspended { callee_domain, callee_vp_id, .. } = &*state {
-                        Some((callee_domain.clone(), *callee_vp_id))
-                    } else {
-                        None
-                    };
+                let callee_info = if let VpRunState::Suspended {
+                    callee_domain,
+                    callee_vp_id,
+                    ..
+                } = &*state
+                {
+                    Some((callee_domain.clone(), *callee_vp_id))
+                } else {
+                    None
+                };
 
                 // Verify the VP is claimable.
                 match &*state {
                     VpRunState::Available | VpRunState::Suspended { .. } => {}
-                    _ => return Err(CapaError::InvalidOperation(
-                        "target VP is not available".to_string(),
-                    )),
+                    _ => {
+                        return Err(CapaError::InvalidOperation(
+                            "target VP is not available".to_string(),
+                        ))
+                    }
                 }
 
                 *state = VpRunState::Running {
@@ -1346,17 +1427,21 @@ impl Capability<Domain> {
 
         // Build call chain: chain[0] = leaf (Running), chain[n-1] = handler (Locked).
         // Each element: (domain_cap, domain_id, vp_arc).
-        let mut chain: Vec<(CapabilityRef<Domain>, u64, VProcessorRef)> = vec![
-            (interrupted_cap.clone(), interrupted_domain_id, leaf_vp_arc.clone()),
-        ];
+        let mut chain: Vec<(CapabilityRef<Domain>, u64, VProcessorRef)> = vec![(
+            interrupted_cap.clone(),
+            interrupted_domain_id,
+            leaf_vp_arc.clone(),
+        )];
 
         // Seed: read caller context from leaf VP.
         let mut next_ctx: Option<VpCallContext> = {
             match &*leaf_vp_arc.run_state.read() {
                 VpRunState::Running { caller, .. } => caller.clone(),
-                _ => return Err(CapaError::InvalidOperation(
-                    "leaf VP not Running during interrupt delivery".to_string(),
-                )),
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "leaf VP not Running during interrupt delivery".to_string(),
+                    ))
+                }
             }
         };
 
@@ -1394,9 +1479,11 @@ impl Capability<Domain> {
             next_ctx = {
                 match &*vp_arc.run_state.read() {
                     VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                    _ => return Err(CapaError::InvalidOperation(
-                        "expected Locked VP in interrupt call chain".to_string(),
-                    )),
+                    _ => {
+                        return Err(CapaError::InvalidOperation(
+                            "expected Locked VP in interrupt call chain".to_string(),
+                        ))
+                    }
                 }
             };
         }
@@ -1437,9 +1524,11 @@ impl Capability<Domain> {
         let handler_prev_caller = {
             match &*chain[n - 1].2.run_state.read() {
                 VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                _ => return Err(CapaError::InvalidOperation(
-                    "handler VP not in Locked state".to_string(),
-                )),
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "handler VP not in Locked state".to_string(),
+                    ))
+                }
             }
         };
         *chain[n - 1].2.run_state.write() = VpRunState::Running {
@@ -1460,4 +1549,3 @@ impl Capability<Domain> {
         })
     }
 }
-

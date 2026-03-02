@@ -206,7 +206,9 @@ fn test_carve_from_exclusive_is_exclusive() {
     let region = MemoryRegion::new_root(0x0, 0x10000);
     assert_eq!(region.status, RegionStatus::Exclusive);
 
-    let carved = region.carve(Access::new(0x1000, 0x1000, Rights::R)).unwrap();
+    let carved = region
+        .carve(Access::new(0x1000, 0x1000, Rights::R))
+        .unwrap();
     assert_eq!(carved.status, RegionStatus::Exclusive);
 }
 
@@ -217,7 +219,9 @@ fn test_carve_from_aliased_is_aliased() {
 
     assert_eq!(aliased_parent.status, RegionStatus::Aliased);
 
-    let carved = aliased_parent.carve(Access::new(0x1000, 0x1000, Rights::R)).unwrap();
+    let carved = aliased_parent
+        .carve(Access::new(0x1000, 0x1000, Rights::R))
+        .unwrap();
     assert_eq!(carved.status, RegionStatus::Aliased); // Inherits from parent
 }
 
@@ -225,11 +229,15 @@ fn test_carve_from_aliased_is_aliased() {
 fn test_alias_always_aliased() {
     let region = MemoryRegion::new_root(0x0, 0x10000);
 
-    let aliased1 = region.alias(Access::new(0x1000, 0x1000, Rights::R)).unwrap();
+    let aliased1 = region
+        .alias(Access::new(0x1000, 0x1000, Rights::R))
+        .unwrap();
     assert_eq!(aliased1.status, RegionStatus::Aliased);
 
     // Alias from an alias
-    let aliased2 = aliased1.alias(Access::new(0x1000, 0x500, Rights::R)).unwrap();
+    let aliased2 = aliased1
+        .alias(Access::new(0x1000, 0x500, Rights::R))
+        .unwrap();
     assert_eq!(aliased2.status, RegionStatus::Aliased);
 }
 
@@ -287,7 +295,7 @@ fn test_large_memory_region() {
 #[test]
 fn test_multiple_attributes() {
     let attrs = Attributes::from_bits(
-        Attributes::HASH | Attributes::CLEAN | Attributes::VITAL | Attributes::META
+        Attributes::HASH | Attributes::CLEAN | Attributes::VITAL | Attributes::META,
     );
 
     let region = MemoryRegion::new_root(0, 0x1000);

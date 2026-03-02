@@ -69,7 +69,10 @@ impl fmt::Display for CapaError {
             CapaError::InvalidRemapping => write!(f, "Invalid remapping"),
             CapaError::AlreadyExists => write!(f, "Resource already exists"),
             CapaError::MonotonicityViolation => {
-                write!(f, "Monotonicity violation: child exceeds parent permissions")
+                write!(
+                    f,
+                    "Monotonicity violation: child exceeds parent permissions"
+                )
             }
             CapaError::ApiNotAllowed => {
                 write!(f, "Operation not allowed by domain's MonitorAPI")

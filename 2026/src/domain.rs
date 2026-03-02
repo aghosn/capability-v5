@@ -1,10 +1,11 @@
 //! Domain capabilities and policies
 
+use crate::capability::{CapabilityRef, CapabilityWeak, LocalHandle};
 use crate::error::{CapaError, Result};
-use crate::capability::{CapabilityWeak, LocalHandle};
 use crate::memory::MemoryRegion;
 use crate::sync::RwLock;
 use crate::update::CoreId;
+use crate::view::{compute_view_from_cap_arcs, AddressSpaceView};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -59,7 +60,9 @@ impl MonitorAPI {
 
     /// Create from raw bits
     pub const fn from_bits(bits: u16) -> Self {
-        MonitorAPI { bits: bits & 0x1FFF }
+        MonitorAPI {
+            bits: bits & 0x1FFF,
+        }
     }
 
     /// Get raw bits
@@ -206,7 +209,7 @@ pub enum VpRunState {
         /// The VP context that switched to us (None = no call-chain predecessor).
         caller: Option<VpCallContext>,
     },
-    /// VP is blocked because it called switch_domain; waiting for the callee to return.
+    /// VP is locked because it called switch_domain; waiting for the callee to return.
     Locked {
         callee_domain_id: u64,
         callee_vp_id: u64,
@@ -388,6 +391,9 @@ pub struct Domain {
     /// Handles that have been frozen (sent but not yet accepted/rejected)
     pub frozen_handles: BTreeSet<LocalHandle>,
 
+    /// Cached address-space view (kept up-to-date by all capability mutations)
+    pub cached_view: AddressSpaceView,
+
     /// Next pending capability ID
     next_pending_id: u64,
 }
@@ -395,14 +401,16 @@ pub struct Domain {
 impl Domain {
     /// Create a new unsealed domain
     pub fn new(policy: DomainPolicy) -> Self {
+        let id = generate_domain_id();
         Domain {
-            id: generate_domain_id(),
+            id,
             status: DomainStatus::Unsealed,
             policy,
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
+            cached_view: AddressSpaceView::new(id),
             next_pending_id: 0,
         }
     }
@@ -417,6 +425,7 @@ impl Domain {
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
+            cached_view: AddressSpaceView::new(0),
             next_pending_id: 0,
         };
         d.create_vprocessors();
@@ -436,7 +445,9 @@ impl Domain {
     /// Allocate VP Arc objects according to `policy.num_vprocessors`.
     fn create_vprocessors(&mut self) {
         for id in 0..self.policy.num_vprocessors as u64 {
-            self.policy.vprocessor_states.push(Arc::new(VProcessorState::new(id)));
+            self.policy
+                .vprocessor_states
+                .push(Arc::new(VProcessorState::new(id)));
         }
     }
 
@@ -463,8 +474,13 @@ impl Domain {
     }
 
     /// Register a memory capability owned by this domain
-    pub fn add_memory_capability(&mut self, handle: LocalHandle, capa: CapabilityWeak<MemoryRegion>) {
+    pub fn add_memory_capability(
+        &mut self,
+        handle: LocalHandle,
+        capa: CapabilityWeak<MemoryRegion>,
+    ) {
         self.memory_capabilities.insert(handle, capa);
+        self.refresh_view();
     }
 
     /// Register a domain capability owned by this domain
@@ -473,17 +489,28 @@ impl Domain {
     }
 
     /// Remove a memory capability from tracking
-    pub fn remove_memory_capability(&mut self, handle: LocalHandle) -> Option<CapabilityWeak<MemoryRegion>> {
-        self.memory_capabilities.remove(&handle)
+    pub fn remove_memory_capability(
+        &mut self,
+        handle: LocalHandle,
+    ) -> Option<CapabilityWeak<MemoryRegion>> {
+        let result = self.memory_capabilities.remove(&handle);
+        self.refresh_view();
+        result
     }
 
     /// Remove a domain capability from tracking
-    pub fn remove_domain_capability(&mut self, handle: LocalHandle) -> Option<CapabilityWeak<Domain>> {
+    pub fn remove_domain_capability(
+        &mut self,
+        handle: LocalHandle,
+    ) -> Option<CapabilityWeak<Domain>> {
         self.domain_capabilities.remove(&handle)
     }
 
     /// Get a memory capability by handle
-    pub fn get_memory_capability(&self, handle: LocalHandle) -> Option<&CapabilityWeak<MemoryRegion>> {
+    pub fn get_memory_capability(
+        &self,
+        handle: LocalHandle,
+    ) -> Option<&CapabilityWeak<MemoryRegion>> {
         self.memory_capabilities.get(&handle)
     }
 
@@ -505,7 +532,9 @@ impl Domain {
     /// Allocate the next available handle for a memory capability
     pub fn allocate_memory_handle(&self) -> LocalHandle {
         let mut handle: LocalHandle = 1;
-        while self.memory_capabilities.contains_key(&handle) || self.frozen_handles.contains(&handle) {
+        while self.memory_capabilities.contains_key(&handle)
+            || self.frozen_handles.contains(&handle)
+        {
             handle += 1;
         }
         handle
@@ -533,6 +562,21 @@ impl Domain {
     /// Check if a memory handle is frozen
     pub fn is_memory_handle_frozen(&self, handle: LocalHandle) -> bool {
         self.frozen_handles.contains(&handle)
+    }
+
+    /// Recompute the cached address-space view from the current memory_capabilities table.
+    fn refresh_view(&mut self) {
+        // Under loom, skip the O(N) lock-acquisition walk — view correctness is
+        // covered by integration tests; loom only checks concurrency invariants.
+        #[cfg(not(loom))]
+        {
+            let cap_arcs: alloc::vec::Vec<CapabilityRef<MemoryRegion>> = self
+                .memory_capabilities
+                .values()
+                .filter_map(|w| w.upgrade())
+                .collect();
+            self.cached_view = compute_view_from_cap_arcs(self.id, &cap_arcs);
+        }
     }
 
     /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)

@@ -1,5 +1,6 @@
 //! Tests for update batch operations
 
+use capability_engine::memory::Rights;
 use capability_engine::*;
 use std::sync::Arc;
 
@@ -8,8 +9,8 @@ use std::sync::Arc;
 #[test]
 fn test_update_batch() {
     let mut batch = UpdateBatch::new();
-    batch.add_unmap(1, 0x1000, 0x1000);
-    batch.add_map(2, 0x2000, 0x1000, 0x10000, true, true, false);
+    batch.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch.add_change_rights(2, 0x2000, 0x1000, 0x10000, Rights::RW, false);
 
     assert_eq!(batch.len(), 2);
     assert_eq!(batch.affected_domains().len(), 2);
@@ -20,10 +21,10 @@ fn test_update_batch() {
 #[test]
 fn test_merge_batches() {
     let mut batch1 = UpdateBatch::new();
-    batch1.add_unmap(1, 0x1000, 0x1000);
+    batch1.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
 
     let mut batch2 = UpdateBatch::new();
-    batch2.add_map(2, 0x2000, 0x1000, 0x10000, true, false, false);
+    batch2.add_change_rights(2, 0x2000, 0x1000, 0x10000, Rights::R, false);
 
     batch1.merge(batch2);
     assert_eq!(batch1.len(), 2);
@@ -41,8 +42,8 @@ fn test_empty_batch() {
 #[test]
 fn test_batch_clear() {
     let mut batch = UpdateBatch::new();
-    batch.add_unmap(1, 0x1000, 0x1000);
-    batch.add_map(2, 0x2000, 0x1000, 0x10000, true, true, false);
+    batch.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch.add_change_rights(2, 0x2000, 0x1000, 0x10000, Rights::RW, false);
 
     assert!(!batch.is_empty());
 
@@ -58,47 +59,55 @@ fn test_batch_clear() {
 #[test]
 fn test_unmap_update() {
     let mut batch = UpdateBatch::new();
-    batch.add_unmap(5, 0x1000, 0x2000);
+    batch.add_change_rights(5, 0x1000, 0x2000, 0x1000, Rights::NONE, true);
 
     let updates = batch.updates();
     assert_eq!(updates.len(), 1);
 
-    if let Update::Unmap { domain, address, size } = &updates[0] {
+    if let Update::ChangeRights {
+        domain,
+        address,
+        size,
+        rights,
+        ..
+    } = &updates[0]
+    {
         assert_eq!(*domain, 5);
         assert_eq!(*address, 0x1000);
         assert_eq!(*size, 0x2000);
+        assert_eq!(*rights, Rights::NONE);
     } else {
-        panic!("Expected Unmap update");
+        panic!("Expected ChangeRights update");
     }
 }
 
 #[test]
 fn test_map_update() {
     let mut batch = UpdateBatch::new();
-    batch.add_map(10, 0x3000, 0x1000, 0x50000, true, false, true);
+    batch.add_change_rights(10, 0x3000, 0x1000, 0x50000, Rights::RX, false);
 
     let updates = batch.updates();
     assert_eq!(updates.len(), 1);
 
-    if let Update::Map {
+    if let Update::ChangeRights {
         domain,
         address,
         size,
         physical,
-        read,
-        write,
-        execute,
+        rights,
+        shootdown_required,
     } = &updates[0]
     {
         assert_eq!(*domain, 10);
         assert_eq!(*address, 0x3000);
         assert_eq!(*size, 0x1000);
         assert_eq!(*physical, 0x50000);
-        assert_eq!(*read, true);
-        assert_eq!(*write, false);
-        assert_eq!(*execute, true);
+        assert_eq!(rights.read(), true);
+        assert_eq!(rights.write(), false);
+        assert_eq!(rights.execute(), true);
+        assert_eq!(*shootdown_required, false);
     } else {
-        panic!("Expected Map update");
+        panic!("Expected ChangeRights update");
     }
 }
 
@@ -144,9 +153,9 @@ fn test_zero_memory_update() {
 fn test_multiple_updates_same_domain() {
     let mut batch = UpdateBatch::new();
 
-    batch.add_unmap(1, 0x1000, 0x1000);
-    batch.add_unmap(1, 0x2000, 0x1000);
-    batch.add_map(1, 0x3000, 0x1000, 0x10000, true, true, false);
+    batch.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch.add_change_rights(1, 0x2000, 0x1000, 0x2000, Rights::NONE, true);
+    batch.add_change_rights(1, 0x3000, 0x1000, 0x10000, Rights::RW, false);
 
     assert_eq!(batch.len(), 3);
     assert_eq!(batch.affected_domains().len(), 1);
@@ -157,8 +166,8 @@ fn test_multiple_updates_same_domain() {
 fn test_multiple_updates_different_domains() {
     let mut batch = UpdateBatch::new();
 
-    batch.add_unmap(1, 0x1000, 0x1000);
-    batch.add_map(2, 0x2000, 0x1000, 0x10000, true, false, false);
+    batch.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch.add_change_rights(2, 0x2000, 0x1000, 0x10000, Rights::R, false);
     batch.add_revoke_domain(3);
 
     assert_eq!(batch.len(), 3);
@@ -176,12 +185,14 @@ fn test_carve_generates_updates() {
     let root = Capability::new_root(0, 0, root_domain);
     let total_mem = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 1, total_mem);
-    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
+    root.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&mem_root));
 
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let child_access = Access::new(0x1000, 0x1000, Rights::RWX);
     let (_child_h, _child_sub, updates) = Capability::carve_memory(&root, 1, child_access).unwrap();
 
-    // Carve with same owner generates NO updates
+    // Carve with same rights as parent generates NO updates (fast path)
     assert!(updates.is_empty());
 }
 
@@ -191,7 +202,9 @@ fn test_revoke_generates_updates() {
     let root = Capability::new_root(0, 0, root_domain);
     let total_mem = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 1, total_mem);
-    root.write().data.add_memory_capability(1, Arc::downgrade(&mem_root));
+    root.write()
+        .data
+        .add_memory_capability(1, Arc::downgrade(&mem_root));
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (_child_h, child_sub, _) = Capability::carve_memory(&root, 1, child_access).unwrap();
@@ -209,8 +222,8 @@ fn test_affected_domain_tracking() {
     let mut batch = UpdateBatch::new();
 
     // Add updates for different domains
-    batch.add_unmap(1, 0x1000, 0x1000);
-    batch.add_map(2, 0x2000, 0x1000, 0x10000, true, false, false);
+    batch.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch.add_change_rights(2, 0x2000, 0x1000, 0x10000, Rights::R, false);
     batch.add_revoke_domain(3);
     batch.add_zero_memory(0x5000, 0x1000); // No domain
 
@@ -225,12 +238,12 @@ fn test_affected_domain_tracking() {
 #[test]
 fn test_merge_combines_affected_domains() {
     let mut batch1 = UpdateBatch::new();
-    batch1.add_unmap(1, 0x1000, 0x1000);
-    batch1.add_unmap(2, 0x2000, 0x1000);
+    batch1.add_change_rights(1, 0x1000, 0x1000, 0x1000, Rights::NONE, true);
+    batch1.add_change_rights(2, 0x2000, 0x1000, 0x2000, Rights::NONE, true);
 
     let mut batch2 = UpdateBatch::new();
-    batch2.add_map(3, 0x3000, 0x1000, 0x10000, true, false, false);
-    batch2.add_map(4, 0x4000, 0x1000, 0x20000, true, false, false);
+    batch2.add_change_rights(3, 0x3000, 0x1000, 0x10000, Rights::R, false);
+    batch2.add_change_rights(4, 0x4000, 0x1000, 0x20000, Rights::R, false);
 
     batch1.merge(batch2);
 

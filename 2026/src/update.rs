@@ -1,9 +1,10 @@
 //! Update tracking for domain address space modifications
 
+use crate::memory::Rights;
+use crate::sync::RwLock;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::RwLock;
 
 /// A domain identifier
 pub type DomainId = u64;
@@ -14,39 +15,26 @@ pub type CoreId = u64;
 /// Types of updates that affect domain address spaces
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
-    /// Unmap a memory range in a domain
-    Unmap {
-        domain: DomainId,
-        address: u64,
-        size: u64,
-    },
-
-    /// Map a memory range in a domain
-    Map {
-        domain: DomainId,
-        address: u64,
-        size: u64,
-        physical: u64,
-        read: bool,
-        write: bool,
-        execute: bool,
-    },
-
-    /// Change access rights for a memory range
+    /// Set access rights for a memory range in a domain.
+    /// `rights == Rights::NONE` means no access (full unmap).
+    /// `shootdown_required` must be `true` when rights are being reduced or the
+    /// mapping is being fully removed — the platform must perform a TLB shootdown
+    /// before allowing any receiver to proceed.
+    /// `shootdown_required` must be `false` for additive changes (new mapping or
+    /// rights upgrade) — no shootdown needed.
+    /// `physical` is the backing physical address; ignored by the platform when
+    /// `rights == Rights::NONE`.
     ChangeRights {
         domain: DomainId,
         address: u64,
         size: u64,
-        read: bool,
-        write: bool,
-        execute: bool,
+        physical: u64,
+        rights: Rights,
+        shootdown_required: bool,
     },
 
     /// Zero memory region (for clean attribute)
-    ZeroMemory {
-        address: u64,
-        size: u64,
-    },
+    ZeroMemory { address: u64, size: u64 },
 
     /// Revoke a domain entirely.
     /// `fallback` is the first non-revoked ancestor domain ID computed by the
@@ -59,18 +47,14 @@ pub enum Update {
     },
 
     /// Flush TLB for a domain
-    FlushTLB {
-        domain: DomainId,
-    },
+    FlushTLB { domain: DomainId },
 }
 
 impl Update {
     /// Get the domain ID affected by this update (if applicable)
     pub fn affected_domain(&self) -> Option<DomainId> {
         match self {
-            Update::Unmap { domain, .. }
-            | Update::Map { domain, .. }
-            | Update::ChangeRights { domain, .. }
+            Update::ChangeRights { domain, .. }
             | Update::RevokeDomain { domain, .. }
             | Update::FlushTLB { domain } => Some(*domain),
             Update::ZeroMemory { .. } => None,
@@ -105,37 +89,6 @@ impl UpdateBatch {
         self.updates.push(update);
     }
 
-    /// Add multiple unmap operations
-    pub fn add_unmap(&mut self, domain: DomainId, address: u64, size: u64) {
-        self.add(Update::Unmap {
-            domain,
-            address,
-            size,
-        });
-    }
-
-    /// Add multiple map operations
-    pub fn add_map(
-        &mut self,
-        domain: DomainId,
-        address: u64,
-        size: u64,
-        physical: u64,
-        read: bool,
-        write: bool,
-        execute: bool,
-    ) {
-        self.add(Update::Map {
-            domain,
-            address,
-            size,
-            physical,
-            read,
-            write,
-            execute,
-        });
-    }
-
     /// Add domain revocation with no pre-computed fallback (platform looks up parent)
     pub fn add_revoke_domain(&mut self, domain: DomainId) {
         self.add_revoke_domain_with_fallback(domain, None);
@@ -145,13 +98,37 @@ impl UpdateBatch {
     /// `fallback` is the first non-revoked ancestor; passed to the platform's
     /// `on_domain_revoked` so it can redirect any core running `domain` without
     /// needing CDT access. Must be `None` for vital-memory-triggered revocations.
-    pub fn add_revoke_domain_with_fallback(&mut self, domain: DomainId, fallback: Option<DomainId>) {
+    pub fn add_revoke_domain_with_fallback(
+        &mut self,
+        domain: DomainId,
+        fallback: Option<DomainId>,
+    ) {
         self.add(Update::RevokeDomain { domain, fallback });
     }
 
     /// Add memory zeroing (for clean attribute)
     pub fn add_zero_memory(&mut self, address: u64, size: u64) {
         self.add(Update::ZeroMemory { address, size });
+    }
+
+    /// Add a change-rights update for a memory range
+    pub fn add_change_rights(
+        &mut self,
+        domain: DomainId,
+        address: u64,
+        size: u64,
+        physical: u64,
+        rights: Rights,
+        shootdown_required: bool,
+    ) {
+        self.add(Update::ChangeRights {
+            domain,
+            address,
+            size,
+            physical,
+            rights,
+            shootdown_required,
+        });
     }
 
     /// Get all updates in the batch
@@ -345,4 +322,3 @@ impl Default for UpdateProcessor {
         Self::new()
     }
 }
-

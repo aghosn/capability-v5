@@ -96,6 +96,10 @@ path = "tests/integration/send_pending.rs"
 name = "integration_interrupt"
 path = "tests/integration/interrupt.rs"
 
+[[test]]
+name = "integration_send_bugs"
+path = "tests/integration/send_bugs.rs"
+
 # ── concurrency tests ─────────────────────────────────────────────────────────
 [[test]]
 name = "concurrency_basic"
