@@ -37,8 +37,8 @@ pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
     let (mut maps, mut unmaps, mut zeros) = (0, 0, 0);
     for update in updates.updates() {
         match update {
-            Update::Map { .. } => maps += 1,
-            Update::Unmap { .. } => unmaps += 1,
+            Update::ChangeRights { rights, .. } if *rights == capability_engine::Rights::NONE => unmaps += 1,
+            Update::ChangeRights { .. } => maps += 1,
             Update::ZeroMemory { .. } => zeros += 1,
             _ => {}
         }
