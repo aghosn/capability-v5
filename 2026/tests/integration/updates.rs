@@ -128,7 +128,7 @@ fn test_complex_memory_update_scenario() {
     // r3_h_in_dom1 is auto-allocated (r1 at 1, r2 at 2, so r3 gets 3).
     // r3_h_in_dom1 is also r3's stable SubHandle used for revocation.
     let r3_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (r3_h_in_dom1, r3_sub) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
+    let (_r3_h_in_dom1, r3_sub) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
     println!("✓ Created r3 = [0x1000, 0x2000) RW as alias of r2");
 
     // Dom1.send(Dom2, r2) — Dom2 is unsealed → immediate transfer

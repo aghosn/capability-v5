@@ -57,7 +57,7 @@ fn test_concurrent_child_creation() {
 
             // Each thread creates 10 children
             for j in 0..10 {
-                let handle_id = (i * 10 + j) as u64;
+                let _handle_id = (i * 10 + j) as u64;
                 match Capability::create_child_domain(&root_clone, child_policy.clone(), i as u64) {
                     Ok(child) => {
                         let child_read = child.read();
@@ -196,7 +196,7 @@ fn test_concurrent_read_write_mix() {
         let handle = thread::spawn(move || {
             for j in 0..10 {
                 let child_policy = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
-                let handle_id = (i * 10 + j) as u64;
+                let _handle_id = (i * 10 + j) as u64;
                 match Capability::create_child_domain(&root_clone, child_policy, i as u64) {
                     Ok(_) => {
                         thread::sleep(Duration::from_micros(2));
@@ -370,7 +370,7 @@ fn test_stress_test_mixed_operations() {
     for i in 0..3 {
         let root_clone = Arc::clone(&root_shared);
         let handle = thread::spawn(move || {
-            for j in 0..20 {
+            for _j in 0..20 {
                 let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
                 let _ = Capability::create_child_domain(&root_clone, child_policy, i as u64);
                 thread::yield_now();

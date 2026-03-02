@@ -18,7 +18,7 @@ fn test_revoke_carved_child_never_sent() {
     let (root, _r0, r0_h) = bootstrap();
 
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, child_sub, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
+    let (_child_h, child_sub, _) = Capability::carve_memory(&root, r0_h, child_access).unwrap();
 
     // Revoke the child — it was never sent, so owner unchanged, no MMU updates
     let updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
@@ -78,7 +78,7 @@ fn test_revoke_aliased_child_no_remapping() {
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
     .unwrap();
-    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
+    let _dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
     let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
@@ -216,7 +216,7 @@ fn test_revoke_preserves_parent_rights() {
         DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     )
     .unwrap();
-    let dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
+    let _dom5 = root.read().data.domain_capabilities[&dom5_h].upgrade().unwrap();
 
     let _send = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 

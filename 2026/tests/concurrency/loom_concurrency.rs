@@ -1313,10 +1313,10 @@ fn loom_dm_concurrent_revokes() {
         let (dom, h_root, _root_mem) = dm_make_root(0x4000);
 
         // Sequential setup: carve two non-overlapping children.
-        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+        let (_h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
         ).expect("setup: carve child1");
-        let (h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
+        let (_h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
         ).expect("setup: carve child2");
 
@@ -1386,7 +1386,7 @@ fn loom_dm_send_vs_revoke_sibling() {
         let (h_c1, _, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x0000, 0x1000, Rights::RW),
         ).expect("setup: carve child1");
-        let (h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
+        let (_h_c2, sub_c2, _) = Capability::<Domain>::carve_memory(
             &dom, h_root, Access::new(0x2000, 0x1000, Rights::RW),
         ).expect("setup: carve child2");
 
