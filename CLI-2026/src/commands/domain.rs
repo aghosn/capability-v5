@@ -467,7 +467,6 @@ pub fn cmd_accept_capability(
     state.session.add_command(Command::AcceptCapability {
         domain: domain_name.to_string(),
         pending_id,
-        handle,
     });
 
     Ok(())

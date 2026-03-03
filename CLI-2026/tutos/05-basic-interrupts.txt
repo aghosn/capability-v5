@@ -1,92 +1,176 @@
-# Tutorial 5: Interrupt Routing and Policies
-# ===========================================
-# Demonstrates interrupt routing based on domain policies.
+# Tutorial 5: Interrupt Routing and VP Suspension
+# ================================================
+# Demonstrates interrupt routing and how interrupts suspend VP call chains.
 
-@msg ━━━ Tutorial 5: Interrupt Routing ━━━
+@msg ━━━ Tutorial 5: Interrupt Routing and VP Suspension ━━━
 @msg
-@msg This tutorial demonstrates hierarchical interrupt routing.
-@msg We'll configure interrupt policies and see how interrupts route up the domain tree.
+@msg This tutorial demonstrates:
+@msg   • Hierarchical interrupt routing (child → parent → root)
+@msg   • How an interrupt suspends the VP call chain
+@msg   • Why you cannot resume an interrupted VP arbitrarily
+@msg   • The correct recovery: reschedule the suspended caller first
 @msg
 
 # Initialize
 @msg 📋 Step 1: Set up domain hierarchy
 init root 0x200000
-create-domain root parent 0b1111 GET,ATTEST,SWITCH
+create-domain root parent 0b0001 GET,ATTEST,SWITCH
 
 @msg
-@msg ✓ Created parent domain
+@msg ✓ Created parent domain (1 VP for core 0)
 @msg
 
-# Give parent memory and seal it
-@msg 📋 Step 2: Allocate memory to parent and seal
+# Give parent memory
+@msg 📋 Step 2: Allocate memory to parent
 carve r0 parent_mem 0x80000 0x60000 RWX
 send parent_mem parent
+
+@msg
+@msg ✓ Parent has 384KB memory
+@msg
+
+# Configure parent's interrupt policy BEFORE sealing
+@msg 📋 Step 3: Configure parent interrupt policy (before sealing)
+@msg   • parent: NOTREPORT for vector 55 — routing continues up to root
+set-interrupt-policy parent 55 NOTREPORT
+
+@msg
+@msg ✓ Parent will not handle vector 55
+@msg
+
+# Seal parent
+@msg 📋 Step 4: Seal parent domain
 seal parent
 
 @msg
-@msg ✓ Parent sealed with 384KB memory
+@msg ✓ Parent sealed — VP[0] created and set to Available
 @msg
 
-# Create child domain (parent must be sealed first so parent creates it)
-@msg 📋 Step 3: Create child domain and seal it
-create-domain parent child 0b1111 GET,ATTEST,SWITCH
+# Create child domain under parent
+@msg 📋 Step 5: Create child domain under parent
+create-domain parent child 0b0001 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Child domain created under parent (1 VP for core 0)
+@msg
+
+# Configure child's interrupt policies BEFORE sealing
+@msg 📋 Step 6: Configure child interrupt policies (before sealing)
+@msg   • child: NOTREPORT for vector 55 — routing passes through to parent, then root
+@msg   • child: REPORT as default for all other vectors
+set-interrupt-policy child 55 NOTREPORT
+set-default-interrupt-policy child REPORT
+
+@msg
+@msg ✓ Vector 55 routing chain: child(NOTREPORT) → parent(NOTREPORT) → root(DELIVER)
+@msg ✓ Root always delivers interrupts that reach it (default policy)
+@msg
+
+# Seal child
+@msg 📋 Step 7: Seal child domain
 seal child
 
 @msg
 @msg ✓ All domains sealed and ready
 @msg
 
-# Set interrupt policies - child cannot handle interrupt 55
-@msg 📋 Step 4: Configure interrupt policies
-@msg   • child: NOTREPORT for vector 55 (cannot handle it)
-@msg   • parent: DELIVER for vector 55 (will handle it)
-set-interrupt-policy child 55 NOTREPORT
-set-interrupt-policy parent 55 DELIVER
-
-@msg
-@msg ✓ Configured: child ignores interrupt 55, parent handles it
-@msg
-
-# Switch to child on core 0 via parent (VP-aware: switch <domain> <core> <vp_id>)
-@msg 📋 Step 5: Switch to child domain on core 0 (root → parent → child)
+# Establish VP call chain on core 0
+@msg 📋 Step 8: Establish VP call chain on core 0
+@msg   root VP[0] calls into parent VP[0], which calls into child VP[0]
 switch parent 0 0
 switch child 0 0
 
 @msg
-@msg ✓ Core 0 now running child (switched via parent)
+@msg ✓ VP call chain established on core 0:
+@msg     root   VP[0]: Running → Locked  (called parent)
+@msg     parent VP[0]: Available → Locked  (called child)
+@msg     child  VP[0]: Available → Running (executing on core 0)
 @msg
 
-# Send interrupt to core 0
-@msg 📋 Step 6: Deliver interrupt 55 to core 0 (currently running child)
-interrupt 55 0
-
-@msg
-@msg ✓ Interrupt routed from child → parent
-@msg   Core automatically switched to parent (the handler)
-@msg
-
-# Check core status
-@msg 📋 Step 7: Verify core status after interrupt routing
+# Show state before interrupt
+@msg 📋 Step 9: Verify core 0 is running child
 list
 
 @msg
-@msg Notice: Core 0 now running 'parent' (automatically switched during routing)
-@msg
 
-# Set default policy
-@msg 📋 Step 8: Set default interrupt policy for all other vectors
-set-default-interrupt-policy child REPORT
+# Deliver interrupt 55 on core 0
+@msg 📋 Step 10: Deliver interrupt 55 to core 0 (child VP[0] is Running)
+interrupt 55 0
 
 @msg
-@msg ✓ Child will be notified of other interrupts but routing continues
+@msg ✓ Interrupt routed: child(NOTREPORT) → parent(NOTREPORT) → root(DELIVER)
+@msg
+@msg   The VP call chain was updated atomically:
+@msg     child  VP[0]: Running → Interrupted  (frozen — NOT directly resumable)
+@msg     parent VP[0]: Locked  → Suspended    (child's caller, awaiting reschedule)
+@msg     root   VP[0]: Locked  → Running      (interrupt handler, now on core 0)
 @msg
 
+# Show state after interrupt
+@msg 📋 Step 11: Verify core 0 is now running root (the interrupt handler)
+list
+
+@msg
+@msg ⚠️  child VP[0] is Interrupted and CANNOT be resumed directly.
+@msg   Its caller (parent VP[0]) is Suspended and has not been re-scheduled yet.
+@msg   The system enforces this to preserve call-chain integrity.
+@msg
+
+# Attempt to switch directly to child — this will FAIL
+@msg 📋 Step 12: Attempt direct switch to interrupted child (will fail)
+switch child 0 0
+
+@msg
+@msg ✗ As expected: direct switch to child failed.
+@msg   root has no capability handle for child (encapsulation), and even if it did,
+@msg   child VP[0] is Interrupted — unavailable until its Suspended caller
+@msg   (parent VP[0]) is re-scheduled first.
+@msg
+
+# Correct recovery: reschedule the suspended caller first
+@msg 📋 Step 13: Re-schedule parent VP[0] (Suspended → Running)
+@msg   Switching to a Suspended VP also frees its Interrupted callee to Available.
+switch parent 0 0
+
+@msg
+@msg ✓ parent VP[0]: Suspended → Running  (now on core 0)
+@msg ✓ child  VP[0]: Interrupted → Available  (freed automatically)
+@msg
+@msg   parent VP[0] is running again. child VP[0] is now Available and resumable.
+@msg
+
+# Now switching to child succeeds
+@msg 📋 Step 14: Resume child VP[0] (now Available)
+switch child 0 0
+
+@msg
+@msg ✓ child VP[0]: Available → Running  (restored on core 0)
+@msg   The full call chain is active again.
+@msg
+
+# Final state
+@msg 📋 Step 15: Final state — call chain fully restored
+list
+
+@msg
 @msg 📖 Key Takeaways:
-@msg   • DELIVER: Domain handles the interrupt (routing stops)
-@msg   • REPORT: Domain is notified but routing continues to parent
-@msg   • NOTREPORT: Domain skipped silently, routing continues
-@msg   • Interrupt routing is hierarchical (up the domain tree)
-@msg   • Core automatically switches to the handler domain
-@msg   • Per-vector and default policies provide fine-grained control
-@msg   • switch <domain> <core> <vp_id> is the VP-aware form
+@msg   Interrupt routing:
+@msg   • DELIVER: domain handles the interrupt (routing stops here)
+@msg   • REPORT: domain is notified, routing continues to parent
+@msg   • NOTREPORT: domain skipped silently, routing continues
+@msg   • Root always DELIVER — any interrupt that reaches root is handled
+@msg   • Set interrupt policies BEFORE sealing a domain
+@msg
+@msg   VP call-chain suspension:
+@msg   • interrupt 55 on core 0 walks the live VP chain to find the handler
+@msg   • Leaf VP (Running)            → Interrupted  (frozen)
+@msg   • Intermediate VPs (Locked)   → Suspended    (claimable, callee frozen)
+@msg   • Handler VP (Locked)         → Running      (woken to handle interrupt)
+@msg
+@msg   Recovery rule — you CANNOT switch to an Interrupted VP directly:
+@msg   1. First switch to its Suspended caller  (Suspended → Running, callee freed)
+@msg   2. Then switch to the now-Available VP   (Available → Running)
+@msg
+@msg   • switch <core>               — VP return (unwind one call step)
+@msg   • switch <domain> <core> <vp_id> — VP-aware forward switch
 @msg

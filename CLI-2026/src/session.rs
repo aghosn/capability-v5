@@ -31,7 +31,6 @@ pub enum Command {
     Send {
         mem: String,
         domain: String,
-        handle: u64,
         attrs: String,
     },
     Seal {
@@ -63,7 +62,6 @@ pub enum Command {
     AcceptCapability {
         domain: String,
         pending_id: u64,
-        handle: u64,
     },
     RejectCapability {
         domain: String,
@@ -111,7 +109,7 @@ impl Session {
                 Command::Alias { parent, name, start, size, rights } => {
                     format!("alias {} {} 0x{:x} 0x{:x} {}", parent, name, start, size, rights)
                 }
-                Command::Send { mem, domain, handle: _, attrs } => {
+                Command::Send { mem, domain, attrs } => {
                     format!("send {} {} {}", mem, domain, attrs)
                 }
                 Command::Seal { domain } => {
@@ -135,7 +133,7 @@ impl Session {
                 Command::EnumeratePending { domain } => {
                     format!("enumerate-pending {}", domain)
                 }
-                Command::AcceptCapability { domain, pending_id, handle: _ } => {
+                Command::AcceptCapability { domain, pending_id } => {
                     format!("accept-capability {} {}", domain, pending_id)
                 }
                 Command::RejectCapability { domain, pending_id } => {
@@ -275,7 +273,7 @@ impl Session {
                     owner_map.insert(name.clone(), parent_owner);
                 }
 
-                Command::Send { mem, domain, handle: _, attrs } => {
+                Command::Send { mem, domain, attrs } => {
                     let mem_owner   = owner_map.get(mem)
                         .cloned().unwrap_or_default();
                     let sender_arc  = arc_map.get(&mem_owner)
@@ -387,7 +385,7 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::AcceptCapability { domain, pending_id, handle: _ } => {
+                Command::AcceptCapability { domain, pending_id } => {
                     let domain_arc = arc_map.get(domain)
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 

@@ -193,7 +193,6 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     state.session.add_command(Command::Send {
         mem: mem_name.to_string(),
         domain: domain_name.to_string(),
-        handle: sender_handle,
         attrs: format_attributes(&attrs),
     });
 

@@ -11,7 +11,7 @@ use parking_lot::{
 use capability_engine::{
     CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
 };
-use capability_engine::{CapabilityRef, Domain, SwitchContext};
+use capability_engine::{CapabilityRef, Domain};
 
 struct CliDomainEntry {
     revoked: bool,
@@ -66,15 +66,6 @@ impl CliPlatform {
     /// Set the "currently executing" core ID used by VP-aware calls.
     pub fn set_current_core(&self, core: Option<CoreId>) {
         self.inner.lock().current_core = core;
-    }
-
-    pub fn switch(
-        &self,
-        core: u64,
-        from: &CapabilityRef<Domain>,
-        to: Option<&CapabilityRef<Domain>>,
-    ) -> Result<SwitchContext> {
-        self.inner.lock().switch_manager.switch(core, from, to)
     }
 
     pub fn route_interrupt(
