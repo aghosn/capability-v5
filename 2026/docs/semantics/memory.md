@@ -40,11 +40,71 @@ Attributes are per-ownership metadata set at `send` time. They affect behaviour 
 | `CLEAN` | Zero physical memory before restoring parent access |
 | `VITAL` | Also revoke the domain that owns this capability |
 | `HASH` | Region content is/should be hashed for attestation |
-| `META` | Informational: this region holds monitor metadata |
+| `META` | Monitor metadata: excluded from address space; implies `CLEAN` + `VITAL` at revocation |
 
 ---
 
-## Carve vs. Alias — Effect on Parent Access
+## META — Monitor Metadata Regions
+
+A region sent with `META` is **metadata memory allocated for the monitor's use** within the receiving domain. It has a distinct set of semantics compared to ordinary sent regions:
+
+| Property | Behaviour |
+|----------|-----------|
+| Address space | **Excluded** — the receiver gets no MMU mapping; no `ChangeRights` is emitted for it |
+| Attestation | **Included** — appears in the attestation report like a normal region entry |
+| Source requirement | Source must be `RegionStatus::Exclusive` (unbroken chain of carves) |
+| Re-send / carve / alias | **Rejected** — once a region is META in a domain, it cannot be used for any further derivation operations |
+| Revocation | Implies `CLEAN` + `VITAL`: zeroes the physical range and revokes the owning domain |
+| Sealed receiver | Goes through the normal pending/accept flow; the receiver must explicitly `accept` or `reject` |
+
+At `send` time the engine automatically materialises `META` into `META | CLEAN | VITAL` so that revocation needs no META-specific logic.
+
+### ✓ Success: send a META region to a sealed domain
+
+```
+cap> carve r0 monitor_scratch 0x500000 0x10000 RW
+# RegionStatus::Exclusive — unbroken chain of carves ✓
+
+cap> send monitor_scratch app META
+# app is sealed → enqueued as pending; caller handle frozen
+cap> accept-memory app <pending_id>
+✓ Accepted META region 'monitor_scratch'. No MMU mapping granted.
+```
+
+`monitor_scratch` appears in `attest(app)` but is not accessible from `app`'s address space.
+
+### ✗ Failure: META on an aliased region
+
+```
+cap> alias r0 shared 0x600000 0x10000 RW   # status = Aliased
+cap> send shared app META
+✗ Error: PermissionDenied — only Exclusive regions may be sent as META
+```
+
+### ✗ Failure: re-send or carve a META region
+
+```
+# Inside app — monitor_scratch is already META
+cap> send monitor_scratch other_domain
+✗ Error: PermissionDenied — META regions cannot be re-sent, carved, or aliased
+```
+
+### Revocation
+
+Revoking a META region triggers the same sequence as `CLEAN | VITAL`:
+
+1. `ZeroMemory` — physical range is zeroed.
+2. Parent regains access (if carved).
+3. `RevokeDomain` — the domain that held the META capability is revoked.
+
+```
+cap> revoke r0 monitor_scratch
+✓ Zeroed [0x500000..0x510000). Domain 'app' revoked (META implies VITAL).
+```
+
+---
+
+
 
 These two operations differ in what they do to the **parent**:
 

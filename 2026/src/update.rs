@@ -24,6 +24,10 @@ pub enum Update {
     /// rights upgrade) — no shootdown needed.
     /// `physical` is the backing physical address; ignored by the platform when
     /// `rights == Rights::NONE`.
+    ///
+    /// NOTE (#7): `physical` is currently always set equal to the virtual `address`
+    /// (identity-map assumption). This is correct for the current identity-mapped
+    /// deployment but must be revisited for non-identity-mapped platforms.
     ChangeRights {
         domain: DomainId,
         address: u64,
