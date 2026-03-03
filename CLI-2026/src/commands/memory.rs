@@ -38,7 +38,7 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
 
     let platform = state.platform.clone();
     let (child_handle, batch) = execute(&*platform, false, || {
-        Capability::carve_memory(&owner, parent_handle, access)
+        Capability::carve(&owner, parent_handle, access)
             .map(|(h, _sub, b)| (h, b))
     }).map_err(|e| format!("Failed to carve: {:?}", e))?;
 
@@ -105,7 +105,7 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let parent_handle = find_memory_handle(&owner, &parent)
         .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
 
-    let (child_handle, _) = Capability::alias_memory(&owner, parent_handle, access)
+    let (child_handle, _) = Capability::alias(&owner, parent_handle, access)
         .map_err(|e| format!("Failed to alias: {:?}", e))?;
 
     // Retrieve the child Arc from owner's memory table.
@@ -227,7 +227,7 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let (_, batch) = execute(&*platform, !is_sealed, || {
         let recv_h = find_domain_handle(&sender_domain, &domain)
             .ok_or(CapaError::NotFound)?;
-        let updates = Capability::send_memory(&sender_domain, sender_handle, recv_h, attrs)?;
+        let updates = Capability::send(&sender_domain, sender_handle, recv_h, attrs)?;
         Ok(((), updates))
     }).map_err(|e| format!("Failed to send: {:?}", e))?;
 

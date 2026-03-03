@@ -192,11 +192,11 @@ fn new_exec_state() -> (Arc<RwLock<()>>, Arc<Mutex<()>>, Arc<Mutex<E2EState>>) {
 //
 // | Thread A (shared cap lock)                     | Thread B (shared cap lock)                     |
 // |------------------------------------------------|------------------------------------------------|
-// | execute_shared → send_memory(dom, h_c1, dh_a)  | execute_shared → send_memory(dom, h_c2, dh_b)  |
+// | execute_shared → send(dom, h_c1, dh_a)  | execute_shared → send(dom, h_c2, dh_b)  |
 //
 // Setup: sealed root domain `dom` with root memory cap; two carved non-
 // overlapping children c1 [0x0000, 0x1000) and c2 [0x2000, 0x1000);
-// two unsealed child domains recv_a and recv_b created via create_domain.
+// two unsealed child domains recv_a and recv_b created via create.
 //
 // Both sends to unsealed receivers are immediate (no pending queue).
 // Each send produces Unmap(dom, range) + Map(recv, range) via view_diff
@@ -218,13 +218,13 @@ fn loom_e2e_concurrent_sends() {
         let dom_id = dom.read().data.id;
 
         // Sequential setup: carve two non-overlapping children.
-        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
-        let (h_c2, _sub2, _) = Capability::<Domain>::carve_memory(
+        let (h_c2, _sub2, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x2000, 0x1000, Rights::RW),
@@ -232,9 +232,9 @@ fn loom_e2e_concurrent_sends() {
         .expect("setup: carve c2");
 
         // Create two unsealed child domains as receivers via the domain-mediated API.
-        let dh_a = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a");
-        let dh_b = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b");
         let recv_a = {
             let r = dom.read();
@@ -251,7 +251,7 @@ fn loom_e2e_concurrent_sends() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_a, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, dh_a, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -260,7 +260,7 @@ fn loom_e2e_concurrent_sends() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c2, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c2, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -312,12 +312,12 @@ fn loom_e2e_concurrent_sends() {
 //
 // | Thread A (shared cap lock)                      | Thread B (shared cap lock)                      |
 // |-------------------------------------------------|-------------------------------------------------|
-// | execute_shared → accept_memory(recv, pending_id)| execute_shared → accept_memory(recv, pending_id)|
+// | execute_shared → accept(recv, pending_id)| execute_shared → accept(recv, pending_id)|
 //
 // Setup: sender sends c1 to a sealed receiver → pending entry created.
 // Both threads race to accept the same pending_id.
 //
-// accept_memory removes the pending entry atomically (receiver.write() in the
+// accept removes the pending entry atomically (receiver.write() in the
 // first step), so exactly one thread wins; the other gets NotFound.
 //
 // skip_unmap = true (c1's parent = root_mem, owned by sender = sender_id ==
@@ -337,10 +337,10 @@ fn loom_e2e_accept_race() {
         let sender_id = sender.read().data.id;
 
         // Sealed child domain as receiver (supports receive_after_seal).
-        // Use create_domain + seal_domain so it is properly parented under sender.
-        let dh_recv = Capability::<Domain>::create_domain(&sender, DomainPolicy::new_root(1))
+        // Use create + seal so it is properly parented under sender.
+        let dh_recv = Capability::<Domain>::create(&sender, DomainPolicy::new_root(1))
             .expect("setup: create recv");
-        Capability::<Domain>::seal_domain(&sender, dh_recv)
+        Capability::<Domain>::seal(&sender, dh_recv)
             .expect("setup: seal recv");
         let recv = {
             let r = sender.read();
@@ -349,13 +349,13 @@ fn loom_e2e_accept_race() {
         let recv_id = recv.read().data.id;
 
         // Carve c1 and send to the sealed receiver → pending queue path.
-        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
             &sender,
             h_root,
             Access::new(0x0, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
-        Capability::<Domain>::send_memory(&sender, h_c1, dh_recv, Attributes::NONE)
+        Capability::<Domain>::send(&sender, h_c1, dh_recv, Attributes::NONE)
             .expect("setup: send to sealed receiver");
 
         // Capture the single pending_id (setup is sequential, so exactly one).
@@ -367,7 +367,7 @@ fn loom_e2e_accept_race() {
         let (opl, ul_a, st, r) = (op_lock.clone(), ul.clone(), state.clone(), recv.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let (handle, batch) = Capability::<Domain>::accept_memory(&r, pending_id)?;
+                let (handle, batch) = Capability::<Domain>::accept(&r, pending_id)?;
                 Ok((handle, batch))
             })
         });
@@ -376,7 +376,7 @@ fn loom_e2e_accept_race() {
         let (opl, ul_b, st, r) = (op_lock.clone(), ul.clone(), state.clone(), recv.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let (handle, batch) = Capability::<Domain>::accept_memory(&r, pending_id)?;
+                let (handle, batch) = Capability::<Domain>::accept(&r, pending_id)?;
                 Ok((handle, batch))
             })
         });
@@ -395,7 +395,7 @@ fn loom_e2e_accept_race() {
         let loser = if res_a.is_err() { &res_a } else { &res_b };
         assert_eq!(*loser.as_ref().unwrap_err(), CapaError::NotFound);
 
-        // accept_memory generates Unmap(sender) + Map(recv): sender's frozen cap is
+        // accept generates Unmap(sender) + Map(recv): sender's frozen cap is
         // removed at accept time, shrinking sender's view and triggering a shootdown.
         let applied = state.lock().unwrap().applied.clone();
         assert_eq!(applied.len(), 2, "Unmap(sender) + Map(recv) from accept");
@@ -424,7 +424,7 @@ fn loom_e2e_accept_race() {
 //
 // | Thread A (exclusive cap lock)                           | Thread B (shared cap lock)                    |
 // |---------------------------------------------------------|-----------------------------------------------|
-// | execute_exclusive → revoke_memory_child(dom, root, sub1)| execute_shared → send_memory(dom, h_c2, dh_b) |
+// | execute_exclusive → revoke(dom, root, sub1)| execute_shared → send(dom, h_c2, dh_b) |
 //
 // Setup:
 //   1. dom (sealed root) with root_mem at h_root.
@@ -433,12 +433,12 @@ fn loom_e2e_accept_race() {
 //      After send: c1.owned.owner = recv_a_id; c1 still in tree under root_mem.
 //   4. Create unsealed recv_b.
 //
-// Thread A (exclusive): revoke_memory_child(dom, h_root, sub_c1).
+// Thread A (exclusive): revoke(dom, h_root, sub_c1).
 //   revoke_subtree: c1.parent = root_mem (owned by dom_id),
 //                  c1.owner  = recv_a_id  →  skip_unmap = false
 //   Batch: [Unmap(recv_a_id, 0x0000, 0x1000), Map(dom_id, 0x0000, 0x1000)]
 //
-// Thread B (shared): send_memory(dom, h_c2, dh_b, NONE) → Map(recv_b_id, 0x2000)
+// Thread B (shared): send(dom, h_c2, dh_b, NONE) → Map(recv_b_id, 0x2000)
 //   skip_unmap = true (c2's parent = root_mem owned by dom).
 //
 // Because A holds the exclusive cap lock, A and B are strictly serialised.
@@ -457,21 +457,21 @@ fn loom_e2e_revoke_child_vs_send() {
         let dom_id = dom.read().data.id;
 
         // Carve c1 and c2.
-        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, sub_c1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
-        let (h_c2, _sub2, _) = Capability::<Domain>::carve_memory(
+        let (h_c2, _sub2, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x2000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c2");
 
-        // Create recv_a and recv_b as proper child domains via create_domain.
-        let dh_a = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        // Create recv_a and recv_b as proper child domains via create.
+        let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a");
         let recv_a = {
             let r = dom.read();
@@ -480,12 +480,12 @@ fn loom_e2e_revoke_child_vs_send() {
         let recv_a_id = recv_a.read().data.id;
 
         // Immediately send c1 to unsealed recv_a (updates discarded — setup only).
-        Capability::<Domain>::send_memory(&dom, h_c1, dh_a, Attributes::NONE)
+        Capability::<Domain>::send(&dom, h_c1, dh_a, Attributes::NONE)
             .expect("setup: send c1 to recv_a");
         // After send: h_c1 removed from dom's table; c1.owner = recv_a_id.
 
         // Register recv_b for Thread B's send.
-        let dh_b = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b");
         let recv_b = {
             let r = dom.read();
@@ -497,7 +497,7 @@ fn loom_e2e_revoke_child_vs_send() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -506,7 +506,7 @@ fn loom_e2e_revoke_child_vs_send() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c2, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c2, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -579,7 +579,7 @@ fn loom_e2e_revoke_child_vs_send() {
 //
 // | Thread A (exclusive cap lock)                    | Thread B (shared cap lock)                    |
 // |--------------------------------------------------|-----------------------------------------------|
-// | execute_exclusive → revoke_domain(dom, h_child)  | execute_shared → send_memory(dom, h_c1, dh_r) |
+// | execute_exclusive → revoke_domain(dom, h_child)  | execute_shared → send(dom, h_c1, dh_r) |
 //
 // Setup:
 //   1. dom (sealed root) with root_mem at h_root.
@@ -591,7 +591,7 @@ fn loom_e2e_revoke_child_vs_send() {
 //   revoke_domain_subtree: emits RevokeDomain(ch1_id, fallback=Some(dom_id)).
 //   Batch: [RevokeDomain(ch1_id)]
 //
-// Thread B (shared): send_memory(dom, h_c1, dh_r, NONE).
+// Thread B (shared): send(dom, h_c1, dh_r, NONE).
 //   Immediate send (unsealed recv_m); skip_unmap = true.
 //   Batch: [Map(recv_m_id, 0x0000, 0x1000)]
 //
@@ -610,7 +610,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         let dom_id = dom.read().data.id;
 
         // Carve c1 for Thread B to send.
-        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
@@ -618,7 +618,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         .expect("setup: carve c1");
 
         // Create child domain ch1 under dom.
-        let h_child = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create child domain");
         let ch1_id: DomainId = dom
             .read()
@@ -633,7 +633,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 
         // Create an unsealed memory receiver as a proper child domain.
         // h_child was allocated as handle 1; recv_m gets handle 2.
-        let dh_r = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_r = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_m");
         let recv_m = {
             let r = dom.read();
@@ -654,7 +654,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_r, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, dh_r, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -700,19 +700,19 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 //
 // | Thread A (exclusive cap lock)                    | Thread B (shared cap lock)                      |
 // |--------------------------------------------------|--------------------------------------------------|
-// | execute_exclusive → revoke_domain(dom, h_child)  | execute_shared → send_memory(dom, h_c1, h_child)|
+// | execute_exclusive → revoke_domain(dom, h_child)  | execute_shared → send(dom, h_c1, h_child)|
 //
 // Setup:
 //   1. dom (sealed root) with root_mem at h_root.
 //   2. Carve c1 [0x0000, 0x1000) from root_mem.
-//   3. Create child domain ch1 via create_domain (unsealed); h_child is the
+//   3. Create child domain ch1 via create (unsealed); h_child is the
 //      LocalHandle for ch1 in dom's domain-capability table.
 //   4. Capture ch1_id.
 //
 // Thread A (exclusive): revoke_domain(dom, h_child).
 //   Removes h_child from dom's domain table; emits RevokeDomain(ch1_id).
 //
-// Thread B (shared): send_memory(dom, h_c1, h_child, NONE).
+// Thread B (shared): send(dom, h_c1, h_child, NONE).
 //   Looks up h_child in dom's domain table to find the recipient ch1.
 //   ch1 is unsealed → immediate transfer path.
 //   skip_unmap = true (c1's parent = root_mem owned by dom).
@@ -740,7 +740,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
         let dom_id = dom.read().data.id;
 
         // Carve c1 for Thread B to send.
-        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
@@ -748,7 +748,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
         .expect("setup: carve c1");
 
         // Create child domain ch1 under dom (unsealed — supports immediate send).
-        let h_child = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create ch1");
         let ch1_id: DomainId = dom
             .read()
@@ -774,7 +774,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, h_child, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, h_child, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -861,7 +861,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
 //
 // | Thread A (shared cap lock)                       | Thread B (shared cap lock)                       |
 // |--------------------------------------------------|--------------------------------------------------|
-// | execute_shared → send_memory(dom, h_c1, dh_a)   | execute_shared → send_memory(dom, h_c1, dh_b)   |
+// | execute_shared → send(dom, h_c1, dh_a)   | execute_shared → send(dom, h_c1, dh_b)   |
 //
 // Both threads target the *same* LocalHandle (h_c1) in dom's memory table.
 // Since both hold shared cap locks they can truly interleave; the inner
@@ -869,11 +869,11 @@ fn loom_e2e_send_to_domain_being_revoked() {
 // h_c1 — only one thread wins the slot.
 //
 // Setup: dom (sealed root) with root_mem; one carved child c1; two unsealed
-// child domains recv_a and recv_b created via create_domain.
+// child domains recv_a and recv_b created via create.
 //
 // Valid outcomes (all schedules):
 //  - Exactly one send succeeds → Unmap(dom) + Map(winner) applied.
-//  - Loser's send_memory returns NotFound (h_c1 removed from dom's table by
+//  - Loser's send returns NotFound (h_c1 removed from dom's table by
 //    winner under the write lock) or PermissionDenied (pre-flight owner
 //    check observed the cap already transferred — both are correct race
 //    outcomes since the authoritative commit is remove_memory_capability).
@@ -886,7 +886,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let dom_id = dom.read().data.id;
 
         // One cap that both threads will race to send.
-        let (h_c1, _sub1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
@@ -894,9 +894,9 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         .expect("setup: carve c1");
 
         // Two distinct unsealed child domains as receivers.
-        let dh_a = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a");
-        let dh_b = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b");
         let recv_a = {
             let r = dom.read();
@@ -913,7 +913,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_a, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, dh_a, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -922,7 +922,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -992,7 +992,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
 //
 // | Thread A (shared cap lock)                       | Thread B (exclusive cap lock)                    |
 // |--------------------------------------------------|--------------------------------------------------|
-// | execute_shared → send_memory(dom, h_c1, dh_recv) | execute_exclusive → revoke_memory_child(h_root, sub_c1) |
+// | execute_shared → send(dom, h_c1, dh_recv) | execute_exclusive → revoke(h_root, sub_c1) |
 //
 // The same capability node is reachable via two independent "addresses":
 //   h_c1   — LocalHandle in dom's memory-capability table (used by send).
@@ -1025,7 +1025,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let dom_id = dom.read().data.id;
 
         // Carve c1; keep both the LocalHandle and the SubHandle.
-        let (h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+        let (h_c1, sub_c1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
@@ -1033,7 +1033,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         .expect("setup: carve c1");
 
         // Unsealed child domain as receiver for Thread A's immediate send.
-        let dh_recv = Capability::<Domain>::create_domain(&dom, DomainPolicy::new_root(1))
+        let dh_recv = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
             .expect("setup: create recv");
         let recv = {
             let r = dom.read();
@@ -1045,7 +1045,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send_memory(&d, h_c1, dh_recv, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&d, h_c1, dh_recv, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -1054,7 +1054,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_exclusive(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -1062,7 +1062,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let res_a = ta.join().unwrap();
         tb.join()
             .unwrap()
-            .expect("B: revoke_memory_child must always succeed");
+            .expect("B: revoke must always succeed");
 
         let applied = state.lock().unwrap().applied.clone();
 
@@ -1171,7 +1171,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
 //
 // | Thread A (exclusive cap lock)                           | Thread B (exclusive cap lock)                           |
 // |---------------------------------------------------------|---------------------------------------------------------|
-// | execute_exclusive → revoke_memory_child(h_root, sub_c1) | execute_exclusive → revoke_memory_child(h_root, sub_c1) |
+// | execute_exclusive → revoke(h_root, sub_c1) | execute_exclusive → revoke(h_root, sub_c1) |
 //
 // Both cores hold references to the same domain and race to revoke the
 // same child node (same sub_c1).  The exclusive lock serialises them;
@@ -1182,8 +1182,8 @@ fn loom_e2e_send_vs_revoke_same_cap() {
 // update_lock is never acquired.
 //
 // Valid outcomes (all schedules):
-//  - Winner: revoke_memory_child succeeds, batch = [].
-//  - Loser:  revoke_memory_child returns NotFound (sub_c1 already gone).
+//  - Winner: revoke succeeds, batch = [].
+//  - Loser:  revoke returns NotFound (sub_c1 already gone).
 //  - Applied updates: [] in every ordering.
 //  - h_c1 is absent from dom's memory table after both threads complete.
 #[test]
@@ -1193,7 +1193,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let (dom, h_root, _root_mem) = make_root(0x2000);
 
         // Carve c1 — both threads will race to revoke it.
-        let (_h_c1, sub_c1, _) = Capability::<Domain>::carve_memory(
+        let (_h_c1, sub_c1, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
@@ -1204,7 +1204,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -1213,7 +1213,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_exclusive(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::revoke_memory_child(&d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });

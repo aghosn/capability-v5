@@ -31,7 +31,7 @@ fn make_child(
     parent: &CapabilityRef<Domain>,
     policy: DomainPolicy,
 ) -> (CapabilityRef<Domain>, LocalHandle) {
-    let h = Capability::create_domain(parent, policy).unwrap();
+    let h = Capability::create(parent, policy).unwrap();
     let child = parent
         .read()
         .data
@@ -43,7 +43,7 @@ fn make_child(
 
 /// Seal a child via its parent handle.
 fn seal(parent: &CapabilityRef<Domain>, h: LocalHandle) {
-    Capability::seal_domain(parent, h).unwrap();
+    Capability::seal(parent, h).unwrap();
 }
 
 /// Force VP[vp_id] of `domain` into `Interrupted { vector }`.
@@ -722,7 +722,7 @@ fn test_default_visibility_monotonicity_enforced() {
     seal(&parent, child_h);
 
     // Create grandchild under the now-sealed child.
-    let grand_h = Capability::create_domain(
+    let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     ).unwrap();
 
@@ -752,7 +752,7 @@ fn test_vector_visibility_monotonicity_enforced() {
     seal(&parent, parent_h);
 
     // Create grandchild under the sealed child.
-    let grand_h = Capability::create_domain(
+    let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
     ).unwrap();
 
@@ -767,7 +767,7 @@ fn test_vector_visibility_monotonicity_enforced() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// seal_domain — SEAL permission check
+// seal — SEAL permission check
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -780,12 +780,12 @@ fn test_seal_domain_denied_without_seal_permission() {
 
     // child is now sealed with CREATE but NOT SEAL.
     // The grandchild must have only the permissions child has (monotonicity).
-    let grand_h = Capability::create_domain(
+    let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, no_seal_api),
     ).unwrap();
 
     // Attempting to seal grand_h through child must be denied.
-    let err = Capability::seal_domain(&child, grand_h).unwrap_err();
+    let err = Capability::seal(&child, grand_h).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
@@ -794,5 +794,5 @@ fn test_seal_domain_allowed_with_seal_permission() {
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // parent has SEAL (root has ALL), so sealing should succeed.
-    Capability::seal_domain(&parent, h).unwrap();
+    Capability::seal(&parent, h).unwrap();
 }

@@ -13,7 +13,7 @@ use crate::state::{CliState, find_domain_handle};
 /// 1. `switch <core>`                  — return to the VP that called into the current domain
 /// 2. `switch <domain> <core> <vp_id>` — call into `<domain>` VP `<vp_id>` from the current VP
 ///
-/// Both operations go through `Capability::switch_domain` (handle=0 signals return),
+/// Both operations go through `Capability::switch` (handle=0 signals return),
 /// which enforces all VP invariants (sealed caller, SWITCH permission, VP availability, etc.)
 /// and updates platform core tracking transparently.
 pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
@@ -53,7 +53,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 false,
                 || {
                     // handle=0 signals "return to caller VP" in switch_domain.
-                    let ctx = Capability::<Domain>::switch_domain(
+                    let ctx = Capability::<Domain>::switch(
                         &domain_ref,
                         0,
                         0,
@@ -137,7 +137,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 state.platform.as_ref(),
                 false,
                 || {
-                    let ctx = Capability::<Domain>::switch_domain(
+                    let ctx = Capability::<Domain>::switch(
                         &from_ref,
                         to_handle,
                         to_vp_id,

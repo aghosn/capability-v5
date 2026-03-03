@@ -198,7 +198,7 @@ impl InterruptPolicy {
     }
 }
 
-/// Call-chain context saved when a VP does a switch_domain call.
+/// Call-chain context saved when a VP does a switch call.
 #[derive(Debug, Clone)]
 pub struct VpCallContext {
     /// Weak reference to the calling domain's capability (no ownership cycle)
@@ -220,7 +220,7 @@ pub enum VpRunState {
         /// The VP context that switched to us (None = no call-chain predecessor).
         caller: Option<VpCallContext>,
     },
-    /// VP is locked because it called switch_domain; waiting for the callee to return.
+    /// VP is locked because it called switch; waiting for the callee to return.
     Locked {
         callee_domain_id: u64,
         callee_vp_id: u64,
@@ -230,7 +230,7 @@ pub enum VpRunState {
     /// VP was preempted by an interrupt while Locked on a callee.
     ///
     /// The callee VP is now `Interrupted` (or also `Suspended` for deeper chains).
-    /// This VP is claimable by a forward `switch_domain` (same as `Available`).
+    /// This VP is claimable by a forward `switch` (same as `Available`).
     /// When claimed, its direct callee is freed to `Available` if it is `Interrupted`.
     Suspended {
         /// Weak reference to the callee domain's capability.
@@ -244,8 +244,8 @@ pub enum VpRunState {
     },
     /// VP was Running when an interrupt fired and preempted it.
     ///
-    /// Cannot be claimed by normal `switch_domain` (forward or return).
-    /// Freed to `Available` when its `Suspended` parent is claimed via `switch_domain`.
+    /// Cannot be claimed by normal `switch` (forward or return).
+    /// Freed to `Available` when its `Suspended` parent is claimed via `switch`.
     Interrupted {
         /// The interrupt vector that caused this VP to be preempted.
         vector: u8,

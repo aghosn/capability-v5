@@ -99,7 +99,7 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
 
     // Use the domain-mediated interface: allocates handle, sets owner_domain, registers in table.
     let child_handle =
-        Capability::create_domain(&parent, child_policy)
+        Capability::create(&parent, child_policy)
             .map_err(|e| format!("Failed to create child: {:?}", e))?;
 
     // Retrieve the new child Arc from parent's table.
@@ -161,7 +161,7 @@ pub fn cmd_seal(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let cap_handle = find_domain_handle(&owner, &domain)
         .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
 
-    Capability::seal_domain(&owner, cap_handle)
+    Capability::seal(&owner, cap_handle)
         .map_err(|e| format!("Failed to seal: {:?}", e))?;
 
     // Record command
@@ -204,7 +204,7 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
         let platform = state.platform.clone();
         let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_memory_child(&owner, parent_handle, child_sub)?;
+            let updates = Capability::revoke(&owner, parent_handle, child_sub)?;
             Ok(((), updates))
         })
         .map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
@@ -651,7 +651,7 @@ pub fn cmd_accept_capability(
     // Accept the pending memory capability using the new API
     let platform = state.platform.clone();
     let (handle, batch) = execute(&*platform, false, || {
-        let (h, updates) = Capability::accept_memory(domain, pending_id)?;
+        let (h, updates) = Capability::accept(domain, pending_id)?;
         Ok((h, updates))
     })
     .map_err(|e| format!("Failed to accept capability: {:?}", e))?;
@@ -794,7 +794,7 @@ pub fn cmd_reject_capability(
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    Capability::reject_memory(domain, pending_id)
+    Capability::reject(domain, pending_id)
         .map_err(|e| format!("Failed to reject capability: {:?}", e))?;
 
     println!(

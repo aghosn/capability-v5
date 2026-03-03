@@ -1,6 +1,6 @@
 //! Tests for domain switching (VP-aware) and interrupt routing
 //!
-//! Domain switching is exclusively tested via `Capability::switch_domain` —
+//! Domain switching is exclusively tested via `Capability::switch` —
 //! the unified VP-aware domain-mediated API (handle=0 = return to caller).
 //! `SwitchManager::switch` is infrastructure; only interrupt routing tests use it directly.
 
@@ -24,8 +24,8 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 /// Child gets `MonitorAPI::ALL` (includes SWITCH) and all 4 cores.
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let h = Capability::create_domain(parent, policy).unwrap();
-    Capability::seal_domain(parent, h).unwrap();
+    let h = Capability::create(parent, policy).unwrap();
+    Capability::seal(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
@@ -121,7 +121,7 @@ fn test_vp_switch_domain_basic() {
     let root_id = root.read().data.id;
     let child_id = child.read().data.id;
 
-    let ctx = Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    let ctx = Capability::switch(&root, child_h, 0, &platform).unwrap();
 
     assert_eq!(ctx.from_domain, root_id);
     assert_eq!(ctx.to_domain, child_id);
@@ -131,7 +131,7 @@ fn test_vp_switch_domain_basic() {
     assert_eq!(ctx.to_vp_id, Some(0));
 }
 
-/// switch_domain followed by return_domain restores original domain.
+/// switch followed by return_domain restores original domain.
 #[test]
 fn test_vp_return_domain_basic() {
     let (root, child, child_h, platform) = fixture();
@@ -140,10 +140,10 @@ fn test_vp_return_domain_basic() {
     let child_id = child.read().data.id;
 
     // Switch root → child VP[0]
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
 
     // Now platform says core 0 is running child; child VP[0] is Running{caller=root.VP[0]}
-    let ret_ctx = Capability::switch_domain(&child, 0, 0, &platform).unwrap();
+    let ret_ctx = Capability::switch(&child, 0, 0, &platform).unwrap();
 
     assert_eq!(ret_ctx.from_domain, child_id);
     assert_eq!(ret_ctx.to_domain, root_id);
@@ -157,11 +157,11 @@ fn test_vp_return_domain_basic() {
 fn test_vp_switch_return_switch_again() {
     let (root, child, child_h, platform) = fixture();
 
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
-    Capability::switch_domain(&child, 0, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&child, 0, 0, &platform).unwrap();
 
     // Root VP[0] should be Running again; switch one more time
-    let ctx = Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    let ctx = Capability::switch(&root, child_h, 0, &platform).unwrap();
     assert_eq!(ctx.to_vp_id, Some(0));
 }
 
@@ -180,8 +180,8 @@ fn test_vp_nested_switch_and_return() {
 
     // child1 under root
     let child1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child1_h = Capability::create_domain(&root, child1_policy).unwrap();
-    Capability::seal_domain(&root, child1_h).unwrap();
+    let child1_h = Capability::create(&root, child1_policy).unwrap();
+    Capability::seal(&root, child1_h).unwrap();
     let child1 = root.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
@@ -190,8 +190,8 @@ fn test_vp_nested_switch_and_return() {
 
     // child2 under child1
     let child2_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child2_h = Capability::create_domain(&child1, child2_policy).unwrap();
-    Capability::seal_domain(&child1, child2_h).unwrap();
+    let child2_h = Capability::create(&child1, child2_policy).unwrap();
+    Capability::seal(&child1, child2_h).unwrap();
     let child2 = child1.read().data.domain_capabilities[&child2_h]
         .upgrade()
         .unwrap();
@@ -199,27 +199,27 @@ fn test_vp_nested_switch_and_return() {
     platform.register_domain(child2_id, Some(child1_id));
 
     // root → child1
-    Capability::switch_domain(&root, child1_h, 0, &platform).unwrap();
+    Capability::switch(&root, child1_h, 0, &platform).unwrap();
 
     // child1 VP[0] needs to be Running on core 0 for its own switch
-    // (switch_domain sets child1 VP[0] to Running when root switches into it)
+    // (switch sets child1 VP[0] to Running when root switches into it)
 
     // child1 → child2
-    let ctx12 = Capability::switch_domain(&child1, child2_h, 0, &platform).unwrap();
+    let ctx12 = Capability::switch(&child1, child2_h, 0, &platform).unwrap();
     assert_eq!(ctx12.to_domain, child2_id);
 
     // return child2 → child1
-    let ret1 = Capability::switch_domain(&child2, 0, 0, &platform).unwrap();
+    let ret1 = Capability::switch(&child2, 0, 0, &platform).unwrap();
     assert_eq!(ret1.to_domain, child1_id);
 
     // return child1 → root
-    let ret0 = Capability::switch_domain(&child1, 0, 0, &platform).unwrap();
+    let ret0 = Capability::switch(&child1, 0, 0, &platform).unwrap();
     assert_eq!(ret0.to_domain, root_id);
 }
 
 // ── VP-aware domain switching (adversarial / error cases) ────────────────────
 
-/// switch_domain fails when no VP in the caller domain is Running on the current core.
+/// switch fails when no VP in the caller domain is Running on the current core.
 #[test]
 fn test_vp_switch_no_vp_running_on_core() {
     let platform = common::TestPlatform::new();
@@ -232,18 +232,18 @@ fn test_vp_switch_no_vp_running_on_core() {
 
     let (_, child_h) = make_sealed_child(&root);
 
-    let result = Capability::switch_domain(&root, child_h, 0, &platform);
+    let result = Capability::switch(&root, child_h, 0, &platform);
     assert!(result.is_err(), "expected error when no VP running on core");
 }
 
-/// switch_domain fails when the target VP is already Running (not Available).
+/// switch fails when the target VP is already Running (not Available).
 #[test]
 fn test_vp_switch_target_not_available() {
     let (root, child, child_h, platform) = fixture();
 
     // Claim child VP[0] first
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
-    Capability::switch_domain(&child, 0, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&child, 0, 0, &platform).unwrap();
 
     // Manually set child VP[0] back to Running (simulating another core holding it)
     {
@@ -257,14 +257,14 @@ fn test_vp_switch_target_not_available() {
     }
 
     // Now try to switch again — should fail because VP[0] is Running on core 99
-    let result = Capability::switch_domain(&root, child_h, 0, &platform);
+    let result = Capability::switch(&root, child_h, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when target VP is not Available"
     );
 }
 
-/// switch_domain fails when the target domain doesn't allow the current core.
+/// switch fails when the target domain doesn't allow the current core.
 #[test]
 fn test_vp_switch_core_not_allowed() {
     let platform = common::TestPlatform::new();
@@ -278,44 +278,44 @@ fn test_vp_switch_core_not_allowed() {
 
     // Child only allows core 0
     let child_policy = DomainPolicy::new_restricted(0b0001, MonitorAPI::ALL);
-    let child_h = Capability::create_domain(&root, child_policy).unwrap();
-    Capability::seal_domain(&root, child_h).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap();
+    Capability::seal(&root, child_h).unwrap();
 
     // Try to switch from core 1 to child — child doesn't allow core 1
-    let result = Capability::switch_domain(&root, child_h, 0, &platform);
+    let result = Capability::switch(&root, child_h, 0, &platform);
     assert!(result.is_err(), "expected error for core not allowed");
 }
 
-/// switch_domain fails when platform returns None for current core.
+/// switch fails when platform returns None for current core.
 #[test]
 fn test_vp_switch_unknown_core() {
     let (root, _, child_h, platform) = fixture();
     platform.set_current_core(None); // simulate unknown core
 
-    let result = Capability::switch_domain(&root, child_h, 0, &platform);
+    let result = Capability::switch(&root, child_h, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when current core is unknown"
     );
 }
 
-/// switch_domain fails when the caller domain is not sealed.
+/// switch fails when the caller domain is not sealed.
 #[test]
 fn test_vp_switch_caller_unsealed() {
     let platform = common::TestPlatform::new();
     platform.set_current_core(Some(0));
 
     // Unsealed domain: Domain::new creates it Unsealed (no VPs yet).
-    // switch_domain checks is_sealed() in step 2, before any VP or target lookup,
+    // switch checks is_sealed() in step 2, before any VP or target lookup,
     // so a dummy handle is fine — we never reach the target resolution step.
     let policy = DomainPolicy::new_root(4);
     let caller = Capability::new_root(0, 0, Domain::new(policy));
 
-    let result = Capability::switch_domain(&caller, 1 /* dummy */, 0, &platform);
+    let result = Capability::switch(&caller, 1 /* dummy */, 0, &platform);
     assert!(result.is_err(), "expected error for unsealed caller");
 }
 
-/// switch_domain fails when caller lacks SWITCH permission.
+/// switch fails when caller lacks SWITCH permission.
 #[test]
 fn test_vp_switch_no_switch_api() {
     let platform = common::TestPlatform::new();
@@ -329,8 +329,8 @@ fn test_vp_switch_no_switch_api() {
     // Sealed caller without SWITCH permission.
     let no_switch_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST);
     let caller_policy = DomainPolicy::new_restricted(0b1111, no_switch_api);
-    let caller_h = Capability::create_domain(&root, caller_policy).unwrap();
-    Capability::seal_domain(&root, caller_h).unwrap();
+    let caller_h = Capability::create(&root, caller_policy).unwrap();
+    Capability::seal(&root, caller_h).unwrap();
     let caller = root.read().data.domain_capabilities[&caller_h]
         .upgrade()
         .unwrap();
@@ -338,23 +338,23 @@ fn test_vp_switch_no_switch_api() {
     platform.register_domain(caller_id, Some(root_id));
     init_vp_running(&caller, 0, 0);
 
-    // switch_domain checks the api permission in step 2, before any target-handle
+    // switch checks the api permission in step 2, before any target-handle
     // lookup, so a dummy handle is sufficient — ApiNotAllowed is returned first.
-    let result = Capability::switch_domain(&caller, 1 /* dummy */, 0, &platform);
+    let result = Capability::switch(&caller, 1 /* dummy */, 0, &platform);
     assert!(result.is_err(), "expected error when SWITCH api is missing");
 }
 
-/// switch_domain fails when the target domain is not sealed.
+/// switch fails when the target domain is not sealed.
 #[test]
 fn test_vp_switch_target_unsealed() {
     let (root, _, _, platform) = fixture();
 
     // Create unsealed child
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create_domain(&root, child_policy).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap();
     // NOT sealing
 
-    let result = Capability::switch_domain(&root, child_h, 0, &platform);
+    let result = Capability::switch(&root, child_h, 0, &platform);
     assert!(result.is_err(), "expected error for unsealed target domain");
 }
 
@@ -364,7 +364,7 @@ fn test_vp_return_no_caller() {
     let (root, _, _, platform) = fixture();
 
     // root VP[0] is Running{caller: None} — no one called us
-    let result = Capability::switch_domain(&root, 0, 0, &platform);
+    let result = Capability::switch(&root, 0, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when returning from initial VP with no caller"
@@ -376,10 +376,10 @@ fn test_vp_return_no_caller() {
 fn test_vp_return_unknown_core() {
     let (root, child, child_h, platform) = fixture();
 
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
     platform.set_current_core(None);
 
-    let result = Capability::switch_domain(&child, 0, 0, &platform);
+    let result = Capability::switch(&child, 0, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when current core is unknown"
@@ -391,7 +391,7 @@ fn test_vp_return_unknown_core() {
 fn test_vp_return_no_vp_on_core() {
     let (root, child, child_h, platform) = fixture();
 
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
 
     // Simulate child VP[0] no longer Running on core 0 (manually reset it)
     {
@@ -402,7 +402,7 @@ fn test_vp_return_no_vp_on_core() {
         *vp0.run_state.write() = VpRunState::Available;
     }
 
-    let result = Capability::switch_domain(&child, 0, 0, &platform);
+    let result = Capability::switch(&child, 0, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when no VP running on core in caller"
@@ -539,7 +539,7 @@ fn test_multi_level_interrupt_routing() {
 
 // ── VP-aware interrupt delivery (lazy-unwind) tests ───────────────────────────
 
-/// Helper: build a 3-domain call chain on core 0 using switch_domain.
+/// Helper: build a 3-domain call chain on core 0 using switch.
 ///
 /// Returns `(dom0=handler, dom1=report/intermediate, dom2=running, platform)`.
 /// dom0.vp0 → dom1.vp0 → dom2.vp0 (all on core 0).
@@ -566,7 +566,7 @@ fn setup_3domain_chain() -> (
     platform.register_domain(dom1_id, Some(dom0_id));
 
     // dom0 switches to dom1: dom0.vp0 → Locked, dom1.vp0 → Running
-    Capability::switch_domain(&dom0, dom1_h, 0, &platform).unwrap();
+    Capability::switch(&dom0, dom1_h, 0, &platform).unwrap();
 
     // dom2: child of dom0 (visible from dom1 via parent's domain cap), sealed
     // For simplicity, create dom2 as a child of dom0, give dom1 a handle to it.
@@ -586,7 +586,7 @@ fn setup_3domain_chain() -> (
     };
 
     // dom1 switches to dom2: dom1.vp0 → Locked, dom2.vp0 → Running
-    Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &platform).unwrap();
+    Capability::switch(&dom1, dom2_h_in_dom1, 0, &platform).unwrap();
 
     (dom0, dom1, dom2, platform)
 }
@@ -600,7 +600,7 @@ fn test_deliver_interrupt_vp_2domain() {
     let child_id = child.read().data.id;
 
     // Switch root → child: root.vp0 → Locked, child.vp0 → Running on core 0
-    Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
+    Capability::switch(&root, child_h, 0, &platform).unwrap();
 
     // Deliver interrupt: handler is root, interrupted is child
     let ctx = Capability::<Domain>::deliver_interrupt_vp(&child, root_id, 0, 0, &platform).unwrap();
@@ -677,7 +677,7 @@ fn test_deliver_interrupt_vp_3domain() {
 }
 
 /// After interrupt delivery (3-domain chain), dom0 switches to dom1 via
-/// switch_domain.  This resumes dom1.vp0 from Suspended → Running and
+/// switch.  This resumes dom1.vp0 from Suspended → Running and
 /// simultaneously frees dom2.vp0 from Interrupted → Available.
 #[test]
 fn test_interrupt_resume_frees_interrupted_callee() {
@@ -691,7 +691,7 @@ fn test_interrupt_resume_frees_interrupted_callee() {
 
     // After delivery: dom1.vp0 = Suspended, dom2.vp0 = Interrupted
 
-    // dom0 now does switch_domain to dom1 (the REPORT domain).
+    // dom0 now does switch to dom1 (the REPORT domain).
     // dom1.vp0 is Suspended — the forward switch should accept it.
     // Build dom1's handle in dom0's table.
     let dom1_h_in_dom0 = dom0
@@ -710,7 +710,7 @@ fn test_interrupt_resume_frees_interrupted_callee() {
         .expect("dom0 should hold a handle to dom1");
 
     // Switch dom0 → dom1 (Suspended → Running)
-    let switch_ctx = Capability::switch_domain(&dom0, dom1_h_in_dom0, 0, &platform).unwrap();
+    let switch_ctx = Capability::switch(&dom0, dom1_h_in_dom0, 0, &platform).unwrap();
     assert_eq!(switch_ctx.to_domain, dom1_id);
 
     // dom1.vp0 should now be Running
@@ -747,7 +747,7 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
 }
 
 /// The key invariant: after interrupt delivery, a *second* VP of the intermediate
-/// domain (dom1.vp1) cannot claim dom2.vp0 via `switch_domain`.
+/// domain (dom1.vp1) cannot claim dom2.vp0 via `switch`.
 ///
 /// After `deliver_interrupt_vp`, dom2.vp0 is `Interrupted`.  The forward switch
 /// path only accepts `Available` or `Suspended`; `Interrupted` is rejected.
@@ -797,10 +797,10 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
         .expect("dom1 should hold a handle to dom2");
 
     // Attempt to claim dom2.vp0 from dom1.vp1 — must be rejected.
-    let result = Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &platform);
+    let result = Capability::switch(&dom1, dom2_h_in_dom1, 0, &platform);
     assert!(
         result.is_err(),
-        "Interrupted VP must not be claimable via switch_domain"
+        "Interrupted VP must not be claimable via switch"
     );
 }
 
@@ -843,7 +843,7 @@ fn setup_4domain_chain() -> (
     let (dom1, dom1_h) = make_sealed_child(&dom0);
     let dom1_id = dom1.read().data.id;
     platform.register_domain(dom1_id, Some(dom0_id));
-    Capability::switch_domain(&dom0, dom1_h, 0, &platform).unwrap();
+    Capability::switch(&dom0, dom1_h, 0, &platform).unwrap();
 
     let (dom2, _dom2_h_in_dom0) = make_sealed_child(&dom0);
     let dom2_id = dom2.read().data.id;
@@ -855,7 +855,7 @@ fn setup_4domain_chain() -> (
         d1.data.add_domain_capability(h, dom2_weak);
         h
     };
-    Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &platform).unwrap();
+    Capability::switch(&dom1, dom2_h_in_dom1, 0, &platform).unwrap();
 
     let (dom3, _dom3_h_in_dom0) = make_sealed_child(&dom0);
     let dom3_id = dom3.read().data.id;
@@ -867,7 +867,7 @@ fn setup_4domain_chain() -> (
         d2.data.add_domain_capability(h, dom3_weak);
         h
     };
-    Capability::switch_domain(&dom2, dom3_h_in_dom2, 0, &platform).unwrap();
+    Capability::switch(&dom2, dom3_h_in_dom2, 0, &platform).unwrap();
 
     let _ = (dom2_id, dom3_id); // silence unused warnings
     (dom0, dom1, dom2, dom3, platform)
@@ -948,7 +948,7 @@ fn test_4domain_transitive_suspended_chain_cleanup() {
 
     // Step 1: dom0 claims dom1 (Suspended → Running).
     let dom1_h = find_domain_handle(&dom0, dom1_id);
-    Capability::switch_domain(&dom0, dom1_h, 0, &platform).unwrap();
+    Capability::switch(&dom0, dom1_h, 0, &platform).unwrap();
 
     // dom1.vp0 → Running
     let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
@@ -975,7 +975,7 @@ fn test_4domain_transitive_suspended_chain_cleanup() {
     // dom1 is now Running on core 0; it can switch to dom2.
     let dom2_id = dom2.read().data.id;
     let dom2_h = find_domain_handle(&dom1, dom2_id);
-    Capability::switch_domain(&dom1, dom2_h, 0, &platform).unwrap();
+    Capability::switch(&dom1, dom2_h, 0, &platform).unwrap();
 
     // dom2.vp0 → Running
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();

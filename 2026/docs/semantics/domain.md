@@ -221,10 +221,10 @@ Only the domain that holds the child capability handle can seal it. Attempting t
 ```rust
 // Domain-mediated: caller is the parent domain; cap_handle is the handle
 // caller holds for the target domain in its domain capability table.
-Capability::seal_domain(&caller_domain, child_cap_handle)?;
+Capability::<Domain>::seal(&caller_domain, child_cap_handle)?;
 ```
 
-Internally `seal_domain` looks up the child by handle in the caller's domain capability table, then calls `child.write().data.seal()`. The lookup enforces that only a domain which actually holds the child capability can seal it.
+Internally `seal` looks up the child by handle in the caller's domain capability table, then calls `child.write().data.seal()`. The lookup enforces that only a domain which actually holds the child capability can seal it.
 
 ---
 
@@ -350,7 +350,7 @@ let self_report = Capability::<Domain>::attest_self(&caller)?;
 let report = Capability::<Domain>::attest(&caller, chan_h)?;
 
 // Send memory to target via channel
-Capability::<Domain>::send_memory(&caller, mem_handle, chan_h, Attributes::NONE)?;
+Capability::<Domain>::send(&caller, mem_handle, chan_h, Attributes::NONE)?;
 
 // Transfer the channel to another domain (move semantics)
 Capability::<Domain>::send_channel(&caller, chan_h, receiver_handle, Attributes::NONE)?;
@@ -442,7 +442,7 @@ let report = Capability::<Domain>::attest(&caller, chan_h)?;
 let self_report = Capability::<Domain>::attest_self(&caller)?;
 
 // Send memory to target via channel
-Capability::<Domain>::send_memory(&caller, mem_handle, chan_h, Attributes::NONE)?;
+Capability::<Domain>::send(&caller, mem_handle, chan_h, Attributes::NONE)?;
 
 // Transfer the channel to another domain (move semantics)
 Capability::<Domain>::send_channel(&caller, chan_h, receiver_handle, Attributes::NONE)?;

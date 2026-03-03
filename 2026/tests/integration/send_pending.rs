@@ -77,7 +77,7 @@ fn send_then_accept() {
         .write()
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
 
     assert!(
         sender.read().data.is_memory_handle_frozen(1),
@@ -88,7 +88,7 @@ fn send_then_accept() {
     let pending_id = pending_ids[0];
 
     // Accept: fires MMU operations, transfers ownership.
-    let (new_handle, updates) = Capability::<Domain>::accept_memory(&receiver, pending_id).unwrap();
+    let (new_handle, updates) = Capability::<Domain>::accept(&receiver, pending_id).unwrap();
 
     // Sender no longer has handle 1 in any form.
     assert!(
@@ -140,12 +140,12 @@ fn send_then_reject() {
         .write()
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
     // Reject: unfreezes handle 1 in sender, removes pending entry.
-    Capability::<Domain>::reject_memory(&receiver, pending_id).unwrap();
+    Capability::<Domain>::reject(&receiver, pending_id).unwrap();
 
     // Handle 1 is back — accessible and not frozen.
     assert!(
@@ -184,25 +184,25 @@ fn frozen_handle_refuses_ops() {
         .write()
         .data
         .add_domain_capability(2, Arc::downgrade(&receiver2));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
     assert!(sender.read().data.is_memory_handle_frozen(1));
 
     // carve on frozen handle → PermissionDenied
-    let r = Capability::<Domain>::carve_memory(&sender, 1, Access::new(0x0, 0x1000, Rights::RW));
+    let r = Capability::<Domain>::carve(&sender, 1, Access::new(0x0, 0x1000, Rights::RW));
     assert!(
         matches!(r, Err(CapaError::PermissionDenied)),
         "carve on frozen handle must fail"
     );
 
     // alias on frozen handle → PermissionDenied
-    let r = Capability::<Domain>::alias_memory(&sender, 1, Access::new(0x0, 0x1000, Rights::RW));
+    let r = Capability::<Domain>::alias(&sender, 1, Access::new(0x0, 0x1000, Rights::RW));
     assert!(
         matches!(r, Err(CapaError::PermissionDenied)),
         "alias on frozen handle must fail"
     );
 
     // send again (double-send) → PermissionDenied
-    let r = Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::NONE);
+    let r = Capability::<Domain>::send(&sender, 1, 2, Attributes::NONE);
     assert!(
         matches!(r, Err(CapaError::PermissionDenied)),
         "second send on frozen handle must fail"
@@ -216,10 +216,10 @@ fn frozen_handle_refuses_ops() {
 // ── Test 4 — revoke_parent_cancels_pending ────────────────────────────────────
 
 /// What it does: A carves a child from a root cap, sends the child to B
-/// (pending), then A revokes the child via revoke_memory_child using its
+/// (pending), then A revokes the child via revoke using its
 /// stable SubHandle.
 /// Expected outcome: the cap's Arc strong count drops to zero; B's
-/// accept_memory returns NotFound because the pending weak ref is dead.
+/// accept returns NotFound because the pending weak ref is dead.
 #[test]
 fn revoke_parent_cancels_pending() {
     let sender = make_sealed_domain();
@@ -230,7 +230,7 @@ fn revoke_parent_cancels_pending() {
 
     // Carve a child [0x1000, 0x2000) — auto-allocates handle 2, sub_handle = 2.
     let (child_handle, child_sub, _) =
-        Capability::<Domain>::carve_memory(&sender, 1, Access::new(0x1000, 0x1000, Rights::RW))
+        Capability::<Domain>::carve(&sender, 1, Access::new(0x1000, 0x1000, Rights::RW))
             .unwrap();
     assert_eq!(child_handle, 2);
 
@@ -239,17 +239,17 @@ fn revoke_parent_cancels_pending() {
         .write()
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, child_handle, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, child_handle, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
     // Revoke the child using its SubHandle (= child_sub at creation time = 2).
     // The parent is at handle 1; child_sub = 2.
-    Capability::<Domain>::revoke_memory_child(&sender, 1, child_sub).unwrap();
+    Capability::<Domain>::revoke(&sender, 1, child_sub).unwrap();
 
     // Now the cap's Arc strong count is 0 — the pending weak ref is dead.
-    // accept_memory must return NotFound.
-    let result = Capability::<Domain>::accept_memory(&receiver, pending_id);
+    // accept must return NotFound.
+    let result = Capability::<Domain>::accept(&receiver, pending_id);
     assert!(
         matches!(result, Err(CapaError::NotFound)),
         "accept after parent revoke must return NotFound, got: {:?}",
@@ -271,11 +271,11 @@ fn revoke_sender_domain_cancels_pending() {
 
     // Create sender domain A as a child of P in the domain CDT via domain API.
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let sender_h = Capability::create_domain(&parent, policy).unwrap();
+    let sender_h = Capability::create(&parent, policy).unwrap();
     let sender = parent.read().data.domain_capabilities[&sender_h]
         .upgrade()
         .unwrap();
-    Capability::seal_domain(&parent, sender_h).unwrap();
+    Capability::seal(&parent, sender_h).unwrap();
 
     // Register a memory cap in A's table at handle 1.
     let _mem = register_root_mem(&sender, 1);
@@ -285,7 +285,7 @@ fn revoke_sender_domain_cancels_pending() {
         .write()
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
 
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
@@ -298,7 +298,7 @@ fn revoke_sender_domain_cancels_pending() {
     );
 
     // B tries to accept — must fail because sender is revoked.
-    let result = Capability::<Domain>::accept_memory(&receiver, pending_id);
+    let result = Capability::<Domain>::accept(&receiver, pending_id);
     assert!(
         matches!(result, Err(CapaError::PermissionDenied)),
         "accept after sender domain revoke must return PermissionDenied, got: {:?}",
@@ -330,12 +330,12 @@ fn reject_then_reuse_handle() {
         .write()
         .data
         .add_domain_capability(2, Arc::downgrade(&receiver2));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
     let pending_id = receiver1.read().data.get_pending_ids()[0];
-    Capability::<Domain>::reject_memory(&receiver1, pending_id).unwrap();
+    Capability::<Domain>::reject(&receiver1, pending_id).unwrap();
 
     // Handle 1 is unfrozen — second send must succeed.
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::NONE)
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::NONE)
         .expect("send after reject must succeed");
 
     // receiver2 has a pending entry; receiver1 has none.
@@ -375,15 +375,15 @@ fn accept_gives_independent_handles() {
         .write()
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 1, Attributes::NONE).unwrap();
-    Capability::<Domain>::send_memory(&sender, 2, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
+    Capability::<Domain>::send(&sender, 2, 1, Attributes::NONE).unwrap();
 
     let pending_ids = receiver.read().data.get_pending_ids();
     assert_eq!(pending_ids.len(), 2);
 
     // Accept both.
-    let (h1, _) = Capability::<Domain>::accept_memory(&receiver, pending_ids[0]).unwrap();
-    let (h2, _) = Capability::<Domain>::accept_memory(&receiver, pending_ids[1]).unwrap();
+    let (h1, _) = Capability::<Domain>::accept(&receiver, pending_ids[0]).unwrap();
+    let (h2, _) = Capability::<Domain>::accept(&receiver, pending_ids[1]).unwrap();
 
     // Handles must be distinct.
     assert_ne!(h1, h2, "accepted handles must be distinct");
@@ -423,7 +423,7 @@ fn send_sealed_failed_freeze_leaves_attrs_unchanged() {
         .data
         .add_domain_capability(1, Arc::downgrade(&receiver));
     let vital = Attributes::from_bits(Attributes::VITAL);
-    let result = Capability::<Domain>::send_memory(&sender, 1, 1, vital);
+    let result = Capability::<Domain>::send(&sender, 1, 1, vital);
 
     // The send must fail because the handle was already frozen.
     assert!(result.is_err(), "send must fail when handle is already frozen");
@@ -450,7 +450,7 @@ fn send_sealed_success_applies_attrs() {
         .add_domain_capability(1, Arc::downgrade(&receiver));
 
     let vital = Attributes::from_bits(Attributes::VITAL);
-    Capability::<Domain>::send_memory(&sender, 1, 1, vital).unwrap();
+    Capability::<Domain>::send(&sender, 1, 1, vital).unwrap();
 
     // After a successful send, the capability's attrs should be VITAL.
     let after_attrs = mem.read().owned.attributes;

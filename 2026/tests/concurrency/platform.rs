@@ -206,7 +206,7 @@ fn test_revoke_domain_carries_fallback() {
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::REVOKE);
     let child_policy = DomainPolicy::new_restricted(0b0001, child_api);
     let child_h =
-        Capability::create_domain(&root, child_policy).expect("create_domain should succeed");
+        Capability::create(&root, child_policy).expect("create should succeed");
 
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
@@ -215,7 +215,7 @@ fn test_revoke_domain_carries_fallback() {
     reg(&platform, child_id, Some(ROOT_ID));
 
     // Root domain is already sealed (new_root); seal the child
-    Capability::seal_domain(&root, child_h).unwrap();
+    Capability::seal(&root, child_h).unwrap();
 
     let (_, batch) = execute(&platform, true, || {
         let updates =

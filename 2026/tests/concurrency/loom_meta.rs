@@ -119,8 +119,8 @@ fn make_root(
 // Setup: sealed root domain `dom` with a carved child cap `h_c` and two
 // unsealed receiver domains recv_a, recv_b.
 //
-// Thread A: execute_shared → send_memory(dom, h_c, dh_a, META)
-// Thread B: execute_shared → send_memory(dom, h_c, dh_b, META)
+// Thread A: execute_shared → send(dom, h_c, dh_a, META)
+// Thread B: execute_shared → send(dom, h_c, dh_b, META)
 //
 // The freeze-based commit ensures exactly one send wins.
 // Winner: emits exactly one Unmap for dom (h_c leaves dom's view).
@@ -138,7 +138,7 @@ fn loom_meta_concurrent_send_race() {
         let dom_id = dom.read().data.id;
 
         // Carve one child that both threads will race to send as META.
-        let (h_c, _sub, _) = Capability::<Domain>::carve_memory(
+        let (h_c, _sub, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0, 0x1000, Rights::RWX),
@@ -174,7 +174,7 @@ fn loom_meta_concurrent_send_race() {
 
         let ta = thread::spawn(move || {
             execute_shared(&op_a, &ul_a, &st_a, || {
-                let upd = Capability::<Domain>::send_memory(
+                let upd = Capability::<Domain>::send(
                     &dom_a,
                     h_c,
                     dh_a,
@@ -186,7 +186,7 @@ fn loom_meta_concurrent_send_race() {
 
         let tb = thread::spawn(move || {
             execute_shared(&op_b, &ul_b, &st_b, || {
-                let upd = Capability::<Domain>::send_memory(
+                let upd = Capability::<Domain>::send(
                     &dom_b,
                     h_c,
                     dh_b,
@@ -244,8 +244,8 @@ fn loom_meta_concurrent_send_race() {
 // M2 — META send races with revocation of the same cap
 // ═════════════════════════════════════════════════════════════════════════════
 //
-// Thread A (shared):    send_memory(dom, h_c, dh_recv, META)
-// Thread B (exclusive): revoke_memory_child(dom, h_root, sub_c)
+// Thread A (shared):    send(dom, h_c, dh_recv, META)
+// Thread B (exclusive): revoke(dom, h_root, sub_c)
 //
 // Two valid orderings:
 //
@@ -265,7 +265,7 @@ fn loom_meta_send_vs_revoke() {
         let (op_lock, ul, state) = new_exec_state();
         let (dom, h_root, _root_mem) = make_root(0x2000);
 
-        let (h_c, sub_c, _) = Capability::<Domain>::carve_memory(
+        let (h_c, sub_c, _) = Capability::<Domain>::carve(
             &dom,
             h_root,
             Access::new(0x0, 0x1000, Rights::RWX),
@@ -292,7 +292,7 @@ fn loom_meta_send_vs_revoke() {
         // Thread A: send as META (shared lock).
         let ta = thread::spawn(move || {
             execute_shared(&op_a, &ul_a, &st_a, || {
-                let upd = Capability::<Domain>::send_memory(
+                let upd = Capability::<Domain>::send(
                     &dom_a,
                     h_c,
                     dh_recv,
@@ -306,7 +306,7 @@ fn loom_meta_send_vs_revoke() {
         let tb = thread::spawn(move || {
             execute_exclusive(&op_b, &ul_b, &st_b, || {
                 let upd =
-                    Capability::<Domain>::revoke_memory_child(&dom_b, h_root, sub_c)?;
+                    Capability::<Domain>::revoke(&dom_b, h_root, sub_c)?;
                 Ok(((), upd))
             })
         });

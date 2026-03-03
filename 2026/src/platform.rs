@@ -225,7 +225,7 @@ pub trait Platform: Send + Sync {
 
     /// Update the VP currently executing on `core_id`.
     ///
-    /// Called by [`Capability::switch_domain`] (both forward and return paths) after
+    /// Called by [`Capability::switch`] (both forward and return paths) after
     /// every VP-level context switch so that `CoreContext::running_vp` stays consistent.
     ///
     /// **Default implementation** is a no-op.

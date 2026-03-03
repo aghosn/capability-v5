@@ -18,9 +18,9 @@ fn test_enumerate_tree() {
     let root_domain = Domain::new_root(4);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
-    // Use create_domain which requires root to be sealed (new_root is already sealed)
+    // Use create which requires root to be sealed (new_root is already sealed)
     let child_policy = DomainPolicy::new_root(4);
-    let _child_h = Capability::create_domain(&root_ref, child_policy).unwrap();
+    let _child_h = Capability::create(&root_ref, child_policy).unwrap();
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 2);
@@ -57,17 +57,17 @@ fn test_enumerate_tree_with_multiple_levels() {
     let root_ref = Capability::new_root(0, 0, root_domain);
 
     // Create first level children using domain-mediated API
-    let child1_h = Capability::create_domain(&root_ref, DomainPolicy::new_root(4)).unwrap();
-    let _child2_h = Capability::create_domain(&root_ref, DomainPolicy::new_root(4)).unwrap();
+    let child1_h = Capability::create(&root_ref, DomainPolicy::new_root(4)).unwrap();
+    let _child2_h = Capability::create(&root_ref, DomainPolicy::new_root(4)).unwrap();
 
     // Seal child1 before creating grandchild under it
-    Capability::seal_domain(&root_ref, child1_h).unwrap();
+    Capability::seal(&root_ref, child1_h).unwrap();
     let child1_ref = root_ref.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
 
     // Create grandchild under child1
-    let _grandchild_h = Capability::create_domain(&child1_ref, DomainPolicy::new_root(4)).unwrap();
+    let _grandchild_h = Capability::create(&child1_ref, DomainPolicy::new_root(4)).unwrap();
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 4); // root + 2 children + 1 grandchild

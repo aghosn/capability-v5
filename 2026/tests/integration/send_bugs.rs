@@ -30,7 +30,7 @@ fn setup_root() -> (CapabilityRef<Domain>, LocalHandle) {
 
 fn make_unsealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create_domain(parent, policy).unwrap();
+    let child_h = Capability::create(parent, policy).unwrap();
     let child = parent.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -56,7 +56,7 @@ fn a1a_send_carve_caller_owns_parent_must_emit_unmap() {
     // Carve [0x1000, 0x2000) with same rights — no hardware update expected yet.
     let carve_access = Access::new(0x1000, 0x1000, Rights::RWX);
     let (c1_h, _c1_sub, carve_updates) =
-        Capability::carve_memory(&root, r0_h, carve_access).unwrap();
+        Capability::carve(&root, r0_h, carve_access).unwrap();
     assert!(
         carve_updates.is_empty(),
         "Carve with same rights should not produce hardware updates yet"
@@ -71,7 +71,7 @@ fn a1a_send_carve_caller_owns_parent_must_emit_unmap() {
         .data
         .id;
 
-    let send_updates = Capability::send_memory(&root, c1_h, d1_h, Attributes::NONE).unwrap();
+    let send_updates = Capability::send(&root, c1_h, d1_h, Attributes::NONE).unwrap();
 
     // Must unmap from root.
     let has_unmap = send_updates.updates().iter().any(|u| {
@@ -111,7 +111,7 @@ fn a1b_carve_with_reduced_rights_must_emit_change_rights() {
     // Carve with RW only — X is dropped.
     let carve_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (_c1_h, _c1_sub, carve_updates) =
-        Capability::carve_memory(&root, r0_h, carve_access).unwrap();
+        Capability::carve(&root, r0_h, carve_access).unwrap();
 
     let has_change_rights = carve_updates.updates().iter().any(|u| {
         matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
@@ -145,7 +145,7 @@ fn a1c_send_received_capability_always_emits_unmap() {
 
     // dom0 carves r1 [0x1000, 0x2000) RWX.
     let r1_access = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (r1_h, _r1_sub, _) = Capability::carve_memory(&root, r0_h, r1_access).unwrap();
+    let (r1_h, _r1_sub, _) = Capability::carve(&root, r0_h, r1_access).unwrap();
 
     // Create dom1 (unsealed) and send r1 to it.
     let (_dom1, dom1_h) = make_unsealed_child(&root);
@@ -154,17 +154,17 @@ fn a1c_send_received_capability_always_emits_unmap() {
         .unwrap();
     let dom1_id = dom1.read().data.id;
 
-    Capability::send_memory(&root, r1_h, dom1_h, Attributes::NONE).unwrap();
+    Capability::send(&root, r1_h, dom1_h, Attributes::NONE).unwrap();
 
     // Seal dom1 so it can SEND.
-    Capability::seal_domain(&root, dom1_h).unwrap();
+    Capability::seal(&root, dom1_h).unwrap();
 
     // dom1 now holds r1 at handle 1 (first cap in a fresh domain).
     let r1_h_in_dom1: LocalHandle = 1;
 
     // Create dom3 (unsealed) in dom1's table.
     let dom3_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let dom3_h_in_dom1 = Capability::create_domain(&dom1, dom3_policy).unwrap();
+    let dom3_h_in_dom1 = Capability::create(&dom1, dom3_policy).unwrap();
     let dom3 = dom1.read().data.domain_capabilities[&dom3_h_in_dom1]
         .upgrade()
         .unwrap();
@@ -172,7 +172,7 @@ fn a1c_send_received_capability_always_emits_unmap() {
 
     // dom1 sends r1 to dom3.  dom1 does NOT own r0 (the parent of r1).
     let send_updates =
-        Capability::send_memory(&dom1, r1_h_in_dom1, dom3_h_in_dom1, Attributes::NONE).unwrap();
+        Capability::send(&dom1, r1_h_in_dom1, dom3_h_in_dom1, Attributes::NONE).unwrap();
 
     // Unmap must be emitted for dom1.
     let has_unmap = send_updates.updates().iter().any(|u| {

@@ -37,7 +37,7 @@ fn main() {
     );
     let child_policy = DomainPolicy::new_restricted(0b1111, child_api);
 
-    let child_h = Capability::create_domain(&root, child_policy).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap();
 
     // Resolve Arc for later use (attestation, view, switch).
     let child = root
@@ -65,7 +65,7 @@ fn main() {
     println!("Creating EXCLUSIVE memory for child...");
     let exclusive_access = Access::new(0x100000, 0x100000, Rights::RWX);
     let (excl_h, excl_sub, carve_updates) =
-        Capability::carve_memory(&root, 1, exclusive_access).unwrap();
+        Capability::carve(&root, 1, exclusive_access).unwrap();
     println!(
         "✓ Carved exclusive memory at handle {} (sub {})",
         excl_h, excl_sub
@@ -75,7 +75,7 @@ fn main() {
     // Alias shared memory for child (512 KB at 0x200000).
     println!("\nCreating SHARED memory for child...");
     let shared_access = Access::new(0x200000, 0x80000, Rights::RW);
-    let (shared_h, shared_sub) = Capability::alias_memory(&root, 1, shared_access).unwrap();
+    let (shared_h, shared_sub) = Capability::alias(&root, 1, shared_access).unwrap();
     println!(
         "✓ Aliased shared memory at handle {} (sub {})",
         shared_h, shared_sub
@@ -89,7 +89,7 @@ fn main() {
     println!("------------------------------------");
 
     let clean_attrs = Attributes::from_bits(Attributes::CLEAN);
-    let send1_updates = Capability::send_memory(&root, excl_h, child_h, clean_attrs).unwrap();
+    let send1_updates = Capability::send(&root, excl_h, child_h, clean_attrs).unwrap();
     println!(
         "✓ Sent exclusive memory to child (handle {} removed from root)",
         excl_h
@@ -101,7 +101,7 @@ fn main() {
     }
 
     let send2_updates =
-        Capability::send_memory(&root, shared_h, child_h, Attributes::NONE).unwrap();
+        Capability::send(&root, shared_h, child_h, Attributes::NONE).unwrap();
     println!(
         "\n✓ Sent shared memory to child (handle {} removed from root)",
         shared_h
@@ -117,7 +117,7 @@ fn main() {
     println!("\nSTEP 5: Seal child domain");
     println!("--------------------------");
 
-    Capability::seal_domain(&root, child_h).unwrap();
+    Capability::seal(&root, child_h).unwrap();
     println!("✓ Child domain sealed");
     println!("  • Status: {:?}", child.read().data.status);
 
@@ -202,7 +202,7 @@ fn main() {
 
     // Revoke exclusive and shared memory from root's parent capability (handle 1 = mem_root).
     // sub_handles are stable even though the caps were sent away.
-    let rev1 = Capability::revoke_memory_child(&root, 1, excl_sub).unwrap();
+    let rev1 = Capability::revoke(&root, 1, excl_sub).unwrap();
     println!(
         "✓ Revoked exclusive memory (sub {}): {} updates",
         excl_sub,
@@ -212,7 +212,7 @@ fn main() {
         println!("    {}. {:?}", i + 1, u);
     }
 
-    let rev2 = Capability::revoke_memory_child(&root, 1, shared_sub).unwrap();
+    let rev2 = Capability::revoke(&root, 1, shared_sub).unwrap();
     println!(
         "✓ Revoked shared memory (sub {}): {} updates",
         shared_sub,

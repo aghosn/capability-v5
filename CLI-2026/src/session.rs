@@ -232,7 +232,7 @@ impl Session {
                     writeln!(file, "    let {name}_api = MonitorAPI::from_bits({api_bits});",
                         api_bits = parse_api_bits(api))?;
                     writeln!(file, "    let {name}_policy = DomainPolicy::new_restricted(0x{cores:x}, {name}_api);")?;
-                    writeln!(file, "    let {handle_var} = Capability::create_domain(&{parent_arc}, {name}_policy).unwrap();")?;
+                    writeln!(file, "    let {handle_var} = Capability::create(&{parent_arc}, {name}_policy).unwrap();")?;
                     writeln!(file, "    let {child_var} = {parent_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -252,7 +252,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(domain)));
 
                     writeln!(file, "    // Seal domain: {domain}")?;
-                    writeln!(file, "    Capability::seal_domain(&{owner_arc}, {handle_var}).unwrap();")?;
+                    writeln!(file, "    Capability::seal(&{owner_arc}, {handle_var}).unwrap();")?;
                     writeln!(file)?;
                 }
 
@@ -269,7 +269,7 @@ impl Session {
 
                     writeln!(file, "    // Carve memory region: {name}")?;
                     writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::carve_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::carve(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -293,7 +293,7 @@ impl Session {
 
                     writeln!(file, "    // Alias memory region: {name}")?;
                     writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let ({handle_var}, {sub_var}) = Capability::alias_memory(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}) = Capability::alias(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -323,7 +323,7 @@ impl Session {
                     writeln!(file, "            {sender_arc}.write().data.add_domain_capability(h, std::sync::Arc::downgrade(&{recv_arc}));")?;
                     writeln!(file, "            h")?;
                     writeln!(file, "        }});")?;
-                    writeln!(file, "    let _ = Capability::send_memory(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}).unwrap();")?;
+                    writeln!(file, "    let _ = Capability::send(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}).unwrap();")?;
                     writeln!(file, "    // Note: {mem} is now owned by {domain}; handle lookup needed for further ops.")?;
                     writeln!(file)?;
 
@@ -354,7 +354,7 @@ impl Session {
                             .cloned().unwrap_or_else(|| format!("{}_sub_handle", sanitize_name(child)));
 
                         writeln!(file, "    // Revoke memory {child} from {parent}")?;
-                        writeln!(file, "    let _ = Capability::revoke_memory_child(&{owner_arc}, {parent_handle}, {child_sub}).unwrap();")?;
+                        writeln!(file, "    let _ = Capability::revoke(&{owner_arc}, {parent_handle}, {child_sub}).unwrap();")?;
                     }
                     writeln!(file)?;
                 }
@@ -421,7 +421,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 
                     writeln!(file, "    // Accept pending capability {pending_id} for {domain}")?;
-                    writeln!(file, "    let (_handle, _updates) = Capability::accept_memory(&{domain_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    let (_handle, _updates) = Capability::accept(&{domain_arc}, {pending_id}).unwrap();")?;
                     writeln!(file)?;
                 }
 
@@ -430,7 +430,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 
                     writeln!(file, "    // Reject pending capability {pending_id} for {domain}")?;
-                    writeln!(file, "    Capability::reject_memory(&{domain_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    Capability::reject(&{domain_arc}, {pending_id}).unwrap();")?;
                     writeln!(file)?;
                 }
 

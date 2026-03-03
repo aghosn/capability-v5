@@ -83,7 +83,7 @@ fn test_meta_excluded_from_address_space() {
         .add_domain_capability(2, Arc::downgrade(&receiver));
 
     let updates =
-        Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+        Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
             .unwrap();
 
     // Sender must have lost the region.
@@ -132,7 +132,7 @@ fn test_meta_appears_in_attestation() {
         .data
         .add_domain_capability(2, Arc::downgrade(&receiver));
 
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
     let report = attest_domain(&receiver).report;
@@ -154,7 +154,7 @@ fn test_meta_send_requires_exclusive() {
 
     // Create a root cap and alias from it — the alias is Aliased (non-exclusive).
     let _root = register_root_mem(&sender, 1);
-    let (alias_h, _) = Capability::<Domain>::alias_memory(
+    let (alias_h, _) = Capability::<Domain>::alias(
         &sender,
         1,
         Access::new(0x0, 0x1000, Rights::RWX),
@@ -166,7 +166,7 @@ fn test_meta_send_requires_exclusive() {
         .data
         .add_domain_capability(10, Arc::downgrade(&receiver));
 
-    let result = Capability::<Domain>::send_memory(
+    let result = Capability::<Domain>::send(
         &sender,
         alias_h,
         10,
@@ -193,7 +193,7 @@ fn test_meta_cannot_be_re_sent() {
         .write()
         .data
         .add_domain_capability(2, Arc::downgrade(&middle));
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
     // middle now holds the META cap; add receiver to middle's domain table.
@@ -203,7 +203,7 @@ fn test_meta_cannot_be_re_sent() {
         .add_domain_capability(3, Arc::downgrade(&receiver));
     let meta_handle = *middle.read().data.memory_capabilities.keys().next().unwrap();
 
-    let result = Capability::<Domain>::send_memory(
+    let result = Capability::<Domain>::send(
         &middle,
         meta_handle,
         3,
@@ -228,11 +228,11 @@ fn test_meta_cannot_be_carved() {
         .write()
         .data
         .add_domain_capability(2, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
     let meta_handle = *receiver.read().data.memory_capabilities.keys().next().unwrap();
-    let result = Capability::<Domain>::carve_memory(
+    let result = Capability::<Domain>::carve(
         &receiver,
         meta_handle,
         Access::new(0x0, 0x100, Rights::R),
@@ -256,11 +256,11 @@ fn test_meta_cannot_be_aliased() {
         .write()
         .data
         .add_domain_capability(2, Arc::downgrade(&receiver));
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
     let meta_handle = *receiver.read().data.memory_capabilities.keys().next().unwrap();
-    let result = Capability::<Domain>::alias_memory(
+    let result = Capability::<Domain>::alias(
         &receiver,
         meta_handle,
         Access::new(0x0, 0x100, Rights::R),
@@ -287,7 +287,7 @@ fn test_meta_revocation_triggers_domain_revoke() {
     let _mem = register_root_mem(&root, 1);
 
     // Carve a sub-region so we have a child cap to revoke.
-    let (carved_h, carved_sub, _) = Capability::<Domain>::carve_memory(
+    let (carved_h, carved_sub, _) = Capability::<Domain>::carve(
         &root,
         1,
         Access::new(0x0, 0x1000, Rights::RWX),
@@ -298,7 +298,7 @@ fn test_meta_revocation_triggers_domain_revoke() {
     root.write()
         .data
         .add_domain_capability(5, Arc::downgrade(&child));
-    Capability::<Domain>::send_memory(
+    Capability::<Domain>::send(
         &root,
         carved_h,
         5,
@@ -307,7 +307,7 @@ fn test_meta_revocation_triggers_domain_revoke() {
     .unwrap();
 
     // Revoke the META cap from root (by sub_handle, since it was sent away).
-    let updates = Capability::<Domain>::revoke_memory_child(&root, 1, carved_sub).unwrap();
+    let updates = Capability::<Domain>::revoke(&root, 1, carved_sub).unwrap();
 
     let has_revoke = updates.updates().iter().any(|op| {
         matches!(op, Update::RevokeDomain { domain, .. } if *domain == child_id)
@@ -355,7 +355,7 @@ fn test_meta_sealed_send_and_accept_no_mmu_update() {
         .add_domain_capability(2, Arc::downgrade(&receiver));
 
     // Sealed send — enqueues pending, freezes handle.
-    Capability::<Domain>::send_memory(&sender, 1, 2, Attributes::from_bits(Attributes::META))
+    Capability::<Domain>::send(&sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
     assert!(sender.read().data.is_memory_handle_frozen(1));
@@ -364,7 +364,7 @@ fn test_meta_sealed_send_and_accept_no_mmu_update() {
 
     // Accept — completes the transfer.
     let (new_handle, updates) =
-        Capability::<Domain>::accept_memory(&receiver, pending_ids[0]).unwrap();
+        Capability::<Domain>::accept(&receiver, pending_ids[0]).unwrap();
 
     // Receiver holds the cap.
     assert!(receiver.read().data.get_memory_capability(new_handle).is_some());

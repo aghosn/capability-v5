@@ -189,7 +189,7 @@ impl<T> Capability<T> {
 impl Capability<MemoryRegion> {
     /// Create an aliased child region (static method, explicit owner)
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`alias_memory`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`alias`] instead.
     #[doc(hidden)]
     pub fn alias_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
@@ -232,7 +232,7 @@ impl Capability<MemoryRegion> {
 
     /// Create a carved child region
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`carve_memory`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`carve`] instead.
     /// Returns only the child capability ref; update generation is handled by the
     /// domain-mediated layer via view-diff.
     #[doc(hidden)]
@@ -276,7 +276,7 @@ impl Capability<MemoryRegion> {
 
     /// Send this capability to another domain.
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`send_memory`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`send`] instead.
     /// Transfers ownership only; callers are responsible for generating MMU updates
     /// via view-diff at the domain-mediated layer.
     #[doc(hidden)]
@@ -315,7 +315,7 @@ impl Capability<MemoryRegion> {
     /// Prefer this over [`revoke_child`] when the capability may have been `send`-ed
     /// (its `LocalHandle` changes on transfer but the `Arc` identity is stable).
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`revoke_memory_child`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`revoke`] instead.
     #[doc(hidden)]
     pub fn revoke_child_ref(
         parent_ref: &CapabilityRef<MemoryRegion>,
@@ -339,7 +339,7 @@ impl Capability<MemoryRegion> {
 
     /// Revoke a child capability by its stable SubHandle
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`revoke_memory_child`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`revoke`] instead.
     #[doc(hidden)]
     pub fn revoke_child(
         parent_ref: &CapabilityRef<MemoryRegion>,
@@ -498,9 +498,9 @@ impl Capability<Domain> {
     /// Create a child domain (static method, explicit owner).
     ///
     /// The `owner` parameter allows tests and low-level callers to assign an explicit
-    /// owner domain ID. The high-level [`create_domain`] always uses the parent's own ID.
+    /// owner domain ID. The high-level [`create`] always uses the parent's own ID.
     ///
-    /// **Internal primitive.** Prefer the domain-mediated [`create_domain`] instead.
+    /// **Internal primitive.** Prefer the domain-mediated [`create`] instead.
     #[doc(hidden)]
     pub fn create_child_domain(
         parent_ref: &CapabilityRef<Domain>,
@@ -568,7 +568,7 @@ impl Capability<Domain> {
     /// Memory capabilities owned by a revoked domain are NOT automatically removed from the
     /// capability tree. Their `owner_domain` Weak pointer becomes stale; future operations on
     /// them return `PermissionDenied`. The parent memory capability retains these as children
-    /// in the tree until an ancestor domain explicitly calls `revoke_memory_child`.
+    /// in the tree until an ancestor domain explicitly calls `revoke`.
     /// Walking memory trees during domain revocation would require holding memory and domain
     /// locks simultaneously, violating the lock-ordering discipline — so cleanup is left to
     /// the caller.
@@ -617,18 +617,12 @@ impl Capability<Domain> {
 
         Ok(updates)
     }
-
-    // =========================================================================
-    // Domain-mediated high-level operations
-    // =========================================================================
 }
 
-/// Read the cached address-space view for a domain.  O(1).
-///
 /// Recompute and store the domain's cached address-space view.
-/// Must be called while the caller holds the domain write lock
-/// (passed as `&mut Capability<Domain>`).  Acquiring cap read locks inside
-/// is safe because the domain write lock prevents concurrent table mutations.
+/// Must be called while holding the domain write lock
+/// (`&mut Capability<Domain>`). Acquiring cap read locks inside is safe
+/// because the domain write lock prevents concurrent table mutations.
 fn refresh_domain_view(cap: &mut Capability<Domain>) {
     let domain_id = cap.data.id;
     let cap_arcs: alloc::vec::Vec<Arc<RwLock<Capability<MemoryRegion>>>> = cap
@@ -640,29 +634,31 @@ fn refresh_domain_view(cap: &mut Capability<Domain>) {
     cap.data.cached_view = compute_view_from_cap_arcs(domain_id, &cap_arcs);
 }
 
-
+/// Read the cached address-space view for a domain.  O(1).
+/// Updated automatically after every mutating operation
 /// (carve, send, accept, revoke).  Callers get a consistent snapshot
 /// by reading under a single domain read lock.
 pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView {
     domain.read().data.cached_view.clone()
 }
 
-impl Capability<Domain> {
-    // =========================================================================
-    // Domain-mediated high-level operations (continued)
-    // =========================================================================
+// =============================================================================
+// Domain-mediated high-level operations
+// =============================================================================
 
+impl Capability<Domain> {
     /// Carve a memory sub-region.  Returns `(LocalHandle, SubHandle, UpdateBatch)`.
     ///
     /// - `LocalHandle`: the caller's domain-table key for the new child.
     /// - `SubHandle`: the child's stable tree identity (auto-allocated from the
-    ///   parent capability's counter).  Pass this to [`revoke_memory_child`] to
+    ///   parent capability's counter).  Pass this to [`revoke`] to
     ///   revoke the child even after it has been sent to another domain.
     ///
-    ///
-    /// The domain-level checks (frozen handle, ownership) are performed here before
-    /// delegating to the low-level primitive, keeping domain logic in the domain-mediated layer.
-    pub fn carve_memory(
+    /// # Errors
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, parent has `META` attribute, or `CARVE` API not allowed.
+    /// - [`CapaError::NotFound`] — `parent` handle not found in caller's table.
+    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed parent.
+    pub fn carve(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
         access: Access,
@@ -733,15 +729,23 @@ impl Capability<Domain> {
 
     /// Alias a memory sub-region.  Returns `(LocalHandle, SubHandle)`.
     ///
-    /// See [`carve_memory`] for the meaning of each return value.
+    /// See [`carve`] for the meaning of each return value.
     /// The domain-level checks (frozen handle, ownership) are performed here before
     /// delegating to the low-level primitive, keeping domain logic in the domain-mediated layer.
-    pub fn alias_memory(
+    /// Alias a memory region.  Returns `(LocalHandle, SubHandle)`.
+    ///
+    /// Creates a read-only alias of `parent` restricted to `access` in the caller's table.
+    ///
+    /// # Errors
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, parent has `META` attribute, or `ALIAS` API not allowed.
+    /// - [`CapaError::NotFound`] — `parent` handle not found in caller's table.
+    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed parent.
+    pub fn alias(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
         access: Access,
     ) -> Result<(LocalHandle, SubHandle)> {
-        // Pre-flight: read-only validation (same rationale as carve_memory).
+        // Pre-flight: read-only validation (same rationale as carve).
         let owner_id;
         let parent_ref: CapabilityRef<MemoryRegion>;
         {
@@ -769,7 +773,7 @@ impl Capability<Domain> {
                 p.owned.clone()
                 // p (parent_ref.read()) dropped here
             };
-            // Validate after releasing parent_ref.read() — same ABBA fix as carve_memory.
+            // Validate after releasing parent_ref.read() — same ABBA fix as carve.
             parent_owned.validate_operation(MonitorAPI::ALIAS)?;
         }
 
@@ -800,7 +804,13 @@ impl Capability<Domain> {
     ///   pending queue (no MMU operation yet).
     /// - If the receiver is **sealed** without `RECEIVE_AFTER_SEAL`, the send is
     ///   rejected.
-    pub fn send_memory(
+    ///
+    /// # Errors
+    /// - [`CapaError::PermissionDenied`] — `cap` handle is frozen, caller does not own the
+    ///   capability, `META` region may not be sent via non-META path, or `SEND` API not allowed.
+    /// - [`CapaError::NotFound`] — `cap` or `receiver` handle not found.
+    /// - [`CapaError::ApiNotAllowed`] — receiver is sealed without `RECEIVE_AFTER_SEAL`.
+    pub fn send(
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
         receiver: LocalHandle,
@@ -876,7 +886,7 @@ impl Capability<Domain> {
     }
 
     /// Sealed send: freeze the caller's handle and enqueue in the receiver's pending table.
-    /// No MMU updates are emitted — those are deferred to `accept_memory`.
+    /// No MMU updates are emitted — those are deferred to `accept`.
     fn send_memory_sealed(
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
@@ -1030,7 +1040,15 @@ impl Capability<Domain> {
 
     /// Accept a pending memory capability. Auto-allocates a new LocalHandle in the
     /// receiver's table. Fires the actual MMU unmap (sender) + map (receiver).
-    pub fn accept_memory(
+    /// Accept a pending memory capability and take ownership.
+    ///
+    /// Removes the pending entry, transfers ownership from sender to receiver,
+    /// allocates a fresh [`LocalHandle`] in the receiver's table, and unfreezes the sender's handle.
+    /// Returns `(LocalHandle, UpdateBatch)`.
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending queue.
+    pub fn accept(
         receiver: &CapabilityRef<Domain>,
         pending_id: u64,
     ) -> Result<(LocalHandle, UpdateBatch)> {
@@ -1051,7 +1069,7 @@ impl Capability<Domain> {
             .upgrade()
             .ok_or(CapaError::PermissionDenied)?;
 
-        // Acquire both write locks in domain-ID order (same rule as send_memory unsealed
+        // Acquire both write locks in domain-ID order (same rule as send unsealed
         // path) so that concurrent send + accept on the same domain pair cannot deadlock.
         let (mut recv_w, mut sender_w) = if receiver_id < sender_id_peek {
             let r = receiver.write();
@@ -1124,7 +1142,10 @@ impl Capability<Domain> {
     }
 
     /// Reject a pending memory capability. Unfreezes the sender's LocalHandle.
-    pub fn reject_memory(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending queue.
+    pub fn reject(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
         // 1. Remove pending from receiver
         let pending = {
             let mut recv = receiver.write();
@@ -1270,6 +1291,9 @@ impl Capability<Domain> {
     /// sender's frozen handle.
     ///
     /// Returns the new [`LocalHandle`] assigned to the channel in the receiver.
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending channel queue.
     pub fn accept_channel(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<LocalHandle> {
         let receiver_id = receiver.read().data.id;
 
@@ -1313,6 +1337,9 @@ impl Capability<Domain> {
     }
 
     /// Reject a pending channel capability. Unfreezes the sender's handle.
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending channel queue.
     pub fn reject_channel(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
         let pending = {
             let mut rw = receiver.write();
@@ -1339,12 +1366,17 @@ impl Capability<Domain> {
     /// Revoke a direct child of the parent capability identified by `child_sub`.
     ///
     /// `parent` is the LocalHandle of the parent memory region in `caller`'s table.
-    /// `child_sub` is the SubHandle returned by [`carve_memory`] or [`alias_memory`]
+    /// `child_sub` is the SubHandle returned by [`carve`] or [`alias`]
     /// when the child was created.  Because SubHandles are auto-allocated from the
     /// parent's internal counter they are unique among siblings and stable across
     /// ownership transfers — so this call succeeds even after the child has been
     /// sent to another domain.
-    pub fn revoke_memory_child(
+    ///
+    /// # Errors
+    /// - [`CapaError::PermissionDenied`] — `parent` handle is frozen, caller does not own the parent,
+    ///   parent has `META` attribute, or `REVOKE` API not allowed.
+    /// - [`CapaError::NotFound`] — `parent` handle or `child_sub` not found.
+    pub fn revoke(
         caller: &CapabilityRef<Domain>,
         parent: LocalHandle,
         child_sub: SubHandle,
@@ -1373,7 +1405,7 @@ impl Capability<Domain> {
                 p.owned.clone()
                 // p (parent_ref.read()) dropped here
             };
-            // Validate after releasing parent_ref.read() — same ABBA fix as carve_memory.
+            // Validate after releasing parent_ref.read() — same ABBA fix as carve.
             parent_owned.validate_operation(MonitorAPI::REVOKE)?;
         }
 
@@ -1387,7 +1419,12 @@ impl Capability<Domain> {
     }
 
     /// Seal the domain identified by cap handle.
-    pub fn seal_domain(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `cap` not found in caller's domain table.
+    /// - [`CapaError::ApiNotAllowed`] — `cap` is a channel capability, or `SEAL` API not allowed.
+    /// - [`CapaError::DomainAlreadySealed`] — domain is already sealed.
+    pub fn seal(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
         let cap_weak = caller
             .read()
             .data
@@ -1407,7 +1444,12 @@ impl Capability<Domain> {
     /// Create a child domain under `parent`, auto-allocating a LocalHandle in
     /// `parent`'s domain table.  Sets `owner_domain` on the child so subsequent
     /// domain-mediated operations on it are properly validated.
-    pub fn create_domain(
+    ///
+    /// # Errors
+    /// - [`CapaError::DomainNotSealed`] — `parent` is not yet sealed.
+    /// - [`CapaError::ApiNotAllowed`] — `CREATE` API not allowed on `parent`.
+    /// - [`CapaError::InvalidPolicy`] — `policy` violates monotonicity relative to parent.
+    pub fn create(
         parent: &CapabilityRef<Domain>,
         policy: DomainPolicy,
     ) -> Result<LocalHandle> {
@@ -1436,6 +1478,11 @@ impl Capability<Domain> {
     ///
     /// Looks up the child's Arc to get its actual SubHandle, then delegates to
     /// the low-level `revoke_child_domain` (which validates the REVOKE permission).
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `child_handle` not found in caller's domain table.
+    /// - [`CapaError::ApiNotAllowed`] — `child_handle` is a channel capability.
+    /// - [`CapaError::PermissionDenied`] — `REVOKE` API not allowed on caller.
     pub fn revoke_domain(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
@@ -1525,7 +1572,7 @@ impl Capability<Domain> {
     /// A channel is a restricted child capability of the target domain.
     /// It can be used to:
     ///   - Attest the target domain (`attest`).
-    ///   - Send memory capabilities to the target domain (`send_memory`).
+    ///   - Send memory capabilities to the target domain (`send`).
     ///   - Be transferred to another domain (`send_channel` / `accept_channel`).
     ///
     /// A channel cannot switch to, revoke, or administer the target domain.
@@ -1643,7 +1690,15 @@ impl Capability<Domain> {
     /// 4. Verify previous VP is `Locked { callee == caller }`.
     /// 5. Restore previous VP (`Locked → Running`); mark caller VP `Available`.
     /// 6. Update platform core tracking.
-    pub fn switch_domain(
+    ///
+    /// # Errors
+    /// - [`CapaError::InvalidOperation`] — current core unknown, no VP running on that core,
+    ///   or (return path) no saved caller context.
+    /// - [`CapaError::DomainNotSealed`] — caller or target domain not sealed.
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::SWITCH`, or target VP
+    ///   is not `Available`.
+    /// - [`CapaError::NotFound`] — `to_handle` not found in caller's domain table.
+    pub fn switch(
         caller: &CapabilityRef<Domain>,
         to_handle: LocalHandle,
         to_vp_id: u64,
@@ -1925,7 +1980,7 @@ impl Capability<Domain> {
     /// This preserves the synchronous call chain: intermediate VPs stay frozen
     /// (`Suspended`) so no other VP can claim the interrupted leaf prematurely.
     /// The leaf is only freed (`Available`) when its direct `Suspended` parent
-    /// is later claimed via a forward `switch_domain`.
+    /// is later claimed via a forward `switch`.
     ///
     /// # Special case
     ///
@@ -2105,6 +2160,12 @@ impl Capability<Domain> {
     ///   corresponding parent field (monotonicity).
     /// - Register-access bitmaps (`VectorRegReadSet` / `VectorRegWriteSet`) are
     ///   **not** subject to monotonicity; the parent may freely configure them.
+    ///
+    /// # Errors
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::SET`.
+    /// - [`CapaError::NotFound`] — `child_handle` not found in caller's domain table.
+    /// - [`CapaError::DomainAlreadySealed`] — child is already sealed.
+    /// - [`CapaError::InvalidPolicy`] — new value exceeds parent (monotonicity violation).
     pub fn set_policy(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
@@ -2130,7 +2191,7 @@ impl Capability<Domain> {
         let mut child_w = child_ref.write();
 
         // Sealed check must be done while holding the write lock to prevent a
-        // concurrent seal_domain from racing between the check and the mutation.
+        // concurrent seal from racing between the check and the mutation.
         if child_w.data.status != crate::domain::DomainStatus::Unsealed {
             return Err(CapaError::DomainSealed);
         }
@@ -2220,6 +2281,10 @@ impl Capability<Domain> {
     ///
     /// Caller must have [`MonitorAPI::GET`] permission.
     /// Succeeds regardless of the child's seal status.
+    ///
+    /// # Errors
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::GET`.
+    /// - [`CapaError::NotFound`] — `child_handle` not found in caller's domain table.
     pub fn get_policy(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
@@ -2268,6 +2333,12 @@ impl Capability<Domain> {
     ///    policy for the target VP's current run state.
     ///
     /// The actual write is delegated to [`Platform::set_vp_register`].
+    ///
+    /// # Errors
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::SET`.
+    /// - [`CapaError::NotFound`] — `child_handle` or `vp_id` not found.
+    /// - [`CapaError::RegisterAccessDenied`] — `reg_id` not set in write bitmap.
+    /// - [`CapaError::InvalidOperation`] — `reg_id` out of range.
     pub fn set_register(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,
@@ -2300,6 +2371,12 @@ impl Capability<Domain> {
     ///    policy for the target VP's current run state.
     ///
     /// The actual read is delegated to [`Platform::get_vp_register`].
+    ///
+    /// # Errors
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::GET`.
+    /// - [`CapaError::NotFound`] — `child_handle` or `vp_id` not found.
+    /// - [`CapaError::RegisterAccessDenied`] — `reg_id` not set in read bitmap.
+    /// - [`CapaError::InvalidOperation`] — `reg_id` out of range.
     pub fn get_register(
         caller: &CapabilityRef<Domain>,
         child_handle: LocalHandle,

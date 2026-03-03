@@ -38,7 +38,7 @@ fn test_cvm_with_exclusive_and_shared_memory() {
         MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::ENUMERATE | MonitorAPI::SWITCH,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b0011, cvm_api); // cores 0-1
-    let cvm_h = Capability::create_domain(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
@@ -46,20 +46,20 @@ fn test_cvm_with_exclusive_and_shared_memory() {
     // Carve exclusive memory for CVM (private memory): 512MB
     let cvm_private_access = Access::new(0x0, 0x20000000, Rights::RWX);
     let (cvm_private_mem_h, _, _updates1) =
-        Capability::carve_memory(&root, mem_root_h, cvm_private_access).unwrap();
+        Capability::carve(&root, mem_root_h, cvm_private_access).unwrap();
     let cvm_private_mem = root.read().data.memory_capabilities[&cvm_private_mem_h]
         .upgrade()
         .unwrap();
 
     // Create aliased memory for virtio (shared with host): 64MB
     let virtio_access = Access::new(0x20000000, 0x4000000, Rights::RW);
-    let (virtio_mem_h, _) = Capability::alias_memory(&root, mem_root_h, virtio_access).unwrap();
+    let (virtio_mem_h, _) = Capability::alias(&root, mem_root_h, virtio_access).unwrap();
     let virtio_mem = root.read().data.memory_capabilities[&virtio_mem_h]
         .upgrade()
         .unwrap();
 
     // Seal the CVM
-    Capability::seal_domain(&root, cvm_h).unwrap();
+    Capability::seal(&root, cvm_h).unwrap();
 
     // Verify domain is sealed
     assert!(cvm.read().data.is_sealed());
@@ -132,22 +132,22 @@ fn test_enclave_inside_cvm() {
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST | MonitorAPI::CARVE,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b1111, cvm_api);
-    let cvm_h = Capability::create_domain(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
 
     // Give CVM 256MB of exclusive memory
     let cvm_mem_access = Access::new(0x0, 0x10000000, Rights::RWX);
-    let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
+    let (cvm_mem_h, _, _) = Capability::carve(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
-    Capability::seal_domain(&root, cvm_h).unwrap();
+    Capability::seal(&root, cvm_h).unwrap();
 
     // Create enclave inside CVM with even more restricted permissions
     let enclave_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let enclave_policy = DomainPolicy::new_restricted(0b0001, enclave_api); // only core 0
-    let enclave_h = Capability::create_domain(&cvm, enclave_policy).unwrap();
+    let enclave_h = Capability::create(&cvm, enclave_policy).unwrap();
     let enclave = cvm.read().data.domain_capabilities[&enclave_h]
         .upgrade()
         .unwrap();
@@ -155,13 +155,13 @@ fn test_enclave_inside_cvm() {
     // Carve exclusive memory for enclave from CVM's memory: 16MB
     let enclave_mem_access = Access::new(0x0, 0x1000000, Rights::RW);
     let (enclave_mem_h, _, _updates) =
-        Capability::carve_memory(&root, cvm_mem_h, enclave_mem_access).unwrap();
+        Capability::carve(&root, cvm_mem_h, enclave_mem_access).unwrap();
     let enclave_mem = root.read().data.memory_capabilities[&enclave_mem_h]
         .upgrade()
         .unwrap();
 
     // Seal enclave
-    Capability::seal_domain(&cvm, enclave_h).unwrap();
+    Capability::seal(&cvm, enclave_h).unwrap();
 
     // Verify enclave is sealed and has correct policy
     assert!(enclave.read().data.is_sealed());
@@ -222,22 +222,22 @@ fn test_sandbox_inside_cvm() {
             | MonitorAPI::SWITCH,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b1111, cvm_api);
-    let cvm_h = Capability::create_domain(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
 
     // Give CVM 128MB
     let cvm_mem_access = Access::new(0x0, 0x8000000, Rights::RWX);
-    let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
+    let (cvm_mem_h, _, _) = Capability::carve(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
-    Capability::seal_domain(&root, cvm_h).unwrap();
+    Capability::seal(&root, cvm_h).unwrap();
 
     // Create sandbox with aliased memory (shared with CVM)
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let sandbox_policy = DomainPolicy::new_restricted(0b0011, sandbox_api);
-    let sandbox_h = Capability::create_domain(&cvm, sandbox_policy).unwrap();
+    let sandbox_h = Capability::create(&cvm, sandbox_policy).unwrap();
     let sandbox = cvm.read().data.domain_capabilities[&sandbox_h]
         .upgrade()
         .unwrap();
@@ -245,13 +245,13 @@ fn test_sandbox_inside_cvm() {
     // Alias memory for sandbox: 32MB shared with CVM
     let sandbox_mem_access = Access::new(0x1000000, 0x2000000, Rights::RW); // Reduced rights
     let (sandbox_mem_h, _) =
-        Capability::alias_memory(&root, cvm_mem_h, sandbox_mem_access).unwrap();
+        Capability::alias(&root, cvm_mem_h, sandbox_mem_access).unwrap();
     let sandbox_mem = root.read().data.memory_capabilities[&sandbox_mem_h]
         .upgrade()
         .unwrap();
 
     // Seal sandbox
-    Capability::seal_domain(&cvm, sandbox_h).unwrap();
+    Capability::seal(&cvm, sandbox_h).unwrap();
 
     // Verify sandbox setup
     assert!(sandbox.read().data.is_sealed());
@@ -290,7 +290,7 @@ fn test_sandbox_inside_cvm() {
     platform.set_core_vp(0, Some(0));
 
     // VP-aware switch from CVM to sandbox (sandbox VP[0])
-    let switch_ctx = Capability::switch_domain(&cvm, sandbox_h, 0, &platform).unwrap();
+    let switch_ctx = Capability::switch(&cvm, sandbox_h, 0, &platform).unwrap();
     assert_eq!(switch_ctx.from_domain, cvm_id);
     assert_eq!(switch_ctx.to_domain, sandbox_id);
     assert_eq!(switch_ctx.core_id, 0);
@@ -302,7 +302,7 @@ fn test_sandbox_inside_cvm() {
     assert_eq!(platform.get_core_domain(0), Some(sandbox_id));
 
     // VP-aware return from sandbox back to CVM
-    let ret_ctx = Capability::switch_domain(&sandbox, 0, 0, &platform).unwrap();
+    let ret_ctx = Capability::switch(&sandbox, 0, 0, &platform).unwrap();
     assert_eq!(ret_ctx.from_domain, sandbox_id);
     assert_eq!(ret_ctx.to_domain, cvm_id);
     assert!(ret_ctx.is_return);
@@ -324,7 +324,7 @@ fn test_two_cvms_with_shared_memory() {
     // Create CVM1
     let cvm1_api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let cvm1_policy = DomainPolicy::new_restricted(0b0011, cvm1_api); // cores 0-1
-    let cvm1_h = Capability::create_domain(&root, cvm1_policy).unwrap();
+    let cvm1_h = Capability::create(&root, cvm1_policy).unwrap();
     let cvm1 = root.read().data.domain_capabilities[&cvm1_h]
         .upgrade()
         .unwrap();
@@ -332,21 +332,21 @@ fn test_two_cvms_with_shared_memory() {
     // Create CVM2
     let cvm2_api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let cvm2_policy = DomainPolicy::new_restricted(0b1100, cvm2_api); // cores 2-3
-    let cvm2_h = Capability::create_domain(&root, cvm2_policy).unwrap();
+    let cvm2_h = Capability::create(&root, cvm2_policy).unwrap();
     let cvm2 = root.read().data.domain_capabilities[&cvm2_h]
         .upgrade()
         .unwrap();
 
     // Give CVM1 exclusive memory: 512MB
     let cvm1_mem_access = Access::new(0x0, 0x20000000, Rights::RWX);
-    let (cvm1_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm1_mem_access).unwrap();
+    let (cvm1_mem_h, _, _) = Capability::carve(&root, mem_root_h, cvm1_mem_access).unwrap();
     let cvm1_mem = root.read().data.memory_capabilities[&cvm1_mem_h]
         .upgrade()
         .unwrap();
 
     // Give CVM2 exclusive memory: 512MB
     let cvm2_mem_access = Access::new(0x20000000, 0x20000000, Rights::RWX);
-    let (cvm2_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm2_mem_access).unwrap();
+    let (cvm2_mem_h, _, _) = Capability::carve(&root, mem_root_h, cvm2_mem_access).unwrap();
     let cvm2_mem = root.read().data.memory_capabilities[&cvm2_mem_h]
         .upgrade()
         .unwrap();
@@ -354,19 +354,19 @@ fn test_two_cvms_with_shared_memory() {
     // Create shared memory region (aliased to both CVMs): 64MB
     let shared_mem_access = Access::new(0x40000000, 0x4000000, Rights::RW);
     let (shared_for_cvm1_h, _) =
-        Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
+        Capability::alias(&root, mem_root_h, shared_mem_access).unwrap();
     let shared_for_cvm1 = root.read().data.memory_capabilities[&shared_for_cvm1_h]
         .upgrade()
         .unwrap();
     let (shared_for_cvm2_h, _) =
-        Capability::alias_memory(&root, mem_root_h, shared_mem_access).unwrap();
+        Capability::alias(&root, mem_root_h, shared_mem_access).unwrap();
     let shared_for_cvm2 = root.read().data.memory_capabilities[&shared_for_cvm2_h]
         .upgrade()
         .unwrap();
 
     // Seal both CVMs
-    Capability::seal_domain(&root, cvm1_h).unwrap();
-    Capability::seal_domain(&root, cvm2_h).unwrap();
+    Capability::seal(&root, cvm1_h).unwrap();
+    Capability::seal(&root, cvm2_h).unwrap();
 
     // Verify both CVMs are sealed
     assert!(cvm1.read().data.is_sealed());
@@ -475,44 +475,44 @@ fn test_complex_hierarchy_with_updates() {
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::CARVE | MonitorAPI::ATTEST,
     );
     let cvm_h =
-        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, cvm_api)).unwrap();
+        Capability::create(&root, DomainPolicy::new_restricted(0b1111, cvm_api)).unwrap();
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
 
     let (cvm_mem_h, _, _) =
-        Capability::carve_memory(&root, mem_root_h, Access::new(0x0, 0x8000000, Rights::RWX))
+        Capability::carve(&root, mem_root_h, Access::new(0x0, 0x8000000, Rights::RWX))
             .unwrap();
-    Capability::seal_domain(&root, cvm_h).unwrap();
+    Capability::seal(&root, cvm_h).unwrap();
 
     // Enclave inside CVM
     let enclave_api = MonitorAPI::from_bits(
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::CARVE | MonitorAPI::ATTEST,
     );
     let enclave_h =
-        Capability::create_domain(&cvm, DomainPolicy::new_restricted(0b0011, enclave_api)).unwrap();
+        Capability::create(&cvm, DomainPolicy::new_restricted(0b0011, enclave_api)).unwrap();
     let enclave = cvm.read().data.domain_capabilities[&enclave_h]
         .upgrade()
         .unwrap();
 
     let (enclave_mem_h, _, _) =
-        Capability::carve_memory(&root, cvm_mem_h, Access::new(0x0, 0x2000000, Rights::RW))
+        Capability::carve(&root, cvm_mem_h, Access::new(0x0, 0x2000000, Rights::RW))
             .unwrap();
-    Capability::seal_domain(&cvm, enclave_h).unwrap();
+    Capability::seal(&cvm, enclave_h).unwrap();
 
     // Nested sandbox inside enclave
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let sandbox_h =
-        Capability::create_domain(&enclave, DomainPolicy::new_restricted(0b0001, sandbox_api))
+        Capability::create(&enclave, DomainPolicy::new_restricted(0b0001, sandbox_api))
             .unwrap();
     let sandbox = enclave.read().data.domain_capabilities[&sandbox_h]
         .upgrade()
         .unwrap();
 
     let (_sandbox_mem_h, _, _) =
-        Capability::carve_memory(&root, enclave_mem_h, Access::new(0x0, 0x100000, Rights::R))
+        Capability::carve(&root, enclave_mem_h, Access::new(0x0, 0x100000, Rights::R))
             .unwrap();
-    Capability::seal_domain(&enclave, sandbox_h).unwrap();
+    Capability::seal(&enclave, sandbox_h).unwrap();
 
     // Verify hierarchy
     assert_eq!(root.read().data.id, 0);
@@ -582,16 +582,16 @@ fn test_complex_memory_update_scenario() {
                 | MonitorAPI::ATTEST,
         ),
     );
-    let dom1_h = Capability::create_domain(&dom0, dom1_policy).unwrap();
+    let dom1_h = Capability::create(&dom0, dom1_policy).unwrap();
     let dom1 = dom0.read().data.domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
 
     let r1_access = Access::new(0x1000, 0x2000, Rights::RWX);
-    let (r1_h, _, _) = Capability::carve_memory(&dom0, r0_h, r1_access).unwrap();
-    Capability::send_memory(&dom0, r1_h, dom1_h, Attributes::NONE).unwrap();
+    let (r1_h, _, _) = Capability::carve(&dom0, r0_h, r1_access).unwrap();
+    Capability::send(&dom0, r1_h, dom1_h, Attributes::NONE).unwrap();
     let r1_h_in_dom1: LocalHandle = 1;
-    Capability::seal_domain(&dom0, dom1_h).unwrap();
+    Capability::seal(&dom0, dom1_h).unwrap();
 
     let dom1_view = compute_address_space(&dom1);
     assert!(dom1_view.is_accessible(0x1000));
@@ -606,19 +606,19 @@ fn test_complex_memory_update_scenario() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::REVOKE),
     );
-    let dom2_h = Capability::create_domain(&dom1, dom2_policy).unwrap();
+    let dom2_h = Capability::create(&dom1, dom2_policy).unwrap();
     let dom2 = dom1.read().data.domain_capabilities[&dom2_h]
         .upgrade()
         .unwrap();
 
     let r2_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (r2_h_in_dom1, r2_sub, _) =
-        Capability::carve_memory(&dom1, r1_h_in_dom1, r2_access).unwrap();
+        Capability::carve(&dom1, r1_h_in_dom1, r2_access).unwrap();
 
     let r3_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_, r3_sub) = Capability::alias_memory(&dom1, r2_h_in_dom1, r3_access).unwrap();
+    let (_, r3_sub) = Capability::alias(&dom1, r2_h_in_dom1, r3_access).unwrap();
 
-    Capability::send_memory(&dom1, r2_h_in_dom1, dom2_h, Attributes::NONE).unwrap();
+    Capability::send(&dom1, r2_h_in_dom1, dom2_h, Attributes::NONE).unwrap();
     let r2_h_in_dom2: LocalHandle = 1;
 
     let r2_arc = dom2.read().data.memory_capabilities[&r2_h_in_dom2]
@@ -627,15 +627,15 @@ fn test_complex_memory_update_scenario() {
     let r2_rights = r2_arc.read().data.access.rights;
     assert!(r2_rights.read() && r2_rights.write() && !r2_rights.execute());
 
-    Capability::seal_domain(&dom1, dom2_h).unwrap();
+    Capability::seal(&dom1, dom2_h).unwrap();
 
     let dom1_view_after = compute_address_space(&dom1);
     assert!(dom1_view_after.is_accessible(0x1000));
     assert!(dom1_view_after.is_accessible(0x1FFF));
 
     // ── Revoke r3 from r2, then r2 from r1 ───────────────────────────
-    Capability::revoke_memory_child(&dom2, r2_h_in_dom2, r3_sub).unwrap();
-    Capability::revoke_memory_child(&dom1, r1_h_in_dom1, r2_sub).unwrap();
+    Capability::revoke(&dom2, r2_h_in_dom2, r3_sub).unwrap();
+    Capability::revoke(&dom1, r1_h_in_dom1, r2_sub).unwrap();
 
     let r1_rights_after = r1_arc.read().data.access.rights;
     assert!(r1_rights_after.read() && r1_rights_after.write() && r1_rights_after.execute());

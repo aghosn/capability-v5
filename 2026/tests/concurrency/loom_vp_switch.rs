@@ -1,17 +1,17 @@
-//! Loom tests for VP-aware domain switching (`Capability::switch_domain`).
+//! Loom tests for VP-aware domain switching (`Capability::switch`).
 //!
 //! Tests the key invariant: **atomic VP claim** — only one core can transition
 //! a VP from `Available → Running` at a time, regardless of schedule.
 //!
 //! # Design
 //!
-//! `switch_domain` operates on per-VP `crate::sync::RwLock<VpRunState>` objects.
+//! `switch` operates on per-VP `crate::sync::RwLock<VpRunState>` objects.
 //! Under `--features loom` these become `loom::sync::RwLock`, so loom explores
 //! every valid interleaving of the write-lock acquisitions that guard state
 //! transitions.
 //!
 //! The tests do NOT go through `execute()` (which adds the platform op-lock
-//! layer); they call `switch_domain` directly, matching real usage where the
+//! layer); they call `switch` directly, matching real usage where the
 //! caller already holds the appropriate lock.  The `LoomPlatform` below provides
 //! a minimal `Platform` implementation backed by `loom::sync` primitives.
 //!
@@ -80,7 +80,7 @@ impl LoomPlatform {
     }
 }
 
-// VP tests call switch_domain directly (not via execute()), so the op-lock
+// VP tests call switch directly (not via execute()), so the op-lock
 // methods are never invoked.  A dummy guard satisfies the trait bound.
 struct DummyGuard;
 impl OpLockGuard for DummyGuard {}
@@ -158,8 +158,8 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 /// Child has all-core access and full API (including SWITCH).
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let h = Capability::create_domain(parent, policy).unwrap();
-    Capability::seal_domain(parent, h).unwrap();
+    let h = Capability::create(parent, policy).unwrap();
+    Capability::seal(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
@@ -170,7 +170,7 @@ fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, 
 // V1 — Two cores race for the same VP
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Two cores concurrently call `switch_domain` targeting VP[0] of the same
+/// Two cores concurrently call `switch` targeting VP[0] of the same
 /// domain.  Exactly one should succeed (`Available → Running`); the other
 /// should fail ("target VP is not available").
 #[test]
@@ -200,13 +200,13 @@ fn vp_race_two_cores_same_vp() {
             let _target = target_t0; // keep alive
             let plat = LoomPlatform::new(0, state_t0);
             // Core 0 claims target VP[0].
-            Capability::switch_domain(&root_t0, target_h, 0, &plat)
+            Capability::switch(&root_t0, target_h, 0, &plat)
         });
 
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
             // Core 1 also tries to claim target VP[0].
-            Capability::switch_domain(&root_t1, target_h, 0, &plat)
+            Capability::switch(&root_t1, target_h, 0, &plat)
         });
 
         let r0 = t0.join().unwrap();
@@ -263,13 +263,13 @@ fn vp_two_cores_different_vps() {
             let _target = target_t0;
             let plat = LoomPlatform::new(0, state_t0);
             // Core 0 claims VP[0].
-            Capability::switch_domain(&root_t0, target_h, 0, &plat)
+            Capability::switch(&root_t0, target_h, 0, &plat)
         });
 
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
             // Core 1 claims VP[1].
-            Capability::switch_domain(&root_t1, target_h, 1, &plat)
+            Capability::switch(&root_t1, target_h, 1, &plat)
         });
 
         let r0 = t0.join().unwrap();
@@ -305,9 +305,9 @@ fn vp_two_cores_different_vps() {
 /// Core 1 is inside domain root (root.VP[1] Running).
 ///
 /// Concurrently:
-/// * Thread 0 (core 0): returns from B to root (switch_domain(&B, 0, 0, &plat0)).
+/// * Thread 0 (core 0): returns from B to root (switch(&B, 0, 0, &plat0)).
 /// * Thread 1 (core 1): tries to switch from root into B, claiming B.VP[0]
-///                      (switch_domain(&root, B_h, 0, &plat1)).
+///                      (switch(&root, B_h, 0, &plat1)).
 ///
 /// Two valid orderings under loom:
 ///
@@ -378,13 +378,13 @@ fn vp_concurrent_return_and_claim() {
         // Thread 0 (core 0): return from B → root.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::switch_domain(&b_t0, 0, 0, &plat)
+            Capability::switch(&b_t0, 0, 0, &plat)
         });
 
         // Thread 1 (core 1): try to switch from root → B, claiming VP[0].
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch_domain(&root_t1, b_h, 0, &plat)
+            Capability::switch(&root_t1, b_h, 0, &plat)
         });
 
         let r0 = t0.join().unwrap();
@@ -453,7 +453,7 @@ fn vp_concurrent_return_and_claim() {
 /// * Thread 0 (core 0): `deliver_interrupt_vp(&dom2, dom0_id, 0)` —
 ///                       sets dom2.vp0 Running→Interrupted, dom1.vp0 Locked→Suspended,
 ///                       dom0.vp0 Locked→Running.
-/// * Thread 1 (core 1): `switch_domain(&dom1, dom2_h, 0)` —
+/// * Thread 1 (core 1): `switch(&dom1, dom2_h, 0)` —
 ///                       dom1.vp1 tries to forward-switch to dom2.vp0.
 ///
 /// Invariants in **all** loom-explored orderings:
@@ -463,7 +463,7 @@ fn vp_concurrent_return_and_claim() {
 ///
 /// This is the key safety property of the lazy-unwind interrupt model:
 /// the interrupted VP cannot be stolen by any concurrent claim, regardless
-/// of how `deliver_interrupt_vp` and `switch_domain` interleave.
+/// of how `deliver_interrupt_vp` and `switch` interleave.
 #[test]
 fn vp_interrupt_delivery_vs_claim_race() {
     loom::model(|| {
@@ -494,9 +494,9 @@ fn vp_interrupt_delivery_vs_claim_race() {
         //   dom0.vp0 = Running{core:0}
         init_vp_running(&dom0, 0, 0);
         //   dom0 switches to dom1.vp0 → dom0.vp0=Locked, dom1.vp0=Running{core:0}
-        Capability::switch_domain(&dom0, dom1_h_in_dom0, 0, &plat_setup).unwrap();
+        Capability::switch(&dom0, dom1_h_in_dom0, 0, &plat_setup).unwrap();
         //   dom1 switches to dom2.vp0 → dom1.vp0=Locked, dom2.vp0=Running{core:0}
-        Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &plat_setup).unwrap();
+        Capability::switch(&dom1, dom2_h_in_dom1, 0, &plat_setup).unwrap();
 
         // dom1.vp1 = Running on core 1: the "attacker" VP that will try to steal dom2.vp0.
         init_vp_running(&dom1, 1, 1);
@@ -521,7 +521,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // (after Thread 0's write) — neither is Available or Suspended — always fails.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch_domain(&dom1_t1, dom2_h_in_dom1, 0, &plat)
+            Capability::switch(&dom1_t1, dom2_h_in_dom1, 0, &plat)
         });
 
         let r0 = t0.join().unwrap();
@@ -539,7 +539,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // The claim attempt must always fail — dom2.vp0 is never Available or Suspended.
         assert!(
             r1.is_err(),
-            "switch_domain to a Running/Interrupted VP must always fail"
+            "switch to a Running/Interrupted VP must always fail"
         );
     });
 }
@@ -555,8 +555,8 @@ fn vp_interrupt_delivery_vs_claim_race() {
 ///   dom2.vp0  Interrupted
 ///
 /// Concurrently:
-/// * Thread 0 (core 0, dom0.vp0): `switch_domain(&dom0, dom1_h, 0)` — claim dom1.vp0.
-/// * Thread 1 (core 1, dom0.vp1): `switch_domain(&dom0, dom1_h, 0)` — same target.
+/// * Thread 0 (core 0, dom0.vp0): `switch(&dom0, dom1_h, 0)` — claim dom1.vp0.
+/// * Thread 1 (core 1, dom0.vp1): `switch(&dom0, dom1_h, 0)` — same target.
 ///
 /// Invariants in **all** loom-explored orderings:
 /// * Exactly one core wins the write-lock on dom1.vp0's run_state.
@@ -611,13 +611,13 @@ fn vp_two_cores_race_suspended_vp() {
         // Thread 0 (core 0, dom0.vp0): try to claim dom1.vp0.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::switch_domain(&dom0_t0, dom1_h_in_dom0, 0, &plat)
+            Capability::switch(&dom0_t0, dom1_h_in_dom0, 0, &plat)
         });
 
         // Thread 1 (core 1, dom0.vp1): same target.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch_domain(&dom0_t1, dom1_h_in_dom0, 0, &plat)
+            Capability::switch(&dom0_t1, dom1_h_in_dom0, 0, &plat)
         });
 
         let r0 = t0.join().unwrap();

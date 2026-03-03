@@ -3,7 +3,7 @@
 //! Coverage:
 //!  1. get_chan creates a child cap with channel_target pointing to target domain
 //!  2. attest via channel reports the target domain (with Channel:true header)
-//!  3. send_memory to a channel cap delivers to the target domain
+//!  3. send to a channel cap delivers to the target domain
 //!  4. send_channel + accept_channel transfers a channel (move semantics)
 //!  5. reject_channel unfreezes the sender's handle
 //!  6. send_channel to an unsealed domain transfers immediately
@@ -11,9 +11,9 @@
 //!  8. Revoking while channel is in-transit cancels the pending entry
 //!  9. get_chan denied without GETCHAN permission
 //! 10. Only channel caps may be transferred via send_channel
-//! 11. seal_domain on a channel handle is rejected (ApiNotAllowed)
+//! 11. seal on a channel handle is rejected (ApiNotAllowed)
 //! 12. revoke_domain on a channel handle is rejected (NotFound — channel is not a CDT child of caller)
-//! 13. switch_domain using a channel handle as target is rejected (DomainNotSealed — sentinel has no VPs)
+//! 13. switch using a channel handle as target is rejected (DomainNotSealed — sentinel has no VPs)
 
 use capability_engine::*;
 use parking_lot::RwLock;
@@ -31,8 +31,8 @@ fn root_domain() -> CapabilityRef<Domain> {
 /// Create and seal a child domain under `parent` with full permissions.
 fn sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let h = Capability::create_domain(parent, policy).unwrap();
-    Capability::seal_domain(parent, h).unwrap();
+    let h = Capability::create(parent, policy).unwrap();
+    Capability::seal(parent, h).unwrap();
     let child = parent
         .read()
         .data
@@ -100,14 +100,14 @@ fn test_get_chan_denied_without_permission() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL),
     );
-    let restricted_h = Capability::create_domain(&root, restricted).unwrap();
-    Capability::seal_domain(&root, restricted_h).unwrap();
+    let restricted_h = Capability::create(&root, restricted).unwrap();
+    Capability::seal(&root, restricted_h).unwrap();
     let restricted_dom = root.read().data.domain_capabilities[&restricted_h].upgrade().unwrap();
 
     // restricted_dom creates a child — it now OWNS that child cap
     let child_policy = DomainPolicy::new_restricted(0b0001, MonitorAPI::NONE);
-    let child_h = Capability::create_domain(&restricted_dom, child_policy).unwrap();
-    Capability::seal_domain(&restricted_dom, child_h).unwrap();
+    let child_h = Capability::create(&restricted_dom, child_policy).unwrap();
+    Capability::seal(&restricted_dom, child_h).unwrap();
 
     // restricted_dom tries get_chan on its own child — must fail (no GETCHAN)
     let result = Capability::get_chan(&restricted_dom, child_h);
@@ -119,7 +119,7 @@ fn test_get_chan_requires_sealed_target() {
     let root = root_domain();
     // Create but do NOT seal the child
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create_domain(&root, policy).unwrap();
+    let child_h = Capability::create(&root, policy).unwrap();
     // child not sealed
     let result = Capability::get_chan(&root, child_h);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
@@ -147,7 +147,7 @@ fn test_attest_channel_reports_target() {
     );
 }
 
-// ── Test 3: send_memory via channel delivers to target ───────────────────────
+// ── Test 3: send via channel delivers to target ───────────────────────
 
 #[test]
 fn test_send_memory_via_channel_sealed_target() {
@@ -159,8 +159,8 @@ fn test_send_memory_via_channel_sealed_target() {
     root.write().data.add_domain_capability(child_h, Arc::downgrade(&child));
 
     // Send using chan_h as receiver handle — must be routed to child.
-    let result = Capability::<Domain>::send_memory(&root, 10, chan_h, Attributes::NONE);
-    // child is sealed, so send_memory goes through sealed path (pending)
+    let result = Capability::<Domain>::send(&root, 10, chan_h, Attributes::NONE);
+    // child is sealed, so send goes through sealed path (pending)
     assert!(result.is_ok(), "send via channel should succeed: {:?}", result);
 
     // Pending entry should be in child's queue, not in the channel's fake domain
@@ -254,7 +254,7 @@ fn test_send_channel_unsealed_receiver_immediate() {
 
     // Create an UNSEALED receiver
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let unsealed_h = Capability::create_domain(&root, policy).unwrap();
+    let unsealed_h = Capability::create(&root, policy).unwrap();
     let unsealed = root.read().data.domain_capabilities[&unsealed_h].upgrade().unwrap();
 
     Capability::<Domain>::send_channel(&root, chan_h, unsealed_h, Attributes::NONE).unwrap();
@@ -378,7 +378,7 @@ fn test_send_channel_rejects_non_channel() {
     );
 }
 
-// ── Test 11: seal_domain on a channel handle is rejected ─────────────────────
+// ── Test 11: seal on a channel handle is rejected ─────────────────────
 
 #[test]
 fn test_seal_channel_rejected() {
@@ -386,10 +386,10 @@ fn test_seal_channel_rejected() {
     let (_child, child_h) = sealed_child(&root);
     let chan_h = Capability::get_chan(&root, child_h).unwrap();
 
-    let result = Capability::<Domain>::seal_domain(&root, chan_h);
+    let result = Capability::<Domain>::seal(&root, chan_h);
     assert!(
         matches!(result, Err(CapaError::ApiNotAllowed)),
-        "seal_domain must reject a channel handle, got {:?}",
+        "seal must reject a channel handle, got {:?}",
         result
     );
 }
@@ -410,15 +410,15 @@ fn test_revoke_channel_rejected() {
     );
 }
 
-// ── Test 13: switch_domain using a channel handle as target is rejected ───────
+// ── Test 13: switch using a channel handle as target is rejected ───────
 
 #[test]
 fn test_switch_to_channel_rejected() {
     let root = root_domain();
     // caller must be sealed with SWITCH permission
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let caller_h = Capability::create_domain(&root, policy).unwrap();
-    Capability::seal_domain(&root, caller_h).unwrap();
+    let caller_h = Capability::create(&root, policy).unwrap();
+    Capability::seal(&root, caller_h).unwrap();
     let caller = root.read().data.domain_capabilities[&caller_h].upgrade().unwrap();
 
     // Give the caller a channel handle to pass as switch target
@@ -431,10 +431,10 @@ fn test_switch_to_channel_rejected() {
 
     let platform = common::TestPlatform::new();
     platform.set_current_core(Some(0));
-    let result = Capability::<Domain>::switch_domain(&caller, chan_h, 0, &platform);
+    let result = Capability::<Domain>::switch(&caller, chan_h, 0, &platform);
     assert!(
         matches!(result, Err(CapaError::ApiNotAllowed)),
-        "switch_domain must reject a channel handle as target, got {:?}",
+        "switch must reject a channel handle as target, got {:?}",
         result
     );
     let _ = target;
