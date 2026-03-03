@@ -59,7 +59,7 @@ fn test_cvm_with_exclusive_and_shared_memory() {
         .unwrap();
 
     // Seal the CVM
-    Capability::seal_domain_op(&root, cvm_h).unwrap();
+    Capability::seal_domain(&root, cvm_h).unwrap();
 
     // Verify domain is sealed
     assert!(cvm.read().data.is_sealed());
@@ -142,7 +142,7 @@ fn test_enclave_inside_cvm() {
     let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
-    Capability::seal_domain_op(&root, cvm_h).unwrap();
+    Capability::seal_domain(&root, cvm_h).unwrap();
 
     // Create enclave inside CVM with even more restricted permissions
     let enclave_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
@@ -161,7 +161,7 @@ fn test_enclave_inside_cvm() {
         .unwrap();
 
     // Seal enclave
-    Capability::seal_domain_op(&cvm, enclave_h).unwrap();
+    Capability::seal_domain(&cvm, enclave_h).unwrap();
 
     // Verify enclave is sealed and has correct policy
     assert!(enclave.read().data.is_sealed());
@@ -232,7 +232,7 @@ fn test_sandbox_inside_cvm() {
     let (cvm_mem_h, _, _) = Capability::carve_memory(&root, mem_root_h, cvm_mem_access).unwrap();
 
     // Seal CVM
-    Capability::seal_domain_op(&root, cvm_h).unwrap();
+    Capability::seal_domain(&root, cvm_h).unwrap();
 
     // Create sandbox with aliased memory (shared with CVM)
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
@@ -251,7 +251,7 @@ fn test_sandbox_inside_cvm() {
         .unwrap();
 
     // Seal sandbox
-    Capability::seal_domain_op(&cvm, sandbox_h).unwrap();
+    Capability::seal_domain(&cvm, sandbox_h).unwrap();
 
     // Verify sandbox setup
     assert!(sandbox.read().data.is_sealed());
@@ -365,8 +365,8 @@ fn test_two_cvms_with_shared_memory() {
         .unwrap();
 
     // Seal both CVMs
-    Capability::seal_domain_op(&root, cvm1_h).unwrap();
-    Capability::seal_domain_op(&root, cvm2_h).unwrap();
+    Capability::seal_domain(&root, cvm1_h).unwrap();
+    Capability::seal_domain(&root, cvm2_h).unwrap();
 
     // Verify both CVMs are sealed
     assert!(cvm1.read().data.is_sealed());
@@ -483,7 +483,7 @@ fn test_complex_hierarchy_with_updates() {
     let (cvm_mem_h, _, _) =
         Capability::carve_memory(&root, mem_root_h, Access::new(0x0, 0x8000000, Rights::RWX))
             .unwrap();
-    Capability::seal_domain_op(&root, cvm_h).unwrap();
+    Capability::seal_domain(&root, cvm_h).unwrap();
 
     // Enclave inside CVM
     let enclave_api = MonitorAPI::from_bits(
@@ -498,7 +498,7 @@ fn test_complex_hierarchy_with_updates() {
     let (enclave_mem_h, _, _) =
         Capability::carve_memory(&root, cvm_mem_h, Access::new(0x0, 0x2000000, Rights::RW))
             .unwrap();
-    Capability::seal_domain_op(&cvm, enclave_h).unwrap();
+    Capability::seal_domain(&cvm, enclave_h).unwrap();
 
     // Nested sandbox inside enclave
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
@@ -512,7 +512,7 @@ fn test_complex_hierarchy_with_updates() {
     let (_sandbox_mem_h, _, _) =
         Capability::carve_memory(&root, enclave_mem_h, Access::new(0x0, 0x100000, Rights::R))
             .unwrap();
-    Capability::seal_domain_op(&enclave, sandbox_h).unwrap();
+    Capability::seal_domain(&enclave, sandbox_h).unwrap();
 
     // Verify hierarchy
     assert_eq!(root.read().data.id, 0);
@@ -591,7 +591,7 @@ fn test_complex_memory_update_scenario() {
     let (r1_h, _, _) = Capability::carve_memory(&dom0, r0_h, r1_access).unwrap();
     Capability::send_memory(&dom0, r1_h, dom1_h, Attributes::NONE).unwrap();
     let r1_h_in_dom1: LocalHandle = 1;
-    Capability::seal_domain_op(&dom0, dom1_h).unwrap();
+    Capability::seal_domain(&dom0, dom1_h).unwrap();
 
     let dom1_view = compute_address_space(&dom1);
     assert!(dom1_view.is_accessible(0x1000));
@@ -627,7 +627,7 @@ fn test_complex_memory_update_scenario() {
     let r2_rights = r2_arc.read().data.access.rights;
     assert!(r2_rights.read() && r2_rights.write() && !r2_rights.execute());
 
-    Capability::seal_domain_op(&dom1, dom2_h).unwrap();
+    Capability::seal_domain(&dom1, dom2_h).unwrap();
 
     let dom1_view_after = compute_address_space(&dom1);
     assert!(dom1_view_after.is_accessible(0x1000));

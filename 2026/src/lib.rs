@@ -36,8 +36,8 @@ pub use capability::{
 };
 pub use domain::{
     effective_vector, Domain, DomainPolicy, DomainStatus, InterruptPolicy, InterruptVisibility,
-    MonitorAPI, PolicyIdentifier, VProcessorRef, VProcessorState, VectorPolicy, VpCallContext,
-    VpRunState, VECTOR_AVAILABLE,
+    MonitorAPI, PendingDomainCapability, PolicyIdentifier, VProcessorRef, VProcessorState,
+    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 pub use error::{CapaError, Result};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};

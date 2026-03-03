@@ -304,7 +304,7 @@ fn test_revoke_domain_tree() {
 
     // Create child and seal it
     let child_h = Capability::create_domain(&root, DomainPolicy::new_root(4)).unwrap();
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -450,7 +450,7 @@ fn test_depth_invariant() {
     assert_eq!(child.read().depth, 1, "child domain should have depth 1");
 
     // Level-2 grandchild domain (child must be sealed first) has depth 2
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
     let grandchild_h = Capability::create_domain(&child, DomainPolicy::new_root(4)).unwrap();
     let grandchild = child.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
@@ -468,14 +468,14 @@ fn test_multi_level_domain_revoke() {
 
     // Build a 3-level subtree under root: child → grandchild → great_grandchild
     let child_h = Capability::create_domain(&root, DomainPolicy::new_root(4)).unwrap();
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
     let child_id = child_ref.read().data.id;
 
     let grandchild_h = Capability::create_domain(&child_ref, DomainPolicy::new_root(4)).unwrap();
-    Capability::seal_domain_op(&child_ref, grandchild_h).unwrap();
+    Capability::seal_domain(&child_ref, grandchild_h).unwrap();
     let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();

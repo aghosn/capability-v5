@@ -117,7 +117,7 @@ fn main() {
     println!("\nSTEP 5: Seal child domain");
     println!("--------------------------");
 
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
     println!("✓ Child domain sealed");
     println!("  • Status: {:?}", child.read().data.status);
 

@@ -161,7 +161,7 @@ pub fn cmd_seal(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let cap_handle = find_domain_handle(&owner, &domain)
         .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
 
-    Capability::seal_domain_op(&owner, cap_handle)
+    Capability::seal_domain(&owner, cap_handle)
         .map_err(|e| format!("Failed to seal: {:?}", e))?;
 
     // Record command

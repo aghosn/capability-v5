@@ -157,7 +157,7 @@ fn a1c_send_received_capability_always_emits_unmap() {
     Capability::send_memory(&root, r1_h, dom1_h, Attributes::NONE).unwrap();
 
     // Seal dom1 so it can SEND.
-    Capability::seal_domain_op(&root, dom1_h).unwrap();
+    Capability::seal_domain(&root, dom1_h).unwrap();
 
     // dom1 now holds r1 at handle 1 (first cap in a fresh domain).
     let r1_h_in_dom1: LocalHandle = 1;

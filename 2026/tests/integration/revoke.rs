@@ -180,7 +180,7 @@ fn test_nested_carve_revoke() {
     let _send1 = Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
 
     // Seal dom5 so it can carve from child1
-    Capability::seal_domain_op(&root, dom5_h).unwrap();
+    Capability::seal_domain(&root, dom5_h).unwrap();
 
     // After send, child1 is the first (and only) cap in dom5's memory table → handle 1
     let child1_h_in_dom5: LocalHandle = 1;
@@ -298,7 +298,7 @@ fn test_multi_level_revoke_exact_updates() {
     let dom5_id = dom5.read().data.id;
 
     Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
-    Capability::seal_domain_op(&root, dom5_h).unwrap();
+    Capability::seal_domain(&root, dom5_h).unwrap();
 
     // dom5 carves child2 [0x3000, 0x1000) R from child1 (handle 1 in dom5's table)
     let child1_h_in_dom5: LocalHandle = 1;
@@ -378,7 +378,7 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
     let dom5_id = dom5.read().data.id;
 
     Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
-    Capability::seal_domain_op(&root, dom5_h).unwrap();
+    Capability::seal_domain(&root, dom5_h).unwrap();
 
     // dom5 carves child2 [0x2000, 0x2000) R from child1 and sends to dom_carved_recv
     let child1_h_in_dom5: LocalHandle = 1;

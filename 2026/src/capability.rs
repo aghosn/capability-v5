@@ -1,8 +1,10 @@
 //! Core capability structures with thread-safe parent-child relationships
 
+use crate::attest::{self, AttestationReport};
 use crate::domain::{
     effective_vector, Domain, DomainPolicy, InterruptVisibility, MonitorAPI, PendingCapability,
-    PolicyIdentifier, VProcessorRef, VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
+    PendingDomainCapability, PolicyIdentifier, VProcessorRef, VectorPolicy, VpCallContext,
+    VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
@@ -41,6 +43,10 @@ pub struct Ownership {
     pub attributes: Attributes,
     /// Weak reference to the owning domain capability (for sealed/API validation)
     pub owner_domain: Option<CapabilityWeak<Domain>>,
+    /// Set when a channel capability is frozen in-transit (send_channel).
+    /// Points to the receiver domain so revocation can cancel the pending entry.
+    /// Always `None` for non-channel capabilities.
+    pub pending_receiver: Option<CapabilityWeak<Domain>>,
 }
 
 impl Ownership {
@@ -49,6 +55,7 @@ impl Ownership {
             owner,
             attributes: Attributes::NONE,
             owner_domain: None,
+            pending_receiver: None,
         }
     }
 
@@ -96,6 +103,10 @@ pub struct Capability<T> {
     /// Capability data (Domain or MemoryRegion)
     pub data: T,
 
+    /// If `Some`, this is a channel capability: all operations are forwarded to
+    /// the target domain.  Always `None` for `Capability<MemoryRegion>`.
+    pub channel_target: Option<CapabilityWeak<Domain>>,
+
     /// Weak reference to parent (prevents reference cycles)
     pub parent: CapabilityWeak<T>,
 
@@ -114,6 +125,7 @@ impl<T> Capability<T> {
             sub_handle,
             depth: 0,
             data,
+            channel_target: None,
             parent: Weak::new(),
             children: Vec::new(),
             next_child_sub: 1,
@@ -133,6 +145,7 @@ impl<T> Capability<T> {
             sub_handle,
             depth,
             data,
+            channel_target: None,
             parent,
             children: Vec::new(),
             next_child_sub: 1,
@@ -470,6 +483,12 @@ fn subtract_region(regions: &[Access], to_subtract: &Access) -> Vec<Access> {
 }
 
 impl Capability<Domain> {
+    /// Returns `true` if this is a channel capability (created by [`get_chan`]).
+    #[inline]
+    pub fn is_channel(&self) -> bool {
+        self.channel_target.is_some()
+    }
+
     /// Create a child domain (static method, explicit owner).
     ///
     /// The `owner` parameter allows tests and low-level callers to assign an explicit
@@ -564,6 +583,29 @@ impl Capability<Domain> {
         }
 
         let mut domain = domain_ref.write();
+
+        // If this is a channel capability currently frozen (in transit), cancel
+        // the pending entry in the receiver domain and unfreeze the sender's handle.
+        if domain.is_channel() {
+            if let Some(recv_ref) = domain.owned.pending_receiver.as_ref().and_then(|w| w.upgrade()) {
+                let mut rw = recv_ref.write();
+                // Find and remove the pending entry for this channel
+                let pending_id = rw.data.pending_domain_capabilities.iter()
+                    .find(|(_, p)| p.cap.upgrade().map_or(false, |c| Arc::ptr_eq(&c, domain_ref)))
+                    .map(|(id, _)| *id);
+                if let Some(id) = pending_id {
+                    if let Some(pending) = rw.data.pending_domain_capabilities.remove(&id) {
+                        if let Some(sender_ref) = pending.sender_domain.upgrade() {
+                            if !Arc::ptr_eq(&sender_ref, domain_ref) {
+                                sender_ref.write().data.unfreeze_domain_handle(pending.sender_handle);
+                            }
+                        }
+                    }
+                }
+            }
+            domain.owned.pending_receiver = None;
+        }
+
         domain.data.revoke();
         updates.add_revoke_domain_with_fallback(domain.data.id, fallback);
 
@@ -754,7 +796,6 @@ impl Capability<Domain> {
         // The frozen check here is non-authoritative; the write-lock commit below is.
         let caller_id;
         let receiver_ref: CapabilityRef<Domain>;
-        let recv_sealed;
         {
             let r = caller.read();
             if r.data.is_memory_handle_frozen(cap) {
@@ -767,10 +808,19 @@ impl Capability<Domain> {
                 .ok_or(CapaError::NotFound)?
                 .clone();
             drop(r);
-            receiver_ref = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
-            recv_sealed = receiver_ref.read().data.is_sealed();
+            let resolved = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
+            // If the handle is a channel, follow channel_target to the actual receiver.
+            receiver_ref = {
+                if resolved.read().is_channel() {
+                    let target = resolved.read().channel_target.as_ref().and_then(|w| w.upgrade());
+                    target.unwrap_or(resolved)
+                } else {
+                    resolved
+                }
+            };
         }
 
+        let recv_sealed = receiver_ref.read().data.is_sealed();
         if recv_sealed {
             Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs)
         } else {
@@ -1048,6 +1098,197 @@ impl Capability<Domain> {
         Ok(())
     }
 
+    // ── Channel transfer (send_channel / accept_channel / reject_channel) ────
+
+    /// Transfer a channel capability (move semantics) to another domain.
+    ///
+    /// Only channel capabilities (created by [`get_chan`]) may be transferred.
+    /// Regular domain capabilities are not transferable.
+    ///
+    /// For **sealed receivers** (`RECEIVE_AFTER_SEAL` required): the source handle
+    /// is frozen and a [`PendingDomainCapability`] is enqueued in the receiver.
+    /// The receiver must call [`accept_channel`] to complete the transfer.
+    ///
+    /// For **unsealed receivers**: ownership transfers immediately.
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — handle not found.
+    /// - [`CapaError::PermissionDenied`] — capability is not a channel, handle is
+    ///   frozen, caller does not own the channel, or sealed receiver lacks
+    ///   `RECEIVE_AFTER_SEAL`.
+    pub fn send_channel(
+        caller: &CapabilityRef<Domain>,
+        chan_handle: LocalHandle,
+        receiver_handle: LocalHandle,
+        attrs: Attributes,
+    ) -> Result<()> {
+        // Pre-flight reads.
+        let caller_id;
+        let chan_ref: CapabilityRef<Domain>;
+        let receiver_ref: CapabilityRef<Domain>;
+        let recv_sealed;
+        {
+            let r = caller.read();
+            if r.data.is_domain_handle_frozen(chan_handle) {
+                return Err(CapaError::PermissionDenied);
+            }
+            caller_id = r.data.id;
+            let chan_weak = r
+                .data
+                .get_domain_capability(chan_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let recv_weak = r
+                .data
+                .get_domain_capability(receiver_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            chan_ref = chan_weak.upgrade().ok_or(CapaError::NotFound)?;
+            receiver_ref = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
+            recv_sealed = receiver_ref.read().data.is_sealed();
+        }
+
+        // Only channels may be transferred.
+        if !chan_ref.read().is_channel() {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        // Caller must own the channel.
+        if chan_ref.read().owned.owner != caller_id {
+            return Err(CapaError::PermissionDenied);
+        }
+
+        // Validate SEND permission on channel cap.
+        chan_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
+
+        if recv_sealed {
+            // Sealed path: check receiver accepts after seal.
+            if !receiver_ref.read().data.policy.receive_after_seal() {
+                return Err(CapaError::PermissionDenied);
+            }
+
+            // Freeze source handle (authoritative commit).
+            {
+                let mut cw = caller.write();
+                if cw.data.is_domain_handle_frozen(chan_handle) {
+                    return Err(CapaError::PermissionDenied);
+                }
+                cw.data.freeze_domain_handle(chan_handle);
+            }
+
+            // Apply attrs (after freeze commit) and record the receiver for revocation cleanup.
+            {
+                let mut cw = chan_ref.write();
+                cw.owned.attributes = attrs;
+                cw.owned.pending_receiver = Some(Arc::downgrade(&receiver_ref));
+            }
+
+            let pending = PendingDomainCapability {
+                cap: Arc::downgrade(&chan_ref),
+                sender_domain_id: caller_id,
+                sender_handle: chan_handle,
+                sender_domain: Arc::downgrade(caller),
+            };
+            receiver_ref.write().data.add_pending_domain_capability(pending);
+        } else {
+            // Unsealed path: immediate ownership transfer.
+            let receiver_id = receiver_ref.read().data.id;
+            {
+                let mut cw = caller.write();
+                cw.data.remove_domain_capability(chan_handle);
+            }
+            {
+                let mut cw = chan_ref.write();
+                cw.owned.owner = receiver_id;
+                cw.owned.owner_domain = Some(Arc::downgrade(&receiver_ref));
+                cw.owned.attributes = attrs;
+            }
+            let new_handle = {
+                let mut rw = receiver_ref.write();
+                let h = rw.data.allocate_domain_handle();
+                rw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
+                h
+            };
+            let _ = new_handle;
+        }
+
+        Ok(())
+    }
+
+    /// Accept a pending channel capability.
+    ///
+    /// Transfers ownership from the sender to the receiver, allocates a fresh
+    /// [`LocalHandle`] in the receiver's domain capability table, and clears the
+    /// sender's frozen handle.
+    ///
+    /// Returns the new [`LocalHandle`] assigned to the channel in the receiver.
+    pub fn accept_channel(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<LocalHandle> {
+        let receiver_id = receiver.read().data.id;
+
+        // Atomically remove the pending entry.
+        let pending = {
+            let mut rw = receiver.write();
+            rw.data
+                .pending_domain_capabilities
+                .remove(&pending_id)
+                .ok_or(CapaError::NotFound)?
+        };
+
+        // Check sender is still alive.
+        let sender_ref = pending.sender_domain.upgrade().ok_or(CapaError::NotFound)?;
+        let chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Transfer ownership and clear the in-transit marker.
+        {
+            let mut cw = chan_ref.write();
+            cw.owned.owner = receiver_id;
+            cw.owned.owner_domain = Some(Arc::downgrade(receiver));
+            cw.owned.pending_receiver = None;
+        }
+
+        // Unfreeze sender's handle and remove it from sender's table.
+        {
+            let mut sw = sender_ref.write();
+            sw.data.unfreeze_domain_handle(pending.sender_handle);
+            sw.data.remove_domain_capability(pending.sender_handle);
+        }
+
+        // Allocate handle in receiver's table.
+        let new_handle = {
+            let mut rw = receiver.write();
+            let h = rw.data.allocate_domain_handle();
+            rw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
+            h
+        };
+
+        Ok(new_handle)
+    }
+
+    /// Reject a pending channel capability. Unfreezes the sender's handle.
+    pub fn reject_channel(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
+        let pending = {
+            let mut rw = receiver.write();
+            rw.data
+                .pending_domain_capabilities
+                .remove(&pending_id)
+                .ok_or(CapaError::NotFound)?
+        };
+
+        if let Some(sender_ref) = pending.sender_domain.upgrade() {
+            sender_ref
+                .write()
+                .data
+                .unfreeze_domain_handle(pending.sender_handle);
+        }
+        // Clear in-transit marker on the channel cap.
+        if let Some(chan_ref) = pending.cap.upgrade() {
+            chan_ref.write().owned.pending_receiver = None;
+        }
+
+        Ok(())
+    }
+
     /// Revoke a direct child of the parent capability identified by `child_sub`.
     ///
     /// `parent` is the LocalHandle of the parent memory region in `caller`'s table.
@@ -1099,7 +1340,7 @@ impl Capability<Domain> {
     }
 
     /// Seal the domain identified by cap handle.
-    pub fn seal_domain_op(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
+    pub fn seal_domain(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
         let cap_weak = caller
             .read()
             .data
@@ -1107,6 +1348,9 @@ impl Capability<Domain> {
             .ok_or(CapaError::NotFound)?
             .clone();
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        if cap_ref.read().is_channel() {
+            return Err(CapaError::ApiNotAllowed);
+        }
         // Caller must have SEAL permission before sealing a child domain.
         cap_ref.read().owned.validate_operation(MonitorAPI::SEAL)?;
         let result = cap_ref.write().data.seal();
@@ -1157,12 +1401,168 @@ impl Capability<Domain> {
             .ok_or(CapaError::NotFound)?
             .clone();
         let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+        if child_ref.read().is_channel() {
+            return Err(CapaError::ApiNotAllowed);
+        }
         let child_sub = child_ref.read().sub_handle;
         let updates = Capability::revoke_child_domain(caller, child_sub)?;
         // Remove the now-revoked child from caller's domain table so the
         // LocalHandle is reclaimed by allocate_domain_handle.
         caller.write().data.remove_domain_capability(child_handle);
         Ok(updates)
+    }
+
+    /// Attest the caller domain itself.
+    ///
+    /// Requires the caller domain to be sealed and have `MonitorAPI::ATTEST` enabled.
+    ///
+    /// # Errors
+    /// - [`CapaError::DomainNotSealed`] — caller is not sealed.
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::ATTEST`.
+    pub fn attest_self(caller: &CapabilityRef<Domain>) -> Result<AttestationReport> {
+        {
+            let c = caller.read();
+            if !c.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            if !c.data.policy.api.attest() {
+                return Err(CapaError::ApiNotAllowed);
+            }
+        }
+        Ok(attest::attest_domain(caller))
+    }
+
+    /// Attest a domain (or its channel target) identified by `handle` in the caller's table.
+    ///
+    /// Requires the **caller** domain to be sealed and have `MonitorAPI::ATTEST` enabled.
+    /// The domain at `handle` must also be sealed.
+    /// If `handle` resolves to a channel capability, the channel's target domain is attested
+    /// (channel targets are always sealed by construction).
+    ///
+    /// # Errors
+    /// - [`CapaError::DomainNotSealed`] — caller or target is not sealed.
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::ATTEST`.
+    /// - [`CapaError::NotFound`] — `handle` not found in caller's domain table.
+    pub fn attest(
+        caller: &CapabilityRef<Domain>,
+        handle: LocalHandle,
+    ) -> Result<AttestationReport> {
+        {
+            let c = caller.read();
+            if !c.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            if !c.data.policy.api.attest() {
+                return Err(CapaError::ApiNotAllowed);
+            }
+        }
+        let cap_weak = caller
+            .read()
+            .data
+            .get_domain_capability(handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        // For non-channel caps, verify the target is sealed.
+        // Channel caps always reference a sealed target (enforced at get_chan time).
+        if !cap_ref.read().is_channel() && !cap_ref.read().data.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+        // Pass cap_ref directly — attest::attest_domain handles channel resolution
+        // internally and preserves the "Channel: true" header.
+        Ok(attest::attest_domain(&cap_ref))
+    }
+
+    /// Create a channel capability for `target_handle`.
+    ///
+    /// A channel is a restricted child capability of the target domain.
+    /// It can be used to:
+    ///   - Attest the target domain (`attest`).
+    ///   - Send memory capabilities to the target domain (`send_memory`).
+    ///   - Be transferred to another domain (`send_channel` / `accept_channel`).
+    ///
+    /// A channel cannot switch to, revoke, or administer the target domain.
+    ///
+    /// The channel is inserted as a child of `target`'s CDT node and registered
+    /// in `caller`'s domain capability table at a freshly allocated handle.
+    ///
+    /// # Errors
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::GETCHAN`.
+    /// - [`CapaError::NotFound`] — `target_handle` not found in caller.
+    /// - [`CapaError::DomainNotSealed`] — target domain is not yet sealed.
+    pub fn get_chan(
+        caller: &CapabilityRef<Domain>,
+        target_handle: LocalHandle,
+    ) -> Result<LocalHandle> {
+        let caller_id = caller.read().data.id;
+
+        // 1. Resolve target domain capability.
+        let target_weak = caller
+            .read()
+            .data
+            .get_domain_capability(target_handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let target_ref = target_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // 2. Check GETCHAN permission: validate that the caller domain (owner of
+        //    target_ref) has GETCHAN in its policy.  We use the standard pattern of
+        //    calling validate_operation on the owned struct of the capability being
+        //    operated on — its owner_domain IS the caller.
+        {
+            let target_r = target_ref.read();
+            target_r.owned.validate_operation(MonitorAPI::GETCHAN)?;
+        }
+
+        // 3. Target must be sealed (channels are only meaningful for live domains).
+        if !target_ref.read().data.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+
+        // 4. Allocate a SubHandle and depth from the target's CDT node.
+        let (sub_handle, chan_depth) = {
+            let mut t = target_ref.write();
+            let s = t.next_child_sub;
+            t.next_child_sub += 1;
+            (s, t.depth + 1)
+        };
+
+        // 5. Build the channel capability.
+        //    - data: sentinel (never used directly)
+        //    - channel_target: weak ref to target
+        //    - MonitorAPI: ATTEST | GETCHAN | SEND only
+        let chan_policy = DomainPolicy::new_restricted(0, MonitorAPI::CHAN_ALLOWED);
+        let chan_domain = Domain::new_sentinel();
+        let chan_ref: CapabilityRef<Domain> = Arc::new(crate::sync::RwLock::new(Capability {
+            owned: {
+                let mut o = Ownership::new(caller_id);
+                o.owner_domain = Some(Arc::downgrade(caller));
+                o
+            },
+            sub_handle,
+            depth: chan_depth,
+            data: chan_domain,
+            channel_target: Some(Arc::downgrade(&target_ref)),
+            parent: Arc::downgrade(&target_ref),
+            children: Vec::new(),
+            next_child_sub: 1,
+        }));
+
+        // 6. Register channel as a child of target in the CDT.
+        target_ref.write().add_child(chan_ref.clone());
+
+        // 7. Register in caller's domain capability table and return handle.
+        let chan_handle = {
+            let mut cw = caller.write();
+            let h = cw.data.allocate_domain_handle();
+            cw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
+            h
+        };
+
+        // Keep a strong reference alive inside the CDT (the target's children vec
+        // already holds one, so the Arc won't be dropped prematurely).
+        let _ = chan_policy; // chan_policy embedded in sentinel; not separately stored
+        Ok(chan_handle)
     }
 
     // =========================================================================
@@ -1329,6 +1729,20 @@ impl Capability<Domain> {
                 return Err(CapaError::DomainNotSealed);
             }
             if !c.data.policy.api.has(MonitorAPI::SWITCH) {
+                return Err(CapaError::ApiNotAllowed);
+            }
+        }
+
+        // Reject channel handles early — a channel cannot be a switch target.
+        {
+            let to_domain_weak = caller
+                .read()
+                .data
+                .get_domain_capability(to_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
+            if to_domain_ref.read().is_channel() {
                 return Err(CapaError::ApiNotAllowed);
             }
         }
@@ -1679,7 +2093,7 @@ impl Capability<Domain> {
         let mut child_w = child_ref.write();
 
         // Sealed check must be done while holding the write lock to prevent a
-        // concurrent seal_domain_op from racing between the check and the mutation.
+        // concurrent seal_domain from racing between the check and the mutation.
         if child_w.data.status != crate::domain::DomainStatus::Unsealed {
             return Err(CapaError::DomainSealed);
         }

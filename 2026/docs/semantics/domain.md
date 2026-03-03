@@ -221,10 +221,10 @@ Only the domain that holds the child capability handle can seal it. Attempting t
 ```rust
 // Domain-mediated: caller is the parent domain; cap_handle is the handle
 // caller holds for the target domain in its domain capability table.
-Capability::seal_domain_op(&caller_domain, child_cap_handle)?;
+Capability::seal_domain(&caller_domain, child_cap_handle)?;
 ```
 
-Internally `seal_domain_op` looks up the child by handle in the caller's domain capability table, then calls `child.write().data.seal()`. The lookup enforces that only a domain which actually holds the child capability can seal it.
+Internally `seal_domain` looks up the child by handle in the caller's domain capability table, then calls `child.write().data.seal()`. The lookup enforces that only a domain which actually holds the child capability can seal it.
 
 ---
 
@@ -271,4 +271,183 @@ cap> revoke root grandchild
 let updates = Capability::revoke_child_domain(&parent, child_handle)?;
 // Extension trait form
 let updates = parent_ref.revoke_child(child_handle)?;
+```
+
+---
+
+### `get-chan` — Obtain a Channel Capability
+
+**Requires**: `GETCHAN` API permission; caller must be Sealed; target domain must be Sealed.
+
+A **channel** is a restricted child capability that allows one domain to communicate with another without granting administrative control. Channels can be used to attest the target domain, send memory capabilities to it, and be transferred to other domains. They cannot be used to switch to, seal, revoke, or administer the target domain.
+
+In the CDT a channel is a **child of the target domain** (not of the caller). Revoking the target domain therefore automatically revokes all channels pointing to it.
+
+#### ✓ Success
+
+```
+cap> create-domain root dom1 0b1111 GET,ATTEST,GETCHAN,RECEIVE_AFTER_SEAL,SEND
+cap> seal dom1
+cap> get-chan root dom1
+✓ Created channel capability to 'dom1' (handle: 2)
+```
+
+#### ✗ Failure: caller lacks GETCHAN
+
+```
+cap> create-domain root restricted 0b1111 GET,ATTEST
+cap> seal restricted
+cap> get-chan root restricted
+✗ Error: API not allowed — GETCHAN permission required
+```
+
+#### ✗ Failure: target not sealed
+
+```
+cap> create-domain root unsealed_dom 0b1111 GET,ATTEST
+# dom not yet sealed
+cap> get-chan root unsealed_dom
+✗ Error: domain not sealed
+```
+
+#### Channel permission set
+
+A channel capability carries a fixed restricted permission set: `ATTEST | GETCHAN | SEND`. Attempting to use a channel handle for `seal`, `revoke`, or `switch` returns `ApiNotAllowed`.
+
+Channel-mediated operations check the **holder's** (caller's) permissions, not the target domain's:
+- `attest` via channel: caller must be Sealed and have `ATTEST`
+- `send` via channel: caller must have `SEND`; target must have `RECEIVE_AFTER_SEAL`
+
+#### Transfer semantics (move)
+
+Channels use **move semantics** on transfer. Once `send-channel` is called, the sender's handle is frozen until the receiver accepts or rejects:
+
+```
+cap> send-channel dom0 chan1 dom2       # sealed path: enqueued as pending
+cap> accept-channel dom2 <pending_id>  # dom2 accepts; dom0's handle cleared
+cap> reject-channel dom2 <pending_id>  # dom2 rejects; dom0's handle unfrozen
+```
+
+#### Revocation cascade
+
+Revoking the **target** domain revokes all its channel capabilities automatically (CDT invariant). If a channel is in-transit (frozen, pending acceptance) when the target is revoked, the pending entry is cancelled and the sender's handle is unfrozen.
+
+```
+cap> revoke root dom1
+✓ Revoked 'dom1' and all its children — channels pointing to 'dom1' are also revoked.
+```
+
+#### What it looks like in code
+
+```rust
+// Obtain a channel to a child domain
+let chan_h = Capability::get_chan(&caller, child_handle)?;
+
+// Attest caller itself (requires caller Sealed + ATTEST)
+let self_report = Capability::<Domain>::attest_self(&caller)?;
+
+// Attest target via channel (requires caller Sealed + ATTEST)
+let report = Capability::<Domain>::attest(&caller, chan_h)?;
+
+// Send memory to target via channel
+Capability::<Domain>::send_memory(&caller, mem_handle, chan_h, Attributes::NONE)?;
+
+// Transfer the channel to another domain (move semantics)
+Capability::<Domain>::send_channel(&caller, chan_h, receiver_handle, Attributes::NONE)?;
+// receiver accepts:
+let new_h = Capability::<Domain>::accept_channel(&receiver, pending_id)?;
+// or rejects:
+Capability::<Domain>::reject_channel(&receiver, pending_id)?;
+```
+
+---
+
+### `get-chan` — Obtain a Channel Capability
+
+**Requires**: `GETCHAN` API permission; caller must be Sealed; target domain must be Sealed.
+
+A **channel** is a restricted capability that allows one domain to communicate with another without granting administrative control. Channels can be used to attest the target domain, send memory capabilities to it, and be transferred to other domains. Channels cannot be used to switch to, seal, revoke, or administer the target domain.
+
+In the CDT, a channel is a **child of the target domain** (not of the caller). This means revoking the target domain automatically revokes all channels pointing to it.
+
+#### ✓ Success
+
+```
+cap> create-domain root dom1 0b1111 GET,ATTEST,GETCHAN,RECEIVE_AFTER_SEAL,SEND
+cap> seal dom1
+cap> get-chan root dom1
+✓ Created channel capability to 'dom1' (handle: 2)
+```
+
+#### ✗ Failure: caller lacks GETCHAN
+
+```
+cap> create-domain root restricted 0b1111 GET,ATTEST
+cap> seal restricted
+cap> get-chan root restricted
+✗ Error: API not allowed — GETCHAN permission required
+```
+
+#### ✗ Failure: target not sealed
+
+```
+cap> create-domain root unsealed_dom 0b1111 GET,ATTEST
+# dom not yet sealed
+cap> get-chan root unsealed_dom
+✗ Error: domain not sealed
+```
+
+#### Channel permissions
+
+A channel capability carries a fixed restricted permission set: `ATTEST | GETCHAN | SEND`. Attempting to use a channel handle for `seal`, `revoke`, or `switch` returns `ApiNotAllowed`.
+
+Channel-mediated operations check the **holder's** (caller's) permissions, not the target domain's:
+- `attest` via channel: checks caller has `ATTEST`
+- `send` via channel: checks caller has `SEND` and target has `RECEIVE_AFTER_SEAL`
+
+#### Transfer semantics (move)
+
+Channels use **move semantics** on transfer. Once `send-channel` is called, the sender's handle is frozen until the receiver accepts or rejects:
+
+```
+cap> send-channel dom0 chan1 dom2      # transfer chan1 from dom0 to dom2 (sealed path: pending)
+cap> accept-channel dom2 <pending_id> # dom2 accepts; dom0's handle cleared
+```
+
+```
+cap> reject-channel dom2 <pending_id> # dom2 rejects; dom0's handle unfrozen
+```
+
+#### Revocation cascade
+
+Revoking the **target** domain revokes all its channel capabilities automatically (CDT invariant):
+
+```
+cap> revoke root dom1
+✓ Revoked 'dom1' and all its children — channels pointing to 'dom1' are also revoked.
+```
+
+If a channel is in-transit (frozen, awaiting acceptance) when its target is revoked, the pending entry is cancelled and the sender's handle is unfrozen.
+
+#### What it looks like in code
+
+```rust
+// Obtain a channel to child_dom
+let chan_h = Capability::get_chan(&caller, child_handle)?;
+
+// Attest target via channel (checks caller has ATTEST)
+let report = Capability::<Domain>::attest(&caller, chan_h)?;
+
+// Attest caller itself
+let self_report = Capability::<Domain>::attest_self(&caller)?;
+
+// Send memory to target via channel
+Capability::<Domain>::send_memory(&caller, mem_handle, chan_h, Attributes::NONE)?;
+
+// Transfer the channel to another domain (move semantics)
+Capability::<Domain>::send_channel(&caller, chan_h, receiver_handle, Attributes::NONE)?;
+// receiver accepts:
+let new_h = Capability::<Domain>::accept_channel(&receiver, pending_id)?;
+// or rejects:
+Capability::<Domain>::reject_channel(&receiver, pending_id)?;
 ```

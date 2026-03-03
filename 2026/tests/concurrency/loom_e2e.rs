@@ -337,10 +337,10 @@ fn loom_e2e_accept_race() {
         let sender_id = sender.read().data.id;
 
         // Sealed child domain as receiver (supports receive_after_seal).
-        // Use create_domain + seal_domain_op so it is properly parented under sender.
+        // Use create_domain + seal_domain so it is properly parented under sender.
         let dh_recv = Capability::<Domain>::create_domain(&sender, DomainPolicy::new_root(1))
             .expect("setup: create recv");
-        Capability::<Domain>::seal_domain_op(&sender, dh_recv)
+        Capability::<Domain>::seal_domain(&sender, dh_recv)
             .expect("setup: seal recv");
         let recv = {
             let r = sender.read();

@@ -159,7 +159,7 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let h = Capability::create_domain(parent, policy).unwrap();
-    Capability::seal_domain_op(parent, h).unwrap();
+    Capability::seal_domain(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();

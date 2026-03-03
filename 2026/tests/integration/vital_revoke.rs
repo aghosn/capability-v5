@@ -42,7 +42,7 @@ fn test_session() {
     .unwrap();
 
     // Seal dom1
-    Capability::seal_domain_op(&root, dom1_h).unwrap();
+    Capability::seal_domain(&root, dom1_h).unwrap();
 
     // Attest
     let _attestation = attest_domain(&root);

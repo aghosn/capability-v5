@@ -36,6 +36,7 @@ fn make_sealed_domain() -> CapabilityRef<Domain> {
         depth: 0,
         next_child_sub: 1,
         data: domain,
+        channel_target: None,
         parent: std::sync::Weak::new(),
         children: Vec::new(),
     }))
@@ -274,7 +275,7 @@ fn revoke_sender_domain_cancels_pending() {
     let sender = parent.read().data.domain_capabilities[&sender_h]
         .upgrade()
         .unwrap();
-    Capability::seal_domain_op(&parent, sender_h).unwrap();
+    Capability::seal_domain(&parent, sender_h).unwrap();
 
     // Register a memory cap in A's table at handle 1.
     let _mem = register_root_mem(&sender, 1);

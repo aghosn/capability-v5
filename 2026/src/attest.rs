@@ -35,10 +35,34 @@ impl AttestationReport {
     }
 }
 
-/// Generate an attestation report for a domain
+/// Generate an attestation report for a domain (or channel) capability.
+///
+/// If `domain_ref` is a channel capability, the report begins with a
+/// `Channel: true` header and the target domain is attested in place of the
+/// channel's sentinel data.
 pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
-    let domain = domain_ref.read();
-    let mut report = format!("Domain ID: {}\n", domain.data.id);
+    // Resolve channel indirection, if any.
+    let (effective_ref, is_channel) = {
+        let r = domain_ref.read();
+        if r.is_channel() {
+            let target = r.channel_target.as_ref().and_then(|w| w.upgrade());
+            drop(r);
+            (target.unwrap_or_else(|| domain_ref.clone()), true)
+        } else {
+            drop(r);
+            (domain_ref.clone(), false)
+        }
+    };
+
+    let domain = effective_ref.read();
+    let mut report = String::new();
+    if is_channel {
+        report.push_str("Channel: true\n");
+        report.push_str(&format!("Target Domain ID: {}\n", domain.data.id));
+    } else {
+        report.push_str(&format!("Domain ID: {}\n", domain.data.id));
+    }
+    let domain_id = domain.data.id;
     report.push_str(&format!("Status: {:?}\n", domain.data.status));
     report.push_str(&format!("Cores: {:#b}\n", domain.data.policy.cores));
     report.push_str("API:\n");
@@ -154,7 +178,7 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
         }
     }
 
-    AttestationReport::new(domain.data.id, report)
+    AttestationReport::new(domain_id, report)
 }
 
 /// Generate an attestation report for a memory region capability tree

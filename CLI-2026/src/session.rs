@@ -221,7 +221,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(domain)));
 
                     writeln!(file, "    // Seal domain: {domain}")?;
-                    writeln!(file, "    Capability::seal_domain_op(&{owner_arc}, {handle_var}).unwrap();")?;
+                    writeln!(file, "    Capability::seal_domain(&{owner_arc}, {handle_var}).unwrap();")?;
                     writeln!(file)?;
                 }
 

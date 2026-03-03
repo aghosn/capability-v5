@@ -215,7 +215,7 @@ fn test_revoke_domain_carries_fallback() {
     reg(&platform, child_id, Some(ROOT_ID));
 
     // Root domain is already sealed (new_root); seal the child
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
 
     let (_, batch) = execute(&platform, true, || {
         let updates =

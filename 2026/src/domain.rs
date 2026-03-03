@@ -64,6 +64,11 @@ impl MonitorAPI {
     /// No operations allowed
     pub const NONE: Self = MonitorAPI { bits: 0 };
 
+    /// Permissions granted to a channel capability: attest, getchan, send.
+    pub const CHAN_ALLOWED: Self = MonitorAPI {
+        bits: Self::ATTEST | Self::GETCHAN | Self::SEND,
+    };
+
     /// Create from raw bits
     pub const fn from_bits(bits: u16) -> Self {
         MonitorAPI {
@@ -418,6 +423,19 @@ pub struct PendingCapability {
     pub sender_domain: CapabilityWeak<Domain>,
 }
 
+/// Pending channel capability in transit (sent but not yet accepted by the receiver).
+#[derive(Debug)]
+pub struct PendingDomainCapability {
+    /// The channel cap being transferred (weak; the strong ref lives in the CDT tree).
+    pub cap: CapabilityWeak<Domain>,
+    /// Sender's domain ID.
+    pub sender_domain_id: crate::update::DomainId,
+    /// Handle in the sender's domain_capabilities table (frozen during transit).
+    pub sender_handle: LocalHandle,
+    /// Weak ref to sender's domain (to unfreeze on reject).
+    pub sender_domain: CapabilityWeak<Domain>,
+}
+
 /// Domain capability data
 #[derive(Debug)]
 pub struct Domain {
@@ -436,8 +454,11 @@ pub struct Domain {
     /// Domain capabilities owned by this domain (handle -> weak ref)
     pub domain_capabilities: BTreeMap<LocalHandle, CapabilityWeak<Domain>>,
 
-    /// Pending capabilities that have been sent but not yet accepted (sealed domains only)
+    /// Pending memory capabilities that have been sent but not yet accepted (sealed domains only)
     pub pending_capabilities: BTreeMap<u64, PendingCapability>,
+
+    /// Pending channel capabilities in transit (sent but not yet accepted).
+    pub pending_domain_capabilities: BTreeMap<u64, PendingDomainCapability>,
 
     /// Handles that have been frozen (sent but not yet accepted/rejected)
     pub frozen_handles: BTreeSet<LocalHandle>,
@@ -460,6 +481,7 @@ impl Domain {
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
+            pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(id),
             next_pending_id: 0,
@@ -477,12 +499,33 @@ impl Domain {
             memory_capabilities: BTreeMap::new(),
             domain_capabilities: BTreeMap::new(),
             pending_capabilities: BTreeMap::new(),
+            pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(0),
             next_pending_id: 0,
         };
         d.create_vprocessors();
         d
+    }
+
+    /// Create a sentinel Domain used as a placeholder inside channel capabilities.
+    ///
+    /// A sentinel must **never** be operated on directly; all operations on a
+    /// channel capability are forwarded to the `channel_target` instead.
+    /// `id` is set to `u64::MAX` to make accidental use obvious.
+    pub fn new_sentinel() -> Self {
+        Domain {
+            id: u64::MAX,
+            status: DomainStatus::Unsealed,
+            policy: DomainPolicy::new_restricted(0, MonitorAPI::NONE),
+            memory_capabilities: BTreeMap::new(),
+            domain_capabilities: BTreeMap::new(),
+            pending_capabilities: BTreeMap::new(),
+            pending_domain_capabilities: BTreeMap::new(),
+            frozen_handles: BTreeSet::new(),
+            cached_view: AddressSpaceView::new(u64::MAX),
+            next_pending_id: 0,
+        }
     }
 
     /// Seal the domain. VPs are already allocated at creation time.
@@ -643,5 +686,35 @@ impl Domain {
     /// Get all pending capability IDs
     pub fn get_pending_ids(&self) -> Vec<u64> {
         self.pending_capabilities.keys().copied().collect()
+    }
+
+    // ── Channel (domain) pending helpers ────────────────────────────────────
+
+    /// Freeze a domain handle (channel in transit; analogous to freeze_memory_handle).
+    pub fn freeze_domain_handle(&mut self, handle: LocalHandle) {
+        self.frozen_handles.insert(handle);
+    }
+
+    /// Unfreeze a domain handle.
+    pub fn unfreeze_domain_handle(&mut self, handle: LocalHandle) -> bool {
+        self.frozen_handles.remove(&handle)
+    }
+
+    /// Check if a domain handle is frozen.
+    pub fn is_domain_handle_frozen(&self, handle: LocalHandle) -> bool {
+        self.frozen_handles.contains(&handle)
+    }
+
+    /// Enqueue a pending domain (channel) capability. Returns the pending ID.
+    pub fn add_pending_domain_capability(&mut self, cap: PendingDomainCapability) -> u64 {
+        let pending_id = self.next_pending_id;
+        self.next_pending_id += 1;
+        self.pending_domain_capabilities.insert(pending_id, cap);
+        pending_id
+    }
+
+    /// Get all pending domain capability IDs.
+    pub fn get_pending_domain_ids(&self) -> Vec<u64> {
+        self.pending_domain_capabilities.keys().copied().collect()
     }
 }

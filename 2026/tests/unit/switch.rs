@@ -25,7 +25,7 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let h = Capability::create_domain(parent, policy).unwrap();
-    Capability::seal_domain_op(parent, h).unwrap();
+    Capability::seal_domain(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
@@ -181,7 +181,7 @@ fn test_vp_nested_switch_and_return() {
     // child1 under root
     let child1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let child1_h = Capability::create_domain(&root, child1_policy).unwrap();
-    Capability::seal_domain_op(&root, child1_h).unwrap();
+    Capability::seal_domain(&root, child1_h).unwrap();
     let child1 = root.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
@@ -191,7 +191,7 @@ fn test_vp_nested_switch_and_return() {
     // child2 under child1
     let child2_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let child2_h = Capability::create_domain(&child1, child2_policy).unwrap();
-    Capability::seal_domain_op(&child1, child2_h).unwrap();
+    Capability::seal_domain(&child1, child2_h).unwrap();
     let child2 = child1.read().data.domain_capabilities[&child2_h]
         .upgrade()
         .unwrap();
@@ -279,7 +279,7 @@ fn test_vp_switch_core_not_allowed() {
     // Child only allows core 0
     let child_policy = DomainPolicy::new_restricted(0b0001, MonitorAPI::ALL);
     let child_h = Capability::create_domain(&root, child_policy).unwrap();
-    Capability::seal_domain_op(&root, child_h).unwrap();
+    Capability::seal_domain(&root, child_h).unwrap();
 
     // Try to switch from core 1 to child — child doesn't allow core 1
     let result = Capability::switch_domain(&root, child_h, 0, &platform);
@@ -330,7 +330,7 @@ fn test_vp_switch_no_switch_api() {
     let no_switch_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST);
     let caller_policy = DomainPolicy::new_restricted(0b1111, no_switch_api);
     let caller_h = Capability::create_domain(&root, caller_policy).unwrap();
-    Capability::seal_domain_op(&root, caller_h).unwrap();
+    Capability::seal_domain(&root, caller_h).unwrap();
     let caller = root.read().data.domain_capabilities[&caller_h]
         .upgrade()
         .unwrap();

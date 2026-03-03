@@ -61,7 +61,7 @@ fn test_enumerate_tree_with_multiple_levels() {
     let _child2_h = Capability::create_domain(&root_ref, DomainPolicy::new_root(4)).unwrap();
 
     // Seal child1 before creating grandchild under it
-    Capability::seal_domain_op(&root_ref, child1_h).unwrap();
+    Capability::seal_domain(&root_ref, child1_h).unwrap();
     let child1_ref = root_ref.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();

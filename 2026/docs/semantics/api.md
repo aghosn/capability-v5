@@ -108,6 +108,36 @@ cap> attest app
 
 ---
 
+### 6b. Channels
+
+A channel is a restricted capability that grants communication access to a domain without administrative control. It is obtained via `get-chan`:
+
+```
+cap> get-chan root dom1
+✓ Created channel capability to 'dom1' (handle: 2)
+```
+
+Once obtained, a channel can be used to attest or send memory to the target:
+
+```
+cap> attest chan1          # report is for dom1; checks root has ATTEST
+cap> send mem1 chan1       # forwards to dom1; checks root has SEND
+```
+
+Channels can be transferred to other domains (move semantics):
+
+```
+cap> send-channel dom0 chan1 dom2
+✓ Channel in transit (pending ID: 1)
+
+cap> accept-channel dom2 1
+✓ dom2 now holds channel to dom1
+```
+
+See [domain.md § get-chan](domain.md#get-chan--obtain-a-channel-capability) for full semantics.
+
+---
+
 ### 7. Switching and Interrupts
 
 Execution is transferred between domains via explicit switches. A switch can only move one level in the domain hierarchy at a time (parent ↔ direct child):
@@ -156,6 +186,8 @@ cap> revoke root app
 init
  └─ create-domain        (parent must be sealed)
      └─ seal             (after configuration)
+          ├─ get-chan     (requires GETCHAN; target must be sealed)
+          │   └─ send-channel / accept-channel / reject-channel
           ├─ switch      (requires sealed target)
           └─ revoke      (requires REVOKE API permission on caller)
 
