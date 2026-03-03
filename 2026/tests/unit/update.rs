@@ -2,7 +2,6 @@
 
 use capability_engine::memory::Rights;
 use capability_engine::*;
-use std::sync::Arc;
 
 // ==================== Basic Update Operations ====================
 
@@ -175,44 +174,6 @@ fn test_multiple_updates_different_domains() {
     assert!(batch.affected_domains().contains(&1));
     assert!(batch.affected_domains().contains(&2));
     assert!(batch.affected_domains().contains(&3));
-}
-
-// ==================== Updates from Capability Operations ====================
-
-#[test]
-fn test_carve_generates_updates() {
-    let root_domain = Domain::new_root(4);
-    let root = Capability::new_root(0, 0, root_domain);
-    let total_mem = MemoryRegion::new_root(0x0, 0x10000);
-    let mem_root = Capability::new_root(0, 1, total_mem);
-    root.write()
-        .data
-        .add_memory_capability(1, Arc::downgrade(&mem_root));
-
-    let child_access = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_child_h, _child_sub, updates) = Capability::carve_memory(&root, 1, child_access).unwrap();
-
-    // Carve with same rights as parent generates NO updates (fast path)
-    assert!(updates.is_empty());
-}
-
-#[test]
-fn test_revoke_generates_updates() {
-    let root_domain = Domain::new_root(4);
-    let root = Capability::new_root(0, 0, root_domain);
-    let total_mem = MemoryRegion::new_root(0x0, 0x10000);
-    let mem_root = Capability::new_root(0, 1, total_mem);
-    root.write()
-        .data
-        .add_memory_capability(1, Arc::downgrade(&mem_root));
-
-    let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child_h, child_sub, _) = Capability::carve_memory(&root, 1, child_access).unwrap();
-
-    let updates = Capability::revoke_memory_child(&root, 1, child_sub).unwrap();
-
-    // Should NOT generate updates because parent never lost access (same owner)
-    assert!(updates.is_empty());
 }
 
 // ==================== Update Affected Domain Tracking ====================

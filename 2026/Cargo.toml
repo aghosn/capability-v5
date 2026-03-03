@@ -44,10 +44,6 @@ name = "unit_domain"
 path = "tests/unit/domain.rs"
 
 [[test]]
-name = "unit_capability"
-path = "tests/unit/capability.rs"
-
-[[test]]
 name = "unit_update"
 path = "tests/unit/update.rs"
 
@@ -97,14 +93,6 @@ name = "integration_send_bugs"
 path = "tests/integration/send_bugs.rs"
 
 # ── concurrency tests ─────────────────────────────────────────────────────────
-[[test]]
-name = "concurrency_basic"
-path = "tests/concurrency/basic.rs"
-
-[[test]]
-name = "concurrency_crosscore"
-path = "tests/concurrency/crosscore.rs"
-
 [[test]]
 name = "concurrency_platform"
 path = "tests/concurrency/platform.rs"

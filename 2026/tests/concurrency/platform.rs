@@ -7,7 +7,6 @@ mod common;
 
 use capability_engine::{
     execute, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform, Update,
-    UpdateBatch,
 };
 use capability_engine::memory::Rights;
 use common::TestPlatform;

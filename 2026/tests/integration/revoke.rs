@@ -259,3 +259,190 @@ fn test_revoke_preserves_parent_rights() {
         "Remapping should preserve parent's original rights"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-level revocation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 3-level memory tree: root → child1 → child2 (different owners at each level).
+/// Revocation must produce exactly 4 ChangeRights updates: Unmap+Remap for child2,
+/// then Unmap+Remap for child1.
+#[test]
+fn test_multi_level_revoke_exact_updates() {
+    let (root, _r0, r0_h) = bootstrap();
+    let root_id = root.read().data.id;
+
+    // Root carves child1 [0x2000, 0x4000) RW
+    let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
+    let (child1_h, child1_sub, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
+
+    // Create dom5 (unsealed), send child1 immediately, then seal dom5
+    let dom5_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h]
+        .upgrade()
+        .unwrap();
+    let dom5_id = dom5.read().data.id;
+
+    Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
+    Capability::seal_domain_op(&root, dom5_h).unwrap();
+
+    // dom5 carves child2 [0x3000, 0x1000) R from child1 (handle 1 in dom5's table)
+    let child1_h_in_dom5: LocalHandle = 1;
+    let c2_access = Access::new(0x3000, 0x1000, Rights::R);
+    let (child2_h_in_dom5, _, _) =
+        Capability::carve_memory(&dom5, child1_h_in_dom5, c2_access).unwrap();
+
+    // Create dom10 via root, register in dom5's domain table, send child2 to dom10
+    let dom10_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom10 = root.read().data.domain_capabilities[&dom10_h]
+        .upgrade()
+        .unwrap();
+    let dom10_id = dom10.read().data.id;
+
+    let dom10_h_in_dom5: LocalHandle = 1;
+    dom5.write()
+        .data
+        .add_domain_capability(dom10_h_in_dom5, Arc::downgrade(&dom10));
+    Capability::send_memory(&dom5, child2_h_in_dom5, dom10_h_in_dom5, Attributes::NONE).unwrap();
+
+    // Revoke child1 from root — cascades to child2
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_sub).unwrap();
+    let updates = revoke_updates.updates();
+
+    // Must generate exactly 4 updates:
+    //  1. Unmap dom10 from child2's range  (shootdown: true)
+    //  2. Remap dom5  to  child2's range   (shootdown: false, rights = child1's RW)
+    //  3. Unmap dom5  from child1's range  (shootdown: true)
+    //  4. Remap root  to  child1's range   (shootdown: false, rights = mem_root's RWX)
+    assert_eq!(updates.len(), 4, "3-level tree with distinct owners generates exactly 4 updates");
+
+    let has_unmap_dom10 = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
+            if *domain == dom10_id && *address == 0x3000 && *size == 0x1000 && *rights == Rights::NONE)
+    });
+    assert!(has_unmap_dom10, "must unmap child2's range from dom10");
+
+    let has_remap_dom5_child2 = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == dom5_id && *address == 0x3000 && *size == 0x1000)
+    });
+    assert!(has_remap_dom5_child2, "must remap child2's range back to dom5");
+
+    let has_unmap_dom5 = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
+            if *domain == dom5_id && *address == 0x2000 && *size == 0x4000 && *rights == Rights::NONE)
+    });
+    assert!(has_unmap_dom5, "must unmap child1's full range from dom5");
+
+    let has_remap_root = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == root_id && *address == 0x2000 && *size == 0x4000)
+    });
+    assert!(has_remap_root, "must remap child1's full range back to root");
+}
+
+/// Mixed subtree: one carved child sent away (generates Unmap+Remap) and one
+/// aliased child sent away (generates no ChangeRights — aliases are shared).
+/// Revocation of the parent must produce exactly 4 updates.
+#[test]
+fn test_revoke_mixed_carved_and_alias_subtree() {
+    let (root, _r0, r0_h) = bootstrap();
+    let root_id = root.read().data.id;
+
+    // Root carves child1 [0x2000, 0x6000) RW, sends to dom5, seals dom5
+    let c1_access = Access::new(0x2000, 0x6000, Rights::RW);
+    let (child1_h, child1_sub, _) = Capability::carve_memory(&root, r0_h, c1_access).unwrap();
+
+    let dom5_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom5 = root.read().data.domain_capabilities[&dom5_h]
+        .upgrade()
+        .unwrap();
+    let dom5_id = dom5.read().data.id;
+
+    Capability::send_memory(&root, child1_h, dom5_h, Attributes::NONE).unwrap();
+    Capability::seal_domain_op(&root, dom5_h).unwrap();
+
+    // dom5 carves child2 [0x2000, 0x2000) R from child1 and sends to dom_carved_recv
+    let child1_h_in_dom5: LocalHandle = 1;
+    let c2_access = Access::new(0x2000, 0x2000, Rights::R);
+    let (child2_h_in_dom5, _, _) =
+        Capability::carve_memory(&dom5, child1_h_in_dom5, c2_access).unwrap();
+
+    let dom_carved_recv_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom_carved_recv = root.read().data.domain_capabilities[&dom_carved_recv_h]
+        .upgrade()
+        .unwrap();
+    let dom_carved_recv_id = dom_carved_recv.read().data.id;
+
+    dom5.write()
+        .data
+        .add_domain_capability(1, Arc::downgrade(&dom_carved_recv));
+    Capability::send_memory(&dom5, child2_h_in_dom5, 1, Attributes::NONE).unwrap();
+
+    // dom5 aliases alias1 [0x4000, 0x1000) R from child1 and sends to dom_alias_recv
+    // alias1 does NOT overlap with the carved child2 [0x2000, 0x4000)
+    let alias_access = Access::new(0x4000, 0x1000, Rights::R);
+    let (alias1_h_in_dom5, _) =
+        Capability::alias_memory(&dom5, child1_h_in_dom5, alias_access).unwrap();
+
+    let dom_alias_recv_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom_alias_recv = root.read().data.domain_capabilities[&dom_alias_recv_h]
+        .upgrade()
+        .unwrap();
+    let dom_alias_recv_id = dom_alias_recv.read().data.id;
+
+    dom5.write()
+        .data
+        .add_domain_capability(2, Arc::downgrade(&dom_alias_recv));
+    Capability::send_memory(&dom5, alias1_h_in_dom5, 2, Attributes::NONE).unwrap();
+
+    // Revoke child1 — alias branch generates no ChangeRights updates
+    let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_sub).unwrap();
+    let updates = revoke_updates.updates();
+
+    // Exactly 4 updates:
+    //  Unmap dom_carved_recv + Remap dom5 (child2's range)
+    //  Unmap dom5 + Remap root (child1's full range)
+    // alias1 contributes 0 updates.
+    assert_eq!(updates.len(), 4, "alias children generate no ChangeRights updates");
+
+    let has_unmap_carved = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
+            if *domain == dom_carved_recv_id && *address == 0x2000 && *size == 0x2000 && *rights == Rights::NONE)
+    });
+    assert!(has_unmap_carved, "must unmap carved child from its receiver");
+
+    let has_remap_dom5_child2 = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == dom5_id && *address == 0x2000 && *size == 0x2000)
+    });
+    assert!(has_remap_dom5_child2, "dom5 must regain carved child's range");
+
+    let has_unmap_dom5 = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
+            if *domain == dom5_id && *address == 0x2000 && *size == 0x6000 && *rights == Rights::NONE)
+    });
+    assert!(has_unmap_dom5, "must unmap child1's full range from dom5");
+
+    let has_remap_root = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == root_id && *address == 0x2000 && *size == 0x6000)
+    });
+    assert!(has_remap_root, "root must regain child1's full range");
+
+    // Alias receiver must not appear in any ChangeRights update
+    let alias_recv_has_update = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, .. } if *domain == dom_alias_recv_id)
+    });
+    assert!(!alias_recv_has_update, "alias children must not generate ChangeRights updates");
+}

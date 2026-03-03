@@ -323,3 +323,212 @@ fn test_revoke_domain_tree() {
     assert!(grandchild_ref.read().data.is_revoked());
     assert!(updates.len() >= 2); // at least one RevokeDomain per domain in subtree
 }
+
+// ==================== Tree Semantics (ported from unit/capability.rs) ====================
+
+/// Carving with rights that exceed the parent cap's rights must be rejected.
+/// Tests rights monotonicity through a two-level tree.
+#[test]
+fn test_nested_carve_excessive_rights() {
+    let (root, mem_root_h, _mem_root) = setup_root();
+    // mem_root has RWX; carve a child with RW only
+    let rw_access = Access::new(0x2000, 0x2000, Rights::RW);
+    let (rw_h, _, _) = Capability::carve_memory(&root, mem_root_h, rw_access).unwrap();
+
+    // Try to carve from the RW child with RWX — execute bit not in parent, must fail
+    let rwx_access = Access::new(0x2000, 0x1000, Rights::RWX);
+    let result = Capability::carve_memory(&root, rw_h, rwx_access);
+    assert!(result.is_err(), "carve with rights exceeding parent must fail");
+}
+
+/// After sending a carved (exclusive) cap to another domain, the sender's
+/// address space must no longer include that range.
+#[test]
+fn test_address_space_shrinks_after_send_of_carve() {
+    let (root, mem_root_h, _mem_root) = setup_root();
+
+    // Carve [0x2000, 0x4000) exclusively from root's mem
+    let carved_access = Access::new(0x2000, 0x2000, Rights::RW);
+    let (carved_h, _, _) = Capability::carve_memory(&root, mem_root_h, carved_access).unwrap();
+
+    // Send to an unsealed receiver (immediate transfer)
+    let recv_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
+            .unwrap();
+    Capability::send_memory(&root, carved_h, recv_h, Attributes::NONE).unwrap();
+
+    // Root lost the carved handle; its remaining cap (mem_root) has a hole where
+    // the carved child was — so the carved range must no longer be accessible.
+    let view = compute_address_space(&root);
+    assert!(
+        !view.is_accessible(0x2000),
+        "carved range must not be accessible to root after send"
+    );
+    assert!(!view.is_accessible(0x3000));
+
+    // Surrounding ranges remain accessible via mem_root
+    assert!(view.is_accessible(0x0000));
+    assert!(view.is_accessible(0x1000));
+    assert!(view.is_accessible(0x4000));
+    assert!(view.is_accessible(0x5000));
+}
+
+/// After sending an aliased cap to another domain, the sender's address space
+/// must still include that range — aliases are shared, not exclusive.
+#[test]
+fn test_address_space_unchanged_after_send_of_alias() {
+    let (root, mem_root_h, _mem_root) = setup_root();
+
+    // Alias [0x2000, 0x4000) from root's mem (shared — does not remove from parent view)
+    let alias_access = Access::new(0x2000, 0x2000, Rights::R);
+    let (alias_h, _) = Capability::alias_memory(&root, mem_root_h, alias_access).unwrap();
+
+    // Send the alias to an unsealed receiver
+    let recv_h =
+        Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
+            .unwrap();
+    Capability::send_memory(&root, alias_h, recv_h, Attributes::NONE).unwrap();
+
+    // Root's full range must remain accessible: aliasing is shared, so mem_root's
+    // view is unchanged regardless of whether the alias handle was transferred.
+    let view = compute_address_space(&root);
+    assert!(view.is_accessible(0x0000));
+    assert!(
+        view.is_accessible(0x2000),
+        "aliased range must still be accessible to root after send"
+    );
+    assert!(view.is_accessible(0x3000));
+    assert!(view.is_accessible(0x4000));
+    assert!(view.is_accessible(0x5000));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Depth and multi-level domain revocation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The `depth` field is 0 for root capabilities and increments by 1 for each
+/// level in the tree, for both memory and domain capabilities.
+#[test]
+fn test_depth_invariant() {
+    let (root, mem_root_h, mem_root) = setup_root();
+
+    // Memory root is at depth 0
+    assert_eq!(mem_root.read().depth, 0, "mem_root should have depth 0");
+
+    // Level-1 carve has depth 1
+    let l1_access = Access::new(0x1000, 0x4000, Rights::RW);
+    let (l1_h, _, _) = Capability::carve_memory(&root, mem_root_h, l1_access).unwrap();
+    let l1 = root.read().data.memory_capabilities[&l1_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(l1.read().depth, 1, "level-1 carve should have depth 1");
+
+    // Level-2 carve from level-1 has depth 2
+    let l2_access = Access::new(0x2000, 0x1000, Rights::R);
+    let (l2_h, _, _) = Capability::carve_memory(&root, l1_h, l2_access).unwrap();
+    let l2 = root.read().data.memory_capabilities[&l2_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(l2.read().depth, 2, "level-2 carve should have depth 2");
+
+    // Alias of the root region has depth 1
+    let alias_access = Access::new(0x6000, 0x1000, Rights::R);
+    let (alias_h, _) = Capability::alias_memory(&root, mem_root_h, alias_access).unwrap();
+    let alias = root.read().data.memory_capabilities[&alias_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(alias.read().depth, 1, "alias of root memory should have depth 1");
+
+    // Root domain has depth 0
+    assert_eq!(root.read().depth, 0, "root domain should have depth 0");
+
+    // Level-1 child domain has depth 1
+    let child_h = Capability::create_domain(&root, DomainPolicy::new_root(4)).unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(child.read().depth, 1, "child domain should have depth 1");
+
+    // Level-2 grandchild domain (child must be sealed first) has depth 2
+    Capability::seal_domain_op(&root, child_h).unwrap();
+    let grandchild_h = Capability::create_domain(&child, DomainPolicy::new_root(4)).unwrap();
+    let grandchild = child.read().data.domain_capabilities[&grandchild_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(grandchild.read().depth, 2, "grandchild domain should have depth 2");
+}
+
+/// Revoking a child domain propagates through a 3-level subtree.
+/// All domains in the subtree receive a `RevokeDomain` update with the same
+/// fallback = the direct parent of the revoked subtree root.
+#[test]
+fn test_multi_level_domain_revoke() {
+    let (root, _, _mem_root) = setup_root();
+    let root_id = root.read().data.id;
+
+    // Build a 3-level subtree under root: child → grandchild → great_grandchild
+    let child_h = Capability::create_domain(&root, DomainPolicy::new_root(4)).unwrap();
+    Capability::seal_domain_op(&root, child_h).unwrap();
+    let child_ref = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    let child_id = child_ref.read().data.id;
+
+    let grandchild_h = Capability::create_domain(&child_ref, DomainPolicy::new_root(4)).unwrap();
+    Capability::seal_domain_op(&child_ref, grandchild_h).unwrap();
+    let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
+        .upgrade()
+        .unwrap();
+    let grandchild_id = grandchild_ref.read().data.id;
+
+    let great_grandchild_h =
+        Capability::create_domain(&grandchild_ref, DomainPolicy::new_root(4)).unwrap();
+    let great_grandchild_ref = grandchild_ref.read().data.domain_capabilities[&great_grandchild_h]
+        .upgrade()
+        .unwrap();
+    let great_grandchild_id = great_grandchild_ref.read().data.id;
+
+    // Revoke child (transitively revokes grandchild and great_grandchild)
+    let updates = Capability::revoke_domain(&root, child_h).unwrap();
+    let updates_list = updates.updates();
+
+    // Exactly 3 RevokeDomain updates — one per domain in the subtree
+    let revoke_updates: Vec<_> = updates_list
+        .iter()
+        .filter(|u| matches!(u, Update::RevokeDomain { .. }))
+        .collect();
+    assert_eq!(revoke_updates.len(), 3, "one RevokeDomain per domain in the 3-level subtree");
+
+    // All 3 must carry fallback = Some(root_id)
+    for u in &revoke_updates {
+        if let Update::RevokeDomain { fallback, .. } = u {
+            assert_eq!(
+                *fallback,
+                Some(root_id),
+                "fallback must be the revoked subtree root's parent (root_id)"
+            );
+        }
+    }
+
+    // All 3 domains covered
+    let has_child = revoke_updates
+        .iter()
+        .any(|u| matches!(u, Update::RevokeDomain { domain, .. } if *domain == child_id));
+    let has_grandchild = revoke_updates
+        .iter()
+        .any(|u| matches!(u, Update::RevokeDomain { domain, .. } if *domain == grandchild_id));
+    let has_great_grandchild = revoke_updates
+        .iter()
+        .any(|u| matches!(u, Update::RevokeDomain { domain, .. } if *domain == great_grandchild_id));
+    assert!(has_child, "child must have a RevokeDomain update");
+    assert!(has_grandchild, "grandchild must have a RevokeDomain update");
+    assert!(has_great_grandchild, "great_grandchild must have a RevokeDomain update");
+
+    // All 3 are marked revoked in their domain state
+    assert!(child_ref.read().data.is_revoked(), "child must be revoked");
+    assert!(grandchild_ref.read().data.is_revoked(), "grandchild must be revoked");
+    assert!(
+        great_grandchild_ref.read().data.is_revoked(),
+        "great_grandchild must be revoked"
+    );
+}
