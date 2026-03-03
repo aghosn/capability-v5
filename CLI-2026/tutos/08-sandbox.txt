@@ -78,6 +78,7 @@ seal sandbox1
 # Try to send more memory (will fail)
 @msg 📋 Step 8: Attempt to send additional memory (expected to fail)
 alias r0 extra_mem 0x4000000 0x10000 RW
+# EXPECT_FAIL
 send extra_mem sandbox1
 
 @msg
@@ -95,6 +96,7 @@ view sandbox1
 
 # Attest sandbox (will fail - no ATTEST permission)
 @msg 📋 Step 10: Try to attest sandbox (expected to fail)
+# EXPECT_FAIL
 attest sandbox1
 
 @msg

@@ -27,6 +27,7 @@ carve r0 exclusive1 0x10000 0x10000 RWX
 
 # Step 3: Try to carve overlapping memory (will fail)
 @msg 📋 Step 3: Attempt to carve overlapping memory (expected to fail)
+# EXPECT_FAIL
 carve r0 overlap 0x15000 0x10000 RW
 
 @msg

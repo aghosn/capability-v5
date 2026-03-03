@@ -1,4 +1,0 @@
-init root 0x100000
-carve r0 exclusive1 0x10000 0x10000 RWX
-carve r0 exclusive2 0x40000 0x20000 RW
-list

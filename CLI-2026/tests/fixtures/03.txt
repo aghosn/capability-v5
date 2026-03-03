@@ -1,7 +1,0 @@
-init root 0x200000
-create-domain root child1 0b1111 GET,ATTEST,SWITCH
-carve r0 child1_mem 0x80000 0x40000 RWX
-send child1_mem child1
-alias r0 shared_buf 0x100000 0x20000 RW
-send shared_buf child1
-view child1

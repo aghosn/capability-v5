@@ -112,12 +112,23 @@ pub fn cmd_load(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     let mut executed = 0;
     let mut failed = 0;
+    let mut skip_next_cmd = false;
 
     for (line_num, line) in lines.iter().enumerate() {
         let line = line.trim();
 
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
+        // Skip empty lines, @msg narrative lines, and plain comments.
+        // A `# EXPECT_FAIL` marker causes the very next command to be skipped
+        // (used in tutorial files to annotate intentionally-failing commands).
+        if line.is_empty() || line.starts_with("@msg") {
+            continue;
+        }
+        if line.starts_with('#') {
+            skip_next_cmd = line == "# EXPECT_FAIL";
+            continue;
+        }
+        if skip_next_cmd {
+            skip_next_cmd = false;
             continue;
         }
 

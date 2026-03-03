@@ -43,6 +43,7 @@ seal strict
 # Step 4: Try sending to the strict domain (should fail)
 @msg 📋 Step 4: Attempt to send a new capability to 'strict' (expected to fail)
 carve r0 extra1 0x3000000 0x10000 RW
+# EXPECT_FAIL
 send extra1 strict
 
 @msg
