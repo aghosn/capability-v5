@@ -52,6 +52,10 @@ name = "unit_switch"
 path = "tests/unit/switch.rs"
 
 [[test]]
+name = "unit_set_get"
+path = "tests/unit/set_get.rs"
+
+[[test]]
 name = "unit_view"
 path = "tests/unit/view.rs"
 
