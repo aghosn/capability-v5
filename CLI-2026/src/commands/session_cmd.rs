@@ -112,23 +112,19 @@ pub fn cmd_load(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     let mut executed = 0;
     let mut failed = 0;
-    let mut skip_next_cmd = false;
+    let mut expect_next_fail = false;
 
     for (line_num, line) in lines.iter().enumerate() {
         let line = line.trim();
 
         // Skip empty lines, @msg narrative lines, and plain comments.
-        // A `# EXPECT_FAIL` marker causes the very next command to be skipped
-        // (used in tutorial files to annotate intentionally-failing commands).
+        // A `# EXPECT_FAIL` marker means the very next command is expected to
+        // return an error; if it succeeds instead, that is treated as a failure.
         if line.is_empty() || line.starts_with("@msg") {
             continue;
         }
         if line.starts_with('#') {
-            skip_next_cmd = line == "# EXPECT_FAIL";
-            continue;
-        }
-        if skip_next_cmd {
-            skip_next_cmd = false;
+            expect_next_fail = line == "# EXPECT_FAIL";
             continue;
         }
 
@@ -141,9 +137,24 @@ pub fn cmd_load(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         let cmd = parts[0];
         let cmd_args = &parts[1..];
 
+        let should_fail = expect_next_fail;
+        expect_next_fail = false;
+
         // Execute the command
         match commands::dispatch(state, cmd, cmd_args) {
+            Ok(_) if should_fail => {
+                failed += 1;
+                println!(
+                    "{} Line {}: {} - expected failure but command succeeded",
+                    "✗".bright_red().bold(),
+                    line_num + 1,
+                    line.bright_white(),
+                );
+            }
             Ok(_) => {
+                executed += 1;
+            }
+            Err(_) if should_fail => {
                 executed += 1;
             }
             Err(e) => {

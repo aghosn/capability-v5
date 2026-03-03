@@ -3,7 +3,8 @@
 //! Each test loads the corresponding tutorial file from `tutos/` through the
 //! CLI's `load` command and asserts that no command fails.  Commands that are
 //! intentionally expected to fail must be preceded by a `# EXPECT_FAIL` line
-//! in the tutorial file; `cmd_load` will skip them automatically.
+//! in the tutorial file; `cmd_load` will run them and assert they return an
+//! error — if they unexpectedly succeed, that is treated as a failure.
 //!
 //! Run with:  cargo test
 
