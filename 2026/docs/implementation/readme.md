@@ -6,45 +6,45 @@ This document describes how the capability engine's modules fit together.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        capability-engine                         │
-│                                                                  │
+│                        capability-engine                        │
+│                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
 │  │  memory.rs   │   │  domain.rs   │   │     switch.rs        │ │
 │  │ MemoryRegion │   │   Domain     │   │   SwitchManager      │ │
 │  │ Rights       │   │ DomainPolicy │   │   VP states          │ │
 │  │ Attributes   │   │ MonitorAPI   │   │   interrupt routing  │ │
 │  └──────┬───────┘   └──────┬───────┘   └──────────────────────┘ │
-│         │                  │                                      │
-│         └──────────┬───────┘                                      │
-│                    ▼                                              │
-│           ┌─────────────────┐                                     │
-│           │  capability.rs  │                                     │
-│           │  Capability<T>  │  ← generic tree node               │
-│           │  CDT traversal  │                                     │
-│           │  carve/alias/   │                                     │
-│           │  send/revoke    │                                     │
-│           └────────┬────────┘                                     │
-│                    │ produces                                      │
-│                    ▼                                              │
-│           ┌─────────────────┐                                     │
-│           │   update.rs     │  ← hardware change descriptors     │
-│           │ UpdateBatch     │                                      │
-│           │ UpdateProcessor │  ← simulation queue helper         │
-│           └────────┬────────┘                                     │
-│                    │ applied via                                   │
-│                    ▼                                              │
-│           ┌─────────────────┐                                     │
-│           │  platform.rs    │  ← hardware abstraction            │
-│           │  Platform trait │                                     │
-│           │  execute()      │  ← lock + operate + IPI            │
-│           └─────────────────┘                                     │
-│                                                                   │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐  │
-│  │   view.rs    │   │  attest.rs   │   │      sync.rs         │  │
-│  │ address-space│   │ attestation  │   │ RwLock abstraction   │  │
-│  │ view compute │   │ reports      │   │ (parking_lot/spin/   │  │
-│  └──────────────┘   └──────────────┘   │       loom)          │  │
-│                                         └──────────────────────┘  │
+│         │                  │                                    │
+│         └──────────┬───────┘                                    │
+│                    ▼                                            │
+│           ┌─────────────────┐                                   │
+│           │  capability.rs  │                                   │
+│           │  Capability<T>  │  ← generic tree node              │
+│           │  CDT traversal  │                                   │
+│           │  carve/alias/   │                                   │
+│           │  send/revoke    │                                   │
+│           └────────┬────────┘                                   │
+│                    │ produces                                   │
+│                    ▼                                            │
+│           ┌─────────────────┐                                   │
+│           │   update.rs     │  ← hardware change descriptors    │
+│           │ UpdateBatch     │                                   │
+│           │ UpdateProcessor │  ← simulation queue helper        │
+│           └────────┬────────┘                                   │
+│                    │ applied via                                │
+│                    ▼                                            │
+│           ┌─────────────────┐                                   │
+│           │  platform.rs    │  ← hardware abstraction           │
+│           │  Platform trait │                                   │
+│           │  execute()      │  ← lock + operate + IPI           │
+│           └─────────────────┘                                   │
+│                                                                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
+│  │   view.rs    │   │  attest.rs   │   │      sync.rs         │ │
+│  │ address-space│   │ attestation  │   │ RwLock abstraction   │ │
+│  │ view compute │   │ reports      │   │ (parking_lot/spin/   │ │
+│  └──────────────┘   └──────────────┘   │       loom)          │ │
+│                                        └──────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

@@ -44,21 +44,39 @@ Attributes are per-ownership metadata set at `send` time. They affect behaviour 
 
 ---
 
+## Carve vs. Alias — Effect on Parent Access
+
+These two operations differ in what they do to the **parent**:
+
+- **Carve** — the parent **loses access** to the carved range. That range is handed off exclusively to the child. The parent regains access only when the child is revoked.
+- **Alias** — the parent **retains access**. Both parent and child can access the same range simultaneously. Revoking an alias restores nothing to the parent (the parent never lost access).
+
 ## Exclusive vs. Aliased
 
-### Exclusive (`Carve`)
+`RegionStatus` records whether the region is exclusively held or shared. This is a property of the **derivation chain**, not just the immediate operation:
 
-- Only one domain has access at a time.
-- Created by the **carve** operation.
-- When revoked, if the capability was sent to a different domain, the parent **regains** access.
-- Two carved regions from the same parent must not overlap.
+### Exclusive (`RegionStatus::Exclusive`)
 
-### Aliased (`Alias`)
+A region is Exclusive when it was obtained through an **unbroken chain of carves** from the root. No alias appears anywhere in its ancestry. This guarantees that at most one party holds access to the physical range at any point.
 
-- Multiple domains may hold simultaneous access.
-- Created by the **alias** operation.
-- Parent retains its own access; revoking an alias restores nothing.
-- A new alias is rejected if it overlaps an existing *carved* child (that range is exclusively held).
+### Aliased (`RegionStatus::Aliased`)
+
+A region is Aliased when an **alias appears somewhere in its derivation chain** — meaning at least one ancestor retained access when the region was derived. The physical memory is therefore shared (or potentially shared) with other holders above the alias point.
+
+The status propagates downward: carving from an aliased region produces an `Aliased` carved child. The carve still removes access from the immediate parent, but the grandparent (and any ancestor above the alias) still has access. The region is not exclusively held.
+
+**Example — alias then carve:**
+
+```
+cap> alias r0 shared 0x10000 0x10000 RW
+# shared: kind=Alias, status=Aliased   — r0 still has access to [0x10000..0x20000)
+
+cap> carve shared sub 0x10000 0x4000 RW
+# sub:    kind=Carve, status=Aliased   — 'shared' loses access to [0x10000..0x14000)
+#                                        but r0 still has access through the original alias
+```
+
+`sub` is Aliased, not Exclusive: `r0` retained access when `shared` was created, so exclusive physical ownership is not guaranteed regardless of what happens below.
 
 ---
 
