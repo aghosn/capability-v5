@@ -58,10 +58,29 @@ cargo test --test integration_revoke
 [loom](https://github.com/tokio-rs/loom) systematically explores every valid thread interleaving. Run in release mode — loom's bookkeeping is CPU-intensive.
 
 ```bash
+# Run all loom suites (alias defined in .cargo/config.toml)
+cargo loom
+
+# Or run individual suites:
 cargo test --test loom_concurrency --features loom --release
 cargo test --test loom_e2e        --features loom --release
 cargo test --test loom_vp_switch  --features loom --release
+cargo test --test loom_meta       --features loom --release
 ```
+
+> **Expected runtimes** (measured on an Intel i7, release build):
+>
+> | Suite              | Tests | Time      | Notes                                        |
+> |--------------------|-------|-----------|----------------------------------------------|
+> | `loom_concurrency` |  30   |  ~35 s    | Core capability / memory / domain races      |
+> | `loom_e2e`         |   8   |  ~4 min   | Full send/accept/revoke end-to-end races     |
+> | `loom_meta`        |   2   |  ~35 s    | META attribute send & revoke races           |
+> | `loom_vp_switch`   |   5   |  ~12 min  | VP switch / interrupt delivery races         |
+> | **Total**          |  45   | **~17 min** |                                            |
+>
+> `loom_e2e` and `loom_vp_switch` contain tests that explore a very large interleaving
+> space — it is normal for individual tests within those suites to run for several minutes
+> before completing. Do not interrupt them.
 
 ### Coverage
 

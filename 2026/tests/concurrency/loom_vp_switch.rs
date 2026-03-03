@@ -513,7 +513,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::<Domain>::deliver_interrupt_vp(&dom2_t0, dom0_id, 0, &plat)
+            Capability::<Domain>::deliver_interrupt_vp(&dom2_t0, dom0_id, 0, 0, &plat)
         });
 
         // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.

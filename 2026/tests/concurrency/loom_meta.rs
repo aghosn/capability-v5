@@ -28,7 +28,7 @@ use loom::sync::{Arc, Mutex, RwLock};
 use loom::thread;
 
 use capability_engine::{
-    Access, Attributes, CapaError, Capability, Domain, DomainId, DomainPolicy, LocalHandle,
+    Access, Attributes, CapaError, Capability, Domain, DomainPolicy, LocalHandle,
     MemoryRegion, Rights, Update, UpdateBatch,
 };
 
@@ -163,8 +163,8 @@ fn loom_meta_concurrent_send_race() {
 
         let dom_a = dom.clone();
         let dom_b = dom.clone();
-        let recv_a2 = recv_a.clone();
-        let recv_b2 = recv_b.clone();
+        let _recv_a2 = recv_a.clone();
+        let _recv_b2 = recv_b.clone();
         let op_a = op_lock.clone();
         let op_b = op_lock.clone();
         let ul_a = ul.clone();
