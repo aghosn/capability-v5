@@ -136,10 +136,26 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
         for (handle, weak_ref) in &domain.data.domain_capabilities {
             if let Some(child_domain_ref) = weak_ref.upgrade() {
                 let child = child_domain_ref.read();
-                report.push_str(&format!(
-                    "  Handle {}: Domain {} (status: {:?})\n",
-                    handle, child.data.id, child.data.status
-                ));
+                if child.is_channel() {
+                    // Resolve channel target to show the actual domain it points to
+                    if let Some(target) = child.channel_target.as_ref().and_then(|w| w.upgrade()) {
+                        let target = target.read();
+                        report.push_str(&format!(
+                            "  Handle {}: Channel → Domain {} (status: {:?})\n",
+                            handle, target.data.id, target.data.status
+                        ));
+                    } else {
+                        report.push_str(&format!(
+                            "  Handle {}: Channel (target unavailable)\n",
+                            handle
+                        ));
+                    }
+                } else {
+                    report.push_str(&format!(
+                        "  Handle {}: Domain {} (status: {:?})\n",
+                        handle, child.data.id, child.data.status
+                    ));
+                }
             }
         }
     }

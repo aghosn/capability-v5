@@ -514,13 +514,33 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
     } else {
         for (name, domain) in &state.domains {
             let d = domain.read();
-            println!(
-                "  {} {} (ID: {}, status: {:?})",
-                "•".bright_yellow(),
-                name.bright_white(),
-                d.data.id,
-                d.data.status
-            );
+            if d.is_channel() {
+                // Resolve channel target to show the actual domain it points to
+                if let Some(target) = d.channel_target.as_ref().and_then(|w| w.upgrade()) {
+                    let target = target.read();
+                    println!(
+                        "  {} {} (Channel → Domain ID: {}, status: {:?})",
+                        "•".bright_yellow(),
+                        name.bright_white(),
+                        target.data.id,
+                        target.data.status
+                    );
+                } else {
+                    println!(
+                        "  {} {} (Channel, target unavailable)",
+                        "•".bright_yellow(),
+                        name.bright_white(),
+                    );
+                }
+            } else {
+                println!(
+                    "  {} {} (ID: {}, status: {:?})",
+                    "•".bright_yellow(),
+                    name.bright_white(),
+                    d.data.id,
+                    d.data.status
+                );
+            }
             let pending_ids = d.data.get_pending_ids();
             if !pending_ids.is_empty() {
                 println!("    {} Pending capabilities ({}):", "⏸".bright_yellow(), pending_ids.len());
