@@ -2,71 +2,82 @@
 
 ## What is a Capability?
 
-A **capability** is an unforgeable token that simultaneously names a resource and specifies the rights the holder has over it. In this engine there are exactly two kinds of resource:
+A **capability** is an unforgeable token that simultaneously names a resource and specifies the rights the holder has over that resource. The engine has exactly two kinds of resource:
 
-- **Memory regions** — a contiguous range of physical/virtual address space together with access rights.
-- **Trust domains** — execution environments with policies governing what they may do and which cores they may run on.
+- **Memory regions** — a contiguous range of address space with access rights (read / write / execute).
+- **Trust domains** — isolated execution environments governed by a policy.
 
-Capabilities are generic (`Capability<T>` where `T` is `MemoryRegion` or `Domain`). Every capability carries:
+Capabilities are generic: `Capability<T>` where `T` is either `MemoryRegion` or `Domain`. Every capability carries:
 
-| Field | Type | Meaning |
-|-------|------|---------|
-| `owned` | `Ownership` | Who owns this capability (domain ID + local handle + attributes) |
-| `data` | `T` | The resource itself |
-| `parent` | `CapabilityWeak<T>` | Weak reference to the parent (no ownership cycle) |
-| `children` | `Vec<CapabilityRef<T>>` | Strong references to derived children |
+| Field | Meaning |
+|-------|---------|
+| `owned` | Who holds this capability: domain ID, local handle, and ownership attributes |
+| `data` | The resource itself (the memory region or domain) |
+| `parent` | Weak reference to the parent capability — no ownership cycle |
+| `children` | Strong references to all derived children — parent owns children |
 
 ## The Capability Derivation Tree (CDT)
 
-All capabilities of the same type form a **tree** called the Capability Derivation Tree:
+All capabilities of the same type form a **tree** rooted at an initial resource created by the monitor. This tree is called the Capability Derivation Tree:
 
 ```
 Root memory region  [0x0 .. 0x100000, RWX]
   ├─ Carved child   [0x10000 .. 0x20000, RWX]   (sent to domain 2)
   │    └─ Carved grandchild [0x10000 .. 0x14000, R]
   └─ Aliased child  [0x50000 .. 0x60000, R]     (shared with domain 3)
-```
 
-```
 Root domain  (id=0, sealed)
   └─ Child domain  (id=1, sealed)
        └─ Grandchild domain  (id=2, unsealed)
 ```
 
 The CDT enforces two invariants:
+
 1. **Authority flows down only** — a child's rights are always a subset of its parent's.
-2. **Ownership is explicit** — each node records exactly one owner (a domain ID and a local handle). There is no ambient authority.
+2. **Ownership is explicit** — each node records exactly one owner. There is no ambient authority.
 
 ## Handles and Ownership
 
-Within a domain, capabilities are referenced by a **local handle** (`LocalHandle = u64`). A handle is meaningful only inside the domain that owns it — two domains can hold handles with the same numeric value that name entirely different capabilities.
+Within a domain, capabilities are referenced by a **local handle** (`LocalHandle = u64`). A handle is meaningful only inside the domain that owns it — two domains can hold handles with the same numeric value naming entirely different capabilities.
 
 The `Ownership` struct records:
 
-```rust
-pub struct Ownership {
-    pub owner: DomainId,       // domain that holds this capability
-    pub handle: LocalHandle,   // domain-local index
-    pub attributes: Attributes,// CLEAN, VITAL, HASH, META flags on this ownership
-    pub owner_domain: Option<CapabilityWeak<Domain>>, // optional back-ref for API validation
-}
 ```
-
-The `owner_domain` back-reference is used to enforce that only **sealed** domains with the appropriate **MonitorAPI** permission may invoke a given operation (see [Domain Capabilities](domain-capabilities.md) and [Operations](operations.md)).
+owned.owner      — DomainId of the domain holding this capability
+owned.handle     — domain-local index (assigned at creation or send time)
+owned.attributes — CLEAN, VITAL, HASH, META flags (applied at revocation)
+```
 
 ## Reference Counting and Lifetimes
 
-Capabilities are heap-allocated and reference-counted:
+| Type | Semantics |
+|------|-----------|
+| `CapabilityRef<T>` = `Arc<RwLock<Capability<T>>>` | Strong reference — keeps the capability alive |
+| `CapabilityWeak<T>` = `Weak<RwLock<Capability<T>>>` | Weak reference — does not prevent deallocation |
 
-| Type | Rust type | Semantics |
-|------|-----------|-----------|
-| `CapabilityRef<T>` | `Arc<RwLock<Capability<T>>>` | Strong reference — keeps the capability alive |
-| `CapabilityWeak<T>` | `Weak<RwLock<Capability<T>>>` | Weak reference — does not prevent deallocation |
+Parent → child edges are **strong** (parent owns children). Child → parent edges are **weak** (prevents cycles). When the last strong reference to a capability is dropped — because it was revoked and removed from its parent's children list — the capability is freed automatically.
 
-Parent → child edges are **strong** (parent owns children). Child → parent edges are **weak** (prevents reference cycles). When the last strong reference to a capability is dropped — because it was revoked and removed from its parent's children list — the capability is freed automatically.
+## Safety Properties
 
-## Summary
+The CDT model provides the following guarantees:
 
-- A capability = resource identity + rights + ownership, arranged in a tree.
-- The CDT is the single source of truth for "who may do what to which resource".
-- Authority is strictly monotone: derivation can only restrict, never amplify.
+### P1 — Derivation Monotonicity
+Every child capability is *at most as powerful* as its parent. Enforced at creation time for every derivation (carve, alias, create-domain). Because derivation is the only way to obtain a non-root capability, the property holds for all nodes by induction.
+
+### P2 — Memory Exclusivity
+At any point in time, at most one domain has exclusive access to any physical page, unless access was explicitly shared via alias. Enforced by overlap checks at carve and alias time, and by access-restoration updates at revocation time.
+
+### P3 — Capability Confinement
+A domain cannot forge capabilities. The only way to obtain one is to receive it from a domain that already holds it (via carve, alias, or send). Capabilities are opaque heap objects; they cannot be constructed by value from outside the engine.
+
+### P4 — Operation Authority
+A domain may only invoke a capability operation if its policy explicitly grants the corresponding `MonitorAPI` permission bit. Every operation validates the owning domain's sealed status and API bitmap before touching the tree.
+
+### P5 — Revocation Completeness
+Revoking a capability destroys all capabilities derived from it, transitively. The recursive revocation algorithm removes children before the node itself, so no derived capability can outlive its ancestor.
+
+### P6 — No Authority Amplification
+Sending a capability to another domain does not increase total authority. The sender loses (or loses exclusive) access; the receiver gains exactly what was sent, with identical rights.
+
+### P7 — Sealed-Domain Immutability
+Once a domain is sealed its policy is frozen. Its capability set can only grow through the explicit `RECEIVE_AFTER_SEAL` mechanism, and only for capabilities the domain itself chooses to accept.
