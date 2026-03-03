@@ -214,3 +214,134 @@ fn test_merge_combines_affected_domains() {
     assert!(batch1.affected_domains().contains(&3));
     assert!(batch1.affected_domains().contains(&4));
 }
+
+// ==================== UpdateProcessor ====================
+
+fn make_batch_for_domain(domain_id: DomainId) -> UpdateBatch {
+    let mut b = UpdateBatch::new();
+    b.add_change_rights(domain_id, 0x1000, 0x1000, 0x1000, capability_engine::memory::Rights::NONE, true);
+    b
+}
+
+#[test]
+fn test_update_processor_register_and_lookup_domain_core() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+    assert_eq!(proc.get_domain_core(1), Some(0));
+
+    proc.unregister_domain(1);
+    assert_eq!(proc.get_domain_core(1), None);
+}
+
+#[test]
+fn test_submit_updates_routes_to_correct_core() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(42, 3); // domain 42 runs on core 3
+
+    let batch = make_batch_for_domain(42);
+    let cores = proc.submit_updates(batch);
+
+    assert_eq!(cores.len(), 1);
+    assert!(cores.contains(&3), "batch must be routed to core 3");
+
+    let pending = proc.get_pending_updates(3);
+    assert_eq!(pending.len(), 1);
+    assert!(matches!(pending[0].status, UpdateStatus::Pending));
+}
+
+#[test]
+fn test_submit_updates_unaffected_core_gets_nothing() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(10, 0);
+
+    let batch = make_batch_for_domain(99); // domain 99 not running anywhere
+    let cores = proc.submit_updates(batch);
+    assert!(cores.is_empty(), "no cores should be notified for an idle domain");
+    assert!(proc.get_pending_updates(0).is_empty());
+}
+
+#[test]
+fn test_mark_in_progress_transitions_pending() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+    proc.submit_updates(make_batch_for_domain(1));
+
+    assert!(proc.mark_in_progress(0, 0), "mark_in_progress must return true for a Pending entry");
+
+    let updates = proc.get_pending_updates(0);
+    assert!(updates.is_empty(), "InProgress entry must not appear in get_pending_updates");
+}
+
+#[test]
+fn test_mark_in_progress_idempotent_on_non_pending() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+    proc.submit_updates(make_batch_for_domain(1));
+
+    proc.mark_in_progress(0, 0);
+    // Second mark_in_progress on the same index must return false (already InProgress).
+    assert!(!proc.mark_in_progress(0, 0));
+}
+
+#[test]
+fn test_mark_completed_and_clean() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+    proc.submit_updates(make_batch_for_domain(1));
+
+    proc.mark_in_progress(0, 0);
+    assert!(proc.mark_completed(0, 0));
+
+    // Entry is Completed — still in queue until clean_completed.
+    assert!(!proc.has_pending_updates(0));
+
+    proc.clean_completed(0);
+    // Queue is empty after clean.
+    assert!(proc.get_pending_updates(0).is_empty());
+}
+
+#[test]
+fn test_has_pending_updates() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+
+    assert!(!proc.has_pending_updates(0));
+    proc.submit_updates(make_batch_for_domain(1));
+    assert!(proc.has_pending_updates(0));
+
+    proc.mark_in_progress(0, 0);
+    assert!(!proc.has_pending_updates(0)); // InProgress is not Pending
+}
+
+#[test]
+fn test_get_cores_with_pending_updates() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+    proc.register_domain_on_core(2, 1);
+
+    proc.submit_updates(make_batch_for_domain(1)); // → core 0
+    proc.submit_updates(make_batch_for_domain(2)); // → core 1
+
+    let cores = proc.get_cores_with_pending_updates();
+    assert_eq!(cores.len(), 2);
+    assert!(cores.contains(&0));
+    assert!(cores.contains(&1));
+
+    // Mark core 0's update in-progress — it should drop from the list.
+    proc.mark_in_progress(0, 0);
+    let cores = proc.get_cores_with_pending_updates();
+    assert_eq!(cores.len(), 1);
+    assert!(cores.contains(&1));
+}
+
+#[test]
+fn test_multiple_batches_same_core_ordered() {
+    let proc = UpdateProcessor::new();
+    proc.register_domain_on_core(1, 0);
+
+    proc.submit_updates(make_batch_for_domain(1));
+    proc.submit_updates(make_batch_for_domain(1));
+
+    let pending = proc.get_pending_updates(0);
+    assert_eq!(pending.len(), 2, "both batches must be queued in order");
+}

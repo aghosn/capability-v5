@@ -391,3 +391,71 @@ fn accept_gives_independent_handles() {
     assert!(receiver.read().data.get_memory_capability(h1).is_some());
     assert!(receiver.read().data.get_memory_capability(h2).is_some());
 }
+
+// ── T3 — send_memory_sealed attributes unchanged on failed freeze ─────────────
+
+/// Verifies that when a `send_memory_sealed` call fails because the handle was
+/// already frozen (simulating a concurrent send), the original capability's
+/// attributes are NOT modified.
+///
+/// Prior to the fix, `cap_ref.write().owned.attributes = attrs` ran
+/// unconditionally before the authoritative freeze check, permanently mutating
+/// attrs on a failed send.  After the fix, attributes are set only after the
+/// freeze commits.
+#[test]
+fn send_sealed_failed_freeze_leaves_attrs_unchanged() {
+    let sender = make_sealed_domain();
+    let receiver = make_sealed_domain();
+    let mem = register_root_mem(&sender, 1);
+
+    // Record the original attributes (NONE).
+    let original_attrs = mem.read().owned.attributes;
+
+    // Manually freeze handle 1 in the sender — simulates a concurrent send
+    // that already committed the freeze before us.
+    sender.write().data.freeze_memory_handle(1);
+    assert!(sender.read().data.is_memory_handle_frozen(1));
+
+    // Attempt send with VITAL attrs — different from the original.
+    sender
+        .write()
+        .data
+        .add_domain_capability(1, Arc::downgrade(&receiver));
+    let vital = Attributes::from_bits(Attributes::VITAL);
+    let result = Capability::<Domain>::send_memory(&sender, 1, 1, vital);
+
+    // The send must fail because the handle was already frozen.
+    assert!(result.is_err(), "send must fail when handle is already frozen");
+
+    // Attributes must be unchanged — the failed freeze must not have mutated them.
+    let after_attrs = mem.read().owned.attributes;
+    assert_eq!(
+        after_attrs, original_attrs,
+        "attributes must not be modified when the freeze fails"
+    );
+}
+
+/// Confirm the happy path: a successful `send_memory_sealed` DOES apply the
+/// requested attributes after the freeze commits.
+#[test]
+fn send_sealed_success_applies_attrs() {
+    let sender = make_sealed_domain();
+    let receiver = make_sealed_domain();
+    let mem = register_root_mem(&sender, 1);
+
+    sender
+        .write()
+        .data
+        .add_domain_capability(1, Arc::downgrade(&receiver));
+
+    let vital = Attributes::from_bits(Attributes::VITAL);
+    Capability::<Domain>::send_memory(&sender, 1, 1, vital).unwrap();
+
+    // After a successful send, the capability's attrs should be VITAL.
+    let after_attrs = mem.read().owned.attributes;
+    assert_eq!(
+        after_attrs,
+        vital,
+        "attributes must be applied on a successful sealed send"
+    );
+}

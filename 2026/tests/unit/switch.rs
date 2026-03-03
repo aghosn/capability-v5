@@ -803,3 +803,191 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
         "Interrupted VP must not be claimable via switch_domain"
     );
 }
+
+// ── T5: Multi-level Suspended chain cleanup ───────────────────────────────────
+//
+// 4-domain chain: dom0(handler) → dom1(Locked) → dom2(Locked) → dom3(Running)
+//
+// After delivering an interrupt to dom3 with dom0 as handler:
+//   dom3.vp0 = Interrupted
+//   dom2.vp0 = Suspended { callee: dom3.vp0 }
+//   dom1.vp0 = Suspended { callee: dom2.vp0 }
+//   dom0.vp0 = Running (handler)
+//
+// When dom0 claims dom1 (Suspended → Running):
+//   dom1.vp0 → Running
+//   dom2.vp0 must stay Suspended (it's not Interrupted; only Interrupted callees
+//   are freed when their parent is claimed)
+//
+// When dom1 then claims dom2 (Suspended → Running):
+//   dom2.vp0 → Running
+//   dom3.vp0 → Available (it was Interrupted, so it is freed)
+
+fn setup_4domain_chain() -> (
+    CapabilityRef<Domain>,
+    CapabilityRef<Domain>,
+    CapabilityRef<Domain>,
+    CapabilityRef<Domain>,
+    common::TestPlatform,
+) {
+    let platform = common::TestPlatform::new();
+    platform.set_current_core(Some(0));
+
+    let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
+    let dom0_id = dom0.read().data.id;
+    platform.register_domain(dom0_id, None);
+    platform.set_core_domain(0, dom0_id);
+    init_vp_running(&dom0, 0, 0);
+    platform.set_core_vp(0, Some(0));
+
+    let (dom1, dom1_h) = make_sealed_child(&dom0);
+    let dom1_id = dom1.read().data.id;
+    platform.register_domain(dom1_id, Some(dom0_id));
+    Capability::switch_domain(&dom0, dom1_h, 0, &platform).unwrap();
+
+    let (dom2, _dom2_h_in_dom0) = make_sealed_child(&dom0);
+    let dom2_id = dom2.read().data.id;
+    platform.register_domain(dom2_id, Some(dom0_id));
+    let dom2_h_in_dom1 = {
+        let dom2_weak = Arc::downgrade(&dom2);
+        let mut d1 = dom1.write();
+        let h = d1.data.allocate_domain_handle();
+        d1.data.add_domain_capability(h, dom2_weak);
+        h
+    };
+    Capability::switch_domain(&dom1, dom2_h_in_dom1, 0, &platform).unwrap();
+
+    let (dom3, _dom3_h_in_dom0) = make_sealed_child(&dom0);
+    let dom3_id = dom3.read().data.id;
+    platform.register_domain(dom3_id, Some(dom0_id));
+    let dom3_h_in_dom2 = {
+        let dom3_weak = Arc::downgrade(&dom3);
+        let mut d2 = dom2.write();
+        let h = d2.data.allocate_domain_handle();
+        d2.data.add_domain_capability(h, dom3_weak);
+        h
+    };
+    Capability::switch_domain(&dom2, dom3_h_in_dom2, 0, &platform).unwrap();
+
+    let _ = (dom2_id, dom3_id); // silence unused warnings
+    (dom0, dom1, dom2, dom3, platform)
+}
+
+fn find_domain_handle(holder: &CapabilityRef<Domain>, target_id: u64) -> LocalHandle {
+    holder
+        .read()
+        .data
+        .domain_capability_handles()
+        .into_iter()
+        .find(|&h| {
+            holder
+                .read()
+                .data
+                .get_domain_capability(h)
+                .and_then(|w| w.upgrade())
+                .map(|c| c.read().data.id == target_id)
+                .unwrap_or(false)
+        })
+        .expect("handle not found")
+}
+
+/// After interrupt delivery to a 4-domain chain, verify the intermediate states:
+/// dom3=Interrupted, dom2=Suspended{callee=dom3}, dom1=Suspended{callee=dom2}.
+#[test]
+fn test_4domain_interrupt_delivery_states() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let dom0_id = dom0.read().data.id;
+    let dom2_id = dom2.read().data.id;
+    let dom3_id = dom3.read().data.id;
+
+    Capability::<Domain>::deliver_interrupt_vp(&dom3, dom0_id, 0, 0, &platform).unwrap();
+
+    // dom3.vp0 → Interrupted
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom3_vp0.run_state.read(), VpRunState::Interrupted { .. }),
+        "dom3 VP[0] should be Interrupted"
+    );
+
+    // dom2.vp0 → Suspended { callee: dom3.vp0 }
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom2_vp0.run_state.read(),
+            VpRunState::Suspended { callee_domain_id, callee_vp_id, .. }
+            if callee_domain_id == dom3_id && callee_vp_id == 0),
+        "dom2 VP[0] should be Suspended on dom3.vp0"
+    );
+
+    // dom1.vp0 → Suspended { callee: dom2.vp0 }
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom1_vp0.run_state.read(),
+            VpRunState::Suspended { callee_domain_id, callee_vp_id, .. }
+            if callee_domain_id == dom2_id && callee_vp_id == 0),
+        "dom1 VP[0] should be Suspended on dom2.vp0"
+    );
+
+    // dom0.vp0 → Running (handler)
+    let dom0_vp0 = dom0.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom0_vp0.run_state.read(), VpRunState::Running { core: 0, .. }),
+        "dom0 VP[0] should be Running as handler"
+    );
+}
+
+/// When dom0 claims dom1 (Suspended → Running), dom2 stays Suspended
+/// because dom2's callee (dom3) is Interrupted, not dom2 itself.
+/// Only when dom1 subsequently claims dom2 is dom3 freed to Available.
+#[test]
+fn test_4domain_transitive_suspended_chain_cleanup() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let dom0_id = dom0.read().data.id;
+    let dom1_id = dom1.read().data.id;
+
+    Capability::<Domain>::deliver_interrupt_vp(&dom3, dom0_id, 0, 0, &platform).unwrap();
+
+    // Step 1: dom0 claims dom1 (Suspended → Running).
+    let dom1_h = find_domain_handle(&dom0, dom1_id);
+    Capability::switch_domain(&dom0, dom1_h, 0, &platform).unwrap();
+
+    // dom1.vp0 → Running
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom1_vp0.run_state.read(), VpRunState::Running { .. }),
+        "dom1 VP[0] must be Running after being claimed"
+    );
+
+    // dom2.vp0 must still be Suspended (dom3 is Interrupted, not dom2)
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom2_vp0.run_state.read(), VpRunState::Suspended { .. }),
+        "dom2 VP[0] must remain Suspended — it was dom1's callee, not Interrupted"
+    );
+
+    // dom3.vp0 must still be Interrupted
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom3_vp0.run_state.read(), VpRunState::Interrupted { .. }),
+        "dom3 VP[0] must still be Interrupted"
+    );
+
+    // Step 2: dom1 claims dom2 (Suspended → Running).
+    // dom1 is now Running on core 0; it can switch to dom2.
+    let dom2_id = dom2.read().data.id;
+    let dom2_h = find_domain_handle(&dom1, dom2_id);
+    Capability::switch_domain(&dom1, dom2_h, 0, &platform).unwrap();
+
+    // dom2.vp0 → Running
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom2_vp0.run_state.read(), VpRunState::Running { .. }),
+        "dom2 VP[0] must be Running after being claimed by dom1"
+    );
+
+    // dom3.vp0 → Available (freed because dom2's callee dom3 was Interrupted)
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom3_vp0.run_state.read(), VpRunState::Available),
+        "dom3 VP[0] must be freed to Available when dom2 (its Suspended parent) is claimed"
+    );
+}
