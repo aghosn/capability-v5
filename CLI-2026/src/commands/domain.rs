@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::parser::{format_api, parse_api, parse_number};
 use crate::session::Command;
-use crate::state::{CliState, find_domain_handle, find_memory_handle};
+use crate::state::{CliState, find_domain_handle, find_domain_owner, find_memory_handle};
 use crate::update_processor::process_updates;
 
 /// Initialize root domain and memory region
@@ -675,6 +675,109 @@ pub fn cmd_accept_capability(
     Ok(())
 }
 
+/// Obtain a channel capability: get-chan <target> <chan_name>
+/// The caller is inferred as the domain that owns <target> in its capability table.
+pub fn cmd_get_chan(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 2 {
+        return Err("Usage: get-chan <target> <chan_name>".to_string());
+    }
+    let target_name = args[0];
+    let chan_name   = args[1];
+
+    let target = state.domains.get(target_name)
+        .ok_or_else(|| format!("Domain '{}' not found", target_name))?.clone();
+
+    let (caller_name, caller, target_handle) = find_domain_owner(state, &target)
+        .ok_or_else(|| format!("No domain found that owns '{}'", target_name))?;
+
+    let chan_handle = Capability::get_chan(&caller, target_handle)
+        .map_err(|e| format!("get-chan failed: {:?}", e))?;
+
+    let chan_ref = caller.read().data.domain_capabilities[&chan_handle].upgrade()
+        .ok_or("Internal error: channel cap not found after creation")?;
+
+    state.domains.insert(chan_name.to_string(), chan_ref);
+
+    state.session.add_command(Command::GetChan {
+        caller: caller_name.clone(),
+        target: target_name.to_string(),
+        chan_name: chan_name.to_string(),
+    });
+
+    println!(
+        "{} Created channel '{}' → '{}' (owned by '{}')",
+        "✓".bright_green().bold(),
+        chan_name.bright_white(),
+        target_name.bright_white(),
+        caller_name.bright_white(),
+    );
+    Ok(())
+}
+
+/// Accept a pending channel: accept-channel <receiver> <pending_id> <chan_name>
+pub fn cmd_accept_channel(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 3 {
+        return Err("Usage: accept-channel <receiver> <pending_id> <chan_name>".to_string());
+    }
+    let receiver_name = args[0];
+    let pending_id    = parse_number(args[1])?;
+    let chan_name     = args[2];
+
+    let receiver = state.domains.get(receiver_name)
+        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+
+    let new_handle = Capability::<Domain>::accept_channel(&receiver, pending_id)
+        .map_err(|e| format!("accept-channel failed: {:?}", e))?;
+
+    let chan_ref = receiver.read().data.domain_capabilities[&new_handle].upgrade()
+        .ok_or("Internal error: channel not found after accept")?;
+
+    state.domains.insert(chan_name.to_string(), chan_ref);
+
+    state.session.add_command(Command::AcceptChannel {
+        receiver: receiver_name.to_string(),
+        pending_id,
+        chan_name: chan_name.to_string(),
+    });
+
+    println!(
+        "{} '{}' accepted channel as '{}' (handle: {})",
+        "✓".bright_green().bold(),
+        receiver_name.bright_white(),
+        chan_name.bright_white(),
+        new_handle,
+    );
+    Ok(())
+}
+
+/// Reject a pending channel: reject-channel <receiver> <pending_id>
+pub fn cmd_reject_channel(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 2 {
+        return Err("Usage: reject-channel <receiver> <pending_id>".to_string());
+    }
+    let receiver_name = args[0];
+    let pending_id    = parse_number(args[1])?;
+
+    let receiver = state.domains.get(receiver_name)
+        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+
+    Capability::<Domain>::reject_channel(&receiver, pending_id)
+        .map_err(|e| format!("reject-channel failed: {:?}", e))?;
+
+    state.session.add_command(Command::RejectChannel {
+        receiver: receiver_name.to_string(),
+        pending_id,
+    });
+
+    println!(
+        "{} '{}' rejected pending channel {}",
+        "✓".bright_green().bold(),
+        receiver_name.bright_white(),
+        pending_id,
+    );
+    Ok(())
+}
+
 /// Reject (discard) a pending capability
 pub fn cmd_reject_capability(
     state: &mut CliState,
@@ -683,7 +786,6 @@ pub fn cmd_reject_capability(
     if args.len() != 2 {
         return Err("Usage: reject-capability <domain> <pending_id>".to_string());
     }
-
     let domain_name = args[0];
     let pending_id = parse_number(args[1])?;
 

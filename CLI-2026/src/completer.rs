@@ -102,6 +102,21 @@ const COMMANDS: &[CommandInfo] = &[
         description: "Reject (discard) a pending capability",
     },
     CommandInfo {
+        name: "get-chan",
+        usage: "get-chan <target> <chan_name>",
+        description: "Create a channel capability to target (caller inferred from ownership)",
+    },
+    CommandInfo {
+        name: "accept-channel",
+        usage: "accept-channel <receiver> <pending_id> <chan_name>",
+        description: "Accept a pending channel capability",
+    },
+    CommandInfo {
+        name: "reject-channel",
+        usage: "reject-channel <receiver> <pending_id>",
+        description: "Reject a pending channel capability",
+    },
+    CommandInfo {
         name: "reset",
         usage: "reset",
         description: "Reset CLI to initial state",
@@ -190,7 +205,9 @@ impl CliHelper {
             // Commands where first arg is a domain name
             ("seal", 1) | ("attest", 1) | ("view", 1) | ("enumerate-pending", 1)
             | ("set-interrupt-policy", 1) | ("set-default-interrupt-policy", 1)
-            | ("accept-capability", 1) | ("reject-capability", 1) => {
+            | ("accept-capability", 1) | ("reject-capability", 1)
+            | ("get-chan", 1)
+            | ("accept-channel", 1) | ("reject-channel", 1) => {
                 for name in state.domains.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {

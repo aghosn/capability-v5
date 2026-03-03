@@ -26,6 +26,9 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "enumerate-pending" => domain::cmd_enumerate_pending(state, args),
         "accept-capability" => domain::cmd_accept_capability(state, args),
         "reject-capability" => domain::cmd_reject_capability(state, args),
+        "get-chan"          => domain::cmd_get_chan(state, args),
+        "accept-channel"    => domain::cmd_accept_channel(state, args),
+        "reject-channel"    => domain::cmd_reject_channel(state, args),
 
         // Memory commands
         "carve" => memory::cmd_carve(state, args),

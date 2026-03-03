@@ -144,6 +144,21 @@ fn show_help() {
     println!("    Example: reject-capability child1 0");
     println!();
 
+    println!("{}", "Channel Operations:".bright_yellow());
+    println!("  {} <target> <chan_name>", "get-chan".bright_white().bold());
+    println!("    Create a channel capability to target (caller inferred from ownership)");
+    println!("    Example: get-chan dom2 chan1");
+    println!("  {} <chan> <receiver>", "send".bright_white().bold());
+    println!("    Transfer a channel capability (same as memory send — caller inferred)");
+    println!("    Example: send chan1 dom2");
+    println!("  {} <receiver> <pending_id> <chan_name>", "accept-channel".bright_white().bold());
+    println!("    Accept a pending channel capability");
+    println!("    Example: accept-channel dom2 0 chan1");
+    println!("  {} <receiver> <pending_id>", "reject-channel".bright_white().bold());
+    println!("    Reject a pending channel capability");
+    println!("    Example: reject-channel dom2 0");
+    println!();
+
     println!("{}", "Memory Operations:".bright_yellow());
     println!("  {} <parent> <name> <start> <size> <rights>", "carve".bright_white().bold());
     println!("    Carve exclusive memory from parent");

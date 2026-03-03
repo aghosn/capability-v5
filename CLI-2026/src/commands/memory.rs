@@ -5,7 +5,7 @@ use colored::*;
 
 use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
 use crate::session::Command;
-use crate::state::{CliState, find_domain_handle, find_memory_handle};
+use crate::state::{CliState, find_domain_handle, find_domain_owner, find_memory_handle};
 use crate::update_processor::process_updates;
 
 /// Carve exclusive memory from parent
@@ -142,6 +142,51 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
 
 /// Send memory capability to domain
 pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    // Detect channel send: first arg is a domain cap (channel), not a memory region.
+    if args.len() >= 1 && state.domains.contains_key(args[0]) {
+        if args.len() != 2 {
+            return Err("Usage: send <chan> <receiver>".to_string());
+        }
+        let chan_name     = args[0];
+        let receiver_name = args[1];
+
+        let chan_ref = state.domains.get(chan_name).unwrap().clone();
+        let receiver = state.domains.get(receiver_name)
+            .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+
+        // Infer sender from who owns the channel cap — mirrors memory send's owner lookup.
+        let (caller_name, caller, chan_handle) = find_domain_owner(state, &chan_ref)
+            .ok_or_else(|| format!("No domain found that owns channel '{}'", chan_name))?;
+
+        let recv_handle = find_domain_handle(&caller, &receiver)
+            .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", receiver_name, caller_name))?;
+
+        Capability::<Domain>::send_channel(&caller, chan_handle, recv_handle, Attributes::NONE)
+            .map_err(|e| format!("send failed: {:?}", e))?;
+
+        let recv_sealed = receiver.read().data.is_sealed();
+        if recv_sealed {
+            println!(
+                "{} Channel '{}' sent to '{}' (pending — use accept-channel or reject-channel)",
+                "✓".bright_green().bold(), chan_name.bright_white(), receiver_name.bright_white(),
+            );
+        } else {
+            state.domains.remove(chan_name);
+            println!(
+                "{} Channel '{}' transferred to '{}'",
+                "✓".bright_green().bold(), chan_name.bright_white(), receiver_name.bright_white(),
+            );
+        }
+
+        state.session.add_command(Command::SendChannel {
+            caller: caller_name,
+            chan_name: chan_name.to_string(),
+            receiver: receiver_name.to_string(),
+        });
+        return Ok(());
+    }
+
+    // Memory send: send <mem> <domain> [attrs]
     if args.len() < 2 || args.len() > 3 {
         return Err("Usage: send <mem> <domain> [attrs]".to_string());
     }

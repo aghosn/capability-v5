@@ -38,6 +38,24 @@ pub fn find_domain_handle(
         .map(|(h, _)| *h)
 }
 
+/// Search all domains in state for the one that holds `cap` in its domain_capabilities table.
+/// Returns `(owner_name, owner_arc, handle)` if found.
+pub fn find_domain_owner<'a>(
+    state: &'a super::state::CliState,
+    cap: &Arc<RwLock<Capability<Domain>>>,
+) -> Option<(String, Arc<RwLock<Capability<Domain>>>, LocalHandle)> {
+    let cap_ptr = Arc::as_ptr(cap);
+    for (name, owner) in &state.domains {
+        if let Some(h) = owner.read().data.domain_capabilities.iter()
+            .find(|(_, weak)| weak.upgrade().map(|r| Arc::as_ptr(&r) == cap_ptr).unwrap_or(false))
+            .map(|(h, _)| *h)
+        {
+            return Some((name.clone(), owner.clone(), h));
+        }
+    }
+    None
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI State
 // ─────────────────────────────────────────────────────────────────────────────

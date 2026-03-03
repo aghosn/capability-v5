@@ -67,6 +67,25 @@ pub enum Command {
         domain: String,
         pending_id: u64,
     },
+    GetChan {
+        caller: String,
+        target: String,
+        chan_name: String,
+    },
+    SendChannel {
+        caller: String,
+        chan_name: String,
+        receiver: String,
+    },
+    AcceptChannel {
+        receiver: String,
+        pending_id: u64,
+        chan_name: String,
+    },
+    RejectChannel {
+        receiver: String,
+        pending_id: u64,
+    },
 }
 
 /// Session recorder that can export commands as unit tests
@@ -138,6 +157,18 @@ impl Session {
                 }
                 Command::RejectCapability { domain, pending_id } => {
                     format!("reject-capability {} {}", domain, pending_id)
+                }
+                Command::GetChan { caller: _, target, chan_name } => {
+                    format!("get-chan {} {}", target, chan_name)
+                }
+                Command::SendChannel { caller: _, chan_name, receiver } => {
+                    format!("send {} {}", chan_name, receiver)
+                }
+                Command::AcceptChannel { receiver, pending_id, chan_name } => {
+                    format!("accept-channel {} {} {}", receiver, pending_id, chan_name)
+                }
+                Command::RejectChannel { receiver, pending_id } => {
+                    format!("reject-channel {} {}", receiver, pending_id)
                 }
             };
             writeln!(file, "{}", line)?;
@@ -400,6 +431,73 @@ impl Session {
 
                     writeln!(file, "    // Reject pending capability {pending_id} for {domain}")?;
                     writeln!(file, "    Capability::reject_memory(&{domain_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file)?;
+                }
+
+                Command::GetChan { caller, target, chan_name } => {
+                    let caller_arc  = arc_map.get(caller)
+                        .cloned().unwrap_or_else(|| sanitize_name(caller));
+                    let target_handle = handle_map.get(target)
+                        .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(target)));
+                    let chan_var     = format!("{}_cap", sanitize_name(chan_name));
+                    let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
+
+                    writeln!(file, "    // get-chan: create channel from {caller} to {target} as {chan_name}")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan(&{caller_arc}, {target_handle}).unwrap();")?;
+                    writeln!(file, "    let {chan_var} = {caller_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
+                    writeln!(file)?;
+
+                    arc_map.insert(chan_name.clone(), chan_var);
+                    handle_map.insert(chan_name.clone(), chan_handle_var);
+                    owner_map.insert(chan_name.clone(), caller.clone());
+                    is_domain.insert(chan_name.clone());
+                }
+
+                Command::SendChannel { caller, chan_name, receiver } => {
+                    let caller_arc  = arc_map.get(caller)
+                        .cloned().unwrap_or_else(|| sanitize_name(caller));
+                    let chan_handle  = handle_map.get(chan_name)
+                        .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(chan_name)));
+                    let recv_arc    = arc_map.get(receiver)
+                        .cloned().unwrap_or_else(|| sanitize_name(receiver));
+                    let recv_handle_var = format!("{}_recv_dom_h", sanitize_name(receiver));
+
+                    writeln!(file, "    // send-channel: transfer {chan_name} from {caller} to {receiver}")?;
+                    writeln!(file, "    let {recv_handle_var} = {caller_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{recv_arc}))).map(|(h, _)| *h)")?;
+                    writeln!(file, "        .expect(\"receiver handle not found in caller's table\");")?;
+                    writeln!(file, "    Capability::<Domain>::send_channel(&{caller_arc}, {chan_handle}, {recv_handle_var}, Attributes::NONE).unwrap();")?;
+                    writeln!(file)?;
+
+                    owner_map.insert(chan_name.clone(), receiver.clone());
+                    handle_map.remove(chan_name);
+                }
+
+                Command::AcceptChannel { receiver, pending_id, chan_name } => {
+                    let recv_arc    = arc_map.get(receiver)
+                        .cloned().unwrap_or_else(|| sanitize_name(receiver));
+                    let chan_var     = format!("{}_cap", sanitize_name(chan_name));
+                    let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
+
+                    writeln!(file, "    // accept-channel: {receiver} accepts pending channel {pending_id} as {chan_name}")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::<Domain>::accept_channel(&{recv_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    let {chan_var} = {recv_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
+                    writeln!(file)?;
+
+                    arc_map.insert(chan_name.clone(), chan_var);
+                    handle_map.insert(chan_name.clone(), chan_handle_var);
+                    owner_map.insert(chan_name.clone(), receiver.clone());
+                    is_domain.insert(chan_name.clone());
+                }
+
+                Command::RejectChannel { receiver, pending_id } => {
+                    let recv_arc = arc_map.get(receiver)
+                        .cloned().unwrap_or_else(|| sanitize_name(receiver));
+
+                    writeln!(file, "    // reject-channel: {receiver} rejects pending channel {pending_id}")?;
+                    writeln!(file, "    Capability::<Domain>::reject_channel(&{recv_arc}, {pending_id}).unwrap();")?;
                     writeln!(file)?;
                 }
             }
