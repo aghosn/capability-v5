@@ -389,7 +389,11 @@ impl Capability<MemoryRegion> {
                 let child_owner = capa.owned.owner;
 
                 if parent_owner != child_owner {
-                    updates.add_change_rights(child_owner, capa.data.access.start, capa.data.access.size, capa.data.access.start, crate::memory::Rights::NONE, true);
+                    // META regions are never mapped into the owner's address space,
+                    // so no unmap is needed for the child owner.
+                    if !capa.owned.attributes.meta() {
+                        updates.add_change_rights(child_owner, capa.data.access.start, capa.data.access.size, capa.data.access.start, crate::memory::Rights::NONE, true);
+                    }
 
                     updates.add_change_rights(
                         parent_owner,
@@ -410,7 +414,9 @@ impl Capability<MemoryRegion> {
             let child_owner = capa.owned.owner;
             if let Some(parent_ref) = capa.get_parent() {
                 let parent_owner = parent_ref.read().owned.owner;
-                if parent_owner != child_owner {
+                // META regions are never mapped into the owner's address space,
+                // so no unmap is needed.
+                if parent_owner != child_owner && !capa.owned.attributes.meta() {
                     updates.add_change_rights(
                         child_owner,
                         capa.data.access.start,
@@ -424,10 +430,6 @@ impl Capability<MemoryRegion> {
         }
 
         if capa.owned.attributes.vital() {
-            updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
-        }
-
-        if capa.owned.attributes.meta() {
             updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
         }
 
@@ -853,6 +855,11 @@ impl Capability<Domain> {
                 return Err(CapaError::PermissionDenied);
             }
         }
+
+        // Materialize META → META|CLEAN|VITAL so that revoke_subtree's existing
+        // CLEAN and VITAL checks handle zeroing and domain revocation without
+        // any META-specific branches there.
+        let attrs = attrs.canonicalize();
 
         if recv_sealed {
             Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs)

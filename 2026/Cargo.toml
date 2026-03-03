@@ -100,6 +100,10 @@ path = "tests/integration/interrupt.rs"
 name = "integration_send_bugs"
 path = "tests/integration/send_bugs.rs"
 
+[[test]]
+name = "integration_meta"
+path = "tests/integration/meta.rs"
+
 # ── concurrency tests ─────────────────────────────────────────────────────────
 [[test]]
 name = "concurrency_platform"
@@ -118,4 +122,9 @@ required-features = ["loom"]
 [[test]]
 name = "loom_vp_switch"
 path = "tests/concurrency/loom_vp_switch.rs"
+required-features = ["loom"]
+
+[[test]]
+name = "loom_meta"
+path = "tests/concurrency/loom_meta.rs"
 required-features = ["loom"]

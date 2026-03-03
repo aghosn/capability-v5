@@ -139,6 +139,16 @@ impl Attributes {
     pub const fn meta(&self) -> bool {
         self.has(Self::META)
     }
+
+    /// Canonicalize: META implies CLEAN + VITAL, so materialize those flags.
+    /// Call this once at send time to avoid scattered checks in the revocation path.
+    pub const fn canonicalize(self) -> Self {
+        if self.meta() {
+            Attributes { bits: self.bits | Self::CLEAN | Self::VITAL }
+        } else {
+            self
+        }
+    }
 }
 
 impl Default for Attributes {
