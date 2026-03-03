@@ -811,6 +811,7 @@ impl Capability<Domain> {
         // These checks are non-authoritative; the write-lock commit below is authoritative.
         let caller_id;
         let receiver_ref: CapabilityRef<Domain>;
+        let recv_sealed;
         {
             let r = caller.read();
             if r.data.is_memory_handle_frozen(cap) {
@@ -830,15 +831,23 @@ impl Capability<Domain> {
             drop(r);
 
             let resolved = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
-            // If the handle is a channel, follow channel_target to the actual receiver.
-            receiver_ref = {
-                if resolved.read().is_channel() {
-                    let target = resolved.read().channel_target.as_ref().and_then(|w| w.upgrade());
-                    target.unwrap_or(resolved)
+            // One resolved.read(): channel follow + sealed check.
+            let (resolved_ref, recv_sealed_val) = {
+                let r = resolved.read();
+                if r.is_channel() {
+                    let target = r.channel_target.as_ref().and_then(|w| w.upgrade());
+                    drop(r);
+                    let t = target.unwrap_or(resolved);
+                    let sealed = t.read().data.is_sealed();
+                    (t, sealed)
                 } else {
-                    resolved
+                    let sealed = r.data.is_sealed();
+                    drop(r);
+                    (resolved, sealed)
                 }
             };
+            receiver_ref = resolved_ref;
+            recv_sealed = recv_sealed_val;
 
             // META constraints: check capability attributes under cap_ref.read() only
             // (caller.read() already dropped above, so no overlapping lock).
@@ -853,8 +862,6 @@ impl Capability<Domain> {
                 return Err(CapaError::PermissionDenied);
             }
         }
-
-        let recv_sealed = receiver_ref.read().data.is_sealed();
 
         // Materialize META → META|CLEAN|VITAL so that revoke_subtree's existing
         // CLEAN and VITAL checks handle zeroing and domain revocation without
@@ -1663,16 +1670,16 @@ impl Capability<Domain> {
         core_id: CoreId,
         platform: &dyn Platform,
     ) -> Result<SwitchContext> {
-        if !caller.read().data.is_sealed() {
-            return Err(CapaError::DomainNotSealed);
-        }
-        let caller_id = caller.read().data.id;
-
-        let caller_vp_arc = {
+        let (caller_id, caller_vp_arc) = {
             let c = caller.read();
-            c.data.find_vp_on_core(core_id).ok_or_else(|| {
+            if !c.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            let id = c.data.id;
+            let vp = c.data.find_vp_on_core(core_id).ok_or_else(|| {
                 CapaError::InvalidOperation("no VP running on this core".to_string())
-            })?
+            })?;
+            (id, vp)
         };
         let caller_vp_id = caller_vp_arc.id;
 
@@ -1763,7 +1770,8 @@ impl Capability<Domain> {
         core_id: CoreId,
         platform: &dyn Platform,
     ) -> Result<SwitchContext> {
-        {
+        // One caller.read(): sealed + SWITCH check, caller_id, to_domain_weak.
+        let (caller_id, to_domain_ref) = {
             let c = caller.read();
             if !c.data.is_sealed() {
                 return Err(CapaError::DomainNotSealed);
@@ -1771,22 +1779,43 @@ impl Capability<Domain> {
             if !c.data.policy.api.has(MonitorAPI::SWITCH) {
                 return Err(CapaError::ApiNotAllowed);
             }
-        }
-
-        // Reject channel handles early — a channel cannot be a switch target.
-        {
-            let to_domain_weak = caller
-                .read()
+            let id = c.data.id;
+            let to_weak = c
                 .data
                 .get_domain_capability(to_handle)
                 .ok_or(CapaError::NotFound)?
                 .clone();
-            let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
-            if to_domain_ref.read().is_channel() {
+            drop(c);
+            let to_ref = to_weak.upgrade().ok_or(CapaError::NotFound)?;
+            (id, to_ref)
+        };
+
+        // One to_domain_ref.read(): channel guard, sealed, core mask, target VP arc.
+        // Channel check runs before VP lookup to preserve early-reject ordering.
+        let (to_domain_id, core_allowed, to_vp_arc) = {
+            let td = to_domain_ref.read();
+            if td.is_channel() {
                 return Err(CapaError::ApiNotAllowed);
             }
+            if !td.data.is_sealed() {
+                return Err(CapaError::DomainNotSealed);
+            }
+            let core_bit = 1u64 << core_id;
+            let allowed = (td.data.policy.cores & core_bit) != 0;
+            let vp = td
+                .data
+                .policy
+                .vprocessor_states
+                .get(to_vp_id as usize)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            (td.data.id, allowed, vp)
+        };
+        if !core_allowed {
+            return Err(CapaError::PermissionDenied);
         }
 
+        // Second caller.read(): VP lookup (after channel/target checks to preserve error ordering).
         let caller_vp_arc = {
             let c = caller.read();
             c.data.find_vp_on_core(core_id).ok_or_else(|| {
@@ -1794,37 +1823,6 @@ impl Capability<Domain> {
             })?
         };
         let caller_vp_id = caller_vp_arc.id;
-        let caller_id = caller.read().data.id;
-
-        let to_domain_weak = caller
-            .read()
-            .data
-            .get_domain_capability(to_handle)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let to_domain_ref = to_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        let (to_domain_id, core_allowed) = {
-            let td = to_domain_ref.read();
-            if !td.data.is_sealed() {
-                return Err(CapaError::DomainNotSealed);
-            }
-            let core_bit = 1u64 << core_id;
-            (td.data.id, (td.data.policy.cores & core_bit) != 0)
-        };
-        if !core_allowed {
-            return Err(CapaError::PermissionDenied);
-        }
-
-        let to_vp_arc = {
-            let td = to_domain_ref.read();
-            td.data
-                .policy
-                .vprocessor_states
-                .get(to_vp_id as usize)
-                .ok_or(CapaError::NotFound)?
-                .clone()
-        };
 
         // Capture caller's saved-caller context before mutating anything.
         let caller_prev_caller = {
@@ -1946,16 +1944,15 @@ impl Capability<Domain> {
         vector: u8,
         platform: &dyn Platform,
     ) -> Result<VpInterruptContext> {
-        let interrupted_domain_id = interrupted_cap.read().data.id;
-
-        // Find the VP currently running on core_id in the interrupted domain.
-        let leaf_vp_arc: VProcessorRef = {
+        let (interrupted_domain_id, leaf_vp_arc) = {
             let d = interrupted_cap.read();
-            d.data.find_vp_on_core(core_id).ok_or_else(|| {
+            let id = d.data.id;
+            let vp = d.data.find_vp_on_core(core_id).ok_or_else(|| {
                 CapaError::InvalidOperation(
                     "no VP running on core for interrupt delivery".to_string(),
                 )
-            })?
+            })?;
+            (id, vp)
         };
         let leaf_vp_id = leaf_vp_arc.id;
 

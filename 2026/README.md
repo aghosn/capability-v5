@@ -72,15 +72,15 @@ cargo test --test loom_meta       --features loom --release
 >
 > | Suite              | Tests | Time      | Notes                                        |
 > |--------------------|-------|-----------|----------------------------------------------|
-> | `loom_concurrency` |  30   |  ~35 s    | Core capability / memory / domain races      |
+> | `loom_concurrency` |  30   |  ~36 s    | Core capability / memory / domain races      |
 > | `loom_e2e`         |   8   |  ~4 min   | Full send/accept/revoke end-to-end races     |
-> | `loom_meta`        |   2   |  ~35 s    | META attribute send & revoke races           |
-> | `loom_vp_switch`   |   5   |  ~12 min  | VP switch / interrupt delivery races         |
-> | **Total**          |  45   | **~17 min** |                                            |
+> | `loom_meta`        |   2   |  ~34 s    | META attribute send & revoke races           |
+> | `loom_vp_switch`   |   5   |   ~5 s    | VP switch / interrupt delivery races         |
+> | **Total**          |  45   | **~5 min** |                                             |
 >
-> `loom_e2e` and `loom_vp_switch` contain tests that explore a very large interleaving
-> space — it is normal for individual tests within those suites to run for several minutes
-> before completing. Do not interrupt them.
+> `loom_e2e` contains tests that explore a very large interleaving space — it is normal
+> for individual tests within that suite to run for several minutes before completing.
+> Do not interrupt them.
 
 ### Coverage
 
