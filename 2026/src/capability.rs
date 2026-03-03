@@ -7,7 +7,7 @@ use crate::domain::{
     VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
-use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
+use crate::memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus};
 use crate::platform::Platform;
 use crate::switch::{SwitchContext, VpInterruptContext};
 use crate::sync::RwLock;
@@ -427,6 +427,10 @@ impl Capability<MemoryRegion> {
             updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
         }
 
+        if capa.owned.attributes.meta() {
+            updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
+        }
+
         Ok(updates)
     }
 
@@ -685,6 +689,10 @@ impl Capability<Domain> {
                 if p.owned.owner != owner_id {
                     return Err(CapaError::PermissionDenied);
                 }
+                // META regions may not be carved.
+                if p.owned.attributes.meta() {
+                    return Err(CapaError::PermissionDenied);
+                }
                 let parent_rights = p.data.access.rights;
                 same_rights = access.rights == parent_rights;
                 p.owned.clone()
@@ -750,6 +758,10 @@ impl Capability<Domain> {
             let parent_owned = {
                 let p = parent_ref.read();
                 if p.owned.owner != owner_id {
+                    return Err(CapaError::PermissionDenied);
+                }
+                // META regions may not be aliased.
+                if p.owned.attributes.meta() {
                     return Err(CapaError::PermissionDenied);
                 }
                 p.owned.clone()
@@ -821,6 +833,27 @@ impl Capability<Domain> {
         }
 
         let recv_sealed = receiver_ref.read().data.is_sealed();
+
+        // META constraints: validate before dispatching to sealed/unsealed path.
+        {
+            let cap_weak = caller
+                .read()
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            let c = cap_ref.read();
+            // A region already marked META cannot be re-sent.
+            if c.owned.attributes.meta() {
+                return Err(CapaError::PermissionDenied);
+            }
+            // Only exclusive (unbroken chain of carves) regions may be sent as META.
+            if attrs.meta() && c.data.status != RegionStatus::Exclusive {
+                return Err(CapaError::PermissionDenied);
+            }
+        }
+
         if recv_sealed {
             Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs)
         } else {

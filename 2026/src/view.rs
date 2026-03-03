@@ -193,6 +193,11 @@ pub fn compute_view_from_cap_arcs(
 
         let cap = cap_arc.read();
 
+        // META regions are excluded from the address space.
+        if cap.owned.attributes.meta() {
+            continue;
+        }
+
         // Mark alias children owned by this domain for skipping.
         for child_arc in &cap.children {
             let child = child_arc.read();
@@ -307,6 +312,11 @@ pub fn compute_view_from_capabilities(
 
     for cap_arc in &sorted {
         let cap = cap_arc.read();
+
+        // META regions are excluded from the address space.
+        if cap.owned.attributes.meta() {
+            continue;
+        }
 
         // Contribution: cap's access minus all directly carved children.
         let mut contribution = alloc::vec![cap.data.access];
