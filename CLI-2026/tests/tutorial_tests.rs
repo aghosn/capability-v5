@@ -113,3 +113,8 @@ fn tutorial_09_encapsulation() {
 fn tutorial_10_pending_capabilities() {
     run_tuto("10-pending-capabilities.txt").unwrap();
 }
+
+#[test]
+fn tutorial_11_sibling_attestation() {
+    run_tuto("11-sibling-attestation.txt").unwrap();
+}

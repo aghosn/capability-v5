@@ -15,3 +15,4 @@
 08-sandbox.txt|Sandboxed Execution Environment|Create a sandbox with aliased memory
 09-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
 10-pending-capabilities.txt|Pending Capabilities and RECEIVE_AFTER_SEAL|Accept or reject capabilities sent to a sealed domain
+11-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels

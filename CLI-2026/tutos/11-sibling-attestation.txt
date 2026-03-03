@@ -1,0 +1,196 @@
+# Tutorial 11: Sibling Attestation via Channels
+# ===============================================
+# A CVM creates two sibling enclaves and cross-connects them using channels.
+# The enclaves attest each other and establish a private shared memory region
+# for direct communication — bypassing the parent CVM entirely.
+
+@msg ━━━ Tutorial 11: Sibling Attestation via Channels ━━━
+@msg
+@msg This tutorial demonstrates:
+@msg   • Creating two sibling enclaves inside a CVM
+@msg   • Using channels to enable direct sibling-to-sibling communication
+@msg   • Mutual attestation between siblings through channels
+@msg   • Establishing a private shared memory region between enclaves
+@msg
+@msg Normally, siblings cannot communicate (see Tutorial 9).
+@msg Channels solve this: the parent CVM creates a channel to each enclave,
+@msg then cross-connects them so each sibling holds a channel to the other.
+@msg
+
+# Step 1: Initialize root domain
+@msg 📋 Step 1: Initialize root domain with 2GB memory
+init root 0x80000000
+
+@msg
+@msg ✓ Root domain created with 2GB memory pool
+@msg
+
+# Step 2: Create CVM with full permissions
+@msg 📋 Step 2: Create a Confidential VM with ALL permissions
+create-domain root cvm 0b1111 ALL
+
+@msg
+@msg ✓ CVM created with full permissions to manage child domains
+@msg
+
+# Step 3: Carve 512MB of memory for CVM
+@msg 📋 Step 3: Carve 512MB of private memory for CVM
+carve r0 cvm_mem 0x10000000 0x20000000 RWX
+
+@msg
+@msg ✓ CVM has 512MB memory region [0x10000000 – 0x30000000)
+@msg
+
+# Step 4: Send memory to CVM and seal it
+@msg 📋 Step 4: Transfer memory to CVM and seal it
+send cvm_mem cvm CLEAN,VITAL
+
+seal cvm
+
+@msg
+@msg ✓ CVM sealed with its 512MB memory — it can now create child domains
+@msg
+
+# Step 5: Create two sibling enclaves
+@msg 📋 Step 5: Create two sibling enclaves inside the CVM
+@msg   • enclave1 gets ALIAS, CARVE, SEND so it can create shared memory later
+@msg   • enclave2 only needs ATTEST and RECEIVE_AFTER_SEAL
+create-domain cvm enclave1 0b1111 ATTEST,ALIAS,CARVE,SEND,RECEIVE_AFTER_SEAL
+create-domain cvm enclave2 0b1111 ATTEST,RECEIVE_AFTER_SEAL
+
+@msg
+@msg ✓ Two sibling enclaves created under CVM
+@msg
+
+# Step 6: Carve private memory for each enclave
+@msg 📋 Step 6: Carve 64MB of private memory for each enclave
+carve cvm_mem enc1_private 0x10000000 0x4000000 RWX
+carve cvm_mem enc2_private 0x18000000 0x4000000 RWX
+
+@msg
+@msg ✓ enc1_private: 64MB [0x10000000 – 0x14000000)
+@msg ✓ enc2_private: 64MB [0x18000000 – 0x1C000000)
+@msg
+
+# Step 7: Send memory to enclaves and seal them
+@msg 📋 Step 7: Send memory to each enclave and seal them
+send enc1_private enclave1 CLEAN,VITAL,HASH
+send enc2_private enclave2 CLEAN,VITAL,HASH
+
+seal enclave1
+seal enclave2
+
+@msg
+@msg ✓ Both enclaves sealed with private memory (HASH enables integrity checks)
+@msg   From this point on, enclaves are isolated — even from the CVM
+@msg
+
+# Step 8: Get channels from the CVM to each enclave
+@msg 📋 Step 8: CVM obtains a channel to each sealed enclave
+get-chan enclave1 chan_to_enc1
+get-chan enclave2 chan_to_enc2
+
+@msg
+@msg ✓ chan_to_enc1: channel CVM → enclave1
+@msg ✓ chan_to_enc2: channel CVM → enclave2
+@msg
+
+# Step 9: Cross-connect — send each channel to the OTHER enclave
+@msg 📋 Step 9: Cross-connect channels (the key step!)
+@msg   Send chan_to_enc2 → enclave1, so enclave1 gets a channel to enclave2
+@msg   Send chan_to_enc1 → enclave2, so enclave2 gets a channel to enclave1
+send chan_to_enc2 enclave1
+send chan_to_enc1 enclave2
+
+@msg
+@msg ✓ Channels cross-connected — each enclave has a pending channel to its sibling
+@msg
+
+# Step 10: Each enclave accepts its channel
+@msg 📋 Step 10: Each enclave accepts the pending channel
+accept-channel enclave1 0 enc1_peer
+accept-channel enclave2 0 enc2_peer
+
+@msg
+@msg ✓ enclave1 accepted channel → handle: enc1_peer (points to enclave2)
+@msg ✓ enclave2 accepted channel → handle: enc2_peer (points to enclave1)
+@msg   Siblings can now communicate directly!
+@msg
+
+# Step 11: Mutual attestation through channels
+@msg 📋 Step 11: Enclaves attest each other through their channels
+attest enc1_peer
+attest enc2_peer
+
+@msg
+@msg ✓ Each enclave verified the other's identity and integrity
+@msg   Attestation proves the peer is a genuine, sealed enclave
+@msg
+
+# Step 12: Enclave1 creates a shared memory region from its private memory
+@msg 📋 Step 12: Enclave1 aliases 1MB of its private memory for sharing
+alias enc1_private e2e_shared 0x10000000 0x100000 RW
+
+@msg
+@msg ✓ e2e_shared: 1MB alias [0x10000000 – 0x10100000) with RW permissions
+@msg   Both enclave1 and whoever receives this alias can access this memory
+@msg   The CVM has NO access — this is end-to-end private between siblings
+@msg
+
+# Step 13: Send the shared region to enclave2 through the channel
+@msg 📋 Step 13: Enclave1 sends shared memory to enclave2 via channel
+send e2e_shared enc1_peer
+
+@msg
+@msg ✓ Shared memory sent through channel → pending at enclave2
+@msg
+
+# Step 14: Enclave2 accepts the shared memory
+@msg 📋 Step 14: Enclave2 accepts the shared memory capability
+accept-capability enclave2 1
+
+@msg
+@msg ✓ enclave2 accepted the shared memory region
+@msg   Both enclaves can now read/write the same 1MB region!
+@msg
+
+# Step 15: View final state
+@msg 📋 Step 15: View final state of all domains
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • Channels enable sibling-to-sibling communication (normally impossible)
+@msg   • The parent CVM brokers the initial channel setup via cross-connection
+@msg   • Once connected, siblings communicate directly — the CVM is bypassed
+@msg   • Mutual attestation through channels proves peer identity and integrity
+@msg   • Aliased memory sent through channels creates end-to-end private regions
+@msg   • The CVM cannot access e2e_shared — true sibling privacy
+@msg
+@msg 💡 Architecture:
+@msg
+@msg   ┌──────────────────────────────────────────┐
+@msg   │                 CVM                      │
+@msg   │                                          │
+@msg   │   get-chan enc1 ──► chan_to_enc1         │
+@msg   │   get-chan enc2 ──► chan_to_enc2         │
+@msg   │                                          │
+@msg   │   send chan_to_enc2 → enclave1 ┐ Cross-  │
+@msg   │   send chan_to_enc1 → enclave2 ┘ connect │
+@msg   └──────────┬─────────────────┬─────────────┘
+@msg              │                 │
+@msg   ┌──────────▼───┐     ┌──────▼────────┐
+@msg   │  Enclave 1   │     │  Enclave 2    │
+@msg   │              │     │               │
+@msg   │  enc1_peer ━━━━━━━━━━ enc2_peer    │
+@msg   │  (→ enc2)    │     │  (→ enc1)     │
+@msg   │              │     │               │
+@msg   │  ┌───────────────────────────────┐ │
+@msg   │  │  e2e_shared (1MB RW alias)    │ │
+@msg   │  │  Private to both enclaves     │ │
+@msg   │  │  CVM has NO access            │ │
+@msg   │  └───────────────────────────────┘ │
+@msg   └──────────────┘     └───────────────┘
+@msg
+@msg   Flow: CVM sets up channels → Enclaves attest → Private memory shared
+@msg
