@@ -113,8 +113,8 @@ const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "switch",
-        usage: "switch <domain> <core>",
-        description: "Switch to domain on core",
+        usage: "switch <core>  |  switch <domain> <core> <vp_id>",
+        description: "Return to caller VP on core, or forward-switch to domain VP",
     },
     CommandInfo {
         name: "interrupt",

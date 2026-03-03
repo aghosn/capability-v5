@@ -19,25 +19,21 @@ init root 0x40000000
 @msg ✓ Root domain created
 @msg
 
-# Create parent domain with RECEIVE_AFTER_SEAL
-@msg 📋 Step 2: Create parent domain with RECEIVE_AFTER_SEAL permission
-create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,RECEIVE_AFTER_SEAL
+# Create parent domain with full permissions to manage its memory
+@msg 📋 Step 2: Create parent domain with memory management permissions
+create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND,RECEIVE_AFTER_SEAL
 
 @msg
-@msg ✓ Parent can receive capabilities even after sealing
+@msg ✓ Parent can carve, alias, and send memory to its children
 @msg
 
-# Allocate memory to parent before sealing
-@msg 📋 Step 3: Allocate memory to parent (and prepare child regions)
+# Allocate memory to parent BEFORE sealing
+@msg 📋 Step 3: Allocate memory to parent and transfer it
 carve r0 parent_mem 0x10000000 0x10000000 RWX
-carve parent_mem child1_mem 0x10000000 0x1000000 RWX
-carve parent_mem child2_mem 0x11000000 0x1000000 RWX
-alias parent_mem parent_child1_shared 0x12000000 0x10000 RW
 send parent_mem parent
 
 @msg
-@msg ✓ Parent has its own memory (child regions carved out for later)
-@msg ✓ Shared buffer created for parent ↔ child1 communication
+@msg ✓ Parent has its own memory (parent_mem transferred while parent is unsealed)
 @msg
 
 # Seal parent before creating children
@@ -57,8 +53,19 @@ create-domain parent child2 0b1100 GET,ATTEST,SWITCH
 @msg ✓ Created child1 and child2 - they are siblings
 @msg
 
+# Parent carves child regions from its own memory (after receiving it)
+@msg 📋 Step 6: Parent carves memory regions for its children
+carve parent_mem child1_mem 0x10000000 0x1000000 RWX
+carve parent_mem child2_mem 0x11000000 0x1000000 RWX
+alias parent_mem parent_child1_shared 0x12000000 0x10000 RW
+
+@msg
+@msg ✓ Parent carved exclusive regions for each child
+@msg ✓ Parent created a shared buffer for parent ↔ child1 communication
+@msg
+
 # Send memory to children and seal them
-@msg 📋 Step 6: Send memory to children and seal them
+@msg 📋 Step 7: Parent sends memory to children and seals them
 send child1_mem child1
 send parent_child1_shared child1
 send child2_mem child2
@@ -72,7 +79,7 @@ seal child2
 @msg
 
 # Demonstrate parent can still receive capabilities
-@msg 📋 Step 7: Root sends new capability to sealed parent
+@msg 📋 Step 8: Root sends new capability to sealed parent
 carve r0 new_mem 0x20000000 0x100000 RW
 send new_mem parent
 
@@ -82,7 +89,7 @@ send new_mem parent
 @msg
 
 # Check parent's pending capabilities
-@msg 📋 Step 8: Enumerate parent's pending capabilities
+@msg 📋 Step 9: Enumerate parent's pending capabilities
 enumerate-pending parent
 
 @msg
@@ -90,7 +97,7 @@ enumerate-pending parent
 @msg
 
 # Accept the capability
-@msg 📋 Step 9: Parent accepts the pending capability
+@msg 📋 Step 10: Parent accepts the pending capability
 accept-capability parent 0
 
 @msg
@@ -99,7 +106,7 @@ accept-capability parent 0
 @msg
 
 # Try to send from child1 to child2 (not possible directly)
-@msg 📋 Step 10: Demonstrate child1 cannot send to child2
+@msg 📋 Step 11: Demonstrate child1 cannot send to child2
 @msg   (This would require child1 to have a domain capability for child2)
 @msg
 @msg ⚠️  child1 has no way to reference child2 - they are encapsulated!
@@ -108,7 +115,7 @@ accept-capability parent 0
 @msg
 
 # View address spaces
-@msg 📋 Step 11: View each domain's address space
+@msg 📋 Step 12: View each domain's address space
 view parent
 view child1
 view child2
