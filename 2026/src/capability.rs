@@ -390,6 +390,26 @@ impl Capability<MemoryRegion> {
             }
         }
 
+        // Aliased children share access with the parent but may have been sent to
+        // another domain. Unmap from the receiver; do NOT remap the parent because
+        // alias never removes parent access.
+        if capa.data.kind == RegionKind::Alias {
+            let child_owner = capa.owned.owner;
+            if let Some(parent_ref) = capa.get_parent() {
+                let parent_owner = parent_ref.read().owned.owner;
+                if parent_owner != child_owner {
+                    updates.add_change_rights(
+                        child_owner,
+                        capa.data.access.start,
+                        capa.data.access.size,
+                        capa.data.access.start,
+                        crate::memory::Rights::NONE,
+                        true,
+                    );
+                }
+            }
+        }
+
         if capa.owned.attributes.vital() {
             updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
         }
@@ -788,7 +808,6 @@ impl Capability<Domain> {
             // separately, so no cap.read() + dom.read() overlap.
             let cap_owned = cap_ref.read().owned.clone();
             cap_owned.validate_operation(MonitorAPI::SEND)?;
-            cap_ref.write().owned.attributes = attrs;
             cap_ref
         };
 
@@ -800,6 +819,10 @@ impl Capability<Domain> {
             }
             caller_w.data.freeze_memory_handle(cap);
         }
+
+        // Attributes are applied only after the freeze is committed, so a failed
+        // freeze (concurrent send) never leaves attributes in an inconsistent state.
+        cap_ref.write().owned.attributes = attrs;
 
         let pending = PendingCapability {
             cap: Arc::downgrade(&cap_ref),
@@ -1084,6 +1107,8 @@ impl Capability<Domain> {
             .ok_or(CapaError::NotFound)?
             .clone();
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        // Caller must have SEAL permission before sealing a child domain.
+        cap_ref.read().owned.validate_operation(MonitorAPI::SEAL)?;
         let result = cap_ref.write().data.seal();
         result
     }
@@ -1650,13 +1675,14 @@ impl Capability<Domain> {
             .clone();
         let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
 
-        // Child must be unsealed.
-        if child_ref.read().data.status != crate::domain::DomainStatus::Unsealed {
-            return Err(CapaError::DomainSealed);
-        }
-
         let parent_policy = caller.read().data.policy.clone();
         let mut child_w = child_ref.write();
+
+        // Sealed check must be done while holding the write lock to prevent a
+        // concurrent seal_domain_op from racing between the check and the mutation.
+        if child_w.data.status != crate::domain::DomainStatus::Unsealed {
+            return Err(CapaError::DomainSealed);
+        }
 
         match id {
             PolicyIdentifier::Cores => {
@@ -1665,6 +1691,11 @@ impl Capability<Domain> {
                     return Err(CapaError::MonotonicityViolation);
                 }
                 child_w.data.policy.cores = value;
+                // Maintain invariant: num_vprocessors ≤ popcount(cores).
+                let max_vps = value.count_ones() as usize;
+                if child_w.data.policy.num_vprocessors > max_vps {
+                    child_w.data.policy.num_vprocessors = max_vps;
+                }
             }
             PolicyIdentifier::ApiMonitor => {
                 let bits = value as u16;
@@ -1675,10 +1706,24 @@ impl Capability<Domain> {
             }
             PolicyIdentifier::DefaultInterruptVisibility => {
                 let vis = visibility_from_u64(value)?;
+                // Monotonicity: child cannot be more permissive than parent default.
+                // Ordering: Deliver (0) > Report (1) > NotReport (2); higher u64 = more restrictive.
+                if visibility_to_u64(vis) < visibility_to_u64(parent_policy.interrupts.default.visibility) {
+                    return Err(CapaError::MonotonicityViolation);
+                }
                 child_w.data.policy.interrupts.default.visibility = vis;
             }
             PolicyIdentifier::VectorVisibility(vec) => {
                 let vis = visibility_from_u64(value)?;
+                // Monotonicity: child cannot be more permissive than the parent's
+                // effective policy for this vector (override if present, else default).
+                let parent_effective = parent_policy
+                    .interrupts
+                    .get_policy(vec)
+                    .visibility;
+                if visibility_to_u64(vis) < visibility_to_u64(parent_effective) {
+                    return Err(CapaError::MonotonicityViolation);
+                }
                 let default_vis = child_w.data.policy.interrupts.default.visibility;
                 let default_read = child_w.data.policy.interrupts.default.read_set;
                 let default_write = child_w.data.policy.interrupts.default.write_set;
@@ -1824,6 +1869,45 @@ impl Capability<Domain> {
         }
 
         platform.get_vp_register(child_domain_id, vp_id, reg_id)
+    }
+
+    /// Compute a cryptographic hash of the physical memory backing a memory
+    /// capability and store it in the capability's `content_hash` field.
+    ///
+    /// Intended for capabilities carrying [`crate::memory::Attributes::HASH`].
+    /// The hash is computed by delegating to [`Platform::measure_region`], which
+    /// is free to use any algorithm (SHA-256, SHA3-256, …). The result is stored
+    /// as a 32-byte opaque array in [`MemoryRegion::content_hash`].
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] if the handle does not resolve to a memory capability.
+    /// - [`CapaError::PermissionDenied`] if the caller does not own the capability.
+    pub fn compute_memory_hash(
+        caller: &CapabilityRef<Domain>,
+        handle: LocalHandle,
+        platform: &dyn Platform,
+    ) -> Result<[u8; 32]> {
+        let caller_id = caller.read().data.id;
+
+        let cap_weak = caller
+            .read()
+            .data
+            .get_memory_capability(handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        let (address, size) = {
+            let cap_r = cap_ref.read();
+            if cap_r.owned.owner != caller_id {
+                return Err(CapaError::PermissionDenied);
+            }
+            (cap_r.data.access.start, cap_r.data.access.size)
+        };
+
+        let hash = platform.measure_region(address, size);
+        cap_ref.write().data.content_hash = Some(hash);
+        Ok(hash)
     }
 }
 

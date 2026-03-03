@@ -674,3 +674,125 @@ fn test_effective_vector_switches_on_interrupt() {
     let err = Capability::set_register(&parent, h, 0, 0, 3, &platform).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// set_policy(Cores) adjusts num_vprocessors
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_set_cores_narrows_vp_count() {
+    let parent = root();
+    // Child starts with 4 cores (0b1111) and thus 4 VPs.
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    let get_vps = || {
+        let child_weak = parent.read().data.domain_capabilities[&h].clone();
+        child_weak.upgrade().unwrap().read().data.policy.num_vprocessors
+    };
+    assert_eq!(get_vps(), 4);
+
+    // Narrow to 2 cores — VP count must drop to 2.
+    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
+    assert_eq!(get_vps(), 2);
+}
+
+#[test]
+fn test_set_cores_no_change_when_same_popcount() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    // 0b0101 has popcount 2 — VP count must be clamped to 2 even though old count was 4.
+    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0101).unwrap();
+    let vps = parent.read().data.domain_capabilities[&h]
+        .upgrade().unwrap().read().data.policy.num_vprocessors;
+    assert_eq!(vps, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interrupt visibility monotonicity
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_default_visibility_monotonicity_enforced() {
+    // Root has Deliver (0). Create a child, restrict its default to NotReport (2),
+    // seal it, then verify that its grandchild cannot be given Deliver (0).
+    let parent = root();
+    let (child, child_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Restrict child default to NotReport — allowed (2 >= 0 relative to parent Deliver).
+    Capability::set_policy(&parent, child_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
+    seal(&parent, child_h);
+
+    // Create grandchild under the now-sealed child.
+    let grand_h = Capability::create_domain(
+        &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    ).unwrap();
+
+    // NotReport (2) is allowed for grandchild.
+    Capability::set_policy(&child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
+
+    // Deliver (0) must be denied: parent (child) has NotReport (2), 0 < 2.
+    let err = Capability::set_policy(
+        &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 0,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::MonotonicityViolation);
+
+    // Report (1) must also be denied: 1 < 2.
+    let err = Capability::set_policy(
+        &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 1,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::MonotonicityViolation);
+}
+
+#[test]
+fn test_vector_visibility_monotonicity_enforced() {
+    // Root has Deliver (0) default. Create child, set its vector 5 to Report (1), seal it.
+    // Grandchild must not be allowed Deliver (0) for vector 5.
+    let parent = root();
+    let (child, parent_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    Capability::set_policy(&parent, parent_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap(); // Report
+    seal(&parent, parent_h);
+
+    // Create grandchild under the sealed child.
+    let grand_h = Capability::create_domain(
+        &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
+    ).unwrap();
+
+    // Try to set grandchild's vector 5 to Deliver (0) — must be denied (0 < 1).
+    let err = Capability::set_policy(
+        &child, grand_h, PolicyIdentifier::VectorVisibility(5), 0,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::MonotonicityViolation);
+
+    // Report (1) should succeed.
+    Capability::set_policy(&child, grand_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// seal_domain_op — SEAL permission check
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_seal_domain_denied_without_seal_permission() {
+    let parent = root();
+    // Create a child without SEAL in its API, but with CREATE so it can make grandchildren.
+    let no_seal_api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SET | MonitorAPI::GET);
+    let (child, child_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, no_seal_api));
+    seal(&parent, child_h);
+
+    // child is now sealed with CREATE but NOT SEAL.
+    // The grandchild must have only the permissions child has (monotonicity).
+    let grand_h = Capability::create_domain(
+        &child, DomainPolicy::new_restricted(0b1111, no_seal_api),
+    ).unwrap();
+
+    // Attempting to seal grand_h through child must be denied.
+    let err = Capability::seal_domain_op(&child, grand_h).unwrap_err();
+    assert_eq!(err, CapaError::ApiNotAllowed);
+}
+
+#[test]
+fn test_seal_domain_allowed_with_seal_permission() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    // parent has SEAL (root has ALL), so sealing should succeed.
+    Capability::seal_domain_op(&parent, h).unwrap();
+}

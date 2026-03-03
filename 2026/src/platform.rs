@@ -275,6 +275,26 @@ pub trait Platform: Send + Sync {
     ) -> crate::error::Result<()> {
         Err(crate::error::CapaError::NotSupported)
     }
+
+    // -----------------------------------------------------------------------
+    // Memory measurement (attestation)
+    // -----------------------------------------------------------------------
+
+    /// Measure the physical memory region `[address, address + size)` and
+    /// return a cryptographic hash of its contents.
+    ///
+    /// Called by [`Capability::compute_memory_hash`] to populate
+    /// `MemoryRegion::content_hash` for capabilities that carry the
+    /// [`Attributes::HASH`] flag.
+    ///
+    /// The hash algorithm is platform-defined. Returning a 32-byte value
+    /// matches the SHA-256 / SHA3-256 conventions used by most attestation
+    /// stacks, but the engine treats it as an opaque byte array.
+    ///
+    /// **Default implementation** returns `[0u8; 32]` (no-op / not supported).
+    fn measure_region(&self, _address: u64, _size: u64) -> [u8; 32] {
+        [0u8; 32]
+    }
 }
 
 /// Execute a capability operation atomically using the given platform.

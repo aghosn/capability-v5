@@ -83,15 +83,16 @@ fn test_revoke_aliased_child_no_remapping() {
     let dom5_h =
         Capability::create_domain(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
             .unwrap();
-    let _dom5 = root.read().data.domain_capabilities[&dom5_h]
+    let dom5 = root.read().data.domain_capabilities[&dom5_h]
         .upgrade()
         .unwrap();
+    let dom5_id = dom5.read().data.id;
 
     let _send_updates = Capability::send_memory(&root, child_h, dom5_h, Attributes::NONE).unwrap();
 
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child_sub).unwrap();
 
-    // Aliased children must NOT generate a remap to parent
+    // Aliased children must NOT generate a remap to parent (alias never removed parent access).
     let root_id = root.read().data.id;
     let has_map_to_parent = revoke_updates
         .updates()
@@ -100,6 +101,17 @@ fn test_revoke_aliased_child_no_remapping() {
     assert!(
         !has_map_to_parent,
         "Aliased children should not remap to parent on revoke"
+    );
+
+    // Aliased children MUST unmap from the receiver domain.
+    let has_unmap_receiver = revoke_updates
+        .updates()
+        .iter()
+        .any(|u| matches!(u, Update::ChangeRights { domain, rights, shootdown_required: true, .. }
+            if *domain == dom5_id && *rights == Rights::NONE));
+    assert!(
+        has_unmap_receiver,
+        "Alias receiver must be unmapped on revoke"
     );
 }
 
@@ -410,11 +422,11 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
     let revoke_updates = Capability::revoke_memory_child(&root, r0_h, child1_sub).unwrap();
     let updates = revoke_updates.updates();
 
-    // Exactly 4 updates:
+    // Exactly 5 updates:
     //  Unmap dom_carved_recv + Remap dom5 (child2's range)
     //  Unmap dom5 + Remap root (child1's full range)
-    // alias1 contributes 0 updates.
-    assert_eq!(updates.len(), 4, "alias children generate no ChangeRights updates");
+    //  Unmap dom_alias_recv (alias1's range — alias never remaps parent)
+    assert_eq!(updates.len(), 5, "must generate 5 ChangeRights updates");
 
     let has_unmap_carved = updates.iter().any(|u| {
         matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
@@ -440,9 +452,10 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
     });
     assert!(has_remap_root, "root must regain child1's full range");
 
-    // Alias receiver must not appear in any ChangeRights update
-    let alias_recv_has_update = updates.iter().any(|u| {
-        matches!(u, Update::ChangeRights { domain, .. } if *domain == dom_alias_recv_id)
+    // Alias receiver MUST be unmapped (alias was sent to another domain).
+    let alias_recv_unmap = updates.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, shootdown_required: true, .. }
+            if *domain == dom_alias_recv_id && *rights == Rights::NONE)
     });
-    assert!(!alias_recv_has_update, "alias children must not generate ChangeRights updates");
+    assert!(alias_recv_unmap, "alias receiver must be unmapped on revoke");
 }
