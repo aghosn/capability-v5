@@ -1887,6 +1887,11 @@ fn register_access_check(
         .ok_or(CapaError::NotFound)?
         .clone();
 
+    // A VP that is actively executing cannot have its registers safely accessed.
+    if matches!(*vp.run_state.read(), VpRunState::Running { .. }) {
+        return Err(CapaError::RegisterAccessDenied);
+    }
+
     // Determine effective interrupt vector from VP run state.
     let vec = effective_vector(&vp.run_state.read());
 

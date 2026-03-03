@@ -176,7 +176,19 @@ pub struct VectorPolicy {
 }
 ```
 
-The `VECTOR_AVAILABLE` sentinel (`0xFF`) is used for register-access policy lookups in the non-interrupt state (`Available`, `Running`, `Locked`). This unifies policy lookup: a parent configures register visibility for normal execution the same way it configures it for an interrupt vector — no special-casing.
+The `VECTOR_AVAILABLE` sentinel (`0xFF`) is used for register-access policy lookups in the non-interrupt state (`Available`, `Locked`). This unifies policy lookup: a parent configures register visibility for normal execution the same way it configures it for an interrupt vector — no special-casing.
+
+**Allowed VP states for GET/SET register access:**
+
+| VP state      | Access allowed |
+|---------------|---------------|
+| `Available`   | Yes (bitmap checked against `VECTOR_AVAILABLE`) |
+| `Locked`      | Yes (bitmap checked against `VECTOR_AVAILABLE`) |
+| `Interrupted` | Yes (bitmap checked against interrupt vector) |
+| `Suspended`   | Yes (bitmap checked against interrupt vector) |
+| `Running`     | **No** — always denied regardless of bitmaps |
+
+A VP in the `Running` state is actively executing on a core; reading or writing its registers is not safe. The engine returns `RegisterAccessDenied` immediately without consulting the bitmap.
 
 Policy enforcement (actually checking read/write access against these masks) is delegated to the platform implementation. The engine records and exposes the masks but does not enforce them internally.
 

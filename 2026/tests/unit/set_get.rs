@@ -456,6 +456,48 @@ fn test_vector_override_does_not_affect_available_vp() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// set_register / get_register — Running VP must be denied
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_set_register_denied_when_vp_running() {
+    let parent = root();
+    let platform = common::TestPlatform::new();
+    let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Grant full write access under VECTOR_AVAILABLE so bitmaps are not the obstacle.
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), u64::MAX)
+        .unwrap();
+
+    // Confirm write works while Available.
+    Capability::set_register(&parent, h, 0, 0, 0x1, &platform).unwrap();
+
+    // Transition to Running — register access must now be denied.
+    set_vp_running(&child, 0);
+    let err = Capability::set_register(&parent, h, 0, 0, 0x2, &platform).unwrap_err();
+    assert_eq!(err, CapaError::RegisterAccessDenied);
+}
+
+#[test]
+fn test_get_register_denied_when_vp_running() {
+    let parent = root();
+    let platform = common::TestPlatform::new();
+    let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Grant full read access under VECTOR_AVAILABLE.
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE), u64::MAX)
+        .unwrap();
+
+    // Confirm read works while Available.
+    Capability::get_register(&parent, h, 0, 0, &platform).unwrap();
+
+    // Transition to Running — register access must now be denied.
+    set_vp_running(&child, 0);
+    let err = Capability::get_register(&parent, h, 0, 0, &platform).unwrap_err();
+    assert_eq!(err, CapaError::RegisterAccessDenied);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Register out of range
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -627,7 +669,8 @@ fn test_effective_vector_switches_on_interrupt() {
     let err = Capability::set_register(&parent, h, 0, 0, 2, &platform).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 
-    // Back to running: write should succeed again.
+    // Back to Running: write must still be denied (VP is executing).
     set_vp_running(&child, 0);
-    Capability::set_register(&parent, h, 0, 0, 3, &platform).unwrap();
+    let err = Capability::set_register(&parent, h, 0, 0, 3, &platform).unwrap_err();
+    assert_eq!(err, CapaError::RegisterAccessDenied);
 }
