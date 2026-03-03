@@ -33,7 +33,9 @@ use parking_lot::{
     RawRwLock, RwLock,
 };
 
-use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
+use capability_engine::{
+    CapaError, CoreId, DomainId, OpLockGuard, Platform, Result, Update,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal state
@@ -54,6 +56,8 @@ pub struct TestPlatformInner {
     /// The "current core" returned by get_current_core().
     /// Set via set_current_core() before VP-aware operations.
     pub current_core: Option<CoreId>,
+    /// VP register storage: (domain_id, vp_id, reg_id) → value
+    pub registers: BTreeMap<(DomainId, u64, u64), u64>,
 }
 
 struct DomainEntry {
@@ -248,4 +252,43 @@ impl Platform for TestPlatform {
 
     // poll_and_respond_cross_core: default no-op is correct for TestPlatform
     // (no real cross-core IPI delivery in tests).
+
+    fn register_count(&self) -> u64 {
+        64
+    }
+
+    fn get_vp_register(
+        &self,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
+    ) -> Result<u64> {
+        if reg_id >= self.register_count() {
+            return Err(CapaError::RegisterOutOfRange);
+        }
+        Ok(self
+            .inner
+            .lock()
+            .registers
+            .get(&(domain_id, vp_id, reg_id))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn set_vp_register(
+        &self,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
+        value: u64,
+    ) -> Result<()> {
+        if reg_id >= self.register_count() {
+            return Err(CapaError::RegisterOutOfRange);
+        }
+        self.inner
+            .lock()
+            .registers
+            .insert((domain_id, vp_id, reg_id), value);
+        Ok(())
+    }
 }

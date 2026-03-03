@@ -9,7 +9,7 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
+    CapaError, CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
 };
 use capability_engine::{CapabilityRef, Domain};
 
@@ -24,6 +24,8 @@ struct CliPlatformInner {
     num_cores: usize,
     /// The core ID "currently executing" (set by the CLI before VP-aware calls).
     current_core: Option<CoreId>,
+    /// VP register storage: (domain_id, vp_id, reg_id) → value
+    registers: BTreeMap<(DomainId, u64, u64), u64>,
 }
 
 impl CliPlatformInner {
@@ -59,6 +61,7 @@ impl CliPlatform {
                 switch_manager: SwitchManager::new(num_cores),
                 num_cores,
                 current_core: None,
+                registers: BTreeMap::new(),
             })),
         }
     }
@@ -178,5 +181,44 @@ impl Platform for CliPlatform {
         if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
             *core_ref.running_vp.write() = vp_id;
         }
+    }
+
+    fn register_count(&self) -> u64 {
+        64
+    }
+
+    fn get_vp_register(
+        &self,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
+    ) -> Result<u64> {
+        if reg_id >= self.register_count() {
+            return Err(CapaError::RegisterOutOfRange);
+        }
+        Ok(self
+            .inner
+            .lock()
+            .registers
+            .get(&(domain_id, vp_id, reg_id))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn set_vp_register(
+        &self,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
+        value: u64,
+    ) -> Result<()> {
+        if reg_id >= self.register_count() {
+            return Err(CapaError::RegisterOutOfRange);
+        }
+        self.inner
+            .lock()
+            .registers
+            .insert((domain_id, vp_id, reg_id), value);
+        Ok(())
     }
 }

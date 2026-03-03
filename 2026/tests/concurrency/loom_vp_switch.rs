@@ -589,13 +589,14 @@ fn vp_two_cores_race_suspended_vp() {
                 callee_domain: dom2_weak,
                 callee_domain_id: dom2_id,
                 callee_vp_id: 0,
+                vector: 0,
             };
         }
         {
             let d = dom2.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Interrupted;
+            *vp0.run_state.write() = VpRunState::Interrupted { vector: 0 };
         }
 
         // ── Arcs for threads ─────────────────────────────────────────────────

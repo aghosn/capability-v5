@@ -244,7 +244,7 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
     // Falls back to a simple core-state update when VPs are not set up
     // (e.g. domains switched via the non-VP SwitchManager path).
     let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
-        &domain, handler_id, core, state.platform.as_ref(),
+        &domain, handler_id, core, vector, state.platform.as_ref(),
     );
 
     if vp_delivery.is_err() && handler_id != interrupted_id {

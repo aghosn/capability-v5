@@ -321,10 +321,6 @@ fn domain_logical_bytes(cap: &Capability<Domain>) -> usize {
     // vprocessor_states Vec: each VProcessorState struct + its heap contents
     for vp in &cap.data.policy.vprocessor_states {
         bytes += std::mem::size_of::<VProcessorState>();
-        // registers BTreeMap: String heap bytes + u64 per entry
-        for (k, _) in &vp.registers {
-            bytes += k.len() + std::mem::size_of::<u64>();
-        }
         // platform_data Vec payload
         bytes += vp.platform_data.len();
     }

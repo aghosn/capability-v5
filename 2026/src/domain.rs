@@ -234,20 +234,67 @@ pub enum VpRunState {
         callee_domain_id: u64,
         /// VP ID of the callee within its domain.
         callee_vp_id: u64,
+        /// The interrupt vector that caused the callee chain to be suspended.
+        vector: u8,
     },
     /// VP was Running when an interrupt fired and preempted it.
     ///
     /// Cannot be claimed by normal `switch_domain` (forward or return).
     /// Freed to `Available` when its `Suspended` parent is claimed via `switch_domain`.
-    Interrupted,
+    Interrupted {
+        /// The interrupt vector that caused this VP to be preempted.
+        vector: u8,
+    },
+}
+
+/// Synthetic interrupt vector representing the "VP is available / not interrupted" state.
+///
+/// When a VP is `Available`, `Running`, or `Locked`, register access policies are
+/// looked up under this sentinel vector in the domain's `InterruptPolicy.overrides`.
+/// Using a uniform lookup means there is no special-casing: a parent configures
+/// register visibility for the normal state the same way it does for a real vector.
+pub const VECTOR_AVAILABLE: u8 = 0xFF;
+
+/// Return the effective interrupt vector to use for register-access policy lookups.
+///
+/// - `Available / Running / Locked`  → [`VECTOR_AVAILABLE`] (0xFF)
+/// - `Interrupted { vector }`        → `vector`
+/// - `Suspended   { vector, .. }`    → `vector` (callee's interrupt vector)
+pub fn effective_vector(run_state: &VpRunState) -> u8 {
+    match run_state {
+        VpRunState::Available | VpRunState::Running { .. } | VpRunState::Locked { .. } => {
+            VECTOR_AVAILABLE
+        }
+        VpRunState::Interrupted { vector } | VpRunState::Suspended { vector, .. } => *vector,
+    }
+}
+
+/// Identifier for a domain-wide policy field, used by `set_policy` / `get_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyIdentifier {
+    /// Bitmask of allowed physical cores (bit i = core i).
+    Cores,
+    /// Allowed monitor API calls; value is the raw `MonitorAPI` bits (u16 in a u64).
+    ApiMonitor,
+    /// Default interrupt-visibility for all vectors not explicitly overridden.
+    /// Value: 0 = Deliver, 1 = Report, 2 = NotReport.
+    DefaultInterruptVisibility,
+    /// Per-vector interrupt visibility override.
+    /// Value: 0 = Deliver, 1 = Report, 2 = NotReport.
+    /// Use vector = [`VECTOR_AVAILABLE`] (0xFF) for the "VP available" synthetic entry.
+    VectorVisibility(u8),
+    /// Per-vector register read-access bitmap.
+    /// Bit `i` set means the parent may read register `i` when the VP is in this
+    /// interrupt state.
+    VectorRegReadSet(u8),
+    /// Per-vector register write-access bitmap.
+    VectorRegWriteSet(u8),
 }
 
 /// Virtual processor state (platform-specific)
 pub struct VProcessorState {
     pub id: u64,
-    /// General-purpose registers
-    pub registers: BTreeMap<alloc::string::String, u64>,
-    /// Platform-specific state
+    /// Platform-specific state (e.g. saved register file; managed by the platform)
     pub platform_data: Vec<u8>,
     /// Scheduling / call-chain state
     pub run_state: RwLock<VpRunState>,
@@ -257,7 +304,6 @@ impl core::fmt::Debug for VProcessorState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("VProcessorState")
             .field("id", &self.id)
-            .field("registers", &self.registers)
             .field("platform_data_len", &self.platform_data.len())
             .finish()
     }
@@ -267,7 +313,6 @@ impl VProcessorState {
     pub fn new(id: u64) -> Self {
         VProcessorState {
             id,
-            registers: BTreeMap::new(),
             platform_data: Vec::new(),
             run_state: RwLock::new(VpRunState::Available),
         }
@@ -292,8 +337,8 @@ pub struct DomainPolicy {
     /// List of valid virtual processor states
     pub vprocessor_states: Vec<VProcessorRef>,
 
-    /// Number of virtual processors to create when the domain is sealed.
-    /// Set at policy construction time; VP `Arc`s are populated in `Domain::seal()`.
+    /// Number of virtual processors allocated for this domain.
+    /// VPs are created at domain construction time (not at seal time).
     pub num_vprocessors: usize,
 }
 
@@ -405,10 +450,10 @@ pub struct Domain {
 }
 
 impl Domain {
-    /// Create a new unsealed domain
+    /// Create a new unsealed domain. VPs are allocated immediately.
     pub fn new(policy: DomainPolicy) -> Self {
         let id = generate_domain_id();
-        Domain {
+        let mut d = Domain {
             id,
             status: DomainStatus::Unsealed,
             policy,
@@ -418,7 +463,9 @@ impl Domain {
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(id),
             next_pending_id: 0,
-        }
+        };
+        d.create_vprocessors();
+        d
     }
 
     /// Create the root domain (born Sealed with VPs already allocated)
@@ -438,13 +485,12 @@ impl Domain {
         d
     }
 
-    /// Seal the domain and auto-create its virtual processors.
+    /// Seal the domain. VPs are already allocated at creation time.
     pub fn seal(&mut self) -> Result<()> {
         if self.status != DomainStatus::Unsealed {
             return Err(CapaError::DomainSealed);
         }
         self.status = DomainStatus::Sealed;
-        self.create_vprocessors();
         Ok(())
     }
 

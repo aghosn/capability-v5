@@ -154,7 +154,6 @@ fn test_interrupt_policy_override() {
 fn test_vprocessor_state_creation() {
     let vproc = VProcessorState::new(1);
     assert_eq!(vproc.id, 1);
-    assert!(vproc.registers.is_empty());
     assert!(vproc.platform_data.is_empty());
 }
 

@@ -603,7 +603,7 @@ fn test_deliver_interrupt_vp_2domain() {
     Capability::switch_domain(&root, child_h, 0, &platform).unwrap();
 
     // Deliver interrupt: handler is root, interrupted is child
-    let ctx = Capability::<Domain>::deliver_interrupt_vp(&child, root_id, 0, &platform).unwrap();
+    let ctx = Capability::<Domain>::deliver_interrupt_vp(&child, root_id, 0, 0, &platform).unwrap();
 
     assert_eq!(ctx.interrupted_domain_id, child_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
@@ -613,7 +613,7 @@ fn test_deliver_interrupt_vp_2domain() {
     // child.vp0 must be Interrupted
     let child_vp0 = child.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*child_vp0.run_state.read(), VpRunState::Interrupted),
+        matches!(*child_vp0.run_state.read(), VpRunState::Interrupted { .. }),
         "child VP[0] should be Interrupted after delivery"
     );
 
@@ -642,7 +642,7 @@ fn test_deliver_interrupt_vp_3domain() {
     let dom0_id = dom0.read().data.id;
     let dom2_id = dom2.read().data.id;
 
-    let ctx = Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, &platform).unwrap();
+    let ctx = Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, 0, &platform).unwrap();
 
     assert_eq!(ctx.interrupted_domain_id, dom2_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
@@ -652,7 +652,7 @@ fn test_deliver_interrupt_vp_3domain() {
     // dom2.vp0 → Interrupted
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Interrupted),
+        matches!(*dom2_vp0.run_state.read(), VpRunState::Interrupted { .. }),
         "dom2 VP[0] should be Interrupted"
     );
 
@@ -687,7 +687,7 @@ fn test_interrupt_resume_frees_interrupted_callee() {
     let dom1_id = dom1.read().data.id;
 
     // Deliver interrupt: dom0 becomes the handler
-    Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, &platform).unwrap();
+    Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, 0, &platform).unwrap();
 
     // After delivery: dom1.vp0 = Suspended, dom2.vp0 = Interrupted
 
@@ -739,7 +739,7 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
     let root = Capability::new_root(0, 0, Domain::new_root(4));
     let root_id = root.read().data.id;
     // VP[0] left Available — never set to Running
-    let result = Capability::<Domain>::deliver_interrupt_vp(&root, root_id, 0, &platform);
+    let result = Capability::<Domain>::deliver_interrupt_vp(&root, root_id, 0, 0, &platform);
     assert!(
         result.is_err(),
         "expected error when no VP is running on core"
@@ -759,13 +759,13 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
     let dom2_id = dom2.read().data.id;
 
     // Deliver interrupt: dom0 is handler, dom2.vp0 → Interrupted.
-    Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, &platform).unwrap();
+    Capability::<Domain>::deliver_interrupt_vp(&dom2, dom0_id, 0, 0, &platform).unwrap();
 
     // Sanity-check: dom2.vp0 is Interrupted.
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
     assert!(matches!(
         *dom2_vp0.run_state.read(),
-        VpRunState::Interrupted
+        VpRunState::Interrupted { .. }
     ));
 
     // Set dom1.vp1 to Running on core 1 — simulates a second concurrent VP of dom1.

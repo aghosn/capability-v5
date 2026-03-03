@@ -52,6 +52,15 @@ pub enum CapaError {
 
     /// Invalid operation
     InvalidOperation(alloc::string::String),
+
+    /// Operation not supported by this platform
+    NotSupported,
+
+    /// Register ID out of range for this platform
+    RegisterOutOfRange,
+
+    /// Register access denied by the effective-vector policy bitmap
+    RegisterAccessDenied,
 }
 
 impl fmt::Display for CapaError {
@@ -79,6 +88,11 @@ impl fmt::Display for CapaError {
             }
             CapaError::TreeLocked => write!(f, "Capability tree is locked"),
             CapaError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+            CapaError::NotSupported => write!(f, "Operation not supported by this platform"),
+            CapaError::RegisterOutOfRange => write!(f, "Register ID out of range"),
+            CapaError::RegisterAccessDenied => {
+                write!(f, "Register access denied by effective-vector policy bitmap")
+            }
         }
     }
 }

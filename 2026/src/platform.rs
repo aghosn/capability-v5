@@ -230,6 +230,51 @@ pub trait Platform: Send + Sync {
     ///
     /// **Default implementation** is a no-op.
     fn set_core_vp(&self, _core_id: CoreId, _vp_id: Option<u64>) {}
+
+    // -----------------------------------------------------------------------
+    // VP register access (platform-managed register file)
+    // -----------------------------------------------------------------------
+
+    /// Number of registers per VP supported by this platform.
+    ///
+    /// Register IDs are in `0..register_count()`. The engine uses this to
+    /// validate `reg_id` bounds before checking the access bitmap.
+    ///
+    /// **Default implementation** returns 64.
+    fn register_count(&self) -> u64 {
+        64
+    }
+
+    /// Read the value of register `reg_id` for VP `vp_id` of domain `domain_id`.
+    ///
+    /// Called by the engine after validating that the caller has read permission
+    /// for this register (via the effective-vector policy bitmap).
+    ///
+    /// **Default implementation** returns `CapaError::NotSupported`.
+    fn get_vp_register(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u64,
+        _reg_id: u64,
+    ) -> crate::error::Result<u64> {
+        Err(crate::error::CapaError::NotSupported)
+    }
+
+    /// Write `value` to register `reg_id` for VP `vp_id` of domain `domain_id`.
+    ///
+    /// Called by the engine after validating that the caller has write permission
+    /// for this register (via the effective-vector policy bitmap).
+    ///
+    /// **Default implementation** returns `CapaError::NotSupported`.
+    fn set_vp_register(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u64,
+        _reg_id: u64,
+        _value: u64,
+    ) -> crate::error::Result<()> {
+        Err(crate::error::CapaError::NotSupported)
+    }
 }
 
 /// Execute a capability operation atomically using the given platform.

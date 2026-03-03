@@ -279,44 +279,35 @@ pub fn cmd_set_interrupt_policy(
 
     let domain_name = args[0];
     let vector = parse_number(args[1])? as u8;
-    let visibility_str = args[2].to_uppercase();
-
-    let visibility = match visibility_str.as_str() {
-        "DELIVER" => InterruptVisibility::Deliver,
-        "REPORT" => InterruptVisibility::Report,
-        "NOTREPORT" => InterruptVisibility::NotReport,
-        _ => {
-            return Err(format!(
-                "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
-                args[2]
-            ));
-        }
-    };
+    let visibility = parse_visibility(args[2])?;
 
     let domain = state
         .domains
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
+        .clone();
 
-    let policy = VectorPolicy {
-        visibility,
-        read_set: 0,
-        write_set: 0,
-    };
+    let owner_id = domain.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let cap_handle = find_domain_handle(&owner, &domain)
+        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
 
-    domain
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, policy);
+    Capability::set_policy(
+        &owner,
+        cap_handle,
+        PolicyIdentifier::VectorVisibility(vector),
+        visibility as u64,
+    )
+    .map_err(|e| format!("Failed to set interrupt policy: {:?}", e))?;
 
     println!(
         "{} Set interrupt policy for vector {} on domain '{}': {:?}",
         "✓".bright_green().bold(),
         vector,
         domain_name.bright_white(),
-        visibility
+        visibility as u64
     );
 
     Ok(())
@@ -332,41 +323,253 @@ pub fn cmd_set_default_interrupt_policy(
     }
 
     let domain_name = args[0];
-    let visibility_str = args[1].to_uppercase();
-
-    let visibility = match visibility_str.as_str() {
-        "DELIVER" => InterruptVisibility::Deliver,
-        "REPORT" => InterruptVisibility::Report,
-        "NOTREPORT" => InterruptVisibility::NotReport,
-        _ => {
-            return Err(format!(
-                "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
-                args[1]
-            ));
-        }
-    };
+    let visibility = parse_visibility(args[1])?;
 
     let domain = state
         .domains
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
+        .clone();
 
-    let policy = VectorPolicy {
-        visibility,
-        read_set: 0,
-        write_set: 0,
-    };
+    let owner_id = domain.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let cap_handle = find_domain_handle(&owner, &domain)
+        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
 
-    domain.write().data.policy.interrupts.default = policy;
+    Capability::set_policy(
+        &owner,
+        cap_handle,
+        PolicyIdentifier::DefaultInterruptVisibility,
+        visibility as u64,
+    )
+    .map_err(|e| format!("Failed to set default interrupt policy: {:?}", e))?;
 
     println!(
         "{} Set default interrupt policy for domain '{}': {:?}",
         "✓".bright_green().bold(),
         domain_name.bright_white(),
-        visibility
+        visibility as u64
     );
 
     Ok(())
+}
+
+fn parse_visibility(s: &str) -> std::result::Result<InterruptVisibility, String> {
+    match s.to_uppercase().as_str() {
+        "DELIVER" => Ok(InterruptVisibility::Deliver),
+        "REPORT" => Ok(InterruptVisibility::Report),
+        "NOTREPORT" => Ok(InterruptVisibility::NotReport),
+        _ => Err(format!(
+            "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
+            s
+        )),
+    }
+}
+
+/// Set any policy on a child domain: set-policy <parent> <child> <policy> <value>
+pub fn cmd_set_policy(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
+    if args.len() != 4 {
+        return Err(
+            "Usage: set-policy <parent> <child> <policy> <value>\n  Policies: cores, api-monitor, default-visibility, vector-visibility:<v>, vector-read:<v>, vector-write:<v>".to_string(),
+        );
+    }
+
+    let parent_name = args[0];
+    let child_name = args[1];
+    let policy_str = args[2];
+    let value = parse_number(args[3])?;
+
+    let parent = state
+        .domains
+        .get(parent_name)
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
+        .clone();
+    let child = state
+        .domains
+        .get(child_name)
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
+        .clone();
+
+    let cap_handle = find_domain_handle(&parent, &child)
+        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
+
+    let policy_id = parse_policy_id(policy_str)?;
+
+    Capability::set_policy(&parent, cap_handle, policy_id, value)
+        .map_err(|e| format!("Failed to set policy: {:?}", e))?;
+
+    println!(
+        "{} Set policy '{}' = {} on domain '{}' (via '{}')",
+        "✓".bright_green().bold(),
+        policy_str,
+        value,
+        child_name.bright_white(),
+        parent_name
+    );
+
+    Ok(())
+}
+
+/// Get any policy from a child domain: get-policy <parent> <child> <policy>
+pub fn cmd_get_policy(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
+    if args.len() != 3 {
+        return Err(
+            "Usage: get-policy <parent> <child> <policy>".to_string(),
+        );
+    }
+
+    let parent_name = args[0];
+    let child_name = args[1];
+    let policy_str = args[2];
+
+    let parent = state
+        .domains
+        .get(parent_name)
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
+        .clone();
+    let child = state
+        .domains
+        .get(child_name)
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
+        .clone();
+
+    let cap_handle = find_domain_handle(&parent, &child)
+        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
+
+    let policy_id = parse_policy_id(policy_str)?;
+
+    let value = Capability::get_policy(&parent, cap_handle, policy_id)
+        .map_err(|e| format!("Failed to get policy: {:?}", e))?;
+
+    println!(
+        "{} Policy '{}' on domain '{}': {}",
+        "✓".bright_green().bold(),
+        policy_str,
+        child_name.bright_white(),
+        value
+    );
+
+    Ok(())
+}
+
+/// Set a VP register: set-register <parent> <child> <vp_id> <reg_id> <value>
+pub fn cmd_set_register(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
+    if args.len() != 5 {
+        return Err("Usage: set-register <parent> <child> <vp_id> <reg_id> <value>".to_string());
+    }
+
+    let parent_name = args[0];
+    let child_name = args[1];
+    let vp_id = parse_number(args[2])?;
+    let reg_id = parse_number(args[3])?;
+    let value = parse_number(args[4])?;
+
+    let parent = state
+        .domains
+        .get(parent_name)
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
+        .clone();
+    let child = state
+        .domains
+        .get(child_name)
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
+        .clone();
+
+    let cap_handle = find_domain_handle(&parent, &child)
+        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
+
+    Capability::set_register(&parent, cap_handle, vp_id, reg_id, value, state.platform.as_ref())
+        .map_err(|e| format!("Failed to set register: {:?}", e))?;
+
+    println!(
+        "{} Set VP[{}] reg[{}] = {} on domain '{}'",
+        "✓".bright_green().bold(),
+        vp_id,
+        reg_id,
+        value,
+        child_name.bright_white()
+    );
+
+    Ok(())
+}
+
+/// Get a VP register: get-register <parent> <child> <vp_id> <reg_id>
+pub fn cmd_get_register(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
+    if args.len() != 4 {
+        return Err("Usage: get-register <parent> <child> <vp_id> <reg_id>".to_string());
+    }
+
+    let parent_name = args[0];
+    let child_name = args[1];
+    let vp_id = parse_number(args[2])?;
+    let reg_id = parse_number(args[3])?;
+
+    let parent = state
+        .domains
+        .get(parent_name)
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
+        .clone();
+    let child = state
+        .domains
+        .get(child_name)
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
+        .clone();
+
+    let cap_handle = find_domain_handle(&parent, &child)
+        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
+
+    let value = Capability::get_register(&parent, cap_handle, vp_id, reg_id, state.platform.as_ref())
+        .map_err(|e| format!("Failed to get register: {:?}", e))?;
+
+    println!(
+        "{} VP[{}] reg[{}] on domain '{}': {}",
+        "✓".bright_green().bold(),
+        vp_id,
+        reg_id,
+        child_name.bright_white(),
+        value
+    );
+
+    Ok(())
+}
+
+fn parse_policy_id(s: &str) -> std::result::Result<PolicyIdentifier, String> {
+    if s.eq_ignore_ascii_case("cores") {
+        return Ok(PolicyIdentifier::Cores);
+    }
+    if s.eq_ignore_ascii_case("api-monitor") {
+        return Ok(PolicyIdentifier::ApiMonitor);
+    }
+    if s.eq_ignore_ascii_case("default-visibility") {
+        return Ok(PolicyIdentifier::DefaultInterruptVisibility);
+    }
+    if let Some(rest) = s.strip_prefix("vector-visibility:") {
+        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
+        return Ok(PolicyIdentifier::VectorVisibility(v));
+    }
+    if let Some(rest) = s.strip_prefix("vector-read:") {
+        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
+        return Ok(PolicyIdentifier::VectorRegReadSet(v));
+    }
+    if let Some(rest) = s.strip_prefix("vector-write:") {
+        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
+        return Ok(PolicyIdentifier::VectorRegWriteSet(v));
+    }
+    Err(format!("Unknown policy: '{}'. Use: cores, api-monitor, default-visibility, vector-visibility:<v>, vector-read:<v>, vector-write:<v>", s))
 }
 
 /// Enumerate pending capabilities for a sealed domain

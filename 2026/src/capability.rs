@@ -1,7 +1,8 @@
 //! Core capability structures with thread-safe parent-child relationships
 
 use crate::domain::{
-    Domain, DomainPolicy, MonitorAPI, PendingCapability, VProcessorRef, VpCallContext, VpRunState,
+    effective_vector, Domain, DomainPolicy, InterruptVisibility, MonitorAPI, PendingCapability,
+    PolicyIdentifier, VProcessorRef, VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
@@ -1406,7 +1407,7 @@ impl Capability<Domain> {
                     .cloned();
                 if let Some(vp) = vp_opt {
                     let mut s = vp.run_state.write();
-                    if matches!(*s, VpRunState::Interrupted) {
+                    if matches!(*s, VpRunState::Interrupted { .. }) {
                         *s = VpRunState::Available;
                     }
                 }
@@ -1463,6 +1464,7 @@ impl Capability<Domain> {
         interrupted_cap: &CapabilityRef<Domain>,
         handler_domain_id: u64,
         core_id: CoreId,
+        vector: u8,
         platform: &dyn Platform,
     ) -> Result<VpInterruptContext> {
         let interrupted_domain_id = interrupted_cap.read().data.id;
@@ -1570,7 +1572,7 @@ impl Capability<Domain> {
         // chain[n-1]:   Locked   → Running { core, caller: handler's prev_caller }
 
         // Leaf: Running → Interrupted.
-        *chain[0].2.run_state.write() = VpRunState::Interrupted;
+        *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
 
         // Intermediate VPs: Locked → Suspended.
         for i in 1..n - 1 {
@@ -1581,6 +1583,7 @@ impl Capability<Domain> {
                 callee_domain,
                 callee_domain_id,
                 callee_vp_id,
+                vector,
             };
         }
 
@@ -1612,4 +1615,288 @@ impl Capability<Domain> {
             core_id,
         })
     }
+
+    // =========================================================================
+    // Policy and register set / get
+    // =========================================================================
+
+    /// Modify a domain-wide policy field on a child domain.
+    ///
+    /// # Rules
+    /// - Caller must have [`MonitorAPI::SET`] permission.
+    /// - The child domain must be **Unsealed** (hard error if already sealed).
+    /// - For `Cores` and `ApiMonitor`, the new value must be a *subset* of the
+    ///   corresponding parent field (monotonicity).
+    /// - Register-access bitmaps (`VectorRegReadSet` / `VectorRegWriteSet`) are
+    ///   **not** subject to monotonicity; the parent may freely configure them.
+    pub fn set_policy(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        id: PolicyIdentifier,
+        value: u64,
+    ) -> Result<()> {
+        // Validate caller has SET permission.
+        caller
+            .read()
+            .owned
+            .validate_operation(MonitorAPI::SET)?;
+
+        // Retrieve child.
+        let child_weak = caller
+            .read()
+            .data
+            .get_domain_capability(child_handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Child must be unsealed.
+        if child_ref.read().data.status != crate::domain::DomainStatus::Unsealed {
+            return Err(CapaError::DomainSealed);
+        }
+
+        let parent_policy = caller.read().data.policy.clone();
+        let mut child_w = child_ref.write();
+
+        match id {
+            PolicyIdentifier::Cores => {
+                // Monotonicity: new cores must be a subset of parent cores.
+                if (value & !parent_policy.cores) != 0 {
+                    return Err(CapaError::MonotonicityViolation);
+                }
+                child_w.data.policy.cores = value;
+            }
+            PolicyIdentifier::ApiMonitor => {
+                let bits = value as u16;
+                if (bits & !parent_policy.api.bits()) != 0 {
+                    return Err(CapaError::MonotonicityViolation);
+                }
+                child_w.data.policy.api = MonitorAPI::from_bits(bits);
+            }
+            PolicyIdentifier::DefaultInterruptVisibility => {
+                let vis = visibility_from_u64(value)?;
+                child_w.data.policy.interrupts.default.visibility = vis;
+            }
+            PolicyIdentifier::VectorVisibility(vec) => {
+                let vis = visibility_from_u64(value)?;
+                let default_vis = child_w.data.policy.interrupts.default.visibility;
+                let default_read = child_w.data.policy.interrupts.default.read_set;
+                let default_write = child_w.data.policy.interrupts.default.write_set;
+                let entry = child_w
+                    .data
+                    .policy
+                    .interrupts
+                    .overrides
+                    .entry(vec)
+                    .or_insert_with(|| VectorPolicy {
+                        visibility: default_vis,
+                        read_set: default_read,
+                        write_set: default_write,
+                    });
+                entry.visibility = vis;
+            }
+            PolicyIdentifier::VectorRegReadSet(vec) => {
+                let entry = child_w
+                    .data
+                    .policy
+                    .interrupts
+                    .overrides
+                    .entry(vec)
+                    .or_insert_with(VectorPolicy::default_report);
+                entry.read_set = value;
+            }
+            PolicyIdentifier::VectorRegWriteSet(vec) => {
+                let entry = child_w
+                    .data
+                    .policy
+                    .interrupts
+                    .overrides
+                    .entry(vec)
+                    .or_insert_with(VectorPolicy::default_report);
+                entry.write_set = value;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read a domain-wide policy field from a child domain.
+    ///
+    /// Caller must have [`MonitorAPI::GET`] permission.
+    /// Succeeds regardless of the child's seal status.
+    pub fn get_policy(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        id: PolicyIdentifier,
+    ) -> Result<u64> {
+        caller
+            .read()
+            .owned
+            .validate_operation(MonitorAPI::GET)?;
+
+        let child_weak = caller
+            .read()
+            .data
+            .get_domain_capability(child_handle)
+            .ok_or(CapaError::NotFound)?
+            .clone();
+        let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+        let child_r = child_ref.read();
+
+        let value = match id {
+            PolicyIdentifier::Cores => child_r.data.policy.cores,
+            PolicyIdentifier::ApiMonitor => child_r.data.policy.api.bits() as u64,
+            PolicyIdentifier::DefaultInterruptVisibility => {
+                visibility_to_u64(child_r.data.policy.interrupts.default.visibility)
+            }
+            PolicyIdentifier::VectorVisibility(vec) => {
+                visibility_to_u64(child_r.data.policy.interrupts.get_policy(vec).visibility)
+            }
+            PolicyIdentifier::VectorRegReadSet(vec) => {
+                child_r.data.policy.interrupts.get_policy(vec).read_set
+            }
+            PolicyIdentifier::VectorRegWriteSet(vec) => {
+                child_r.data.policy.interrupts.get_policy(vec).write_set
+            }
+        };
+
+        Ok(value)
+    }
+
+    /// Write a VP register on a child domain.
+    ///
+    /// The engine validates:
+    /// 1. Caller has [`MonitorAPI::SET`] permission.
+    /// 2. `reg_id` is within `platform.register_count()`.
+    /// 3. Bit `reg_id` is set in the **write** bitmap of the effective-vector
+    ///    policy for the target VP's current run state.
+    ///
+    /// The actual write is delegated to [`Platform::set_vp_register`].
+    pub fn set_register(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        vp_id: u64,
+        reg_id: u64,
+        value: u64,
+        platform: &dyn Platform,
+    ) -> Result<()> {
+        caller
+            .read()
+            .owned
+            .validate_operation(MonitorAPI::SET)?;
+
+        let (child_domain_id, write_set) =
+            register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
+
+        if (write_set >> reg_id) & 1 == 0 {
+            return Err(CapaError::RegisterAccessDenied);
+        }
+
+        platform.set_vp_register(child_domain_id, vp_id, reg_id, value)
+    }
+
+    /// Read a VP register from a child domain.
+    ///
+    /// The engine validates:
+    /// 1. Caller has [`MonitorAPI::GET`] permission.
+    /// 2. `reg_id` is within `platform.register_count()`.
+    /// 3. Bit `reg_id` is set in the **read** bitmap of the effective-vector
+    ///    policy for the target VP's current run state.
+    ///
+    /// The actual read is delegated to [`Platform::get_vp_register`].
+    pub fn get_register(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        vp_id: u64,
+        reg_id: u64,
+        platform: &dyn Platform,
+    ) -> Result<u64> {
+        caller
+            .read()
+            .owned
+            .validate_operation(MonitorAPI::GET)?;
+
+        let (child_domain_id, read_set) =
+            register_access_check(caller, child_handle, vp_id, reg_id, platform, true)?;
+
+        if (read_set >> reg_id) & 1 == 0 {
+            return Err(CapaError::RegisterAccessDenied);
+        }
+
+        platform.get_vp_register(child_domain_id, vp_id, reg_id)
+    }
 }
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Encode [`InterruptVisibility`] as a `u64` (0=Deliver, 1=Report, 2=NotReport).
+fn visibility_to_u64(v: InterruptVisibility) -> u64 {
+    match v {
+        InterruptVisibility::Deliver => 0,
+        InterruptVisibility::Report => 1,
+        InterruptVisibility::NotReport => 2,
+    }
+}
+
+/// Decode a `u64` to [`InterruptVisibility`].
+fn visibility_from_u64(v: u64) -> Result<InterruptVisibility> {
+    match v {
+        0 => Ok(InterruptVisibility::Deliver),
+        1 => Ok(InterruptVisibility::Report),
+        2 => Ok(InterruptVisibility::NotReport),
+        _ => Err(CapaError::InvalidOperation(
+            alloc::format!("invalid visibility value: {}", v),
+        )),
+    }
+}
+
+/// Shared validation for `set_register` and `get_register`.
+///
+/// Returns `(child_domain_id, bitmap)` where `bitmap` is the read bitmap when
+/// `want_read = true` and the write bitmap otherwise.
+fn register_access_check(
+    caller: &CapabilityRef<Domain>,
+    child_handle: LocalHandle,
+    vp_id: u64,
+    reg_id: u64,
+    platform: &dyn Platform,
+    want_read: bool,
+) -> Result<(DomainId, u64)> {
+    // Bounds check.
+    if reg_id >= platform.register_count() {
+        return Err(CapaError::RegisterOutOfRange);
+    }
+
+    let child_weak = caller
+        .read()
+        .data
+        .get_domain_capability(child_handle)
+        .ok_or(CapaError::NotFound)?
+        .clone();
+    let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+    let child_r = child_ref.read();
+
+    let child_domain_id = child_r.data.id;
+
+    // Look up the target VP.
+    let vp = child_r
+        .data
+        .policy
+        .vprocessor_states
+        .get(vp_id as usize)
+        .ok_or(CapaError::NotFound)?
+        .clone();
+
+    // Determine effective interrupt vector from VP run state.
+    let vec = effective_vector(&vp.run_state.read());
+
+    // Retrieve the effective VectorPolicy (override or domain default).
+    let policy = child_r.data.policy.interrupts.get_policy(vec);
+    let bitmap = if want_read { policy.read_set } else { policy.write_set };
+
+    Ok((child_domain_id, bitmap))
+}
+
+// Suppress the unused-import warning for VECTOR_AVAILABLE when it's only
+// referenced indirectly through effective_vector.
+const _: u8 = VECTOR_AVAILABLE;
