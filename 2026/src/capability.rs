@@ -806,8 +806,9 @@ impl Capability<Domain> {
         receiver: LocalHandle,
         attrs: Attributes,
     ) -> Result<UpdateBatch> {
-        // Pre-flight: fast-fail frozen check, resolve caller_id and receiver Arc.
-        // The frozen check here is non-authoritative; the write-lock commit below is.
+        // Pre-flight: fast-fail frozen check, resolve caller_id, receiver Arc, and META
+        // constraints — all under a single caller.read() to minimise lock round-trips.
+        // These checks are non-authoritative; the write-lock commit below is authoritative.
         let caller_id;
         let receiver_ref: CapabilityRef<Domain>;
         {
@@ -821,7 +822,13 @@ impl Capability<Domain> {
                 .get_domain_capability(receiver)
                 .ok_or(CapaError::NotFound)?
                 .clone();
+            let cap_weak = r
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .clone();
             drop(r);
+
             let resolved = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
             // If the handle is a channel, follow channel_target to the actual receiver.
             receiver_ref = {
@@ -832,18 +839,9 @@ impl Capability<Domain> {
                     resolved
                 }
             };
-        }
 
-        let recv_sealed = receiver_ref.read().data.is_sealed();
-
-        // META constraints: validate before dispatching to sealed/unsealed path.
-        {
-            let cap_weak = caller
-                .read()
-                .data
-                .get_memory_capability(cap)
-                .ok_or(CapaError::NotFound)?
-                .clone();
+            // META constraints: check capability attributes under cap_ref.read() only
+            // (caller.read() already dropped above, so no overlapping lock).
             let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
             let c = cap_ref.read();
             // A region already marked META cannot be re-sent.
@@ -855,6 +853,8 @@ impl Capability<Domain> {
                 return Err(CapaError::PermissionDenied);
             }
         }
+
+        let recv_sealed = receiver_ref.read().data.is_sealed();
 
         // Materialize META → META|CLEAN|VITAL so that revoke_subtree's existing
         // CLEAN and VITAL checks handle zeroing and domain revocation without
