@@ -14,7 +14,7 @@
 # Initialize
 @msg 📋 Step 1: Set up domain hierarchy
 init root 0x200000
-create-domain root parent 0b0001 GET,ATTEST,SWITCH
+create-domain root parent 0b0011 GET,ATTEST,SWITCH
 
 @msg
 @msg ✓ Created parent domain (1 VP for core 0)
@@ -123,9 +123,16 @@ switch child 0 0
 @msg
 @msg ✗ As expected: direct switch to child failed.
 @msg   root has no capability handle for child (encapsulation), and even if it did,
+switch parent 0 1
+switch child 0 0
+
+@msg ✗ As expected: switching to the child from another parent VP does not work.
 @msg   child VP[0] is Interrupted — unavailable until its Suspended caller
 @msg   (parent VP[0]) is re-scheduled first.
 @msg
+
+switch 0
+@msg Return to the root on core 0.
 
 # Correct recovery: reschedule the suspended caller first
 @msg 📋 Step 13: Re-schedule parent VP[0] (Suspended → Running)
