@@ -182,9 +182,8 @@ cap> create-domain root sub 0b1111 CARVE,REVOKE,SEND
 #### What it looks like in code
 
 ```rust
-let child = Capability::create_child_domain(&parent, child_policy, owner_id, handle)?;
-// Extension trait form
-let child = parent_ref.create_child(child_policy, handle)?;
+// Domain-mediated public API
+let child_handle = Capability::<Domain>::create(&parent, child_policy)?;
 ```
 
 ---
@@ -268,9 +267,8 @@ cap> revoke root grandchild
 #### What it looks like in code
 
 ```rust
-let updates = Capability::revoke_child_domain(&parent, child_handle)?;
-// Extension trait form
-let updates = parent_ref.revoke_child(child_handle)?;
+// Domain-mediated public API (child_handle is the LocalHandle in caller's table)
+let updates = Capability::<Domain>::revoke_domain(&caller, child_handle)?;
 ```
 
 ---

@@ -67,7 +67,7 @@ cap> carve r0 monitor_scratch 0x500000 0x10000 RW
 
 cap> send monitor_scratch app META
 # app is sealed → enqueued as pending; caller handle frozen
-cap> accept-memory app <pending_id>
+cap> accept-capability app <pending_id>
 ✓ Accepted META region 'monitor_scratch'. No MMU mapping granted.
 ```
 
@@ -201,11 +201,8 @@ cap> carve ro_region wide 0x20000 0x1000 RWX
 #### What it looks like in code
 
 ```rust
-// Static form: explicit owner domain and handle
-let (child, updates) = Capability::carve_child(&parent, access, owner_id, handle)?;
-
-// Extension trait form: infers owner from the capability itself
-let (child, updates) = parent_ref.carve(access, handle)?;
+// Domain-mediated public API
+let (child_handle, child_sub, updates) = Capability::<Domain>::carve(&caller, parent_handle, access)?;
 ```
 
 ---
@@ -244,11 +241,8 @@ cap> alias r0 shared 0x15000 0x8000 R
 #### What it looks like in code
 
 ```rust
-// Static form
-let child = Capability::alias_child(&parent, access, owner_id, handle)?;
-
-// Extension trait form
-let child = parent_ref.alias(access, handle)?;
+// Domain-mediated public API
+let (child_handle, child_sub) = Capability::<Domain>::alias(&caller, parent_handle, access)?;
 ```
 
 ---
@@ -294,9 +288,8 @@ cap> send extra app
 #### What it looks like in code
 
 ```rust
-let updates = Capability::send_to(&region, caller_domain, new_owner_id, new_handle, Attributes::CLEAN)?;
-// Extension trait form
-let updates = region_ref.send(new_owner_id, new_handle, Attributes::CLEAN)?;
+// Domain-mediated public API
+let updates = Capability::<Domain>::send(&caller, cap_handle, receiver_handle, Attributes::CLEAN)?;
 ```
 
 ---
@@ -351,9 +344,6 @@ cap> revoke r0 unrelated_region
 #### What it looks like in code
 
 ```rust
-// Revoke by handle
-let updates = Capability::revoke_child(&parent, child_handle)?;
-
-// Revoke by Arc pointer (safe if the capability was sent and its handle changed)
-let updates = Capability::revoke_child_ref(&parent, &child_ref)?;
+// Domain-mediated public API (child_sub is the SubHandle returned by carve/alias)
+let updates = Capability::<Domain>::revoke(&caller, parent_handle, child_sub)?;
 ```
