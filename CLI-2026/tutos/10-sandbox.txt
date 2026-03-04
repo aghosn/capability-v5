@@ -1,8 +1,8 @@
-# Tutorial 8: Sandboxed Execution Environment
+# Tutorial 10: Sandboxed Execution Environment
 # ============================================
 # Demonstrates creating a sandbox using aliased memory with limited permissions.
 
-@msg ━━━ Tutorial 8: Sandbox with Aliased Memory ━━━
+@msg ━━━ Tutorial 10: Sandbox with Aliased Memory ━━━
 @msg
 @msg This tutorial shows how to create a sandbox that:
 @msg   • Uses ALIASED memory (parent retains access)

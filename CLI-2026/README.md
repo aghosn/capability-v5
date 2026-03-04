@@ -9,7 +9,7 @@ An interactive command-line interface for experimenting with the Capability Engi
 - **Command History**: Navigate previous commands with arrow keys (persisted in `.capability_cli_history`)
 - **Session Replay**: Save your session as replayable CLI commands and reload with `load`
 - **Unit Test Export**: Export your session as a Rust unit test via `export-as-unit-test`
-- **Interactive Tutorials**: Ten built-in guided tutorials covering basic to advanced scenarios
+- **Interactive Tutorials**: Thirteen built-in guided tutorials covering basic to advanced scenarios
 - **Auto-List Mode**: Toggle automatic `list` output after every command
 - **Memory Usage Reporting**: Inspect logical memory footprint of all capability objects
 - **Colored Output**: Visual feedback for better readability
@@ -101,11 +101,20 @@ Example: `init root 0x1000000`
 
 | Command | Description |
 |---------|-------------|
-| `send <mem> <domain> [attrs]` | Send a memory capability to a domain (handle auto-allocated) |
+| `send <cap> <target> [attrs]` | Send a capability (memory or channel) to a domain or through a channel |
 | `revoke <parent> <child>` | Revoke a child capability (domain or memory) |
 
-- **`[attrs]`**: optional comma-separated flags — `CLEAN` (zero on revoke), `VITAL` (domain revoked when this is revoked), `META`, `NONE`
+- **`<target>`**: a domain name (direct send) or channel name (send through channel)
+- **`[attrs]`**: optional comma-separated flags — `CLEAN` (zero on revoke), `VITAL` (domain revoked when this is revoked), `HASH` (include in attestation hash), `META` (monitor-private), `NONE`
 - Sending to a sealed domain with `RECEIVE_AFTER_SEAL` places the capability in the pending queue
+
+### Channels
+
+| Command | Description |
+|---------|-------------|
+| `get-chan <domain> <name>` | Create a channel capability to a sealed domain |
+| `accept-channel <domain> <pending_id> <name>` | Accept a pending channel and name it |
+| `reject-channel <domain> <pending_id>` | Reject a pending channel |
 
 ### Information
 
@@ -145,7 +154,7 @@ Legacy two-argument forms are also accepted:
 | `tutos` | List all available tutorials |
 | `tutos <number>` | Run a specific tutorial interactively |
 
-Ten tutorials are included:
+Thirteen tutorials are included:
 
 | # | Title |
 |---|-------|
@@ -154,11 +163,16 @@ Ten tutorials are included:
 | 3 | Capability Transfer with Send |
 | 4 | Domain Switching — Context Switches |
 | 5 | Interrupt Routing and Policies |
-| 6 | Confidential VM with VirtIO Buffer |
-| 7 | Nested Enclave Architecture |
-| 8 | Sandboxed Execution Environment |
-| 9 | Domain Encapsulation and Communication |
-| 10 | Pending Capabilities and RECEIVE_AFTER_SEAL |
+| 6 | Pending Capabilities and RECEIVE_AFTER_SEAL |
+| 7 | META Regions — Monitor Metadata Memory |
+| 8 | Confidential VM with VirtIO Buffer |
+| 9 | Nested Enclave Architecture |
+| 10 | Sandboxed Execution Environment |
+| 11 | Domain Encapsulation and Communication |
+| 12 | Sibling Attestation via Channels |
+| 13 | Channels — Driver Isolation with CVM |
+
+Tutorials 1–7 cover fundamental concepts; 8–13 demonstrate real-world use cases.
 
 ## Number Formats
 

@@ -1,8 +1,8 @@
-# Tutorial 9: Domain Encapsulation and Communication
+# Tutorial 11: Domain Encapsulation and Communication
 # ===================================================
 # Demonstrates how domains are encapsulated and can only communicate with parent.
 
-@msg ━━━ Tutorial 9: Domain Encapsulation ━━━
+@msg ━━━ Tutorial 11: Domain Encapsulation ━━━
 @msg
 @msg This tutorial demonstrates:
 @msg   • How domains are encapsulated (limited communication)

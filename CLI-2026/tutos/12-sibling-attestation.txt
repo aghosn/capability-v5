@@ -1,10 +1,10 @@
-# Tutorial 11: Sibling Attestation via Channels
+# Tutorial 12: Sibling Attestation via Channels
 # ===============================================
 # A CVM creates two sibling enclaves and cross-connects them using channels.
 # The enclaves attest each other and establish a private shared memory region
 # for direct communication — bypassing the parent CVM entirely.
 
-@msg ━━━ Tutorial 11: Sibling Attestation via Channels ━━━
+@msg ━━━ Tutorial 12: Sibling Attestation via Channels ━━━
 @msg
 @msg This tutorial demonstrates:
 @msg   • Creating two sibling enclaves inside a CVM
@@ -12,7 +12,7 @@
 @msg   • Mutual attestation between siblings through channels
 @msg   • Establishing a private shared memory region between enclaves
 @msg
-@msg Normally, siblings cannot communicate (see Tutorial 9).
+@msg Normally, siblings cannot communicate (see Tutorial 11).
 @msg Channels solve this: the parent CVM creates a channel to each enclave,
 @msg then cross-connects them so each sibling holds a channel to the other.
 @msg

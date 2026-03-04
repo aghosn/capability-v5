@@ -112,6 +112,8 @@ For full VP state machine details, see [implementation/switch.md § VP States](.
 
 ## Pending Capabilities (`RECEIVE_AFTER_SEAL`)
 
+> 📖 **Try it:** [Tutorial 6 — Pending Capabilities](../cli/tutorials.md) demonstrates the full pending lifecycle.
+
 By default, a sealed domain's capability set is frozen. The `RECEIVE_AFTER_SEAL` API flag lifts this restriction:
 
 1. Another domain calls `send` targeting a sealed domain with `RECEIVE_AFTER_SEAL`.
@@ -274,6 +276,8 @@ let updates = Capability::<Domain>::revoke_domain(&caller, child_handle)?;
 ---
 
 ### `get-chan` — Obtain a Channel Capability
+
+> 📖 **Try it:** Tutorials [12 (sibling attestation)](../cli/tutorials.md) and [13 (driver channels)](../cli/tutorials.md) show channels in realistic architectures.
 
 **Requires**: `GETCHAN` API permission; caller must be Sealed; target domain must be Sealed.
 

@@ -59,7 +59,7 @@ Running ──── switch (forward, out of this domain) ──► Locked
 
 **Key rule**: you cannot switch directly to an `Interrupted` VP. You must first switch to its `Suspended` caller, which atomically frees the interrupted VP to `Available`.
 
-CLI example (from Tutorial 5):
+CLI example (from [Tutorial 5 — Interrupt Routing](../cli/tutorials.md)):
 
 ```
 # After interrupt 55 fires on core 0 while child VP[0] is Running:

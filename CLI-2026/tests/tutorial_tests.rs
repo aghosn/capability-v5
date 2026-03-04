@@ -90,38 +90,38 @@ fn tutorial_05_basic_interrupts() {
 }
 
 #[test]
-fn tutorial_06_cvm_virtio() {
-    run_tuto("06-cvm-virtio.txt").unwrap();
+fn tutorial_06_pending_capabilities() {
+    run_tuto("06-pending-capabilities.txt").unwrap();
 }
 
 #[test]
-fn tutorial_07_nested_enclave() {
-    run_tuto("07-nested-enclave.txt").unwrap();
+fn tutorial_07_meta_regions() {
+    run_tuto("07-meta-regions.txt").unwrap();
 }
 
 #[test]
-fn tutorial_08_sandbox() {
-    run_tuto("08-sandbox.txt").unwrap();
+fn tutorial_08_cvm_virtio() {
+    run_tuto("08-cvm-virtio.txt").unwrap();
 }
 
 #[test]
-fn tutorial_09_encapsulation() {
-    run_tuto("09-encapsulation.txt").unwrap();
+fn tutorial_09_nested_enclave() {
+    run_tuto("09-nested-enclave.txt").unwrap();
 }
 
 #[test]
-fn tutorial_10_pending_capabilities() {
-    run_tuto("10-pending-capabilities.txt").unwrap();
+fn tutorial_10_sandbox() {
+    run_tuto("10-sandbox.txt").unwrap();
 }
 
 #[test]
-fn tutorial_11_sibling_attestation() {
-    run_tuto("11-sibling-attestation.txt").unwrap();
+fn tutorial_11_encapsulation() {
+    run_tuto("11-encapsulation.txt").unwrap();
 }
 
 #[test]
-fn tutorial_12_meta_regions() {
-    run_tuto("12-meta-regions.txt").unwrap();
+fn tutorial_12_sibling_attestation() {
+    run_tuto("12-sibling-attestation.txt").unwrap();
 }
 
 #[test]

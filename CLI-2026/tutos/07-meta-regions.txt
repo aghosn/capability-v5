@@ -1,10 +1,10 @@
-# Tutorial 12: META Regions — Monitor Metadata Memory
+# Tutorial 7: META Regions — Monitor Metadata Memory
 # =====================================================
 # Demonstrates the META attribute for sending monitor-private memory
 # to a domain: excluded from address space, visible in attestation,
 # revocation implies CLEAN + VITAL.
 
-@msg ━━━ Tutorial 12: META Regions — Monitor Metadata ━━━
+@msg ━━━ Tutorial 7: META Regions — Monitor Metadata ━━━
 @msg
 @msg META memory is allocated BY the monitor FOR its own use inside a domain.
 @msg The receiving domain cannot access it (no MMU mapping), but the region

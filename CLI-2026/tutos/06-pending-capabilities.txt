@@ -1,9 +1,9 @@
-# Tutorial 10: Pending Capabilities and RECEIVE_AFTER_SEAL
+# Tutorial 6: Pending Capabilities and RECEIVE_AFTER_SEAL
 # =========================================================
 # Demonstrates the full pending capability lifecycle:
 # sending to a sealed domain, enumerating, accepting, and rejecting.
 
-@msg ━━━ Tutorial 10: Pending Capabilities ━━━
+@msg ━━━ Tutorial 6: Pending Capabilities ━━━
 @msg
 @msg By default a sealed domain cannot receive new capabilities.
 @msg The RECEIVE_AFTER_SEAL permission enables this: capabilities arrive

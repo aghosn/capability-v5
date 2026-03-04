@@ -46,6 +46,8 @@ Attributes are per-ownership metadata set at `send` time. They affect behaviour 
 
 ## META — Monitor Metadata Regions
 
+> 📖 **Try it:** [Tutorial 7 — META Regions](../cli/tutorials.md) demonstrates all META semantics interactively.
+
 A region sent with `META` is **metadata memory allocated for the monitor's use** within the receiving domain. It has a distinct set of semantics compared to ordinary sent regions:
 
 | Property | Behaviour |
@@ -152,6 +154,8 @@ This is validated at creation and never re-checked — the invariant is structur
 ---
 
 ## Allowed Operations
+
+> 📖 **Try it:** Tutorials [1 (carve)](../cli/tutorials.md), [2 (alias)](../cli/tutorials.md), and [3 (send)](../cli/tutorials.md) walk through these operations interactively.
 
 ### `carve` — Create an Exclusive Child
 

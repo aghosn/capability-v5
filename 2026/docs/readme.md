@@ -12,13 +12,16 @@ docs/
 │   ├── api.md             — end-to-end API flow using CLI-style operations
 │   ├── memory.md          — memory region capabilities: rights, attributes, operations
 │   └── domain.md          — domain capabilities: lifecycle, policy, operations
-└── implementation/        — implementation notes (how the engine does it)
-    ├── readme.md          — module overview and data-flow diagram
-    ├── capabilities.md    — Capability<T> internals, extension traits
-    ├── concurrency.md     — global RW lock, execute(), IPI/barrier protocol, loom
-    ├── updates.md         — Update enum, UpdateBatch, UpdateProcessor
-    ├── platform.md        — Platform trait, contract per method, reference implementations
-    └── switch.md          — SwitchManager, VP states, switching, interrupt routing
+├── implementation/        — implementation notes (how the engine does it)
+│   ├── readme.md          — module overview and data-flow diagram
+│   ├── capabilities.md    — Capability<T> internals, extension traits
+│   ├── concurrency.md     — global RW lock, execute(), IPI/barrier protocol, loom
+│   ├── updates.md         — Update enum, UpdateBatch, UpdateProcessor
+│   ├── platform.md        — Platform trait, contract per method, reference implementations
+│   └── switch.md          — SwitchManager, VP states, switching, interrupt routing
+└── cli/                   — CLI simulator documentation
+    ├── readme.md          — architecture, key concepts, quick start
+    └── tutorials.md       — tutorial index and authoring guide
 ```
 
 ## Where to Start
@@ -30,3 +33,5 @@ docs/
 **Working on the implementation?** Start with [implementation/readme.md](implementation/readme.md) for the module map, then dive into the specific module document.
 
 **Adding a new platform backend?** See [implementation/platform.md](implementation/platform.md).
+
+**Using the CLI simulator?** See [cli/readme.md](cli/readme.md) for architecture and commands, [cli/tutorials.md](cli/tutorials.md) for the 13 interactive tutorials.
