@@ -95,6 +95,7 @@ fn test_map_update() {
         physical,
         rights,
         shootdown_required,
+        ..
     } = &updates[0]
     {
         assert_eq!(*domain, 10);

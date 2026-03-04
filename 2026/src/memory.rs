@@ -253,6 +253,9 @@ pub struct MemoryRegion {
     pub access: Access,
     /// Hash of region content (if hash attribute is set)
     pub content_hash: Option<[u8; 32]>,
+    /// Authorized cache colors for this region.
+    #[cfg(feature = "cache_coloring")]
+    pub color_bitmap: Option<crate::translation::ColorBitmap>,
 }
 
 impl MemoryRegion {
@@ -263,6 +266,8 @@ impl MemoryRegion {
             status: RegionStatus::Exclusive,
             access: Access::new(start, size, Rights::RWX),
             content_hash: None,
+            #[cfg(feature = "cache_coloring")]
+            color_bitmap: None,
         }
     }
 
@@ -283,6 +288,8 @@ impl MemoryRegion {
             status: RegionStatus::Aliased,
             access,
             content_hash: None,
+            #[cfg(feature = "cache_coloring")]
+            color_bitmap: None,
         })
     }
 
@@ -304,6 +311,8 @@ impl MemoryRegion {
             status: self.status,
             access,
             content_hash: None,
+            #[cfg(feature = "cache_coloring")]
+            color_bitmap: None,
         })
     }
 

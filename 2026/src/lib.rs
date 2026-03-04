@@ -29,6 +29,9 @@ pub(crate) mod sync;
 pub mod update;
 pub mod view;
 
+#[cfg(feature = "address_translation")]
+pub mod translation;
+
 pub use attest::{attest_domain, attest_memory_region, enumerate_domain_tree, AttestationReport};
 pub use capability::{
     compute_address_space, Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership,
@@ -51,3 +54,8 @@ pub use update::{
 pub use view::{
     compute_view_from_capabilities, view_diff, AddressSpaceView, ViewRegion,
 };
+
+#[cfg(feature = "address_translation")]
+pub use translation::{AddressMap, MapEntry, MappingEntry};
+#[cfg(feature = "cache_coloring")]
+pub use translation::ColorBitmap;

@@ -35,6 +35,9 @@ pub enum Update {
         physical: u64,
         rights: Rights,
         shootdown_required: bool,
+        /// Authorized cache colors for this range.
+        #[cfg(feature = "cache_coloring")]
+        colors: Option<crate::translation::ColorBitmap>,
     },
 
     /// Zero memory region (for clean attribute)
@@ -132,6 +135,8 @@ impl UpdateBatch {
             physical,
             rights,
             shootdown_required,
+            #[cfg(feature = "cache_coloring")]
+            colors: None,
         });
     }
 

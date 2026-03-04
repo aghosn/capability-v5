@@ -466,6 +466,10 @@ pub struct Domain {
     /// Cached address-space view (kept up-to-date by all capability mutations)
     pub cached_view: AddressSpaceView,
 
+    /// Per-domain HPA↔GPA translation bookkeeping.
+    #[cfg(feature = "address_translation")]
+    pub address_map: crate::translation::AddressMap,
+
     /// Next pending capability ID
     next_pending_id: u64,
 }
@@ -484,6 +488,8 @@ impl Domain {
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(id),
+            #[cfg(feature = "address_translation")]
+            address_map: crate::translation::AddressMap::new(),
             next_pending_id: 0,
         };
         d.create_vprocessors();
@@ -502,6 +508,8 @@ impl Domain {
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(0),
+            #[cfg(feature = "address_translation")]
+            address_map: crate::translation::AddressMap::new(),
             next_pending_id: 0,
         };
         d.create_vprocessors();
@@ -524,6 +532,8 @@ impl Domain {
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
             cached_view: AddressSpaceView::new(u64::MAX),
+            #[cfg(feature = "address_translation")]
+            address_map: crate::translation::AddressMap::new(),
             next_pending_id: 0,
         }
     }
