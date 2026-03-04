@@ -23,15 +23,15 @@ Domain {
              create-domain
                    │
              ┌─────▼──────┐
-             │  Unsealed   │  ← being configured; cannot execute
-             └─────┬───────┘
+             │  Unsealed  │  ← being configured; cannot execute
+             └─────┬──────┘
                seal│
              ┌─────▼──────┐
-             │   Sealed    │  ← executable; policy frozen
-             └─────┬───────┘
+             │   Sealed   │  ← executable; policy frozen
+             └─────┬──────┘
             revoke │
              ┌─────▼──────┐
-             │  Revoked    │  ← permanently destroyed
+             │  Revoked   │  ← permanently destroyed
              └────────────┘
 ```
 
