@@ -657,16 +657,16 @@ Two feature gates, implemented in strict order.  The full `address_translation`
 stack (including CLI + loom) is completed and validated before any coloring
 logic touches the engine.
 
-### Phase 1 — `address_translation` foundation
+### Phase 1 — `address_translation` foundation ✅
 
-| Step | Scope | Depends on |
-|------|-------|------------|
-| **1a** | Cargo feature gate `address_translation` + `cache_coloring` (implies `address_translation`) in `Cargo.toml` | — |
-| **1b** | `translation.rs`: `AddressMap`, `MapEntry`, `MappingEntry`. | 1a |
+| Step | Scope | Status |
+|------|-------|--------|
+| **1a** | Cargo feature gate `address_translation` + `cache_coloring` (implies `address_translation`) in `Cargo.toml` | ✅ done |
+| **1b** | `translation.rs`: `AddressMap`, `MapEntry`, `MappingEntry`. | ✅ done |
 |        | Feature-gated `color_bitmap` field (no logic yet). |  |
-| **1c** | `AddressMap` methods: `insert`, `split`, `block`, | 1b |
+| **1c** | `AddressMap` methods: `insert`, `split`, `block`, | ✅ done |
 |        | `unblock`, `remove`, `translate` + unit tests |  |
-| **1d** | Feature-gated struct fields (non-invasive): | 1a |
+| **1d** | Feature-gated struct fields (non-invasive): | ✅ done |
 |        | `Domain.address_map`, `MemoryRegion.color_bitmap`, |  |
 |        | `ChangeRights.colors`. Compile but unused until later. |  |
 
