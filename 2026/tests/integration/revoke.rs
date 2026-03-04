@@ -459,3 +459,116 @@ fn test_revoke_mixed_carved_and_alias_subtree() {
     });
     assert!(alias_recv_unmap, "alias receiver must be unmapped on revoke");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Domain revocation with memory restore (#13)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// When a domain is revoked via `revoke_domain`, memory capabilities it owned
+/// must be revoked too so that ancestor domains regain access.
+#[test]
+fn test_revoke_domain_restores_memory_to_parent() {
+    let (root, _r0, r0_h) = bootstrap();
+    let root_id = root.read().data.id;
+
+    // Create child domain dom1 (unsealed)
+    let dom1_h =
+        Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom1 = root.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
+    let dom1_id = dom1.read().data.id;
+
+    // Carve [0x2000, 0x2000) RW from root memory and send to dom1
+    let c_access = Access::new(0x2000, 0x2000, Rights::RW);
+    let (child_h, _child_sub, _) = Capability::carve(&root, r0_h, c_access).unwrap();
+    let _send = Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+
+    // Revoke the domain — should restore memory to root
+    let updates = Capability::<Domain>::revoke_domain(&root, dom1_h).unwrap();
+    let list = updates.updates();
+
+    // Must contain ChangeRights restoring root's access
+    let has_restore = list.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == root_id && *address == 0x2000 && *size == 0x2000)
+    });
+    assert!(has_restore, "revoke_domain must restore memory to parent domain");
+
+    // Must contain ChangeRights unmapping from dom1
+    let has_unmap = list.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, shootdown_required: true, .. }
+            if *domain == dom1_id && *rights == Rights::NONE)
+    });
+    assert!(has_unmap, "revoke_domain must unmap memory from revoked domain");
+
+    // Must contain RevokeDomain for dom1
+    let has_revoke = list.iter().any(|u| {
+        matches!(u, Update::RevokeDomain { domain, .. } if *domain == dom1_id)
+    });
+    assert!(has_revoke, "revoke_domain must emit RevokeDomain");
+}
+
+/// Multi-level: root → dom1 (with memory) → dom2 (with sub-carved memory).
+/// Revoking dom1 must restore memory to root, including regions that dom1
+/// had carved and sent to dom2.
+#[test]
+fn test_revoke_domain_nested_memory_restore() {
+    let (root, _r0, r0_h) = bootstrap();
+    let root_id = root.read().data.id;
+
+    // Create dom1, carve and send [0x2000, 0x4000) RW
+    let dom1_h =
+        Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom1 = root.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
+    let dom1_id = dom1.read().data.id;
+
+    let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
+    let (c1_h, _, _) = Capability::carve(&root, r0_h, c1_access).unwrap();
+    Capability::send(&root, c1_h, dom1_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom1_h).unwrap();
+
+    // dom1 creates dom2 as its own child (so dom2 is transitively revoked)
+    let dom2_h_in_dom1 =
+        Capability::create(&dom1, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let dom2 = dom1.read().data.domain_capabilities[&dom2_h_in_dom1]
+        .upgrade()
+        .unwrap();
+    let dom2_id = dom2.read().data.id;
+
+    // dom1 carves [0x3000, 0x1000) R and sends to dom2
+    let c1_h_in_dom1: LocalHandle = 1;
+    let c2_access = Access::new(0x3000, 0x1000, Rights::R);
+    let (c2_h_in_dom1, _, _) = Capability::carve(&dom1, c1_h_in_dom1, c2_access).unwrap();
+    Capability::send(&dom1, c2_h_in_dom1, dom2_h_in_dom1, Attributes::NONE).unwrap();
+
+    // Revoke dom1 — should cascade to dom2 and restore all memory to root
+    let updates = Capability::<Domain>::revoke_domain(&root, dom1_h).unwrap();
+    let list = updates.updates();
+
+    // Root must regain the full [0x2000, 0x4000) region
+    let has_restore_root = list.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, shootdown_required: false, .. }
+            if *domain == root_id && *address == 0x2000 && *size == 0x4000)
+    });
+    assert!(has_restore_root, "root must regain the carved region after domain revocation");
+
+    // dom2 must be unmapped from [0x3000, 0x1000)
+    let has_unmap_dom2 = list.iter().any(|u| {
+        matches!(u, Update::ChangeRights { domain, address, size, rights, shootdown_required: true, .. }
+            if *domain == dom2_id && *address == 0x3000 && *size == 0x1000 && *rights == Rights::NONE)
+    });
+    assert!(has_unmap_dom2, "dom2 must be unmapped from its sub-carved region");
+
+    // Both domains must be revoked
+    let revoked_domains: Vec<u64> = list.iter()
+        .filter_map(|u| if let Update::RevokeDomain { domain, .. } = u { Some(*domain) } else { None })
+        .collect();
+    assert!(revoked_domains.contains(&dom1_id), "dom1 must be revoked");
+    assert!(revoked_domains.contains(&dom2_id), "dom2 must be revoked");
+}

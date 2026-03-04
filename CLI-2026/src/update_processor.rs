@@ -6,25 +6,25 @@ use std::collections::HashSet;
 use crate::state::CliState;
 
 /// Process an UpdateBatch returned from a capability operation.
-/// Core state management is now handled by CliPlatform::on_domain_revoked (called by execute()).
-/// This function only performs CliState HashMap cleanup.
+///
+/// The capability engine now generates all platform-level updates (ChangeRights,
+/// ZeroMemory, RevokeDomain) including memory restore on domain revocation.
+/// This function only cleans up the CLI's named-entry bookkeeping.
 pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
-    // 1. Collect revoked domain IDs from RevokeDomain updates
     let revoked_domains: HashSet<u64> = updates.updates().iter()
         .filter_map(|u| if let Update::RevokeDomain { domain, .. } = u { Some(*domain) } else { None })
         .collect();
 
-    // 2. Remove revoked domains from state and clean up their memory capabilities
     if !revoked_domains.is_empty() {
         println!("  Processing {} domain revocation(s)...", revoked_domains.len());
         for &domain_id in &revoked_domains {
-            if let Some(name) = state.get_domain_name(domain_id).map(|s| s.to_string()) {
-                // Remove owned memory capabilities
+            if let Some(name) = state.domain_id_to_name.remove(&domain_id) {
+                // Remove owned memory capabilities from CLI state
                 let owned_mems: Vec<String> = state.memories.iter()
                     .filter_map(|(n, m)| if m.read().owned.owner == domain_id { Some(n.clone()) } else { None })
                     .collect();
-                for mem_name in owned_mems {
-                    state.memories.remove(&mem_name);
+                for mem_name in &owned_mems {
+                    state.memories.remove(mem_name);
                     println!("    ✗ Removed memory capability '{}'", mem_name);
                 }
                 state.domains.remove(&name);
@@ -33,7 +33,7 @@ pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
         }
     }
 
-    // 3. Print MMU update summary
+    // Print MMU update summary
     let (mut maps, mut unmaps, mut zeros) = (0, 0, 0);
     for update in updates.updates() {
         match update {

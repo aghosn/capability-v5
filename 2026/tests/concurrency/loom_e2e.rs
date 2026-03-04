@@ -51,6 +51,11 @@
 //!                                            lock and try to revoke the same memory
 //!                                            child; one gets NotFound, 0 hardware
 //!                                            updates in every ordering.
+//! E9. `loom_e2e_domain_revoke_with_memory_vs_send` — revoke a child domain that
+//!                                            owns memory (exclusive) races against
+//!                                            a concurrent send (shared); memory
+//!                                            restore updates verified under all
+//!                                            interleavings.
 //!
 //! # Running
 //!
@@ -722,8 +727,10 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 // Because A holds the exclusive cap lock, A and B are strictly serialised —
 // no partial interleaving is possible.  Loom explores two orderings:
 //
-//  B-first: send succeeds → Map(ch1_id) applied; then A revokes → RevokeDomain.
-//           applied = [Map(ch1_id, 0x0, 0x1000), RevokeDomain(ch1_id)].
+//  B-first: send succeeds → Map(ch1_id) applied; then A revokes (ch1 now
+//           owns c1) → Unmap(ch1_id) + Restore(dom_id) + RevokeDomain.
+//           applied = [Unmap(dom), Map(ch1_id), Unmap(ch1_id),
+//                      Restore(dom), RevokeDomain(ch1_id)].
 //           Map must precede RevokeDomain in the log.
 //
 //  A-first: revoke removes h_child from dom's table → B's domain-cap lookup
@@ -789,29 +796,42 @@ fn loom_e2e_send_to_domain_being_revoked() {
         match res_b {
             Ok(()) => {
                 // B-first ordering: send generates Unmap(dom) + Map(ch1_id),
-                // then A revokes → RevokeDomain(ch1_id). Total: 3 updates.
-                assert_eq!(applied.len(), 3, "B-first: exactly 3 updates");
+                // then A revokes ch1 which now owns c1 →
+                //   Unmap(ch1_id) + Restore(dom_id) + RevokeDomain(ch1_id).
+                // Total: 5 updates.
+                assert_eq!(applied.len(), 5, "B-first: exactly 5 updates");
                 assert!(
                     applied.iter().any(|u| matches!(
                         u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. }
                         if *domain == dom_id && *rights == Rights::NONE
                     )),
-                    "B-first: Unmap(dom_id) must be present"
+                    "B-first: Unmap(dom_id) from send must be present"
                 );
                 assert!(
                     applied.iter().any(|u| matches!(
                         u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
                         if *domain == ch1_id
                     )),
-                    "B-first: Map(ch1_id) must be present"
+                    "B-first: Map(ch1_id) from send must be present"
                 );
+                // Memory restore: ch1's owned c1 is revoked back to dom.
+                let has_unmap_ch1 = applied.iter().any(|u| matches!(
+                    u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, shootdown_required: true, .. }
+                    if *domain == ch1_id && *rights == Rights::NONE
+                ));
+                assert!(has_unmap_ch1, "B-first: Unmap(ch1_id) from memory revoke must be present");
+                let has_restore_dom = applied.iter().any(|u| matches!(
+                    u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
+                    if *domain == dom_id
+                ));
+                assert!(has_restore_dom, "B-first: Restore(dom_id) from memory revoke must be present");
                 assert!(
                     applied.iter().any(|u| matches!(
                         u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
                     )),
                     "B-first: RevokeDomain(ch1_id) must be present"
                 );
-                // B ran before A: Map must appear before RevokeDomain.
+                // B ran before A: Map(ch1_id) must appear before RevokeDomain.
                 let map_pos = applied
                     .iter()
                     .position(|u| {
@@ -836,6 +856,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
             Err(e) => {
                 // A-first ordering: revoke removed h_child from dom's table before
                 // B could look it up → B gets NotFound.
+                // ch1 had no memory (B never ran) → only RevokeDomain applied.
                 assert_eq!(e, CapaError::NotFound, "A-first: B must get NotFound");
                 assert_eq!(applied.len(), 1, "A-first: only RevokeDomain applied");
                 assert!(
@@ -1240,5 +1261,162 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
             0,
             "no hardware updates for same-owner revoke"
         );
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E9 — Revoke a child domain that owns memory (exclusive) races against a
+//      concurrent send of a different cap (shared)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// | Thread A (exclusive cap lock)                    | Thread B (shared cap lock)                    |
+// |--------------------------------------------------|-----------------------------------------------|
+// | execute_exclusive → revoke_domain(dom, h_child)  | execute_shared → send(dom, h_c2, dh_r)       |
+//
+// Setup:
+//   1. dom (sealed root) with root_mem [0x0, 0x4000) at h_root.
+//   2. Carve c1 [0x0, 0x1000) RW from root_mem; send to ch1 (unsealed child).
+//   3. Carve c2 [0x2000, 0x1000) RW from root_mem for Thread B.
+//   4. Create unsealed receiver recv for Thread B.
+//
+// Thread A (exclusive): revoke_domain(dom, h_child).
+//   revoke_domain_subtree now revokes ch1's owned memory capabilities:
+//     ChangeRights(ch1_id, 0x0, 0x1000, NONE)      — unmap c1 from ch1
+//     ChangeRights(dom_id, 0x0, 0x1000, restore)    — restore c1 to dom
+//     RevokeDomain(ch1_id)
+//
+// Thread B (shared): send(dom, h_c2, dh_r, NONE).
+//   Immediate send (unsealed recv).
+//     ChangeRights(dom_id, 0x2000, 0x1000, NONE)    — unmap c2 from dom
+//     ChangeRights(recv_id, 0x2000, 0x1000, map)     — map c2 to recv
+//
+// Both orderings produce the same 5 updates (different order).
+#[test]
+fn loom_e2e_domain_revoke_with_memory_vs_send() {
+    loom::model(|| {
+        let (op_lock, ul, state) = new_exec_state();
+        let (dom, h_root, _root_mem) = make_root(0x4000);
+        let dom_id = dom.read().data.id;
+
+        // Carve c1 [0x0, 0x1000) and send to ch1 (so ch1 owns memory).
+        let (h_c1, _sub1, _) = Capability::<Domain>::carve(
+            &dom,
+            h_root,
+            Access::new(0x0000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c1");
+
+        let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
+            .expect("setup: create ch1");
+        let ch1_id: DomainId = dom
+            .read()
+            .data
+            .get_domain_capability(h_child)
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .read()
+            .data
+            .id;
+
+        // Send c1 to ch1 — immediate transfer (ch1 is unsealed).
+        Capability::<Domain>::send(&dom, h_c1, h_child, Attributes::NONE)
+            .expect("setup: send c1 to ch1");
+
+        // Carve c2 [0x2000, 0x1000) for Thread B to send.
+        let (h_c2, _sub2, _) = Capability::<Domain>::carve(
+            &dom,
+            h_root,
+            Access::new(0x2000, 0x1000, Rights::RW),
+        )
+        .expect("setup: carve c2");
+
+        // Create unsealed receiver for Thread B.
+        let dh_r = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
+            .expect("setup: create recv");
+        let recv_id: DomainId = dom
+            .read()
+            .data
+            .get_domain_capability(dh_r)
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .read()
+            .data
+            .id;
+
+        // Thread A (exclusive): revoke child domain that owns memory.
+        let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let ta = thread::spawn(move || {
+            execute_exclusive(&opl, &ul_a, &st, || {
+                let batch = Capability::<Domain>::revoke_domain(&d, h_child)?;
+                Ok(((), batch))
+            })
+        });
+
+        // Thread B (shared): send c2 to recv.
+        let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
+        let tb = thread::spawn(move || {
+            execute_shared(&opl, &ul_b, &st, || {
+                let batch = Capability::<Domain>::send(&d, h_c2, dh_r, Attributes::NONE)?;
+                Ok(((), batch))
+            })
+        });
+
+        ta.join().unwrap().expect("A: revoke_domain must succeed");
+        tb.join().unwrap().expect("B: send c2 must succeed");
+
+        let applied = state.lock().unwrap().applied.clone();
+
+        // A: 3 updates (unmap ch1 + restore dom + RevokeDomain)
+        // B: ≥2 updates (at least unmap dom + map recv from view diffs)
+        assert!(applied.len() >= 5, "at least 5 updates, got {}", applied.len());
+
+        // A: memory restored to dom
+        let has_restore = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
+                if *domain == dom_id
+            )
+        });
+        assert!(has_restore, "ChangeRights restoring c1 to dom must be present");
+
+        // A: unmap from ch1
+        let has_unmap_ch1 = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. }
+                if *domain == ch1_id && *rights == Rights::NONE
+            )
+        });
+        assert!(has_unmap_ch1, "ChangeRights(NONE) for ch1 must be present");
+
+        // A: RevokeDomain
+        let has_revoke = applied.iter().any(|u| {
+            matches!(
+                u, Update::RevokeDomain { domain, .. } if *domain == ch1_id
+            )
+        });
+        assert!(has_revoke, "RevokeDomain(ch1_id) must be present");
+
+        // B: map c2 to recv
+        let has_map_recv = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x2000, size: 0x1000, shootdown_required: false, .. }
+                if *domain == recv_id
+            )
+        });
+        assert!(has_map_recv, "Map(recv_id) from send must be present");
+
+        // B: unmap c2 from dom
+        let has_unmap_c2 = applied.iter().any(|u| {
+            matches!(
+                u, Update::ChangeRights { domain, address: 0x2000, size: 0x1000, rights, .. }
+                if *domain == dom_id && *rights == Rights::NONE
+            )
+        });
+        assert!(has_unmap_c2, "Unmap(dom_id, c2 range) from send must be present");
+
+        // dom's domain table must not contain h_child.
+        assert!(dom.read().data.get_domain_capability(h_child).is_none());
     });
 }

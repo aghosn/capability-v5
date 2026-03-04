@@ -360,7 +360,7 @@ impl Capability<MemoryRegion> {
     }
 
     /// Recursively revoke a capability subtree
-    fn revoke_subtree(capa_ref: &CapabilityRef<MemoryRegion>) -> Result<UpdateBatch> {
+    pub(crate) fn revoke_subtree(capa_ref: &CapabilityRef<MemoryRegion>) -> Result<UpdateBatch> {
         let mut capa = capa_ref.write();
 
         let mut updates = UpdateBatch::new();
@@ -565,13 +565,15 @@ impl Capability<Domain> {
 
     /// Recursively revoke a domain capability subtree.
     ///
-    /// Memory capabilities owned by a revoked domain are NOT automatically removed from the
-    /// capability tree. Their `owner_domain` Weak pointer becomes stale; future operations on
-    /// them return `PermissionDenied`. The parent memory capability retains these as children
-    /// in the tree until an ancestor domain explicitly calls `revoke`.
-    /// Walking memory trees during domain revocation would require holding memory and domain
-    /// locks simultaneously, violating the lock-ordering discipline — so cleanup is left to
-    /// the caller.
+    /// Revokes all child domains first (depth-first), then revokes any "root"
+    /// memory capabilities owned by this domain, i.e. memory capabilities whose
+    /// parent in the capability tree belongs to a different domain.  This generates
+    /// the `ChangeRights` restore updates so that ancestor domains regain access to
+    /// regions they had carved and sent into the revoked domain.
+    ///
+    /// Lock discipline: the domain write lock is dropped before touching memory
+    /// capabilities (only memory locks are acquired), then re-acquired for final
+    /// domain processing.
     fn revoke_domain_subtree(
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
@@ -581,11 +583,57 @@ impl Capability<Domain> {
         let mut updates = UpdateBatch::new();
 
         let children = mem::take(&mut domain.children);
+
+        // Snapshot memory capability weak refs and domain id while we hold the lock.
+        let mem_weak_refs: Vec<CapabilityWeak<MemoryRegion>> =
+            domain.data.memory_capabilities.values().cloned().collect();
+        let domain_id = domain.data.id;
+
         drop(domain);
 
         for child_ref in children {
             let child_updates = Self::revoke_domain_subtree(&child_ref, fallback)?;
             updates.merge(child_updates);
+        }
+
+        // Revoke root memory capabilities: those whose parent in the capability
+        // tree is owned by a different domain.  Child domains were already
+        // processed above, so any memory they held has already been detached
+        // from the tree.
+        for mem_weak in &mem_weak_refs {
+            if let Some(mem_ref) = mem_weak.upgrade() {
+                let info = {
+                    let m = mem_ref.read();
+                    let sub = m.sub_handle;
+                    match m.get_parent() {
+                        Some(parent_ref) => {
+                            let is_root = parent_ref.read().owned.owner != domain_id;
+                            Some((sub, parent_ref, is_root))
+                        }
+                        None => None,
+                    }
+                };
+                match info {
+                    Some((sub, parent_ref, true)) => {
+                        // NotFound means the capability was already revoked
+                        // from the tree (e.g. by an explicit revoke before the
+                        // domain revocation).  Safe to skip.
+                        match Capability::<MemoryRegion>::revoke_child(&parent_ref, sub) {
+                            Ok(mem_updates) => updates.merge(mem_updates),
+                            Err(CapaError::NotFound) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    None => {
+                        // Parentless root: should only occur for the initial
+                        // memory capability owned by the root domain.
+                        let mem_updates =
+                            Capability::<MemoryRegion>::revoke_subtree(&mem_ref)?;
+                        updates.merge(mem_updates);
+                    }
+                    _ => {} // Same-domain parent: handled transitively via a root ancestor.
+                }
+            }
         }
 
         let mut domain = domain_ref.write();
