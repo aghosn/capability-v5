@@ -1,0 +1,36 @@
+[package]
+name    = "capavisor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name              = "capavisor"
+path              = "src/main.rs"
+# build.rs emits the absolute path to linker.ld so cargo always finds it.
+
+[dependencies]
+capability-engine-v2  = { workspace = true }
+x86                   = { workspace = true }
+x2apic                = { workspace = true }
+acpi                  = { workspace = true }
+pci_types             = { workspace = true }
+spin                  = { workspace = true }
+limine                = { workspace = true }
+linked_list_allocator = { workspace = true }
+
+vtd          = { workspace = true }
+themis-abi   = { workspace = true }
+ept          = { workspace = true }
+capavisor-pt = { workspace = true }
+
+[profile.dev]
+# No unwinding on bare metal — panic = abort.
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic    = "abort"
+opt-level = 3
+lto      = true
+codegen-units = 1
+strip    = false   # keep symbols for GDB

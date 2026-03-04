@@ -1,0 +1,11 @@
+[package]
+name    = "themis-abi"
+version = "0.1.0"
+edition = "2021"
+
+# no_std so it can be linked into both the bare-metal capavisor and a hosted
+# Linux kernel module (via FFI) without pulling in libstd.
+[features]
+default = []
+
+[dependencies]

@@ -1357,23 +1357,135 @@ Return:    RAX = error code (0 = success), RDI = first return value, RSI = secon
 
 ## Implementation Phases
 
-### Phase 0 — Workspace Setup
+### Phase 0 — Workspace Setup ✅
 
-- [ ] **P0a**: Create `themis/` workspace; `capavisor/` member with `#![no_std]` +
+- [x] **P0a**: Create `themis/` workspace; `capavisor/` member with `#![no_std]` +
   `#![no_main]` + `extern crate alloc`.
-  - Add `capability-engine-v2` path dep: `features = ["address_translation"]`,
+  - Added `capability-engine-v2` path dep: `features = ["address_translation"]`,
     `default-features = false`.
-  - Add `x86`, `x2apic`, `acpi`, `pci_types`, `spin`, `limine`, `linked_list_allocator`.
-- [ ] **P0b**: Linker script + `.cargo/config.toml` for `x86_64-unknown-none` target.
-- [ ] **P0c**: Extract EPT module from `asterinas/hyperenclave` → `crates/ept/`:
-  identify EPT source files, strip TEE-specific policy, adapt frame-allocation hook to
-  Themis's `FrameAllocator`, verify `no_std` compilation.
-  Vendor `verified-nrkernel` → `crates/capavisor-pt/`: confirm Verus proofs pass
-  (`verus crates/capavisor-pt/`), ensure non-Verus build path compiles for the capavisor binary.
-  Port `vmxvmm/crates/vtd/` → `crates/vtd/` (VT-d IOMMU register access).
-- [ ] **P0d**: QEMU development environment:
-  - `qemu-system-x86_64 -enable-kvm -cpu host,+vmx -m 8G -smp 4 -cdrom limine.iso -s -S`
-  - GDB `.gdbinit`: load capavisor ELF symbols + vmlinux symbols at correct addresses.
+  - Added `x86`, `x2apic`, `acpi`, `pci_types`, `spin`, `limine`, `linked_list_allocator`.
+  - Added `rust-toolchain.toml` pinned to nightly (required by `x2apic→x86_64/nightly`
+    and `acpi 6.x/allocator_api`).
+- [x] **P0b**: Linker script (`capavisor/linker.ld`) higher-half at `0xffffffff80000000`;
+  `build.rs` emits absolute `-T` path; `.cargo/config.toml` sets `x86_64-unknown-none`
+  target + soft-float rustflags; Cargo aliases `iso`/`qemu`/`debug` → `scripts/*.sh`.
+- [x] **P0c**: Stubs created for `crates/ept/`, `crates/capavisor-pt/` (each with
+  detailed extraction plan in the source), and full port of `vmxvmm/crates/vtd/` →
+  `crates/vtd/` (local `PhysAddr`/`VirtAddr`/`FrameAllocator` types, bitflags 2.x fixes).
+- [x] **P0d**: QEMU dev environment: `scripts/build-iso.sh` (Limine ISO), `scripts/run-qemu.sh`
+  (`cargo qemu`, KVM+VMX, env knobs), `scripts/debug.sh` (`cargo debug`, QEMU `-s -S` +
+  rust-gdb attach), `themis.gdbinit` (symbol load, `print-cr3` helper).
+  `cargo check` passes cleanly on nightly.
+
+### Phase 0.5 — dom0 Linux Image & Bootloader Integration
+
+**Goal**: give Themis a real Linux kernel + rootfs to hand off as dom0, exercisable
+under QEMU from day one.  The disk image is *not* booted directly — Themis loads it,
+carves it into a domain, and schedules it across all cores before yielding to it.
+
+> **Scope**: this phase uses a **stock minimal Linux image** (Ubuntu cloud image or
+> equivalent) purely to exercise the kernel-loading and boot-params plumbing.  No
+> Themis-specific drivers or paravirtualisation are expected to work at this stage.
+> A dedicated later phase (see *Phase 14 — Custom dom0 Image*) covers building a
+> purpose-built dom0 image with the `themis-vmm.ko` driver, stripped-down config, and
+> any required device support compiled in.
+
+#### Rationale
+
+Limine already supports a "modules" protocol: extra files (kernel ELF, initrd, etc.)
+can be listed in `limine.cfg` and the bootloader will load them into memory before
+jumping to Themis.  Themis reads the Limine module list, finds the Linux kernel ELF
+and initrd, and places them into the dom0 address range before first VMENTRY.
+
+Using a stock cloud image for QEMU development avoids building a custom kernel; once
+the loading path is exercised the same flow works with a bespoke hardened dom0 kernel.
+
+#### Sub-tasks
+
+- [ ] **P0.5a** — Linux kernel binary for dom0:
+  - Obtain a pre-built `vmlinuz` (compressed bzImage) from a Debian/Ubuntu cloud image
+    or from a minimal `defconfig` kernel build.
+  - Preferred: download the official **Ubuntu Minimal Cloud Image**
+    (`ubuntu-24.04-minimal-cloudimg-amd64.img`, squashfs) and extract kernel +
+    initrd from it (`/boot/vmlinuz-*`, `/boot/initrd.img-*`).
+  - Script: `scripts/fetch-dom0.sh` — downloads image, extracts kernel + initrd via
+    `guestfish` or `7z`, places them under `guest/dom0/vmlinuz` and
+    `guest/dom0/initrd.img`.
+  - Kernel command line to be passed by Themis:
+    `root=/dev/vda1 console=ttyS0 earlyprintk=serial,ttyS0 nokaslr quiet`
+    (KASLR off simplifies address-layout debugging during bringup).
+
+- [ ] **P0.5b** — Limine module declarations:
+  - Update `scripts/build-iso.sh` to copy `guest/dom0/vmlinuz` and
+    `guest/dom0/initrd.img` into the ISO tree.
+  - Update the Limine config template:
+    ```
+    /Themis Capavisor
+        PROTOCOL=limine
+        KERNEL_PATH=boot:///boot/capavisor
+        MODULE_PATH=boot:///boot/dom0/vmlinuz
+        MODULE_PATH=boot:///boot/dom0/initrd.img
+    ```
+  - Limine delivers modules via `ModuleRequest` / `ModuleResponse`; add
+    `limine::request::ModuleRequest` to `capavisor/src/main.rs`.
+
+- [ ] **P0.5c** — Themis module-discovery stub:
+  - In `_start`, after `BASE_REVISION` check, iterate `MODULE_RESPONSE.modules()`
+    and log (via `core::fmt::Write` to a Limine terminal or serial) each module's
+    base address and size.
+  - Introduce `capavisor::guest::ModuleInfo { base: u64, size: u64, name: &str }`
+    and a `find_module(name)` helper.
+  - Add a `guest/` sub-module tree to the `capavisor` crate for dom0-loading logic.
+
+- [ ] **P0.5d** — Linux kernel header parsing:
+  - Parse the `linux_boot_params` / `boot_protocol` header at offset 0x1f1 inside
+    the bzImage to extract:  `kernel_alignment`, `init_size`, `pref_address`,
+    `payload_offset` (compressed payload start), `payload_length`.
+  - Define `capavisor::guest::linux::BootHeader` mirroring the relevant fields
+    (refs: Linux `arch/x86/include/uapi/asm/bootparam.h`, boot protocol §4).
+  - This will be used in Phase 7 when setting up the dom0 address space and
+    `struct boot_params` for the guest.
+
+- [ ] **P0.5e** — QEMU disk image (optional block device path):
+  - As an alternative to the Limine-module approach: create a virtio-blk QCOW2 image
+    containing the dom0 filesystem, passed to QEMU as `-drive file=guest/dom0.qcow2`.
+  - During Phase 7 dom0 boot, Themis passes the virtual disk's PCI BDF to the dom0
+    Linux kernel via `boot_params.hdr.cmdline`.
+  - Script: `scripts/create-dom0-disk.sh` — creates `guest/dom0.qcow2` via
+    `qemu-img create` + `mkfs.ext4`, populates with BusyBox rootfs or debootstrap.
+  - **Recommended for now**: use `noroot` / initrd-only approach (P0.5a–P0.5d) to
+    avoid disk I/O complexity until the virtio-blk backend is implemented.
+
+- [ ] **P0.5f** — `.gdbinit` update:
+  - Once P0.5c is working, extend `themis.gdbinit` with an `add-symbol-file` for the
+    uncompressed Linux vmlinux at the address Themis places it in memory.
+  - Add a `dmesg-hint` command that prints the GPA range of the dom0 kernel text
+    section (read from the Themis domain descriptor).
+
+#### Design notes
+
+**Why bzImage, not ELF?**
+Limine natively boots Limine-protocol kernels.  Linux is *not* a Limine kernel; we
+load it ourselves.  A bzImage is the standard deliverable from `make bzImage`.  Themis
+must decompress the payload (gzip/zstd depending on kernel config) and place the
+decompressed image at the correct aligned address before VMENTRY.  For early
+development, build Linux with `CONFIG_KERNEL_UNCOMPRESSED=y` to skip decompression.
+
+**Address placement**
+Linux boot protocol v2.12+ declares `pref_address` (preferred load address, typically
+`0x1000000` = 16 MiB).  Themis should honour this during Phase 7; for Phase 0.5 we
+only parse and print it.
+
+**Boot params page**
+The `struct boot_params` page (4 KiB, zero-filled, then populated by the loader) is
+conventionally placed at `0x10000`.  Themis writes `hdr`, `e820_table`,
+`ext_ramdisk_image`, `ext_ramdisk_size` into it, then sets `rsi = boot_params_gpa`
+before the first VMENTRY into dom0.
+
+**Limine terminal for early output**
+Before serial UART is initialized (Phase 1b), the Limine terminal (`TerminalRequest`)
+is available for `print!`-style debug output.  Add it as a temporary dependency in
+`_start` so module discovery results are visible during bringup.
 
 ### Phase 1 — Boot, Memory, ACPI, PCI
 
@@ -1693,6 +1805,72 @@ CPU feature flag. Depends on Phase 2 (VT-x provides the pattern).
 - [ ] **P13h**: `arch/x86_64/svm.rs`: implement `Arch` trait for SVM path, mirroring
   `arch/x86_64/vmx.rs` structure. Runtime dispatch in `arch/x86_64/mod.rs`:
   `if cpu_features.vmx { vmx::run() } else if cpu_features.svm { svm::run() }`.
+
+### Phase 14 — Custom dom0 Image
+
+**Goal**: replace the stock minimal Linux kernel used in Phase 0.5 with a
+purpose-built dom0 image that has Themis-native drivers compiled in, a stripped
+configuration, and the correct device support for bare-metal operation.
+
+This is intentionally deferred until Phase 12 (`themis-vmm.ko`) is functional,
+because the dom0 image needs to include that driver.
+
+#### Sub-tasks
+
+- [ ] **P14a** — Kernel configuration:
+  - Start from `make defconfig` + `make kvm_guest.config` as a baseline.
+  - Strip all unnecessary drivers, filesystems, and subsystems.
+  - Enable only: virtio-blk, virtio-net, 9p/virtio-fs (for host filesystem sharing),
+    serial console, x86 platform quirks required for bare metal.
+  - Disable: KASLR, DEBUG_INFO_BTF (speeds up build), unnecessary crypto.
+  - Keep: `CONFIG_KVM_GUEST=n` (we are not a KVM guest), `CONFIG_HYPERVISOR_GUEST=y`
+    (for paravirt hooks Themis may eventually exploit).
+  - Ship a committed `guest/dom0/kernel.config` in the repository.
+
+- [ ] **P14b** — `themis-vmm.ko` integration:
+  - The kernel config must be built with module support enabled.
+  - After P14a kernel build, compile `themis-vmm.ko` against the kernel source tree
+    (out-of-tree module build: `make -C <kernel_src> M=<driver_src>`).
+  - Pack the module into the initrd via a `scripts/pack-dom0-initrd.sh` helper that
+    uses `gen_init_cpio` or `dracut --no-compress`.
+
+- [ ] **P14c** — Minimal rootfs:
+  - Use **Alpine Linux mini rootfs** or **BusyBox static** for a small footprint.
+  - The rootfs must auto-load `themis-vmm.ko` on boot (add to `/etc/modules` or
+    an init script).
+  - Provide a minimal init (`/sbin/init` or a custom PID-1 written in Rust) that:
+    1. Loads `themis-vmm.ko`.
+    2. Opens `/dev/themis` and performs the `THEMIS_REGISTER_CHILD_CREATE` hypercall
+       to advertise dom0's child-creation capability to Themis.
+    3. Spawns a getty on `ttyS0` for interactive debugging.
+
+- [ ] **P14d** — Build script `scripts/build-dom0.sh`:
+  - Fetches kernel source at pinned tag (e.g. `v6.8`).
+  - Applies config from `guest/dom0/kernel.config`.
+  - Builds `bzImage` + out-of-tree `themis-vmm.ko`.
+  - Assembles initrd with rootfs + module.
+  - Outputs `guest/dom0/vmlinuz` and `guest/dom0/initrd.img`, replacing the
+    cloud-image-extracted versions from Phase 0.5a.
+
+- [ ] **P14e** — Validation:
+  - Boot under QEMU; verify serial console output shows kernel + driver messages.
+  - Confirm `themis-vmm.ko` loads without errors (module params, `/proc/themis` or
+    similar sysfs node visible).
+  - Run a basic child-domain creation smoke test via the driver.
+
+#### Design notes
+
+**Kernel version policy**: pin to an LTS kernel (6.6 or 6.12) and update
+intentionally.  The `themis-vmm.ko` driver will need to track the KVM/mshv API
+surface it borrows from; a pinned kernel version prevents surprise breakage.
+
+**No KVM inside dom0**: dom0 must not be allowed to load `kvm.ko` or `kvm-intel.ko`.
+The kernel config should have `CONFIG_KVM=n` to prevent accidental use of the
+in-kernel hypervisor from inside a Themis domain.
+
+**Long-term**: the custom dom0 image is a candidate for reproducible builds
+(Nix flake or BitBake/Yocto) so the exact kernel + rootfs can be reproduced from
+source for audit purposes.  This is a post-MVP concern.
 
 
 

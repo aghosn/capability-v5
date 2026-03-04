@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "capavisor",
+    "crates/vtd",
+    "crates/themis-abi",
+    "crates/ept",
+    "crates/capavisor-pt",
+]
+resolver = "2"
+
+# Shared dependency versions for all workspace members.
+[workspace.dependencies]
+capability-engine-v2 = { path = "../2026", default-features = false, features = ["address_translation"] }
+
+x86                    = { version = "0.52",  default-features = false }
+x2apic                 = { version = "0.5",   default-features = false }
+acpi                   = { version = "6",     default-features = false }
+pci_types              = { version = "0.10",  default-features = false }
+spin                   = { version = "0.10",  default-features = false, features = ["mutex", "spin_mutex", "rwlock"] }
+limine                 = { version = "0.5",   default-features = false }
+linked_list_allocator  = { version = "0.10",  default-features = false, features = ["use_spin"] }
+bitflags               = { version = "2",     default-features = false }
+
+# Workspace-internal crates
+vtd          = { path = "crates/vtd" }
+themis-abi   = { path = "crates/themis-abi" }
+ept          = { path = "crates/ept" }
+capavisor-pt = { path = "crates/capavisor-pt" }

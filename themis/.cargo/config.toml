@@ -1,0 +1,16 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    # Soft-float ABI (no SSE in early boot before FPU init)
+    "-C", "target-feature=-mmx,-sse,-sse2",
+]
+
+[alias]
+# Build the Limine bootable ISO
+iso   = ["!bash", "scripts/build-iso.sh"]
+# Build ISO and run in QEMU (no debugger)
+qemu  = ["!bash", "scripts/run-qemu.sh"]
+# Build ISO and run QEMU with -s -S; attach GDB in the same terminal
+debug = ["!bash", "scripts/debug.sh"]
