@@ -145,6 +145,36 @@ impl UpdateBatch {
         &self.updates
     }
 
+    /// Rewrite `ChangeRights.address` from HPA to GPA for one domain.
+    ///
+    /// Searches the domain's [`AddressMap`] (both `Mapped` and `Blocked`
+    /// entries) for the matching HPA and replaces the `address` field
+    /// with the corresponding GPA.  Updates whose HPA has no translation
+    /// are left unchanged (identity mapping fallback).
+    #[cfg(feature = "address_translation")]
+    pub fn fixup_domain_addresses(
+        &mut self,
+        domain_id: DomainId,
+        map: &crate::translation::AddressMap,
+    ) {
+        for update in &mut self.updates {
+            if let Update::ChangeRights {
+                domain,
+                address,
+                size,
+                physical,
+                ..
+            } = update
+            {
+                if *domain == domain_id {
+                    if let Some(gpa) = map.find_gpa_for_hpa(*physical, *size) {
+                        *address = gpa;
+                    }
+                }
+            }
+        }
+    }
+
     /// Get all affected domains
     pub fn affected_domains(&self) -> &BTreeSet<DomainId> {
         &self.affected_domains

@@ -590,26 +590,74 @@ Memory region:
 
 ### 7.1 Engine API Changes
 
-When `feature = "address_translation"` is active:
+#### `send` / `send_at`
+
+The existing `send()` signature is unchanged.  A new `send_at()` method
+accepts the GPA hint:
 
 ```rust
-// Carve with optional color bitmap
-Capability::carve(caller, parent_handle, access, colors: Option<ColorBitmap>)
+/// Send with identity GPA (backward compatible).
+pub fn send(caller, cap, receiver, attrs) -> Result<UpdateBatch> {
+    Self::send_at(caller, cap, receiver, attrs, None)
+}
 
-// Send with optional GPA hint
-Capability::send(caller, mem_handle, target_handle, attrs, gpa_hint: Option<u64>)
+/// Send with optional GPA hint for the receiver's AddressMap.
+/// When `gpa_hint` is `None`, the receiver gets identity GPA = HPA.
+/// When `Some(gpa)`, the receiver's AddressMap places the region
+/// at the requested GPA.
+pub fn send_at(
+    caller, cap, receiver, attrs,
+    gpa_hint: Option<u64>,
+) -> Result<UpdateBatch>
 ```
 
-When the feature is absent, these parameters don't exist and the API is
-unchanged.  This can be achieved with a wrapper type:
+#### `accept` / `accept_at`
+
+Same pattern.  `accept()` uses the sender's hint; `accept_at()` lets the
+receiver override it:
 
 ```rust
-#[cfg(feature = "address_translation")]
-pub struct TranslationParams {
-    #[cfg(feature = "cache_coloring")]
-    pub color_bitmap: Option<ColorBitmap>,
+/// Accept using the sender's GPA hint (or identity if none).
+pub fn accept(receiver, pending_id) -> Result<(LocalHandle, UpdateBatch)> {
+    Self::accept_at(receiver, pending_id, None)
+}
+
+/// Accept with optional GPA override.
+/// If `gpa_hint` is `Some(gpa)`, it overrides the sender's hint.
+/// If `None`, the sender's original hint is used.
+pub fn accept_at(
+    receiver, pending_id,
+    gpa_hint: Option<u64>,
+) -> Result<(LocalHandle, UpdateBatch)>
+```
+
+Neither `gpa_hint` parameter is feature-gated — the methods always exist
+so callers don't need `#[cfg(...)]`.  When `address_translation` is
+disabled, hints are accepted but ignored.
+
+**Sealed-domain path**: `send_at` stores the hint in `PendingCapability`
+(feature-gated field).  `accept()` reads the stored hint and passes it
+to `AddressMap::insert`, so the GPA requested at send time is honoured
+even when the transfer is deferred.
+
+#### `PendingCapability`
+
+```rust
+pub struct PendingCapability {
+    pub cap: CapabilityWeak<MemoryRegion>,
+    pub sender_domain_id: DomainId,
+    pub sender_handle: LocalHandle,
+    pub sender_domain: CapabilityWeak<Domain>,
+    #[cfg(feature = "address_translation")]
     pub gpa_hint: Option<u64>,
 }
+```
+
+#### `carve` (future — Phase 5)
+
+```rust
+// Carve with optional color bitmap (cache_coloring only)
+Capability::carve(caller, parent_handle, access, colors: Option<ColorBitmap>)
 ```
 
 ### 7.2 Platform API Changes
@@ -670,7 +718,7 @@ logic touches the engine.
 |        | `Domain.address_map`, `MemoryRegion.color_bitmap`, |  |
 |        | `ChangeRights.colors`. Compile but unused until later. |  |
 
-### Phase 2 — Hook into engine operations
+### Phase 2 — Hook into engine operations ✅
 
 | Step | Scope | Depends on |
 |------|-------|------------|
@@ -680,15 +728,22 @@ logic touches the engine.
 | **2d** | `view_diff` post-processing: `fixup_updates` rewrites `ChangeRights.address` (HPA→GPA) using `AddressMap::translate` | 2a, 2b, 2c |
 | **2e** | Integration tests: send/carve/revoke with non-identity GPA hints, verify `ChangeRights` updates carry correct GPA and HPA | 2d |
 
+### Phase 2.5 — GPA hint in engine API ✅
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **2.5a** | `send()` accepts `#[cfg(feature = "address_translation")] gpa_hint: Option<u64>`, threaded through to `send_memory_unsealed` and the pending-queue path for sealed receivers. `accept()` reads the stored hint from the pending entry and passes it to `AddressMap::insert`. | 2b |
+| **2.5b** | Integration tests: send with explicit `gpa_hint`, verify receiver's AddressMap has non-identity GPA, verify `ChangeRights` for receiver carries the requested GPA | 2.5a |
+
 ### Phase 3 — Attestation + CLI + Loom (translation only)
 
 | Step | Scope | Depends on |
 |------|-------|------------|
 | **3a** | Attestation: include GPA base per memory region in report | 2d |
 | **3b** | CLI: display GPA alongside HPA in address-space view and `attest` output | 3a |
-| **3c** | CLI: `send` command accepts optional GPA hint argument | 2d |
+| **3c** | CLI: `send` command accepts optional GPA hint argument, passes it to the engine's `send()` | 2.5a |
 | **3d** | Tutorial: update or add a tutorial demonstrating non-identity GPA mapping | 3b, 3c |
-| **3e** | Loom tests: concurrent `send` + `revoke` with `address_translation` enabled, verify `AddressMap` consistency | 2d |
+| **3e** | Loom tests: concurrent `send` + `revoke` with `address_translation` enabled, verify `AddressMap` consistency | 2.5a |
 
 **Checkpoint**: at this point the full `address_translation` feature is
 implemented, tested (unit + integration + loom), and usable from the CLI.
@@ -767,3 +822,89 @@ The following questions were resolved during design review:
 ### Remaining Open Questions
 
 All resolved — see decisions 6–8 above.
+
+---
+
+## 12. Implementation Notes
+
+Key implementation details discovered and resolved during Phase 2/2.5.
+
+### 12.1 Deadlock avoidance in `revoke_subtree`
+
+`Capability::revoke()` holds `caller.write()` (the caller domain's
+write lock) while calling `revoke_subtree()` recursively on the
+capability subtree.  A capability in the subtree may be **owned by the
+caller** (e.g. an alias created before its parent was sent cross-domain).
+The address-translation hooks in `revoke_subtree` need to read/write the
+child's owner domain's `AddressMap`, which would deadlock if the owner
+IS the caller.
+
+**Solution**: use `try_read()` / `try_write()` (non-blocking) when
+accessing the child domain's `AddressMap` from `revoke_subtree`.  If the
+lock cannot be acquired (because the caller already holds the write
+lock), the GPA lookup falls back to HPA and the cleanup is skipped.
+The top-level `revoke()` compensates:
+
+- **Unblock**: `revoke()` scans the returned updates for
+  `ChangeRights(caller, ..., rights, shootdown=false)` and calls
+  `AddressMap::unblock` on the caller's map.
+- **Alias unmaps**: `ChangeRights(caller, ..., NONE, shootdown=true)`
+  from alias revocations are **not** processed as removals because
+  aliases never had their own `AddressMap` entry in the caller — the
+  caller's entry is for the carved parent, not the alias.
+
+`try_read` / `try_write` were added to the loom sync wrapper
+(`src/sync.rs`) for compatibility across all three RwLock backends
+(parking_lot, spin, loom).
+
+### 12.2 Coalescing after unblock
+
+`AddressMap::unblock` restores a `Blocked` entry to `Mapped` and calls
+`try_coalesce`, which merges adjacent entries with identical rights and
+contiguous HPA ranges.  After a revoke, the original pre-split state is
+restored if all neighbours match.  Tests must use `translate()` rather
+than direct entry lookup at a specific GPA, since the entry may have
+been absorbed into a larger coalesced mapping.
+
+### 12.3 `fixup_domain_addresses` placement
+
+`fixup_domain_addresses(domain_id, &AddressMap)` rewrites the `address`
+field of every `ChangeRights` update for the given domain from HPA to
+GPA.  It must be called **after** all `AddressMap` mutations (split,
+block, unblock, insert) but **before** dropping the domain write lock,
+so that the `AddressMap` is in its final state when the lookup runs.
+
+In `revoke_subtree`, `fixup_domain_addresses` is NOT called — the
+subtree doesn't know all domains' maps.  Instead, the top-level
+`revoke()` and `send`/`accept` apply the fixup for each affected
+domain while their write locks are held.
+
+### 12.4 GPA conflict → `RegionOverlap` error
+
+`send_at` and `accept_at` validate the requested GPA range **before**
+any mutations.  If the receiver's `AddressMap` already has an entry
+(Mapped or Blocked) that overlaps `[gpa_base, gpa_base + size)`, the
+operation returns `CapaError::RegionOverlap` and the capability is
+rolled back to the caller (for `send_at`) or the pending entry is
+re-inserted (for `accept_at`).
+
+This is a pre-check, not a rollback: domain write locks are held but
+no mutations have occurred yet, so there is nothing to undo except
+the table removals performed before the check.
+
+### 12.5 View-aware insert
+
+When a capability with carved children is sent (or accepted), the
+receiver's `AddressMap` must reflect the **view** — i.e. the visible
+ranges after subtracting carved-away sub-regions:
+
+1. `compute_view()` returns sorted visible `Access` ranges.
+2. `insert_view_aware` walks the full HPA range `[hpa_start, hpa_end)`,
+   inserting `Mapped` entries for ranges in the view and `Blocked` entries
+   for gaps (carved-away sub-regions).  Each entry is placed at the
+   corresponding GPA offset from `gpa_base`.
+
+This ensures the receiver cannot fill a carved-away gap with another
+capability (the `Blocked` entry causes an overlap check to fail).
+When the carved child is later revoked, the `unblock` path restores
+the parent entry in the receiver's map.

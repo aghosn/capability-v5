@@ -421,6 +421,9 @@ pub struct PendingCapability {
     pub sender_handle: LocalHandle,
     /// Weak ref to sender's domain (to unfreeze on reject)
     pub sender_domain: CapabilityWeak<Domain>,
+    /// Optional GPA hint for the receiver's AddressMap.
+    #[cfg(feature = "address_translation")]
+    pub gpa_hint: Option<u64>,
 }
 
 /// Pending channel capability in transit (sent but not yet accepted by the receiver).
@@ -576,6 +579,8 @@ impl Domain {
     /// Revoke the domain
     pub fn revoke(&mut self) {
         self.status = DomainStatus::Revoked;
+        #[cfg(feature = "address_translation")]
+        self.address_map.clear();
     }
 
     /// Register a memory capability owned by this domain

@@ -140,6 +140,11 @@ impl AddressMap {
         &self.entries
     }
 
+    /// Mutable access to the entries map.
+    pub fn entries_mut(&mut self) -> &mut BTreeMap<u64, MapEntry> {
+        &mut self.entries
+    }
+
     /// Register a new GPA→HPA mapping.
     ///
     /// If `gpa_hint` is `Some`, uses that GPA (rejects if it overlaps
@@ -322,6 +327,55 @@ impl AddressMap {
         self.entries.remove(&gpa).ok_or("no entry at GPA")
     }
 
+    /// Remove all entries whose HPA range falls within `[hpa, hpa+size)`.
+    ///
+    /// Used during revocation to clean up a domain's AddressMap for
+    /// a revoked HPA range that may have been split into multiple
+    /// GPA entries.
+    pub fn remove_by_hpa_range(&mut self, hpa: u64, size: u64) {
+        let hpa_end = hpa + size;
+        let to_remove: alloc::vec::Vec<u64> = self
+            .entries
+            .iter()
+            .filter_map(|(&gpa, entry)| {
+                let (e_hpa, e_size) = match entry {
+                    MapEntry::Mapped(m) => (m.hpa_start, m.size),
+                    MapEntry::Blocked { hpa_start, size } => (*hpa_start, *size),
+                };
+                if e_hpa >= hpa && e_hpa + e_size <= hpa_end {
+                    Some(gpa)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for gpa in to_remove {
+            self.entries.remove(&gpa);
+        }
+    }
+
+    /// Find the GPA corresponding to an HPA range, searching both
+    /// `Mapped` and `Blocked` entries.
+    ///
+    /// Returns the GPA start (with offset applied) if found.
+    pub fn find_gpa_for_hpa(&self, hpa: u64, size: u64) -> Option<u64> {
+        for (&gpa, entry) in &self.entries {
+            let (e_hpa, e_size) = match entry {
+                MapEntry::Mapped(m) => (m.hpa_start, m.size),
+                MapEntry::Blocked { hpa_start, size } => (*hpa_start, *size),
+            };
+            if hpa >= e_hpa && hpa + size <= e_hpa + e_size {
+                return Some(gpa + (hpa - e_hpa));
+            }
+        }
+        None
+    }
+
+    /// Drop all entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Translate an HPA range to GPA.
     ///
     /// Finds the entry whose HPA range contains the given address.
@@ -346,7 +400,7 @@ impl AddressMap {
     // ── internal helpers ────────────────────────────────────────────
 
     /// Check if [gpa, gpa+size) overlaps any existing entry.
-    fn overlaps(&self, gpa: u64, size: u64) -> bool {
+    pub fn overlaps(&self, gpa: u64, size: u64) -> bool {
         let end = gpa + size;
         // Check entry just before or at `gpa`.
         if let Some((&e_gpa, entry)) = self.entries.range(..end).next_back() {

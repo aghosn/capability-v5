@@ -45,6 +45,14 @@ mod loom_rwlock {
         pub fn write(&self) -> loom::sync::RwLockWriteGuard<'_, T> {
             self.0.write().unwrap()
         }
+
+        pub fn try_read(&self) -> Option<loom::sync::RwLockReadGuard<'_, T>> {
+            self.0.try_read().ok()
+        }
+
+        pub fn try_write(&self) -> Option<loom::sync::RwLockWriteGuard<'_, T>> {
+            self.0.try_write().ok()
+        }
     }
 }
 

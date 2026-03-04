@@ -11,6 +11,9 @@ use crate::memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus};
 use crate::platform::Platform;
 use crate::switch::{SwitchContext, VpInterruptContext};
 use crate::sync::RwLock;
+#[cfg(feature = "address_translation")]
+use crate::update::{CoreId, DomainId, Update, UpdateBatch};
+#[cfg(not(feature = "address_translation"))]
 use crate::update::{CoreId, DomainId, UpdateBatch};
 use crate::view::{compute_view_from_cap_arcs, view_diff, AddressSpaceView};
 use alloc::string::ToString;
@@ -374,54 +377,108 @@ impl Capability<MemoryRegion> {
             updates.merge(child_updates);
         }
 
-        // Re-acquire lock to process this capability
+        // Re-acquire lock to extract all needed info.
         let capa = capa_ref.read();
 
-        // Check if we need to clean memory
-        if capa.owned.attributes.clean() {
-            updates.add_zero_memory(capa.data.access.start, capa.data.access.size);
-        }
+        let hpa_start = capa.data.access.start;
+        let hpa_size = capa.data.access.size;
+        let child_owner = capa.owned.owner;
+        let kind = capa.data.kind;
+        let clean = capa.owned.attributes.clean();
+        let vital = capa.owned.attributes.vital();
+        let meta = capa.owned.attributes.meta();
 
-        if capa.data.kind == RegionKind::Carve {
-            if let Some(parent_ref) = capa.get_parent() {
+        #[cfg(feature = "address_translation")]
+        let child_domain_weak = capa.owned.owner_domain.clone();
+
+        // Extract cross-domain info while we hold the lock.
+        let parent_info = if kind == RegionKind::Carve {
+            capa.get_parent().and_then(|parent_ref| {
                 let parent = parent_ref.read();
                 let parent_owner = parent.owned.owner;
-                let child_owner = capa.owned.owner;
-
                 if parent_owner != child_owner {
-                    // META regions are never mapped into the owner's address space,
-                    // so no unmap is needed for the child owner.
-                    if !capa.owned.attributes.meta() {
-                        updates.add_change_rights(child_owner, capa.data.access.start, capa.data.access.size, capa.data.access.start, crate::memory::Rights::NONE, true);
-                    }
+                    Some((parent_owner, parent.data.access.rights))
+                } else {
+                    None
+                }
+            })
+        } else if kind == RegionKind::Alias {
+            capa.get_parent().and_then(|parent_ref| {
+                let parent_owner = parent_ref.read().owned.owner;
+                if parent_owner != child_owner {
+                    Some((parent_owner, crate::memory::Rights::NONE))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
 
+        drop(capa);
+
+        // === Address translation: look up child's GPA ===
+        // Only needed when parent_info.is_some() (cross-domain transfer).
+        // Use try_read to avoid deadlock when child_owner is the top-level
+        // caller (whose domain write-lock is already held by revoke()).
+        #[cfg(feature = "address_translation")]
+        let child_gpa = if parent_info.is_some() {
+            child_domain_weak
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .and_then(|dom_ref| {
+                    dom_ref
+                        .try_read()
+                        .and_then(|dom| dom.data.address_map.find_gpa_for_hpa(hpa_start, hpa_size))
+                })
+                .unwrap_or(hpa_start)
+        } else {
+            hpa_start
+        };
+        #[cfg(not(feature = "address_translation"))]
+        let child_gpa = hpa_start;
+
+        // Check if we need to clean memory
+        if clean {
+            updates.add_zero_memory(hpa_start, hpa_size);
+        }
+
+        if kind == RegionKind::Carve {
+            if let Some((parent_owner, parent_rights)) = parent_info {
+                // META regions are never mapped into the owner's address space,
+                // so no unmap is needed for the child owner.
+                if !meta {
                     updates.add_change_rights(
-                        parent_owner,
-                        capa.data.access.start,
-                        capa.data.access.size,
-                        capa.data.access.start,
-                        parent.data.access.rights,
-                        false,
+                        child_owner,
+                        child_gpa,
+                        hpa_size,
+                        hpa_start,
+                        crate::memory::Rights::NONE,
+                        true,
                     );
                 }
+                updates.add_change_rights(
+                    parent_owner,
+                    hpa_start,
+                    hpa_size,
+                    hpa_start,
+                    parent_rights,
+                    false,
+                );
             }
         }
 
         // Aliased children share access with the parent but may have been sent to
         // another domain. Unmap from the receiver; do NOT remap the parent because
         // alias never removes parent access.
-        if capa.data.kind == RegionKind::Alias {
-            let child_owner = capa.owned.owner;
-            if let Some(parent_ref) = capa.get_parent() {
-                let parent_owner = parent_ref.read().owned.owner;
-                // META regions are never mapped into the owner's address space,
-                // so no unmap is needed.
-                if parent_owner != child_owner && !capa.owned.attributes.meta() {
+        if kind == RegionKind::Alias {
+            if let Some((_, _)) = parent_info {
+                if !meta {
                     updates.add_change_rights(
                         child_owner,
-                        capa.data.access.start,
-                        capa.data.access.size,
-                        capa.data.access.start,
+                        child_gpa,
+                        hpa_size,
+                        hpa_start,
                         crate::memory::Rights::NONE,
                         true,
                     );
@@ -429,8 +486,24 @@ impl Capability<MemoryRegion> {
             }
         }
 
-        if capa.owned.attributes.vital() {
-            updates.add_revoke_domain_with_fallback(capa.owned.owner, None);
+        // === Address translation: clean up child domain's AddressMap ===
+        // Use try_write to avoid deadlock when child_owner is the caller.
+        // If try_write fails, revoke() handles cleanup for the caller's map.
+        #[cfg(feature = "address_translation")]
+        if parent_info.is_some() {
+            if let Some(ref w) = child_domain_weak {
+                if let Some(dom_ref) = w.upgrade() {
+                    if let Some(mut dom) = dom_ref.try_write() {
+                        dom.data
+                            .address_map
+                            .remove_by_hpa_range(hpa_start, hpa_size);
+                    }
+                }
+            }
+        }
+
+        if vital {
+            updates.add_revoke_domain_with_fallback(child_owner, None);
         }
 
         Ok(updates)
@@ -627,8 +700,7 @@ impl Capability<Domain> {
                     None => {
                         // Parentless root: should only occur for the initial
                         // memory capability owned by the root domain.
-                        let mem_updates =
-                            Capability::<MemoryRegion>::revoke_subtree(&mem_ref)?;
+                        let mem_updates = Capability::<MemoryRegion>::revoke_subtree(&mem_ref)?;
                         updates.merge(mem_updates);
                     }
                     _ => {} // Same-domain parent: handled transitively via a root ancestor.
@@ -641,17 +713,32 @@ impl Capability<Domain> {
         // If this is a channel capability currently frozen (in transit), cancel
         // the pending entry in the receiver domain and unfreeze the sender's handle.
         if domain.is_channel() {
-            if let Some(recv_ref) = domain.owned.pending_receiver.as_ref().and_then(|w| w.upgrade()) {
+            if let Some(recv_ref) = domain
+                .owned
+                .pending_receiver
+                .as_ref()
+                .and_then(|w| w.upgrade())
+            {
                 let mut rw = recv_ref.write();
                 // Find and remove the pending entry for this channel
-                let pending_id = rw.data.pending_domain_capabilities.iter()
-                    .find(|(_, p)| p.cap.upgrade().map_or(false, |c| Arc::ptr_eq(&c, domain_ref)))
+                let pending_id = rw
+                    .data
+                    .pending_domain_capabilities
+                    .iter()
+                    .find(|(_, p)| {
+                        p.cap
+                            .upgrade()
+                            .map_or(false, |c| Arc::ptr_eq(&c, domain_ref))
+                    })
                     .map(|(id, _)| *id);
                 if let Some(id) = pending_id {
                     if let Some(pending) = rw.data.pending_domain_capabilities.remove(&id) {
                         if let Some(sender_ref) = pending.sender_domain.upgrade() {
                             if !Arc::ptr_eq(&sender_ref, domain_ref) {
-                                sender_ref.write().data.unfreeze_domain_handle(pending.sender_handle);
+                                sender_ref
+                                    .write()
+                                    .data
+                                    .unfreeze_domain_handle(pending.sender_handle);
                             }
                         }
                     }
@@ -671,6 +758,72 @@ impl Capability<Domain> {
 /// Must be called while holding the domain write lock
 /// (`&mut Capability<Domain>`). Acquiring cap read locks inside is safe
 /// because the domain write lock prevents concurrent table mutations.
+/// Insert a capability's view into the receiver's AddressMap.
+///
+/// Visible ranges (from `compute_view`) are inserted as `Mapped`.
+/// Carved-away gaps (ranges in `[hpa_start, hpa_start+size)` not covered
+/// by the view) are inserted as `Blocked`.
+#[cfg(feature = "address_translation")]
+fn insert_view_aware(
+    map: &mut crate::translation::AddressMap,
+    hpa_start: u64,
+    size: u64,
+    gpa_base: u64,
+    view: &[Access],
+) {
+    let hpa_end = hpa_start + size;
+    let mut cursor = hpa_start;
+
+    // View ranges are sorted by start address (from compute_view).
+    // Walk through and insert Mapped for visible, Blocked for gaps.
+    for v in view {
+        let v_start = v.start;
+        let v_end = v.start + v.size;
+
+        // Gap before this visible range → Blocked.
+        if cursor < v_start {
+            let gap_size = v_start - cursor;
+            let gap_gpa = gpa_base + (cursor - hpa_start);
+            map.entries_mut().insert(
+                gap_gpa,
+                crate::translation::MapEntry::Blocked {
+                    hpa_start: cursor,
+                    size: gap_size,
+                },
+            );
+            cursor = v_start;
+        }
+
+        // Visible range → Mapped.
+        if cursor < v_end {
+            let mapped_size = v_end - cursor;
+            let mapped_gpa = gpa_base + (cursor - hpa_start);
+            let _ = map.insert(
+                cursor,
+                mapped_size,
+                v.rights,
+                #[cfg(feature = "cache_coloring")]
+                None,
+                Some(mapped_gpa),
+            );
+            cursor = v_end;
+        }
+    }
+
+    // Trailing gap after last visible range → Blocked.
+    if cursor < hpa_end {
+        let gap_size = hpa_end - cursor;
+        let gap_gpa = gpa_base + (cursor - hpa_start);
+        map.entries_mut().insert(
+            gap_gpa,
+            crate::translation::MapEntry::Blocked {
+                hpa_start: cursor,
+                size: gap_size,
+            },
+        );
+    }
+}
+
 fn refresh_domain_view(cap: &mut Capability<Domain>) {
     let domain_id = cap.data.id;
     let cap_arcs: alloc::vec::Vec<Arc<RwLock<Capability<MemoryRegion>>>> = cap
@@ -762,14 +915,29 @@ impl Capability<Domain> {
 
         let new_handle = w.data.allocate_memory_handle();
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
-        w.data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        w.data
+            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
         refresh_domain_view(&mut *w);
 
         let updates = if same_rights {
             UpdateBatch::new()
         } else {
+            // Split the parent's AddressMap entry at the carved range.
+            #[cfg(feature = "address_translation")]
+            {
+                if let Ok((gpa, _, _)) = w.data.address_map.translate(access.start, access.size) {
+                    let _ = w.data.address_map.split(gpa, access.size, access.rights);
+                }
+            }
+
             let view_after = w.data.cached_view.clone();
-            view_diff(owner_id, &view_before, &view_after)
+            #[allow(unused_mut)]
+            let mut updates = view_diff(owner_id, &view_before, &view_after);
+
+            #[cfg(feature = "address_translation")]
+            updates.fixup_domain_addresses(owner_id, &w.data.address_map);
+
+            updates
         };
 
         Ok((new_handle, child_sub, updates))
@@ -832,7 +1000,8 @@ impl Capability<Domain> {
 
         let new_handle = w.data.allocate_memory_handle();
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
-        w.data.add_memory_capability(new_handle, Arc::downgrade(&child_ref));
+        w.data
+            .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
         refresh_domain_view(&mut *w);
 
         Ok((new_handle, child_sub))
@@ -863,6 +1032,25 @@ impl Capability<Domain> {
         cap: LocalHandle,
         receiver: LocalHandle,
         attrs: Attributes,
+    ) -> Result<UpdateBatch> {
+        Self::send_at(caller, cap, receiver, attrs, None)
+    }
+
+    /// Send a memory capability to a receiver domain, with an optional GPA
+    /// hint that controls where the region appears in the receiver's guest
+    /// address space.
+    ///
+    /// When `gpa_hint` is `None` (or `address_translation` is disabled), the
+    /// receiver gets an identity mapping (GPA = HPA).  When `Some(gpa)`, the
+    /// receiver's `AddressMap` places the region at the requested GPA.
+    ///
+    /// See [`send`] for the full description of the send semantics.
+    pub fn send_at(
+        caller: &CapabilityRef<Domain>,
+        cap: LocalHandle,
+        receiver: LocalHandle,
+        attrs: Attributes,
+        _gpa_hint: Option<u64>,
     ) -> Result<UpdateBatch> {
         // Pre-flight: fast-fail frozen check, resolve caller_id, receiver Arc, and META
         // constraints — all under a single caller.read() to minimise lock round-trips.
@@ -927,9 +1115,9 @@ impl Capability<Domain> {
         let attrs = attrs.canonicalize();
 
         if recv_sealed {
-            Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs)
+            Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)
         } else {
-            Self::send_memory_unsealed(caller, cap, &receiver_ref, caller_id, attrs)
+            Self::send_memory_unsealed(caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)
         }
     }
 
@@ -941,6 +1129,7 @@ impl Capability<Domain> {
         receiver_ref: &CapabilityRef<Domain>,
         caller_id: DomainId,
         attrs: Attributes,
+        _gpa_hint: Option<u64>,
     ) -> Result<UpdateBatch> {
         // Pre-flight: resolve cap, check ownership, validate SEND — all under read
         // locks so validate_operation can safely upgrade owner_domain.
@@ -984,6 +1173,8 @@ impl Capability<Domain> {
             sender_domain_id: caller_id,
             sender_handle: cap,
             sender_domain: Arc::downgrade(caller),
+            #[cfg(feature = "address_translation")]
+            gpa_hint: _gpa_hint,
         };
         receiver_ref.write().data.add_pending_capability(pending);
 
@@ -1005,6 +1196,7 @@ impl Capability<Domain> {
         receiver_ref: &CapabilityRef<Domain>,
         caller_id: DomainId,
         attrs: Attributes,
+        _gpa_hint: Option<u64>,
     ) -> Result<UpdateBatch> {
         let receiver_id = receiver_ref.read().data.id;
 
@@ -1054,6 +1246,44 @@ impl Capability<Domain> {
         refresh_domain_view(&mut *caller_w);
 
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Read cap info for AddressMap operations.
+        #[cfg(feature = "address_translation")]
+        let (cap_hpa, cap_size, _cap_rights, cap_is_carve, cap_view) = {
+            let c = cap_ref.read();
+            (
+                c.data.access.start,
+                c.data.access.size,
+                c.data.access.rights,
+                c.data.kind == RegionKind::Carve,
+                c.compute_view(),
+            )
+        };
+
+        // Validate GPA hint: the full range must not overlap any existing
+        // entry in the receiver's AddressMap.
+        #[cfg(feature = "address_translation")]
+        {
+            let gpa_base = _gpa_hint.unwrap_or(cap_hpa);
+            if recv_w.data.address_map.overlaps(gpa_base, cap_size) {
+                // Roll back: re-insert the cap into the caller's table.
+                caller_w
+                    .data
+                    .add_memory_capability(cap, Arc::downgrade(&cap_ref));
+                refresh_domain_view(&mut *caller_w);
+                return Err(CapaError::RegionOverlap);
+            }
+        }
+
+        // Block sender's AddressMap entry (Carve only; aliases don't
+        // remove sender access).
+        #[cfg(feature = "address_translation")]
+        if cap_is_carve {
+            if let Ok((gpa, _, _)) = caller_w.data.address_map.translate(cap_hpa, cap_size) {
+                let _ = caller_w.data.address_map.block(gpa);
+            }
+        }
+
         let new_handle = recv_w.data.allocate_memory_handle();
 
         // Transfer ownership (cap_ref is a separate arc — safe to write while
@@ -1070,11 +1300,22 @@ impl Capability<Domain> {
             .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
         refresh_domain_view(&mut *recv_w);
 
+        // Insert into receiver's AddressMap: visible ranges as Mapped,
+        // carved-away gaps as Blocked.
+        #[cfg(feature = "address_translation")]
+        {
+            let gpa_base = _gpa_hint.unwrap_or(cap_hpa);
+            insert_view_aware(
+                &mut recv_w.data.address_map,
+                cap_hpa,
+                cap_size,
+                gpa_base,
+                &cap_view,
+            );
+        }
+
         let view_caller_after = caller_w.data.cached_view.clone();
         let view_receiver_after = recv_w.data.cached_view.clone();
-
-        drop(caller_w);
-        drop(recv_w);
 
         let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
         updates.merge(view_diff(
@@ -1083,22 +1324,46 @@ impl Capability<Domain> {
             &view_receiver_after,
         ));
 
+        #[cfg(feature = "address_translation")]
+        {
+            updates.fixup_domain_addresses(caller_id, &caller_w.data.address_map);
+            updates.fixup_domain_addresses(receiver_id, &recv_w.data.address_map);
+        }
+
+        drop(caller_w);
+        drop(recv_w);
+
         Ok(updates)
     }
 
     /// Accept a pending memory capability. Auto-allocates a new LocalHandle in the
     /// receiver's table. Fires the actual MMU unmap (sender) + map (receiver).
-    /// Accept a pending memory capability and take ownership.
     ///
-    /// Removes the pending entry, transfers ownership from sender to receiver,
-    /// allocates a fresh [`LocalHandle`] in the receiver's table, and unfreezes the sender's handle.
-    /// Returns `(LocalHandle, UpdateBatch)`.
+    /// Uses the GPA hint specified by the sender at `send_at` time (if any).
+    /// To override the sender's hint, use [`accept_at`] instead.
     ///
     /// # Errors
     /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending queue.
     pub fn accept(
         receiver: &CapabilityRef<Domain>,
         pending_id: u64,
+    ) -> Result<(LocalHandle, UpdateBatch)> {
+        Self::accept_at(receiver, pending_id, None)
+    }
+
+    /// Accept a pending memory capability with an optional GPA override.
+    ///
+    /// If `gpa_hint` is `Some(gpa)`, the receiver's `AddressMap` places the
+    /// region at the requested GPA, ignoring the sender's hint.
+    /// If `gpa_hint` is `None`, the sender's original hint is used (which
+    /// itself defaults to identity GPA = HPA if the sender didn't specify one).
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending queue.
+    pub fn accept_at(
+        receiver: &CapabilityRef<Domain>,
+        pending_id: u64,
+        _gpa_override: Option<u64>,
     ) -> Result<(LocalHandle, UpdateBatch)> {
         // Peek at the pending entry to learn the sender's domain ID, which we need
         // to acquire both write locks in a consistent order.  The actual removal
@@ -1110,7 +1375,11 @@ impl Capability<Domain> {
                 .pending_capabilities
                 .get(&pending_id)
                 .ok_or(CapaError::NotFound)?;
-            (r.data.id, pending.sender_domain_id, pending.sender_domain.clone())
+            (
+                r.data.id,
+                pending.sender_domain_id,
+                pending.sender_domain.clone(),
+            )
         };
 
         let sender_ref = sender_domain_weak
@@ -1135,13 +1404,44 @@ impl Capability<Domain> {
             .pending_capabilities
             .remove(&pending_id)
             .ok_or(CapaError::NotFound)?;
-        let (sender_domain_id, sender_handle, cap_weak) = (
-            pending.sender_domain_id,
-            pending.sender_handle,
-            pending.cap,
-        );
+        #[cfg(feature = "address_translation")]
+        let orig_gpa_hint = pending.gpa_hint;
+        #[cfg(feature = "address_translation")]
+        let pending_gpa_hint = _gpa_override.or(orig_gpa_hint);
+        let (sender_domain_id, sender_handle, cap_weak) =
+            (pending.sender_domain_id, pending.sender_handle, pending.cap);
 
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Read cap info for AddressMap operations.
+        #[cfg(feature = "address_translation")]
+        let (cap_hpa, cap_size, cap_is_carve, cap_view) = {
+            let c = cap_ref.read();
+            (
+                c.data.access.start,
+                c.data.access.size,
+                c.data.kind == RegionKind::Carve,
+                c.compute_view(),
+            )
+        };
+
+        // Validate GPA hint before mutations.
+        #[cfg(feature = "address_translation")]
+        {
+            let gpa_base = pending_gpa_hint.unwrap_or(cap_hpa);
+            if recv_w.data.address_map.overlaps(gpa_base, cap_size) {
+                // Roll back: re-insert the pending entry.
+                recv_w.data.pending_capabilities.insert(pending_id, PendingCapability {
+                    cap: Arc::downgrade(&cap_ref),
+                    sender_domain_id,
+                    sender_handle,
+                    sender_domain: Arc::downgrade(&sender_ref),
+                    #[cfg(feature = "address_translation")]
+                    gpa_hint: orig_gpa_hint,
+                });
+                return Err(CapaError::RegionOverlap);
+            }
+        }
 
         // Check sender domain not revoked — revocation cancels pending transfers.
         if sender_w.data.is_revoked() {
@@ -1159,6 +1459,14 @@ impl Capability<Domain> {
         sender_w.data.unfreeze_memory_handle(sender_handle);
         refresh_domain_view(&mut *sender_w);
 
+        // Block sender's AddressMap entry (Carve only).
+        #[cfg(feature = "address_translation")]
+        if cap_is_carve {
+            if let Ok((gpa, _, _)) = sender_w.data.address_map.translate(cap_hpa, cap_size) {
+                let _ = sender_w.data.address_map.block(gpa);
+            }
+        }
+
         // Update cap ownership (cap_ref is a separate arc — safe).
         {
             let mut cap = cap_ref.write();
@@ -1172,12 +1480,23 @@ impl Capability<Domain> {
             .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
         refresh_domain_view(&mut *recv_w);
 
+        // Insert into receiver's AddressMap: visible ranges as Mapped,
+        // carved-away gaps as Blocked.
+        #[cfg(feature = "address_translation")]
+        {
+            let gpa_base = pending_gpa_hint.unwrap_or(cap_hpa);
+            insert_view_aware(
+                &mut recv_w.data.address_map,
+                cap_hpa,
+                cap_size,
+                gpa_base,
+                &cap_view,
+            );
+        }
+
         // Snapshot views AFTER mutation.
         let view_sender_after = sender_w.data.cached_view.clone();
         let view_receiver_after = recv_w.data.cached_view.clone();
-
-        drop(recv_w);
-        drop(sender_w);
 
         let mut updates = view_diff(sender_domain_id, &view_sender_before, &view_sender_after);
         updates.merge(view_diff(
@@ -1185,6 +1504,15 @@ impl Capability<Domain> {
             &view_receiver_before,
             &view_receiver_after,
         ));
+
+        #[cfg(feature = "address_translation")]
+        {
+            updates.fixup_domain_addresses(sender_domain_id, &sender_w.data.address_map);
+            updates.fixup_domain_addresses(receiver_id, &recv_w.data.address_map);
+        }
+
+        drop(recv_w);
+        drop(sender_w);
 
         Ok((new_handle, updates))
     }
@@ -1306,7 +1634,10 @@ impl Capability<Domain> {
                 sender_handle: chan_handle,
                 sender_domain: Arc::downgrade(caller),
             };
-            receiver_ref.write().data.add_pending_domain_capability(pending);
+            receiver_ref
+                .write()
+                .data
+                .add_pending_domain_capability(pending);
         } else {
             // Unsealed path: immediate ownership transfer.
             let receiver_id = receiver_ref.read().data.id;
@@ -1342,7 +1673,10 @@ impl Capability<Domain> {
     ///
     /// # Errors
     /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending channel queue.
-    pub fn accept_channel(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<LocalHandle> {
+    pub fn accept_channel(
+        receiver: &CapabilityRef<Domain>,
+        pending_id: u64,
+    ) -> Result<LocalHandle> {
         let receiver_id = receiver.read().data.id;
 
         // Atomically remove the pending entry.
@@ -1460,8 +1794,39 @@ impl Capability<Domain> {
         // Mutation: hold write lock. revoke_child operates only on
         // CapabilityRef<MemoryRegion> arcs (independent) — no deadlock risk.
         let mut w = caller.write();
-        let updates = Capability::revoke_child(&parent_ref, child_sub)?;
+        #[allow(unused_mut)]
+        let mut updates = Capability::revoke_child(&parent_ref, child_sub)?;
         refresh_domain_view(&mut *w);
+
+        // Unblock parent's AddressMap entries that were blocked during send.
+        // The updates contain ChangeRights(parent, ..., rights, false) for
+        // each restored region.  We do NOT remove entries for unmap updates
+        // (shootdown_required && rights==NONE) because those come from alias
+        // revocations that never had their own AddressMap entry in the caller.
+        #[cfg(feature = "address_translation")]
+        {
+            for update in updates.updates() {
+                if let Update::ChangeRights {
+                    domain,
+                    physical,
+                    size,
+                    rights,
+                    shootdown_required,
+                    ..
+                } = update
+                {
+                    if *domain == owner_id
+                        && !*shootdown_required
+                        && *rights != crate::memory::Rights::NONE
+                    {
+                        if let Some(gpa) = w.data.address_map.find_gpa_for_hpa(*physical, *size) {
+                            let _ = w.data.address_map.unblock(gpa, *rights);
+                        }
+                    }
+                }
+            }
+            updates.fixup_domain_addresses(owner_id, &w.data.address_map);
+        }
 
         Ok(updates)
     }
@@ -1497,10 +1862,7 @@ impl Capability<Domain> {
     /// - [`CapaError::DomainNotSealed`] — `parent` is not yet sealed.
     /// - [`CapaError::ApiNotAllowed`] — `CREATE` API not allowed on `parent`.
     /// - [`CapaError::InvalidPolicy`] — `policy` violates monotonicity relative to parent.
-    pub fn create(
-        parent: &CapabilityRef<Domain>,
-        policy: DomainPolicy,
-    ) -> Result<LocalHandle> {
+    pub fn create(parent: &CapabilityRef<Domain>, policy: DomainPolicy) -> Result<LocalHandle> {
         let owner_id = parent.read().data.id;
 
         // 1. Auto-allocate handle (domain table key)
@@ -2221,10 +2583,7 @@ impl Capability<Domain> {
         value: u64,
     ) -> Result<()> {
         // Validate caller has SET permission.
-        caller
-            .read()
-            .owned
-            .validate_operation(MonitorAPI::SET)?;
+        caller.read().owned.validate_operation(MonitorAPI::SET)?;
 
         // Retrieve child.
         let child_weak = caller
@@ -2268,7 +2627,9 @@ impl Capability<Domain> {
                 let vis = visibility_from_u64(value)?;
                 // Monotonicity: child cannot be more permissive than parent default.
                 // Ordering: Deliver (0) > Report (1) > NotReport (2); higher u64 = more restrictive.
-                if visibility_to_u64(vis) < visibility_to_u64(parent_policy.interrupts.default.visibility) {
+                if visibility_to_u64(vis)
+                    < visibility_to_u64(parent_policy.interrupts.default.visibility)
+                {
                     return Err(CapaError::MonotonicityViolation);
                 }
                 child_w.data.policy.interrupts.default.visibility = vis;
@@ -2277,10 +2638,7 @@ impl Capability<Domain> {
                 let vis = visibility_from_u64(value)?;
                 // Monotonicity: child cannot be more permissive than the parent's
                 // effective policy for this vector (override if present, else default).
-                let parent_effective = parent_policy
-                    .interrupts
-                    .get_policy(vec)
-                    .visibility;
+                let parent_effective = parent_policy.interrupts.get_policy(vec).visibility;
                 if visibility_to_u64(vis) < visibility_to_u64(parent_effective) {
                     return Err(CapaError::MonotonicityViolation);
                 }
@@ -2338,10 +2696,7 @@ impl Capability<Domain> {
         child_handle: LocalHandle,
         id: PolicyIdentifier,
     ) -> Result<u64> {
-        caller
-            .read()
-            .owned
-            .validate_operation(MonitorAPI::GET)?;
+        caller.read().owned.validate_operation(MonitorAPI::GET)?;
 
         let child_weak = caller
             .read()
@@ -2395,10 +2750,7 @@ impl Capability<Domain> {
         value: u64,
         platform: &dyn Platform,
     ) -> Result<()> {
-        caller
-            .read()
-            .owned
-            .validate_operation(MonitorAPI::SET)?;
+        caller.read().owned.validate_operation(MonitorAPI::SET)?;
 
         let (child_domain_id, write_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
@@ -2432,10 +2784,7 @@ impl Capability<Domain> {
         reg_id: u64,
         platform: &dyn Platform,
     ) -> Result<u64> {
-        caller
-            .read()
-            .owned
-            .validate_operation(MonitorAPI::GET)?;
+        caller.read().owned.validate_operation(MonitorAPI::GET)?;
 
         let (child_domain_id, read_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, true)?;
@@ -2504,9 +2853,10 @@ fn visibility_from_u64(v: u64) -> Result<InterruptVisibility> {
         0 => Ok(InterruptVisibility::Deliver),
         1 => Ok(InterruptVisibility::Report),
         2 => Ok(InterruptVisibility::NotReport),
-        _ => Err(CapaError::InvalidOperation(
-            alloc::format!("invalid visibility value: {}", v),
-        )),
+        _ => Err(CapaError::InvalidOperation(alloc::format!(
+            "invalid visibility value: {}",
+            v
+        ))),
     }
 }
 
@@ -2557,7 +2907,11 @@ fn register_access_check(
 
     // Retrieve the effective VectorPolicy (override or domain default).
     let policy = child_r.data.policy.interrupts.get_policy(vec);
-    let bitmap = if want_read { policy.read_set } else { policy.write_set };
+    let bitmap = if want_read {
+        policy.read_set
+    } else {
+        policy.write_set
+    };
 
     Ok((child_domain_id, bitmap))
 }

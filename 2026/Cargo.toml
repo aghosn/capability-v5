@@ -92,6 +92,11 @@ name = "integration_vital_revoke"
 path = "tests/integration/vital_revoke.rs"
 
 [[test]]
+name = "integration_translation"
+path = "tests/integration/translation.rs"
+required-features = ["address_translation"]
+
+[[test]]
 name = "integration_overlap"
 path = "tests/integration/overlap.rs"
 
