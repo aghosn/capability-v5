@@ -22,6 +22,8 @@ docs/
 └── cli/                   — CLI simulator documentation
     ├── readme.md          — architecture, key concepts, quick start
     └── tutorials.md       — tutorial index and authoring guide
+└── design/                — design documents for planned features
+    └── address_translation.md — address translation layer (GPA, cache colors)
 ```
 
 ## Where to Start

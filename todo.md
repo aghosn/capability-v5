@@ -54,60 +54,15 @@
 
 ## Future Work / Design
 
-- [ ] **#F1** **GPA Remapping Layer** — On certain platforms the monitor needs to project physical
-  memory into a *guest virtual address space* (GPA): a domain still holds capabilities over physical
-  ranges, but those ranges are accessible at domain-chosen guest virtual addresses rather than at
-  their identity-mapped physical address.  This is the deeper issue behind the `ChangeRights.physical
-  == start` identity-map assumption documented in #7.
+- [ ] **#F1** **Address Translation Layer** — On certain platforms the monitor needs to project physical
+  memory into a *guest address space* (GPA): a domain still holds capabilities over physical
+  ranges, but those ranges are accessible at domain-chosen guest addresses rather than at
+  their identity-mapped physical address.  Additionally, the translation must be extensible to
+  support **cache-color-aware compaction**: a platform may partition physical pages by cache color,
+  and the capability may carry a color bitmap restricting which pages are mapped.  The translation
+  layer compacts authorized pages into contiguous GPAs so the domain sees a gap-free region.
 
-  ### Problem statement
-
-  Today every `UpdateBatch` entry uses `physical == virtual == start` because the only deployment
-  is fully identity-mapped.  On a platform with a two-dimensional page table (e.g. Intel EPT / AMD
-  NPT) the monitor controls a *GPA→HPA* mapping per domain.  The capability still tracks the
-  physical range (HPA) but sends/receives must also maintain the per-domain GPA mapping.
-
-  ### Requirements
-
-  1. **Feature-gated** — the entire remapping layer must be hidden behind a Cargo feature
-     (e.g. `feature = "gpa_remap"`).  When the feature is absent the library behaves exactly as
-     today (identity map, zero overhead).
-
-  2. **Isolated layer** — remapping logic lives in its own module/file and does not scatter
-     conditionals through the core capability engine.  The public API surface of the engine does
-     not change for non-remap builds.
-
-  3. **No double-mapping of a physical page** — a given HPA range may appear at most once in any
-     single domain's GPA space.  Enforced at `send`/`accept` time: if the incoming physical range
-     already has a GPA mapping in the receiver, the operation is rejected.
-
-  4. **No aliasing of a GPA** — a guest virtual address may map to at most one physical address
-     within a domain.  Enforced at remap-registration time.
-
-  5. **Carved-gap exclusion** — after a domain carves a sub-region and sends it away, the gap left
-     in the parent's GPA space is *frozen*: no new GPA mapping may cover that physical range until
-     the child is revoked and the parent regains the region.  This prevents a collision at revocation
-     time where the remap engine would need to restore a GPA that is already occupied.
-
-  6. **API extension** — `send` (and potentially `carve`/`alias`) gains an optional `GpaHint`
-     argument when the feature is active.  The hint specifies the guest virtual base address at
-     which the transferred region should be mapped in the receiver's address space.  When absent the
-     platform may choose an address or leave the region unmapped-in-GPA (identity fallback).
-
-  7. **UpdateBatch correctness** — the `Map`, `Unmap`, `ChangeRights`, and `ZeroMemory` update
-     variants must carry the correct GPA (`virtual` field) when the feature is active.  The
-     `physical` field always carries the HPA.  Revocation must restore the *original* GPA in the
-     parent (stored at `send` time), not the identity address.
-
-  8. **Attestation** — the GPA mapping for each memory region should appear in the attestation
-     report when the feature is active so that the verifier can inspect the layout.
-
-  ### Design document
-
-  Before implementation: write `docs/design/gpa_remap.md` covering the data-model changes
-  (`MemoryRegion` gains an optional `gpa: u64` field), the bookkeeping needed in `Domain`
-  (a `gpa_map: BTreeMap<u64, SubHandle>` for collision detection), the modified update-emission
-  paths, and the interaction with the loom concurrency model.
+  **Design document**: [`docs/design/address_translation.md`](2026/docs/design/address_translation.md)
 
 ## CLI Improvements
 
