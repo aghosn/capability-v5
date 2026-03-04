@@ -693,9 +693,20 @@ The `AddressMap` is stored inside `Domain`, which is behind `RwLock`.
 Translation lookups happen inside the existing capability lock (shared or
 exclusive), so no additional synchronisation is needed.
 
-The loom test suite should gain at least one test that exercises concurrent
-`send` + `revoke` with translation enabled to verify that `AddressMap`
-mutations are properly serialised.
+The `loom_translation` test suite (4 tests, ~4 min in release) verifies
+`AddressMap` consistency under exhaustive interleaving exploration:
+
+| Test | Scenario | Invariant |
+|------|----------|-----------|
+| `loom_concurrent_send_at_different_gpas` | Two threads send different carved caps to the same receiver at distinct GPAs | Both succeed; receiver has 2 map entries |
+| `loom_concurrent_send_at_same_gpa` | Two threads send different caps to the same GPA | Exactly one succeeds; other gets `RegionOverlap`; receiver has 1 entry |
+| `loom_concurrent_accept_at` | Two threads race to accept the same pending entry | Exactly one succeeds; receiver has 1 entry at the sender's GPA hint |
+| `loom_revoke_vs_accept_at_map_consistency` | One thread revokes the parent cap while another accepts the pending entry for the same cap | If revoke first: accept gets `NotFound`, map empty. If accept first: revoke cascades cleanup, map empty. Both orderings leave consistent state. |
+
+Run with:
+```bash
+cargo test --test loom_translation --features loom,address_translation --release
+```
 
 ---
 
@@ -732,22 +743,28 @@ logic touches the engine.
 
 | Step | Scope | Depends on |
 |------|-------|------------|
-| **2.5a** | `send()` accepts `#[cfg(feature = "address_translation")] gpa_hint: Option<u64>`, threaded through to `send_memory_unsealed` and the pending-queue path for sealed receivers. `accept()` reads the stored hint from the pending entry and passes it to `AddressMap::insert`. | 2b |
-| **2.5b** | Integration tests: send with explicit `gpa_hint`, verify receiver's AddressMap has non-identity GPA, verify `ChangeRights` for receiver carries the requested GPA | 2.5a |
+| **2.5a** | `send_at()` with `gpa_hint: Option<u64>`, threaded through `send_memory_unsealed` and the pending-queue path for sealed receivers.  `accept_at()` with `gpa_override: Option<u64>` lets the receiver override the sender's hint.  `send()` and `accept()` are thin wrappers passing `None`. | 2b |
+| **2.5b** | GPA conflict → `CapaError::RegionOverlap`: early validation in both `send_at` and `accept_at` checks `AddressMap::overlaps` before any mutation; on conflict the capability is rolled back (re-inserted into sender or pending table). | 2.5a |
+| **2.5c** | View-aware insert: `insert_view_aware()` helper walks `compute_view()` output, inserts `Mapped` entries for visible ranges and `Blocked` entries for carved-away gaps, preventing gap-filling by the receiver. | 2.5a |
+| **2.5d** | Adversarial integration tests: conflicting GPA (both send_at and accept_at), blocked gap prevents fill, view-aware insert with carved children. | 2.5a, 2.5b, 2.5c |
 
-### Phase 3 — Attestation + CLI + Loom (translation only)
+### Phase 3 — Attestation + CLI + Loom (translation only) ✅
 
 | Step | Scope | Depends on |
 |------|-------|------------|
-| **3a** | Attestation: include GPA base per memory region in report | 2d |
-| **3b** | CLI: display GPA alongside HPA in address-space view and `attest` output | 3a |
-| **3c** | CLI: `send` command accepts optional GPA hint argument, passes it to the engine's `send()` | 2.5a |
-| **3d** | Tutorial: update or add a tutorial demonstrating non-identity GPA mapping | 3b, 3c |
-| **3e** | Loom tests: concurrent `send` + `revoke` with `address_translation` enabled, verify `AddressMap` consistency | 2.5a |
+| **3a** | Attestation: include GPA base per memory region in report (uses `find_gpa_for_hpa(hpa, 1)` to handle split entries from view-aware insert) | 2d |
+| **3b** | CLI: enable `address_translation` feature by default in `CLI-2026/Cargo.toml` | 2.5a |
+| **3c** | CLI: `view` command shows GPA Address Space section alongside HPA view (Mapped entries with "(identity)" tag, Blocked entries in red) | 3a, 3b |
+| **3d** | CLI: `attest` shows GPA info (automatic via engine-side report changes) | 3a |
+| **3e** | CLI: `send <mem> <domain> [attrs] [at <gpa>]` — parses optional GPA hint, calls `send_at` | 2.5a, 3b |
+| **3f** | CLI: `accept-capability <domain> <pending_id> [at <gpa>]` — parses optional GPA override, calls `accept_at` | 2.5a, 3b |
+| **3g** | Tutorial 08 (GPA Address Translation): 15-step walkthrough covering identity mapping, non-identity GPA, accept_at override, view-aware blocked gaps, gap fill rejection | 3c, 3e, 3f |
+| **3h** | Loom tests (`loom_translation`): 4 tests — concurrent send_at different GPAs, concurrent send_at same GPA (conflict), concurrent accept_at (double-accept race), revoke-vs-accept_at map consistency | 2.5a |
 
-**Checkpoint**: at this point the full `address_translation` feature is
-implemented, tested (unit + integration + loom), and usable from the CLI.
-No coloring code has modified the engine's operational logic.
+**Checkpoint**: the full `address_translation` feature is implemented, tested
+(unit + integration + loom), documented (semantics + implementation), and
+usable from the CLI with tutorials.  No coloring code has modified the
+engine's operational logic.
 
 ### Phase 4 — `cache_coloring` foundation
 
