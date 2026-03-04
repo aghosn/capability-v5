@@ -173,6 +173,24 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
                     handle, mem.data.access, mem.data.kind, mem.owned.attributes
                 ));
 
+                // Show GPA mapping if address translation is enabled.
+                #[cfg(feature = "address_translation")]
+                {
+                    let hpa = mem.data.access.start;
+                    // Use size=1 to find the GPA for the start of the region,
+                    // even when the cap has carved children (split entries).
+                    if let Some(gpa) = domain.data.address_map.find_gpa_for_hpa(hpa, 1) {
+                        if gpa != hpa {
+                            report.push_str(&format!(
+                                "    GPA: {:#x} (HPA {:#x})\n",
+                                gpa, hpa
+                            ));
+                        } else {
+                            report.push_str(&format!("    GPA: {:#x} (identity)\n", gpa));
+                        }
+                    }
+                }
+
                 // Show direct children
                 if !mem.children.is_empty() {
                     for child_ref in &mem.children {
@@ -187,6 +205,39 @@ pub fn attest_domain(domain_ref: &CapabilityRef<Domain>) -> AttestationReport {
                             child.data.access.start,
                             child.data.access.size,
                             child.data.access.rights
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // GPA Address Space summary
+    #[cfg(feature = "address_translation")]
+    {
+        report.push_str("\nGPA Address Space:\n");
+        let entries = domain.data.address_map.entries();
+        if entries.is_empty() {
+            report.push_str("  (empty)\n");
+        } else {
+            for (gpa, entry) in entries {
+                match entry {
+                    crate::translation::MapEntry::Mapped(m) => {
+                        report.push_str(&format!(
+                            "  GPA {:#x}..{:#x} → HPA {:#x} {} {}\n",
+                            gpa,
+                            gpa + m.size,
+                            m.hpa_start,
+                            m.rights,
+                            if *gpa == m.hpa_start { "(identity)" } else { "" }
+                        ));
+                    }
+                    crate::translation::MapEntry::Blocked { hpa_start, size } => {
+                        report.push_str(&format!(
+                            "  GPA {:#x}..{:#x} → BLOCKED (HPA {:#x})\n",
+                            gpa,
+                            gpa + size,
+                            hpa_start
                         ));
                     }
                 }

@@ -186,18 +186,32 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         return Ok(());
     }
 
-    // Memory send: send <mem> <domain> [attrs]
-    if args.len() < 2 || args.len() > 3 {
-        return Err("Usage: send <mem> <domain> [attrs]".to_string());
+    // Memory send: send <mem> <domain> [attrs] [at <gpa>]
+    if args.len() < 2 || args.len() > 5 {
+        return Err("Usage: send <mem> <domain> [attrs] [at <gpa>]".to_string());
     }
 
     let mem_name = args[0];
     let domain_name = args[1];
-    let attrs = if args.len() == 3 {
-        parse_attributes(args[2])?
-    } else {
-        Attributes::NONE
-    };
+
+    // Parse optional attrs and "at <gpa>" from remaining args.
+    let mut attrs = Attributes::NONE;
+    let mut gpa_hint: Option<u64> = None;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "at" {
+            if i + 1 >= args.len() {
+                return Err("Usage: send <mem> <domain> [attrs] [at <gpa>]".to_string());
+            }
+            gpa_hint = Some(parse_number(args[i + 1])?);
+            i += 2;
+        } else if gpa_hint.is_none() && attrs == Attributes::NONE {
+            attrs = parse_attributes(args[i])?;
+            i += 1;
+        } else {
+            return Err("Usage: send <mem> <domain> [attrs] [at <gpa>]".to_string());
+        }
+    }
 
     let mem = state
         .memories
@@ -227,7 +241,7 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let (_, batch) = execute(&*platform, !is_sealed, || {
         let recv_h = find_domain_handle(&sender_domain, &domain)
             .ok_or(CapaError::NotFound)?;
-        let updates = Capability::send(&sender_domain, sender_handle, recv_h, attrs)?;
+        let updates = Capability::send_at(&sender_domain, sender_handle, recv_h, attrs, gpa_hint)?;
         Ok(((), updates))
     }).map_err(|e| format!("Failed to send: {:?}", e))?;
 
@@ -241,19 +255,23 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         attrs: format_attributes(&attrs),
     });
 
+    let gpa_msg = gpa_hint.map_or(String::new(), |g| format!(" at GPA {:#x}", g));
+
     if is_sealed {
         println!(
-            "{} Sent '{}' to sealed domain '{}' - pending acceptance",
+            "{} Sent '{}' to sealed domain '{}'{} - pending acceptance",
             "⏸".bright_yellow().bold(),
             mem_name.bright_white(),
             domain_name.bright_white(),
+            gpa_msg,
         );
     } else {
         println!(
-            "{} Sent '{}' to domain '{}'",
+            "{} Sent '{}' to domain '{}'{}",
             "✓".bright_green().bold(),
             mem_name.bright_white(),
             domain_name.bright_white(),
+            gpa_msg,
         );
     }
 

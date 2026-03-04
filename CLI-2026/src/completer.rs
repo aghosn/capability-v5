@@ -48,7 +48,7 @@ const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "send",
-        usage: "send <mem> <domain> [attrs]",
+        usage: "send <mem> <domain> [attrs] [at <gpa>]",
         description: "Send memory capability to domain",
     },
     CommandInfo {
@@ -93,7 +93,7 @@ const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "accept-capability",
-        usage: "accept-capability <domain> <pending_id> [handle]",
+        usage: "accept-capability <domain> <pending_id> [at <gpa>]",
         description: "Accept a pending capability",
     },
     CommandInfo {

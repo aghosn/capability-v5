@@ -294,7 +294,12 @@ cap> send extra app
 ```rust
 // Domain-mediated public API
 let updates = Capability::<Domain>::send(&caller, cap_handle, receiver_handle, Attributes::CLEAN)?;
+
+// With GPA hint (address translation)
+let updates = Capability::<Domain>::send_at(&caller, cap_handle, receiver_handle, Attributes::CLEAN, Some(0xA0000))?;
 ```
+
+> 📖 For GPA placement, view-aware insert, and accept-side overrides, see [Translation semantics](translation.md).
 
 ---
 

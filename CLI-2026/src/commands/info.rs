@@ -64,8 +64,47 @@ pub fn cmd_view(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         domain: domain_name.to_string(),
     });
 
-    println!("\n{}", "Address Space View:".bright_cyan().bold());
+    println!("\n{}", "Address Space View (HPA):".bright_cyan().bold());
     println!("{}", view);
+
+    // GPA Address Space from the domain's AddressMap.
+    {
+        let d = domain.read();
+        let entries = d.data.address_map.entries();
+        if entries.is_empty() {
+            println!("{}", "GPA Address Space: (empty)".dimmed());
+        } else {
+            println!("{}", "GPA Address Space:".bright_cyan().bold());
+            for (gpa, entry) in entries {
+                match entry {
+                    capability_engine::translation::MapEntry::Mapped(m) => {
+                        let tag = if *gpa == m.hpa_start {
+                            " (identity)".dimmed().to_string()
+                        } else {
+                            String::new()
+                        };
+                        println!(
+                            "  GPA {:#x}..{:#x} → HPA {:#x} {}{}",
+                            gpa,
+                            gpa + m.size,
+                            m.hpa_start,
+                            m.rights,
+                            tag
+                        );
+                    }
+                    capability_engine::translation::MapEntry::Blocked { hpa_start, size } => {
+                        println!(
+                            "  GPA {:#x}..{:#x} → {} (HPA {:#x})",
+                            gpa,
+                            gpa + size,
+                            "BLOCKED".red(),
+                            hpa_start
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }

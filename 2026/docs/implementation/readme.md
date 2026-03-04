@@ -45,6 +45,11 @@ This document describes how the capability engine's modules fit together.
 │  │ view compute │   │ reports      │   │ (parking_lot/spin/   │ │
 │  └──────────────┘   └──────────────┘   │       loom)          │ │
 │                                        └──────────────────────┘ │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  translation.rs  (feature: address_translation)          │   │
+│  │  AddressMap, MapEntry, MappingEntry, ColorBitmap          │   │
+│  │  GPA→HPA mapping, split, block, unblock, coalesce         │   │
+│  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -61,6 +66,7 @@ This document describes how the capability engine's modules fit together.
 | `view.rs` | `compute_address_space` and `compute_view_from_capabilities` — walk the capability tree to produce a merged `AddressSpaceView` for a domain. |
 | `attest.rs` | Generate human-readable attestation reports for domains and memory regions. `enumerate_domain_tree` walks the domain CDT for an inventory. |
 | `sync.rs` | Internal `RwLock` alias. Resolves to `parking_lot::RwLock` (hosted), `loom::sync::RwLock` (loom testing), or `spin::RwLock` (bare-metal). All engine code goes through this alias, so switching backends requires no changes outside `sync.rs`. |
+| `translation.rs` | `AddressMap`, `MapEntry`, `MappingEntry`, `ColorBitmap`. Feature-gated (`address_translation`). Tracks GPA→HPA mappings per domain. Used by capability hooks (split on carve, block/insert on send, unblock/remove on revoke). See [translation.md](translation.md). |
 | `error.rs` | `CapaError` enum and `Result<T>` alias. |
 
 ## Data Flow for a Typical Capability Operation

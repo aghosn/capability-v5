@@ -1,0 +1,166 @@
+# Tutorial 8: GPA Address Translation
+# =====================================
+# Demonstrates non-identity GPA mapping using send_at and accept_at.
+# Shows how the hypervisor can place memory at arbitrary guest-physical
+# addresses, and how the view command reveals both HPA and GPA spaces.
+
+@msg ━━━ Tutorial 8: GPA Address Translation ━━━
+@msg
+@msg By default, memory capabilities use identity mapping (GPA = HPA).
+@msg With 'send ... at <gpa>', the hypervisor can place a region at any
+@msg guest-physical address.  'accept-capability ... at <gpa>' lets the
+@msg receiver override the placement.  This tutorial demonstrates both.
+@msg
+
+# Step 1: Initialize
+@msg 📋 Step 1: Initialize system with 1MB of memory
+init root 0x100000
+
+@msg
+@msg ✓ System initialized with 1MB memory at HPA [0x0..0x100000)
+@msg
+
+# Step 2: Create an unsealed child domain
+@msg 📋 Step 2: Create an unsealed child domain
+create-domain root guest 0b1111 GET,ATTEST,SWITCH
+
+@msg
+@msg ✓ Created 'guest' (unsealed — sends transfer immediately)
+@msg
+
+# Step 3: Carve memory and send with identity mapping (default)
+@msg 📋 Step 3: Carve memory and send with default (identity) mapping
+carve r0 code 0x10000 0x10000 RWX
+send code guest
+
+@msg
+@msg ✓ 'code' sent with identity mapping: GPA 0x10000 = HPA 0x10000
+@msg
+
+# Step 4: View the GPA address space — identity mapping
+@msg 📋 Step 4: View guest's address space — notice GPA = HPA
+view guest
+
+@msg
+@msg The GPA view shows "(identity)" because the guest-physical address
+@msg matches the host-physical address.
+@msg
+
+# Step 5: Carve another region and send at a specific GPA
+@msg 📋 Step 5: Send memory at a non-identity GPA
+@msg   HPA 0x20000 will appear at GPA 0xA0000 in the guest's view.
+carve r0 data 0x20000 0x10000 RW
+send data guest at 0xA0000
+
+@msg
+@msg ✓ 'data' placed at GPA 0xA0000 (HPA 0x20000) — non-identity mapping!
+@msg
+
+# Step 6: View the GPA address space — non-identity mapping visible
+@msg 📋 Step 6: View guest's address space — notice the GPA ≠ HPA entry
+view guest
+
+@msg
+@msg The GPA view now shows two entries:
+@msg   • GPA 0x10000 → HPA 0x10000 (identity)
+@msg   • GPA 0xA0000 → HPA 0x20000 (non-identity — the guest sees this at 0xA0000)
+@msg
+
+# Step 7: Attest the guest to see GPA info in the report
+@msg 📋 Step 7: Attestation report includes GPA information
+attest guest
+
+@msg
+@msg The attestation report shows the full GPA Address Space, including
+@msg which mappings are identity and which are translated.
+@msg
+
+# Step 8: Demonstrate accept_at with a sealed domain
+@msg 📋 Step 8: Create a sealed domain and use accept-capability with GPA override
+create-domain root enclave 0b1111 GET,ATTEST,SWITCH,RECEIVE_AFTER_SEAL
+seal enclave
+
+@msg
+@msg ✓ 'enclave' is sealed with RECEIVE_AFTER_SEAL
+@msg
+
+# Step 9: Send memory to enclave with a GPA hint
+@msg 📋 Step 9: Send memory to sealed enclave at GPA 0x80000
+carve r0 enc_mem 0x30000 0x8000 RWX
+send enc_mem enclave at 0x80000
+
+@msg
+@msg ⏸ Sent with GPA hint 0x80000 — pending acceptance
+@msg
+
+# Step 10: Accept at a different GPA (receiver overrides)
+@msg 📋 Step 10: Enclave overrides the GPA — accept at 0xC0000 instead
+accept-capability enclave 0 at 0xC0000
+
+@msg
+@msg ✓ Enclave accepted at GPA 0xC0000, overriding sender's hint of 0x80000
+@msg
+
+# Step 11: View enclave's GPA space
+@msg 📋 Step 11: View enclave's GPA address space
+view enclave
+
+@msg
+@msg The enclave placed the memory at its preferred address (0xC0000),
+@msg not the sender's suggestion (0x80000).
+@msg
+
+# Step 12: Demonstrate view-aware insert (carved child creates blocked gap)
+@msg 📋 Step 12: View-aware insert — carved children create blocked gaps
+@msg   We'll carve a region, sub-carve part of it, then send the parent.
+@msg   The receiver will see a "blocked" gap where the sub-carve lives.
+carve r0 parent_mem 0x40000 0x10000 RW
+carve parent_mem sub_carve 0x44000 0x4000 RW
+
+@msg
+@msg ✓ 'parent_mem' [0x40000..0x50000) with sub-carve at [0x44000..0x48000)
+@msg
+
+# Step 13: Send parent_mem to guest at GPA 0xD0000
+@msg 📋 Step 13: Send parent_mem (with carved child) to guest at GPA 0xD0000
+send parent_mem guest at 0xD0000
+
+@msg
+@msg ✓ Sent! The guest's GPA space should show:
+@msg   • Mapped:  GPA 0xD0000..0xD4000 → HPA 0x40000 (before sub_carve)
+@msg   • Blocked: GPA 0xD4000..0xD8000 (sub_carve gap)
+@msg   • Mapped:  GPA 0xD8000..0xE0000 → HPA 0x48000 (after sub_carve)
+@msg
+
+# Step 14: Verify the blocked gap
+@msg 📋 Step 14: View guest's address space — observe the blocked gap
+view guest
+
+@msg
+@msg The blocked gap at GPA 0xD4000 prevents the guest from using that
+@msg address range.  When sub_carve is revoked, the gap will be restored.
+@msg
+
+# Step 15: Try to fill the gap (should fail)
+@msg 📋 Step 15: Attempt to send another region into the blocked gap (expected failure)
+carve r0 fill_attempt 0x60000 0x4000 RW
+# EXPECT_FAIL
+send fill_attempt guest at 0xD4000
+
+@msg
+@msg ⚠️  The send failed — the blocked gap rejects overlapping insertions.
+@msg   This preserves the integrity of the carved child's address space.
+@msg
+
+@msg 📖 Key Takeaways:
+@msg   • send <mem> <dom> at <gpa>  — place memory at a specific GPA
+@msg   • accept-capability <dom> <id> at <gpa>  — receiver overrides GPA
+@msg   • view <dom>  — shows both HPA and GPA address spaces
+@msg   • attest <dom>  — includes GPA info in the attestation report
+@msg   • Carved children create BLOCKED gaps in the receiver's GPA space
+@msg   • Blocked gaps cannot be filled — they protect carved sub-regions
+@msg
+@msg 💡 GPA Mapping Flow:
+@msg   sender: send mem dom at 0xGPA → [domain's AddressMap] → GPA ≠ HPA
+@msg   receiver (sealed): accept-capability dom id at 0xGPA → override
+@msg

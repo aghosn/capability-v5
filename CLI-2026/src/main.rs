@@ -136,9 +136,10 @@ fn show_help() {
     println!("  {} <domain>", "enumerate-pending".bright_white().bold());
     println!("    List pending capabilities waiting for acceptance");
     println!("    Example: enumerate-pending child1");
-    println!("  {} <domain> <pending_id> [handle]", "accept-capability".bright_white().bold());
-    println!("    Accept a pending capability and activate it");
+    println!("  {} <domain> <pending_id> [at <gpa>]", "accept-capability".bright_white().bold());
+    println!("    Accept a pending capability, optionally placing it at a specific GPA");
     println!("    Example: accept-capability child1 0");
+    println!("    Example: accept-capability child1 0 at 0xA0000");
     println!("  {} <domain> <pending_id>", "reject-capability".bright_white().bold());
     println!("    Reject (discard) a pending capability without activating it");
     println!("    Example: reject-capability child1 0");
@@ -169,9 +170,10 @@ fn show_help() {
     println!();
 
     println!("{}", "Capability Transfer:".bright_yellow());
-    println!("  {} <mem> <domain> [attrs]", "send".bright_white().bold());
-    println!("    Send memory capability to domain (handle auto-allocated)");
+    println!("  {} <mem> <domain> [attrs] [at <gpa>]", "send".bright_white().bold());
+    println!("    Send memory capability to domain, optionally at a specific GPA");
     println!("    Example: send mem1 child1 CLEAN");
+    println!("    Example: send mem1 child1 at 0xA0000");
     println!("  {} <parent> <child>", "revoke".bright_white().bold());
     println!("    Revoke a child capability (memory or domain)");
     println!("    Example: revoke root_mem mem1");

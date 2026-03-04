@@ -636,22 +636,31 @@ pub fn cmd_accept_capability(
     state: &mut CliState,
     args: &[&str],
 ) -> std::result::Result<(), String> {
-    if args.len() != 2 {
-        return Err("Usage: accept-capability <domain> <pending_id>".to_string());
+    if args.len() < 2 || args.len() > 4 {
+        return Err("Usage: accept-capability <domain> <pending_id> [at <gpa>]".to_string());
     }
 
     let domain_name = args[0];
     let pending_id = parse_number(args[1])?;
+
+    // Parse optional "at <gpa>".
+    let gpa_override: Option<u64> = if args.len() >= 4 && args[2] == "at" {
+        Some(parse_number(args[3])?)
+    } else if args.len() > 2 {
+        return Err("Usage: accept-capability <domain> <pending_id> [at <gpa>]".to_string());
+    } else {
+        None
+    };
 
     let domain = state
         .domains
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    // Accept the pending memory capability using the new API
+    // Accept the pending memory capability using accept_at
     let platform = state.platform.clone();
     let (handle, batch) = execute(&*platform, false, || {
-        let (h, updates) = Capability::accept(domain, pending_id)?;
+        let (h, updates) = Capability::accept_at(domain, pending_id, gpa_override)?;
         Ok((h, updates))
     })
     .map_err(|e| format!("Failed to accept capability: {:?}", e))?;
@@ -659,11 +668,13 @@ pub fn cmd_accept_capability(
     // Process updates
     process_updates(state, &batch);
 
+    let gpa_msg = gpa_override.map_or(String::new(), |g| format!(" at GPA {:#x}", g));
     println!(
-        "{} Accepted pending memory capability {} as handle {}",
+        "{} Accepted pending memory capability {} as handle {}{}",
         "✓".bright_green().bold(),
         pending_id,
-        handle
+        handle,
+        gpa_msg,
     );
 
     // Record command
