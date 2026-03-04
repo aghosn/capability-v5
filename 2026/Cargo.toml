@@ -140,3 +140,8 @@ required-features = ["loom"]
 name = "loom_meta"
 path = "tests/concurrency/loom_meta.rs"
 required-features = ["loom"]
+
+[[test]]
+name = "loom_translation"
+path = "tests/concurrency/loom_translation.rs"
+required-features = ["loom", "address_translation"]

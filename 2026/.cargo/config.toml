@@ -7,3 +7,7 @@ coverage = "tarpaulin --lib --tests --out Lcov --output-dir target/tarpaulin --n
 # Run all loom concurrency tests (exhaustive interleaving exploration).
 # Usage: cargo loom
 loom = "test --features loom --release --test loom_concurrency --test loom_e2e --test loom_vp_switch --test loom_meta"
+
+# Run loom tests including address-translation suite.
+# Usage: cargo loom-all
+loom-all = "test --features loom,address_translation --release --test loom_concurrency --test loom_e2e --test loom_vp_switch --test loom_meta --test loom_translation"

@@ -23,6 +23,7 @@ src/
 ├── platform.rs     — Platform trait, execute() helper and IPI/barrier protocol
 ├── switch.rs       — SwitchManager, CoreContext, VP call-chain and interrupt routing
 ├── attest.rs       — attestation report generation for domains and memory regions
+├── translation.rs  — AddressMap (GPA↔HPA), feature-gated under `address_translation`
 ├── view.rs         — compute the merged address-space view for a domain
 └── sync.rs         — internal RwLock abstraction (parking_lot / spin / loom)
 ```
@@ -48,6 +49,9 @@ cargo check --lib --no-default-features
 # Run all unit and integration tests
 cargo test
 
+# Run with address translation hooks
+cargo test --features address_translation
+
 # Run a specific test suite
 cargo test --test unit_memory
 cargo test --test integration_revoke
@@ -59,13 +63,15 @@ cargo test --test integration_revoke
 
 ```bash
 # Run all loom suites (alias defined in .cargo/config.toml)
-cargo loom
+cargo loom            # core suites (no feature-gated tests)
+cargo loom-all        # includes address_translation suite
 
 # Or run individual suites:
-cargo test --test loom_concurrency --features loom --release
-cargo test --test loom_e2e        --features loom --release
-cargo test --test loom_vp_switch  --features loom --release
-cargo test --test loom_meta       --features loom --release
+cargo test --test loom_concurrency   --features loom --release
+cargo test --test loom_e2e           --features loom --release
+cargo test --test loom_vp_switch     --features loom --release
+cargo test --test loom_meta          --features loom --release
+cargo test --test loom_translation   --features loom,address_translation --release
 ```
 
 > **Expected runtimes** (measured on an Intel i7, release build):
@@ -76,11 +82,12 @@ cargo test --test loom_meta       --features loom --release
 > | `loom_e2e`         |   8   |  ~4 min   | Full send/accept/revoke end-to-end races     |
 > | `loom_meta`        |   2   |  ~34 s    | META attribute send & revoke races           |
 > | `loom_vp_switch`   |   5   |   ~5 s    | VP switch / interrupt delivery races         |
-> | **Total**          |  45   | **~5 min** |                                             |
+> | `loom_translation` |   4   |  ~4 min   | Address translation send_at/accept_at/revoke |
+> | **Total**          |  49   | **~10 min** |                                            |
 >
-> `loom_e2e` contains tests that explore a very large interleaving space — it is normal
-> for individual tests within that suite to run for several minutes before completing.
-> Do not interrupt them.
+> `loom_e2e` and `loom_translation` contain tests that explore a very large interleaving
+> space — it is normal for individual tests within those suites to run for several minutes
+> before completing.  Do not interrupt them.
 
 ### Coverage
 
