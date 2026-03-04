@@ -109,3 +109,10 @@
   (a `gpa_map: BTreeMap<u64, SubHandle>` for collision detection), the modified update-emission
   paths, and the interaction with the loom concurrency model.
 
+## CLI Improvements
+
+- [x] **#CLI1** **Meta region colour in address-space view** — Change the display colour of META regions in the CLI's address-space view to purple (or another distinct colour) so they are visually distinguishable from normal memory regions.
+
+## Tutorials
+
+- [x] **#TUT1** **Channel tutorial** — Design and implement an additional tutorial demonstrating channel operations. Implemented as tutorial 13 (driver isolation with CVM communication).

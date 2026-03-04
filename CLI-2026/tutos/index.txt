@@ -16,3 +16,5 @@
 09-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
 10-pending-capabilities.txt|Pending Capabilities and RECEIVE_AFTER_SEAL|Accept or reject capabilities sent to a sealed domain
 11-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels
+12-meta-regions.txt|META Regions — Monitor Metadata Memory|Send monitor-private memory that is invisible to the domain but visible in attestation
+13-driver-channels.txt|Channels — Driver Isolation with CVM|Hypervisor creates driver and CVM, CVM attests and shares memory via channel

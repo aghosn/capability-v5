@@ -1,0 +1,139 @@
+# Tutorial 12: META Regions — Monitor Metadata Memory
+# =====================================================
+# Demonstrates the META attribute for sending monitor-private memory
+# to a domain: excluded from address space, visible in attestation,
+# revocation implies CLEAN + VITAL.
+
+@msg ━━━ Tutorial 12: META Regions — Monitor Metadata ━━━
+@msg
+@msg META memory is allocated BY the monitor FOR its own use inside a domain.
+@msg The receiving domain cannot access it (no MMU mapping), but the region
+@msg appears in attestation — proving the monitor placed it there.
+@msg
+
+# ── Step 1: Initialize ────────────────────────────────────────────────────────
+@msg 📋 Step 1: Initialise root domain with a 256 KB address space
+init root 0x40000
+
+@msg
+
+# ── Step 2: Create a sealed app domain ────────────────────────────────────────
+@msg 📋 Step 2: Create an app domain with RECEIVE_AFTER_SEAL (needed to accept META)
+create-domain root app 0b1111 GET,ATTEST,REVOKE,SWITCH,RECEIVE_AFTER_SEAL
+carve r0 app_code 0x0 0x10000 RWX
+send app_code app
+seal app
+
+@msg
+@msg ✓ 'app' is sealed and owns [0x0..0x10000). It can accept new capabilities.
+@msg
+
+# ── Step 3: Send a META region to the sealed domain ───────────────────────────
+@msg 📋 Step 3: Carve a META region and send it to 'app'
+@msg
+@msg The source MUST be Exclusive (unbroken chain of carves).
+@msg META goes through the pending queue because 'app' is sealed.
+carve r0 monitor_scratch 0x20000 0x4000 RW
+send monitor_scratch app META
+
+@msg
+@msg ⏸ The META region is pending in 'app'. The sender's handle is frozen.
+@msg
+
+# ── Step 4: Accept the pending META capability ───────────────────────────────
+@msg 📋 Step 4: Accept the pending capability
+enumerate-pending app
+accept-capability app 0
+
+@msg
+@msg ✓ Accepted — but notice: NO ChangeRights/Map was emitted.
+@msg   META regions are excluded from the domain's address space.
+@msg
+
+# ── Step 5: Verify the view — META region is NOT mapped ──────────────────────
+@msg 📋 Step 5: View app's address space — monitor_scratch is absent
+view app
+
+@msg
+@msg 💡 The META region does NOT appear in the address space view.
+@msg    It exists only as an attestation entry.
+@msg
+
+# ── Step 6: Verify attestation — META region IS visible ──────────────────────
+@msg 📋 Step 6: Attest 'app' — monitor_scratch appears in the report
+attest app
+
+@msg
+@msg ✓ The attestation report includes monitor_scratch with META attribute.
+@msg   A remote verifier can confirm the monitor placed metadata there.
+@msg
+
+# ── Step 7: Physical address space — META is purple ──────────────────────────
+@msg 📋 Step 7: List all resources — META regions show in purple
+list
+
+@msg
+@msg 💡 In the physical address space view, META regions are displayed in purple.
+@msg
+
+# ── Step 8: Try forbidden operations on META ─────────────────────────────────
+@msg 📋 Step 8: META regions cannot be re-sent, carved, or aliased
+@msg
+@msg Once a region is META inside a domain, no further derivation is allowed.
+
+# EXPECT_FAIL
+carve monitor_scratch attempt 0x20000 0x1000 RW
+@msg
+@msg ✗ Carve rejected — META regions cannot be carved.
+
+# EXPECT_FAIL
+alias monitor_scratch attempt 0x20000 0x1000 RW
+@msg
+@msg ✗ Alias rejected — META regions cannot be aliased.
+@msg
+
+# ── Step 9: META must come from an Exclusive source ──────────────────────────
+@msg 📋 Step 9: Attempting META on an aliased region (expected to fail)
+@msg
+@msg Only Exclusive regions (pure carve chain) can be sent as META.
+alias r0 shared_region 0x30000 0x4000 RW
+
+# EXPECT_FAIL
+send shared_region app META
+
+@msg
+@msg ✗ PermissionDenied — aliased regions cannot be sent as META.
+@msg
+
+# ── Step 10: Revocation — META implies CLEAN + VITAL ─────────────────────────
+@msg 📋 Step 10: Revoke the META region — zeroes memory and revokes 'app'
+@msg
+@msg META automatically implies CLEAN (zero on revoke) and VITAL (revoke the
+@msg owning domain). This is the monitor's guarantee that metadata is cleaned up.
+revoke r0 monitor_scratch
+
+@msg
+@msg ✓ Three things happened:
+@msg   1. ZeroMemory — physical range [0x20000..0x24000) was zeroed
+@msg   2. ChangeRights — root regained access to the region
+@msg   3. RevokeDomain — 'app' was revoked (META implies VITAL)
+@msg
+
+# ── Step 11: Verify final state ──────────────────────────────────────────────
+@msg 📋 Step 11: Final state — app is revoked, root regains memory
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • META regions are monitor-private: NO MMU mapping for the receiver
+@msg   • META regions appear in attestation, proving monitor placement
+@msg   • Source must be Exclusive (pure carve chain, no aliases)
+@msg   • META regions cannot be re-sent, carved, or aliased
+@msg   • Revocation implies CLEAN (zero) + VITAL (domain revoked)
+@msg   • Sealed receivers require RECEIVE_AFTER_SEAL to accept META
+@msg
+@msg 💡 Use case: the monitor can place per-domain bookkeeping structures
+@msg    (page tables, interrupt descriptors, scheduling state) in META regions.
+@msg    They are invisible to the domain, provable via attestation, and
+@msg    automatically cleaned up when the domain is revoked.
+@msg

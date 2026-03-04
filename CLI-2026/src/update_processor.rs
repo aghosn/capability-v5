@@ -25,10 +25,10 @@ pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
                     .collect();
                 for mem_name in &owned_mems {
                     state.memories.remove(mem_name);
-                    println!("    ✗ Removed memory capability '{}'", mem_name);
+                    println!("    − Removed memory capability '{}'", mem_name);
                 }
                 state.domains.remove(&name);
-                println!("    ✗ Removed domain '{}' (ID: {})", name, domain_id);
+                println!("    − Removed domain '{}' (ID: {})", name, domain_id);
             }
         }
     }

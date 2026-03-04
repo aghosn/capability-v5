@@ -78,6 +78,7 @@ struct MemoryNode {
     end: u64,
     kind: RegionKind,
     status: RegionStatus,
+    is_meta: bool,
     children: Vec<MemoryNode>,
     owner_name: String,
 }
@@ -151,6 +152,7 @@ fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
             end: m.data.access.end(),
             kind: m.data.kind.clone(),
             status: m.data.status,
+            is_meta: m.owned.attributes.meta(),
             children: children_nodes,
             owner_name,
         })
@@ -185,12 +187,16 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
     let bar_end = addr_to_bar_pos(node.end, total_size, bar_width);
     let bar_size = (bar_end - bar_start).max(1);
 
-    // Choose color based on kind and status:
-    //   Carve + Exclusive => cyan, Carve + Aliased (carved from alias) => green, Alias => yellow
-    let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = match (node.kind, node.status) {
-        (RegionKind::Carve, RegionStatus::Exclusive) => ('█', |s| s.bright_cyan()),
-        (RegionKind::Carve, RegionStatus::Aliased)   => ('█', |s| s.bright_green()),
-        (RegionKind::Alias, _)                       => ('▓', |s| s.bright_yellow()),
+    // Choose color based on kind, status, and META attribute:
+    //   META => purple, Carve + Exclusive => cyan, Carve + Aliased => green, Alias => yellow
+    let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = if node.is_meta {
+        ('█', |s| s.bright_purple())
+    } else {
+        match (node.kind, node.status) {
+            (RegionKind::Carve, RegionStatus::Exclusive) => ('█', |s| s.bright_cyan()),
+            (RegionKind::Carve, RegionStatus::Aliased)   => ('█', |s| s.bright_green()),
+            (RegionKind::Alias, _)                       => ('▓', |s| s.bright_yellow()),
+        }
     };
 
     // Truncate name if too long, ensuring it fits within NAME_COLUMN_WIDTH
@@ -227,9 +233,7 @@ fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar
     }
 
     // Show address range and owner
-    println!("  {} {} [0x{:x}..0x{:x}) owner:{}",
-        format!("{:?}", node.kind).bright_black(),
-        format!("{:?}", node.status).bright_black(),
+    println!("  [0x{:x}..0x{:x}) {}",
         node.start, node.end, node.owner_name.bright_magenta());
 }
 
@@ -286,8 +290,10 @@ fn display_physical_address_space(state: &CliState) {
     display_memory_tree(&tree, 0, max_end);
 
     println!();
-    println!("  Legend: {} = Carved (exclusive), {} = Carved (from alias), {} = Aliased, {} = Carved portion in parent",
-        "█".bright_cyan(), "█".bright_green(), "▓".bright_yellow(), "░".bright_cyan());
+    println!("  Legend: {} = Carved (exclusive), {} = Carved (from alias), {} = Aliased",
+        "█".bright_cyan(), "█".bright_green(), "▓".bright_yellow());
+    println!("          {} = Meta, {} = Carved portion in parent",
+        "█".bright_purple(), "░".bright_cyan());
 }
 
 /// Compute logical memory footprint (bytes) of a single domain capability node.

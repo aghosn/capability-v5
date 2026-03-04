@@ -118,3 +118,13 @@ fn tutorial_10_pending_capabilities() {
 fn tutorial_11_sibling_attestation() {
     run_tuto("11-sibling-attestation.txt").unwrap();
 }
+
+#[test]
+fn tutorial_12_meta_regions() {
+    run_tuto("12-meta-regions.txt").unwrap();
+}
+
+#[test]
+fn tutorial_13_driver_channels() {
+    run_tuto("13-driver-channels.txt").unwrap();
+}

@@ -1,0 +1,180 @@
+# Tutorial 13: Channels — Driver Isolation with CVM Communication
+# =================================================================
+# Demonstrates channels for device driver isolation: the hypervisor
+# creates a driver domain and a CVM, the CVM attests the driver via
+# a channel, then shares memory with it for I/O.
+
+@msg ━━━ Tutorial 13: Channels — Driver Isolation ━━━
+@msg
+@msg Channels let one domain communicate with another without the parent
+@msg domain staying in the middle.  This tutorial shows a real use case:
+@msg   • A hypervisor sets up a device driver domain
+@msg   • A CVM receives a channel to the driver
+@msg   • The CVM attests the driver through the channel
+@msg   • The CVM shares memory with the driver for I/O
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1: Initialise the hypervisor
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 1: Initialise the hypervisor with a large address space
+init hypervisor 0x100000
+
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2: Create the device driver domain
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 2: Create a device driver domain with its config space
+@msg
+@msg The driver gets an exclusive carve representing the device's
+@msg configuration/MMIO region.  Once sealed, the driver is isolated.
+create-domain hypervisor device_driver 0b1111 GET,ATTEST,SEND,GETCHAN,RECEIVE_AFTER_SEAL
+carve r0 driver_config 0x0 0x10000 RW
+send driver_config device_driver VITAL,CLEAN
+seal device_driver
+
+@msg
+@msg ✓ 'device_driver' is sealed with its config space [0x0..0x10000)
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3: Get a channel to the driver
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 3: Obtain a channel capability pointing to device_driver
+@msg
+@msg get-chan creates a lightweight capability that references device_driver.
+@msg It can be sent to other domains so they can communicate with the driver
+@msg without going through the hypervisor.
+get-chan device_driver ch_device
+
+@msg
+@msg ✓ 'ch_device' is a channel to 'device_driver' (owned by hypervisor)
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4: Create the CVM with private memory
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 4: Create a CVM with private memory, then seal it
+@msg
+@msg The CVM gets exclusive memory for its own code and data.
+@msg We seal it before sending the channel so the channel goes through
+@msg the pending queue — giving the CVM explicit control over acceptance.
+carve r0 cvm_private 0x20000 0x40000 RWX
+
+create-domain hypervisor cvm 0b1111 ALL
+send cvm_private cvm VITAL,CLEAN,HASH
+seal cvm
+
+@msg
+@msg ✓ CVM is sealed with private memory [0x20000..0x60000)
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 5: Send the channel to the sealed CVM
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 5: Send the driver channel to the CVM (sealed → pending)
+@msg
+@msg Because the CVM is sealed, the channel goes into its pending queue.
+@msg The CVM must explicitly accept it.
+send ch_device cvm
+
+@msg
+@msg ⏸ Channel is pending in the CVM
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 6: CVM accepts the channel
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 6: CVM accepts the pending channel
+enumerate-pending cvm
+accept-channel cvm 0 drv_chan
+
+@msg
+@msg ✓ CVM now owns 'drv_chan' — a direct channel to device_driver
+@msg   The hypervisor is no longer on the communication path!
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 7: CVM attests the driver through the channel
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 7: The CVM attests the device driver via its channel
+@msg
+@msg The CVM does NOT need a direct domain handle to the driver.
+@msg It uses the channel to get the driver's attestation report,
+@msg proving to the CVM what code the driver runs and what memory
+@msg it holds.
+attest drv_chan
+
+@msg
+@msg ✓ The attestation report shows the driver's identity, its sealed
+@msg   policy, and its memory layout (driver_config).  The CVM can
+@msg   verify the driver is trustworthy before sharing data with it.
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 8: CVM shares an I/O buffer with the driver through the channel
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 8: CVM carves an I/O region from its private memory and
+@msg          sends it to the driver via the channel
+@msg
+@msg The CVM carves a sub-region from its own private memory for I/O.
+@msg Sending via the channel delivers it directly to device_driver's
+@msg pending queue (sealed → requires accept).
+alias cvm_private io_buffer 0x50000 0x10000 RW
+send io_buffer drv_chan
+
+@msg
+@msg ⏸ I/O buffer sent to device_driver via channel — pending acceptance
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 9: Driver accepts the shared I/O memory
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 9: The driver accepts the pending I/O buffer
+enumerate-pending device_driver
+accept-capability device_driver 0
+
+@msg
+@msg ✓ The driver now has access to the I/O buffer!
+@msg   Both the CVM and the driver can read/write [0x50000..0x60000).
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 10: Final attestation — verify the complete setup
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 10: Attest both domains to see the final memory layout
+@msg
+@msg The driver's attestation now includes the shared I/O region.
+attest drv_chan
+
+@msg
+@msg The CVM's attestation shows its full layout.
+attest cvm
+
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 11: View the physical address space
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 11: Physical address space — see the complete system layout
+list
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • get-chan creates a lightweight reference to a sealed domain
+@msg   • Channels carry ATTEST + GETCHAN + SEND permissions only
+@msg   • The hypervisor brokers setup; afterwards CVM ↔ driver is direct
+@msg   • attest via a channel proves the remote domain's identity
+@msg   • Memory sent through a channel goes to the channel's target domain
+@msg   • Sealed receivers queue incoming capabilities as pending
+@msg
+@msg 💡 Architecture:
+@msg
+@msg   hypervisor
+@msg    ├── device_driver (sealed, config space + shared I/O)
+@msg    └── cvm (sealed, private mem + channel→driver)
+@msg
+@msg   Data path:  CVM ──channel──→ device_driver
+@msg   The hypervisor is NOT on the data path after setup.
+@msg
