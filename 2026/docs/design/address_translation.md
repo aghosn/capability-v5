@@ -41,8 +41,9 @@ engine maintaining the bookkeeping and emitting the correct GPA in every
 
 ### 3.1 Core Requirements
 
-1. **Feature-gated** — the entire translation layer is behind a Cargo feature
-   (e.g. `feature = "address_translation"`).  When absent, the engine behaves
+1. **Feature-gated** — the translation layer is behind `feature = "address_translation"`.
+   Cache-color support is behind a separate `feature = "cache_coloring"` which
+   implies `address_translation`.  When both are absent, the engine behaves
    exactly as today: identity-mapped, zero overhead.
 
 2. **Isolated module** — translation logic lives in its own module
@@ -67,7 +68,11 @@ engine maintaining the bookkeeping and emitting the correct GPA in every
 7. **Attestation** — the GPA mapping for each memory region appears in the
    attestation report.
 
-### 3.2 Cache-Color Requirements
+### 3.2 Cache-Color Requirements (`feature = "cache_coloring"`)
+
+Cache coloring is behind a separate feature gate that implies
+`address_translation`.  When only `address_translation` is enabled,
+the engine supports GPA mapping but no color-based compaction.
 
 8. **Platform-provided color function** — the `Platform` trait gains a method
    to determine the color of a physical page (or a method that returns the
@@ -126,10 +131,17 @@ The translation layer needs to intercept at two levels:
 ### 5.1 Module Structure
 
 ```
+# Cargo.toml
+[features]
+address_translation = []
+cache_coloring = ["address_translation"]
+```
+
+```
 src/
 ├── translation.rs        (or translation/mod.rs if it grows)
-│   ├── AddressMap         — per-domain HPA↔GPA bookkeeping
-│   ├── ColorPolicy        — color bitmap logic
+│   ├── AddressMap         — per-domain HPA↔GPA bookkeeping (#[cfg(feature = "address_translation")])
+│   ├── ColorBitmap        — color bitmap logic              (#[cfg(feature = "cache_coloring")])
 │   └── translate()        — HPA → GPA lookup for update emission
 └── ...existing files...
 ```
@@ -241,6 +253,7 @@ struct MappingEntry {
     gpa_start: u64,
     size: u64,           // mapped size (may be < HPA range if color-filtered)
     rights: Rights,      // access rights for this mapping (tracked per §5.2)
+    #[cfg(feature = "cache_coloring")]
     color_bitmap: Option<ColorBitmap>,
 }
 ```
@@ -343,7 +356,8 @@ corresponding `AddressMap` mutation:
 
 | Operation | Capability effect | AddressMap effect |
 |-----------|-------------------|-------------------|
-| `carve` | Parent's view may shrink (if rights attenuated) | **Entry split** if carved rights differ from parent's: parent's entry is split into up to 3 entries (left, carved sub-range with reduced rights, right). See §5.2. |
+| `carve` | Parent's view may shrink | **Entry split** if carved rights differ: up to 3 entries |
+|         | (if rights attenuated)   | (left, carved sub-range, right). See §5.2. |
 | `send` carved (to unsealed) | Receiver gains cap; sender loses carved range | `receiver.insert(hpa)`; **sender: entry split + block** (see below) |
 | `send` alias (to unsealed) | Receiver gains cap; sender keeps access | `receiver.insert(hpa)`; sender's map unchanged |
 | `send` (to sealed → pending) | No immediate view change | No map change yet (deferred to `accept`) |
@@ -401,7 +415,7 @@ pub trait Platform: Send + Sync {
     /// has color `(addr / page_size) % num_colors`.
     ///
     /// Returns `None` if the platform is not cache-color aware.
-    #[cfg(feature = "address_translation")]
+    #[cfg(feature = "cache_coloring")]
     fn cache_color_info(&self) -> Option<CacheColorInfo> {
         None
     }
@@ -479,7 +493,7 @@ ChangeRights {
     physical: u64,           // HPA start
     rights: Rights,
     shootdown_required: bool,
-    #[cfg(feature = "address_translation")]
+    #[cfg(feature = "cache_coloring")]
     colors: Option<ColorBitmap>,  // which pages within the range to map
 }
 ```
@@ -517,7 +531,7 @@ pub struct MemoryRegion {
     pub kind: RegionKind,
     pub status: RegionStatus,
     pub access: Access,
-    #[cfg(feature = "address_translation")]
+    #[cfg(feature = "cache_coloring")]
     pub color_bitmap: Option<ColorBitmap>,
 }
 ```
@@ -548,14 +562,14 @@ ChangeRights {
     physical: u64,
     rights: Rights,
     shootdown_required: bool,
-    #[cfg(feature = "address_translation")]
+    #[cfg(feature = "cache_coloring")]
     colors: Option<ColorBitmap>,
 }
 ```
 
-When the feature is absent, the struct is unchanged.  When present but
-`colors` is `None`, the update behaves as a single contiguous mapping
-(backward compatible).
+When `cache_coloring` is absent, the `colors` field does not exist.
+When present but `colors` is `None`, the update behaves as a single
+contiguous mapping (backward compatible).
 
 ### 6.4 Attestation
 
@@ -592,6 +606,7 @@ unchanged.  This can be achieved with a wrapper type:
 ```rust
 #[cfg(feature = "address_translation")]
 pub struct TranslationParams {
+    #[cfg(feature = "cache_coloring")]
     pub color_bitmap: Option<ColorBitmap>,
     pub gpa_hint: Option<u64>,
 }
@@ -602,7 +617,7 @@ pub struct TranslationParams {
 ```rust
 pub trait Platform: Send + Sync {
     /// Cache color configuration. Returns `None` for non-colored platforms.
-    #[cfg(feature = "address_translation")]
+    #[cfg(feature = "cache_coloring")]
     fn cache_color_info(&self) -> Option<CacheColorInfo> { None }
 }
 ```
@@ -638,17 +653,70 @@ mutations are properly serialised.
 
 ## 10. Implementation Plan
 
-| Phase | Scope | Depends on |
-|-------|-------|------------|
-| **P1** | Feature gate + `AddressMap` struct + `translate()` + unit tests | — |
-| **P2** | Hook into `send` / `accept` / `revoke` update emission | P1 |
-| **P3** | `view_diff` post-processing (`fixup_updates`) | P2 |
-| **P4** | Attestation: include GPA in report | P2 |
-| **P5** | `ColorBitmap` + compaction logic in `AddressMap` | P1 |
-| **P6** | Platform trait extension (`cache_color_info`) | P5 |
-| **P7** | `carve` / `alias` color bitmap parameter + monotonicity | P5 |
-| **P8** | CLI support (display GPA, color options) | P3, P4 |
-| **P9** | Loom concurrency tests with translation | P3 |
+Two feature gates, implemented in strict order.  The full `address_translation`
+stack (including CLI + loom) is completed and validated before any coloring
+logic touches the engine.
+
+### Phase 1 — `address_translation` foundation
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **1a** | Cargo feature gate `address_translation` + `cache_coloring` (implies `address_translation`) in `Cargo.toml` | — |
+| **1b** | `translation.rs`: `AddressMap`, `MapEntry`, `MappingEntry`. | 1a |
+|        | Feature-gated `color_bitmap` field (no logic yet). |  |
+| **1c** | `AddressMap` methods: `insert`, `split`, `block`, | 1b |
+|        | `unblock`, `remove`, `translate` + unit tests |  |
+| **1d** | Feature-gated struct fields (non-invasive): | 1a |
+|        | `Domain.address_map`, `MemoryRegion.color_bitmap`, |  |
+|        | `ChangeRights.colors`. Compile but unused until later. |  |
+
+### Phase 2 — Hook into engine operations
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **2a** | `carve`: call `AddressMap::split` on the parent domain when rights differ | 1c |
+| **2b** | `send` / `accept`: call `AddressMap::block` on sender + `AddressMap::insert` on receiver | 1c |
+| **2c** | `revoke`: call `AddressMap::unblock` on parent + `AddressMap::remove` on child owner | 1c |
+| **2d** | `view_diff` post-processing: `fixup_updates` rewrites `ChangeRights.address` (HPA→GPA) using `AddressMap::translate` | 2a, 2b, 2c |
+| **2e** | Integration tests: send/carve/revoke with non-identity GPA hints, verify `ChangeRights` updates carry correct GPA and HPA | 2d |
+
+### Phase 3 — Attestation + CLI + Loom (translation only)
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **3a** | Attestation: include GPA base per memory region in report | 2d |
+| **3b** | CLI: display GPA alongside HPA in address-space view and `attest` output | 3a |
+| **3c** | CLI: `send` command accepts optional GPA hint argument | 2d |
+| **3d** | Tutorial: update or add a tutorial demonstrating non-identity GPA mapping | 3b, 3c |
+| **3e** | Loom tests: concurrent `send` + `revoke` with `address_translation` enabled, verify `AddressMap` consistency | 2d |
+
+**Checkpoint**: at this point the full `address_translation` feature is
+implemented, tested (unit + integration + loom), and usable from the CLI.
+No coloring code has modified the engine's operational logic.
+
+### Phase 4 — `cache_coloring` foundation
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **4a** | `ColorBitmap` struct (`Vec<u64>`) + `contains`, `is_subset_of`, `popcount` + unit tests | 1a |
+| **4b** | Platform trait extension: `cache_color_info() -> Option<CacheColorInfo>` behind `cache_coloring` | 4a |
+
+### Phase 5 — Coloring in engine operations
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **5a** | Compaction logic in `AddressMap::insert`: filter pages by color bitmap, assign contiguous GPAs | 4a, 3e |
+| **5b** | `carve` / `alias`: optional color bitmap parameter + monotonicity enforcement (`child ⊆ parent`) | 5a |
+| **5c** | `ChangeRights.colors` field populated during update emission; platform-side page iteration in `apply_update` | 5a |
+| **5d** | Integration tests: colored carve/send/revoke, verify compacted GPA ranges and per-page updates | 5b, 5c |
+
+### Phase 6 — Coloring CLI + Loom
+
+| Step | Scope | Depends on |
+|------|-------|------------|
+| **6a** | CLI: `carve` / `alias` accept optional color bitmap argument | 5b |
+| **6b** | CLI: display color bitmap in address-space view and attestation | 5d |
+| **6c** | Loom tests: concurrent colored `send` + `revoke`, verify compacted `AddressMap` consistency | 5d |
 
 ---
 
@@ -656,17 +724,45 @@ mutations are properly serialised.
 
 The following questions were resolved during design review:
 
-| # | Question | Decision | Rationale |
-|---|----------|----------|-----------|
-| 1 | GPA allocation: bump or recycle? | **Recycle** — freed GPAs may be reused | Avoids address-space exhaustion; invariants (e.g. carved-gap exclusion) prevent unsafe reuse |
-| 2 | Root domain `AddressMap`? | **Yes** — root has an `AddressMap` | Enables platform-level relocation of the root domain in physical memory |
-| 3 | Alias GPA sharing across domains? | **Independent GPAs** per domain | Simpler, more isolated; each domain's `AddressMap` is self-contained |
-| 4 | Colored-region update granularity? | **Single update** with color bitmap; platform iterates pages | Avoids state explosion for large colored regions; platform knows page size |
-| 5 | Color bitmap width? | **Dynamically sized** (`Vec<u64>`) | Some platforms have more than 64 colors |
-| 6 | Free-list data structure? | **No explicit free-list** — derive free ranges from occupied entries | The `AddressMap` tracks all taken GPAs; free ranges are the gaps. When a carved region is **sent** (not at carve time — the parent retains access until send), its GPA entry transitions from `Mapped` to `Blocked`, preventing reuse until revocation restores it. |
-| 7 | GPA hint conflicts? | **Reject the operation** — caller is responsible for choosing a valid GPA | If no hint is provided, default to identity mapping (GPA == HPA) and record the translation in the `AddressMap`. |
-| 8 | `no_std` compatibility? | **Use `alloc`** for `Vec<u64>` in `ColorBitmap` | The engine already depends on `alloc`; no new dependency. |
-| 9 | Should `AddressMap` track rights? | **Yes (Option B)** — each `MappingEntry` carries `Rights` | Self-contained view of GPA space; carve-time splits make send-time blocking trivial; enables leaner locking (no capability tree re-lock for translation). Option A (translation only) rejected — see §5.2. |
+1. **GPA allocation: bump or recycle?** → **Recycle.**
+   Freed GPAs may be reused. Invariants (carved-gap exclusion)
+   prevent unsafe reuse.
+
+2. **Root domain `AddressMap`?** → **Yes.**
+   Enables platform-level relocation of the root domain.
+
+3. **Alias GPA sharing across domains?** → **Independent GPAs.**
+   Simpler, more isolated; each domain's `AddressMap` is self-contained.
+
+4. **Colored-region update granularity?** → **Single update** with
+   color bitmap; platform iterates pages internally. Avoids state
+   explosion for large colored regions.
+
+5. **Color bitmap width?** → **Dynamically sized** (`Vec<u64>`).
+   Some platforms have more than 64 colors.
+
+6. **Free-list data structure?** → **No explicit free-list.**
+   Free ranges are derived from gaps between occupied entries.
+   When a carved region is **sent** (not at carve time — parent
+   retains access until send), its entry transitions `Mapped` →
+   `Blocked`, preventing reuse until revocation.
+
+7. **GPA hint conflicts?** → **Reject the operation.**
+   Caller is responsible for choosing a valid GPA.  When no hint
+   is provided, default to identity mapping (GPA == HPA).
+
+8. **`no_std` compatibility?** → **Use `alloc`.**
+   The engine already depends on `alloc`; no new dependency.
+
+9. **Should `AddressMap` track rights?** → **Yes (Option B).**
+   Each `MappingEntry` carries `Rights`. Self-contained GPA view;
+   carve-time splits make send-time blocking trivial; enables
+   leaner locking. Option A rejected — see §5.2.
+
+10. **Separate feature gate for coloring?** → **Yes.**
+    `cache_coloring` implies `address_translation`. GPA translation
+    is useful on its own (EPT platforms). Coloring adds complexity
+    that many platforms don't need.
 
 ### Remaining Open Questions
 
