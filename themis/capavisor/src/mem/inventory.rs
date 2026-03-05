@@ -2,8 +2,12 @@
 
 use limine::memory_map::{Entry, EntryType};
 
-/// Desired heap size (64 MiB).
+/// Desired heap size (64 MiB).  Compile-time configurable.
 const HEAP_SIZE: u64 = 64 * 1024 * 1024;
+
+const PAGE_SIZE: u64 = 4096;
+/// Entries per EPT page table level (512 for 4K pages in a 4-level structure).
+const EPT_ENTRIES_PER_TABLE: u64 = 512;
 
 /// A contiguous physical memory region.
 #[derive(Debug, Clone, Copy)]
@@ -32,9 +36,36 @@ pub struct PhysicalInventory {
     pub heap_size: u64,
 }
 
+/// Result of Phase 1b memory partitioning.
+pub struct MemoryPartition {
+    /// Regions given to dom0 as normal capabilities.
+    pub dom0_owned: [PhysRegion; PhysicalInventory::MAX_REGIONS],
+    /// Number of valid dom0_owned entries.
+    pub dom0_owned_count: usize,
+    /// META pool for dom0's hardware VP structures (VMXON, VMCS, VAPIC, EPT).
+    pub meta_pool: PhysRegion,
+    /// Breakdown of META pool usage.
+    pub meta_breakdown: MetaBreakdown,
+}
+
+/// Breakdown of how the META pool is sized.
+#[derive(Debug, Clone, Copy)]
+pub struct MetaBreakdown {
+    /// VMXON region pages (1 per physical core).
+    pub vmxon_pages: u64,
+    /// VMCS pages (1 per VP).
+    pub vmcs_pages: u64,
+    /// VAPIC pages (1 per VP).
+    pub vapic_pages: u64,
+    /// EPT page table pages (4K-only mapping).
+    pub ept_pages: u64,
+    /// Total META pages.
+    pub total_pages: u64,
+}
+
 impl PhysicalInventory {
     /// Maximum number of usable regions we track (generous for any real system).
-    const MAX_REGIONS: usize = 128;
+    pub const MAX_REGIONS: usize = 128;
 
     /// Parse the Limine memory map, carve out a heap, and initialize the global
     /// allocator.
@@ -83,7 +114,6 @@ impl PhysicalInventory {
 
             if i == heap_idx {
                 // The heap is carved from the start of this region.
-                // If there's space left after the heap, record the remainder.
                 let remainder_base = entry.base + HEAP_SIZE;
                 let remainder_len = entry.length - HEAP_SIZE;
                 if remainder_len > 0 {
@@ -119,7 +149,7 @@ impl PhysicalInventory {
         }
     }
 
-    /// Iterator over usable regions (excluding the heap).
+    /// Usable regions (excluding the heap).
     pub fn usable_regions(&self) -> &[PhysRegion] {
         &self.regions[..self.count]
     }
@@ -128,4 +158,107 @@ impl PhysicalInventory {
     pub fn available_bytes(&self) -> u64 {
         self.usable_regions().iter().map(|r| r.length).sum()
     }
+
+    /// Partition usable memory into dom0-owned regions and a META pool.
+    ///
+    /// The META pool is sized minimally for dom0's own hardware VP structures:
+    /// - VMXON: 1 page per physical core
+    /// - VMCS: 1 page per VP (= per core for dom0)
+    /// - VAPIC: 1 page per VP
+    /// - EPT: enough 4K-granularity page table pages to map `dom0_mem_bytes`
+    ///
+    /// The equation: we need `x` META pages to map `(available - x*4K)` bytes
+    /// of dom0 memory.  We solve iteratively (converges in 1–2 steps).
+    ///
+    /// # Arguments
+    /// * `num_cores` — number of physical cores (from Limine MP response)
+    pub fn partition(&self, num_cores: u64) -> MemoryPartition {
+        let num_vps = num_cores; // dom0 gets one VP per core
+
+        // Fixed per-VP/core overhead.
+        let vmxon_pages = num_cores;
+        let vmcs_pages = num_vps;
+        let vapic_pages = num_vps;
+        let fixed_pages = vmxon_pages + vmcs_pages + vapic_pages;
+
+        // Solve for EPT pages: we need enough page table pages to map
+        // (total_available - meta_pool_size) at 4K granularity.
+        //
+        // EPT structure (4-level, 4K pages only):
+        //   L4: 1 page (PML4)
+        //   L3: ceil(mapped_pages / 512³) pages (PDPT) — always 1 for < 512 GiB
+        //   L2: ceil(mapped_pages / 512²) pages (PD)
+        //   L1: ceil(mapped_pages / 512) pages (PT)
+        let available = self.available_bytes();
+        let mut meta_pages = fixed_pages;
+
+        // Iterate: compute EPT pages needed for (available - meta*4K).
+        // Converges in 1–2 iterations since EPT overhead is tiny.
+        for _ in 0..3 {
+            let dom0_bytes = available - meta_pages * PAGE_SIZE;
+            let dom0_pages = dom0_bytes / PAGE_SIZE;
+
+            let l1 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE);
+            let l2 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE);
+            let l3 = div_ceil(
+                dom0_pages,
+                EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE,
+            );
+            let l4 = 1;
+            let ept_pages = l1 + l2 + l3 + l4;
+
+            meta_pages = fixed_pages + ept_pages;
+        }
+
+        let ept_pages = meta_pages - fixed_pages;
+        let meta_size = meta_pages * PAGE_SIZE;
+
+        // Carve the META pool from the end of the largest region.
+        let mut dom0_owned = self.regions;
+        let mut dom0_owned_count = self.count;
+        let mut meta_pool = PhysRegion { base: 0, length: 0 };
+
+        // Find the largest region and carve META from its end.
+        let mut largest_idx = 0;
+        let mut largest_len: u64 = 0;
+        for (i, r) in self.usable_regions().iter().enumerate() {
+            if r.length > largest_len {
+                largest_idx = i;
+                largest_len = r.length;
+            }
+        }
+
+        assert!(
+            largest_len >= meta_size,
+            "largest usable region ({} KiB) too small for META pool ({} KiB)",
+            largest_len / 1024,
+            meta_size / 1024,
+        );
+
+        // Shrink the region and place META at the end.
+        let region = &mut dom0_owned[largest_idx];
+        region.length -= meta_size;
+        meta_pool = PhysRegion {
+            base: region.base + region.length,
+            length: meta_size,
+        };
+
+        MemoryPartition {
+            dom0_owned,
+            dom0_owned_count,
+            meta_pool,
+            meta_breakdown: MetaBreakdown {
+                vmxon_pages,
+                vmcs_pages,
+                vapic_pages,
+                ept_pages,
+                total_pages: meta_pages,
+            },
+        }
+    }
+}
+
+/// Integer ceiling division.
+fn div_ceil(a: u64, b: u64) -> u64 {
+    (a + b - 1) / b
 }

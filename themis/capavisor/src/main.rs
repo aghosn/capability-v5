@@ -224,13 +224,46 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!();
 
-    // TODO Phase 1b: partition remaining memory into dom0-owned + META pool.
+    // ── Phase 1b: Memory partitioning ────────────────────────────────── //
+
+    let mp_response = MP_REQUEST
+        .get_response()
+        .expect("no MP response from Limine");
+    let num_cores = mp_response.cpus().len() as u64;
+    serial_println!("CPUs: {} cores (BSP + {} APs)", num_cores, num_cores - 1);
+
+    let partition = inventory.partition(num_cores);
+
+    serial_println!();
+    serial_println!("Memory partitioning (Phase 1b):");
+    serial_println!("  META pool:       {:#x}–{:#x} ({} KiB, {} pages)",
+        partition.meta_pool.base,
+        partition.meta_pool.base + partition.meta_pool.length,
+        partition.meta_pool.length / 1024,
+        partition.meta_breakdown.total_pages,
+    );
+    serial_println!("    VMXON:  {} pages ({} cores)", partition.meta_breakdown.vmxon_pages, num_cores);
+    serial_println!("    VMCS:   {} pages ({} VPs)", partition.meta_breakdown.vmcs_pages, num_cores);
+    serial_println!("    VAPIC:  {} pages ({} VPs)", partition.meta_breakdown.vapic_pages, num_cores);
+    serial_println!("    EPT:    {} pages (4K-granularity page tables)", partition.meta_breakdown.ept_pages);
+
+    let dom0_total: u64 = partition.dom0_owned[..partition.dom0_owned_count]
+        .iter()
+        .map(|r| r.length)
+        .sum();
+    serial_println!("  dom0 owned:      {} MiB ({} regions)",
+        dom0_total / (1024 * 1024),
+        partition.dom0_owned_count,
+    );
+
+    serial_println!();
+
     // TODO Phase 1c: SMP bootstrap.
     // TODO Phase 1d: ACPI parsing.
     // TODO Phase 1e: PCI enumeration.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
-    serial_println!("Halting (Phase 1b+ not implemented yet).");
+    serial_println!("Halting (Phase 1c+ not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
