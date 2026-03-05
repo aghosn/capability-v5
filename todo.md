@@ -1548,6 +1548,15 @@ carve META from its own pool, register it for the child VP.
   the number of dom0 VPs × per-VP hardware structures (VMCS 4 KiB + VAPIC 4 KiB +
   VpStateMeta 4 KiB + VMXON 4 KiB per core + EPT root pages).  Remaining memory
   goes to dom0-owned.
+
+  **Capavisor page table safety invariant**: The capavisor's own CR3 page tables
+  currently live in Limine `BOOTLOADER_RECLAIMABLE` memory, which is implicitly
+  safe because `from_limine()` only partitions `USABLE` regions.  New PT pages
+  created by `paging.rs::ensure_table()` come from the heap (also excluded).
+  However, there is no explicit tracking of which frames are capavisor PT pages.
+  When we replace the ad-hoc paging module with the verified host PT
+  implementation (`verified-nrkernel`), we must explicitly account for these
+  frames — especially if we ever reclaim `BOOTLOADER_RECLAIMABLE` memory.
 - [x] **P1c**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
   global barrier until all APs complete Phase 2 init.
   *(Note: AP entry stub (`ap_entry`) already exists — it parks APs in a halt loop.
