@@ -2508,12 +2508,21 @@ impl Capability<Domain> {
 
         // Apply state changes (all VP locks are independent — no deadlock risk).
         //
-        // chain[0]:     Running  → Interrupted
+        // chain[0]:      Running → Interrupted (or Available when n==2)
         // chain[1..n-2]: Locked  → Suspended { callee = chain[i-1] }
-        // chain[n-1]:   Locked   → Running { core, caller: handler's prev_caller }
+        // chain[n-1]:    Locked  → Running { core, caller: handler's prev_caller }
+        //
+        // When the handler VP becomes Running it "unlocks" its immediate callee.
+        // For n>2 the callee is Suspended (already claimable).  For n==2 the
+        // callee is the leaf itself, so we set it to Available directly.
 
-        // Leaf: Running → Interrupted.
-        *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
+        // Leaf: Running → Interrupted, unless the handler is the direct caller
+        // (n==2) in which case the handler becoming Running unlocks it immediately.
+        if n > 2 {
+            *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
+        } else {
+            *chain[0].2.run_state.write() = VpRunState::Available;
+        }
 
         // Intermediate VPs: Locked → Suspended.
         for i in 1..n - 1 {

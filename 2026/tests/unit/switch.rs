@@ -592,7 +592,8 @@ fn setup_3domain_chain() -> (
 }
 
 /// `deliver_interrupt_vp` with a 2-domain chain: dom0(handler) → dom1(running).
-/// After delivery: dom1.vp0 = Interrupted, dom0.vp0 = Running.
+/// After delivery: dom1.vp0 = Available (unlocked by handler becoming Running),
+/// dom0.vp0 = Running.
 #[test]
 fn test_deliver_interrupt_vp_2domain() {
     let (root, child, child_h, platform) = fixture();
@@ -610,11 +611,11 @@ fn test_deliver_interrupt_vp_2domain() {
     assert_eq!(ctx.handler_domain_id, root_id);
     assert_eq!(ctx.handler_vp_id, 0);
 
-    // child.vp0 must be Interrupted
+    // child.vp0 must be Available (handler is direct caller, unlock is immediate)
     let child_vp0 = child.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*child_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "child VP[0] should be Interrupted after delivery"
+        matches!(*child_vp0.run_state.read(), VpRunState::Available),
+        "child VP[0] should be Available after 2-domain interrupt delivery"
     );
 
     // root.vp0 must be Running on core 0
