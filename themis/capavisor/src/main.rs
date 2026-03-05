@@ -102,10 +102,10 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 /// - No allocator, no serial, no ACPI yet — those are Phase 1.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    SerialPort::init();
+
     // Verify the bootloader honours our requested revision.
     assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
-
-    SerialPort::init();
 
     serial_println!();
     serial_println!("========================================");
@@ -133,6 +133,29 @@ pub extern "C" fn _start() -> ! {
             if info.cmdline == "dom0-kernel" {
                 serial_println!("  → dom0 kernel found at {:#x} ({} KiB)", info.base as usize, info.size / 1024);
                 kernel_found = true;
+
+                match guest::linux::BootHeader::from_module(&info) {
+                    Ok(hdr) => {
+                        serial_println!();
+                        serial_println!("  Linux boot header (protocol v{}.{:02}):",
+                            hdr.version >> 8, hdr.version & 0xff);
+                        serial_println!("    pref_address      = {:#x}", hdr.pref_address);
+                        serial_println!("    kernel_alignment  = {:#x}", hdr.kernel_alignment);
+                        serial_println!("    init_size         = {:#x} ({} KiB)", hdr.init_size, hdr.init_size / 1024);
+                        serial_println!("    payload_offset    = {:#x} (file offset {:#x})",
+                            hdr.payload_offset, hdr.payload_file_offset());
+                        serial_println!("    payload_length    = {:#x} ({} KiB)",
+                            hdr.payload_length, hdr.payload_length / 1024);
+                        serial_println!("    code32_start      = {:#x}", hdr.code32_start);
+                        serial_println!("    relocatable       = {}", hdr.relocatable);
+                        serial_println!("    64-bit capable    = {}", hdr.is_64bit());
+                        serial_println!("    can load above 4G = {}", hdr.can_load_above_4g());
+                        serial_println!("    cmdline_size      = {}", hdr.cmdline_size);
+                    }
+                    Err(e) => {
+                        serial_println!("  ⚠ failed to parse Linux boot header: {:?}", e);
+                    }
+                }
             }
         }
         if !kernel_found {

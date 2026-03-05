@@ -6,5 +6,6 @@
 //! name-based lookup via the `module_cmdline` tag set in `limine.conf`.
 
 mod modules;
+pub mod linux;
 
 pub use modules::{find_module, ModuleInfo};
