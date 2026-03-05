@@ -384,13 +384,10 @@ impl Hinter for CliHelper {
 
     fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
         let trimmed = line.trim();
-
-        // If line is empty or just whitespace, don't show hint
         if trimmed.is_empty() {
             return None;
         }
 
-        // Extract the command (first word)
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.is_empty() {
             return None;
@@ -398,19 +395,19 @@ impl Hinter for CliHelper {
 
         let cmd = parts[0];
 
-        // Find matching command
         for command_info in COMMANDS {
             if command_info.name == cmd {
-                // Show the full usage, graying out what's already typed
-                let hint = command_info.usage.to_string();
-                if hint.starts_with(trimmed) {
-                    // Show the remaining part of the usage
-                    return Some(hint[trimmed.len()..].to_string());
-                } else if parts.len() == 1 {
-                    // Just the command name is typed, show usage without the command name
-                    return Some(format!(" {}", &hint[cmd.len()..].trim()));
+                let usage_tokens: Vec<&str> = command_info.usage.split_whitespace().collect();
+                // `parts.len()` covers the command name (slot 0) plus all typed args,
+                // so usage_tokens[parts.len()..] is what still needs to be filled in.
+                let skip = parts.len();
+                if skip >= usage_tokens.len() {
+                    return None;
                 }
-                break;
+                let remaining = usage_tokens[skip..].join(" ");
+                // Avoid a double space when the line already ends with a space.
+                let prefix = if line.ends_with(' ') { "" } else { " " };
+                return Some(format!("{}{}", prefix, remaining));
             }
         }
 
