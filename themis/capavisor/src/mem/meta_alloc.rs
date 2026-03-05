@@ -8,6 +8,7 @@
 //! support if needed.
 
 use super::PhysRegion;
+use ept::FrameAllocator;
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -90,4 +91,16 @@ impl MetaAllocator {
     pub fn base(&self) -> u64 {
         self.base
     }
+}
+
+/// `MetaAllocator` satisfies `ept::FrameAllocator`: every allocated frame is
+/// zeroed, and `free_frame` is intentionally a no-op (bump allocator).
+impl FrameAllocator for MetaAllocator {
+    fn allocate_frame(&mut self) -> Option<u64> {
+        if self.next + PAGE_SIZE > self.size {
+            return None;
+        }
+        Some(self.alloc_frame())
+    }
+    // free_frame: use default (no-op) — bump allocator does not reclaim pages.
 }

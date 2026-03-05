@@ -1,24 +1,8 @@
 //! Extended Page Table (EPT) mapper for Themis.
 //!
-//! # Status: STUB — Phase 0
-//!
-//! This crate is a placeholder.  The real implementation will be extracted
-//! from `asterinas/hyperenclave` (Apache-2.0, ASPLOS'24) per Phase 0c of the
-//! implementation plan.
-//!
-//! ## Extraction plan
-//!
-//! 1. Clone `https://github.com/asterinas/hyperenclave`.
-//! 2. Identify the EPT source files under `src/mm/` (look for `EptMapper`,
-//!    `EptEntry`, `EptLevel`, `InvEpt`).
-//! 3. Strip the TEE/enclave ownership-tracking policy (attestation, enclave
-//!    page types) — keep only the raw 4-level EPT walk, map, unmap, and
-//!    INVEPT wrappers.
-//! 4. Adapt the `FrameAllocator` hook to use `capavisor`'s `FrameAllocator`
-//!    trait (defined in `capavisor::memory`).
-//! 5. Verify `no_std` compilation against `x86_64-unknown-none`.
-//! 6. Run the extracted unit tests (if any) under `cargo test --target
-//!    x86_64-unknown-linux-gnu` with a hosted frame allocator.
+//! Ported from `vmxvmm/crates/mmu/` (local, Apache-2.0).  All vmxvmm
+//! external dependencies (`utils`, `vmx::bitmaps`) have been replaced with
+//! local types so this crate has no external dependencies beyond `bitflags`.
 //!
 //! ## AMD NPT note
 //!
@@ -29,51 +13,40 @@
 
 #![no_std]
 
-/// Physical address type — will be replaced with `capavisor::memory::PhysAddr`
-/// once that module exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct PhysAddr(pub u64);
+mod addr;
+mod mapper;
+mod walker;
 
-/// Stub EPT mapper — panics on every call until the real extraction lands.
-pub struct EptMapper;
-
-impl EptMapper {
-    /// Allocate a new EPT root.  Returns the physical address of the PML4.
-    pub fn new() -> (Self, PhysAddr) {
-        unimplemented!("EPT: extract from asterinas/hyperenclave (Phase 0c)")
-    }
-
-    /// Map `size` bytes at guest-physical `gpa` to host-physical `hpa`
-    /// with the given `rights`.
-    pub fn map(&mut self, _gpa: u64, _hpa: PhysAddr, _size: u64, _rights: EptRights) {
-        unimplemented!("EPT: extract from asterinas/hyperenclave (Phase 0c)")
-    }
-
-    /// Unmap the region starting at `gpa`.
-    pub fn unmap(&mut self, _gpa: u64, _size: u64) {
-        unimplemented!("EPT: extract from asterinas/hyperenclave (Phase 0c)")
-    }
-
-    /// Execute `INVEPT` for this EPT context.
-    pub fn invept(&self) {
-        unimplemented!("EPT: extract from asterinas/hyperenclave (Phase 0c)")
-    }
-
-    /// Return the EPT pointer value to write into `VMCS.EPT_POINTER` /
-    /// `VMCB.N_CR3`.  Encodes: 4-level walk, WB memory type, accessed/dirty
-    /// bits disabled.
-    pub fn eptp(&self) -> u64 {
-        unimplemented!("EPT: extract from asterinas/hyperenclave (Phase 0c)")
-    }
-}
+pub use addr::{GuestPhysAddr, HostPhysAddr, HostVirtAddr};
+pub use mapper::{EptMapper, EptMemoryType, EPT_MEM_TYPE_MASK, EPT_PRESENT, EPT_ROOT_FLAGS};
+pub use walker::{Level, WalkNext, Walker};
 
 bitflags::bitflags! {
     /// EPT page-table permission bits (Intel SDM Vol 3C §29.3.2).
-    #[derive(Clone, Copy, Debug)]
-    pub struct EptRights: u8 {
-        const READ    = 1 << 0;
-        const WRITE   = 1 << 1;
-        const EXECUTE = 1 << 2;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EptEntryFlags: u64 {
+        const READ               = 1 << 0;
+        const WRITE              = 1 << 1;
+        /// Execute permission for supervisor-mode linear addresses.
+        const SUPERVISOR_EXECUTE = 1 << 2;
+        /// Large/huge page flag (set in L3 or L2 entries that are leaves).
+        const PAGE               = 1 << 7;
+        /// Execute permission for user-mode linear addresses.
+        const USER_EXECUTE       = 1 << 10;
     }
+}
+
+/// Trait for physical frame allocators used by the EPT mapper.
+///
+/// The allocator MUST return zeroed frames (intermediate EPT page-table pages
+/// must be zeroed to indicate "not present").  [`MetaAllocator::alloc_frame`]
+/// already satisfies this invariant.
+pub trait FrameAllocator {
+    /// Allocate one 4 KiB zeroed frame.  Returns the physical address, or
+    /// `None` if the allocator is exhausted.
+    fn allocate_frame(&mut self) -> Option<u64>;
+
+    /// Return a frame to the allocator.  The default implementation leaks
+    /// the frame — correct for bump allocators like `MetaAllocator`.
+    fn free_frame(&mut self, _phys: u64) {}
 }
