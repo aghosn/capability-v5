@@ -8,6 +8,7 @@ extern crate alloc;
 
 use core::fmt;
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use limine::request::{HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
 use limine::BaseRevision;
@@ -91,6 +92,13 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 /// Until `init_heap()` is called all `alloc` operations will panic.
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+// ── SMP barrier ─────────────────────────────────────────────────────────── //
+
+/// Number of APs that have completed their init and are parked.
+static AP_READY_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Simple spinlock to serialize AP serial output.
+static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 
 // ── Entry point ─────────────────────────────────────────────────────────── //
 
@@ -258,12 +266,37 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!();
 
-    // TODO Phase 1c: SMP bootstrap.
+    // ── Phase 1c: SMP bootstrap ──────────────────────────────────────── //
+
+    let bsp_lapic_id = mp_response.bsp_lapic_id();
+    let cpus = mp_response.cpus();
+    let num_aps = cpus.len() as u64 - 1;
+
+    serial_println!("SMP: BSP LAPIC ID = {}, starting {} APs ...", bsp_lapic_id, num_aps);
+
+    // Wake each AP by writing our entry function to its goto_address.
+    for cpu in cpus.iter() {
+        if cpu.lapic_id == bsp_lapic_id {
+            continue; // Skip BSP
+        }
+        cpu.goto_address.write(ap_entry);
+    }
+
+    // Wait for all APs to check in.
+    if num_aps > 0 {
+        while AP_READY_COUNT.load(Ordering::Acquire) < num_aps {
+            core::hint::spin_loop();
+        }
+    }
+
+    serial_println!("SMP: all {} APs parked ✓", num_aps);
+    serial_println!();
+
     // TODO Phase 1d: ACPI parsing.
     // TODO Phase 1e: PCI enumeration.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
-    serial_println!("Halting (Phase 1c+ not implemented yet).");
+    serial_println!("Halting (Phase 1d+ not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
@@ -274,12 +307,23 @@ pub extern "C" fn _start() -> ! {
 
 /// Application processor entry point — called by Limine for each AP.
 ///
-/// Limine boots each AP and calls this function with a pointer to the
-/// `limine::smp::CpuInfo` describing the core.  At this stage the function
-/// just parks the AP; Phase 1 will set up a proper mailbox.
-pub extern "C" fn ap_entry(_cpu: *const limine::mp::Cpu) -> ! {
+/// Limine boots each AP and calls this function with a reference to the
+/// `limine::mp::Cpu` describing the core.  The AP signals readiness via
+/// the global barrier, then parks until Phase 2 sets up VMXON/VMCS.
+unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
+    // Serialize serial output across APs.
+    while SERIAL_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+    serial_println!("  AP {} (LAPIC {}) ready", cpu.id, cpu.lapic_id);
+    SERIAL_LOCK.store(false, Ordering::Release);
+
+    // Signal readiness to BSP.
+    AP_READY_COUNT.fetch_add(1, Ordering::Release);
+
+    // Park until Phase 2 gives us work (VMXON, etc.).
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        core::arch::asm!("hlt", options(nomem, nostack));
     }
 }
 
