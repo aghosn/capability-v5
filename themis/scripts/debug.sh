@@ -34,6 +34,12 @@ fi
 
 echo "→ Starting QEMU (GDB stub on :1234) ..."
 
+IMAGE_NAME="jammy-server-cloudimg-amd64.img"
+DISK_ARGS=""
+if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
+    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=ide "
+fi
+
 qemu-system-x86_64 \
     $KVM_ARGS \
     -smp "$QEMU_CPUS" \
@@ -44,6 +50,7 @@ qemu-system-x86_64 \
     -display none \
     -no-reboot \
     -s -S \
+    ${DISK_ARGS} \
     ${QEMU_EXTRA_ARGS:-} &
 
 QEMU_PID=$!

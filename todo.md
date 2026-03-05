@@ -1402,18 +1402,26 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
 
 #### Sub-tasks
 
-- [ ] **P0.5a** — Linux kernel binary for dom0:
-  - Obtain a pre-built `vmlinuz` (compressed bzImage) from a Debian/Ubuntu cloud image
-    or from a minimal `defconfig` kernel build.
-  - Preferred: download the official **Ubuntu Minimal Cloud Image**
-    (`ubuntu-24.04-minimal-cloudimg-amd64.img`, squashfs) and extract kernel +
-    initrd from it (`/boot/vmlinuz-*`, `/boot/initrd.img-*`).
-  - Script: `scripts/fetch-dom0.sh` — downloads image, extracts kernel + initrd via
-    `guestfish` or `7z`, places them under `guest/dom0/vmlinuz` and
-    `guest/dom0/initrd.img`.
-  - Kernel command line to be passed by Themis:
-    `root=/dev/vda1 console=ttyS0 earlyprintk=serial,ttyS0 nokaslr quiet`
-    (KASLR off simplifies address-layout debugging during bringup).
+- [ ] **P0.5a** — dom0 disk image:
+  - Download **Ubuntu Jammy cloud image** (`jammy-server-cloudimg-amd64-custom-20241017-0.qcow2`)
+    from `ch-images.azureedge.net` (same image used by cloud-hypervisor integration tests).
+  - Script: `scripts/fetch-dom0.sh` — downloads disk + creates FAT32 CIDATA cloud-init seed.
+  - **No separate kernel download**: the kernel and initrd already live inside the disk at
+    `/boot/vmlinuz` and `/boot/initrd.img`. Limine loads them directly from the disk via:
+    ```
+    MODULE_PATH=fslabel(cloudimg-rootfs)://boot/vmlinuz
+    MODULE_PATH=fslabel(cloudimg-rootfs)://boot/initrd.img
+    ```
+    This means the ISO contains only Themis; the dom0 kernel version is always the one
+    that matches the rootfs. Updating the disk automatically updates what Themis boots.
+  - **BIOS/IDE caveat**: Limine runs at BIOS level using INT 13h for disk access.
+    virtio-blk is invisible at this stage (requires an OS driver). The disk must be
+    attached to QEMU as `-drive ...,if=ide` so Limine can reach it.
+    Ubuntu cloud images use UUID-based root mounting, so dom0 boots correctly regardless
+    of whether it sees the disk as `hda`/`sda` (IDE) or `vda` (virtio).
+    On real hardware this is a non-issue (Limine uses native UEFI/BIOS block I/O).
+  - `module_cmdline` tags (`dom0-kernel`, `dom0-initrd`) let Themis identify each
+    module by name in `MODULE_RESPONSE` at runtime.
 
 - [ ] **P0.5b** — Limine module declarations:
   - Update `scripts/build-iso.sh` to copy `guest/dom0/vmlinuz` and
@@ -1446,15 +1454,11 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
   - This will be used in Phase 7 when setting up the dom0 address space and
     `struct boot_params` for the guest.
 
-- [ ] **P0.5e** — QEMU disk image (optional block device path):
-  - As an alternative to the Limine-module approach: create a virtio-blk QCOW2 image
-    containing the dom0 filesystem, passed to QEMU as `-drive file=guest/dom0.qcow2`.
-  - During Phase 7 dom0 boot, Themis passes the virtual disk's PCI BDF to the dom0
-    Linux kernel via `boot_params.hdr.cmdline`.
-  - Script: `scripts/create-dom0-disk.sh` — creates `guest/dom0.qcow2` via
-    `qemu-img create` + `mkfs.ext4`, populates with BusyBox rootfs or debootstrap.
-  - **Recommended for now**: use `noroot` / initrd-only approach (P0.5a–P0.5d) to
-    avoid disk I/O complexity until the virtio-blk backend is implemented.
+- [ ] **P0.5e** — *(Future)* Switch to virtio-blk for dom0 disk once Themis's virtio-blk
+  backend is implemented (Phase 12+). At that point, the disk can be passed as
+  `-drive ...,if=virtio` in QEMU and Limine access becomes irrelevant (Themis will load
+  the kernel from memory, not Limine). Kernel command line root= will switch to
+  `root=/dev/vda1`.
 
 - [ ] **P0.5f** — `.gdbinit` update:
   - Once P0.5c is working, extend `themis.gdbinit` with an `add-symbol-file` for the

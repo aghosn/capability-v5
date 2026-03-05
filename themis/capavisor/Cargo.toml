@@ -22,15 +22,3 @@ vtd          = { workspace = true }
 themis-abi   = { workspace = true }
 ept          = { workspace = true }
 capavisor-pt = { workspace = true }
-
-[profile.dev]
-# No unwinding on bare metal — panic = abort.
-panic = "abort"
-opt-level = 1
-
-[profile.release]
-panic    = "abort"
-opt-level = 3
-lto      = true
-codegen-units = 1
-strip    = false   # keep symbols for GDB

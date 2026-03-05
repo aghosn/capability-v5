@@ -3,14 +3,27 @@ target = "x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
 rustflags = [
-    # Soft-float ABI (no SSE in early boot before FPU init)
-    "-C", "target-feature=-mmx,-sse,-sse2",
+    # Soft-float ABI: disable SSE/SSE2 until the FPU is initialised in early boot.
+    # (-mmx omitted — not a recognised LLVM target feature on x86-64 toolchains)
+    "-C", "target-feature=-sse,-sse2",
+    # Produce a static executable (ET_EXEC) instead of PIE (ET_DYN).
+    # Limine expects either ET_EXEC or ET_DYN with PT_DYNAMIC; the Rust
+    # default PIE for x86_64-unknown-none produces ET_DYN without PT_DYNAMIC
+    # which Limine rejects.
+    "-C", "relocation-model=static",
 ]
 
 [alias]
-# Build the Limine bootable ISO
-iso   = ["!bash", "scripts/build-iso.sh"]
-# Build ISO and run in QEMU (no debugger)
-qemu  = ["!bash", "scripts/run-qemu.sh"]
-# Build ISO and run QEMU with -s -S; attach GDB in the same terminal
-debug = ["!bash", "scripts/debug.sh"]
+# cargo iso / qemu / debug / fetch-dom0 dispatch through xtask/src/main.rs
+# which runs the corresponding scripts/<task>.sh on the host.
+# All environment knobs (QEMU_MEM, PROFILE, FORCE, …) are forwarded.
+#
+# --manifest-path keeps xtask out of the bare-metal workspace.
+# --target x86_64-unknown-linux-gnu overrides the workspace default target
+# (x86_64-unknown-none) so xtask links against std on the host.
+iso           = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "build-iso"]
+themis        = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-qemu"]
+debug         = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "debug"]
+fetch-dom0    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-dom0"]
+dom0          = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-dom0"]
+setup-limine  = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "setup-limine"]

@@ -1,0 +1,19 @@
+[package]
+name    = "xtask"
+version = "0.1.0"
+edition = "2021"
+
+# xtask is a host-side build helper — it must NOT be compiled for the
+# bare-metal target set by the workspace .cargo/config.toml.
+# It lives in its own mini-workspace (see [workspace] below) and is excluded
+# from the main workspace to avoid polluting `cargo check/build` outputs.
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+
+# Own workspace root so Cargo treats this as independent from the parent
+# bare-metal workspace.  Aliases in ../.cargo/config.toml invoke it via
+# `--manifest-path xtask/Cargo.toml --target x86_64-unknown-linux-gnu`.
+[workspace]

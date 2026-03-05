@@ -1,0 +1,4 @@
+# Override the workspace-level x86_64-unknown-none target.
+# xtask is a host utility; it must compile and run on the build machine.
+[build]
+target = "x86_64-unknown-linux-gnu"

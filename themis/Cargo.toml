@@ -6,6 +6,10 @@ members = [
     "crates/ept",
     "crates/capavisor-pt",
 ]
+# xtask is a host-side build helper; keep it OUT of the bare-metal workspace
+# so that plain `cargo check/build` does not try to compile it for x86_64-unknown-none.
+# It has its own mini-workspace at xtask/Cargo.toml and is invoked explicitly via aliases.
+exclude = ["xtask"]
 resolver = "2"
 
 # Shared dependency versions for all workspace members.
@@ -26,3 +30,16 @@ vtd          = { path = "crates/vtd" }
 themis-abi   = { path = "crates/themis-abi" }
 ept          = { path = "crates/ept" }
 capavisor-pt = { path = "crates/capavisor-pt" }
+
+# Profiles must be defined at the workspace root (non-root package profiles are ignored).
+# No unwinding on bare metal — panic = abort everywhere.
+[profile.dev]
+panic     = "abort"
+opt-level = 1
+
+[profile.release]
+panic          = "abort"
+opt-level      = 3
+lto            = true
+codegen-units  = 1
+strip          = false   # keep symbols for GDB

@@ -10,10 +10,7 @@
 #
 # Prerequisites:
 #   • xorriso     (sudo apt install xorriso)
-#   • limine      (cargo install limine-install  OR  apt install limine)
-#     Alternatively: clone https://github.com/limine-bootloader/limine and
-#     build with `make` — copy limine-bios.sys, limine-bios-cd.bin,
-#     limine-uefi-cd.bin to ~/.local/share/limine/ or set LIMINE_DIR.
+#   • limine      (cargo setup-limine — clones and builds locally in tools/limine/)
 #
 # The LIMINE_DIR environment variable can override the default search path.
 
@@ -22,17 +19,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ── Prerequisites ──────────────────────────────────────────────────────────
+
+if ! command -v xorriso &>/dev/null; then
+    echo "ERROR: xorriso not found. Install: sudo apt install xorriso" >&2
+    exit 1
+fi
+
 # ── Locate Limine ──────────────────────────────────────────────────────────
 
 LIMINE_DIR="${LIMINE_DIR:-}"
 
-# Search common install locations if not set
+# Search common install locations if not set (local first)
 if [[ -z "$LIMINE_DIR" ]]; then
     for candidate in \
+        "$WORKSPACE_ROOT/tools/limine" \
         "$HOME/.local/share/limine" \
         "/usr/share/limine" \
-        "/usr/local/share/limine" \
-        "$WORKSPACE_ROOT/tools/limine"
+        "/usr/local/share/limine"
     do
         if [[ -f "$candidate/limine-bios.sys" ]]; then
             LIMINE_DIR="$candidate"
@@ -41,10 +45,16 @@ if [[ -z "$LIMINE_DIR" ]]; then
     done
 fi
 
+# Auto-setup if not found
 if [[ -z "$LIMINE_DIR" ]]; then
-    echo "ERROR: Limine boot files not found." >&2
-    echo "       Clone https://github.com/limine-bootloader/limine, build it," >&2
-    echo "       then set LIMINE_DIR to the directory containing limine-bios.sys" >&2
+    echo "→ Limine not found; running setup-limine.sh ..."
+    bash "$SCRIPT_DIR/setup-limine.sh"
+    LIMINE_DIR="$WORKSPACE_ROOT/tools/limine"
+fi
+
+if [[ ! -f "$LIMINE_DIR/limine-bios.sys" ]]; then
+    echo "ERROR: Limine boot files not found in $LIMINE_DIR" >&2
+    echo "       Run: cargo setup-limine" >&2
     exit 1
 fi
 
@@ -86,13 +96,25 @@ cp "$LIMINE_DIR/limine-bios.sys"      "$ISO_ROOT/boot/limine/"
 cp "$LIMINE_DIR/limine-bios-cd.bin"   "$ISO_ROOT/boot/limine/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin"   "$ISO_ROOT/boot/limine/" 2>/dev/null || true
 
-cat > "$ISO_ROOT/boot/limine/limine.cfg" <<'EOF'
-TIMEOUT=0
+cat > "$ISO_ROOT/boot/limine/limine.conf" <<'CONF'
+timeout: 0
+serial: yes
 
 /Themis Capavisor
-    PROTOCOL=limine
-    KERNEL_PATH=boot:///boot/capavisor
-EOF
+    protocol: limine
+    kernel_path: boot():/boot/capavisor
+CONF
+
+# Only include dom0 modules if the disk image is present.
+# Without these lines Limine boots the capavisor alone (useful for testing).
+if [[ -f "$WORKSPACE_ROOT/guest/jammy-server-cloudimg-amd64.img" ]]; then
+    cat >> "$ISO_ROOT/boot/limine/limine.conf" <<'CONF'
+    module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
+    module_cmdline: dom0-kernel
+    module_path: fslabel(cloudimg-rootfs):/boot/initrd.img
+    module_cmdline: dom0-initrd
+CONF
+fi
 
 # Copy UEFI loader if present
 if [[ -d "$LIMINE_DIR/EFI/BOOT" ]]; then

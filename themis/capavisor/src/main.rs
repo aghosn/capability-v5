@@ -6,11 +6,54 @@
 // memory map.
 extern crate alloc;
 
+use core::fmt;
 use core::panic::PanicInfo;
 
 use limine::request::{HhdmRequest, MemoryMapRequest, MpRequest, RsdpRequest};
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
+
+// ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
+
+struct SerialPort;
+
+impl SerialPort {
+    /// Standard COM1 UART initialization (8N1, 115200 baud).
+    fn init() {
+        unsafe {
+            x86::io::outb(0x3F8 + 1, 0x00); // Disable interrupts
+            x86::io::outb(0x3F8 + 3, 0x80); // Enable DLAB (set baud rate divisor)
+            x86::io::outb(0x3F8 + 0, 0x01); // 115200 baud (divisor = 1)
+            x86::io::outb(0x3F8 + 1, 0x00);
+            x86::io::outb(0x3F8 + 3, 0x03); // 8 bits, no parity, one stop bit
+            x86::io::outb(0x3F8 + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
+            x86::io::outb(0x3F8 + 4, 0x03); // RTS/DSR set
+        }
+    }
+}
+
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for b in s.bytes() {
+            unsafe {
+                // Spin until the transmit holding register is empty (bit 5 of LSR).
+                while (x86::io::inb(0x3F8 + 5) & 0x20) == 0 {}
+                x86::io::outb(0x3F8, b);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Print to the serial console (COM1).
+macro_rules! serial_print {
+    ($($arg:tt)*) => { let _ = core::fmt::write(&mut SerialPort, format_args!($($arg)*)); };
+}
+
+macro_rules! serial_println {
+    ()            => { serial_print!("\n") };
+    ($($arg:tt)*) => { serial_print!("{}\n", format_args!($($arg)*)) };
+}
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
@@ -56,8 +99,18 @@ pub extern "C" fn _start() -> ! {
     // Verify the bootloader honours our requested revision.
     assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
 
+    SerialPort::init();
+
+    serial_println!();
+    serial_println!("========================================");
+    serial_println!("  Themis capavisor reached — Limine OK");
+    serial_println!("========================================");
+    serial_println!();
+
     // TODO Phase 1: parse memory map, initialise heap, serial console, ACPI, PCI.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
+
+    serial_println!("Halting (Phase 1 not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
@@ -80,8 +133,8 @@ pub extern "C" fn ap_entry(_cpu: *const limine::mp::Cpu) -> ! {
 // ── Panic handler ────────────────────────────────────────────────────────── //
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    // TODO Phase 1: print panic info to serial before halting.
+fn panic(info: &PanicInfo) -> ! {
+    serial_println!("!!! PANIC: {}", info);
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
