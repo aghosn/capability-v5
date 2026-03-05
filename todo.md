@@ -1470,7 +1470,7 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
     `from_limine_file()` constructor and `find_module(name)` lookup helper.
   - No heap allocation required (iterates Limine response in-place).
 
-- [ ] **P0.5d** — Linux kernel header parsing:
+- [x] **P0.5d** — Linux kernel header parsing:
   - Parse the `linux_boot_params` / `boot_protocol` header at offset 0x1f1 inside
     the bzImage to extract:  `kernel_alignment`, `init_size`, `pref_address`,
     `payload_offset` (compressed payload start), `payload_length`.
@@ -1485,7 +1485,7 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
   the kernel from memory, not Limine). Kernel command line root= will switch to
   `root=/dev/vda1`.
 
-- [ ] **P0.5f** — `.gdbinit` update:
+- [x] **P0.5f** — `.gdbinit` update:
   - Once P0.5c is working, extend `themis.gdbinit` with an `add-symbol-file` for the
     uncompressed Linux vmlinux at the address Themis places it in memory.
   - Add a `dmesg-hint` command that prints the GPA range of the dom0 kernel text
@@ -1539,20 +1539,20 @@ physical memory map into three pools:
 When dom0 later creates children via `themis-vmm.ko`, it follows the same pattern:
 carve META from its own pool, register it for the child VP.
 
-- [ ] **P1a**: Limine entry `_start`: parse memory map → `PhysicalInventory`; reserve heap
+- [x] **P1a**: Limine entry `_start`: parse memory map → `PhysicalInventory`; reserve heap
   (64 MB); init `linked_list_allocator::LockedHeap`.
   *(Note: serial console is already implemented — see Phase 0. `_start` currently
   boots, prints to serial, and halts. Phase 1 continues from the halt point.)*
-- [ ] **P1b**: Physical memory partitioning: split the physical memory map into
+- [x] **P1b**: Physical memory partitioning: split the physical memory map into
   `{themis_heap, dom0_owned, dom0_meta_pool}`.  The META pool size is computed from
   the number of dom0 VPs × per-VP hardware structures (VMCS 4 KiB + VAPIC 4 KiB +
   VpStateMeta 4 KiB + VMXON 4 KiB per core + EPT root pages).  Remaining memory
   goes to dom0-owned.
-- [ ] **P1c**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
+- [x] **P1c**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
   global barrier until all APs complete Phase 2 init.
   *(Note: AP entry stub (`ap_entry`) already exists — it parks APs in a halt loop.
   Phase 1 replaces the halt with a proper mailbox/barrier.)*
-- [ ] **P1d**: ACPI parsing:
+- [x] **P1d**: ACPI parsing:
   - Implement `acpi::AcpiHandler` trait (physical → virtual address mapping using HHDM offset).
   - `AcpiTables::from_rsdp(handler, rsdp_phys)`.
   - Extract: MADT (LAPIC IDs, x2APIC entries), MCFG (PCIe ECAM bases), DMAR raw bytes.
