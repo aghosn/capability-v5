@@ -1556,7 +1556,7 @@ carve META from its own pool, register it for the child VP.
   - Implement `acpi::AcpiHandler` trait (physical → virtual address mapping using HHDM offset).
   - `AcpiTables::from_rsdp(handler, rsdp_phys)`.
   - Extract: MADT (LAPIC IDs, x2APIC entries), MCFG (PCIe ECAM bases), DMAR raw bytes.
-- [ ] **P1e**: PCI enumeration via `pci_types` over ECAM:
+- [x] **P1e**: PCI enumeration via `pci_types` over ECAM:
   - Implement `ConfigRegionAccess` using volatile MMIO over ECAM window.
   - Walk all buses/devices/functions; decode headers + BARs + capabilities (MSI/MSI-X).
   - Build `DEVICE_TABLE: Vec<PciDevice>`.
