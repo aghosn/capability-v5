@@ -397,14 +397,23 @@ impl Hinter for CliHelper {
 
         for command_info in COMMANDS {
             if command_info.name == cmd {
-                let usage_tokens: Vec<&str> = command_info.usage.split_whitespace().collect();
-                // `parts.len()` covers the command name (slot 0) plus all typed args,
-                // so usage_tokens[parts.len()..] is what still needs to be filled in.
-                let skip = parts.len();
-                if skip >= usage_tokens.len() {
+                // Handle commands with alternative usage forms separated by |
+                let forms: Vec<&str> = command_info.usage.split('|').collect();
+                let mut remaining_hints: Vec<String> = Vec::new();
+
+                for form in &forms {
+                    let usage_tokens: Vec<&str> = form.trim().split_whitespace().collect();
+                    let skip = parts.len();
+                    if skip < usage_tokens.len() {
+                        remaining_hints.push(usage_tokens[skip..].join(" "));
+                    }
+                }
+
+                if remaining_hints.is_empty() {
                     return None;
                 }
-                let remaining = usage_tokens[skip..].join(" ");
+
+                let remaining = remaining_hints.join("  |  ");
                 // Avoid a double space when the line already ends with a space.
                 let prefix = if line.ends_with(' ') { "" } else { " " };
                 return Some(format!("{}{}", prefix, remaining));
