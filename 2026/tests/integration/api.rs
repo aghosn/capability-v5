@@ -93,7 +93,7 @@ fn test_nested_carve_memory() {
 fn test_create_domain() {
     let (root, _, _mem_root) = setup_root();
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let child_h = Capability::create(&root, child_policy).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap().0;
 
     assert!(root.read().data.domain_capabilities.contains_key(&child_h));
     let child = root.read().data.domain_capabilities[&child_h]
@@ -106,7 +106,7 @@ fn test_create_domain() {
 fn test_revoke_domain() {
     let (root, _, _mem_root) = setup_root();
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let child_h = Capability::create(&root, child_policy).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap().0;
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -303,14 +303,14 @@ fn test_revoke_domain_tree() {
     let (root, _, _mem_root) = setup_root();
 
     // Create child and seal it
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap();
+    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
     Capability::seal(&root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
 
     // Create grandchild under child (child must be sealed)
-    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap();
+    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap().0;
     let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
@@ -354,7 +354,7 @@ fn test_address_space_shrinks_after_send_of_carve() {
     // Send to an unsealed receiver (immediate transfer)
     let recv_h =
         Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
-            .unwrap();
+            .unwrap().0;
     Capability::send(&root, carved_h, recv_h, Attributes::NONE).unwrap();
 
     // Root lost the carved handle; its remaining cap (mem_root) has a hole where
@@ -386,7 +386,7 @@ fn test_address_space_unchanged_after_send_of_alias() {
     // Send the alias to an unsealed receiver
     let recv_h =
         Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
-            .unwrap();
+            .unwrap().0;
     Capability::send(&root, alias_h, recv_h, Attributes::NONE).unwrap();
 
     // Root's full range must remain accessible: aliasing is shared, so mem_root's
@@ -443,7 +443,7 @@ fn test_depth_invariant() {
     assert_eq!(root.read().depth, 0, "root domain should have depth 0");
 
     // Level-1 child domain has depth 1
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap();
+    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -451,7 +451,7 @@ fn test_depth_invariant() {
 
     // Level-2 grandchild domain (child must be sealed first) has depth 2
     Capability::seal(&root, child_h).unwrap();
-    let grandchild_h = Capability::create(&child, DomainPolicy::new_root(4)).unwrap();
+    let grandchild_h = Capability::create(&child, DomainPolicy::new_root(4)).unwrap().0;
     let grandchild = child.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
@@ -467,14 +467,14 @@ fn test_multi_level_domain_revoke() {
     let root_id = root.read().data.id;
 
     // Build a 3-level subtree under root: child → grandchild → great_grandchild
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap();
+    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
     Capability::seal(&root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
     let child_id = child_ref.read().data.id;
 
-    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap();
+    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap().0;
     Capability::seal(&child_ref, grandchild_h).unwrap();
     let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
@@ -482,7 +482,7 @@ fn test_multi_level_domain_revoke() {
     let grandchild_id = grandchild_ref.read().data.id;
 
     let great_grandchild_h =
-        Capability::create(&grandchild_ref, DomainPolicy::new_root(4)).unwrap();
+        Capability::create(&grandchild_ref, DomainPolicy::new_root(4)).unwrap().0;
     let great_grandchild_ref = grandchild_ref.read().data.domain_capabilities[&great_grandchild_h]
         .upgrade()
         .unwrap();

@@ -1,10 +1,10 @@
 //! Per-domain META frame allocator.
 //!
-//! Each domain owns a contiguous physical META pool from which it allocates
+//! Each domain owns a pool of physical META pages from which it allocates
 //! 4 KiB-aligned pages for hardware VP structures (VMXON, VMCS, VAPIC, EPT).
 //!
-//! Fresh pages come from a bump pointer.  Freed pages are pushed onto a
-//! `Vec`-backed free stack and reused before bumping further.
+//! The allocator starts empty; call `add_range` to populate it.
+//! Freed pages are pushed onto a `Vec`-backed free stack and reused.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -14,37 +14,43 @@ use ept::FrameAllocator;
 
 const PAGE_SIZE: u64 = 4096;
 
-/// Bump allocator with a free stack over a contiguous physical memory region.
+/// Free-stack allocator over a (potentially non-contiguous) set of physical pages.
 ///
-/// Allocation order: pop from `free_stack` first; if empty, advance the bump
-/// pointer.  Freed pages are pushed onto `free_stack` for reuse.
+/// Allocation order: pop from `free_stack`.  Freed pages are pushed back
+/// onto `free_stack` for reuse.
 ///
 /// Thread-safety is the caller's responsibility.
 pub struct MetaAllocator {
-    /// Physical base of the META pool.
-    base: u64,
-    /// Total size of the pool in bytes.
-    size: u64,
-    /// Byte offset of the next *never-used* page (relative to `base`).
-    next: u64,
     /// HHDM offset for phys→virt conversion.
     hhdm_offset: u64,
-    /// Stack of freed physical page addresses available for reuse.
+    /// Stack of free physical page addresses available for allocation.
     free_stack: Vec<u64>,
+    /// Total number of pages ever added via `add_range`.
+    total: u64,
+    /// Number of pages currently allocated (total - free_stack.len()).
+    allocated: u64,
 }
 
 impl MetaAllocator {
-    /// Create a new allocator over the given physical region.
-    pub fn new(region: PhysRegion, hhdm_offset: u64) -> Self {
-        assert!(region.base % PAGE_SIZE == 0, "META pool not page-aligned");
-        assert!(region.length % PAGE_SIZE == 0, "META pool size not page-aligned");
+    /// Create a new empty allocator.
+    pub fn new(hhdm_offset: u64) -> Self {
         Self {
-            base: region.base,
-            size: region.length,
-            next: 0,
             hhdm_offset,
             free_stack: Vec::new(),
+            total: 0,
+            allocated: 0,
         }
+    }
+
+    /// Add all 4 KiB-aligned pages of `[region.base, region.base + region.length)` to the pool.
+    pub fn add_range(&mut self, region: PhysRegion) {
+        assert!(region.base % PAGE_SIZE == 0, "META pool not page-aligned");
+        assert!(region.length % PAGE_SIZE == 0, "META pool size not page-aligned");
+        let pages = region.length / PAGE_SIZE;
+        for i in 0..pages {
+            self.free_stack.push(region.base + i * PAGE_SIZE);
+        }
+        self.total += pages;
     }
 
     /// Zero a page and return its physical address.
@@ -61,61 +67,41 @@ impl MetaAllocator {
     /// # Panics
     /// Panics if the META pool is exhausted.
     pub fn alloc_frame(&mut self) -> u64 {
-        if let Some(phys) = self.free_stack.pop() {
-            return self.zero_and_return(phys);
-        }
-        assert!(
-            self.next + PAGE_SIZE <= self.size,
-            "META pool exhausted ({} / {} bytes used)",
-            self.next,
-            self.size
-        );
-        let phys = self.base + self.next;
-        self.next += PAGE_SIZE;
+        let phys = self.free_stack.pop().expect("META pool exhausted");
+        self.allocated += 1;
         self.zero_and_return(phys)
     }
 
     /// Return a previously-allocated page back to the pool.
     pub fn free_frame(&mut self, phys: u64) {
-        debug_assert!(
-            phys >= self.base && phys < self.base + self.size && phys % PAGE_SIZE == 0,
-            "free_frame: address 0x{:x} not in META pool",
-            phys
-        );
         self.free_stack.push(phys);
+        self.allocated -= 1;
     }
 
-    /// Return the virtual (HHDM) address corresponding to a physical address
-    /// within this pool.
+    /// Return the virtual (HHDM) address corresponding to a physical address.
     pub fn phys_to_virt(&self, phys: u64) -> *mut u8 {
-        debug_assert!(phys >= self.base && phys < self.base + self.size);
         (phys + self.hhdm_offset) as *mut u8
     }
 
-    /// Number of pages currently in use (bumped minus freed).
+    /// Number of pages currently allocated.
     pub fn allocated_pages(&self) -> u64 {
-        self.next / PAGE_SIZE - self.free_stack.len() as u64
+        self.allocated
     }
 
-    /// Number of free pages remaining (virgin bump pages + free stack).
+    /// Number of free pages remaining.
     pub fn free_pages(&self) -> u64 {
-        (self.size - self.next) / PAGE_SIZE + self.free_stack.len() as u64
+        self.free_stack.len() as u64
     }
 
     /// Total capacity in pages.
     pub fn total_pages(&self) -> u64 {
-        self.size / PAGE_SIZE
-    }
-
-    /// Physical base address of the pool.
-    pub fn base(&self) -> u64 {
-        self.base
+        self.total
     }
 }
 
 impl FrameAllocator for MetaAllocator {
     fn allocate_frame(&mut self) -> Option<u64> {
-        if self.free_stack.is_empty() && self.next + PAGE_SIZE > self.size {
+        if self.free_stack.is_empty() {
             return None;
         }
         Some(self.alloc_frame())

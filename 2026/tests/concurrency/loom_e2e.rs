@@ -238,9 +238,9 @@ fn loom_e2e_concurrent_sends() {
 
         // Create two unsealed child domains as receivers via the domain-mediated API.
         let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_a");
+            .expect("setup: create recv_a").0;
         let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_b");
+            .expect("setup: create recv_b").0;
         let recv_a = {
             let r = dom.read();
             r.data.get_domain_capability(dh_a).unwrap().upgrade().unwrap()
@@ -344,7 +344,7 @@ fn loom_e2e_accept_race() {
         // Sealed child domain as receiver (supports receive_after_seal).
         // Use create + seal so it is properly parented under sender.
         let dh_recv = Capability::<Domain>::create(&sender, DomainPolicy::new_root(1))
-            .expect("setup: create recv");
+            .expect("setup: create recv").0;
         Capability::<Domain>::seal(&sender, dh_recv)
             .expect("setup: seal recv");
         let recv = {
@@ -477,7 +477,7 @@ fn loom_e2e_revoke_child_vs_send() {
 
         // Create recv_a and recv_b as proper child domains via create.
         let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_a");
+            .expect("setup: create recv_a").0;
         let recv_a = {
             let r = dom.read();
             r.data.get_domain_capability(dh_a).unwrap().upgrade().unwrap()
@@ -491,7 +491,7 @@ fn loom_e2e_revoke_child_vs_send() {
 
         // Register recv_b for Thread B's send.
         let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_b");
+            .expect("setup: create recv_b").0;
         let recv_b = {
             let r = dom.read();
             r.data.get_domain_capability(dh_b).unwrap().upgrade().unwrap()
@@ -624,7 +624,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 
         // Create child domain ch1 under dom.
         let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create child domain");
+            .expect("setup: create child domain").0;
         let ch1_id: DomainId = dom
             .read()
             .data
@@ -639,7 +639,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         // Create an unsealed memory receiver as a proper child domain.
         // h_child was allocated as handle 1; recv_m gets handle 2.
         let dh_r = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_m");
+            .expect("setup: create recv_m").0;
         let recv_m = {
             let r = dom.read();
             r.data.get_domain_capability(dh_r).unwrap().upgrade().unwrap()
@@ -756,7 +756,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
 
         // Create child domain ch1 under dom (unsealed — supports immediate send).
         let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create ch1");
+            .expect("setup: create ch1").0;
         let ch1_id: DomainId = dom
             .read()
             .data
@@ -916,9 +916,9 @@ fn loom_e2e_two_cores_race_send_same_cap() {
 
         // Two distinct unsealed child domains as receivers.
         let dh_a = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_a");
+            .expect("setup: create recv_a").0;
         let dh_b = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv_b");
+            .expect("setup: create recv_b").0;
         let recv_a = {
             let r = dom.read();
             r.data.get_domain_capability(dh_a).unwrap().upgrade().unwrap()
@@ -1055,7 +1055,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
 
         // Unsealed child domain as receiver for Thread A's immediate send.
         let dh_recv = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv");
+            .expect("setup: create recv").0;
         let recv = {
             let r = dom.read();
             r.data.get_domain_capability(dh_recv).unwrap().upgrade().unwrap()
@@ -1307,7 +1307,7 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
         .expect("setup: carve c1");
 
         let h_child = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create ch1");
+            .expect("setup: create ch1").0;
         let ch1_id: DomainId = dom
             .read()
             .data
@@ -1333,7 +1333,7 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
 
         // Create unsealed receiver for Thread B.
         let dh_r = Capability::<Domain>::create(&dom, DomainPolicy::new_root(1))
-            .expect("setup: create recv");
+            .expect("setup: create recv").0;
         let recv_id: DomainId = dom
             .read()
             .data

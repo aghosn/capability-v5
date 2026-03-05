@@ -31,7 +31,7 @@ fn root_domain() -> CapabilityRef<Domain> {
 /// Create and seal a child domain under `parent` with full permissions.
 fn sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let h = Capability::create(parent, policy).unwrap();
+    let h = Capability::create(parent, policy).unwrap().0;
     Capability::seal(parent, h).unwrap();
     let child = parent
         .read()
@@ -100,13 +100,13 @@ fn test_get_chan_denied_without_permission() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL),
     );
-    let restricted_h = Capability::create(&root, restricted).unwrap();
+    let restricted_h = Capability::create(&root, restricted).unwrap().0;
     Capability::seal(&root, restricted_h).unwrap();
     let restricted_dom = root.read().data.domain_capabilities[&restricted_h].upgrade().unwrap();
 
     // restricted_dom creates a child — it now OWNS that child cap
     let child_policy = DomainPolicy::new_restricted(0b0001, MonitorAPI::NONE);
-    let child_h = Capability::create(&restricted_dom, child_policy).unwrap();
+    let child_h = Capability::create(&restricted_dom, child_policy).unwrap().0;
     Capability::seal(&restricted_dom, child_h).unwrap();
 
     // restricted_dom tries get_chan on its own child — must fail (no GETCHAN)
@@ -119,7 +119,7 @@ fn test_get_chan_requires_sealed_target() {
     let root = root_domain();
     // Create but do NOT seal the child
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create(&root, policy).unwrap();
+    let child_h = Capability::create(&root, policy).unwrap().0;
     // child not sealed
     let result = Capability::get_chan(&root, child_h);
     assert!(matches!(result, Err(CapaError::DomainNotSealed)));
@@ -254,7 +254,7 @@ fn test_send_channel_unsealed_receiver_immediate() {
 
     // Create an UNSEALED receiver
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let unsealed_h = Capability::create(&root, policy).unwrap();
+    let unsealed_h = Capability::create(&root, policy).unwrap().0;
     let unsealed = root.read().data.domain_capabilities[&unsealed_h].upgrade().unwrap();
 
     Capability::<Domain>::send_channel(&root, chan_h, unsealed_h, Attributes::NONE).unwrap();
@@ -417,7 +417,7 @@ fn test_switch_to_channel_rejected() {
     let root = root_domain();
     // caller must be sealed with SWITCH permission
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let caller_h = Capability::create(&root, policy).unwrap();
+    let caller_h = Capability::create(&root, policy).unwrap().0;
     Capability::seal(&root, caller_h).unwrap();
     let caller = root.read().data.domain_capabilities[&caller_h].upgrade().unwrap();
 

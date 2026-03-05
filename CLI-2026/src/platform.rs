@@ -106,8 +106,10 @@ impl Platform for CliPlatform {
         // no-op in CLI
     }
 
-    fn apply_update(&self, _update: &Update) {
-        // no-op; output happens in process_updates
+    fn apply_update(&self, update: &Update) {
+        if let Update::CreateDomain { domain_id, parent_id } = update {
+            self.register_domain(*domain_id, *parent_id);
+        }
     }
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {

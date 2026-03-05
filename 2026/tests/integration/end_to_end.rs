@@ -38,7 +38,7 @@ fn test_cvm_with_exclusive_and_shared_memory() {
         MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::ENUMERATE | MonitorAPI::SWITCH,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b0011, cvm_api); // cores 0-1
-    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap().0;
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
@@ -132,7 +132,7 @@ fn test_enclave_inside_cvm() {
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::ATTEST | MonitorAPI::CARVE,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b1111, cvm_api);
-    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap().0;
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
@@ -147,7 +147,7 @@ fn test_enclave_inside_cvm() {
     // Create enclave inside CVM with even more restricted permissions
     let enclave_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let enclave_policy = DomainPolicy::new_restricted(0b0001, enclave_api); // only core 0
-    let enclave_h = Capability::create(&cvm, enclave_policy).unwrap();
+    let enclave_h = Capability::create(&cvm, enclave_policy).unwrap().0;
     let enclave = cvm.read().data.domain_capabilities[&enclave_h]
         .upgrade()
         .unwrap();
@@ -222,7 +222,7 @@ fn test_sandbox_inside_cvm() {
             | MonitorAPI::SWITCH,
     );
     let cvm_policy = DomainPolicy::new_restricted(0b1111, cvm_api);
-    let cvm_h = Capability::create(&root, cvm_policy).unwrap();
+    let cvm_h = Capability::create(&root, cvm_policy).unwrap().0;
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
@@ -237,7 +237,7 @@ fn test_sandbox_inside_cvm() {
     // Create sandbox with aliased memory (shared with CVM)
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let sandbox_policy = DomainPolicy::new_restricted(0b0011, sandbox_api);
-    let sandbox_h = Capability::create(&cvm, sandbox_policy).unwrap();
+    let sandbox_h = Capability::create(&cvm, sandbox_policy).unwrap().0;
     let sandbox = cvm.read().data.domain_capabilities[&sandbox_h]
         .upgrade()
         .unwrap();
@@ -324,7 +324,7 @@ fn test_two_cvms_with_shared_memory() {
     // Create CVM1
     let cvm1_api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let cvm1_policy = DomainPolicy::new_restricted(0b0011, cvm1_api); // cores 0-1
-    let cvm1_h = Capability::create(&root, cvm1_policy).unwrap();
+    let cvm1_h = Capability::create(&root, cvm1_policy).unwrap().0;
     let cvm1 = root.read().data.domain_capabilities[&cvm1_h]
         .upgrade()
         .unwrap();
@@ -332,7 +332,7 @@ fn test_two_cvms_with_shared_memory() {
     // Create CVM2
     let cvm2_api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let cvm2_policy = DomainPolicy::new_restricted(0b1100, cvm2_api); // cores 2-3
-    let cvm2_h = Capability::create(&root, cvm2_policy).unwrap();
+    let cvm2_h = Capability::create(&root, cvm2_policy).unwrap().0;
     let cvm2 = root.read().data.domain_capabilities[&cvm2_h]
         .upgrade()
         .unwrap();
@@ -475,7 +475,7 @@ fn test_complex_hierarchy_with_updates() {
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::CARVE | MonitorAPI::ATTEST,
     );
     let cvm_h =
-        Capability::create(&root, DomainPolicy::new_restricted(0b1111, cvm_api)).unwrap();
+        Capability::create(&root, DomainPolicy::new_restricted(0b1111, cvm_api)).unwrap().0;
     let cvm = root.read().data.domain_capabilities[&cvm_h]
         .upgrade()
         .unwrap();
@@ -490,7 +490,7 @@ fn test_complex_hierarchy_with_updates() {
         MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::CARVE | MonitorAPI::ATTEST,
     );
     let enclave_h =
-        Capability::create(&cvm, DomainPolicy::new_restricted(0b0011, enclave_api)).unwrap();
+        Capability::create(&cvm, DomainPolicy::new_restricted(0b0011, enclave_api)).unwrap().0;
     let enclave = cvm.read().data.domain_capabilities[&enclave_h]
         .upgrade()
         .unwrap();
@@ -504,7 +504,7 @@ fn test_complex_hierarchy_with_updates() {
     let sandbox_api = MonitorAPI::from_bits(MonitorAPI::ATTEST);
     let sandbox_h =
         Capability::create(&enclave, DomainPolicy::new_restricted(0b0001, sandbox_api))
-            .unwrap();
+            .unwrap().0;
     let sandbox = enclave.read().data.domain_capabilities[&sandbox_h]
         .upgrade()
         .unwrap();
@@ -582,7 +582,7 @@ fn test_complex_memory_update_scenario() {
                 | MonitorAPI::ATTEST,
         ),
     );
-    let dom1_h = Capability::create(&dom0, dom1_policy).unwrap();
+    let dom1_h = Capability::create(&dom0, dom1_policy).unwrap().0;
     let dom1 = dom0.read().data.domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
@@ -606,7 +606,7 @@ fn test_complex_memory_update_scenario() {
         0b1111,
         MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST | MonitorAPI::REVOKE),
     );
-    let dom2_h = Capability::create(&dom1, dom2_policy).unwrap();
+    let dom2_h = Capability::create(&dom1, dom2_policy).unwrap().0;
     let dom2 = dom1.read().data.domain_capabilities[&dom2_h]
         .upgrade()
         .unwrap();

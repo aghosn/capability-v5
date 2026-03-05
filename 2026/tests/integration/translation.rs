@@ -37,7 +37,7 @@ fn seed_map(root: &CapabilityRef<Domain>, hpa: u64, size: u64, rights: Rights, g
 fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(root, policy).unwrap();
+    let h = Capability::create(root, policy).unwrap().0;
     let dom = root
         .read()
         .data
@@ -331,7 +331,7 @@ fn test_accept_blocks_and_inserts() {
     // Need RECEIVE_AFTER_SEAL for sealed-domain accept path.
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap();
+    let dom1_h = Capability::create(&root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -551,7 +551,7 @@ fn test_accept_preserves_gpa_hint() {
     // Sealed receiver with RECEIVE_AFTER_SEAL.
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap();
+    let dom1_h = Capability::create(&root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -605,7 +605,7 @@ fn test_accept_at_overrides_sender_hint() {
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap();
+    let dom1_h = Capability::create(&root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -658,7 +658,7 @@ fn test_accept_at_none_falls_back_to_sender() {
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap();
+    let dom1_h = Capability::create(&root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -747,7 +747,7 @@ fn test_accept_at_conflicting_gpa() {
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap();
+    let dom1_h = Capability::create(&root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data

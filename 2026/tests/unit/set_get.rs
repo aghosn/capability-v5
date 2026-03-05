@@ -31,7 +31,7 @@ fn make_child(
     parent: &CapabilityRef<Domain>,
     policy: DomainPolicy,
 ) -> (CapabilityRef<Domain>, LocalHandle) {
-    let h = Capability::create(parent, policy).unwrap();
+    let h = Capability::create(parent, policy).unwrap().0;
     let child = parent
         .read()
         .data
@@ -724,7 +724,7 @@ fn test_default_visibility_monotonicity_enforced() {
     // Create grandchild under the now-sealed child.
     let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
-    ).unwrap();
+    ).unwrap().0;
 
     // NotReport (2) is allowed for grandchild.
     Capability::set_policy(&child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
@@ -754,7 +754,7 @@ fn test_vector_visibility_monotonicity_enforced() {
     // Create grandchild under the sealed child.
     let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
-    ).unwrap();
+    ).unwrap().0;
 
     // Try to set grandchild's vector 5 to Deliver (0) — must be denied (0 < 1).
     let err = Capability::set_policy(
@@ -782,7 +782,7 @@ fn test_seal_domain_denied_without_seal_permission() {
     // The grandchild must have only the permissions child has (monotonicity).
     let grand_h = Capability::create(
         &child, DomainPolicy::new_restricted(0b1111, no_seal_api),
-    ).unwrap();
+    ).unwrap().0;
 
     // Attempting to seal grand_h through child must be denied.
     let err = Capability::seal(&child, grand_h).unwrap_err();

@@ -1333,6 +1333,17 @@ impl Capability<Domain> {
         drop(caller_w);
         drop(recv_w);
 
+        {
+            let cap_ref_r = cap_ref.read();
+            if cap_ref_r.owned.attributes.meta() {
+                updates.add_give_meta_mem(
+                    receiver_id,
+                    cap_ref_r.data.access.start,
+                    cap_ref_r.data.access.size,
+                );
+            }
+        }
+
         Ok(updates)
     }
 
@@ -1513,6 +1524,17 @@ impl Capability<Domain> {
 
         drop(recv_w);
         drop(sender_w);
+
+        {
+            let cap_ref_r = cap_ref.read();
+            if cap_ref_r.owned.attributes.meta() {
+                updates.add_give_meta_mem(
+                    receiver_id,
+                    cap_ref_r.data.access.start,
+                    cap_ref_r.data.access.size,
+                );
+            }
+        }
 
         Ok((new_handle, updates))
     }
@@ -1862,7 +1884,7 @@ impl Capability<Domain> {
     /// - [`CapaError::DomainNotSealed`] — `parent` is not yet sealed.
     /// - [`CapaError::ApiNotAllowed`] — `CREATE` API not allowed on `parent`.
     /// - [`CapaError::InvalidPolicy`] — `policy` violates monotonicity relative to parent.
-    pub fn create(parent: &CapabilityRef<Domain>, policy: DomainPolicy) -> Result<LocalHandle> {
+    pub fn create(parent: &CapabilityRef<Domain>, policy: DomainPolicy) -> Result<(LocalHandle, UpdateBatch)> {
         let owner_id = parent.read().data.id;
 
         // 1. Auto-allocate handle (domain table key)
@@ -1881,7 +1903,11 @@ impl Capability<Domain> {
             .data
             .add_domain_capability(new_handle, Arc::downgrade(&child_ref));
 
-        Ok(new_handle)
+        let new_domain_id = child_ref.read().data.id;
+        let parent_id = Some(parent.read().data.id);
+        let mut batch = UpdateBatch::new();
+        batch.add_create_domain(new_domain_id, parent_id);
+        Ok((new_handle, batch))
     }
 
     /// Revoke a child domain that `caller` holds at `child_handle` in its domain table.

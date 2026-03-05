@@ -271,7 +271,7 @@ fn revoke_sender_domain_cancels_pending() {
 
     // Create sender domain A as a child of P in the domain CDT via domain API.
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let sender_h = Capability::create(&parent, policy).unwrap();
+    let sender_h = Capability::create(&parent, policy).unwrap().0;
     let sender = parent.read().data.domain_capabilities[&sender_h]
         .upgrade()
         .unwrap();

@@ -30,7 +30,7 @@ fn setup_root() -> (CapabilityRef<Domain>, LocalHandle) {
 
 fn make_unsealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create(parent, policy).unwrap();
+    let child_h = Capability::create(parent, policy).unwrap().0;
     let child = parent.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -164,7 +164,7 @@ fn a1c_send_received_capability_always_emits_unmap() {
 
     // Create dom3 (unsealed) in dom1's table.
     let dom3_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let dom3_h_in_dom1 = Capability::create(&dom1, dom3_policy).unwrap();
+    let dom3_h_in_dom1 = Capability::create(&dom1, dom3_policy).unwrap().0;
     let dom3 = dom1.read().data.domain_capabilities[&dom3_h_in_dom1]
         .upgrade()
         .unwrap();

@@ -158,7 +158,7 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 /// Child has all-core access and full API (including SWITCH).
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let h = Capability::create(parent, policy).unwrap();
+    let h = Capability::create(parent, policy).unwrap().0;
     Capability::seal(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()

@@ -38,7 +38,11 @@ impl Domain {
     pub fn new(id: DomainId, meta_pool: PhysRegion, hhdm_offset: u64) -> Self {
         Self {
             id,
-            meta: MetaAllocator::new(meta_pool, hhdm_offset),
+            meta: {
+                let mut alloc = MetaAllocator::new(hhdm_offset);
+                alloc.add_range(meta_pool);
+                alloc
+            },
             vmxon_regions: Vec::new(),
         }
     }

@@ -851,7 +851,7 @@ fn domain_revoke_vs_creation() {
 
         // Pre-create child 1.
         let child_policy = DomainPolicy::new_restricted(1, capability_engine::MonitorAPI::ALL);
-        let child1_h = Capability::create(&parent, child_policy.clone()).unwrap();
+        let child1_h = Capability::create(&parent, child_policy.clone()).unwrap().0;
         let child1 = parent.read().data.domain_capabilities[&child1_h]
             .upgrade()
             .unwrap();

@@ -37,7 +37,7 @@ fn main() {
     );
     let child_policy = DomainPolicy::new_restricted(0b1111, child_api);
 
-    let child_h = Capability::create(&root, child_policy).unwrap();
+    let child_h = Capability::create(&root, child_policy).unwrap().0;
 
     // Resolve Arc for later use (attestation, view, switch).
     let child = root

@@ -100,6 +100,7 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
     // Use the domain-mediated interface: allocates handle, sets owner_domain, registers in table.
     let child_handle =
         Capability::create(&parent, child_policy)
+            .map(|(h, _batch)| h)
             .map_err(|e| format!("Failed to create child: {:?}", e))?;
 
     // Retrieve the new child Arc from parent's table.

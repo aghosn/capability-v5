@@ -1609,10 +1609,60 @@ the EPT with no synchronization overhead.
   update-application lock serialising all `apply_update` calls (see `platform.rs`).
 - [ ] **P2-platform**: Implement the capability engine's `Platform` trait as
   `ThemisPlatform` (`platform.rs`).  Bootstrap mode:
-  - `apply_update(ChangeRights)` → programs dom0's `EptMapper`
-  - `acquire_*_lock` / `sync_barrier` / `send_ipi` → no-ops (single-threaded at boot)
-  - `register_domain` → records in a domain table
-  - Transitions to full mode once all cores enter VMX non-root
+  - `apply_update(ChangeRights)` → programs the domain's `EptMapper`
+  - `apply_update(GiveMetaMem)` → calls `meta.add_range(region)` on the domain's allocator
+  - `acquire_*_lock` / `sync_barrier` / `send_ipi` / update-lock → use trait defaults (no-ops, returns true)
+  - `register_domain` → creates a `PlatformDomain` with **empty** `MetaAllocator` and no EPT root yet
+  - EPT root allocated lazily on first `ChangeRights` for the domain (or on first `GiveMetaMem`)
+  - `on_domain_revoked` → free EPT structures, remove from table
+
+  **Internal state**:
+  ```
+  ThemisPlatform {
+      domains:     Mutex<BTreeMap<DomainId, PlatformDomain>>,
+      core_domain: Mutex<BTreeMap<CoreId, DomainId>>,
+      cap_lock:    RwLock<()>,
+      hhdm_offset: u64,
+  }
+  PlatformDomain { ept: Option<EptMapper>, meta: MetaAllocator, parent: Option<DomainId> }
+  ```
+
+  **Engine gaps to fix first (required)**:
+  1. `register_domain` is currently **never called** by the engine — `Capability::create` has
+     no `platform` parameter.  Fix: add `Update::CreateDomain { domain_id, parent_id }` emitted
+     by `Capability::create`; handle it in **`apply_update`** (consistent with the design where
+     `apply_update` is the single handler for all platform reactions to engine decisions).
+     `apply_update(CreateDomain)` → inserts an empty `PlatformDomain` into the registry.
+  2. META memory delivery: when a parent sends META memory to a child domain, the platform must
+     be notified so it can call `meta.add_range(region)`.  Fix: add `Update::GiveMetaMem
+     { domain_id, region }` emitted when a META-flagged memory capability is transferred.
+     `apply_update(GiveMetaMem)` → `domain.meta.add_range(region)`.
+  3. For dom0 bootstrap, the capavisor manually drives `apply_update(CreateDomain { 0, None })`
+     and `apply_update(GiveMetaMem { 0, meta_pool })` before running `execute()`.
+
+  **MetaAllocator redesign** (non-contiguous, starts empty):
+  - Remove `base`, `size`, `next` fields; keep only `free_stack: Vec<u64>` + `hhdm_offset`.
+  - `MetaAllocator::new(hhdm_offset)` → empty allocator.
+  - `add_range(&mut self, region: PhysRegion)` → push all pages of region onto `free_stack`.
+  - alloc/free unchanged (pop/push on free_stack).
+  - Supports non-contiguous META: multiple `add_range` calls work naturally.
+
+  **ChangeRights EPT mapping note**:
+  - `rights != NONE` means map (may be new mapping OR rights update on existing entry).
+    The walker must handle the case where an entry already exists — it should overwrite in
+    place (update flags and HPA).  Verify this is correct in `map_range` before wiring up.
+  - `rights == NONE` means unmap.
+
+  **VMCS / VP structures**: `PlatformDomain` will eventually hold a `Vec<VpState>` (one per VP).
+  EPT root is shared by all VPs of the domain.  Add as placeholder now; fill in at P2d.
+
+  **Capability reference on core**: At runtime, each core needs a reference to the
+  `CapabilityRef<Domain>` currently executing on it (for VMCALL/switch).  Design TBD for P3 —
+  may require the engine to emit an update on `switch`.  Noted as a known gap.
+
+  **Parent ID in PlatformDomain**: needed for `on_domain_revoked` when `fallback: None`
+  (vital-memory revocation — platform must compute fallback from its own parent map).
+
 - [ ] **P2c**: Capability engine initialization:
   - Create root domain capability (`Domain::new_root(num_cores)`).
   - Create initial memory capabilities from `partition.dom0_owned` regions

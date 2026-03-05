@@ -55,6 +55,22 @@ pub enum Update {
 
     /// Flush TLB for a domain
     FlushTLB { domain: DomainId },
+
+    /// A new domain was created.  The platform must initialise hardware state
+    /// (domain registry entry, empty frame allocator) for this domain.
+    CreateDomain {
+        domain_id: DomainId,
+        parent_id: Option<DomainId>,
+    },
+
+    /// A META-flagged memory region was transferred to `domain_id`.
+    /// The platform must add `[start, start+size)` to the domain's frame
+    /// allocator so it can be used for EPT page-table pages etc.
+    GiveMetaMem {
+        domain_id: DomainId,
+        start: u64,
+        size: u64,
+    },
 }
 
 impl Update {
@@ -64,6 +80,8 @@ impl Update {
             Update::ChangeRights { domain, .. }
             | Update::RevokeDomain { domain, .. }
             | Update::FlushTLB { domain } => Some(*domain),
+            Update::CreateDomain { domain_id, .. }
+            | Update::GiveMetaMem { domain_id, .. } => Some(*domain_id),
             Update::ZeroMemory { .. } => None,
         }
     }
@@ -138,6 +156,16 @@ impl UpdateBatch {
             #[cfg(feature = "cache_coloring")]
             colors: None,
         });
+    }
+
+    /// Add a create-domain update.
+    pub fn add_create_domain(&mut self, domain_id: DomainId, parent_id: Option<DomainId>) {
+        self.add(Update::CreateDomain { domain_id, parent_id });
+    }
+
+    /// Add a give-meta-mem update.
+    pub fn add_give_meta_mem(&mut self, domain_id: DomainId, start: u64, size: u64) {
+        self.add(Update::GiveMetaMem { domain_id, start, size });
     }
 
     /// Get all updates in the batch

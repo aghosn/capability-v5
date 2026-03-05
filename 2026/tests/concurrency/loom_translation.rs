@@ -48,7 +48,7 @@ fn bootstrap() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHand
 fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(root, policy).unwrap();
+    let h = Capability::create(root, policy).unwrap().0;
     let dom = root
         .read()
         .data
@@ -62,7 +62,7 @@ fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domai
 fn make_sealed_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(root, policy).unwrap();
+    let h = Capability::create(root, policy).unwrap().0;
     Capability::<Domain>::seal(root, h).unwrap();
     let dom = root
         .read()
