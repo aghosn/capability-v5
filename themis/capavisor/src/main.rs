@@ -15,9 +15,11 @@ use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
 mod acpi;
+mod domain;
 mod guest;
 mod mem;
 mod pci;
+mod vmx;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
@@ -373,9 +375,61 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!();
 
-    // TODO Phase 2: VT-x VMXON, VMCS setup.
+    // ── Phase 2a: CPU feature detection ──────────────────────────────── //
 
-    serial_println!("Halting (Phase 2+ not implemented yet).");
+    let cpu_features = vmx::detect_features(acpi_info.has_dmar);
+
+    serial_println!("CPU features:");
+    serial_println!("  VMX:        {}", if cpu_features.vmx { "yes" } else { "NO" });
+    serial_println!("  x2APIC:     {}", if cpu_features.x2apic { "yes" } else { "no" });
+    serial_println!("  VMCS rev:   {:#x}", cpu_features.vmcs_revision_id);
+    serial_println!("  phys bits:  {}", cpu_features.phys_addr_bits);
+    serial_println!("  APICv:      {} (reg_virt={} vid={} pi={})",
+        if cpu_features.has_apicv() { "full" } else { "partial/none" },
+        cpu_features.apic_register_virt,
+        cpu_features.virtual_intr_delivery,
+        cpu_features.posted_interrupts);
+    serial_println!("  VT-d:       {}", if cpu_features.vtd { "yes" } else { "no" });
+
+    assert!(cpu_features.vmx, "VMX not supported — cannot continue");
+
+    // ── Phase 2b: Create dom0 Domain + VMXON on BSP ────────────────── //
+
+    // Map META pool into HHDM (usable memory, likely already mapped, but ensure it).
+    mem::map_phys_range(partition.meta_pool.base, partition.meta_pool.length, hhdm_offset);
+
+    // Bootstrap dom0 as the first domain.  dom0 is special only in that
+    // its META pool is carved directly by the capavisor at boot (no parent).
+    let mut dom0 = domain::Domain::new(0, partition.meta_pool, hhdm_offset);
+
+    // Allocate VMXON regions for all cores from dom0's META pool.
+    let num_cores = cpus.len();
+    dom0.alloc_vmxon_regions(num_cores, cpu_features.vmcs_revision_id);
+
+    serial_println!("dom0: META pool at {:#x}, {} pages ({} allocated, {} free)",
+        partition.meta_pool.base,
+        dom0.meta.total_pages(),
+        dom0.meta.allocated_pages(),
+        dom0.meta.free_pages());
+
+    // Find BSP's core index in the cpu list.
+    let bsp_index = cpus.iter()
+        .position(|c| c.lapic_id == bsp_lapic_id)
+        .expect("BSP not found in CPU list");
+
+    // Execute VMXON on BSP using its allocated VMXON region.
+    vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index))
+        .expect("VMXON failed on BSP");
+    serial_println!("VMX: VMXON on BSP (LAPIC {}, core {}) ✓", bsp_lapic_id, bsp_index);
+
+    // AP VMXON deferred to Phase 7 — APs need a mailbox mechanism to execute
+    // VMXON on their respective cores.
+
+    serial_println!();
+
+    // TODO Phase 2c–e: VMCS, EPT, VMEXIT dispatch (Phase 7).
+
+    serial_println!("Halting (Phase 2c+ not implemented yet — VMXON active on BSP).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };

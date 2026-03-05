@@ -1563,9 +1563,17 @@ carve META from its own pool, register it for the child VP.
 
 ### Phase 2 — VT-x Foundation
 
-- [ ] **P2a**: CPUID checks: VMX, x2APIC, APICv (APIC-register virtualization,
+**Architecture note**: Every domain (including dom0) owns a `Domain` struct with a
+per-domain `MetaAllocator` — a bump allocator over its META pool.  All hardware VP
+structures (VMXON, VMCS, VAPIC, EPT pages) are allocated via `domain.meta.alloc_frame()`.
+dom0 is special only in that the capavisor bootstraps its META pool at boot (no parent).
+Child domains will receive their META pool via capability operations from their parent.
+
+- [x] **P2a**: CPUID checks: VMX, x2APIC, APICv (APIC-register virtualization,
   virtual-interrupt delivery, posted interrupts), VT-d. Record a global `CpuFeatures` struct.
-- [ ] **P2b**: VMXON on BSP and all APs (per-core VMXON region from dom0 META pool).
+- [x] **P2b**: VMXON on BSP (per-core VMXON region from dom0's `MetaAllocator`).
+  AP VMXON deferred to Phase 7 (requires mailbox mechanism to wake parked APs).
+  Introduced `Domain` struct (`domain.rs`) and `MetaAllocator` (`mem/meta_alloc.rs`).
 - [ ] **P2c**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
   - VMCS pages allocated from dom0 META pool (one per VP).
   - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_handler`.
