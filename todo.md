@@ -59,13 +59,13 @@ The [Limine protocol](https://github.com/limine-bootloader/limine) is the modern
 
 ```rust
 // capavisor/src/main.rs — Limine requests (all zero-cost statics)
-static BASE_REVISION: BaseRevision       = BaseRevision::new();
-static MEMMAP:        MemmapRequest      = MemmapRequest::new();
-static MODULES:       ModuleRequest      = ModuleRequest::new();
-static SMP:           MpRequest          = MpRequest::new();
-static HHDM:          HhdmRequest        = HhdmRequest::new();
-static RSDP:          RsdpRequest        = RsdpRequest::new();
-static KADDR:         KernelAddressRequest = KernelAddressRequest::new();
+// Current state: BASE_REVISION, MEMMAP, HHDM, RSDP, MP are declared.
+// ModuleRequest will be added in Phase 0.5c when module discovery is implemented.
+static BASE_REVISION:   BaseRevision       = BaseRevision::new();
+static MEMMAP_REQUEST:  MemoryMapRequest   = MemoryMapRequest::new();
+static HHDM_REQUEST:    HhdmRequest        = HhdmRequest::new();
+static RSDP_REQUEST:    RsdpRequest        = RsdpRequest::new();
+static MP_REQUEST:      MpRequest          = MpRequest::new();
 ```
 
 ### VT-x / VMX
@@ -1366,15 +1366,21 @@ Return:    RAX = error code (0 = success), RDI = first return value, RSI = secon
   - Added `x86`, `x2apic`, `acpi`, `pci_types`, `spin`, `limine`, `linked_list_allocator`.
   - Added `rust-toolchain.toml` pinned to nightly (required by `x2apic→x86_64/nightly`
     and `acpi 6.x/allocator_api`).
+  - Serial console (COM1, 115200 baud, 8N1) implemented directly in `main.rs` with
+    `serial_print!`/`serial_println!` macros.
+  - `crates/themis-abi/`: hypercall ABI fully defined (24 opcodes, error codes,
+    `VpRegister` enum with 39 registers, META page layout constants).
 - [x] **P0b**: Linker script (`capavisor/linker.ld`) higher-half at `0xffffffff80000000`;
   `build.rs` emits absolute `-T` path; `.cargo/config.toml` sets `x86_64-unknown-none`
-  target + soft-float rustflags; Cargo aliases `iso`/`qemu`/`debug` → `scripts/*.sh`.
+  target + soft-float rustflags (`-sse,-sse2`) + `relocation-model=static` (Limine
+  rejects PIE ET_DYN without PT_DYNAMIC).
 - [x] **P0c**: Stubs created for `crates/ept/`, `crates/capavisor-pt/` (each with
   detailed extraction plan in the source), and full port of `vmxvmm/crates/vtd/` →
   `crates/vtd/` (local `PhysAddr`/`VirtAddr`/`FrameAllocator` types, bitflags 2.x fixes).
-- [x] **P0d**: QEMU dev environment: `scripts/build-iso.sh` (Limine ISO), `scripts/run-qemu.sh`
-  (`cargo qemu`, KVM+VMX, env knobs), `scripts/debug.sh` (`cargo debug`, QEMU `-s -S` +
-  rust-gdb attach), `themis.gdbinit` (symbol load, `print-cr3` helper).
+- [x] **P0d**: QEMU dev environment: `scripts/build-iso.sh` (Limine ISO),
+  `scripts/run-qemu.sh` (`cargo themis`, KVM+VMX, env knobs),
+  `scripts/debug.sh` (`cargo debug`, QEMU `-s -S` + rust-gdb attach),
+  `themis.gdbinit` (symbol load, `print-cr3` helper).
   `cargo check` passes cleanly on nightly.
 
 ### Phase 0.5 — dom0 Linux Image & Bootloader Integration
@@ -1392,9 +1398,9 @@ carves it into a domain, and schedules it across all cores before yielding to it
 
 #### Rationale
 
-Limine already supports a "modules" protocol: extra files (kernel ELF, initrd, etc.)
-can be listed in `limine.cfg` and the bootloader will load them into memory before
-jumping to Themis.  Themis reads the Limine module list, finds the Linux kernel ELF
+Limine supports a "modules" protocol: extra files (kernel, initrd, etc.) can be
+declared in `limine.conf` and the bootloader will load them into memory before
+jumping to Themis.  Themis reads the Limine module list, finds the Linux kernel
 and initrd, and places them into the dom0 address range before first VMENTRY.
 
 Using a stock cloud image for QEMU development avoids building a custom kernel; once
@@ -1402,45 +1408,63 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
 
 #### Sub-tasks
 
-- [ ] **P0.5a** — dom0 disk image:
-  - Download **Ubuntu Jammy cloud image** (`jammy-server-cloudimg-amd64-custom-20241017-0.qcow2`)
-    from `ch-images.azureedge.net` (same image used by cloud-hypervisor integration tests).
-  - Script: `scripts/fetch-dom0.sh` — downloads disk + creates FAT32 CIDATA cloud-init seed.
-  - **No separate kernel download**: the kernel and initrd already live inside the disk at
-    `/boot/vmlinuz` and `/boot/initrd.img`. Limine loads them directly from the disk via:
+- [x] **P0.5a** — dom0 disk image + standalone boot:
+  - `scripts/fetch-dom0.sh` downloads the **standard Ubuntu Jammy cloud image**
+    (`jammy-server-cloudimg-amd64.img`) from `cloud-images.ubuntu.com/jammy/current/`.
+    *(Originally planned to use the CH-custom image from `ch-images.azureedge.net`,
+    but that image was EFI-only with no BIOS GRUB modules, causing GRUB rescue errors
+    when booted standalone. Switched to the standard Ubuntu image which boots under
+    both BIOS and UEFI.)*
+  - Cloud-init seed: uses `cloud-localds` to create an ISO9660 CIDATA seed
+    (`guest/seed.img`). *(Originally planned FAT32 via `mkdosfs`/`mcopy`; `cloud-localds`
+    is simpler and is the standard cloud-image-utils approach.)*
+    Credentials: user `cloud` / password `cloud123`, passwordless sudo.
+  - **No separate kernel download**: the kernel and initrd live inside the disk at
+    `/boot/vmlinuz` and `/boot/initrd.img`. Limine loads them directly from the disk
+    via `fslabel(cloudimg-rootfs)`.
+  - `scripts/run-dom0.sh` (`cargo dom0`): standalone QEMU boot of the dom0 disk
+    (no Themis, no Limine) using virtio-blk + `-nographic`. Used as a sanity check.
+    First boot requires `SEED=1 cargo dom0` to provision cloud-init; subsequent boots
+    need no seed (`.dom0-seeded` marker file tracks this).
+
+- [x] **P0.5b** — Limine config & ISO build:
+  - `scripts/build-iso.sh` packages the capavisor ELF into a Limine-bootable ISO.
+    Limine v8.x uses `limine.conf` (not the old `.cfg`) with lowercase YAML-like
+    syntax. The config declares dom0 modules loaded from the disk at runtime:
     ```
-    MODULE_PATH=fslabel(cloudimg-rootfs)://boot/vmlinuz
-    MODULE_PATH=fslabel(cloudimg-rootfs)://boot/initrd.img
+    /Themis Capavisor
+        protocol: limine
+        kernel_path: boot():/boot/capavisor
+        module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
+        module_cmdline: dom0-kernel
+        module_path: fslabel(cloudimg-rootfs):/boot/initrd.img
+        module_cmdline: dom0-initrd
     ```
-    This means the ISO contains only Themis; the dom0 kernel version is always the one
-    that matches the rootfs. Updating the disk automatically updates what Themis boots.
+    *(Originally planned to copy vmlinuz/initrd into the ISO tree. In practice, Limine
+    reads them directly from the attached disk via `fslabel()`, so the ISO contains
+    only the capavisor binary. The dom0 module lines are only added if the disk image
+    is present, allowing capavisor-only ISO builds for testing.)*
   - **BIOS/IDE caveat**: Limine runs at BIOS level using INT 13h for disk access.
     virtio-blk is invisible at this stage (requires an OS driver). The disk must be
     attached to QEMU as `-drive ...,if=ide` so Limine can reach it.
-    Ubuntu cloud images use UUID-based root mounting, so dom0 boots correctly regardless
-    of whether it sees the disk as `hda`/`sda` (IDE) or `vda` (virtio).
-    On real hardware this is a non-issue (Limine uses native UEFI/BIOS block I/O).
-  - `module_cmdline` tags (`dom0-kernel`, `dom0-initrd`) let Themis identify each
-    module by name in `MODULE_RESPONSE` at runtime.
 
-- [ ] **P0.5b** — Limine module declarations:
-  - Update `scripts/build-iso.sh` to copy `guest/dom0/vmlinuz` and
-    `guest/dom0/initrd.img` into the ISO tree.
-  - Update the Limine config template:
-    ```
-    /Themis Capavisor
-        PROTOCOL=limine
-        KERNEL_PATH=boot:///boot/capavisor
-        MODULE_PATH=boot:///boot/dom0/vmlinuz
-        MODULE_PATH=boot:///boot/dom0/initrd.img
-    ```
-  - Limine delivers modules via `ModuleRequest` / `ModuleResponse`; add
-    `limine::request::ModuleRequest` to `capavisor/src/main.rs`.
+- [x] **P0.5-tooling** — Limine setup, xtask, and cargo aliases:
+  - `scripts/setup-limine.sh` (`cargo setup-limine`): clones Limine v8.7.0 (commit
+    `aad3edd`) from the `v8.x-binary` branch into `tools/limine/` and builds only the
+    CLI tool. Everything local — nothing installed system-wide. Auto-triggered by
+    `build-iso.sh` if Limine is not found.
+  - `xtask/` crate: thin dispatcher that maps `cargo <task>` to `scripts/<task>.sh`.
+    *(Originally used `["!bash", "scripts/foo.sh"]` aliases in `.cargo/config.toml`,
+    which is not valid Cargo syntax. Replaced with xtask pattern: aliases invoke
+    `cargo run --manifest-path xtask/Cargo.toml -- <task>`, xtask `exec()`s the
+    corresponding script so QEMU gets direct terminal access.)*
+  - Aliases: `cargo iso`, `cargo themis` (was `cargo qemu`, renamed for clarity),
+    `cargo debug`, `cargo fetch-dom0`, `cargo dom0`, `cargo setup-limine`.
 
 - [ ] **P0.5c** — Themis module-discovery stub:
+  - Add `limine::request::ModuleRequest` to `capavisor/src/main.rs`.
   - In `_start`, after `BASE_REVISION` check, iterate `MODULE_RESPONSE.modules()`
-    and log (via `core::fmt::Write` to a Limine terminal or serial) each module's
-    base address and size.
+    and log (via serial) each module's base address and size.
   - Introduce `capavisor::guest::ModuleInfo { base: u64, size: u64, name: &str }`
     and a `find_module(name)` helper.
   - Add a `guest/` sub-module tree to the `capavisor` crate for dom0-loading logic.
@@ -1487,23 +1511,26 @@ conventionally placed at `0x10000`.  Themis writes `hdr`, `e820_table`,
 before the first VMENTRY into dom0.
 
 **Limine terminal for early output**
-Before serial UART is initialized (Phase 1b), the Limine terminal (`TerminalRequest`)
-is available for `print!`-style debug output.  Add it as a temporary dependency in
-`_start` so module discovery results are visible during bringup.
+Serial UART (COM1, 115200 baud) is already initialized in `_start` (Phase 0).
+`serial_print!` / `serial_println!` macros are available for debug output during
+module discovery and subsequent phases.
 
 ### Phase 1 — Boot, Memory, ACPI, PCI
 
 - [ ] **P1a**: Limine entry `_start`: parse memory map → `PhysicalInventory`; reserve heap
   (64 MB); init `linked_list_allocator::LockedHeap`.
-- [ ] **P1b**: Serial console (UART 16550) + `println!` macro.
-- [ ] **P1c**: `FrameAllocator` over physical pages beyond heap (for EPT frames, VMCS, etc.).
-- [ ] **P1d**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
+  *(Note: serial console is already implemented — see Phase 0. `_start` currently
+  boots, prints to serial, and halts. Phase 1 continues from the halt point.)*
+- [ ] **P1b**: `FrameAllocator` over physical pages beyond heap (for EPT frames, VMCS, etc.).
+- [ ] **P1c**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
   global barrier until all APs complete Phase 2 init.
-- [ ] **P1e**: ACPI parsing:
+  *(Note: AP entry stub (`ap_entry`) already exists — it parks APs in a halt loop.
+  Phase 1 replaces the halt with a proper mailbox/barrier.)*
+- [ ] **P1d**: ACPI parsing:
   - Implement `acpi::AcpiHandler` trait (physical → virtual address mapping using HHDM offset).
   - `AcpiTables::from_rsdp(handler, rsdp_phys)`.
   - Extract: MADT (LAPIC IDs, x2APIC entries), MCFG (PCIe ECAM bases), DMAR raw bytes.
-- [ ] **P1f**: PCI enumeration via `pci_types` over ECAM:
+- [ ] **P1e**: PCI enumeration via `pci_types` over ECAM:
   - Implement `ConfigRegionAccess` using volatile MMIO over ECAM window.
   - Walk all buses/devices/functions; decode headers + BARs + capabilities (MSI/MSI-X).
   - Build `DEVICE_TABLE: Vec<PciDevice>`.
