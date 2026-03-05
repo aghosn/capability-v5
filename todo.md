@@ -1518,11 +1518,36 @@ module discovery and subsequent phases.
 
 ### Phase 1 — Boot, Memory, ACPI, PCI
 
+The memory architecture follows a two-tier model:
+
+- **Heap** (`linked_list_allocator`): internal bookkeeping, capability tables, data
+  structures, message buffers.  Carved once at boot from the Limine memory map.
+- **META-backed frames**: VMCS, VAPIC, EPT pages, `VpStateMeta`, PI descriptors.
+  These are allocated by *carving META capabilities* through the capability engine.
+  The parent (Themis for dom0, dom0 for its children) retains read/write access to
+  META pages while the child owns them in the capability tree.
+
+**dom0 bootstrap**: at boot, Themis plays the parent role for dom0.  It splits the
+physical memory map into three pools:
+
+1. **Themis heap** — internal allocator, never exposed to any domain.
+2. **dom0-owned regions** — normal capabilities sent to dom0's cap table.
+3. **dom0 META pool** — physical frames reserved for dom0's VMCS, EPT root, VAPIC,
+   and `VpStateMeta` pages.  Reflected as META capabilities in dom0's cap table
+   (dom0 "owns" them, Themis retains parent-side access).
+
+When dom0 later creates children via `themis-vmm.ko`, it follows the same pattern:
+carve META from its own pool, register it for the child VP.
+
 - [ ] **P1a**: Limine entry `_start`: parse memory map → `PhysicalInventory`; reserve heap
   (64 MB); init `linked_list_allocator::LockedHeap`.
   *(Note: serial console is already implemented — see Phase 0. `_start` currently
   boots, prints to serial, and halts. Phase 1 continues from the halt point.)*
-- [ ] **P1b**: `FrameAllocator` over physical pages beyond heap (for EPT frames, VMCS, etc.).
+- [ ] **P1b**: Physical memory partitioning: split the physical memory map into
+  `{themis_heap, dom0_owned, dom0_meta_pool}`.  The META pool size is computed from
+  the number of dom0 VPs × per-VP hardware structures (VMCS 4 KiB + VAPIC 4 KiB +
+  VpStateMeta 4 KiB + VMXON 4 KiB per core + EPT root pages).  Remaining memory
+  goes to dom0-owned.
 - [ ] **P1c**: SMP bootstrap via Limine `MpRequest`: per-AP `goto_address` entry point;
   global barrier until all APs complete Phase 2 init.
   *(Note: AP entry stub (`ap_entry`) already exists — it parks APs in a halt loop.
@@ -1540,8 +1565,9 @@ module discovery and subsequent phases.
 
 - [ ] **P2a**: CPUID checks: VMX, x2APIC, APICv (APIC-register virtualization,
   virtual-interrupt delivery, posted interrupts), VT-d. Record a global `CpuFeatures` struct.
-- [ ] **P2b**: VMXON on BSP and all APs (per-core VMXON region from `FrameAllocator`).
+- [ ] **P2b**: VMXON on BSP and all APs (per-core VMXON region from dom0 META pool).
 - [ ] **P2c**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
+  - VMCS pages allocated from dom0 META pool (one per VP).
   - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_handler`.
   - Guest state: from `VProcessorState.registers`.
   - Execution controls: intercept VMCALL, CPUID, CR accesses, I/O bitmap,
@@ -1551,9 +1577,9 @@ module discovery and subsequent phases.
   - Install NMI IDT handler in root mode: must be present at all times since NMI is
     non-maskable regardless of `CLI`; handler writes EOI (IRET re-enables NMI window) and
     records a watchdog event or panics.
-- [ ] **P2d**: EPT setup: call `crates/ept` to allocate an EPT root per domain; wire
-  `map`/`unmap`/`invept` to `FrameAllocator`. Write EPTP into `VMCS.EPT_POINTER`
-  (4-level, WB memory type).
+- [ ] **P2d**: EPT setup: call `crates/ept` to allocate an EPT root per domain; EPT page
+  frames come from the domain's META pool (parent retains access for map/unmap).
+  Write EPTP into `VMCS.EPT_POINTER` (4-level, WB memory type).
 - [ ] **P2e**: Minimal VMEXIT dispatch: VMCALL → stub, CPUID → emulate, HLT → spin,
   others → log + halt. VMRESUME after each handled exit.
 
@@ -1649,17 +1675,26 @@ module discovery and subsequent phases.
 
 ### Phase 7 — Capability Engine Initialization + dom0 Boot
 
-- [ ] **P7a**: `init_root()`: root domain (id=0, sealed, all cores) + r0.
-- [ ] **P7b**: Carve dom0_ept_meta + dom0_mem; create dom0; send with META + normal attrs.
-- [ ] **P7c**: Set dom0 interrupt policy: all vectors DELIVER (dom0 is the default handler).
-- [ ] **P7d**: Set dom0 VP[i] registers from Linux bzImage boot params; seal dom0.
-- [ ] **P7e**: Platform: allocate VMCS + VAPIC + PI descriptor per VP; write all VMCS fields;
-  call `IrqRouter::configure_domain_policy` for dom0.
-  Optionally: register dom0 VP META pages via `VMCALL_REGISTER_VP_META` to enable zero-cost
-  register access (Phase 10 prerequisite); at this phase, defer if not yet implemented.
-- [ ] **P7f**: Parse Linux bzImage; write `boot_params` into dom0_mem; set up initial
-  identity-mapped page tables; set VP RIP/RSP/RSI/CR3.
-- [ ] **P7g**: `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH via mailbox.
+dom0 bootstrap: Themis acts as the parent and sets up the initial capability tree.
+
+- [ ] **P7a**: `init_root()`: root domain (id=0, sealed, all cores) + r0 covering all
+  physical memory from the Limine memory map.
+- [ ] **P7b**: Partition r0 into three pools:
+  1. `themis_heap` — already reserved in P1a, excluded from the capability tree.
+  2. `dom0_meta_pool` — carve as META capabilities; sized for dom0's VMCS + VAPIC +
+     VpStateMeta + EPT root pages + VMXON regions.  Reflected in dom0's cap table
+     with META flag (dom0 owns them, Themis retains parent-side access).
+  3. `dom0_mem` — remaining memory sent to dom0 as normal capabilities.
+- [ ] **P7c**: Create dom0 domain; send `dom0_mem` (normal) + `dom0_meta_pool` (META).
+- [ ] **P7d**: Set dom0 interrupt policy: all vectors DELIVER (dom0 is the default handler).
+- [ ] **P7e**: Allocate dom0 hardware VP structures from the META pool:
+  VMCS + VAPIC + PI descriptor + VpStateMeta per VP.  Write all VMCS fields.
+  Call `IrqRouter::configure_domain_policy` for dom0.
+- [ ] **P7f**: Parse Linux bzImage (using `BootHeader` from P0.5d); write `boot_params`
+  into dom0_mem; set up initial identity-mapped page tables in EPT; set VP
+  RIP/RSP/RSI/CR3.
+- [ ] **P7g**: Seal dom0; `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH
+  via mailbox.
 
 ### Phase 8 — Hypercall Dispatch + Hypercall ABI
 
@@ -1818,7 +1853,7 @@ CPU feature flag. Depends on Phase 2 (VT-x provides the pattern).
   unsafe fn vmload(vmcb_phys: u64) { asm!("vmload rax", in("rax") vmcb_phys); }
   ```
   Enable SVM globally: `wrmsr(IA32_EFER, rdmsr(IA32_EFER) | EFER_SVME)`.
-  Allocate per-core VMCB host save area (4 KB from `FrameAllocator`);
+  Allocate per-core VMCB host save area (4 KB from META pool);
   `wrmsr(MSR_VM_HSAVE_PA, host_save_phys)`.
 - [ ] **P13d**: VMCB control area setup: intercept VMCALL (`#VMEXIT_VMCALL`), CPUID,
   CR0/CR3/CR4 writes, physical interrupts (`V_INTR_MASKING=1`, `INTERCEPT_INTR=1`),
