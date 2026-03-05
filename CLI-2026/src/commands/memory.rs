@@ -253,6 +253,7 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
         mem: mem_name.to_string(),
         domain: domain_name.to_string(),
         attrs: format_attributes(&attrs),
+        gpa_hint,
     });
 
     let gpa_msg = gpa_hint.map_or(String::new(), |g| format!(" at GPA {:#x}", g));

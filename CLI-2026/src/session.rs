@@ -32,6 +32,7 @@ pub enum Command {
         mem: String,
         domain: String,
         attrs: String,
+        gpa_hint: Option<u64>,
     },
     Seal {
         domain: String,
@@ -50,6 +51,7 @@ pub enum Command {
         core: u64,
         from: String,
         to: String,
+        vp_id: Option<u64>,
     },
     Interrupt {
         vector: u64,
@@ -128,8 +130,15 @@ impl Session {
                 Command::Alias { parent, name, start, size, rights } => {
                     format!("alias {} {} 0x{:x} 0x{:x} {}", parent, name, start, size, rights)
                 }
-                Command::Send { mem, domain, attrs } => {
-                    format!("send {} {} {}", mem, domain, attrs)
+                Command::Send { mem, domain, attrs, gpa_hint } => {
+                    let mut line = format!("send {} {}", mem, domain);
+                    if attrs != "NONE" {
+                        line.push_str(&format!(" {}", attrs));
+                    }
+                    if let Some(gpa) = gpa_hint {
+                        line.push_str(&format!(" at 0x{:x}", gpa));
+                    }
+                    line
                 }
                 Command::Seal { domain } => {
                     format!("seal {}", domain)
@@ -143,8 +152,11 @@ impl Session {
                 Command::View { domain } => {
                     format!("view {}", domain)
                 }
-                Command::Switch { core, from, to } => {
-                    format!("switch {} {} {}", core, from, to)
+                Command::Switch { core, from: _, to, vp_id } => {
+                    match vp_id {
+                        Some(vp) => format!("switch {} {} {}", to, core, vp),
+                        None => format!("switch {}", core),
+                    }
                 }
                 Command::Interrupt { vector, domain, core } => {
                     format!("interrupt {} {} {}", vector, domain, core)
@@ -304,7 +316,7 @@ impl Session {
                     owner_map.insert(name.clone(), parent_owner);
                 }
 
-                Command::Send { mem, domain, attrs } => {
+                Command::Send { mem, domain, attrs, gpa_hint } => {
                     let mem_owner   = owner_map.get(mem)
                         .cloned().unwrap_or_default();
                     let sender_arc  = arc_map.get(&mem_owner)
@@ -323,7 +335,11 @@ impl Session {
                     writeln!(file, "            {sender_arc}.write().data.add_domain_capability(h, std::sync::Arc::downgrade(&{recv_arc}));")?;
                     writeln!(file, "            h")?;
                     writeln!(file, "        }});")?;
-                    writeln!(file, "    let _ = Capability::send(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}).unwrap();")?;
+                    let gpa_arg = match gpa_hint {
+                        Some(gpa) => format!("Some(0x{:x})", gpa),
+                        None => "None".to_string(),
+                    };
+                    writeln!(file, "    let _ = Capability::send_at(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}, {gpa_arg}).unwrap();")?;
                     writeln!(file, "    // Note: {mem} is now owned by {domain}; handle lookup needed for further ops.")?;
                     writeln!(file)?;
 
@@ -379,7 +395,7 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::Switch { core, from, to } => {
+                Command::Switch { core, from, to, .. } => {
                     let from_arc = arc_map.get(from)
                         .cloned().unwrap_or_else(|| sanitize_name(from));
                     let to_arc   = arc_map.get(to)

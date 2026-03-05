@@ -76,6 +76,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 core,
                 from: domain_name.clone(),
                 to: to_name.clone(),
+                vp_id: None,
             });
 
             println!(
@@ -155,6 +156,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 core,
                 from: from_name.clone(),
                 to: to_name.to_string(),
+                vp_id: Some(to_vp_id),
             });
 
             println!(
