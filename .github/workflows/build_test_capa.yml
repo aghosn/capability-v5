@@ -7,6 +7,12 @@ on:
       - '2026/*'
   pull_request:
     branches: [ "v2026.1" ]
+  workflow_dispatch: 
+    inputs:
+      reason:
+        description: 'Why are you running this manually?'
+        required: false
+        default: 'Manual health check'
 
 env:
   CARGO_TERM_COLOR: always
