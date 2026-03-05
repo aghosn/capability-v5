@@ -46,7 +46,7 @@ pub trait FrameAllocator {
     /// `None` if the allocator is exhausted.
     fn allocate_frame(&mut self) -> Option<u64>;
 
-    /// Return a frame to the allocator.  The default implementation leaks
-    /// the frame — correct for bump allocators like `MetaAllocator`.
+    /// Return a frame to the allocator.  The default implementation is a
+    /// no-op; implementations should override this.
     fn free_frame(&mut self, _phys: u64) {}
 }
