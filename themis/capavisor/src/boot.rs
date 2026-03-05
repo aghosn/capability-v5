@@ -1,0 +1,252 @@
+//! Boot phase functions.
+//!
+//! `_start()` in `main.rs` is the orchestrator; the logic for each phase lives
+//! here so the entry point stays readable.
+//!
+//! Phase flow:
+//!   platform()  → PlatformInfo  (memory, SMP, ACPI, PCI)
+//!   vmx()       → VmxState      (feature detect, dom0 Domain, VMXON on BSP)
+//!   capa()      → (future)      (capability engine, EPT, VMCS)
+
+extern crate alloc;
+use alloc::vec::Vec;
+
+use limine::memory_map::Entry;
+use limine::mp::Cpu;
+
+use crate::acpi::AcpiInfo;
+use crate::domain::Domain;
+use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory};
+use crate::pci::PciDevice;
+use crate::vmx::CpuFeatures;
+use crate::{serial_print, serial_println, AP_READY_COUNT, SERIAL_LOCK};
+
+use core::sync::atomic::Ordering;
+
+// ── Output structs ────────────────────────────────────────────────────────── //
+
+/// Everything discovered during platform init (Phase 1a–1e).
+pub struct PlatformInfo {
+    pub hhdm_offset: u64,
+    pub partition: MemoryPartition,
+    pub num_cores: usize,
+    pub bsp_lapic_id: u32,
+    /// LAPIC IDs for all cores, indexed by Limine cpu.id.
+    pub cpu_lapic_ids: Vec<u32>,
+    pub acpi: AcpiInfo,
+    pub pci_devices: Option<Vec<PciDevice>>,
+}
+
+/// State after VMX init (Phase 2a–2b).
+pub struct VmxState {
+    pub features: CpuFeatures,
+    /// dom0 Domain with VMXON regions allocated from META, BSP already in VMX root mode.
+    pub dom0: Domain,
+    /// Index into cpu_lapic_ids of the BSP.
+    pub bsp_index: usize,
+}
+
+// ── Phase 1: Platform discovery ───────────────────────────────────────────── //
+
+/// Phase 1a–1e: memory map, heap, SMP, ACPI, PCI.
+///
+/// # Arguments
+/// * `entries` — Limine memory map entries
+/// * `hhdm_offset` — HHDM offset from Limine
+/// * `rsdp_phys` — physical address of the RSDP (base revision 3 = physical)
+/// * `cpus` — all CPUs from Limine MP response
+/// * `bsp_lapic_id` — BSP LAPIC ID from Limine MP response
+pub fn platform(
+    entries: &[&Entry],
+    hhdm_offset: u64,
+    rsdp_phys: u64,
+    cpus: &[&Cpu],
+    bsp_lapic_id: u32,
+) -> PlatformInfo {
+    // ── Phase 1a: Memory map + heap ──────────────────────────────────────── //
+
+    serial_println!("HHDM offset: {:#x}", hhdm_offset);
+    serial_println!("Memory map: {} entries", entries.len());
+
+    for entry in entries.iter() {
+        let kind = match entry.entry_type {
+            limine::memory_map::EntryType::USABLE              => "usable",
+            limine::memory_map::EntryType::RESERVED            => "reserved",
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => "acpi-reclaim",
+            limine::memory_map::EntryType::ACPI_NVS            => "acpi-nvs",
+            limine::memory_map::EntryType::BAD_MEMORY          => "bad",
+            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader",
+            limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+modules",
+            limine::memory_map::EntryType::FRAMEBUFFER         => "framebuffer",
+            _ => "unknown",
+        };
+        serial_println!("  {:#012x}–{:#012x}  {:>8} KiB  {}",
+            entry.base, entry.base + entry.length, entry.length / 1024, kind);
+    }
+
+    let inventory = PhysicalInventory::from_limine(entries, hhdm_offset);
+    serial_println!();
+    serial_println!("Total usable RAM:  {} MiB", inventory.total_usable / (1024 * 1024));
+    serial_println!("Heap carved at:    {:#x} ({} MiB)",
+        inventory.heap_phys, inventory.heap_size / (1024 * 1024));
+    serial_println!("Remaining usable:  {} MiB ({} regions)",
+        inventory.available_bytes() / (1024 * 1024),
+        inventory.usable_regions().len());
+
+    {
+        let mut v = alloc::vec![1u64, 2, 3];
+        v.push(4);
+        serial_println!("Heap check:        alloc::vec![1,2,3,4] → len={} ✓", v.len());
+    }
+
+    // ── Phase 1b: Memory partitioning ────────────────────────────────────── //
+
+    let num_cores = cpus.len();
+    serial_println!();
+    serial_println!("CPUs: {} cores (BSP + {} APs)", num_cores, num_cores - 1);
+
+    let partition = inventory.partition(num_cores as u64);
+
+    serial_println!();
+    serial_println!("Memory partitioning:");
+    serial_println!("  META pool:  {:#x}–{:#x}  ({} KiB, {} pages)",
+        partition.meta_pool.base,
+        partition.meta_pool.base + partition.meta_pool.length,
+        partition.meta_pool.length / 1024,
+        partition.meta_breakdown.total_pages);
+    serial_println!("    VMXON: {} pages  VMCS: {} pages  VAPIC: {} pages  EPT: {} pages",
+        partition.meta_breakdown.vmxon_pages,
+        partition.meta_breakdown.vmcs_pages,
+        partition.meta_breakdown.vapic_pages,
+        partition.meta_breakdown.ept_pages);
+
+    let dom0_total: u64 = partition.dom0_owned[..partition.dom0_owned_count]
+        .iter().map(|r| r.length).sum();
+    serial_println!("  dom0 owned: {} MiB ({} regions)",
+        dom0_total / (1024 * 1024), partition.dom0_owned_count);
+
+    // ── Phase 1c: SMP bootstrap ───────────────────────────────────────────── //
+
+    serial_println!();
+    let num_aps = num_cores as u64 - 1;
+    serial_println!("SMP: BSP LAPIC {} — waking {} APs ...", bsp_lapic_id, num_aps);
+
+    for cpu in cpus.iter() {
+        if cpu.lapic_id != bsp_lapic_id {
+            cpu.goto_address.write(crate::ap_entry);
+        }
+    }
+
+    if num_aps > 0 {
+        while AP_READY_COUNT.load(Ordering::Acquire) < num_aps {
+            core::hint::spin_loop();
+        }
+    }
+    serial_println!("SMP: all {} APs parked ✓", num_aps);
+
+    // ── Phase 1d: ACPI parsing ────────────────────────────────────────────── //
+
+    serial_println!();
+    // Map ACPI/reserved regions that Limine base revision 3 leaves unmapped.
+    for entry in entries.iter() {
+        match entry.entry_type {
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE
+            | limine::memory_map::EntryType::ACPI_NVS
+            | limine::memory_map::EntryType::RESERVED => {
+                crate::mem::map_phys_range(entry.base, entry.length, hhdm_offset);
+            }
+            _ => {}
+        }
+    }
+
+    serial_println!("ACPI: RSDP at phys {:#x}", rsdp_phys);
+    let acpi = AcpiInfo::parse(rsdp_phys, hhdm_offset);
+
+    serial_println!("ACPI: {} processors, {} I/O APICs, VT-d: {}",
+        acpi.processors.len(), acpi.io_apics.len(),
+        if acpi.has_dmar { "present" } else { "absent" });
+
+    if let Some(ref regions) = acpi.pci_config_regions {
+        serial_println!("ACPI: {} PCIe ECAM region(s)", regions.regions.len());
+    } else {
+        serial_println!("ACPI: no MCFG (no PCIe ECAM)");
+    }
+
+    // ── Phase 1e: PCI enumeration ─────────────────────────────────────────── //
+
+    serial_println!();
+    let pci_devices = crate::pci::enumerate(&acpi, hhdm_offset);
+    if let Some(ref devices) = pci_devices {
+        serial_println!("PCI: {} device(s) found", devices.len());
+        for dev in devices {
+            let a = dev.address;
+            serial_println!("  {:02x}:{:02x}.{}  {:04x}:{:04x}  class={:02x}.{:02x}.{:02x}",
+                a.bus(), a.device(), a.function(),
+                dev.vendor_id, dev.device_id,
+                dev.class, dev.subclass, dev.interface);
+        }
+    } else {
+        serial_println!("PCI: no ECAM — skipping enumeration");
+    }
+
+    let cpu_lapic_ids: Vec<u32> = cpus.iter().map(|c| c.lapic_id).collect();
+
+    PlatformInfo {
+        hhdm_offset,
+        partition,
+        num_cores,
+        bsp_lapic_id,
+        cpu_lapic_ids,
+        acpi,
+        pci_devices,
+    }
+}
+
+// ── Phase 2a-b: VMX init ─────────────────────────────────────────────────── //
+
+/// Phase 2a–2b: detect VMX features, create dom0 Domain, allocate VMXON
+/// regions, execute VMXON on BSP.
+pub fn vmx(info: &PlatformInfo) -> VmxState {
+    // P2a — CPU feature detection.
+    let features = crate::vmx::detect_features(info.acpi.has_dmar);
+
+    serial_println!();
+    serial_println!("CPU features:");
+    serial_println!("  VMX: {}  x2APIC: {}  APICv: {}  VT-d: {}",
+        if features.vmx { "yes" } else { "NO" },
+        if features.x2apic { "yes" } else { "no" },
+        if features.has_apicv() { "full" } else { "partial/none" },
+        if features.vtd { "yes" } else { "no" });
+    serial_println!("  VMCS rev: {:#x}  phys bits: {}  region size: {} B",
+        features.vmcs_revision_id, features.phys_addr_bits, features.vmx_region_size);
+
+    assert!(features.vmx, "VMX not supported — cannot continue");
+
+    // P2b — Bootstrap dom0 Domain and run VMXON on BSP.
+    crate::mem::map_phys_range(
+        info.partition.meta_pool.base,
+        info.partition.meta_pool.length,
+        info.hhdm_offset,
+    );
+
+    let mut dom0 = Domain::new(0, info.partition.meta_pool, info.hhdm_offset);
+    dom0.alloc_vmxon_regions(info.num_cores, features.vmcs_revision_id);
+
+    serial_println!();
+    serial_println!("dom0: META pool {:#x}  total={} alloc={} free={}",
+        info.partition.meta_pool.base,
+        dom0.meta.total_pages(),
+        dom0.meta.allocated_pages(),
+        dom0.meta.free_pages());
+
+    let bsp_index = info.cpu_lapic_ids.iter()
+        .position(|&id| id == info.bsp_lapic_id)
+        .expect("BSP LAPIC ID not found in CPU list");
+
+    crate::vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index))
+        .expect("VMXON failed on BSP");
+    serial_println!("VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
+        info.bsp_lapic_id, bsp_index);
+
+    VmxState { features, dom0, bsp_index }
+}

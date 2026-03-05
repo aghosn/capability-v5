@@ -15,6 +15,7 @@ use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
 mod acpi;
+mod boot;
 mod domain;
 mod guest;
 mod mem;
@@ -44,7 +45,6 @@ impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
             unsafe {
-                // Spin until the transmit holding register is empty (bit 5 of LSR).
                 while (x86::io::inb(0x3F8 + 5) & 0x20) == 0 {}
                 x86::io::outb(0x3F8, b);
             }
@@ -53,7 +53,6 @@ impl fmt::Write for SerialPort {
     }
 }
 
-/// Print to the serial console (COM1).
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => { let _ = core::fmt::write(&mut $crate::SerialPort, format_args!($($arg)*)); };
@@ -67,370 +66,72 @@ macro_rules! serial_println {
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
-/// Limine protocol revision this kernel targets.  Limine will refuse to boot
-/// us if it only supports an older revision.
-#[used]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
-
-/// Ask Limine for the physical memory map (E820-unified).
-#[used]
-static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
-
-/// Ask Limine for the Higher-Half Direct Map offset (phys + HHDM = virt).
-#[used]
-static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
-
-/// Ask Limine for the RSDP physical address (entry point to ACPI tables).
-#[used]
-static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
-
-/// Ask Limine to boot all application processors and give us their LAPIC IDs.
-#[used]
-static MP_REQUEST: MpRequest = MpRequest::new();
-
-/// Ask Limine for any modules declared in limine.conf (dom0 kernel, initrd, …).
-#[used]
-static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+#[used] static BASE_REVISION:   BaseRevision       = BaseRevision::new();
+#[used] static MEMMAP_REQUEST:  MemoryMapRequest   = MemoryMapRequest::new();
+#[used] static HHDM_REQUEST:    HhdmRequest        = HhdmRequest::new();
+#[used] static RSDP_REQUEST:    RsdpRequest        = RsdpRequest::new();
+#[used] static MP_REQUEST:      MpRequest          = MpRequest::new();
+#[used] static MODULE_REQUEST:  ModuleRequest      = ModuleRequest::new();
 
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
-/// Initialised with an empty heap during Phase 1 boot.
-/// Until `init_heap()` is called all `alloc` operations will panic.
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 // ── SMP barrier ─────────────────────────────────────────────────────────── //
 
-/// Number of APs that have completed their init and are parked.
-static AP_READY_COUNT: AtomicU64 = AtomicU64::new(0);
-/// Simple spinlock to serialize AP serial output.
-static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
+/// Number of APs that have signalled readiness to the BSP.
+pub(crate) static AP_READY_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Spinlock for serializing AP serial output.
+pub(crate) static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 
-// ── Entry point ─────────────────────────────────────────────────────────── //
+// ── BSP entry point ──────────────────────────────────────────────────────── //
 
 /// BSP entry point called by the Limine bootloader.
-///
-/// At this point:
-/// - The CPU is in 64-bit long mode, paging enabled.
-/// - A temporary stack is set up by Limine.
-/// - Physical memory is identity-mapped via the HHDM.
-/// - No allocator, no serial, no ACPI yet — those are Phase 1.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     SerialPort::init();
-
-    // Verify the bootloader honours our requested revision.
     assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
 
     serial_println!();
     serial_println!("========================================");
-    serial_println!("  Themis capavisor reached — Limine OK");
+    serial_println!("  Themis capavisor — Limine OK");
     serial_println!("========================================");
     serial_println!();
 
-    // ── Module discovery ──────────────────────────────────────────────── //
+    // Unpack Limine responses.
+    let hhdm_offset = HHDM_REQUEST.get_response()
+        .expect("no HHDM response").offset();
+    let entries = MEMMAP_REQUEST.get_response()
+        .expect("no memory map response").entries();
+    let rsdp_phys = RSDP_REQUEST.get_response()
+        .expect("no RSDP response").address() as u64;
+    let mp = MP_REQUEST.get_response()
+        .expect("no MP response");
+    let cpus = mp.cpus();
+    let bsp_lapic_id = mp.bsp_lapic_id();
 
-    if let Some(response) = MODULE_REQUEST.get_response() {
-        let files = response.modules();
-        serial_println!("Limine modules: {} loaded", files.len());
-        let mut kernel_found = false;
-        for (i, file) in files.iter().enumerate() {
-            let info = guest::ModuleInfo::from_limine_file(file);
-            serial_println!(
-                "  [{}] cmdline={:?}  path={:?}  base={:#x}  size={} ({} KiB)",
-                i,
-                info.cmdline,
-                info.path,
-                info.base as usize,
-                info.size,
-                info.size / 1024,
-            );
-            if info.cmdline == "dom0-kernel" {
-                serial_println!("  → dom0 kernel found at {:#x} ({} KiB)", info.base as usize, info.size / 1024);
-                kernel_found = true;
-
-                match guest::linux::BootHeader::from_module(&info) {
-                    Ok(hdr) => {
-                        serial_println!();
-                        serial_println!("  Linux boot header (protocol v{}.{:02}):",
-                            hdr.version >> 8, hdr.version & 0xff);
-                        serial_println!("    pref_address      = {:#x}", hdr.pref_address);
-                        serial_println!("    kernel_alignment  = {:#x}", hdr.kernel_alignment);
-                        serial_println!("    init_size         = {:#x} ({} KiB)", hdr.init_size, hdr.init_size / 1024);
-                        serial_println!("    payload_offset    = {:#x} (file offset {:#x})",
-                            hdr.payload_offset, hdr.payload_file_offset());
-                        serial_println!("    payload_length    = {:#x} ({} KiB)",
-                            hdr.payload_length, hdr.payload_length / 1024);
-                        serial_println!("    code32_start      = {:#x}", hdr.code32_start);
-                        serial_println!("    relocatable       = {}", hdr.relocatable);
-                        serial_println!("    64-bit capable    = {}", hdr.is_64bit());
-                        serial_println!("    can load above 4G = {}", hdr.can_load_above_4g());
-                        serial_println!("    cmdline_size      = {}", hdr.cmdline_size);
-                    }
-                    Err(e) => {
-                        serial_println!("  ⚠ failed to parse Linux boot header: {:?}", e);
-                    }
-                }
-            }
+    // Log modules if present.
+    if let Some(r) = MODULE_REQUEST.get_response() {
+        serial_println!("Limine modules: {}", r.modules().len());
+        for (i, m) in r.modules().iter().enumerate() {
+            let info = guest::ModuleInfo::from_limine_file(m);
+            serial_println!("  [{}] {:?}  {:#x}  {} KiB",
+                i, info.cmdline, info.base as usize, info.size / 1024);
         }
-        if !kernel_found {
-            serial_println!("  → dom0-kernel module not found (ISO-only boot?)");
-        }
-    } else {
-        serial_println!("No module response from Limine (no modules declared in limine.conf).");
+        serial_println!();
     }
+
+    // ── Phase 1: Platform discovery ──────────────────────────────────────── //
+    let platform = boot::platform(entries, hhdm_offset, rsdp_phys, cpus, bsp_lapic_id);
+
+    // ── Phase 2a–b: VMX feature detection + VMXON on BSP ─────────────────── //
+    let _vmx = boot::vmx(&platform);
+
+    // ── Phase 2c+: capability engine, EPT, VMCS (coming next) ────────────── //
 
     serial_println!();
-
-    // ── Phase 1a: Memory map + heap ──────────────────────────────────── //
-
-    let hhdm_offset = HHDM_REQUEST
-        .get_response()
-        .expect("no HHDM response from Limine")
-        .offset();
-
-    serial_println!("HHDM offset: {:#x}", hhdm_offset);
-
-    let memmap_response = MEMMAP_REQUEST
-        .get_response()
-        .expect("no memory map response from Limine");
-
-    let entries = memmap_response.entries();
-    serial_println!("Memory map: {} entries", entries.len());
-
-    for entry in entries.iter() {
-        let kind = match entry.entry_type {
-            limine::memory_map::EntryType::USABLE => "usable",
-            limine::memory_map::EntryType::RESERVED => "reserved",
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE => "acpi-reclaim",
-            limine::memory_map::EntryType::ACPI_NVS => "acpi-nvs",
-            limine::memory_map::EntryType::BAD_MEMORY => "bad",
-            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader",
-            limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+modules",
-            limine::memory_map::EntryType::FRAMEBUFFER => "framebuffer",
-            _ => "unknown",
-        };
-        serial_println!(
-            "  {:#012x}–{:#012x}  {:>8} KiB  {}",
-            entry.base,
-            entry.base + entry.length,
-            entry.length / 1024,
-            kind,
-        );
-    }
-
-    let inventory = mem::PhysicalInventory::from_limine(entries, hhdm_offset);
-
-    serial_println!();
-    serial_println!("Total usable RAM:  {} MiB", inventory.total_usable / (1024 * 1024));
-    serial_println!("Heap carved at:    {:#x} ({} MiB)", inventory.heap_phys, inventory.heap_size / (1024 * 1024));
-    serial_println!("Remaining usable:  {} MiB ({} regions)",
-        inventory.available_bytes() / (1024 * 1024),
-        inventory.usable_regions().len(),
-    );
-
-    // Quick sanity check: allocate a Vec to prove the heap works.
-    {
-        let mut v = alloc::vec![1u64, 2, 3];
-        v.push(4);
-        serial_println!("Heap check:        alloc::vec![1,2,3,4] → len={} ✓", v.len());
-    }
-
-    serial_println!();
-
-    // ── Phase 1b: Memory partitioning ────────────────────────────────── //
-
-    let mp_response = MP_REQUEST
-        .get_response()
-        .expect("no MP response from Limine");
-    let num_cores = mp_response.cpus().len() as u64;
-    serial_println!("CPUs: {} cores (BSP + {} APs)", num_cores, num_cores - 1);
-
-    let partition = inventory.partition(num_cores);
-
-    serial_println!();
-    serial_println!("Memory partitioning (Phase 1b):");
-    serial_println!("  META pool:       {:#x}–{:#x} ({} KiB, {} pages)",
-        partition.meta_pool.base,
-        partition.meta_pool.base + partition.meta_pool.length,
-        partition.meta_pool.length / 1024,
-        partition.meta_breakdown.total_pages,
-    );
-    serial_println!("    VMXON:  {} pages ({} cores)", partition.meta_breakdown.vmxon_pages, num_cores);
-    serial_println!("    VMCS:   {} pages ({} VPs)", partition.meta_breakdown.vmcs_pages, num_cores);
-    serial_println!("    VAPIC:  {} pages ({} VPs)", partition.meta_breakdown.vapic_pages, num_cores);
-    serial_println!("    EPT:    {} pages (4K-granularity page tables)", partition.meta_breakdown.ept_pages);
-
-    let dom0_total: u64 = partition.dom0_owned[..partition.dom0_owned_count]
-        .iter()
-        .map(|r| r.length)
-        .sum();
-    serial_println!("  dom0 owned:      {} MiB ({} regions)",
-        dom0_total / (1024 * 1024),
-        partition.dom0_owned_count,
-    );
-
-    serial_println!();
-
-    // ── Phase 1c: SMP bootstrap ──────────────────────────────────────── //
-
-    let bsp_lapic_id = mp_response.bsp_lapic_id();
-    let cpus = mp_response.cpus();
-    let num_aps = cpus.len() as u64 - 1;
-
-    serial_println!("SMP: BSP LAPIC ID = {}, starting {} APs ...", bsp_lapic_id, num_aps);
-
-    // Wake each AP by writing our entry function to its goto_address.
-    for cpu in cpus.iter() {
-        if cpu.lapic_id == bsp_lapic_id {
-            continue; // Skip BSP
-        }
-        cpu.goto_address.write(ap_entry);
-    }
-
-    // Wait for all APs to check in.
-    if num_aps > 0 {
-        while AP_READY_COUNT.load(Ordering::Acquire) < num_aps {
-            core::hint::spin_loop();
-        }
-    }
-
-    serial_println!("SMP: all {} APs parked ✓", num_aps);
-    serial_println!();
-
-    // ── Phase 1d: ACPI parsing ──────────────────────────────────────── //
-
-    // Limine base revision 3 does not HHDM-map ACPI reclaimable/NVS regions.
-    // Map them now so the acpi crate can read firmware tables via HHDM.
-    for entry in entries.iter() {
-        match entry.entry_type {
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE
-            | limine::memory_map::EntryType::ACPI_NVS
-            | limine::memory_map::EntryType::RESERVED => {
-                mem::map_phys_range(entry.base, entry.length, hhdm_offset);
-            }
-            _ => {}
-        }
-    }
-
-    let rsdp_response = RSDP_REQUEST
-        .get_response()
-        .expect("no RSDP response from Limine");
-
-    // Base revision 3: RSDP address is physical.
-    let rsdp_phys = rsdp_response.address() as u64;
-    serial_println!("ACPI: RSDP at phys {:#x}", rsdp_phys);
-    let acpi_info = acpi::AcpiInfo::parse(rsdp_phys, hhdm_offset);
-
-    serial_println!("ACPI: {} processors from MADT:", acpi_info.processors.len());
-    for p in &acpi_info.processors {
-        serial_println!("  UID {} → LAPIC {}", p.processor_uid, p.local_apic_id);
-    }
-
-    serial_println!("ACPI: {} I/O APIC(s):", acpi_info.io_apics.len());
-    for ioapic in &acpi_info.io_apics {
-        serial_println!("  id={} addr={:#x} gsi_base={}", ioapic.id, ioapic.address, ioapic.gsi_base);
-    }
-
-    if !acpi_info.isos.is_empty() {
-        serial_println!("ACPI: {} interrupt source override(s):", acpi_info.isos.len());
-        for iso in &acpi_info.isos {
-            serial_println!("  IRQ {} → GSI {} (bus={}, flags={:#x})", iso.irq, iso.gsi, iso.bus, iso.flags);
-        }
-    }
-
-    serial_println!("ACPI: legacy 8259 PICs: {}", if acpi_info.has_legacy_pics { "yes" } else { "no" });
-
-    if let Some(ref regions) = acpi_info.pci_config_regions {
-        serial_println!("ACPI: {} PCIe ECAM region(s) from MCFG:", regions.regions.len());
-        for r in &regions.regions {
-            let seg = { r.pci_segment_group };
-            let bus_start = { r.bus_number_start };
-            let bus_end = { r.bus_number_end };
-            let base = { r.base_address };
-            serial_println!("  seg={} bus={}..{} base={:#x}", seg, bus_start, bus_end, base);
-        }
-    } else {
-        serial_println!("ACPI: no MCFG table (no PCIe ECAM)");
-    }
-
-    serial_println!("ACPI: VT-d DMAR table: {}", if acpi_info.has_dmar { "present" } else { "absent" });
-    serial_println!();
-
-    // ── Phase 1e: PCI enumeration ────────────────────────────────────── //
-
-    if let Some(devices) = pci::enumerate(&acpi_info, hhdm_offset) {
-        serial_println!("PCI: {} device(s) found:", devices.len());
-        for dev in &devices {
-            let addr = dev.address;
-            serial_println!("  {:02x}:{:02x}.{} {:04x}:{:04x} class={:02x}.{:02x}.{:02x} rev={:02x}",
-                addr.bus(), addr.device(), addr.function(),
-                dev.vendor_id, dev.device_id,
-                dev.class, dev.subclass, dev.interface,
-                dev.revision);
-        }
-    } else {
-        serial_println!("PCI: no ECAM — skipping enumeration");
-    }
-
-    serial_println!();
-
-    // ── Phase 2a: CPU feature detection ──────────────────────────────── //
-
-    let cpu_features = vmx::detect_features(acpi_info.has_dmar);
-
-    serial_println!("CPU features:");
-    serial_println!("  VMX:        {}", if cpu_features.vmx { "yes" } else { "NO" });
-    serial_println!("  x2APIC:     {}", if cpu_features.x2apic { "yes" } else { "no" });
-    serial_println!("  VMCS rev:   {:#x}", cpu_features.vmcs_revision_id);
-    serial_println!("  phys bits:  {}", cpu_features.phys_addr_bits);
-    serial_println!("  APICv:      {} (reg_virt={} vid={} pi={})",
-        if cpu_features.has_apicv() { "full" } else { "partial/none" },
-        cpu_features.apic_register_virt,
-        cpu_features.virtual_intr_delivery,
-        cpu_features.posted_interrupts);
-    serial_println!("  VT-d:       {}", if cpu_features.vtd { "yes" } else { "no" });
-
-    assert!(cpu_features.vmx, "VMX not supported — cannot continue");
-
-    // ── Phase 2b: Create dom0 Domain + VMXON on BSP ────────────────── //
-
-    // Map META pool into HHDM (usable memory, likely already mapped, but ensure it).
-    mem::map_phys_range(partition.meta_pool.base, partition.meta_pool.length, hhdm_offset);
-
-    // Bootstrap dom0 as the first domain.  dom0 is special only in that
-    // its META pool is carved directly by the capavisor at boot (no parent).
-    let mut dom0 = domain::Domain::new(0, partition.meta_pool, hhdm_offset);
-
-    // Allocate VMXON regions for all cores from dom0's META pool.
-    let num_cores = cpus.len();
-    dom0.alloc_vmxon_regions(num_cores, cpu_features.vmcs_revision_id);
-
-    serial_println!("dom0: META pool at {:#x}, {} pages ({} allocated, {} free)",
-        partition.meta_pool.base,
-        dom0.meta.total_pages(),
-        dom0.meta.allocated_pages(),
-        dom0.meta.free_pages());
-
-    // Find BSP's core index in the cpu list.
-    let bsp_index = cpus.iter()
-        .position(|c| c.lapic_id == bsp_lapic_id)
-        .expect("BSP not found in CPU list");
-
-    // Execute VMXON on BSP using its allocated VMXON region.
-    vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index))
-        .expect("VMXON failed on BSP");
-    serial_println!("VMX: VMXON on BSP (LAPIC {}, core {}) ✓", bsp_lapic_id, bsp_index);
-
-    // AP VMXON deferred to Phase 7 — APs need a mailbox mechanism to execute
-    // VMXON on their respective cores.
-
-    serial_println!();
-
-    // TODO Phase 2c–e: VMCS, EPT, VMEXIT dispatch (Phase 7).
-
-    serial_println!("Halting (Phase 2c+ not implemented yet — VMXON active on BSP).");
-
+    serial_println!("Halting — Phase 2c+ not yet implemented.");
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }
@@ -439,22 +140,18 @@ pub extern "C" fn _start() -> ! {
 // ── AP entry point ───────────────────────────────────────────────────────── //
 
 /// Application processor entry point — called by Limine for each AP.
-///
-/// Limine boots each AP and calls this function with a reference to the
-/// `limine::mp::Cpu` describing the core.  The AP signals readiness via
-/// the global barrier, then parks until Phase 2 sets up VMXON/VMCS.
-unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
-    // Serialize serial output across APs.
-    while SERIAL_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
+    while SERIAL_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
         core::hint::spin_loop();
     }
     serial_println!("  AP {} (LAPIC {}) ready", cpu.id, cpu.lapic_id);
     SERIAL_LOCK.store(false, Ordering::Release);
 
-    // Signal readiness to BSP.
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
 
-    // Park until Phase 2 gives us work (VMXON, etc.).
     loop {
         core::arch::asm!("hlt", options(nomem, nostack));
     }
@@ -469,3 +166,4 @@ fn panic(info: &PanicInfo) -> ! {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
 }
+
