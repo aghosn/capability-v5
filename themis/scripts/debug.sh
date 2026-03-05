@@ -77,7 +77,7 @@ echo "→ Attaching $GDB (workspace: $WORKSPACE_ROOT) ..."
 cd "$WORKSPACE_ROOT"
 "$GDB" \
     -ex "target remote :1234" \
-    -x ".gdbinit" \
+    -x "themis.gdbinit" \
     || true
 
 # Kill QEMU when GDB exits
