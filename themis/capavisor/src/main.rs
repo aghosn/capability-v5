@@ -14,6 +14,7 @@ use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
 mod guest;
+mod mem;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
@@ -167,10 +168,69 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!();
 
-    // TODO Phase 1: parse memory map, initialise heap, ACPI, PCI.
+    // ── Phase 1a: Memory map + heap ──────────────────────────────────── //
+
+    let hhdm_offset = HHDM_REQUEST
+        .get_response()
+        .expect("no HHDM response from Limine")
+        .offset();
+
+    serial_println!("HHDM offset: {:#x}", hhdm_offset);
+
+    let memmap_response = MEMMAP_REQUEST
+        .get_response()
+        .expect("no memory map response from Limine");
+
+    let entries = memmap_response.entries();
+    serial_println!("Memory map: {} entries", entries.len());
+
+    for entry in entries.iter() {
+        let kind = match entry.entry_type {
+            limine::memory_map::EntryType::USABLE => "usable",
+            limine::memory_map::EntryType::RESERVED => "reserved",
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE => "acpi-reclaim",
+            limine::memory_map::EntryType::ACPI_NVS => "acpi-nvs",
+            limine::memory_map::EntryType::BAD_MEMORY => "bad",
+            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader",
+            limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+modules",
+            limine::memory_map::EntryType::FRAMEBUFFER => "framebuffer",
+            _ => "unknown",
+        };
+        serial_println!(
+            "  {:#012x}–{:#012x}  {:>8} KiB  {}",
+            entry.base,
+            entry.base + entry.length,
+            entry.length / 1024,
+            kind,
+        );
+    }
+
+    let inventory = mem::PhysicalInventory::from_limine(entries, hhdm_offset);
+
+    serial_println!();
+    serial_println!("Total usable RAM:  {} MiB", inventory.total_usable / (1024 * 1024));
+    serial_println!("Heap carved at:    {:#x} ({} MiB)", inventory.heap_phys, inventory.heap_size / (1024 * 1024));
+    serial_println!("Remaining usable:  {} MiB ({} regions)",
+        inventory.available_bytes() / (1024 * 1024),
+        inventory.usable_regions().len(),
+    );
+
+    // Quick sanity check: allocate a Vec to prove the heap works.
+    {
+        let mut v = alloc::vec![1u64, 2, 3];
+        v.push(4);
+        serial_println!("Heap check:        alloc::vec![1,2,3,4] → len={} ✓", v.len());
+    }
+
+    serial_println!();
+
+    // TODO Phase 1b: partition remaining memory into dom0-owned + META pool.
+    // TODO Phase 1c: SMP bootstrap.
+    // TODO Phase 1d: ACPI parsing.
+    // TODO Phase 1e: PCI enumeration.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
-    serial_println!("Halting (Phase 1 not implemented yet).");
+    serial_println!("Halting (Phase 1b+ not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
