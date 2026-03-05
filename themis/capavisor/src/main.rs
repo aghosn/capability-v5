@@ -17,6 +17,7 @@ use linked_list_allocator::LockedHeap;
 mod acpi;
 mod guest;
 mod mem;
+mod pci;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
@@ -354,10 +355,27 @@ pub extern "C" fn _start() -> ! {
     serial_println!("ACPI: VT-d DMAR table: {}", if acpi_info.has_dmar { "present" } else { "absent" });
     serial_println!();
 
-    // TODO Phase 1e: PCI enumeration.
+    // ── Phase 1e: PCI enumeration ────────────────────────────────────── //
+
+    if let Some(devices) = pci::enumerate(&acpi_info, hhdm_offset) {
+        serial_println!("PCI: {} device(s) found:", devices.len());
+        for dev in &devices {
+            let addr = dev.address;
+            serial_println!("  {:02x}:{:02x}.{} {:04x}:{:04x} class={:02x}.{:02x}.{:02x} rev={:02x}",
+                addr.bus(), addr.device(), addr.function(),
+                dev.vendor_id, dev.device_id,
+                dev.class, dev.subclass, dev.interface,
+                dev.revision);
+        }
+    } else {
+        serial_println!("PCI: no ECAM — skipping enumeration");
+    }
+
+    serial_println!();
+
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
-    serial_println!("Halting (Phase 1e+ not implemented yet).");
+    serial_println!("Halting (Phase 2+ not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };

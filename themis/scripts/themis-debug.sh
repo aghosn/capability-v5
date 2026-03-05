@@ -36,8 +36,16 @@ fi
 FIRMWARE_ARGS=""
 if [[ "${QEMU_BIOS:-0}" != "1" ]]; then
     OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    OVMF_VARS="$WORKSPACE_ROOT/target/ovmf_vars.fd"
     if [[ -f "$OVMF_CODE" ]]; then
+        if [[ ! -f "$OVMF_VARS" ]] && [[ -f "$OVMF_VARS_TEMPLATE" ]]; then
+            cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS"
+        fi
         FIRMWARE_ARGS="-drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+        if [[ -f "$OVMF_VARS" ]]; then
+            FIRMWARE_ARGS+=" -drive if=pflash,format=raw,file=$OVMF_VARS"
+        fi
     else
         echo "WARNING: OVMF not found at $OVMF_CODE — falling back to BIOS"
     fi
@@ -48,11 +56,14 @@ echo "→ Starting QEMU (GDB stub on :1234) ..."
 IMAGE_NAME="jammy-server-cloudimg-amd64.img"
 DISK_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
-    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=virtio "
+    DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=none "
+    DISK_ARGS+="-device virtio-blk-pci,drive=dom0 "
 fi
 
 qemu-system-x86_64 \
     $KVM_ARGS \
+    -machine q35 \
+    -device intel-iommu \
     ${FIRMWARE_ARGS} \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
