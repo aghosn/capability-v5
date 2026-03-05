@@ -2,9 +2,28 @@
 //!
 //! Ported from `vmxvmm/crates/mmu/eptmapper.rs`.  Changes from original:
 //!   - External `utils` / `vmx::bitmaps` types replaced with local types.
-//!   - `FrameAllocator` takes `&mut self` (suits our bump allocator).
+//!   - `FrameAllocator` simplified: `&mut self`, returns `Option<u64>` (phys
+//!     addr directly) instead of `Option<Frame>` with interior mutability.
+//!   - `EptMapper::new` / `get_root` → `new(hhdm_offset, root_phys)` / `eptp`.
+//!   - `alloc_root(allocator)` convenience constructor added.
 //!   - `debug_range` (used `log::`) removed.
-//!   - `free_all` / `unmap_range` kept but `free_frame` is a no-op by default.
+//!   - Redundant `root`/`offset` params removed from `unmap_range`.
+//!
+//! # Thread-safety invariant
+//!
+//! `EptMapper` and `MetaAllocator` are **NOT Sync**.  Correct use requires that
+//! only one core calls `map_range` / `unmap_range` at a time for a given
+//! domain.  This invariant is provided by the **capability engine's
+//! update-application lock**: `execute()` serialises all `apply_update` calls
+//! so that at most one initiating core runs EPT mutations at any instant.
+//! No additional locking is needed inside `EptMapper`.
+//!
+//! # EPT provenance
+//!
+//! The walk/map/unmap logic is ported from `vmxvmm/crates/mmu/` (production-
+//! tested, not formally verified).  The original plan calls for replacing this
+//! with the formally-verified EPT from `asterinas/hyperenclave` (ASPLOS'24,
+//! Rust MIR → Coq proofs); see `todo.md` Phase 5b.
 
 use crate::addr::{GuestPhysAddr, HostPhysAddr, HostVirtAddr};
 use crate::walker::{Level, WalkNext, Walker};
@@ -189,9 +208,14 @@ impl EptMapper {
         let root_phys = self.root;
 
         unsafe {
-            // cleanup only frees intermediate page-table frames; free_frame is
-            // a no-op for bump allocators.  To avoid a borrow-conflict between
-            // the two closures, we use a raw pointer for cleanup's free call.
+            // SAFETY INVARIANT: `cleanup_range` calls `cleanup` and `callback`
+            // sequentially in a single-threaded recursive walk — the two closures
+            // are never invoked concurrently.  The raw pointer below is therefore
+            // safe *as long as no other thread holds a reference to `allocator`*.
+            //
+            // Thread safety is the CALLER's responsibility: the surrounding
+            // `Domain` must be held under an exclusive lock before calling
+            // `unmap_range`.  `EptMapper` and `MetaAllocator` are NOT Sync.
             let alloc_raw = allocator as *mut dyn FrameAllocator;
 
             let mut cleanup = |page_virt: HostVirtAddr| {

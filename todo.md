@@ -1593,14 +1593,14 @@ the EPT with no synchronization overhead.
 - [x] **P2b**: VMXON on BSP (per-core VMXON region from dom0's `MetaAllocator`).
   AP VMXON deferred to Phase 7 (requires mailbox mechanism to wake parked APs).
   Introduced `Domain` struct (`domain.rs`) and `MetaAllocator` (`mem/meta_alloc.rs`).
-- [ ] **P2-refactor**: Split monolithic `_start()` into phase functions:
-  `phase_discovery()` (serial/mem/SMP/ACPI/PCI), `phase_vmx_init()` (feature detect +
-  VMXON), `phase_capa_init()` (capability engine + EPT + VMCS).
-- [ ] **P2-ept**: Port vmxvmm's proven `EptMapper` + `Walker` into `crates/ept/`.
-  Adapt: local `PhysAddr`/`u64` types, `FrameAllocator` trait backed by `MetaAllocator`.
-  Keep 4-level walk, `map_range`, `unmap_range`, huge-page support, `INVEPT`.
-  *(No need to clone `asterinas/hyperenclave` — vmxvmm's implementation is already local
-  and production-proven.  Updating original plan entry P0c accordingly.)*
+- [x] **P2-refactor**: Split monolithic `_start()` into phase functions (done: `boot::platform()`, `boot::vmx()`).
+- [x] **P2-ept**: Port vmxvmm's `EptMapper` + `Walker` into `crates/ept/` (done: `addr.rs`, `walker.rs`, `mapper.rs`).
+  **Note**: vmxvmm code is production-tested but NOT formally verified.  The original plan
+  (P0c) specified `asterinas/hyperenclave` (ASPLOS'24, Rust MIR→Coq proofs).  This was a
+  conscious shortcut.  A future phase must replace `crates/ept/` with the asterinas
+  extraction to restore the formal-verification guarantee (see Phase 5b below).
+  Thread-safety: `EptMapper` is NOT Sync; correctness relies on the capability engine's
+  update-application lock serialising all `apply_update` calls (see `platform.rs`).
 - [ ] **P2-platform**: Implement the capability engine's `Platform` trait as
   `ThemisPlatform` (`platform.rs`).  Bootstrap mode:
   - `apply_update(ChangeRights)` → programs dom0's `EptMapper`
@@ -1652,6 +1652,12 @@ the EPT with no synchronization overhead.
   reprogram context entry for device BDF → domain's DMA page table.
 
 ### Phase 5 — APICv and Virtual APIC
+
+- [ ] **P5-ept-verify**: Replace `crates/ept/` vmxvmm port with the formally-verified
+  EPT from `asterinas/hyperenclave` (ASPLOS'24, Rust MIR → Coq proofs, Apache-2.0).
+  Steps: clone hyperenclave, locate `src/memory/ept.rs` (or equivalent), strip
+  TEE/enclave policy, adapt to our `FrameAllocator` trait and local address types,
+  run unit tests under `x86_64-unknown-linux-gnu`.  This restores the original P0c plan.
 
 - [ ] **P5a**: Per-VP allocation: VAPIC page (4 KB from `FrameAllocator`) and
   posted-interrupt descriptor (64 B, 64 B-aligned from `FrameAllocator`).
