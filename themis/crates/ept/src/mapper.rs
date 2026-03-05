@@ -55,6 +55,17 @@ impl EptMemoryType {
     }
 }
 
+/// Non-leaf EPT entry "present" flags.
+///
+/// Intermediate page-table entries (PML4 → PDPT → PD) must have at minimum
+/// READ | WRITE | SUPERVISOR_EXECUTE set.  USER_EXECUTE (bit 10) must be 0
+/// in non-leaf entries unless the "mode-based execute control for EPT"
+/// VM-execution control is 1 (Intel SDM Vol 3C Table 29-1).  We never enable
+/// that control, so intermediate entries must not set bit 10.
+const EPT_INTERMEDIATE: EptEntryFlags = EptEntryFlags::READ
+    .union(EptEntryFlags::WRITE)
+    .union(EptEntryFlags::SUPERVISOR_EXECUTE);
+
 /// Combination of permission bits that marks a non-leaf EPT entry as "present"
 /// (reader, writer, and both execute bits — the actual permissions are only
 /// checked at the leaf level).
@@ -140,8 +151,8 @@ impl EptMapper {
                 gpa_start,
                 gpa_end,
                 &mut |addr, entry, level| {
-                    // Already mapped — descend or skip huge leaf.
-                    if (*entry & EPT_PRESENT.bits()) != 0 {
+                    // Already mapped — descend into non-leaf, or skip an existing huge leaf.
+                    if (*entry & EptEntryFlags::READ.bits()) != 0 {
                         if (level == Level::L3 || level == Level::L2)
                             && (*entry & EptEntryFlags::PAGE.bits()) != 0
                         {
@@ -154,19 +165,20 @@ impl EptMapper {
                     let hphys = hpa + (addr.as_u64() - gpa);
 
                     if level == Level::L3 {
-                        if addr.as_u64() + GIANT_PAGE_SIZE as u64 <= end
+                        if addr.as_u64() % GIANT_PAGE_SIZE as u64 == 0
+                            && addr.as_u64() + GIANT_PAGE_SIZE as u64 <= end
                             && hphys % GIANT_PAGE_SIZE as u64 == 0
                         {
                             *entry = hphys
                                 | EptEntryFlags::PAGE.bits()
                                 | prot.bits()
-                                | mem_type.bits()
-                                | (1 << 7);
+                                | mem_type.bits();
                             return WalkNext::Leaf;
                         }
                     }
                     if level == Level::L2 {
-                        if addr.as_u64() + HUGE_PAGE_SIZE as u64 <= end
+                        if addr.as_u64() % HUGE_PAGE_SIZE as u64 == 0
+                            && addr.as_u64() + HUGE_PAGE_SIZE as u64 <= end
                             && hphys % HUGE_PAGE_SIZE as u64 == 0
                         {
                             *entry = hphys
@@ -182,10 +194,11 @@ impl EptMapper {
                     }
 
                     // Non-leaf: allocate an intermediate page-table page.
+                    // SDM: intermediate entries must not set USER_EXECUTE (bit 10).
                     let frame = allocator
                         .allocate_frame()
                         .expect("map_range: out of frames for intermediate EPT page");
-                    *entry = frame | EPT_PRESENT.bits();
+                    *entry = frame | EPT_INTERMEDIATE.bits();
                     WalkNext::Continue
                 },
             )
@@ -195,7 +208,18 @@ impl EptMapper {
 
     /// Unmap a guest-physical range, freeing any intermediate page-table pages
     /// that become entirely empty.  Huge/giant pages that partially overlap the
-    /// range are split and the non-removed portions are re-mapped.
+    /// range are split: the portions outside the range are re-mapped.
+    ///
+    /// # Known limitations
+    ///
+    /// 1. **Identity-mapping assumption**: the split re-maps preserved portions
+    ///    with `hpa = gpa`.  If the original mapping was not identity-mapped this
+    ///    is incorrect.  For the current use (dom0 bootstrap identity EPT) this
+    ///    is fine; fix before using for non-identity domain mappings.
+    ///
+    /// 2. **Loses original permissions/memory-type**: the split always re-maps
+    ///    with `READ|WRITE|USER_EXECUTE|SUPERVISOR_EXECUTE` + `WB`.  Original
+    ///    leaf attributes are not preserved.  Same caveat as above.
     pub fn unmap_range(
         &mut self,
         allocator: &mut impl FrameAllocator,
@@ -224,7 +248,7 @@ impl EptMapper {
             };
 
             let mut callback = |addr: GuestPhysAddr, entry: &mut u64, level: Level| {
-                if (*entry & EPT_PRESENT.bits()) == 0 {
+                if (*entry & EptEntryFlags::READ.bits()) == 0 {
                     return WalkNext::Leaf;
                 }
 
@@ -307,7 +331,7 @@ impl EptMapper {
             allocator.free_frame(page_phys);
         };
         let mut callback = |_addr: GuestPhysAddr, entry: &mut u64, level: Level| {
-            if (*entry & EPT_PRESENT.bits()) == 0 {
+            if (*entry & EptEntryFlags::READ.bits()) == 0 {
                 return WalkNext::Leaf;
             }
             if level == Level::L1 || (*entry & EptEntryFlags::PAGE.bits()) != 0 {

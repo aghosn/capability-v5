@@ -209,6 +209,13 @@ where
                     walk_range_rec(walker, child_page, next, addr, end, callback, cleanup)?;
 
                     let use_index_zero = addr.index(next) == 0;
+                    // Note: `next.area_size()` is 4KB at L2 level, which is much
+                    // smaller than a full L1 page (512×4KB = 2MB).  This condition
+                    // is overly permissive for partial-range walks — cleanup may fire
+                    // even when only some entries of the child page were visited.
+                    // Harmless because MetaAllocator::free_frame is a no-op (bump
+                    // allocator); would be a use-after-free bug with a real allocator.
+                    // Fix: replace with `end - start >= level.area_size()`.
                     let use_whole_area = end.as_u64() - start.as_u64() >= next.area_size();
                     if use_index_zero && use_whole_area {
                         cleanup(host_virt);
