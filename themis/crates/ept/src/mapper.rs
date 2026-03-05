@@ -208,18 +208,8 @@ impl EptMapper {
 
     /// Unmap a guest-physical range, freeing any intermediate page-table pages
     /// that become entirely empty.  Huge/giant pages that partially overlap the
-    /// range are split: the portions outside the range are re-mapped.
-    ///
-    /// # Known limitations
-    ///
-    /// 1. **Identity-mapping assumption**: the split re-maps preserved portions
-    ///    with `hpa = gpa`.  If the original mapping was not identity-mapped this
-    ///    is incorrect.  For the current use (dom0 bootstrap identity EPT) this
-    ///    is fine; fix before using for non-identity domain mappings.
-    ///
-    /// 2. **Loses original permissions/memory-type**: the split always re-maps
-    ///    with `READ|WRITE|USER_EXECUTE|SUPERVISOR_EXECUTE` + `WB`.  Original
-    ///    leaf attributes are not preserved.  Same caveat as above.
+    /// range are split: the portions outside the range are re-mapped using the
+    /// original HPA, permissions, and memory type of the huge-page entry.
     pub fn unmap_range(
         &mut self,
         allocator: &mut impl FrameAllocator,
@@ -256,6 +246,11 @@ impl EptMapper {
                 let mut needs_remap = false;
                 let mut aligned_addr = addr.as_u64();
                 let mut big_size: u64 = 0;
+                // Original huge-page attributes — captured before the entry is zeroed
+                // so split re-maps preserve the original HPA, permissions, and memory type.
+                let mut orig_hpa: u64 = 0;
+                let mut orig_prot = EptEntryFlags::empty();
+                let mut orig_mem_type = EptMemoryType::WB;
 
                 if level == Level::L3 && (*entry & EptEntryFlags::PAGE.bits()) != 0 {
                     aligned_addr = addr.as_u64() & level.mask();
@@ -263,6 +258,10 @@ impl EptMapper {
                         *entry = 0;
                         return WalkNext::Leaf;
                     }
+                    // Partial overlap: capture attrs before zeroing.
+                    orig_hpa = *entry & ADDRESS_MASK;
+                    orig_prot = EptEntryFlags::from_bits_truncate(*entry);
+                    orig_mem_type = EptMemoryType(*entry & EPT_MEM_TYPE_MASK);
                     *entry = 0;
                     needs_remap = true;
                     big_size = GIANT_PAGE_SIZE as u64;
@@ -273,6 +272,10 @@ impl EptMapper {
                         *entry = 0;
                         return WalkNext::Leaf;
                     }
+                    // Partial overlap: capture attrs before zeroing.
+                    orig_hpa = *entry & ADDRESS_MASK;
+                    orig_prot = EptEntryFlags::from_bits_truncate(*entry);
+                    orig_mem_type = EptMemoryType(*entry & EPT_MEM_TYPE_MASK);
                     *entry = 0;
                     needs_remap = true;
                     big_size = HUGE_PAGE_SIZE as u64;
@@ -280,30 +283,29 @@ impl EptMapper {
 
                 if needs_remap {
                     let mut sub = EptMapper::new(hhdm, root_phys);
-                    let default_prot = EptEntryFlags::READ
-                        | EptEntryFlags::WRITE
-                        | EptEntryFlags::USER_EXECUTE
-                        | EptEntryFlags::SUPERVISOR_EXECUTE;
+                    // Re-map left portion [aligned_addr, gpa) using original attributes.
                     if aligned_addr < gpa {
                         sub.map_range(
                             allocator,
                             aligned_addr,
-                            aligned_addr,
+                            orig_hpa,
                             (gpa - aligned_addr) as usize,
-                            default_prot,
-                            EptMemoryType::WB,
+                            orig_prot,
+                            orig_mem_type,
                         );
                     }
+                    // Re-map right portion [gpa+size, aligned_addr+big_size) using original attrs.
                     let tail_start = gpa + size as u64;
                     let tail_end = aligned_addr + big_size;
                     if tail_start < tail_end {
+                        let right_hpa = orig_hpa + (tail_start - aligned_addr);
                         sub.map_range(
                             allocator,
                             tail_start,
-                            tail_start,
+                            right_hpa,
                             (tail_end - tail_start) as usize,
-                            default_prot,
-                            EptMemoryType::WB,
+                            orig_prot,
+                            orig_mem_type,
                         );
                     }
                     return WalkNext::Leaf;
