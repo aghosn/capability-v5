@@ -1573,10 +1573,16 @@ carve META from its own pool, register it for the child VP.
 ### Phase 2 — VT-x Foundation
 
 **Architecture note**: Every domain (including dom0) owns a `Domain` struct with a
-per-domain `MetaAllocator` — a bump allocator over its META pool.  All hardware VP
-structures (VMXON, VMCS, VAPIC, EPT pages) are allocated via `domain.meta.alloc_frame()`.
-dom0 is special only in that the capavisor bootstraps its META pool at boot (no parent).
-Child domains will receive their META pool via capability operations from their parent.
+per-domain `MetaAllocator` — a bump+free-stack allocator over its META pool.  All hardware
+VP structures (VMXON, VMCS, VAPIC, EPT pages) are allocated via `domain.meta.alloc_frame()`.
+Freed frames are pushed onto a `Vec<u64>` free stack and reused before the bump pointer
+advances.  dom0 is special only in that the capavisor bootstraps its META pool at boot (no
+parent).  Child domains will receive their META pool via capability operations from their parent.
+
+**Future (memory-efficiency)**: The `Vec<u64>` free stack lives on the global heap.  An
+alternative with zero extra heap overhead is to store the linked-list structure *intrinsively*
+inside the free pages themselves (each free page's first 8 bytes hold the physical address of
+the next free page, read/written via HHDM).  Revisit if heap pressure becomes a concern.
 
 **Revised boot order (capability-first)**:
 The capability engine is initialized *before* VT-x/EPT so that dom0's initial memory
