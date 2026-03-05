@@ -14,12 +14,13 @@ use limine::request::{HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, R
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
+mod acpi;
 mod guest;
 mod mem;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
-struct SerialPort;
+pub struct SerialPort;
 
 impl SerialPort {
     /// Standard COM1 UART initialization (8N1, 115200 baud).
@@ -50,13 +51,15 @@ impl fmt::Write for SerialPort {
 }
 
 /// Print to the serial console (COM1).
+#[macro_export]
 macro_rules! serial_print {
-    ($($arg:tt)*) => { let _ = core::fmt::write(&mut SerialPort, format_args!($($arg)*)); };
+    ($($arg:tt)*) => { let _ = core::fmt::write(&mut $crate::SerialPort, format_args!($($arg)*)); };
 }
 
+#[macro_export]
 macro_rules! serial_println {
-    ()            => { serial_print!("\n") };
-    ($($arg:tt)*) => { serial_print!("{}\n", format_args!($($arg)*)) };
+    ()            => { $crate::serial_print!("\n") };
+    ($($arg:tt)*) => { $crate::serial_print!("{}\n", format_args!($($arg)*)) };
 }
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
@@ -292,11 +295,69 @@ pub extern "C" fn _start() -> ! {
     serial_println!("SMP: all {} APs parked ✓", num_aps);
     serial_println!();
 
-    // TODO Phase 1d: ACPI parsing.
+    // ── Phase 1d: ACPI parsing ──────────────────────────────────────── //
+
+    // Limine base revision 3 does not HHDM-map ACPI reclaimable/NVS regions.
+    // Map them now so the acpi crate can read firmware tables via HHDM.
+    for entry in entries.iter() {
+        match entry.entry_type {
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE
+            | limine::memory_map::EntryType::ACPI_NVS
+            | limine::memory_map::EntryType::RESERVED => {
+                mem::map_phys_range(entry.base, entry.length, hhdm_offset);
+            }
+            _ => {}
+        }
+    }
+
+    let rsdp_response = RSDP_REQUEST
+        .get_response()
+        .expect("no RSDP response from Limine");
+
+    // Base revision 3: RSDP address is physical.
+    let rsdp_phys = rsdp_response.address() as u64;
+    serial_println!("ACPI: RSDP at phys {:#x}", rsdp_phys);
+    let acpi_info = acpi::AcpiInfo::parse(rsdp_phys, hhdm_offset);
+
+    serial_println!("ACPI: {} processors from MADT:", acpi_info.processors.len());
+    for p in &acpi_info.processors {
+        serial_println!("  UID {} → LAPIC {}", p.processor_uid, p.local_apic_id);
+    }
+
+    serial_println!("ACPI: {} I/O APIC(s):", acpi_info.io_apics.len());
+    for ioapic in &acpi_info.io_apics {
+        serial_println!("  id={} addr={:#x} gsi_base={}", ioapic.id, ioapic.address, ioapic.gsi_base);
+    }
+
+    if !acpi_info.isos.is_empty() {
+        serial_println!("ACPI: {} interrupt source override(s):", acpi_info.isos.len());
+        for iso in &acpi_info.isos {
+            serial_println!("  IRQ {} → GSI {} (bus={}, flags={:#x})", iso.irq, iso.gsi, iso.bus, iso.flags);
+        }
+    }
+
+    serial_println!("ACPI: legacy 8259 PICs: {}", if acpi_info.has_legacy_pics { "yes" } else { "no" });
+
+    if let Some(ref regions) = acpi_info.pci_config_regions {
+        serial_println!("ACPI: {} PCIe ECAM region(s) from MCFG:", regions.regions.len());
+        for r in &regions.regions {
+            let seg = { r.pci_segment_group };
+            let bus_start = { r.bus_number_start };
+            let bus_end = { r.bus_number_end };
+            let base = { r.base_address };
+            serial_println!("  seg={} bus={}..{} base={:#x}", seg, bus_start, bus_end, base);
+        }
+    } else {
+        serial_println!("ACPI: no MCFG table (no PCIe ECAM)");
+    }
+
+    serial_println!("ACPI: VT-d DMAR table: {}", if acpi_info.has_dmar { "present" } else { "absent" });
+    serial_println!();
+
     // TODO Phase 1e: PCI enumeration.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
-    serial_println!("Halting (Phase 1d+ not implemented yet).");
+    serial_println!("Halting (Phase 1e+ not implemented yet).");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };

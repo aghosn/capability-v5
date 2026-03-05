@@ -8,5 +8,7 @@
 //! META pool for dom0's hardware VP structures (VMXON, VMCS, VAPIC, EPT).
 
 mod inventory;
+mod paging;
 
 pub use inventory::{MemoryPartition, MetaBreakdown, PhysRegion, PhysicalInventory};
+pub use paging::map_phys_range;
