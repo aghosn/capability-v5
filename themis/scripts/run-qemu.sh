@@ -3,7 +3,6 @@
 #
 # Usage:
 #   cargo themis             # from workspace root via Cargo alias
-#   cargo themis             # release-like debug session
 #   bash scripts/run-qemu.sh
 #
 # Environment knobs:
@@ -11,6 +10,7 @@
 #   QEMU_CPUS=4             number of vCPUs (default: 4)
 #   QEMU_MEM=1G             guest RAM (default: 1G)
 #   QEMU_ENABLE_KVM=1       use KVM acceleration (default: 1 if available)
+#   QEMU_BIOS=1             use legacy BIOS instead of UEFI (default: 0)
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
 
 set -euo pipefail
@@ -35,6 +35,18 @@ else
     KVM_ARGS="-cpu qemu64,+vmx"
 fi
 
+# ── Firmware: UEFI (default) or legacy BIOS ─────────────────────────────────
+FIRMWARE_ARGS=""
+if [[ "${QEMU_BIOS:-0}" != "1" ]]; then
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    if [[ -f "$OVMF_CODE" ]]; then
+        FIRMWARE_ARGS="-drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+    else
+        echo "WARNING: OVMF not found at $OVMF_CODE — falling back to BIOS"
+        echo "         Install: sudo apt install ovmf"
+    fi
+fi
+
 echo "→ Booting $ISO (${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM)"
 
 # ── Optional dom0 disk ──────────────────────────────────────────────────────
@@ -42,18 +54,16 @@ echo "→ Booting $ISO (${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM)"
 IMAGE_NAME="jammy-server-cloudimg-amd64.img"
 DISK_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
-    # IDE interface required: Limine runs at BIOS level and can only access
-    # drives via INT 13h — virtio-blk is invisible until an OS driver loads.
-    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=ide "
-    echo "  + ide hda: guest/$IMAGE_NAME  (Limine reads /boot/vmlinuz from here)"
+    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=virtio "
+    echo "  + virtio disk: guest/$IMAGE_NAME  (Limine reads /boot/vmlinuz from here)"
 fi
 
 exec qemu-system-x86_64 \
     $KVM_ARGS \
+    ${FIRMWARE_ARGS} \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
     -cdrom "$ISO" \
-    -boot d \
     -serial stdio \
     -display none \
     -no-reboot \

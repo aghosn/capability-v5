@@ -116,10 +116,13 @@ if [[ -f "$WORKSPACE_ROOT/guest/jammy-server-cloudimg-amd64.img" ]]; then
 CONF
 fi
 
-# Copy UEFI loader if present
-if [[ -d "$LIMINE_DIR/EFI/BOOT" ]]; then
-    mkdir -p "$ISO_ROOT/EFI/BOOT"
-    cp "$LIMINE_DIR/EFI/BOOT/"* "$ISO_ROOT/EFI/BOOT/" 2>/dev/null || true
+# Copy UEFI loader (BOOTX64.EFI) for fallback/hard-disk boot.
+# Limine v8.x ships BOOTX64.EFI at the top level (no EFI/BOOT/ subdir).
+mkdir -p "$ISO_ROOT/EFI/BOOT"
+if [[ -f "$LIMINE_DIR/BOOTX64.EFI" ]]; then
+    cp "$LIMINE_DIR/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/"
+elif [[ -f "$LIMINE_DIR/EFI/BOOT/BOOTX64.EFI" ]]; then
+    cp "$LIMINE_DIR/EFI/BOOT/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/"
 fi
 
 # ── Create ISO ─────────────────────────────────────────────────────────────

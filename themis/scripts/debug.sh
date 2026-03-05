@@ -10,7 +10,7 @@
 # Uses the .gdbinit in the workspace root for initial GDB commands.
 #
 # Environment knobs (same as run-qemu.sh):
-#   QEMU_MEM, QEMU_CPUS, QEMU_ENABLE_KVM, QEMU_EXTRA_ARGS
+#   QEMU_MEM, QEMU_CPUS, QEMU_ENABLE_KVM, QEMU_BIOS, QEMU_EXTRA_ARGS
 
 set -euo pipefail
 
@@ -32,20 +32,31 @@ else
     KVM_ARGS="-cpu qemu64,+vmx"
 fi
 
+# ── Firmware: UEFI (default) or legacy BIOS ─────────────────────────────────
+FIRMWARE_ARGS=""
+if [[ "${QEMU_BIOS:-0}" != "1" ]]; then
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    if [[ -f "$OVMF_CODE" ]]; then
+        FIRMWARE_ARGS="-drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+    else
+        echo "WARNING: OVMF not found at $OVMF_CODE — falling back to BIOS"
+    fi
+fi
+
 echo "→ Starting QEMU (GDB stub on :1234) ..."
 
 IMAGE_NAME="jammy-server-cloudimg-amd64.img"
 DISK_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
-    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=ide "
+    DISK_ARGS+="-drive file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=virtio "
 fi
 
 qemu-system-x86_64 \
     $KVM_ARGS \
+    ${FIRMWARE_ARGS} \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
     -cdrom "$ISO" \
-    -boot d \
     -serial stdio \
     -display none \
     -no-reboot \
