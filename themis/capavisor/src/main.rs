@@ -9,9 +9,11 @@ extern crate alloc;
 use core::fmt;
 use core::panic::PanicInfo;
 
-use limine::request::{HhdmRequest, MemoryMapRequest, MpRequest, RsdpRequest};
+use limine::request::{HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
+
+mod guest;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
@@ -78,6 +80,10 @@ static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 #[used]
 static MP_REQUEST: MpRequest = MpRequest::new();
 
+/// Ask Limine for any modules declared in limine.conf (dom0 kernel, initrd, …).
+#[used]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
 /// Initialised with an empty heap during Phase 1 boot.
@@ -107,7 +113,38 @@ pub extern "C" fn _start() -> ! {
     serial_println!("========================================");
     serial_println!();
 
-    // TODO Phase 1: parse memory map, initialise heap, serial console, ACPI, PCI.
+    // ── Module discovery ──────────────────────────────────────────────── //
+
+    if let Some(response) = MODULE_REQUEST.get_response() {
+        let files = response.modules();
+        serial_println!("Limine modules: {} loaded", files.len());
+        let mut kernel_found = false;
+        for (i, file) in files.iter().enumerate() {
+            let info = guest::ModuleInfo::from_limine_file(file);
+            serial_println!(
+                "  [{}] cmdline={:?}  path={:?}  base={:#x}  size={} ({} KiB)",
+                i,
+                info.cmdline,
+                info.path,
+                info.base as usize,
+                info.size,
+                info.size / 1024,
+            );
+            if info.cmdline == "dom0-kernel" {
+                serial_println!("  → dom0 kernel found at {:#x} ({} KiB)", info.base as usize, info.size / 1024);
+                kernel_found = true;
+            }
+        }
+        if !kernel_found {
+            serial_println!("  → dom0-kernel module not found (ISO-only boot?)");
+        }
+    } else {
+        serial_println!("No module response from Limine (no modules declared in limine.conf).");
+    }
+
+    serial_println!();
+
+    // TODO Phase 1: parse memory map, initialise heap, ACPI, PCI.
     // TODO Phase 2: VT-x VMXON, VMCS setup.
 
     serial_println!("Halting (Phase 1 not implemented yet).");

@@ -1461,13 +1461,14 @@ the loading path is exercised the same flow works with a bespoke hardened dom0 k
   - Aliases: `cargo iso`, `cargo themis` (was `cargo qemu`, renamed for clarity),
     `cargo debug`, `cargo fetch-dom0`, `cargo dom0`, `cargo setup-limine`.
 
-- [ ] **P0.5c** — Themis module-discovery stub:
-  - Add `limine::request::ModuleRequest` to `capavisor/src/main.rs`.
-  - In `_start`, after `BASE_REVISION` check, iterate `MODULE_RESPONSE.modules()`
-    and log (via serial) each module's base address and size.
-  - Introduce `capavisor::guest::ModuleInfo { base: u64, size: u64, name: &str }`
-    and a `find_module(name)` helper.
-  - Add a `guest/` sub-module tree to the `capavisor` crate for dom0-loading logic.
+- [x] **P0.5c** — Themis module-discovery stub:
+  - Added `limine::request::ModuleRequest` to `capavisor/src/main.rs`.
+  - In `_start`, after `BASE_REVISION` check, iterates `MODULE_REQUEST.get_response()`
+    modules and logs each module's cmdline tag, path, base address, and size via serial.
+  - Identifies `dom0-kernel` module by `module_cmdline` tag match.
+  - `capavisor/src/guest/mod.rs` + `guest/modules.rs`: `ModuleInfo` struct with
+    `from_limine_file()` constructor and `find_module(name)` lookup helper.
+  - No heap allocation required (iterates Limine response in-place).
 
 - [ ] **P0.5d** — Linux kernel header parsing:
   - Parse the `linux_boot_params` / `boot_protocol` header at offset 0x1f1 inside
