@@ -1247,7 +1247,8 @@ impl Capability<Domain> {
 
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
 
-        // Read cap info for AddressMap operations.
+        // Read cap info for AddressMap operations. Also capture `meta_start/size`
+        // and `is_meta` here so the ownership write below needs no extra field reads.
         #[cfg(feature = "address_translation")]
         let (cap_hpa, cap_size, _cap_rights, cap_is_carve, cap_view) = {
             let c = cap_ref.read();
@@ -1287,13 +1288,17 @@ impl Capability<Domain> {
         let new_handle = recv_w.data.allocate_memory_handle();
 
         // Transfer ownership (cap_ref is a separate arc — safe to write while
-        // holding domain write locks).
-        {
+        // holding domain write locks). Capture the immutable access region here
+        // so we never need to re-acquire cap_ref after the domain locks drop.
+        let (meta_start, meta_size) = {
             let mut c = cap_ref.write();
+            let start = c.data.access.start;
+            let size = c.data.access.size;
             c.owned.owner = receiver_id;
             c.owned.attributes = attrs;
             c.owned.owner_domain = Some(Arc::downgrade(receiver_ref));
-        }
+            (start, size)
+        };
 
         recv_w
             .data
@@ -1333,15 +1338,9 @@ impl Capability<Domain> {
         drop(caller_w);
         drop(recv_w);
 
-        {
-            let cap_ref_r = cap_ref.read();
-            if cap_ref_r.owned.attributes.meta() {
-                updates.add_give_meta_mem(
-                    receiver_id,
-                    cap_ref_r.data.access.start,
-                    cap_ref_r.data.access.size,
-                );
-            }
+        // `attrs` is the value just written to cap; `meta_start/size` captured above.
+        if attrs.meta() {
+            updates.add_give_meta_mem(receiver_id, meta_start, meta_size);
         }
 
         Ok(updates)
@@ -1478,12 +1477,17 @@ impl Capability<Domain> {
             }
         }
 
-        // Update cap ownership (cap_ref is a separate arc — safe).
-        {
+        // Update cap ownership (cap_ref is a separate arc — safe). Capture
+        // meta info here to avoid a re-acquire after the domain locks are dropped.
+        let (is_meta, meta_start, meta_size) = {
             let mut cap = cap_ref.write();
+            let is_meta = cap.owned.attributes.meta();
+            let start = cap.data.access.start;
+            let size = cap.data.access.size;
             cap.owned.owner = receiver_id;
             cap.owned.owner_domain = Some(Arc::downgrade(receiver));
-        }
+            (is_meta, start, size)
+        };
 
         // Register in receiver's table and refresh.
         recv_w
@@ -1525,15 +1529,8 @@ impl Capability<Domain> {
         drop(recv_w);
         drop(sender_w);
 
-        {
-            let cap_ref_r = cap_ref.read();
-            if cap_ref_r.owned.attributes.meta() {
-                updates.add_give_meta_mem(
-                    receiver_id,
-                    cap_ref_r.data.access.start,
-                    cap_ref_r.data.access.size,
-                );
-            }
+        if is_meta {
+            updates.add_give_meta_mem(receiver_id, meta_start, meta_size);
         }
 
         Ok((new_handle, updates))
