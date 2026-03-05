@@ -1578,25 +1578,48 @@ structures (VMXON, VMCS, VAPIC, EPT pages) are allocated via `domain.meta.alloc_
 dom0 is special only in that the capavisor bootstraps its META pool at boot (no parent).
 Child domains will receive their META pool via capability operations from their parent.
 
+**Revised boot order (capability-first)**:
+The capability engine is initialized *before* VT-x/EPT so that dom0's initial memory
+capabilities generate `UpdateBatch` updates (`ChangeRights`), and `Platform::apply_update`
+programs the EPT through the same code path used at runtime.  No throwaway ad-hoc EPT code.
+During bootstrap, the Platform implementation operates in **bootstrap mode** — only BSP
+is active, so IPI/barrier/lock operations are no-ops; `apply_update` directly programs
+the EPT with no synchronization overhead.
+
+**Revised step order**:
+
 - [x] **P2a**: CPUID checks: VMX, x2APIC, APICv (APIC-register virtualization,
   virtual-interrupt delivery, posted interrupts), VT-d. Record a global `CpuFeatures` struct.
 - [x] **P2b**: VMXON on BSP (per-core VMXON region from dom0's `MetaAllocator`).
   AP VMXON deferred to Phase 7 (requires mailbox mechanism to wake parked APs).
   Introduced `Domain` struct (`domain.rs`) and `MetaAllocator` (`mem/meta_alloc.rs`).
-- [ ] **P2c**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
+- [ ] **P2-refactor**: Split monolithic `_start()` into phase functions:
+  `phase_discovery()` (serial/mem/SMP/ACPI/PCI), `phase_vmx_init()` (feature detect +
+  VMXON), `phase_capa_init()` (capability engine + EPT + VMCS).
+- [ ] **P2-ept**: Port vmxvmm's proven `EptMapper` + `Walker` into `crates/ept/`.
+  Adapt: local `PhysAddr`/`u64` types, `FrameAllocator` trait backed by `MetaAllocator`.
+  Keep 4-level walk, `map_range`, `unmap_range`, huge-page support, `INVEPT`.
+  *(No need to clone `asterinas/hyperenclave` — vmxvmm's implementation is already local
+  and production-proven.  Updating original plan entry P0c accordingly.)*
+- [ ] **P2-platform**: Implement the capability engine's `Platform` trait as
+  `ThemisPlatform` (`platform.rs`).  Bootstrap mode:
+  - `apply_update(ChangeRights)` → programs dom0's `EptMapper`
+  - `acquire_*_lock` / `sync_barrier` / `send_ipi` → no-ops (single-threaded at boot)
+  - `register_domain` → records in a domain table
+  - Transitions to full mode once all cores enter VMX non-root
+- [ ] **P2c**: Capability engine initialization:
+  - Create root domain capability (`Domain::new_root(num_cores)`).
+  - Create initial memory capabilities from `partition.dom0_owned` regions
+    (`MemoryRegion::new_root` per region).
+  - Call `execute(platform, ...)` to apply resulting `UpdateBatch` → builds dom0 EPT.
+  - No cross-core sync needed (bootstrap mode).
+- [ ] **P2d**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
   - VMCS pages allocated from dom0 META pool (one per VP).
   - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_handler`.
   - Guest state: from `VProcessorState.registers`.
   - Execution controls: intercept VMCALL, CPUID, CR accesses, I/O bitmap,
     `EXTERNAL_INTERRUPT` (all physical interrupts exit to Themis), `NMI_EXITING` (watchdog).
-  - Secondary controls: `EOI_INDUCED` exiting enabled after Phase 5 APICv setup (EOI-exit
-    bitmap controls which vectors cause a VMEXIT on EOI, used for REPORT-policy vectors).
-  - Install NMI IDT handler in root mode: must be present at all times since NMI is
-    non-maskable regardless of `CLI`; handler writes EOI (IRET re-enables NMI window) and
-    records a watchdog event or panics.
-- [ ] **P2d**: EPT setup: call `crates/ept` to allocate an EPT root per domain; EPT page
-  frames come from the domain's META pool (parent retains access for map/unmap).
-  Write EPTP into `VMCS.EPT_POINTER` (4-level, WB memory type).
+  - `VMCS.EPT_POINTER` set from `EptMapper::eptp()` (capability-built EPT from P2c).
 - [ ] **P2e**: Minimal VMEXIT dispatch: VMCALL → stub, CPUID → emulate, HLT → spin,
   others → log + halt. VMRESUME after each handled exit.
 
