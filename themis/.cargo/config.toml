@@ -23,7 +23,8 @@ rustflags = [
 # (x86_64-unknown-none) so xtask links against std on the host.
 iso           = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "build-iso"]
 themis        = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-qemu"]
-debug         = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "debug"]
+themis-debug  = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "themis-debug"]
+gdb           = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "gdb"]
 fetch-dom0    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-dom0"]
 dom0          = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-dom0"]
 setup-limine  = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "setup-limine"]

@@ -1,10 +1,11 @@
 //! xtask — thin dispatcher from `cargo <task>` to `scripts/<task>.sh`.
 //!
 //! Usage (via cargo aliases defined in .cargo/config.toml):
-//!   cargo iso          →  bash scripts/build-iso.sh
-//!   cargo themis        →  bash scripts/run-qemu.sh
-//!   cargo debug        →  bash scripts/debug.sh
-//!   cargo fetch-dom0   →  bash scripts/fetch-dom0.sh
+//!   cargo iso            →  bash scripts/build-iso.sh
+//!   cargo themis         →  bash scripts/run-qemu.sh
+//!   cargo themis-debug   →  bash scripts/themis-debug.sh
+//!   cargo gdb            →  bash scripts/gdb.sh
+//!   cargo fetch-dom0     →  bash scripts/fetch-dom0.sh
 //!
 //! Direct usage:
 //!   cargo run -p xtask -- <task> [extra args...]
@@ -24,7 +25,7 @@ fn main() {
         Some(t) => t,
         None => {
             eprintln!("usage: cargo run -p xtask -- <task> [args...]");
-            eprintln!("tasks: iso | qemu | debug | fetch-dom0 | dom0 | setup-limine");
+            eprintln!("tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine");
             std::process::exit(1);
         }
     };
@@ -45,7 +46,7 @@ fn main() {
             task,
             script.display()
         );
-        eprintln!("available tasks: iso | qemu | debug | fetch-dom0 | dom0 | setup-limine");
+        eprintln!("available tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine");
         std::process::exit(1);
     }
 

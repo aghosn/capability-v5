@@ -68,7 +68,7 @@ path dependency.
 All dependencies are standard packages. Install them in one go:
 
 ```sh
-sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso
+sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso ovmf
 ```
 
 | Tool | Purpose | Package |
@@ -78,6 +78,7 @@ sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso
 | `qemu-img` | Fetch dom0 disk | `qemu-utils` |
 | `cloud-localds` | Create cloud-init seed | `cloud-image-utils` |
 | `xorriso` | Create bootable ISO (ISO 9660 + El Torito) | `xorriso` |
+| `OVMF` | UEFI firmware for QEMU | `ovmf` |
 | `rust-gdb` | Debugging | ships with `rustup component add rust-src` |
 
 ### Limine setup
@@ -136,22 +137,62 @@ cargo check                  # type-check without linking
 ```sh
 cargo iso                    # build ISO → target/themis.iso
 
-cargo themis                  # build ISO and boot Themis under QEMU/KVM
+cargo themis                 # build ISO and boot Themis under QEMU/KVM
                              # dom0 disk attached automatically if present
-
-cargo debug                  # boot QEMU with -s -S (paused), attach rust-gdb
-                             # uses themis.gdbinit for symbol loading
 ```
 
-Environment knobs for `cargo themis` / `cargo debug`:
+QEMU boots via UEFI (OVMF) by default with the dom0 disk on virtio-blk.
+Set `QEMU_BIOS=1` to fall back to legacy BIOS boot.
+
+Environment knobs for `cargo themis` / `cargo themis-debug`:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `QEMU_MEM` | `1G` | Guest RAM |
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
+| `QEMU_BIOS` | `0` | Set to `1` for legacy BIOS (default is UEFI/OVMF) |
 | `PROFILE` | `debug` | `release` for optimised build |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
+
+### Debugging
+
+There are two ways to debug Themis with GDB:
+
+**Option 1: All-in-one** — `cargo themis-debug` starts QEMU paused and
+launches `rust-gdb` already connected in one command:
+
+```sh
+cargo themis-debug           # builds ISO, starts QEMU -s -S, attaches rust-gdb
+                             # QEMU is killed automatically when you quit GDB
+```
+
+**Option 2: Separate terminals** — useful when you want QEMU running
+independently (e.g. to see serial output in one terminal, GDB in another):
+
+```sh
+# Terminal 1: start QEMU with GDB stub enabled
+QEMU_EXTRA_ARGS="-s -S" cargo themis
+
+# Terminal 2: attach GDB
+cargo gdb
+```
+
+Both options load `themis.gdbinit` automatically, which provides the
+capavisor symbols and these custom commands:
+
+| GDB command | Description |
+|-------------|-------------|
+| `load-vmlinux <path> [addr]` | Load Linux vmlinux symbols at a GPA (default: `0x1000000`) |
+| `dmesg-hint` | Print hints for locating the dom0 kernel text and dmesg ring buffer |
+| `print-cr3` | Print the current CR3 (page-table root) |
+| `print-vmcs` | *(stub)* VMCS dump placeholder |
+
+To attach GDB manually (without cargo):
+
+```sh
+rust-gdb -ex "target remote :1234" -x themis.gdbinit
+```
 
 ### dom0 (standalone Linux, no Themis)
 
@@ -187,8 +228,8 @@ module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
 module_path: fslabel(cloudimg-rootfs):/boot/initrd.img
 ```
 
-The disk is attached as an IDE drive (`-drive ...,if=ide`) so that Limine can
-access it via BIOS INT 13h before any OS driver is loaded.
+The disk is attached as a virtio-blk drive under UEFI (OVMF includes virtio
+drivers). Limine accesses it via EFI block I/O protocols before the OS loads.
 
 #### dom0 login credentials
 
@@ -234,7 +275,7 @@ See `../todo.md` for the full implementation plan (Phases 0–14).
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Workspace setup | ✅ done |
-| 0.5 | dom0 Linux image & bootloader integration | 🔧 in progress |
+| 0.5 | dom0 Linux image & bootloader integration | ✅ done |
 | 1 | Boot, memory, ACPI, PCI | ⬜ pending |
 | 2 | VT-x foundation | ⬜ pending |
 | 3–13 | Platform, APICv, IRQ routing, capability integration, AMD SVM | ⬜ pending |
