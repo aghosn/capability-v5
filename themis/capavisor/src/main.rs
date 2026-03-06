@@ -129,10 +129,13 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 2a–b: VMX feature detection + VMXON on BSP ─────────────────── //
     let _vmx = boot::vmx(&platform);
 
-    // ── Phase 2c+: capability engine, EPT, VMCS (coming next) ────────────── //
+    // ── Phase 2c: Capability engine + EPT build ───────────────────────────── //
+    let _capa = boot::capa(&platform);
+
+    // ── Phase 2d+: VMCS setup, VMEXIT dispatch (coming next) ─────────────── //
 
     serial_println!();
-    serial_println!("Halting — Phase 2c+ not yet implemented.");
+    serial_println!("Halting — Phase 2d+ not yet implemented.");
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }

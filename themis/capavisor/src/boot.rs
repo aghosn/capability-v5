@@ -6,7 +6,7 @@
 //! Phase flow:
 //!   platform()  → PlatformInfo  (memory, SMP, ACPI, PCI)
 //!   vmx()       → VmxState      (feature detect, dom0 Domain, VMXON on BSP)
-//!   capa()      → (future)      (capability engine, EPT, VMCS)
+//!   capa()      → CapaState     (capability engine, root domain, EPT build)
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -249,4 +249,130 @@ pub fn vmx(info: &PlatformInfo) -> VmxState {
         info.bsp_lapic_id, bsp_index);
 
     VmxState { features, dom0, bsp_index }
+}
+
+// ── Phase 2c output ───────────────────────────────────────────────────────── //
+
+/// State produced by capability engine initialisation (Phase P2c).
+///
+/// Holds the platform, the root domain capability, and the initial set of
+/// memory capabilities.  These are kept alive for the lifetime of the
+/// capavisor so that capability-tree operations remain valid.
+pub struct CapaState {
+    pub platform: crate::platform::ThemisPlatform,
+    pub root_domain: capability_engine::CapabilityRef<capability_engine::Domain>,
+    pub mem_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
+}
+
+// ── Phase 2c: Capability engine + EPT ────────────────────────────────────── //
+
+/// Phase P2c: initialise the capability engine for dom0.
+///
+/// 1. Registers root domain (id = 0) on the platform and hands it the META pool.
+/// 2. Creates the root [`Domain`] capability (born Sealed, all cores).
+/// 3. Creates one [`MemoryRegion`] capability per `dom0_owned` region.
+/// 4. Drives an initial `UpdateBatch` of [`ChangeRights`] updates through
+///    [`execute`] so that `ThemisPlatform::apply_update` maps every dom0-owned
+///    region into the EPT (identity GPA = HPA, RWX).
+///
+/// No cross-core sync is needed: APs are still parked at this point.
+pub fn capa(info: &PlatformInfo) -> CapaState {
+    use alloc::sync::Arc;
+    use capability_engine::{
+        Capability, Domain as CapaDomain, DomainId, MemoryRegion, Rights, UpdateBatch,
+    };
+    use crate::platform::ThemisPlatform;
+
+    const ROOT_ID: DomainId = 0;
+
+    serial_println!();
+    serial_println!("=== P2c: capability engine init ===");
+
+    // ── 1. Platform: register root domain + give it META ──────────────── //
+
+    let platform = ThemisPlatform::new();
+
+    platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
+    platform.bootstrap_give_meta(ROOT_ID, info.partition.meta_pool);
+
+    serial_println!(
+        "  META pool: {:#x}+{:#x} ({} KiB, {} pages)",
+        info.partition.meta_pool.base,
+        info.partition.meta_pool.length,
+        info.partition.meta_pool.length / 1024,
+        info.partition.meta_pool.length / 4096,
+    );
+
+    // ── 2. Root domain capability ──────────────────────────────────────── //
+
+    let root_domain = Capability::new_root(
+        ROOT_ID,
+        0,
+        CapaDomain::new_root(info.num_cores),
+    );
+
+    // ── 3. Memory capabilities ─────────────────────────────────────────── //
+
+    let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
+    {
+        let mut dom = root_domain.write();
+        let mut sub = 1u64;
+
+        for region in &info.partition.dom0_owned[..info.partition.dom0_owned_count] {
+            if region.length == 0 {
+                continue;
+            }
+            let mem_cap = Capability::new_root(
+                ROOT_ID,
+                sub,
+                MemoryRegion::new_root(region.base, region.length),
+            );
+            dom.data.add_memory_capability(sub, Arc::downgrade(&mem_cap));
+            serial_println!(
+                "  mem cap #{}: {:#x}+{:#x} ({} KiB)",
+                sub, region.base, region.length, region.length / 1024,
+            );
+            mem_caps.push(mem_cap);
+            sub += 1;
+        }
+    }
+
+    // ── 4. Build EPT via UpdateBatch ───────────────────────────────────── //
+    //
+    // Emit one ChangeRights per dom0-owned region (identity GPA = HPA, RWX).
+    // execute() calls apply_update() for each entry, which maps the region into
+    // the domain's EPT (allocating the root lazily on the first call).
+
+    let batch = {
+        let mut b = UpdateBatch::new();
+        for region in &info.partition.dom0_owned[..info.partition.dom0_owned_count] {
+            if region.length == 0 {
+                continue;
+            }
+            b.add_change_rights(
+                ROOT_ID,
+                region.base,    // GPA (identity)
+                region.length,
+                region.base,    // HPA
+                Rights::RWX,
+                false,          // additive — no TLB shootdown needed
+            );
+        }
+        b
+    };
+
+    capability_engine::execute(&platform, false, || Ok(((), batch)))
+        .expect("P2c: capability engine execute failed");
+
+    let eptp = platform.eptp(ROOT_ID)
+        .expect("P2c: EPT root not allocated after execute");
+
+    serial_println!(
+        "  EPT built for dom0: {} regions, EPTP = {:#x}",
+        info.partition.dom0_owned_count,
+        eptp,
+    );
+    serial_println!("=== P2c: done ===");
+
+    CapaState { platform, root_domain, mem_caps }
 }
