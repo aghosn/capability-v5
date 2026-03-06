@@ -96,15 +96,23 @@ pub fn platform(
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
 
     let inventory = PhysicalInventory::from_limine(entries);
-    serial_println!("Total usable RAM:  {} MiB", inventory.total_usable / (1024 * 1024));
-    serial_println!("Usable regions:    {} MiB ({} regions)",
+    serial_println!(
+        "Total usable RAM:  {} MiB",
+        inventory.total_usable / (1024 * 1024)
+    );
+    serial_println!(
+        "Usable regions:    {} MiB ({} regions)",
         inventory.available_bytes() / (1024 * 1024),
-        inventory.usable_regions().len());
+        inventory.usable_regions().len()
+    );
 
     {
         let mut v = alloc::vec![1u64, 2, 3];
         v.push(4);
-        serial_println!("Heap check:        alloc::vec![1,2,3,4] → len={} ✓", v.len());
+        serial_println!(
+            "Heap check:        alloc::vec![1,2,3,4] → len={} ✓",
+            v.len()
+        );
     }
 
     // ── Build UC range table from RESERVED + FRAMEBUFFER entries ─────────── //
@@ -121,7 +129,10 @@ pub fn platform(
             _ => {}
         }
     }
-    serial_println!("UC ranges:         {} MMIO region(s) registered", uc_ranges.len());
+    serial_println!(
+        "UC ranges:         {} MMIO region(s) registered",
+        uc_ranges.len()
+    );
 
     // ── Build non-RAM e820 entries and EPT passthrough region list ────────── //
     // USABLE entries are skipped here — they are replaced by explicit entries in
@@ -131,8 +142,8 @@ pub fn platform(
     let mut passthrough_regions: Vec<PhysRegion> = Vec::new();
     for entry in entries.iter() {
         let e820_type = match entry.entry_type {
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => E820Entry::TYPE_ACPI,
-            limine::memory_map::EntryType::ACPI_NVS            => E820Entry::TYPE_NVS,
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE => E820Entry::TYPE_ACPI,
+            limine::memory_map::EntryType::ACPI_NVS => E820Entry::TYPE_NVS,
             limine::memory_map::EntryType::RESERVED
             | limine::memory_map::EntryType::FRAMEBUFFER
             | limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
@@ -140,7 +151,11 @@ pub fn platform(
             // USABLE and BAD_MEMORY handled separately; skip all others.
             _ => continue,
         };
-        non_ram_e820.push(E820Entry { addr: entry.base, size: entry.length, entry_type: e820_type });
+        non_ram_e820.push(E820Entry {
+            addr: entry.base,
+            size: entry.length,
+            entry_type: e820_type,
+        });
 
         // EPT passthrough: map ACPI/NVS/RESERVED/FRAMEBUFFER but NOT capavisor memory.
         match entry.entry_type {
@@ -148,7 +163,10 @@ pub fn platform(
             | limine::memory_map::EntryType::ACPI_NVS
             | limine::memory_map::EntryType::RESERVED
             | limine::memory_map::EntryType::FRAMEBUFFER => {
-                passthrough_regions.push(PhysRegion { base: entry.base, length: entry.length });
+                passthrough_regions.push(PhysRegion {
+                    base: entry.base,
+                    length: entry.length,
+                });
             }
             // BOOTLOADER_RECLAIMABLE + EXECUTABLE_AND_MODULES: capavisor memory,
             // must not be accessible to dom0 at the hardware level.
@@ -163,39 +181,49 @@ pub fn platform(
     // cause an EPT violation.  Also add it to e820 as RESERVED so Linux knows.
     {
         const ISA_HOLE_BASE: u64 = 0xA0000;
-        const ISA_HOLE_LEN:  u64 = 0x100000 - 0xA0000; // 384 KiB
-        // Only add if not already covered by an existing region.
-        let covered = passthrough_regions.iter().any(|r|
-            r.base <= ISA_HOLE_BASE && r.base + r.length >= ISA_HOLE_BASE + ISA_HOLE_LEN
-        );
+        const ISA_HOLE_LEN: u64 = 0x100000 - 0xA0000; // 384 KiB
+                                                      // Only add if not already covered by an existing region.
+        let covered = passthrough_regions
+            .iter()
+            .any(|r| r.base <= ISA_HOLE_BASE && r.base + r.length >= ISA_HOLE_BASE + ISA_HOLE_LEN);
         if !covered {
-            passthrough_regions.push(PhysRegion { base: ISA_HOLE_BASE, length: ISA_HOLE_LEN });
+            passthrough_regions.push(PhysRegion {
+                base: ISA_HOLE_BASE,
+                length: ISA_HOLE_LEN,
+            });
             non_ram_e820.push(E820Entry {
-                addr: ISA_HOLE_BASE, size: ISA_HOLE_LEN,
+                addr: ISA_HOLE_BASE,
+                size: ISA_HOLE_LEN,
                 entry_type: E820Entry::TYPE_RESERVED,
             });
         }
     }
 
-    // ── Local APIC + I/O APIC MMIO ──────────────────────────────────────── //
-    // The LAPIC (0xFEE00000) and I/O APIC (0xFEC00000) are fixed-address MMIO
-    // regions that firmware does not report in the memory map.  Linux accesses
-    // these directly; without EPT mappings the accesses cause EPT violations.
-    // Map them as passthrough so dom0 can drive the interrupt controllers.
+    // ── Local APIC + I/O APIC + HPET MMIO ─────────────────────────────── //
+    // Fixed-address MMIO regions that firmware does not report in the memory
+    // map.  Linux accesses these directly; without EPT mappings the accesses
+    // cause EPT violations.  Map them as passthrough.
     for &(base, len) in &[
-        (0xFEC0_0000u64, 0x1000u64),  // I/O APIC (4 KiB)
-        (0xFEE0_0000u64, 0x1000u64),  // Local APIC (4 KiB)
+        (0xFEC0_0000u64, 0x1000u64), // I/O APIC (4 KiB)
+        (0xFED0_0000u64, 0x1000u64), // HPET (4 KiB)
+        (0xFEE0_0000u64, 0x1000u64), // Local APIC (4 KiB)
     ] {
-        let covered = passthrough_regions.iter().any(|r|
-            r.base <= base && r.base + r.length >= base + len
-        );
+        let covered = passthrough_regions
+            .iter()
+            .any(|r| r.base <= base && r.base + r.length >= base + len);
         if !covered {
             passthrough_regions.push(PhysRegion { base, length: len });
         }
     }
 
-    serial_println!("Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)", non_ram_e820.len());
-    serial_println!("EPT passthrough:   {} regions (ACPI/NVS/MMIO)", passthrough_regions.len());
+    serial_println!(
+        "Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)",
+        non_ram_e820.len()
+    );
+    serial_println!(
+        "EPT passthrough:   {} regions (ACPI/NVS/MMIO)",
+        passthrough_regions.len()
+    );
 
     // ── Phase 1b: Memory partitioning ────────────────────────────────────── //
 
@@ -213,7 +241,11 @@ pub fn platform(
 
     serial_println!();
     let num_aps = num_cores as u64 - 1;
-    serial_println!("SMP: BSP LAPIC {} — waking {} APs ...", bsp_lapic_id, num_aps);
+    serial_println!(
+        "SMP: BSP LAPIC {} — waking {} APs ...",
+        bsp_lapic_id,
+        num_aps
+    );
 
     for cpu in cpus.iter() {
         if cpu.lapic_id != bsp_lapic_id {
@@ -248,9 +280,12 @@ pub fn platform(
     serial_println!("ACPI: RSDP at phys {:#x}", rsdp_phys);
     let acpi = AcpiInfo::parse(rsdp_phys, hhdm_offset);
 
-    serial_println!("ACPI: {} processors, {} I/O APICs, VT-d: {}",
-        acpi.processors.len(), acpi.io_apics.len(),
-        if acpi.has_dmar { "present" } else { "absent" });
+    serial_println!(
+        "ACPI: {} processors, {} I/O APICs, VT-d: {}",
+        acpi.processors.len(),
+        acpi.io_apics.len(),
+        if acpi.has_dmar { "present" } else { "absent" }
+    );
 
     if let Some(ref regions) = acpi.pci_config_regions {
         serial_println!("ACPI: {} PCIe ECAM region(s)", regions.regions.len());
@@ -261,18 +296,52 @@ pub fn platform(
     // ── Phase 1e: PCI enumeration ─────────────────────────────────────────── //
 
     serial_println!();
-    let pci_devices = crate::pci::enumerate(&acpi, hhdm_offset);
-    if let Some(ref devices) = pci_devices {
-        serial_println!("PCI: {} device(s) found", devices.len());
-        for dev in devices {
+    let pci_result = crate::pci::enumerate(&acpi, hhdm_offset);
+    let pci_devices;
+    let pci_bar_regions;
+    if let Some((devices, bars)) = pci_result {
+        serial_println!(
+            "PCI: {} device(s) found, {} memory BAR(s)",
+            devices.len(),
+            bars.len()
+        );
+        for dev in &devices {
             let a = dev.address;
-            serial_println!("  {:02x}:{:02x}.{}  {:04x}:{:04x}  class={:02x}.{:02x}.{:02x}",
-                a.bus(), a.device(), a.function(),
-                dev.vendor_id, dev.device_id,
-                dev.class, dev.subclass, dev.interface);
+            serial_println!(
+                "  {:02x}:{:02x}.{}  {:04x}:{:04x}  class={:02x}.{:02x}.{:02x}",
+                a.bus(),
+                a.device(),
+                a.function(),
+                dev.vendor_id,
+                dev.device_id,
+                dev.class,
+                dev.subclass,
+                dev.interface
+            );
         }
+        for bar in &bars {
+            serial_println!(
+                "  BAR: {:#x}+{:#x} ({} KiB)",
+                bar.base,
+                bar.size,
+                bar.size / 1024
+            );
+        }
+        // Add PCI memory BARs to passthrough regions so they are mapped in
+        // the EPT.  Firmware (OVMF) assigned these addresses; dom0 needs
+        // direct MMIO access to drive devices.
+        for bar in &bars {
+            passthrough_regions.push(PhysRegion {
+                base: bar.base,
+                length: bar.size,
+            });
+        }
+        pci_bar_regions = Some(bars);
+        pci_devices = Some(devices);
     } else {
         serial_println!("PCI: no ECAM — skipping enumeration");
+        pci_devices = None;
+        pci_bar_regions = None;
     }
 
     // ── Comprehensive memory layout report ──────────────────────────────── //
@@ -287,11 +356,13 @@ pub fn platform(
 
     // Compute HEAP virt/phys range.
     let heap_virt_base = unsafe { crate::HEAP.0.as_ptr() as u64 };
-    let heap_virt_end  = heap_virt_base + crate::HEAP_SIZE as u64;
+    let heap_virt_end = heap_virt_base + crate::HEAP_SIZE as u64;
     let heap_phys_base = if kernel_virt_base != 0 {
         heap_virt_base - kernel_virt_base + kernel_phys_base
-    } else { 0 };
-    let heap_phys_end  = heap_phys_base + crate::HEAP_SIZE as u64;
+    } else {
+        0
+    };
+    let heap_phys_end = heap_phys_base + crate::HEAP_SIZE as u64;
 
     serial_println!("=== P1: Physical memory layout ===");
     serial_println!();
@@ -299,14 +370,26 @@ pub fn platform(
     // 1. Capavisor layout
     serial_println!("Capavisor layout:");
     if kernel_phys_base != 0 {
-        serial_println!("  Binary:  virt [{:#018x}..{:#018x})",
-            kernel_virt_base, kernel_virt_base + (heap_virt_base - kernel_virt_base));
-        serial_println!("           phys [{:#011x}..{:#011x})  [KERNEL_AND_MODULES]",
-            kernel_phys_base, heap_phys_base);
-        serial_println!("  Heap:    virt [{:#018x}..{:#018x})  64 MiB BSS",
-            heap_virt_base, heap_virt_end);
-        serial_println!("           phys [{:#011x}..{:#011x})  [excluded from dom0]",
-            heap_phys_base, heap_phys_end);
+        serial_println!(
+            "  Binary:  virt [{:#018x}..{:#018x})",
+            kernel_virt_base,
+            kernel_virt_base + (heap_virt_base - kernel_virt_base)
+        );
+        serial_println!(
+            "           phys [{:#011x}..{:#011x})  [KERNEL_AND_MODULES]",
+            kernel_phys_base,
+            heap_phys_base
+        );
+        serial_println!(
+            "  Heap:    virt [{:#018x}..{:#018x})  64 MiB BSS",
+            heap_virt_base,
+            heap_virt_end
+        );
+        serial_println!(
+            "           phys [{:#011x}..{:#011x})  [excluded from dom0]",
+            heap_phys_base,
+            heap_phys_end
+        );
     } else {
         serial_println!("  (KernelAddressRequest unavailable)");
     }
@@ -316,15 +399,15 @@ pub fn platform(
     serial_println!("Limine memory map ({} entries):", entries.len());
     for entry in entries.iter() {
         let type_str = match entry.entry_type {
-            limine::memory_map::EntryType::USABLE              => "usable      ",
-            limine::memory_map::EntryType::RESERVED            => "reserved    ",
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => "acpi-reclaim",
-            limine::memory_map::EntryType::ACPI_NVS            => "acpi-nvs    ",
-            limine::memory_map::EntryType::BAD_MEMORY          => "bad-memory  ",
+            limine::memory_map::EntryType::USABLE => "usable      ",
+            limine::memory_map::EntryType::RESERVED => "reserved    ",
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE => "acpi-reclaim",
+            limine::memory_map::EntryType::ACPI_NVS => "acpi-nvs    ",
+            limine::memory_map::EntryType::BAD_MEMORY => "bad-memory  ",
             limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader  ",
             limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+mods ",
-            limine::memory_map::EntryType::FRAMEBUFFER         => "framebuffer ",
-            _                                                  => "other       ",
+            limine::memory_map::EntryType::FRAMEBUFFER => "framebuffer ",
+            _ => "other       ",
         };
         let entry_end = entry.base + entry.length;
         // Check if this entry overlaps with any META region.
@@ -349,12 +432,20 @@ pub fn platform(
             let is_heap = heap_phys_base > 0
                 && entry.base >= heap_phys_base
                 && entry_end <= heap_phys_end + 0x1000;
-            if is_binary { "  ← capavisor binary" }
-            else if is_heap { "  ← capavisor heap (BSS)" }
-            else { "" }
-        } else { "" };
-        serial_println!("  [{:#011x}..{:#011x})  {:>8}  {}{}{}",
-            entry.base, entry_end,
+            if is_binary {
+                "  ← capavisor binary"
+            } else if is_heap {
+                "  ← capavisor heap (BSS)"
+            } else {
+                ""
+            }
+        } else {
+            ""
+        };
+        serial_println!(
+            "  [{:#011x}..{:#011x})  {:>8}  {}{}{}",
+            entry.base,
+            entry_end,
             fmt_kib(entry.length),
             type_str,
             marker,
@@ -365,15 +456,26 @@ pub fn platform(
 
     // 3. META pool summary
     let meta_total_bytes: u64 = partition.meta_regions[..partition.meta_count]
-        .iter().map(|r| r.length).sum();
-    serial_println!("META pool: {} KiB across {} physical region(s):",
-        meta_total_bytes / 1024, partition.meta_count);
+        .iter()
+        .map(|r| r.length)
+        .sum();
+    serial_println!(
+        "META pool: {} KiB across {} physical region(s):",
+        meta_total_bytes / 1024,
+        partition.meta_count
+    );
     for i in 0..partition.meta_count {
         let r = &partition.meta_regions[i];
-        serial_println!("  region [{}]: phys [{:#011x}..{:#011x})  {} KiB",
-            i, r.base, r.base + r.length, r.length / 1024);
+        serial_println!(
+            "  region [{}]: phys [{:#011x}..{:#011x})  {} KiB",
+            i,
+            r.base,
+            r.base + r.length,
+            r.length / 1024
+        );
     }
-    serial_println!("  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT  ({} pages = {} KiB)",
+    serial_println!(
+        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT  ({} pages = {} KiB)",
         partition.meta_breakdown.vmxon_pages,
         partition.meta_breakdown.vmcs_pages,
         partition.meta_breakdown.vapic_pages,
@@ -384,20 +486,37 @@ pub fn platform(
     serial_println!();
 
     // 4. ACPI regions mapped into capavisor page tables
-    serial_println!("ACPI/reserved regions mapped into capavisor PTs ({} entries):", acpi_mapped.len());
+    serial_println!(
+        "ACPI/reserved regions mapped into capavisor PTs ({} entries):",
+        acpi_mapped.len()
+    );
     for (base, len) in &acpi_mapped {
-        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
-            base, base + len, len / 1024);
+        serial_println!(
+            "  [{:#011x}..{:#011x})  {} KiB",
+            base,
+            base + len,
+            len / 1024
+        );
     }
     serial_println!();
 
     // 5. dom0 RAM regions
-    serial_println!("dom0 RAM regions ({} entries, {} MiB total):",
+    serial_println!(
+        "dom0 RAM regions ({} entries, {} MiB total):",
         partition.dom0_owned_count,
-        partition.dom0_owned[..partition.dom0_owned_count].iter().map(|r| r.length).sum::<u64>() / (1024*1024));
+        partition.dom0_owned[..partition.dom0_owned_count]
+            .iter()
+            .map(|r| r.length)
+            .sum::<u64>()
+            / (1024 * 1024)
+    );
     for r in &partition.dom0_owned[..partition.dom0_owned_count] {
-        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
-            r.base, r.base + r.length, r.length / 1024);
+        serial_println!(
+            "  [{:#011x}..{:#011x})  {} KiB",
+            r.base,
+            r.base + r.length,
+            r.length / 1024
+        );
     }
     serial_println!();
 
@@ -406,17 +525,26 @@ pub fn platform(
     {
         let mut e820_all: alloc::vec::Vec<(u64, u64, u32)> = alloc::vec::Vec::new();
         for r in &partition.dom0_owned[..partition.dom0_owned_count] {
-            if r.length > 0 { e820_all.push((r.base, r.length, 1)); }
+            if r.length > 0 {
+                e820_all.push((r.base, r.length, 1));
+            }
         }
         for i in 0..partition.meta_count {
             let r = &partition.meta_regions[i];
-            if r.length > 0 { e820_all.push((r.base, r.length, 2)); }
+            if r.length > 0 {
+                e820_all.push((r.base, r.length, 2));
+            }
         }
         for e in &non_ram_e820 {
-            if e.size > 0 { e820_all.push((e.addr, e.size, e.entry_type)); }
+            if e.size > 0 {
+                e820_all.push((e.addr, e.size, e.entry_type));
+            }
         }
         e820_all.sort_by_key(|e| e.0);
-        serial_println!("dom0 e820 table ({} entries, as seen by Linux):", e820_all.len());
+        serial_println!(
+            "dom0 e820 table ({} entries, as seen by Linux):",
+            e820_all.len()
+        );
         for (base, size, typ) in &e820_all {
             let type_str = match *typ {
                 1 => "RAM     ",
@@ -425,8 +553,14 @@ pub fn platform(
                 4 => "NVS     ",
                 _ => "OTHER   ",
             };
-            serial_println!("  type={} ({})  [{:#011x}..{:#011x})  {} KiB",
-                typ, type_str, base, base + size, size / 1024);
+            serial_println!(
+                "  type={} ({})  [{:#011x}..{:#011x})  {} KiB",
+                typ,
+                type_str,
+                base,
+                base + size,
+                size / 1024
+            );
         }
         serial_println!();
     }
@@ -461,13 +595,23 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
 
     serial_println!();
     serial_println!("CPU features:");
-    serial_println!("  VMX: {}  x2APIC: {}  APICv: {}  VT-d: {}",
+    serial_println!(
+        "  VMX: {}  x2APIC: {}  APICv: {}  VT-d: {}",
         if features.vmx { "yes" } else { "NO" },
         if features.x2apic { "yes" } else { "no" },
-        if features.has_apicv() { "full" } else { "partial/none" },
-        if features.vtd { "yes" } else { "no" });
-    serial_println!("  VMCS rev: {:#x}  phys bits: {}  region size: {} B",
-        features.vmcs_revision_id, features.phys_addr_bits, features.vmx_region_size);
+        if features.has_apicv() {
+            "full"
+        } else {
+            "partial/none"
+        },
+        if features.vtd { "yes" } else { "no" }
+    );
+    serial_println!(
+        "  VMCS rev: {:#x}  phys bits: {}  region size: {} B",
+        features.vmcs_revision_id,
+        features.phys_addr_bits,
+        features.vmx_region_size
+    );
 
     assert!(features.vmx, "VMX not supported — cannot continue");
 
@@ -476,24 +620,34 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
     dom0.alloc_vmxon_regions(platform, info.num_cores, features.vmcs_revision_id);
 
     serial_println!();
-    serial_println!("dom0: allocated {} VMXON pages from META pool",
-        info.num_cores);
+    serial_println!(
+        "dom0: allocated {} VMXON pages from META pool",
+        info.num_cores
+    );
 
-    let bsp_index = info.cpu_lapic_ids.iter()
+    let bsp_index = info
+        .cpu_lapic_ids
+        .iter()
         .position(|&id| id == info.bsp_lapic_id)
         .expect("BSP LAPIC ID not found in CPU list");
 
-    crate::vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index))
-        .expect("VMXON failed on BSP");
-    serial_println!("VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
-        info.bsp_lapic_id, bsp_index);
+    crate::vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index)).expect("VMXON failed on BSP");
+    serial_println!(
+        "VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
+        info.bsp_lapic_id,
+        bsp_index
+    );
 
     // Populate VMXON_PHYS for all cores (visible to APs after AP_LAUNCH_READY Release).
     for i in 0..info.num_cores {
         crate::VMXON_PHYS[i].store(dom0.vmxon_phys(i), core::sync::atomic::Ordering::Relaxed);
     }
 
-    VmxState { features, dom0, bsp_index }
+    VmxState {
+        features,
+        dom0,
+        bsp_index,
+    }
 }
 
 // ── ThemisPlatform init ───────────────────────────────────────────────────── //
@@ -522,16 +676,26 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         platform.bootstrap_give_meta(ROOT_ID, r);
     }
 
-    serial_println!("ThemisPlatform: META pool {} KiB across {} region(s):",
+    serial_println!(
+        "ThemisPlatform: META pool {} KiB across {} region(s):",
         info.partition.meta_regions[..info.partition.meta_count]
-            .iter().map(|r| r.length).sum::<u64>() / 1024,
-        info.partition.meta_count);
+            .iter()
+            .map(|r| r.length)
+            .sum::<u64>()
+            / 1024,
+        info.partition.meta_count
+    );
     for i in 0..info.partition.meta_count {
         let r = &info.partition.meta_regions[i];
-        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
-            r.base, r.base + r.length, r.length / 1024);
+        serial_println!(
+            "  [{:#011x}..{:#011x})  {} KiB",
+            r.base,
+            r.base + r.length,
+            r.length / 1024
+        );
     }
-    serial_println!("  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
+    serial_println!(
+        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
         info.partition.meta_breakdown.vmxon_pages,
         info.partition.meta_breakdown.vmcs_pages,
         info.partition.meta_breakdown.vapic_pages,
@@ -598,11 +762,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 
     // ── Root domain capability ─────────────────────────────────────────── //
 
-    let root_domain = Capability::new_root(
-        ROOT_ID,
-        0,
-        CapaDomain::new_root(info.num_cores),
-    );
+    let root_domain = Capability::new_root(ROOT_ID, 0, CapaDomain::new_root(info.num_cores));
 
     // ── Memory capabilities ────────────────────────────────────────────── //
 
@@ -621,10 +781,14 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
                 sub,
                 MemoryRegion::new_root(region.base, region.length),
             );
-            dom.data.add_memory_capability(sub, Arc::downgrade(&mem_cap));
+            dom.data
+                .add_memory_capability(sub, Arc::downgrade(&mem_cap));
             serial_println!(
                 "  mem cap #{}: {:#x}+{:#x} ({} KiB)",
-                sub, region.base, region.length, region.length / 1024,
+                sub,
+                region.base,
+                region.length,
+                region.length / 1024,
             );
             mem_caps.push(mem_cap);
             sub += 1;
@@ -648,10 +812,14 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
                 sub,
                 MemoryRegion::new_root(region.base, region.length),
             );
-            dom.data.add_memory_capability(sub, Arc::downgrade(&mem_cap));
+            dom.data
+                .add_memory_capability(sub, Arc::downgrade(&mem_cap));
             serial_println!(
                 "  passthrough cap #{}: {:#x}+{:#x} ({} KiB)",
-                sub, region.base, region.length, region.length / 1024,
+                sub,
+                region.base,
+                region.length,
+                region.length / 1024,
             );
             mem_caps.push(mem_cap);
             sub += 1;
@@ -666,11 +834,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         let mut meta_caps_local: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
         for i in 0..info.partition.meta_count {
             let r = &info.partition.meta_regions[i];
-            let cap = Capability::new_root(
-                ROOT_ID,
-                sub,
-                MemoryRegion::new_root(r.base, r.length),
-            );
+            let cap = Capability::new_root(ROOT_ID, sub, MemoryRegion::new_root(r.base, r.length));
             {
                 let mut c = cap.write();
                 c.owned.attributes = Attributes::from_bits(Attributes::META).canonicalize();
@@ -678,7 +842,11 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             dom.data.add_memory_capability(sub, Arc::downgrade(&cap));
             serial_println!(
                 "  meta cap #{}: [{:#011x}..{:#011x})  {} KiB  {} pages",
-                sub, r.base, r.base + r.length, r.length / 1024, r.length / 4096,
+                sub,
+                r.base,
+                r.base + r.length,
+                r.length / 1024,
+                r.length / 4096,
             );
             meta_caps_local.push(cap);
             sub += 1;
@@ -700,9 +868,9 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             }
             b.add_change_rights(
                 ROOT_ID,
-                region.base,  // GPA (identity)
+                region.base, // GPA (identity)
                 region.length,
-                region.base,  // HPA
+                region.base, // HPA
                 Rights::RWX,
                 false,
             );
@@ -713,12 +881,14 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     capability_engine::execute(&platform, false, || Ok(((), batch)))
         .expect("P2c: capability engine execute failed");
 
-    let eptp = platform.eptp(ROOT_ID)
+    let eptp = platform
+        .eptp(ROOT_ID)
         .expect("P2c: EPT root not allocated after execute");
 
     serial_println!(
         "  EPT built for dom0: {} RAM regions, EPTP = {:#x}",
-        info.partition.dom0_owned_count, eptp,
+        info.partition.dom0_owned_count,
+        eptp,
     );
 
     // ── EPT passthrough: map non-RAM regions for device/ACPI access ───────── //
@@ -736,10 +906,10 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             }
             b.add_change_rights(
                 ROOT_ID,
-                region.base,   // GPA (identity)
+                region.base, // GPA (identity)
                 region.length,
-                region.base,   // HPA
-                Rights::RW,    // no execute for MMIO/firmware regions
+                region.base, // HPA
+                Rights::RW,  // no execute for MMIO/firmware regions
                 false,
             );
         }
@@ -755,11 +925,18 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     );
     serial_println!("=== P2c: done ===");
 
-    CapaState { platform, root_domain, mem_caps, meta_caps }
+    CapaState {
+        platform,
+        root_domain,
+        mem_caps,
+        meta_caps,
+    }
 }
 
 // ── Phase 2d output ───────────────────────────────────────────────────────── //
 
+//TODO(aghosn) Is this per domain then or not? If so, it's annoying to have so many stacks
+//allocated it's gonna eat up our heap super fast.
 /// State produced by VMCS setup (Phase P2d).
 pub struct VmcsState {
     /// Per-VP host stacks (heap-allocated, one per VP).
@@ -780,8 +957,8 @@ pub const HOST_STACK_BYTES: usize = 4096 * 4; // 16 KiB
 /// - After return, BSP VMCS is the current VMCS on this core (P7f will patch RIP/RSP).
 /// - Records all per-VP state in `VmcsState`.
 pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsState {
-    use alloc::boxed::Box;
     use crate::vmcs::setup_vmcs_for_vp;
+    use alloc::boxed::Box;
     use x86::bits64::vmx;
     use x86::vmx::vmcs;
 
@@ -793,22 +970,28 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     // causing VMLAUNCH error 8 ("VM entry with invalid host-state field(s)").
     crate::gdt::init();
     crate::gdt::load_for_core(0); // BSP = core 0
-    serial_println!("  GDT loaded: base={:#x}  TR selector={:#06x}  TR base={:#x}",
+    serial_println!(
+        "  GDT loaded: base={:#x}  TR selector={:#06x}  TR base={:#x}",
         crate::gdt::gdtr_base(),
         crate::gdt::tss_selector(0),
-        crate::gdt::tss_base(0));
+        crate::gdt::tss_base(0)
+    );
 
     let num_vps = info.num_cores;
-    let eptp = capa.platform.eptp(0)
+    let eptp = capa
+        .platform
+        .eptp(0)
         .expect("P2d: EPT root not set up — run boot::capa() first");
 
     // Allocate VMCS and VAPIC pages from the META pool via ThemisPlatform.
-    vmx.dom0.alloc_vmcs_regions(&capa.platform, num_vps, vmx.features.vmcs_revision_id);
+    vmx.dom0
+        .alloc_vmcs_regions(&capa.platform, num_vps, vmx.features.vmcs_revision_id);
     vmx.dom0.alloc_vapic_regions(&capa.platform, num_vps);
 
     serial_println!(
         "  Allocated {} VMCS + {} VAPIC pages from META pool",
-        num_vps, num_vps,
+        num_vps,
+        num_vps,
     );
 
     // Per-VP host stacks (heap, not META — stacks need no physical-contiguity).
@@ -832,11 +1015,14 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             vp,
         );
     }
-    capa.platform.bootstrap_set_vp_hardware(0, vp, vmx.dom0.vmcs_phys(vp));
+    capa.platform
+        .bootstrap_set_vp_hardware(0, vp, vmx.dom0.vmcs_phys(vp));
 
     serial_println!(
         "  BSP VMCS ready: vp={} vmcs={:#x} stack_top={:#x}",
-        vp, vmx.dom0.vmcs_phys(vp), stack_top_aligned,
+        vp,
+        vmx.dom0.vmcs_phys(vp),
+        stack_top_aligned,
     );
 
     // Set up VMCS for each AP VP.
@@ -859,17 +1045,17 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             );
             // Override activity state: AP must not enter the kernel entry point
             // directly — it waits for a SIPI from the Linux BSP.
-            vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 3)
-                .expect("AP vmwrite ACTIVITY_STATE");
+            vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 3).expect("AP vmwrite ACTIVITY_STATE");
             // Save VMCS state to memory and deactivate so the AP can load it
             // with VMPTRLD independently.
-            vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp))
-                .expect("AP vmclear");
+            vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp)).expect("AP vmclear");
         }
-        capa.platform.bootstrap_set_vp_hardware(0, ap_vp, vmx.dom0.vmcs_phys(ap_vp));
+        capa.platform
+            .bootstrap_set_vp_hardware(0, ap_vp, vmx.dom0.vmcs_phys(ap_vp));
         serial_println!(
             "  AP VMCS ready:  vp={} vmcs={:#x} (wait-for-SIPI)",
-            ap_vp, vmx.dom0.vmcs_phys(ap_vp),
+            ap_vp,
+            vmx.dom0.vmcs_phys(ap_vp),
         );
     }
 
@@ -877,8 +1063,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     // vmwrite guest RIP/RSP into the correct VMCS.
     if num_vps > 1 {
         unsafe {
-            vmx::vmptrld(vmx.dom0.vmcs_phys(vmx.bsp_index))
-                .expect("BSP vmptrld restore");
+            vmx::vmptrld(vmx.dom0.vmcs_phys(vmx.bsp_index)).expect("BSP vmptrld restore");
         }
     }
     serial_println!("=== P2d: done ===");
@@ -910,10 +1095,7 @@ pub struct LinuxState {
 ///
 /// The [`LinuxState`] returned carries `boot_params_phys` for use by P7g, which
 /// must load it into ESI before executing VMLAUNCH.
-pub fn linux(
-    info: &PlatformInfo,
-    modules: &[crate::guest::ModuleInfo],
-) -> LinuxState {
+pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> LinuxState {
     use crate::guest::{find_module, linux as lx};
     use x86::bits64::vmx;
     use x86::vmx::vmcs::guest;
@@ -933,11 +1115,9 @@ pub fn linux(
     // Write DMAR-stripped RSDP + XSDT copies into dom0 memory so Linux never
     // discovers VT-d hardware.  Falls back to 0 (Linux scans for RSDP) if there
     // is no DMAR table or the platform uses ACPI 1.0.
-    let acpi_rsdp_addr = crate::acpi::strip_dmar(
-        info.acpi.rsdp_phys,
-        lx::ACPI_COPY_PHYS,
-        info.hhdm_offset,
-    ).unwrap_or(0);
+    let acpi_rsdp_addr =
+        crate::acpi::strip_dmar(info.acpi.rsdp_phys, lx::ACPI_COPY_PHYS, info.hhdm_offset)
+            .unwrap_or(0);
 
     // ── Load kernel + initrd, write boot_params ──────────────────────────── //
     let load = lx::load_linux(
@@ -950,7 +1130,7 @@ pub fn linux(
         acpi_rsdp_addr,
         // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
         // is incomplete; can be removed once P7f-dmar is fully verified.
-        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off",
+        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off nokaslr root=/dev/vda1 rw",
     );
 
     // ── Patch VMCS guest RIP and RSP ─────────────────────────────────────── //
@@ -958,21 +1138,21 @@ pub fn linux(
     // RSI (boot_params address) is a GPR — it cannot be vmwrite'd; P7g sets it
     // in the inline asm immediately before VMLAUNCH.
     unsafe {
-        vmx::vmwrite(guest::RIP, load.kernel_entry_phys)
-            .expect("P7f: vmwrite guest RIP");
-        vmx::vmwrite(guest::RSP, lx::INITIAL_RSP_PHYS)
-            .expect("P7f: vmwrite guest RSP");
+        vmx::vmwrite(guest::RIP, load.kernel_entry_phys).expect("P7f: vmwrite guest RIP");
+        vmx::vmwrite(guest::RSP, lx::INITIAL_RSP_PHYS).expect("P7f: vmwrite guest RSP");
     }
 
     serial_println!(
         "  VMCS patched: RIP={:#x} RSP={:#x}  (RSI={:#x} set at VMLAUNCH)",
-        load.kernel_entry_phys, lx::INITIAL_RSP_PHYS, load.boot_params_phys,
+        load.kernel_entry_phys,
+        lx::INITIAL_RSP_PHYS,
+        load.boot_params_phys,
     );
     serial_println!("=== P7f: done ===");
 
     LinuxState {
         kernel_entry_phys: load.kernel_entry_phys,
-        boot_params_phys:  load.boot_params_phys,
+        boot_params_phys: load.boot_params_phys,
     }
 }
 
@@ -988,8 +1168,8 @@ pub fn linux(
 /// This function never returns if VMLAUNCH succeeds.  It panics if the
 /// VMLAUNCH instruction fails, reporting rflags and the VMX error code.
 pub fn launch(linux: &LinuxState) -> ! {
-    use core::sync::atomic::Ordering;
     use crate::AP_LAUNCH_READY;
+    use core::sync::atomic::Ordering;
 
     serial_println!();
     serial_println!("=== P7g: VMLAUNCH ===");
@@ -1014,8 +1194,7 @@ pub fn launch(linux: &LinuxState) -> ! {
             rflags = out(reg) rflags,
         );
         // VMLAUNCH failed — CPU did not enter guest mode.
-        let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR)
-            .unwrap_or(0);
+        let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR).unwrap_or(0);
         panic!(
             "P7g: BSP VMLAUNCH failed — rflags={:#x} VM_INSTRUCTION_ERROR={}",
             rflags, error,

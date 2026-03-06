@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use core::ptr;
 
-use pci_types::{ConfigRegionAccess, PciAddress, PciHeader, HeaderType};
+use pci_types::{ConfigRegionAccess, PciAddress, PciHeader, HeaderType, EndpointHeader, Bar};
 
 use crate::acpi::AcpiInfo;
 
@@ -68,10 +68,20 @@ pub struct PciDevice {
     pub header_type: HeaderType,
 }
 
+/// A PCI memory BAR region (address + size) for EPT mapping.
+#[derive(Debug, Clone, Copy)]
+pub struct PciBarRegion {
+    pub base: u64,
+    pub size: u64,
+}
+
 /// Enumerate all PCI devices on bus 0..255 using the ECAM window.
 ///
 /// Returns `None` if no MCFG table was found (no PCIe ECAM available).
-pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<Vec<PciDevice>> {
+/// On success, returns `(devices, bar_regions)` — the BAR regions are the
+/// physical memory ranges of all discovered memory BARs, suitable for EPT
+/// passthrough mapping.
+pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<(Vec<PciDevice>, Vec<PciBarRegion>)> {
     let regions = acpi_info.pci_config_regions.as_ref()?;
     if regions.regions.is_empty() {
         return None;
@@ -89,6 +99,7 @@ pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<Vec<PciDevice
 
     let access = EcamAccess::new(base_phys, hhdm_offset);
     let mut devices = Vec::new();
+    let mut bar_regions = Vec::new();
 
     for bus in bus_start..=bus_end {
         for device in 0..32u8 {
@@ -126,9 +137,42 @@ pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<Vec<PciDevice
                     revision: rev,
                     header_type: hdr_type,
                 });
+
+                // Read memory BARs from endpoint (Type 0) headers.
+                if let Some(ep) = EndpointHeader::from_header(header, &access) {
+                    let mut slot = 0u8;
+                    while slot < 6 {
+                        match ep.bar(slot, &access) {
+                            Some(Bar::Memory32 { address, size, .. }) => {
+                                if address != 0 && size != 0 {
+                                    bar_regions.push(PciBarRegion {
+                                        base: address as u64,
+                                        size: size as u64,
+                                    });
+                                }
+                                slot += 1;
+                            }
+                            Some(Bar::Memory64 { address, size, .. }) => {
+                                if address != 0 && size != 0 {
+                                    bar_regions.push(PciBarRegion {
+                                        base: address,
+                                        size: size,
+                                    });
+                                }
+                                slot += 2; // 64-bit BARs consume two slots
+                            }
+                            Some(Bar::Io { .. }) => {
+                                slot += 1; // I/O BARs don't need EPT mapping
+                            }
+                            None => {
+                                slot += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    Some(devices)
+    Some((devices, bar_regions))
 }

@@ -28,6 +28,8 @@ pub const EXIT_REASON_WRMSR: u32 = 32;
 pub const EXIT_REASON_VMENTRY_INVALID_GUEST: u32 = 33;
 pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
 pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
+pub const EXIT_REASON_XSETBV: u32 = 55;
+pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
 
 // ── Saved guest GPR layout (matches push order in trampoline) ─────────────── //
 
@@ -162,24 +164,97 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
         }
 
         EXIT_REASON_CPUID => {
-            // Execute host CPUID and pass result to guest.
+            // Execute host CPUID and pass result to guest, masking features
+            // that require VMX configuration Themis hasn't set up.
             let leaf = regs.rax as u32;
             let sub_leaf = regs.rcx as u32;
             let result = core::arch::x86_64::__cpuid_count(leaf, sub_leaf);
-            regs.rax = result.eax as u64;
-            regs.rbx = result.ebx as u64;
-            regs.rcx = result.ecx as u64;
-            regs.rdx = result.edx as u64;
+            let mut eax = result.eax;
+            let mut ebx = result.ebx;
+            let mut ecx = result.ecx;
+            let mut edx = result.edx;
+
+            match (leaf, sub_leaf) {
+                // Leaf 7 sub-leaf 0: structured extended features.
+                // Mask AVX-512 (inconsistent XSAVE state causes userspace #UD),
+                // CET, WAITPKG, ENQCMD, PKU — all need VMX config we lack.
+                (0x7, 0) => {
+                    // EBX: clear AVX-512 family
+                    ebx &= !(1 << 16);  // AVX512F
+                    ebx &= !(1 << 17);  // AVX512DQ
+                    ebx &= !(1 << 21);  // AVX512_IFMA
+                    ebx &= !(1 << 26);  // AVX512PF
+                    ebx &= !(1 << 27);  // AVX512ER
+                    ebx &= !(1 << 28);  // AVX512CD
+                    ebx &= !(1 << 30);  // AVX512BW
+                    ebx &= !(1 << 31);  // AVX512VL
+                    // ECX: clear AVX-512 + unsupported features
+                    ecx &= !(1 << 1);   // AVX512_VBMI
+                    ecx &= !(1 << 4);   // OSPKE / PKU
+                    ecx &= !(1 << 5);   // WAITPKG
+                    ecx &= !(1 << 6);   // AVX512_VBMI2
+                    ecx &= !(1 << 7);   // CET_SS
+                    ecx &= !(1 << 11);  // AVX512_VNNI
+                    ecx &= !(1 << 12);  // AVX512_BITALG
+                    ecx &= !(1 << 14);  // AVX512_VPOPCNTDQ
+                    ecx &= !(1 << 29);  // ENQCMD
+                    // EDX: clear remaining
+                    edx &= !(1 << 8);   // AVX512_VP2INTERSECT
+                    edx &= !(1 << 20);  // CET_IBT
+                    edx &= !(1 << 23);  // AVX512_FP16
+                }
+                // Leaf 0xD sub-leaf 0: XSAVE supported features (XCR0).
+                // Keep only x87+SSE+AVX (bits 0,1,2).  Must also fix
+                // the size fields (EBX/ECX) so they match the reduced
+                // feature set, otherwise the kernel's
+                // paranoid_xstate_size_valid() fires and XSAVE state
+                // is left inconsistent → userspace #UD on XGETBV.
+                //
+                // x87+SSE+AVX XSAVE layout:
+                //   legacy area (x87+SSE) : 512 bytes
+                //   XSAVE header          :  64 bytes
+                //   AVX (YMM_Hi128)       : 256 bytes at offset 576
+                //   total                 = 832 bytes (0x340)
+                (0xD, 0) => {
+                    eax &= 0x7;        // keep x87 + SSE + AVX only
+                    ebx  = 0x340;      // required size for XCR0 = 0x7
+                    ecx  = 0x340;      // max size (same, no other features)
+                    edx  = 0;          // no upper-32 XCR0 bits
+                }
+                // Leaf 0xD sub-leaf 1: XSAVE capabilities.
+                // Clear supervisor-state components (ECX/EDX) — we don't
+                // virtualise IA32_XSS.  Fix EBX (current-XCR0|XSS size)
+                // to match the reduced feature set.
+                (0xD, 1) => {
+                    // EAX: XSAVEOPT / XSAVEC / XGETBV1 / XSAVES flags — keep
+                    ebx = 0x340;       // size for XCR0|XSS = x87+SSE+AVX
+                    ecx = 0;           // no supervisor state components
+                    edx = 0;
+                }
+                // Leaf 0xD sub-leaves 5,6,7,9: individual AVX-512 / PKU
+                // XSAVE areas.  Return zeros so kernel ignores them.
+                (0xD, 5..=7) | (0xD, 9) => {
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
+                }
+                _ => {}
+            }
+
+            regs.rax = eax as u64;
+            regs.rbx = ebx as u64;
+            regs.rcx = ecx as u64;
+            regs.rdx = edx as u64;
             next_instruction();
         }
 
         EXIT_REASON_HLT => {
-            // Guest issued HLT — spin here until an interrupt arrives.
-            // For the minimal P2e implementation: just spin (no WFI).
-            // A proper implementation would block the VP and schedule another.
-            loop {
-                core::arch::asm!("pause", options(nomem, nostack));
-            }
+            // Guest issued HLT — waiting for an interrupt.
+            // Re-enter the guest immediately: if an interrupt is pending the
+            // processor will deliver it on VM entry; if not, the guest will
+            // re-execute HLT.  A proper implementation would block the VP.
+            next_instruction();
         }
 
         EXIT_REASON_RDMSR => {
@@ -239,10 +314,51 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
         }
 
         EXIT_REASON_VMCALL => {
-            // Stub: log the hypercall opcode and return 0 in RAX.
+            // KVM paravirtual hypercall.  We don't implement any, so return
+            // -ENOSYS (= -38 as i64 sign-extended to u64) to make the guest
+            // fall back to native paths (e.g. direct LAPIC IPI instead of
+            // KVM_HC_SEND_IPI).  Returning 0 (success) without performing the
+            // action causes silent hangs.
             let opcode = regs.rax;
-            serial_println!("[VMEXIT] VMCALL opcode={:#x} (stub — returning 0)", opcode);
-            regs.rax = 0;
+            regs.rax = (-38_i64) as u64; // -ENOSYS
+            next_instruction();
+        }
+
+        EXIT_REASON_XSETBV => {
+            // Guest is writing XCR0 (ECX=0) to enable XSAVE feature bits.
+            // XSETBV unconditionally causes a VM exit (SDM §25.1.1).
+            // Pass through: execute XSETBV with the guest's ECX, EDX:EAX.
+            let xcr = regs.rcx as u32;
+            let val = (regs.rdx << 32) | (regs.rax & 0xFFFF_FFFF);
+            if xcr == 0 {
+                // Read current host XCR0 for comparison/fallback.
+                let host_xcr0: u64;
+                unsafe {
+                    let lo: u32;
+                    let hi: u32;
+                    core::arch::asm!(
+                        "xgetbv",
+                        in("ecx") 0u32,
+                        out("eax") lo,
+                        out("edx") hi,
+                        options(nomem, nostack),
+                    );
+                    host_xcr0 = ((hi as u64) << 32) | (lo as u64);
+                }
+                // Mask guest value to only include bits the host supports.
+                let safe_val = val & host_xcr0;
+                // Bit 0 (x87) must always be 1 in XCR0.
+                let safe_val = safe_val | 1;
+                unsafe {
+                    core::arch::asm!(
+                        "xsetbv",
+                        in("ecx") 0u32,
+                        in("eax") safe_val as u32,
+                        in("edx") (safe_val >> 32) as u32,
+                        options(nomem, nostack),
+                    );
+                }
+            }
             next_instruction();
         }
 
@@ -301,7 +417,7 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             next_instruction();
         }
 
-        2 => {
+        EXIT_REASON_TRIPLE_FAULT => {
             // Triple fault: guest hit a fault it could not deliver.
             // Dump guest state for debugging.
             let rip  = vmx::vmread(vmcs::guest::RIP).unwrap_or(0);

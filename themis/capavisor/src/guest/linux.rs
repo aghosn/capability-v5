@@ -435,12 +435,34 @@ pub fn load_linux(
     unsafe { core::ptr::copy_nonoverlapping(src, dst, pm_len); }
     serial_println!("  Kernel PM: {:#x} bytes → phys {:#x}", pm_len, KERNEL_LOAD_PHYS);
 
-    // ── Place initrd immediately after the kernel, 4-KiB aligned ─────────── //
+    // ── Place initrd at the top of the highest dom0 RAM region ───────────── //
+    // Real bootloaders (GRUB, syslinux) place the initrd near the top of RAM,
+    // well away from the kernel decompressor. The kernel uses init_size bytes
+    // around the load address for decompression; placing the initrd right at
+    // that boundary is fragile. Putting it high avoids all overlap issues.
     let (initrd_phys, initrd_size): (u32, u32) = if let Some(rd) = initrd {
-        let start = (KERNEL_LOAD_PHYS + pm_len as u64 + 0xFFF) & !0xFFF;
+        // Find the highest dom0 RAM region that can fit the initrd.
+        let rd_len = rd.size;
+        let mut best_end: u64 = 0;
+        for r in dom0_regions {
+            let region_end = r.base + r.length;
+            if r.length >= rd_len && region_end > best_end {
+                best_end = region_end;
+            }
+        }
+        assert!(best_end > 0, "load_linux: no dom0 region large enough for initrd");
+        // Page-align downward to fit the initrd at the top of the region.
+        let start = (best_end - rd_len) & !0xFFF;
         let rd_dst = (start + hhdm_offset) as *mut u8;
         unsafe { core::ptr::copy_nonoverlapping(rd.base, rd_dst, rd.size as usize); }
-        serial_println!("  Initrd:    {:#x} bytes → phys {:#x}", rd.size, start);
+        serial_println!("  Initrd:    {:#x} bytes → phys {:#x} (top of RAM)", rd.size, start);
+        // Debug: dump first 32 bytes of source and destination to verify integrity
+        unsafe {
+            let src = core::slice::from_raw_parts(rd.base, 32.min(rd.size as usize));
+            let dst = core::slice::from_raw_parts(rd_dst as *const u8, 32.min(rd.size as usize));
+            serial_println!("  Initrd src[0..32]: {:02x?}", src);
+            serial_println!("  Initrd dst[0..32]: {:02x?}", dst);
+        }
         (start as u32, rd.size as u32)
     } else {
         serial_println!("  Initrd:    none");

@@ -85,10 +85,13 @@ pub unsafe fn setup_vmcs_for_vp(
 // ── Control fields ────────────────────────────────────────────────────────── //
 
 unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
-    // ── Pin-based: external-interrupt exiting + NMI exiting ──────────── //
+    // ── Pin-based: NMI exiting only ─────────────────────────────────── //
+    // EXTERNAL_INTERRUPT_EXITING (bit 0) is intentionally OFF: with LAPIC
+    // passthrough, external interrupts must be delivered directly to the
+    // guest via its own IDT.  Enabling it would eat every interrupt and
+    // the guest would never receive timer ticks (silent hang).
     let pin_desired: u64 =
-        (1 << 0)  // EXTERNAL_INTERRUPT_EXITING
-        | (1 << 3);  // NMI_EXITING
+        (1 << 3);  // NMI_EXITING
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
     vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
@@ -258,10 +261,20 @@ unsafe fn write_host_state(host_stack_top: u64) {
     // Control registers.
     let cr0: u64;
     let cr3: u64;
-    let cr4: u64;
+    let mut cr4: u64;
     core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
     core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
     core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+
+    // Enable OSXSAVE (bit 18) so the XSETBV/XGETBV handler can execute
+    // in the host context after VM exit.  Without this, those instructions
+    // #UD and crash Themis (no IDT handler → triple fault → KVM kills VM).
+    let osxsave = 1u64 << 18;
+    if cr4 & osxsave == 0 {
+        cr4 |= osxsave;
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+
     vmx::vmwrite(host::CR0, cr0).expect("vmwrite host CR0");
     vmx::vmwrite(host::CR3, cr3).expect("vmwrite host CR3");
     vmx::vmwrite(host::CR4, cr4).expect("vmwrite host CR4");

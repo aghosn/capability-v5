@@ -155,6 +155,17 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 | `PROFILE` | `debug` | `release` for optimised build |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
 
+### Troubleshooting
+
+**QEMU boots but no serial output at all (not even Limine):**
+The OVMF NVRAM file can get into a corrupt state.  Delete it and re-run —
+the build script recreates it from the template automatically:
+
+```sh
+rm target/ovmf_vars.fd
+cargo themis
+```
+
 ### Debugging
 
 There are two ways to debug Themis with GDB:
