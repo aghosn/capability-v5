@@ -1,4 +1,4 @@
-//! Linux bzImage boot protocol header parsing.
+//! Linux bzImage boot protocol header parsing and kernel loading.
 //!
 //! A bzImage begins with a real-mode boot sector; the *setup header* lives at
 //! byte offset `0x1f1` inside that sector.  We parse the fields Themis needs to
@@ -8,7 +8,11 @@
 //! Reference: Linux `Documentation/arch/x86/boot.rst`, protocol version ≥ 2.12.
 //! Struct layout: `arch/x86/include/uapi/asm/bootparam.h`.
 
+extern crate alloc;
+
 use super::ModuleInfo;
+use crate::mem::PhysRegion;
+use crate::serial_println;
 
 // ── Constants ───────────────────────────────────────────────────────────── //
 
@@ -214,5 +218,246 @@ impl BootHeader {
     /// `true` if the kernel can be loaded above 4 GiB (`XLF_CAN_BE_LOADED_ABOVE_4G`).
     pub fn can_load_above_4g(&self) -> bool {
         self.xloadflags & 0x02 != 0
+    }
+}
+
+// ── E820 memory map entry ─────────────────────────────────────────────────── //
+
+/// E820 memory map entry as defined by the Linux boot protocol
+/// (`arch/x86/include/uapi/asm/e820.h`).  Each entry is exactly 20 bytes.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C, packed)]
+pub struct E820Entry {
+    pub addr: u64,
+    pub size: u64,
+    pub entry_type: u32,
+}
+
+impl E820Entry {
+    pub const TYPE_RAM:      u32 = 1;
+    pub const TYPE_RESERVED: u32 = 2;
+    pub const TYPE_ACPI:     u32 = 3;
+    pub const TYPE_NVS:      u32 = 4;
+}
+
+// ── boot_params wrapper ───────────────────────────────────────────────────── //
+
+/// Wrapper around the 4096-byte `struct boot_params` (Linux x86 boot protocol).
+///
+/// Fields are written by byte offset to avoid mirroring the full (complex,
+/// partially-obsolete) C layout.  Offsets verified against Linux
+/// `arch/x86/include/uapi/asm/bootparam.h`.
+pub struct BootParams([u8; 4096]);
+
+impl BootParams {
+    // ── Byte offsets ──────────────────────────────────────────────────────── //
+    /// Physical address of the ACPI RSDP to expose to dom0.
+    const ACPI_RSDP_OFF:      usize = 0x070;
+    /// Number of valid e820 entries (u8).
+    const E820_ENTRIES_OFF:   usize = 0x1e8;
+    // setup_header fields — header starts at 0x1f1 in boot_params:
+    /// Bootloader type identifier (0xFF = undefined/custom).
+    const TYPE_OF_LOADER_OFF: usize = 0x210;
+    /// Load flags (bit 0 = LOADED_HIGH: kernel above 1 MiB).
+    const LOADFLAGS_OFF:      usize = 0x211;
+    /// 32-bit physical address of the initrd image.
+    const RAMDISK_IMAGE_OFF:  usize = 0x218;
+    /// Byte length of the initrd image.
+    const RAMDISK_SIZE_OFF:   usize = 0x21c;
+    /// 32-bit physical address of the NUL-terminated command-line string.
+    const CMD_LINE_PTR_OFF:   usize = 0x228;
+    /// Start of the e820 table (128 × 20-byte entries).
+    const E820_TABLE_OFF:     usize = 0x2d0;
+    const E820_ENTRY_SIZE:    usize = 20;
+    const E820_MAX:           usize = 128;
+
+    /// Create a zeroed `boot_params` page.
+    pub fn new() -> Self {
+        Self([0u8; 4096])
+    }
+
+    fn write_u8(&mut self, off: usize, v: u8) {
+        self.0[off] = v;
+    }
+    fn write_u32(&mut self, off: usize, v: u32) {
+        self.0[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn write_u64(&mut self, off: usize, v: u64) {
+        self.0[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// Set `type_of_loader` (0xFF = custom/undefined bootloader).
+    pub fn set_type_of_loader(&mut self, v: u8) {
+        self.write_u8(Self::TYPE_OF_LOADER_OFF, v);
+    }
+
+    /// Set `loadflags` (use [`LOADFLAG_LOADED_HIGH`] if kernel is above 1 MiB).
+    pub fn set_loadflags(&mut self, v: u8) {
+        self.write_u8(Self::LOADFLAGS_OFF, v);
+    }
+
+    /// Set the 32-bit physical address of the NUL-terminated command-line string.
+    pub fn set_cmd_line_ptr(&mut self, addr: u32) {
+        self.write_u32(Self::CMD_LINE_PTR_OFF, addr);
+    }
+
+    /// Set initrd physical base and byte length (pass 0/0 if no initrd).
+    pub fn set_ramdisk(&mut self, image: u32, size: u32) {
+        self.write_u32(Self::RAMDISK_IMAGE_OFF, image);
+        self.write_u32(Self::RAMDISK_SIZE_OFF, size);
+    }
+
+    /// Set the physical address of the ACPI RSDP passed to dom0 (0 = let Linux scan).
+    pub fn set_acpi_rsdp_addr(&mut self, addr: u64) {
+        self.write_u64(Self::ACPI_RSDP_OFF, addr);
+    }
+
+    /// Write the e820 memory table and entry count.  Panics if `entries.len() > 128`.
+    pub fn set_e820_table(&mut self, entries: &[E820Entry]) {
+        assert!(entries.len() <= Self::E820_MAX, "too many e820 entries");
+        self.write_u8(Self::E820_ENTRIES_OFF, entries.len() as u8);
+        let mut off = Self::E820_TABLE_OFF;
+        for e in entries {
+            self.0[off..off + 8].copy_from_slice(&e.addr.to_le_bytes());
+            self.0[off + 8..off + 16].copy_from_slice(&e.size.to_le_bytes());
+            self.0[off + 16..off + 20].copy_from_slice(&e.entry_type.to_le_bytes());
+            off += Self::E820_ENTRY_SIZE;
+        }
+    }
+
+    /// Raw byte slice (for copying into guest physical memory).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// `loadflags` bit 0: kernel image was loaded above 1 MiB (`code32_start`).
+pub const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
+
+// ── Linux load result ─────────────────────────────────────────────────────── //
+
+/// Physical addresses produced by [`load_linux`] that the VMCS guest state must
+/// reflect at VM entry.
+pub struct LinuxLoadInfo {
+    /// Physical address of the protected-mode entry point (`code32_start`, 0x100000).
+    pub kernel_entry_phys: u64,
+    /// Physical address of `struct boot_params`.
+    /// Must be in **ESI** at VMLAUNCH (GPR, not a VMCS field — pass to P7g).
+    pub boot_params_phys: u64,
+}
+
+// ── Kernel loader ─────────────────────────────────────────────────────────── //
+
+/// Physical layout used by [`load_linux`]:
+///
+/// | Address     | Content                         |
+/// |-------------|---------------------------------|
+/// | `0x0_7000`  | `struct boot_params` (4 KiB)    |
+/// | `0x0_8000`  | Kernel command-line string       |
+/// | `0x0_8FF8`  | Initial guest stack top          |
+/// | `0x10_0000` | Protected-mode kernel image      |
+/// | after kern  | Initrd, 4-KiB aligned (if any)  |
+pub const BOOT_PARAMS_PHYS: u64  = 0x0_7000;
+pub const CMDLINE_PHYS: u64      = 0x0_8000;
+pub const INITIAL_RSP_PHYS: u64  = 0x0_8FF8;
+pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
+
+/// Load a Linux bzImage into dom0 physical memory and write `struct boot_params`.
+///
+/// Entry mode: **32-bit protected mode via the decompressor** (UNRESTRICTED_GUEST,
+/// PE=1, no paging).  The kernel's own `startup_32` decompresses the payload and
+/// transitions to 64-bit long mode.  dom0's page tables (CR3) are allocated from
+/// its normal (non-META) memory by the decompressor — Themis has no involvement.
+///
+/// # Arguments
+/// * `kernel`       — Limine module carrying the bzImage (already HHDM-mapped).
+/// * `initrd`       — Optional initrd Limine module.
+/// * `hhdm_offset`  — HHDM offset for phys → virt address conversion.
+/// * `dom0_regions` — dom0-owned physical regions; reported verbatim as e820 RAM.
+/// * `cmdline`      — Kernel command line (truncated to 255 bytes).
+pub fn load_linux(
+    kernel: &ModuleInfo,
+    initrd: Option<&ModuleInfo>,
+    hhdm_offset: u64,
+    dom0_regions: &[PhysRegion],
+    cmdline: &str,
+) -> LinuxLoadInfo {
+    // ── Parse bzImage header ─────────────────────────────────────────────── //
+    let hdr = BootHeader::from_module(kernel)
+        .expect("load_linux: invalid bzImage header");
+    serial_println!(
+        "  Linux boot protocol v{:#06x}  is_64bit={}  init_size={:#x}",
+        hdr.version, hdr.is_64bit(), hdr.init_size,
+    );
+
+    // ── Copy protected-mode kernel to code32_start (0x100000) ───────────── //
+    let pm_off = hdr.protected_mode_offset();
+    let total  = kernel.size as usize;
+    assert!(pm_off < total, "load_linux: bzImage smaller than protected_mode_offset");
+    let pm_len = total - pm_off;
+
+    // SAFETY: Limine guarantees the module is fully HHDM-mapped and readable.
+    let src = unsafe { kernel.base.add(pm_off) };
+    let dst = (KERNEL_LOAD_PHYS + hhdm_offset) as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, pm_len); }
+    serial_println!("  Kernel PM: {:#x} bytes → phys {:#x}", pm_len, KERNEL_LOAD_PHYS);
+
+    // ── Place initrd immediately after the kernel, 4-KiB aligned ─────────── //
+    let (initrd_phys, initrd_size): (u32, u32) = if let Some(rd) = initrd {
+        let start = (KERNEL_LOAD_PHYS + pm_len as u64 + 0xFFF) & !0xFFF;
+        let rd_dst = (start + hhdm_offset) as *mut u8;
+        unsafe { core::ptr::copy_nonoverlapping(rd.base, rd_dst, rd.size as usize); }
+        serial_println!("  Initrd:    {:#x} bytes → phys {:#x}", rd.size, start);
+        (start as u32, rd.size as u32)
+    } else {
+        serial_println!("  Initrd:    none");
+        (0, 0)
+    };
+
+    // ── Write command line ────────────────────────────────────────────────── //
+    let cl_dst = (CMDLINE_PHYS + hhdm_offset) as *mut u8;
+    let cl_bytes = cmdline.as_bytes();
+    let cl_len = cl_bytes.len().min(255);
+    unsafe {
+        core::ptr::copy_nonoverlapping(cl_bytes.as_ptr(), cl_dst, cl_len);
+        *cl_dst.add(cl_len) = 0; // NUL-terminate
+    }
+    serial_println!("  Cmdline:   {:?}", &cmdline[..cl_len]);
+
+    // ── Build boot_params ─────────────────────────────────────────────────── //
+    let mut bp = BootParams::new();
+    bp.set_type_of_loader(0xFF);
+    bp.set_loadflags(LOADFLAG_LOADED_HIGH);
+    bp.set_cmd_line_ptr(CMDLINE_PHYS as u32);
+    if initrd_phys != 0 {
+        bp.set_ramdisk(initrd_phys, initrd_size);
+    }
+    // ACPI RSDP: 0 → Linux will scan for it.
+    // TODO(P7f-dmar): replace with a DMAR-stripped RSDP pointer.
+    bp.set_acpi_rsdp_addr(0);
+
+    // e820: report dom0-owned regions as usable RAM.
+    let mut e820_buf = [E820Entry::default(); 128];
+    let count = dom0_regions.len().min(128);
+    for (i, r) in dom0_regions.iter().take(count).enumerate() {
+        e820_buf[i] = E820Entry {
+            addr:       r.base,
+            size:       r.length,
+            entry_type: E820Entry::TYPE_RAM,
+        };
+    }
+    bp.set_e820_table(&e820_buf[..count]);
+
+    // Copy boot_params into guest physical memory via HHDM.
+    let bp_dst = (BOOT_PARAMS_PHYS + hhdm_offset) as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(bp.as_bytes().as_ptr(), bp_dst, 4096); }
+    serial_println!(
+        "  boot_params @ {:#x}  e820_entries={}",
+        BOOT_PARAMS_PHYS, count,
+    );
+
+    LinuxLoadInfo {
+        kernel_entry_phys: KERNEL_LOAD_PHYS,
+        boot_params_phys:  BOOT_PARAMS_PHYS,
     }
 }

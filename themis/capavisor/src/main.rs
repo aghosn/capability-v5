@@ -153,10 +153,22 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
     let _vmcs = boot::vmcs(&platform, &mut vmx_state, &capa);
 
-    // ── Phase 2e+: VMEXIT dispatch wired; VMLAUNCH deferred to P7g ───────── //
+    // ── Collect Limine modules for P7f ────────────────────────────────────── //
+    let modules: alloc::vec::Vec<guest::ModuleInfo> = MODULE_REQUEST
+        .get_response()
+        .map(|r| r.modules().iter().map(|m| guest::ModuleInfo::from_limine_file(m)).collect())
+        .unwrap_or_default();
 
+    // ── Phase 7f: Linux kernel loading + boot_params ──────────────────────── //
+    let linux = boot::linux(&platform, &modules);
+
+    // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
     serial_println!();
     serial_println!("Halting — VMLAUNCH (P7g) not yet implemented.");
+    serial_println!(
+        "(kernel_entry={:#x} boot_params={:#x})",
+        linux.kernel_entry_phys, linux.boot_params_phys,
+    );
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }

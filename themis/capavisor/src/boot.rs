@@ -500,3 +500,79 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
 
     VmcsState { host_stacks }
 }
+
+// ── Phase 7f output ───────────────────────────────────────────────────────── //
+
+/// State produced by Linux kernel loading (Phase P7f).
+pub struct LinuxState {
+    /// Physical address of the kernel's protected-mode entry (`code32_start`).
+    /// Written to VMCS `guest::RIP`.
+    pub kernel_entry_phys: u64,
+    /// Physical address of `struct boot_params`.
+    /// Must be placed in **ESI** immediately before VMLAUNCH (P7g) — ESI is a
+    /// general-purpose register, not a VMCS field, so it cannot be vmwrite'd here.
+    pub boot_params_phys: u64,
+}
+
+// ── Phase 7f: Linux kernel loading ───────────────────────────────────────── //
+
+/// Phase P7f: load a Linux bzImage into dom0 physical memory, write
+/// `struct boot_params`, and patch the VMCS guest `RIP`/`RSP`.
+///
+/// Entry model: **32-bit protected-mode via the decompressor** (UNRESTRICTED_GUEST,
+/// PE=1, no paging).  dom0's page tables are allocated from its own normal memory
+/// by the Linux decompressor — Themis has no involvement in CR3 setup.
+///
+/// The [`LinuxState`] returned carries `boot_params_phys` for use by P7g, which
+/// must load it into ESI before executing VMLAUNCH.
+pub fn linux(
+    info: &PlatformInfo,
+    modules: &[crate::guest::ModuleInfo],
+) -> LinuxState {
+    use crate::guest::{find_module, linux as lx};
+    use x86::bits64::vmx;
+    use x86::vmx::vmcs::guest;
+
+    serial_println!();
+    serial_println!("=== P7f: Linux kernel load ===");
+
+    // ── Locate modules ───────────────────────────────────────────────────── //
+    let kernel_mod = find_module(modules, "dom0-kernel")
+        .expect("P7f: 'dom0-kernel' module not found — check limine.conf");
+    let initrd_mod = find_module(modules, "dom0-initrd");
+    if initrd_mod.is_none() {
+        serial_println!("  (no dom0-initrd module)");
+    }
+
+    // ── Load kernel + initrd, write boot_params ──────────────────────────── //
+    let load = lx::load_linux(
+        kernel_mod,
+        initrd_mod,
+        info.hhdm_offset,
+        &info.partition.dom0_owned[..info.partition.dom0_owned_count],
+        // intel_iommu=off: workaround until P7f-dmar strips the DMAR table.
+        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off",
+    );
+
+    // ── Patch VMCS guest RIP and RSP ─────────────────────────────────────── //
+    // The VMCS for the BSP VP is still loaded (VMPTRLD'd) from P2d.
+    // RSI (boot_params address) is a GPR — it cannot be vmwrite'd; P7g sets it
+    // in the inline asm immediately before VMLAUNCH.
+    unsafe {
+        vmx::vmwrite(guest::RIP, load.kernel_entry_phys)
+            .expect("P7f: vmwrite guest RIP");
+        vmx::vmwrite(guest::RSP, lx::INITIAL_RSP_PHYS)
+            .expect("P7f: vmwrite guest RSP");
+    }
+
+    serial_println!(
+        "  VMCS patched: RIP={:#x} RSP={:#x}  (RSI={:#x} set at VMLAUNCH)",
+        load.kernel_entry_phys, lx::INITIAL_RSP_PHYS, load.boot_params_phys,
+    );
+    serial_println!("=== P7f: done ===");
+
+    LinuxState {
+        kernel_entry_phys: load.kernel_entry_phys,
+        boot_params_phys:  load.boot_params_phys,
+    }
+}

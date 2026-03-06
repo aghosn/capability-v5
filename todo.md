@@ -1321,6 +1321,11 @@ On hardware without APICv (or when disabled for testing):
 | `IO_INSTRUCTION` | Forward/emulate (dom0 has I/O BITMAP disabled initially). |
 | `INIT` / `SIPI` | Should not occur in steady state. |
 
+> **IOMMU ownership note**: Themis retains exclusive ownership of the VT-d IOMMU.
+> The DMAR ACPI table must be hidden from dom0 at boot (see P7f-dmar) to prevent
+> Linux from attempting to initialise VT-d.  If dom0 later needs device assignment,
+> it must go through Themis hypercalls rather than direct IOMMU access.
+
 ---
 
 ## Hypercall ABI
@@ -1673,15 +1678,18 @@ the EPT with no synchronization overhead.
   - No cross-core sync needed (bootstrap mode).
   - dom0 capability state attested via `capability_engine::attest::attest_domain` after
     P2c; report printed to serial so META caps are visible at boot.
-- [ ] **P2d**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
+- [x] **P2d**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
   - VMCS pages allocated from dom0 META pool (one per VP).
-  - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_handler`.
-  - Guest state: from `VProcessorState.registers`.
-  - Execution controls: intercept VMCALL, CPUID, CR accesses, I/O bitmap,
-    `EXTERNAL_INTERRUPT` (all physical interrupts exit to Themis), `NMI_EXITING` (watchdog).
+  - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_trampoline`.
+  - Guest state: 32-bit protected mode stub (PE=1, no paging, UNRESTRICTED_GUEST).
+    RIP/RSP left at 0; patched in P7f.
+  - Execution controls: intercept VMCALL, CPUID, CR accesses, HLT, I/O bitmaps,
+    `EXTERNAL_INTERRUPT`, `NMI_EXITING`.  EPT + VPID + UNRESTRICTED_GUEST enabled.
   - `VMCS.EPT_POINTER` set from `EptMapper::eptp()` (capability-built EPT from P2c).
-- [ ] **P2e**: Minimal VMEXIT dispatch: VMCALL → stub, CPUID → emulate, HLT → spin,
-  others → log + halt. VMRESUME after each handled exit.
+- [x] **P2e**: Minimal VMEXIT dispatch: VMCALL → stub (log + return 0), CPUID → emulate,
+  HLT → spin, CR_ACCESS → log + skip, EPT_VIOLATION/MISCONFIG → log + halt,
+  EXCEPTION_NMI → log + halt, unhandled → log + halt. VMRESUME after each handled exit.
+  Naked trampoline saves/restores all guest GPRs; `next_instruction()` advances RIP.
 
 ### Phase 3 — Platform Trait Implementation
 
@@ -1796,9 +1804,93 @@ dom0 bootstrap: Themis acts as the parent and sets up the initial capability tre
 - [ ] **P7e**: Allocate dom0 hardware VP structures from the META pool:
   VMCS + VAPIC + PI descriptor + VpStateMeta per VP.  Write all VMCS fields.
   Call `IrqRouter::configure_domain_policy` for dom0.
-- [ ] **P7f**: Parse Linux bzImage (using `BootHeader` from P0.5d); write `boot_params`
-  into dom0_mem; set up initial identity-mapped page tables in EPT; set VP
-  RIP/RSP/RSI/CR3.
+- [x] **P7f**: Parse Linux bzImage (using `BootHeader` from P0.5d); write `boot_params`
+  into dom0_mem; copy protected-mode kernel to `code32_start` (0x100000); patch VMCS
+  guest RIP/RSP (RSI set before VMLAUNCH in P7g — it is a GPR, not a VMCS field).
+  Entry mode: **32-bit protected mode via the decompressor** (UNRESTRICTED_GUEST,
+  no paging, PE only) — the kernel's own startup_32 decompresses and transitions to
+  64-bit long mode.  dom0's initial CR3/page tables are part of dom0's **normal
+  (non-META) memory** — Themis does not own or construct them; the decompressor
+  allocates and initialises them from dom0_mem as it sees fit.
+  - IOMMU workaround: `intel_iommu=off` appended to cmdline pending P7f-dmar.
+  - `boot_params_phys` stored in `LinuxState` for P7g to place in ESI before VMLAUNCH.
+  - **Known gap**: e820 currently only contains dom0_owned (TYPE_RAM).  Must be
+    extended (P7f-e820) before dom0 can enumerate devices or read ACPI tables.
+
+### dom0 / Linux visibility policy
+
+The following three invariants govern what dom0 sees and can access:
+
+1. **Capavisor is invisible.**  All capavisor-internal physical memory
+   (binary, heap, page tables, META pool) must appear as `TYPE_RESERVED` in
+   the e820 and must NOT be mapped in dom0's EPT.  Linux will know those
+   physical ranges exist but cannot access them; any attempt produces an EPT
+   violation caught by Themis.
+
+2. **IOMMU is invisible.**  The VT-d IOMMU is retained exclusively by Themis
+   for DMA isolation.  The DMAR ACPI table must be stripped before boot_params
+   is handed to Linux (P7f-dmar).  Linux must never discover VT-d hardware and
+   must not attempt to program it.
+
+3. **Devices are passed through.**  Themis implements no device emulation.
+   Linux sees the real ACPI tables (minus DMAR) and gets direct EPT access to
+   device MMIO regions.  Device drivers in dom0 talk directly to hardware.
+   If a device is later assigned to a child domain, Themis revokes the EPT
+   mapping from dom0 and grants it to the child (future work).
+
+- [ ] **P7f-e820**: Build a complete e820 for dom0 from the full Limine memory map:
+  - `dom0_owned` regions → `TYPE_RAM` (usable RAM for Linux).
+  - `ACPI_RECLAIMABLE` → `TYPE_ACPI` (Linux reads ACPI tables from here).
+  - `ACPI_NVS` → `TYPE_NVS` (firmware non-volatile storage; Linux must not overwrite).
+  - `RESERVED`, `FRAMEBUFFER`, `BOOTLOADER_RECLAIMABLE`, `KERNEL_AND_MODULES` →
+    `TYPE_RESERVED` (covers capavisor binary, heap, page tables, device MMIO holes,
+    and BIOS areas — Linux sees them as non-RAM but cannot use them).
+  - META pool (carved from dom0_owned) → also emit as `TYPE_RESERVED` so Linux
+    sees the physical hole and does not attempt to use those pages.
+  - The Limine memory map entries must be passed all the way from `PlatformInfo`
+    to `load_linux()` (currently only dom0_owned is passed).
+
+- [ ] **P7f-ept-passthrough**: Map non-RAM regions in dom0's EPT for device passthrough:
+  - `ACPI_RECLAIMABLE` + `ACPI_NVS`: map **read-write** so Linux can read (and
+    the firmware can update) ACPI tables.  These use existing `ChangeRights` mechanism.
+  - `RESERVED` regions that are device MMIO (PCI BARs, LAPIC, IOAPIC, HPET, etc.):
+    map **read-write** — Linux device drivers access hardware registers directly.
+  - `BOOTLOADER_RECLAIMABLE` + `KERNEL_AND_MODULES` (capavisor memory): **do NOT
+    map** — enforces invariant (1) above at the hardware level.
+  - META pool: **do NOT map** — already excluded; enforces invariant (1).
+  - Implementation: add a second `UpdateBatch` loop in `boot::capa()` over the
+    Limine entries, emitting `ChangeRights` for mappable non-RAM regions.
+    Requires `PlatformInfo` to carry the raw Limine entries.
+
+- [ ] **P7f-dmar**: Strip DMAR from the ACPI tables exposed to dom0:
+  - Copy the ACPI RSDP + XSDT (or RSDT) into dom0_owned memory.  Locate the
+    DMAR entry in the XSDT pointer array and zero it out (or remove it by
+    shifting remaining entries and decrementing the table length + recomputing
+    the checksum).
+  - Point `boot_params.acpi_rsdp_addr` at the physical address of the modified
+    copy (currently set to 0 in `load_linux` with a TODO marker).
+  - Verify: no `DMAR:` / `AMD-Vi:` / `IOMMU:` lines appear in dom0 dmesg.
+  - **Dependency**: P7f-ept-passthrough must be done first so ACPI_RECLAIMABLE
+    memory is accessible to Linux before we redirect the RSDP pointer into it
+    (or the copy lands in dom0_owned RAM, which is always accessible).
+
+- [ ] **P7f-alt**: *(Future / optional)* **64-bit direct entry** for dom0 instead of the
+  32-bit decompressor path.  Trade-offs:
+  - **Benefits**: skips the decompressor (faster boot, less untrusted code runs before
+    the kernel is in steady state); removes the `UNRESTRICTED_GUEST` dependency;
+    enables measured boot (hash the kernel image before decompression).
+  - **Costs**: requires an uncompressed kernel (`vmlinux`) or implementing the EFI
+    handover / 64-bit boot stub protocol — a stock bzImage cannot be used as-is.
+    The VMCS entry controls require `IA32E_MODE_GUEST`, CR0.PG, CR4.PAE, EFER.LME+LMA
+    and a 64-bit CS descriptor — more VMCS fields to get right.  Boot_params must
+    still be filled in correctly for Linux to enumerate memory and devices.
+  - **Important clarification**: Themis does NOT construct or own dom0's page tables.
+    dom0's CR3 points into its own normal (non-META) memory — those pages are
+    allocated and managed by dom0 (the Linux kernel / decompressor) entirely.
+    Themis only enforces the physical memory boundaries via EPT; it has no visibility
+    into dom0's virtual address space layout.
+  - **Prerequisite**: decide on kernel format policy (bzImage vs vmlinux vs EFI stub)
+    before implementing.
 - [ ] **P7g**: Seal dom0; `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH
   via mailbox.
 - [ ] **P7h**: Per-core VP run loop. Each core runs a tight loop that owns a `VpContext`
