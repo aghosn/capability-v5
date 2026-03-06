@@ -1838,6 +1838,29 @@ The following three invariants govern what dom0 sees and can access:
    If a device is later assigned to a child domain, Themis revokes the EPT
    mapping from dom0 and grants it to the child (future work).
 
+- [x] **P7f-uc**: Uncacheable physical range registry for EPT mapping:
+  - `UncacheableRanges` struct in `capavisor/src/mem/uncacheable.rs`: sorted,
+    non-overlapping table of physical ranges that must be mapped UC in any EPT.
+  - Backed by `spin::RwLock<Inner>` so concurrent EPT mapping on multiple cores
+    never contends; `add()` takes a write lock (boot only), query methods take
+    read locks (concurrent hot path).
+  - `add(base, length)`: insertion-sorted with merge of overlapping/adjacent ranges;
+    panics if more than 64 disjoint UC regions are registered.
+  - `first_overlap(start, size) -> Option<(u64, u64)>`: binary-search returns the
+    clipped intersection with the **first** UC range overlapping `[start, start+size)`.
+    Callers iterate this to split a mapping at UC boundaries without per-page checks.
+  - `any_overlap(start, size) -> bool`: convenience wrapper over `first_overlap`.
+  - Populated during `boot::platform()` from Limine `RESERVED` + `FRAMEBUFFER`
+    entries (device MMIO holes).  `BOOTLOADER_RECLAIMABLE` and `KERNEL_AND_MODULES`
+    are intentionally excluded (capavisor memory — not mapped in EPT at all).
+  - Stored as `Arc<UncacheableRanges>` in both `PlatformInfo` and
+    `ThemisPlatformInner`; `Arc::clone` in `boot::init_themis` shares ownership
+    without copying the table.
+  - `map_range_typed(ept, meta, gpa, hpa, size, flags, uc)` free function in
+    `platform.rs`: iteratively calls `first_overlap` to split a `ChangeRights`
+    range into WB and UC segments, mapping each sub-range with the correct
+    `EptMemoryType`.  Called from the `ChangeRights` handler in `apply_update`.
+
 - [ ] **P7f-e820**: Build a complete e820 for dom0 from the full Limine memory map:
   - `dom0_owned` regions → `TYPE_RAM` (usable RAM for Linux).
   - `ACPI_RECLAIMABLE` → `TYPE_ACPI` (Linux reads ACPI tables from here).
