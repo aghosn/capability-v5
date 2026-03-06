@@ -270,6 +270,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     );
 
     let platform = ThemisPlatform::new();
+    platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
     // Hand the FULL meta_pool to the platform — all hardware allocations
     // (VMXON, VMCS, VAPIC, EPT) come from this single pool.

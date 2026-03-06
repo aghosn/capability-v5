@@ -1,44 +1,160 @@
 //! `ThemisPlatform` — the capability engine's [`Platform`] implementation.
 //!
-//! This is the bootstrap implementation (Phase P2-platform).  It wires the
-//! capability engine's update protocol to real EPT manipulations and a
-//! per-domain META frame allocator.
+//! Phase P3a: full `Platform` implementation with a real RW spinlock, an
+//! update-application serialisation lock, a two-phase IPI barrier, and x2APIC
+//! IPI delivery.
 //!
-//! ## Bootstrap constraints
+//! IOMMU integration points are marked `TODO(P4)` and left as no-ops until
+//! Phase 4 (VT-d).
 //!
-//! * **Single-threaded during init** — APs are parked until after capability
-//!   engine initialisation, so no cross-core IPI/barrier is needed yet.
-//!   `send_ipi`, `sync_barrier`, and the update-lock methods are no-ops that
-//!   return `true` / do nothing.  A proper spinlock-based IPI protocol will
-//!   replace them in Phase P3.
+//! ## Lock hierarchy (always acquire in this order to prevent deadlock)
 //!
-//! * **No `SwitchManager`** — core ↔ domain tracking is a simple
-//!   `BTreeMap<CoreId, DomainId>`.  The VP layer (P2d) will extend this.
+//! 1. `op_lock`     — RW spinlock for capability-tree operation serialisation.
+//! 2. `update_lock` — TAS atomic for the IPI / barrier / apply sequence.
+//! 3. `inner`       — `Mutex<ThemisPlatformInner>` for EPT / domain state.
+//!
+//! ## Cross-core protocol (§5.2)
+//!
+//! ```text
+//! initiating core:
+//!   acquire op_lock (shared or exclusive)
+//!   run capability mutation → UpdateBatch
+//!   spin on update_lock (poll_and_respond_cross_core while waiting)
+//!   for each affected core: send IPI (sets ipi_pending[core])
+//!   sync_barrier(0, n+1)          — wait for all affected cores to stop
+//!   apply_update for each entry   — EPT/memory changes
+//!   sync_barrier(1, n+1)          — release cores to flush local state
+//!   release update_lock
+//!   release op_lock
+//!
+//! responding core (via poll_and_respond_cross_core / P3b IDT handler):
+//!   clear ipi_pending[self]
+//!   sync_barrier(0, 0)    — signal "I have stopped"
+//!   TODO(P3c): INVEPT     — flush stale TLB entries
+//!   sync_barrier(1, 0)    — signal "local flush done"
+//! ```
 
 extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use spin::Mutex;
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use spin::{Mutex, RwLock};
 
 use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
 use ept::{EptEntryFlags, EptMapper, EptMemoryType};
 
 use crate::mem::{MetaAllocator, PhysRegion};
 
-// ── Lock guards (bootstrap: no actual contention, guards are trivial tokens) //
+// ── Constants ─────────────────────────────────────────────────────────────── //
 
-/// Guard token returned by `acquire_shared_lock`.
-struct SharedGuard;
+/// Maximum number of physical cores supported.
+pub const MAX_CORES: usize = 256;
+
+/// x86 interrupt vector reserved for capability-engine cross-core IPIs.
+/// Must match the IDT entry installed in Phase P3b.
+pub const CAPA_IPI_VECTOR: u8 = 0xF2;
+
+// ── Two-phase synchronisation barrier ─────────────────────────────────────── //
+
+/// Reusable two-phase barrier for the cross-core IPI protocol.
+///
+/// The initiating core calls `wait(participants)` which stores the expected
+/// count.  Responding cores call `wait(0)` to read the stored count and wait.
+struct Barrier {
+    /// Total participants expected; written by the initiating core (participants > 0)
+    /// before it begins spinning.  Responding cores use the stored value (pass 0).
+    expected:   AtomicUsize,
+    /// How many cores have arrived so far in the current generation.
+    arrived:    AtomicUsize,
+    /// Incremented when all participants arrive, allowing barrier reuse.
+    generation: AtomicUsize,
+}
+
+impl Barrier {
+    const fn new() -> Self {
+        Barrier {
+            expected:   AtomicUsize::new(0),
+            arrived:    AtomicUsize::new(0),
+            generation: AtomicUsize::new(0),
+        }
+    }
+
+    /// Arrive and wait until all expected participants have arrived.
+    ///
+    /// * `participants > 0` — store as new expected count (initiating core).
+    /// * `participants == 0` — use the previously stored count (responding core).
+    fn wait(&self, participants: usize) {
+        if participants > 0 {
+            self.expected.store(participants, Ordering::Release);
+        }
+        // Spin until the initiating core has stored a non-zero expected count.
+        let expected = loop {
+            let e = self.expected.load(Ordering::Acquire);
+            if e > 0 { break e; }
+            core::hint::spin_loop();
+        };
+        let gen = self.generation.load(Ordering::Acquire);
+        let n   = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
+        if n >= expected {
+            // Last to arrive: reset for the next use, then advance generation.
+            self.arrived.store(0, Ordering::Release);
+            self.expected.store(0, Ordering::Release);
+            self.generation.fetch_add(1, Ordering::Release);
+        } else {
+            while self.generation.load(Ordering::Acquire) == gen {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
+// ── RW-spinlock guards ─────────────────────────────────────────────────────── //
+//
+// `spin::RwLock` guards carry a lifetime tied to the lock reference.  Since
+// `ThemisPlatform` is effectively `'static` (created in `_start` and never
+// dropped), we transmute the guard lifetime to `'static` so the guards can be
+// boxed as `Box<dyn OpLockGuard + Send>`.
+//
+// `ManuallyDrop` is used so we can implement `Drop` ourselves; the inner guard's
+// destructor releases the spinlock when we manually drop it.
+
+/// Guard for a shared (read) capability-tree lock.
+struct SharedGuard(ManuallyDrop<spin::RwLockReadGuard<'static, ()>>);
+
+impl SharedGuard {
+    fn new(lock: &RwLock<()>) -> Self {
+        // SAFETY: `lock` lives as long as `ThemisPlatform` which outlives
+        // any guard it produces ('static in practice).
+        let guard: spin::RwLockReadGuard<'static, ()> =
+            unsafe { core::mem::transmute(lock.read()) };
+        SharedGuard(ManuallyDrop::new(guard))
+    }
+}
+impl Drop for SharedGuard {
+    fn drop(&mut self) { unsafe { ManuallyDrop::drop(&mut self.0) }; }
+}
 impl OpLockGuard for SharedGuard {}
-// SAFETY: `SharedGuard` carries no data; Send is vacuously correct.
+// SAFETY: tied to a 'static platform; moving a guard across logical "threads"
+// (monitor entries) on the same physical core is intentional.
 unsafe impl Send for SharedGuard {}
 
-/// Guard token returned by `acquire_exclusive_lock`.
-struct ExclusiveGuard;
+/// Guard for an exclusive (write) capability-tree lock.
+struct ExclusiveGuard(ManuallyDrop<spin::RwLockWriteGuard<'static, ()>>);
+
+impl ExclusiveGuard {
+    fn new(lock: &RwLock<()>) -> Self {
+        let guard: spin::RwLockWriteGuard<'static, ()> =
+            unsafe { core::mem::transmute(lock.write()) };
+        ExclusiveGuard(ManuallyDrop::new(guard))
+    }
+}
+impl Drop for ExclusiveGuard {
+    fn drop(&mut self) { unsafe { ManuallyDrop::drop(&mut self.0) }; }
+}
 impl OpLockGuard for ExclusiveGuard {}
-// SAFETY: same as above.
 unsafe impl Send for ExclusiveGuard {}
 
 // ── Per-domain hardware state ─────────────────────────────────────────────── //
@@ -83,17 +199,23 @@ impl PlatformDomain {
 // ── ThemisPlatformInner (everything behind the single Mutex) ─────────────── //
 
 struct ThemisPlatformInner {
-    domains: BTreeMap<DomainId, PlatformDomain>,
+    domains:        BTreeMap<DomainId, PlatformDomain>,
     core_to_domain: BTreeMap<CoreId, DomainId>,
     domain_to_core: BTreeMap<DomainId, CoreId>,
+    /// LAPIC IDs indexed by CoreId — populated by `bootstrap_set_lapic_ids`.
+    lapic_ids:      Vec<u32>,
+    /// Cached HHDM offset from the first registered domain.
+    hhdm_offset:    u64,
 }
 
 impl ThemisPlatformInner {
     fn new() -> Self {
         ThemisPlatformInner {
-            domains: BTreeMap::new(),
+            domains:        BTreeMap::new(),
             core_to_domain: BTreeMap::new(),
             domain_to_core: BTreeMap::new(),
+            lapic_ids:      Vec::new(),
+            hhdm_offset:    0,
         }
     }
 }
@@ -102,21 +224,46 @@ impl ThemisPlatformInner {
 
 /// The Themis `Platform` implementation.
 ///
-/// Wraps all mutable hardware state in a single `spin::Mutex` to satisfy the
-/// `Sync` bound required by the capability engine.
+/// Fields outside `inner` are accessed on hot paths (IPI, barrier, lock) and
+/// must not require holding `inner` to prevent lock inversion.
 pub struct ThemisPlatform {
-    inner: Mutex<ThemisPlatformInner>,
+    /// Capability-tree operation lock: shared for carve/alias/send, exclusive
+    /// for revoke.  Held for the entire duration of the capability operation.
+    op_lock:     RwLock<()>,
+    /// Update-application serialisation lock.  Only one core at a time may run
+    /// the IPI / barrier / `apply_update` sequence.
+    update_lock: AtomicBool,
+    /// Two-phase synchronisation barriers (index 0 = pre-update, 1 = post-update).
+    barriers:    [Barrier; 2],
+    /// Per-core IPI-pending flags.  The IPI handler (P3b) sets the flag for the
+    /// interrupted core; `poll_and_respond_cross_core` clears it and participates
+    /// in the barrier protocol.
+    pub ipi_pending: [AtomicBool; MAX_CORES],
+    /// All mutable domain / EPT / core-tracking state.
+    inner:       Mutex<ThemisPlatformInner>,
 }
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
-    ///
-    /// `hhdm_offset` is forwarded to every `PlatformDomain` created by later
-    /// `CreateDomain` updates.
     pub fn new() -> Self {
         ThemisPlatform {
-            inner: Mutex::new(ThemisPlatformInner::new()),
+            op_lock:     RwLock::new(()),
+            update_lock: AtomicBool::new(false),
+            barriers:    [Barrier::new(), Barrier::new()],
+            // SAFETY: AtomicBool is guaranteed to have the same bit pattern as
+            // a zeroed `u8`; false == 0x00.
+            ipi_pending: unsafe { core::mem::zeroed() },
+            inner:       Mutex::new(ThemisPlatformInner::new()),
         }
+    }
+
+    /// Register the LAPIC IDs for all physical cores.
+    ///
+    /// `ids[core_id]` is the x2APIC LAPIC ID for that core.  Must be called
+    /// during bootstrap (before any AP is released) so that `send_ipi` and
+    /// `get_current_core` work correctly.
+    pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
+        self.inner.lock().lapic_ids = ids;
     }
 
     /// Give a domain its initial META region directly, bypassing the update
@@ -139,6 +286,7 @@ impl ThemisPlatform {
         hhdm_offset: u64,
     ) {
         let mut g = self.inner.lock();
+        g.hhdm_offset = hhdm_offset;
         g.domains
             .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
     }
@@ -166,28 +314,91 @@ impl ThemisPlatform {
 // ── Platform trait ────────────────────────────────────────────────────────── //
 
 impl Platform for ThemisPlatform {
-    // ── Locking (bootstrap: trivial no-op guards) ─────────────────────── //
+    // ── Capability-tree operation lock ─────────────────────────────────── //
 
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(SharedGuard))
+        Ok(Box::new(SharedGuard::new(&self.op_lock)))
     }
 
     fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(ExclusiveGuard))
+        Ok(Box::new(ExclusiveGuard::new(&self.op_lock)))
     }
 
-    // ── Cross-core sync (bootstrap: no-op) ───────────────────────────── //
+    // ── Cross-core synchronisation ────────────────────────────────────── //
 
-    fn send_ipi(&self, _core_id: CoreId) {}
+    /// Send a capability-engine sync IPI to `core_id` via x2APIC.
+    ///
+    /// Looks up the target LAPIC ID in the bootstrap-populated table and writes
+    /// the ICR MSR.  The receiving core's IPI handler (P3b) sets
+    /// `ipi_pending[core_id]` so `poll_and_respond_cross_core` can react.
+    fn send_ipi(&self, core_id: CoreId) {
+        let lapic_id = {
+            let g = self.inner.lock();
+            *g.lapic_ids
+                .get(core_id as usize)
+                .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
+        };
+        // x2APIC ICR (MSR 0x830): bits[63:32]=dest, bit[14]=level(assert),
+        // bits[10:8]=delivery(000=fixed), bits[7:0]=vector.
+        let icr: u64 = ((lapic_id as u64) << 32)
+            | (1u64 << 14)              // level = assert
+            | (CAPA_IPI_VECTOR as u64); // fixed delivery, no shorthand
+        unsafe { x86::msr::wrmsr(x86::msr::IA32_X2APIC_ICR, icr) };
+    }
 
-    fn sync_barrier(&self, _id: u8, _participants: usize) {}
+    /// Two-phase synchronisation barrier.
+    ///
+    /// All participants (initiating core + IPI-responding cores) call this with
+    /// the same `id`.  The initiating core passes `participants` > 0; responding
+    /// cores pass 0 (the stored value is used instead).
+    fn sync_barrier(&self, id: u8, participants: usize) {
+        self.barriers[id as usize].wait(participants);
+    }
 
-    // ── Update application ────────────────────────────────────────────── //
+    // ── Update-application serialisation lock ─────────────────────────── //
+
+    fn try_acquire_update_lock(&self) -> bool {
+        self.update_lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn release_update_lock(&self) {
+        self.update_lock.store(false, Ordering::Release);
+    }
+
+    /// Poll for a pending cross-core IPI and participate in the barrier if one
+    /// is waiting.
+    ///
+    /// Called while spinning on `try_acquire_update_lock`.  If another core has
+    /// sent us a capability-engine IPI (set `ipi_pending[our_core]`), we
+    /// participate in its barrier so it can proceed.
+    ///
+    /// TODO(P3b): The IPI handler (IDT vector CAPA_IPI_VECTOR) must set
+    /// `ipi_pending[current_core]`.  Until P3b, IPIs may be missed if delivered
+    /// while the core is executing in the monitor with interrupts disabled.
+    fn poll_and_respond_cross_core(&self) {
+        let Some(core_id) = self.get_current_core() else { return };
+        if core_id as usize >= MAX_CORES { return; }
+        if self.ipi_pending[core_id as usize]
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        // An initiating core sent us an IPI waiting at barrier 0.
+        // Signal "I have stopped" so it can proceed with hardware updates.
+        self.barriers[0].wait(0);
+        // TODO(P3c): INVEPT(single-context) here for TLB shootdown.
+        // Signal "local flush done" so the initiating core can release op_lock.
+        self.barriers[1].wait(0);
+    }
+
+    // ── Hardware state (apply_update) ─────────────────────────────────── //
 
     fn apply_update(&self, update: &Update) {
         match update {
             Update::CreateDomain { domain_id, parent_id } => {
-                // Handled by register_domain — also called via apply_update path.
                 self.register_domain(*domain_id, *parent_id);
             }
 
@@ -197,20 +408,11 @@ impl Platform for ThemisPlatform {
                     .domains
                     .get_mut(domain_id)
                     .expect("GiveMetaMem: unknown domain");
-                d.meta.add_range(PhysRegion {
-                    base: *start,
-                    length: *size,
-                });
+                d.meta.add_range(PhysRegion { base: *start, length: *size });
+                // TODO(P4): update IOMMU domain page table for this META region.
             }
 
-            Update::ChangeRights {
-                domain,
-                address,
-                size,
-                physical,
-                rights,
-                ..
-            } => {
+            Update::ChangeRights { domain, address, size, physical, rights, .. } => {
                 let mut g = self.inner.lock();
                 let d = g
                     .domains
@@ -218,16 +420,14 @@ impl Platform for ThemisPlatform {
                     .expect("ChangeRights: unknown domain");
 
                 if rights.bits() == 0 {
-                    // Unmap
                     if let Some(ept) = d.ept.as_mut() {
                         ept.unmap_range(&mut d.meta, *address, *size as usize);
                     }
-                    // If there's no EPT yet, there's nothing to unmap.
+                    // TODO(P4): remove mapping from IOMMU domain page table.
                 } else {
-                    // Map (or rights update on existing entry)
                     d.ensure_ept();
                     let flags = rights_to_ept_flags(rights);
-                    // All normal RAM is WB; MMIO regions will use UC once
+                    // All normal RAM uses WB; MMIO regions will use UC once
                     // device enumeration is in place (Phase 4).
                     let ept = d.ept.as_mut().unwrap();
                     ept.map_range(
@@ -238,47 +438,55 @@ impl Platform for ThemisPlatform {
                         flags,
                         EptMemoryType::WB,
                     );
+                    // TODO(P4): update IOMMU domain page table with same mapping.
                 }
             }
 
             Update::RevokeDomain { domain, .. } => {
-                // Revoked domains are cleaned up in on_domain_revoked.
-                // apply_update is responsible for freeing EPT structures while
-                // affected cores are paused (between the two barriers).
+                // Free EPT structures while affected cores are paused (between
+                // the two barriers).  `on_domain_revoked` handles core redirect.
                 let mut g = self.inner.lock();
                 if let Some(mut d) = g.domains.remove(domain) {
                     if let Some(ept) = d.ept.take() {
                         ept.free_all(&mut d.meta);
                     }
+                    // TODO(P4): free IOMMU domain page table.
                     // META pages themselves belong to the parent's allocator and
-                    // will be returned when the memory capability is revoked.
+                    // are returned when the memory capability is revoked.
                 }
             }
 
             Update::ZeroMemory { address, size } => {
-                // Zero the range via HHDM — works for pages physically present.
-                // We need hhdm_offset; grab it from any registered domain.
                 let g = self.inner.lock();
-                if let Some(d) = g.domains.values().next() {
-                    let virt = (address + d.hhdm_offset) as *mut u8;
-                    unsafe {
-                        core::ptr::write_bytes(virt, 0, *size as usize);
-                    }
-                }
+                let hhdm = g.hhdm_offset;
+                drop(g);
+                let virt = (address + hhdm) as *mut u8;
+                unsafe { core::ptr::write_bytes(virt, 0, *size as usize) };
             }
 
             Update::FlushTLB { .. } => {
-                // Single-core bootstrap: no TLB shootdown needed.
-                // APs are not running any domain yet.
+                // TODO(P3c): INVEPT(single-context) for the affected domain.
+                // For now, cores do a full INVEPT on VMRESUME via the barrier
+                // protocol once P3b/P3c are implemented.
             }
         }
     }
 
     // ── Domain lifecycle ─────────────────────────────────────────────── //
 
+    fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
+        let mut g = self.inner.lock();
+        if g.domains.contains_key(&domain_id) {
+            return; // Idempotent: bootstrap_register_domain already called.
+        }
+        let hhdm = g.hhdm_offset;
+        g.domains.insert(domain_id, PlatformDomain::new(hhdm, parent_id));
+        // TODO(P4): allocate IOMMU domain page table for domain_id.
+    }
+
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
         // EPT structures were freed in apply_update(RevokeDomain).
-        // Here we redirect any core running this domain to `fallback`.
+        // Redirect any core running this domain to the fallback.
         let mut g = self.inner.lock();
         if let Some(&core_id) = g.domain_to_core.get(&domain_id) {
             g.domain_to_core.remove(&domain_id);
@@ -287,33 +495,16 @@ impl Platform for ThemisPlatform {
                 g.core_to_domain.insert(core_id, fb);
                 g.domain_to_core.insert(fb, core_id);
             }
+            // TODO(P4): reassign devices belonging to domain_id to fallback/parent.
         }
-    }
-
-    fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
-        let mut g = self.inner.lock();
-        // Avoid overwriting an entry created via bootstrap_register_domain.
-        if g.domains.contains_key(&domain_id) {
-            return;
-        }
-        // We need hhdm_offset — borrow it from an existing domain if available.
-        // If the platform is completely empty (root domain registration during
-        // bootstrap), the caller must use bootstrap_register_domain instead.
-        let hhdm_offset = g
-            .domains
-            .values()
-            .next()
-            .map(|d| d.hhdm_offset)
-            .unwrap_or(0);
-        g.domains
-            .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
+        // TODO(multi-VP): a domain can run on multiple cores; this only handles
+        // the single-VP (one core per domain) case.
     }
 
     // ── Core tracking ─────────────────────────────────────────────────── //
 
     fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
         let mut g = self.inner.lock();
-        // Remove any previous assignment for this core.
         if let Some(old_domain) = g.core_to_domain.remove(&core_id) {
             g.domain_to_core.remove(&old_domain);
         }
@@ -330,6 +521,17 @@ impl Platform for ThemisPlatform {
 
     fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
         self.inner.lock().domain_to_core.get(&domain_id).copied()
+    }
+
+    /// Return the CoreId of the calling physical core by reading the x2APIC ID
+    /// and looking it up in the bootstrap-populated LAPIC ID table.
+    fn get_current_core(&self) -> Option<CoreId> {
+        let lapic_id = unsafe { x86::msr::rdmsr(x86::msr::IA32_X2APIC_APICID) as u32 };
+        let g = self.inner.lock();
+        g.lapic_ids
+            .iter()
+            .position(|&id| id == lapic_id)
+            .map(|i| i as CoreId)
     }
 }
 
