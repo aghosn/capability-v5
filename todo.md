@@ -1797,6 +1797,24 @@ dom0 bootstrap: Themis acts as the parent and sets up the initial capability tre
   RIP/RSP/RSI/CR3.
 - [ ] **P7g**: Seal dom0; `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH
   via mailbox.
+- [ ] **P7h**: Per-core VP run loop. Each core runs a tight loop that owns a `VpContext`
+  carrying everything needed to dispatch exits:
+
+  ```
+  per-core loop:
+    vmlaunch / vmresume
+      → VMEXIT → trampoline saves GPRs
+      → handle_vmexit(&mut VpContext, &mut GuestRegs)
+           VpContext = { domain_id, vp_index, &platform, &vmx_state, ... }
+      → dispatch: VMCALL  → capability_engine::execute(...)
+                  EPT vio  → platform.remap(...)
+                  HLT      → park/yield VP
+      → loop
+  ```
+
+  `handle_vmexit` currently has no context (stub); this phase wires in `VpContext`
+  so every exit handler can read/write domain state, invoke the capability engine,
+  and update VMCS fields before VMRESUME.
 
 ### Phase 8 — Hypercall Dispatch + Hypercall ABI
 
