@@ -177,6 +177,23 @@ pub fn platform(
         }
     }
 
+    // ── Local APIC + I/O APIC MMIO ──────────────────────────────────────── //
+    // The LAPIC (0xFEE00000) and I/O APIC (0xFEC00000) are fixed-address MMIO
+    // regions that firmware does not report in the memory map.  Linux accesses
+    // these directly; without EPT mappings the accesses cause EPT violations.
+    // Map them as passthrough so dom0 can drive the interrupt controllers.
+    for &(base, len) in &[
+        (0xFEC0_0000u64, 0x1000u64),  // I/O APIC (4 KiB)
+        (0xFEE0_0000u64, 0x1000u64),  // Local APIC (4 KiB)
+    ] {
+        let covered = passthrough_regions.iter().any(|r|
+            r.base <= base && r.base + r.length >= base + len
+        );
+        if !covered {
+            passthrough_regions.push(PhysRegion { base, length: len });
+        }
+    }
+
     serial_println!("Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)", non_ram_e820.len());
     serial_println!("EPT passthrough:   {} regions (ACPI/NVS/MMIO)", passthrough_regions.len());
 

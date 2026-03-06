@@ -1791,19 +1791,20 @@ the EPT with no synchronization overhead.
 
 dom0 bootstrap: Themis acts as the parent and sets up the initial capability tree.
 
-- [ ] **P7a**: `init_root()`: root domain (id=0, sealed, all cores) + r0 covering all
+- [x] **P7a**: `init_root()`: root domain (id=0, sealed, all cores) + r0 covering all
   physical memory from the Limine memory map.
-- [ ] **P7b**: Partition r0 into three pools:
+- [x] **P7b**: Partition r0 into three pools:
   1. `themis_heap` — already reserved in P1a, excluded from the capability tree.
   2. `dom0_meta_pool` — carve as META capabilities; sized for dom0's VMCS + VAPIC +
      VpStateMeta + EPT root pages + VMXON regions.  Reflected in dom0's cap table
      with META flag (dom0 owns them, Themis retains parent-side access).
   3. `dom0_mem` — remaining memory sent to dom0 as normal capabilities.
-- [ ] **P7c**: Create dom0 domain; send `dom0_mem` (normal) + `dom0_meta_pool` (META).
+- [x] **P7c**: Create dom0 domain; send `dom0_mem` (normal) + `dom0_meta_pool` (META).
 - [ ] **P7d**: Set dom0 interrupt policy: all vectors DELIVER (dom0 is the default handler).
-- [ ] **P7e**: Allocate dom0 hardware VP structures from the META pool:
+- [x] **P7e**: Allocate dom0 hardware VP structures from the META pool:
   VMCS + VAPIC + PI descriptor + VpStateMeta per VP.  Write all VMCS fields.
-  Call `IrqRouter::configure_domain_policy` for dom0.
+  _(Partial: VAPIC page allocated but APICv not yet enabled — using LAPIC passthrough
+  as bringup shortcut, see BUG-6 / #U5.)_
 - [x] **P7f**: Parse Linux bzImage (using `BootHeader` from P0.5d); write `boot_params`
   into dom0_mem; copy protected-mode kernel to `code32_start` (0x100000); patch VMCS
   guest RIP/RSP (RSI set before VMLAUNCH in P7g — it is a GPR, not a VMCS field).
@@ -1816,6 +1817,11 @@ dom0 bootstrap: Themis acts as the parent and sets up the initial capability tre
   - `boot_params_phys` stored in `LinuxState` for P7g to place in ESI before VMLAUNCH.
   - **Known gap**: e820 currently only contains dom0_owned (TYPE_RAM).  Must be
     extended (P7f-e820) before dom0 can enumerate devices or read ACPI tables.
+- [ ] **P7g**: VMLAUNCH + dom0 bringup — **in progress**.  BSP enters guest via
+  VMLAUNCH.  Currently iterating through boot bugs (see "Dom0 Boot Bringup Plan"
+  and "Fixed Bugs" sections below).  Six bugs fixed so far (BUG-1 through BUG-6);
+  Linux now boots into `start_kernel`, prints dmesg, parses ACPI.  Target milestone:
+  BSP in `start_kernel` + all APs online (SMP fully up).
 
 ### dom0 / Linux visibility policy
 
@@ -2297,6 +2303,27 @@ source for audit purposes.  This is a post-MVP concern.
 
 
 
+## Dom0 Boot Bringup Plan
+
+**Milestone**: BSP reaches `start_kernel` + all APs online (SMP fully up).
+
+**Approach**: Iterative debug loop — run guest, capture serial output on
+failure, correlate faulting RIP / EPT violation with root cause, apply
+minimal fix, document in "Fixed Bugs" below, rebuild, repeat.  Bringup
+shortcuts are acceptable (e.g. LAPIC passthrough instead of vAPIC) as long
+as they don't block progress toward the milestone.
+
+**Phase 1 — Boot bug triage (current)**:  Fix every crash/fault until the
+clean-boot milestone.  See "Fixed Bugs" section below for the full list.
+
+**Phase 2 — Post-clean-boot refactor**:  Once SMP is fully up, circle back
+and harden all bringup shortcuts:
+- **#U5 — vAPIC for all domains**: Replace LAPIC/IOAPIC EPT passthrough
+  (BUG-6 shortcut) with proper Virtual-APIC support.
+- Review all other shortcuts accumulated during Phase 1 and decide which
+  need hardening vs. which are fine for dom0.
+
+
 ## Fixed Bugs (VMLAUNCH → dom0 boot)
 
 ### BUG-1: Triple fault at startup_32 `mov %eax, %cr0` — CR0 FIXED0 violation (FIXED)
@@ -2394,9 +2421,32 @@ The hardware capability MSR already advertises support (bit 12 of allowed-1 bits
 
 **Files**: `vmcs.rs` (secondary_desired).
 
+### BUG-6: EPT violation at GPA 0xFEE00020 — LAPIC/IOAPIC MMIO not mapped (FIXED)
+
+**Symptom**: Linux boots past `init_mem_mapping`, then EPT violation at
+GPA=0xFEE00020 (qual=0x181, data read during page-table walk).
+
+**Root cause**: The Local APIC (0xFEE00000) and I/O APIC (0xFEC00000) are
+fixed-address MMIO regions that firmware does not report in the memory map.
+They fall in a gap between passthrough regions (0xF0000000–0xFEFFC000).
+Without EPT mappings, any LAPIC/IOAPIC access causes an EPT violation.
+
+**Fix**: Added explicit 4 KiB passthrough mappings for both the I/O APIC
+(0xFEC00000) and Local APIC (0xFEE00000) in boot.rs, alongside the existing
+ISA hole fix.
+
+**Files**: `boot.rs` (inventory loop, after ISA hole block).
+
+**NOTE — future refactor**: The LAPIC/IOAPIC passthrough is a boot-bringup
+shortcut.  The plan is to use Virtual-APIC (vAPIC) for all domains, including
+dom0.  Once dom0 boots cleanly end-to-end, revisit this: enable "Virtualize
+APIC accesses" (secondary bit 0), set up the APIC-access page, and remove
+the direct LAPIC EPT mapping.  Track under **#U5** below.
+
 
 ## Platform API / Unimplemented Features
 
 - [ ] **#U1** `UpdateBatch::snapshots` — rollback not implemented. _Deferred — future work._
 - [ ] **#U2** `CapavisorAPI::ENUMERATE` / `enumerate_pending` — semantics TBD. _Deferred._
 - [ ] **#U3** Cache coloring — see `./2026/docs/design/address_translation.md`. _Phase 4–6 of address translation design._
+- [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note. _Post-clean-boot refactor._
