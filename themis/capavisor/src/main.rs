@@ -20,6 +20,7 @@ mod domain;
 mod guest;
 mod mem;
 mod pci;
+mod platform;
 mod vmx;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
