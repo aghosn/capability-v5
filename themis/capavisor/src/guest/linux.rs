@@ -329,6 +329,29 @@ impl BootParams {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// Copy the raw setup header from the bzImage into boot_params at 0x1f1.
+    ///
+    /// The kernel's startup code (startup_32/startup_64) reads many fields
+    /// directly from boot_params (e.g., kernel_alignment at 0x230, init_size
+    /// at 0x260).  If these are zero, the relocation calculation overflows.
+    ///
+    /// # Safety
+    /// `module.base` must point to a valid bzImage of at least
+    /// `SETUP_HEADER_OFFSET + header_len` bytes.
+    pub unsafe fn copy_setup_header(&mut self, module: &ModuleInfo) {
+        let header_size = core::mem::size_of::<RawSetupHeader>();
+        let src = module.base.add(SETUP_HEADER_OFFSET);
+        let end = SETUP_HEADER_OFFSET + header_size;
+        // Clamp to 4096 in case the header is very large.
+        let copy_end = end.min(4096);
+        let copy_len = copy_end - SETUP_HEADER_OFFSET;
+        core::ptr::copy_nonoverlapping(
+            src,
+            self.0[SETUP_HEADER_OFFSET..].as_mut_ptr(),
+            copy_len,
+        );
+    }
 }
 
 /// `loadflags` bit 0: kernel image was loaded above 1 MiB (`code32_start`).
@@ -377,7 +400,7 @@ pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
 /// * `initrd`       — Optional initrd Limine module.
 /// * `hhdm_offset`  — HHDM offset for phys → virt address conversion.
 /// * `dom0_regions` — dom0-owned physical regions; reported as e820 TYPE_RAM.
-/// * `meta_pool`    — META pool region; reported as e820 TYPE_RESERVED (hole for Linux).
+/// * `meta_regions` — META regions; each reported as e820 TYPE_RESERVED (hole for Linux).
 /// * `non_ram`      — Non-RAM e820 entries (RESERVED/ACPI/NVS) from the Limine map.
 /// * `acpi_rsdp_addr` — physical address of the (DMAR-stripped) RSDP copy to
 ///   pass to Linux; 0 means Linux will scan for the RSDP itself.
@@ -387,7 +410,7 @@ pub fn load_linux(
     initrd: Option<&ModuleInfo>,
     hhdm_offset: u64,
     dom0_regions: &[PhysRegion],
-    meta_pool: PhysRegion,
+    meta_regions: &[PhysRegion],
     non_ram: &[E820Entry],
     acpi_rsdp_addr: u64,
     cmdline: &str,
@@ -436,6 +459,12 @@ pub fn load_linux(
 
     // ── Build boot_params ─────────────────────────────────────────────────── //
     let mut bp = BootParams::new();
+
+    // Copy the raw setup header from the bzImage so that all fields the
+    // kernel reads (kernel_alignment, init_size, xloadflags, etc.) are
+    // present.  We then override the fields Themis controls.
+    unsafe { bp.copy_setup_header(kernel); }
+
     bp.set_type_of_loader(0xFF);
     bp.set_loadflags(LOADFLAG_LOADED_HIGH);
     bp.set_cmd_line_ptr(CMDLINE_PHYS as u32);
@@ -460,11 +489,13 @@ pub fn load_linux(
             addr: r.base, size: r.length, entry_type: E820Entry::TYPE_RAM,
         });
     }
-    // META pool is carved from dom0_owned but owned by the hypervisor — mark reserved.
-    if meta_pool.length > 0 {
-        push(&mut e820_buf, &mut count, E820Entry {
-            addr: meta_pool.base, size: meta_pool.length, entry_type: E820Entry::TYPE_RESERVED,
-        });
+    // META regions are carved from dom0_owned but owned by the hypervisor — mark reserved.
+    for meta in meta_regions {
+        if meta.length > 0 {
+            push(&mut e820_buf, &mut count, E820Entry {
+                addr: meta.base, size: meta.length, entry_type: E820Entry::TYPE_RESERVED,
+            });
+        }
     }
     for e in non_ram {
         push(&mut e820_buf, &mut count, *e);
@@ -486,8 +517,8 @@ pub fn load_linux(
     let bp_dst = (BOOT_PARAMS_PHYS + hhdm_offset) as *mut u8;
     unsafe { core::ptr::copy_nonoverlapping(bp.as_bytes().as_ptr(), bp_dst, 4096); }
     serial_println!(
-        "  boot_params @ {:#x}  e820_entries={}  (RAM={} META=1 non-RAM={})",
-        BOOT_PARAMS_PHYS, count, dom0_regions.len(), non_ram.len(),
+        "  boot_params @ {:#x}  e820_entries={}  (RAM={} META={} non-RAM={})",
+        BOOT_PARAMS_PHYS, count, dom0_regions.len(), meta_regions.len(), non_ram.len(),
     );
 
     LinuxLoadInfo {

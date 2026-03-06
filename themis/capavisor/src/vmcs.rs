@@ -17,7 +17,7 @@
 
 use x86::bits64::vmx;
 use x86::msr;
-use x86::vmx::vmcs::{control, guest, host, ro};
+use x86::vmx::vmcs::{control, guest, host};
 
 use crate::serial_println;
 use crate::vmexit::vmexit_trampoline;
@@ -90,19 +90,21 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
         (1 << 0)  // EXTERNAL_INTERRUPT_EXITING
         | (1 << 3);  // NMI_EXITING
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
-    vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, adjust(pin_desired, pin_msr))
+    let pin_val = adjust(pin_desired, pin_msr);
+    vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
         .expect("vmwrite pin-based");
 
     // ── Primary proc-based ────────────────────────────────────────────── //
-    // HLT_EXITING (bit 7), USE_IO_BITMAPS (bit 25), USE_MSR_BITMAPS (bit 28),
+    // HLT_EXITING (bit 7), USE_MSR_BITMAPS (bit 28),
     // SECONDARY_CONTROLS (bit 31).
+    // USE_IO_BITMAPS is NOT set: all guest I/O passes through directly.
     let primary_desired: u64 =
         (1 << 7)   // HLT_EXITING
-        | (1 << 25) // USE_IO_BITMAPS
         | (1 << 28) // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
-    vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, adjust(primary_desired, primary_msr))
+    let primary_val = adjust(primary_desired, primary_msr);
+    vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary_val)
         .expect("vmwrite primary proc-based");
 
     // ── Secondary proc-based ──────────────────────────────────────────── //
@@ -112,11 +114,13 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
         (1 << 1)  // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
-        | (1 << 7); // UNRESTRICTED_GUEST
+        | (1 << 7) // UNRESTRICTED_GUEST
+        | (1 << 12); // ENABLE_INVPCID
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
+    let secondary_val = adjust(secondary_desired, secondary_msr);
     vmx::vmwrite(
         control::SECONDARY_PROCBASED_EXEC_CONTROLS,
-        adjust(secondary_desired, secondary_msr),
+        secondary_val,
     )
     .expect("vmwrite secondary proc-based");
 
@@ -128,15 +132,20 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
         | (1 << 20) // SAVE_IA32_EFER
         | (1 << 21); // LOAD_IA32_EFER
     let exit_msr = vmx_ctrl_msr(msr::IA32_VMX_EXIT_CTLS, msr::IA32_VMX_TRUE_EXIT_CTLS);
-    vmx::vmwrite(control::VMEXIT_CONTROLS, adjust(exit_desired, exit_msr))
+    let exit_val = adjust(exit_desired, exit_msr);
+    vmx::vmwrite(control::VMEXIT_CONTROLS, exit_val)
         .expect("vmwrite vm-exit controls");
 
     // ── VM-entry controls ─────────────────────────────────────────────── //
-    // No IA32E_MODE_GUEST: guest starts in protected mode (no paging); P7f
-    // will switch to long mode before VMLAUNCH.
-    let entry_desired: u64 = 0;
+    // No IA32E_MODE_GUEST (bit 9): guest starts in 32-bit protected mode.
+    // LOAD_IA32_EFER (bit 15): load guest EFER from VMCS on each VM entry
+    // so the guest doesn't inherit the host's EFER (which has LMA=1).
+    // Without this, the guest runs in an architecturally undefined state
+    // (LMA=1 + CR0.PG=0).
+    let entry_desired: u64 = 1 << 15; // LOAD_IA32_EFER
     let entry_msr = vmx_ctrl_msr(msr::IA32_VMX_ENTRY_CTLS, msr::IA32_VMX_TRUE_ENTRY_CTLS);
-    vmx::vmwrite(control::VMENTRY_CONTROLS, adjust(entry_desired, entry_msr))
+    let entry_val = adjust(entry_desired, entry_msr);
+    vmx::vmwrite(control::VMENTRY_CONTROLS, entry_val)
         .expect("vmwrite vm-entry controls");
 
     // ── EPT pointer ───────────────────────────────────────────────────── //
@@ -149,28 +158,54 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // ── Exception bitmap: intercept nothing (pass all exceptions to guest) //
     vmx::vmwrite(control::EXCEPTION_BITMAP, 0).expect("vmwrite exception bitmap");
 
-    // ── CR0/CR4 guest-host masks: intercept VMXE (CR4[13]) ───────────── //
-    // The guest sees VMXE = 1 in CR4 via the read shadow, but cannot clear it.
-    vmx::vmwrite(control::CR0_GUEST_HOST_MASK, 0).expect("vmwrite CR0 mask");
-    vmx::vmwrite(control::CR0_READ_SHADOW, 0x31).expect("vmwrite CR0 shadow");
-    vmx::vmwrite(control::CR4_GUEST_HOST_MASK, 1u64 << 13).expect("vmwrite CR4 mask");
-    vmx::vmwrite(control::CR4_READ_SHADOW, 1u64 << 13).expect("vmwrite CR4 shadow");
+    // ── CR0/CR4 guest-host masks ──────────────────────────────────────────── //
+    // CR0: mask the FIXED0 bits (except PE/PG which UNRESTRICTED_GUEST exempts).
+    // In VMX non-root, writing a CR0 value that violates IA32_VMX_CR0_FIXED0
+    // causes #GP(0).  Linux startup_32 writes CR0 = 0x80000001 (PG+PE only),
+    // dropping NE (bit 5) which FIXED0 requires.  By masking the FIXED0 bits
+    // the host owns them (always forced to 1) while the shadow reads 0, so the
+    // guest sees normal hardware behavior — no #GP, no VM exit.
+    let cr0_fixed0 = unsafe { msr::rdmsr(msr::IA32_VMX_CR0_FIXED0) };
+    let cr0_mask = cr0_fixed0 & !((1u64 << 0) | (1u64 << 31)); // remove PE, PG
+    vmx::vmwrite(control::CR0_GUEST_HOST_MASK, cr0_mask).expect("vmwrite CR0 mask");
+    vmx::vmwrite(control::CR0_READ_SHADOW, 0).expect("vmwrite CR0 shadow");
+    // CR4: own VMXE (bit 13) only. The SDM mandates that in VMX non-root
+    // operation, any guest attempt to clear CR4.VMXE causes #GP(0).
+    // With mask bit 13 = 1 and shadow bit 13 = 1, a guest write that clears
+    // VMXE instead causes a CR_ACCESS VM exit, which our handler resolves by
+    // preserving VMXE=1 in the written value.
+    // All other CR4 bits (PAE, PGE, etc.) are guest-controlled (mask=0).
+    const CR4_VMXE: u64 = 1 << 13;
+    vmx::vmwrite(control::CR4_GUEST_HOST_MASK, CR4_VMXE).expect("vmwrite CR4 mask");
+    vmx::vmwrite(control::CR4_READ_SHADOW, 0).expect("vmwrite CR4 shadow");
 
     // ── VAPIC page ────────────────────────────────────────────────────── //
     vmx::vmwrite(control::VIRT_APIC_ADDR_FULL as u32, vapic_phys)
         .expect("vmwrite VAPIC addr");
 
-    // ── MSR / I/O bitmap addresses: all-zero = no interception ───────── //
-    // We write 0 for counts; USE_MSR_BITMAPS and USE_IO_BITMAPS require valid
-    // addresses — we disable them for the bootstrap stage if MSR/IO bitmaps are
-    // not yet allocated.  (The adjust() call will keep USE_IO_BITMAPS only if
-    // the CPU allows it; if not, the bit is stripped.)
+    // ── MSR / I/O bitmap addresses ────────────────────────────────────── //
+    // Explicitly write address 0 (physical page 0, 4KB-aligned, within
+    // physical address space → valid per Intel SDM 26.2.1.1).
+    // A zeroed page at phys 0 means no I/O intercepts and no MSR intercepts,
+    // which is correct for a pass-through hypervisor at bootstrap time.
+    vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
+    vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
+    vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, 0).expect("vmwrite MSR bitmap");
     vmx::vmwrite(control::VMENTRY_MSR_LOAD_COUNT as u32, 0)
         .expect("vmwrite vmentry msr load count");
     vmx::vmwrite(control::VMEXIT_MSR_STORE_COUNT as u32, 0)
         .expect("vmwrite vmexit msr store count");
     vmx::vmwrite(control::VMEXIT_MSR_LOAD_COUNT as u32, 0)
         .expect("vmwrite vmexit msr load count");
+
+    // ── Debug: print MSR raw values and adjusted controls ─────────────── //
+    serial_println!("  VMCS controls (VP{}):", vp_index);
+    serial_println!("    pin_msr={:#018x}  pin={:#010x}", pin_msr, pin_val);
+    serial_println!("    primary_msr={:#018x}  primary={:#010x}", primary_msr, primary_val);
+    serial_println!("    secondary_msr={:#018x}  secondary={:#010x}", secondary_msr, secondary_val);
+    serial_println!("    exit_msr={:#018x}  exit={:#010x}", exit_msr, exit_val);
+    serial_println!("    entry_msr={:#018x}  entry={:#010x}", entry_msr, entry_val);
+    serial_println!("    EPTP={:#018x}  VPID={}", eptp, vp_index + 1);
 }
 
 // ── Host state ────────────────────────────────────────────────────────────── //
@@ -183,7 +218,6 @@ unsafe fn write_host_state(host_stack_top: u64) {
     let es: u16;
     let fs: u16;
     let gs: u16;
-    let tr: u16;
     core::arch::asm!(
         "mov {:x}, cs", out(reg) cs,
         options(nomem, nostack, preserves_flags),
@@ -208,19 +242,18 @@ unsafe fn write_host_state(host_stack_top: u64) {
         "mov {:x}, gs", out(reg) gs,
         options(nomem, nostack, preserves_flags),
     );
-    core::arch::asm!(
-        "str {:x}", out(reg) tr,
-        options(nomem, nostack, preserves_flags),
-    );
 
     // Segment selectors (TI and RPL bits cleared — VMX requirement).
+    // CS/SS/DS/ES/FS/GS come from the actual registers; TR uses the known
+    // selector from the GDT we loaded with gdt::load_for_core() — never 0.
+    let tr_sel = crate::gdt::tss_selector(0); // BSP is always core 0
     vmx::vmwrite(host::CS_SELECTOR as u32, (cs & !7) as u64).expect("vmwrite host CS");
     vmx::vmwrite(host::SS_SELECTOR as u32, (ss & !7) as u64).expect("vmwrite host SS");
     vmx::vmwrite(host::DS_SELECTOR as u32, (ds & !7) as u64).expect("vmwrite host DS");
     vmx::vmwrite(host::ES_SELECTOR as u32, (es & !7) as u64).expect("vmwrite host ES");
     vmx::vmwrite(host::FS_SELECTOR as u32, (fs & !7) as u64).expect("vmwrite host FS");
     vmx::vmwrite(host::GS_SELECTOR as u32, (gs & !7) as u64).expect("vmwrite host GS");
-    vmx::vmwrite(host::TR_SELECTOR as u32, (tr & !7) as u64).expect("vmwrite host TR");
+    vmx::vmwrite(host::TR_SELECTOR as u32, tr_sel as u64).expect("vmwrite host TR");
 
     // Control registers.
     let cr0: u64;
@@ -237,8 +270,9 @@ unsafe fn write_host_state(host_stack_top: u64) {
     let efer = msr::rdmsr(msr::IA32_EFER);
     vmx::vmwrite(host::IA32_EFER_FULL as u32, efer).expect("vmwrite host EFER");
 
-    // GDTR and IDTR base.
-    let gdtr = read_descriptor_table_base("sgdt");
+    // GDTR base: use the GDT we loaded (authoritative, no sgdt ambiguity).
+    // IDTR base: read from the processor (Limine set this up).
+    let gdtr = crate::gdt::gdtr_base();
     let idtr = read_descriptor_table_base("sidt");
     vmx::vmwrite(host::GDTR_BASE, gdtr).expect("vmwrite host GDTR base");
     vmx::vmwrite(host::IDTR_BASE, idtr).expect("vmwrite host IDTR base");
@@ -249,10 +283,10 @@ unsafe fn write_host_state(host_stack_top: u64) {
     vmx::vmwrite(host::FS_BASE, fs_base).expect("vmwrite host FS base");
     vmx::vmwrite(host::GS_BASE, gs_base).expect("vmwrite host GS base");
 
-    // TR base: look up in the GDT.
-    // The TR selector (bits[15:3]) gives the GDT index.  Each GDT entry is 8
-    // bytes; a system segment (TSS) uses two consecutive 8-byte slots (16 bytes).
-    let tr_base = gdt_system_segment_base(gdtr, tr);
+    // TR base: taken directly from our known TSS for core 0 (BSP).
+    // gdt_system_segment_base is kept as a fallback but we use the direct
+    // address to avoid any GDT parse ambiguity.
+    let tr_base = crate::gdt::tss_base(0);
     vmx::vmwrite(host::TR_BASE, tr_base).expect("vmwrite host TR base");
 
     // SYSENTER CS/ESP/EIP (set to zero — Limine / our monitor does not use SYSENTER).
@@ -319,7 +353,8 @@ unsafe fn write_guest_state() {
     // P7f will set PG + load CR3 before VMLAUNCH.
     vmx::vmwrite(guest::CR0, 0x31).expect("vmwrite guest CR0");
     vmx::vmwrite(guest::CR3, 0).expect("vmwrite guest CR3");
-    // CR4: VMXE (bit 13) required in VMX non-root; PAE (bit 5) for future 64-bit.
+    // CR4: VMXE (bit 13) satisfies IA32_VMX_CR4_FIXED0 on this hardware.
+    // Mask = 0 (set above) means startup_32 can freely write CR4 = PAE etc.
     vmx::vmwrite(guest::CR4, 1u64 << 13).expect("vmwrite guest CR4");
 
     // ── EFER: 0 (no long mode in the stub; P7f sets LME+LMA for Linux) ── //
@@ -346,36 +381,14 @@ unsafe fn write_guest_state() {
 
 // ── Descriptor-table helpers ──────────────────────────────────────────────── //
 
-/// Read the base address of GDTR or IDTR via `sgdt` / `sidt`.
+/// Read the base address of IDTR via `sidt`.
 unsafe fn read_descriptor_table_base(insn: &str) -> u64 {
     // The pseudo-descriptor is 10 bytes: 2-byte limit + 8-byte base.
     let mut desc = [0u8; 10];
     match insn {
-        "sgdt" => core::arch::asm!("sgdt [{0}]", in(reg) desc.as_mut_ptr(), options(nostack)),
         "sidt" => core::arch::asm!("sidt [{0}]", in(reg) desc.as_mut_ptr(), options(nostack)),
         _ => unreachable!(),
     }
     // Base is at bytes [2..10], little-endian.
     u64::from_le_bytes(desc[2..10].try_into().unwrap())
-}
-
-/// Extract the 64-bit base of a system segment (TSS/LDT) from the GDT.
-///
-/// A system segment occupies two consecutive 8-byte GDT slots (16 bytes total).
-/// Bits encoding the base: [39:16] in qword 0, [63:32] in qword 1.
-unsafe fn gdt_system_segment_base(gdtr_base: u64, selector: u16) -> u64 {
-    // selector[15:3] = index, selector[2] = TI (ignored here — must be 0),
-    // selector[1:0] = RPL (ignored).
-    let idx = (selector >> 3) as u64;
-    let entry_addr = (gdtr_base + idx * 8) as *const u64;
-
-    let low = *entry_addr;
-    let high = *entry_addr.add(1);
-
-    // Base bits from qword 0: [39:32] = low[39:32], [23:16] = low[23:16].
-    let base_lo = ((low >> 16) & 0xFF_FFFF) | (((low >> 32) & 0xFF) << 24);
-    // Base bits from qword 1: [63:32] = high[31:0].
-    let base_hi = high & 0xFFFF_FFFF;
-
-    base_lo | (base_hi << 32)
 }

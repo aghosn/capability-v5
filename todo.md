@@ -2297,6 +2297,104 @@ source for audit purposes.  This is a post-MVP concern.
 
 
 
+## Fixed Bugs (VMLAUNCH → dom0 boot)
+
+### BUG-1: Triple fault at startup_32 `mov %eax, %cr0` — CR0 FIXED0 violation (FIXED)
+
+**Symptom**: Triple fault at guest RIP=0x100164, which is the `mov $0x80000001, %eax; mov %eax, %cr0`
+instruction in Linux's `startup_32` (compressed kernel decompressor) that enables paging to
+activate long mode.
+
+**Root cause**: `CR0_GUEST_HOST_MASK = 0` let the guest write CR0 = 0x80000001 directly to the
+VMCS guest CR0 field. This value has PG=1 and PE=1 but **NE=0** (bit 5). In VMX non-root
+operation, `IA32_VMX_CR0_FIXED0` requires NE=1 (the UNRESTRICTED_GUEST exemption only covers
+PE and PG, per SDM §24.8). The processor delivers #GP(0) to the guest. Since startup_32 has
+no IDT, the #GP cascades: #GP → #DF → triple fault → VM exit reason 2.
+
+**Fix**: Set `CR0_GUEST_HOST_MASK` to the FIXED0 bits (minus PE/PG), with `CR0_READ_SHADOW = 0`.
+The host owns these bits (always forced to 1 in the actual guest CR0), while the guest sees
+them as 0 through the shadow — matching normal hardware behavior. The guest's write of
+0x80000001 no longer triggers a VM exit or #GP; the actual CR0 becomes 0x80000021 (PG+NE+PE).
+
+**Files**: `vmcs.rs` (CR0_GUEST_HOST_MASK, CR0_READ_SHADOW), `vmexit.rs` (CR_ACCESS handler
+for CR0 now preserves host-owned FIXED0 bits).
+
+### BUG-2: Guest inherits host EFER (LMA=1 without paging) — missing LOAD_IA32_EFER on entry (FIXED)
+
+**Symptom**: Guest state dump showed EFER=0x900 (LME+NXE) even though guest EFER was
+initialized to 0 in the VMCS. The guest was running in an architecturally undefined state
+(EFER.LMA=1 but CR0.PG=0).
+
+**Root cause**: VM-entry controls did not set LOAD_IA32_EFER (bit 15). Without it, the real
+IA32_EFER MSR retains the host's value (which has LME=1, LMA=1 for 64-bit host mode) across
+VM entry. The guest inherits the host EFER. Additionally, the RDMSR/WRMSR handlers for
+IA32_EFER were pass-through to the real MSR — they read/wrote the host's EFER instead of the
+VMCS guest EFER field.
+
+**Fix**:
+1. Set LOAD_IA32_EFER (bit 15) in VM-entry controls. The processor now loads the VMCS guest
+   EFER on each VM entry.
+2. Intercept RDMSR/WRMSR for IA32_EFER (MSR 0xC0000080): reads return the VMCS guest EFER;
+   writes update the VMCS guest EFER (not the host MSR).
+3. Add `sync_ia32e_mode_guest()` at the end of every VM exit handler to keep the
+   IA32E_MODE_GUEST entry control (bit 9) in sync with EFER.LMA. When the guest transitions
+   to long mode, the entry control must flip to 1 (and CS.L must be 1) for the next VM entry
+   to pass consistency checks.
+
+**Files**: `vmcs.rs` (entry_desired), `vmexit.rs` (RDMSR/WRMSR handlers, sync_ia32e_mode_guest,
+CR_ACCESS handler for long-mode activation detection).
+
+### BUG-3: Setup header not copied into boot_params — kernel_alignment=0 overflow (FIXED)
+
+**Symptom**: Triple fault at RIP=0x100263 (startup_64 `push $0x10`) with RSP=0x1fffd0000 —
+far beyond the 4GB identity map.
+
+**Root cause**: `BootParams::new()` creates a zeroed 4096-byte page, and `load_linux()` only
+sets a few fields (loader, loadflags, cmdline, ramdisk, rsdp, e820). The raw setup header
+from the bzImage was never copied in. Critical fields like `kernel_alignment` (0x230) and
+`init_size` (0x260) were zero. In startup_64, `dec %eax` on `kernel_alignment=0` wraps to
+0xFFFFFFFF, `add %rax, %rbp` causes RBP to overflow to a huge address, which passes the
+`cmp $0x1000000` minimum check (unsigned), producing RSP ≈ 8 GB — unmapped in the 4 GB
+identity map → #PF → triple fault.
+
+**Fix**: Added `BootParams::copy_setup_header()` to copy the raw setup header bytes from the
+bzImage at offset 0x1f1 into boot_params. Called before overriding Themis-controlled fields.
+
+**Files**: `guest/linux.rs` (copy_setup_header method, load_linux call).
+
+### BUG-4: EPT violation at GPA 0xC0000 — legacy ISA memory hole not mapped (FIXED)
+
+**Symptom**: After APs signal, guest triple-faults with an EPT violation.  VMEXIT
+qualification 0x181 = data read during guest page-table walk at GPA 0xC0000.
+
+**Root cause**: The legacy ISA memory hole (0xA0000–0x100000) — VGA memory and BIOS
+ROM area — is not reported by firmware in the Limine memory map.  Our EPT setup only
+maps dom0_owned RAM regions and passthrough regions derived from Limine entries, so
+this 384 KiB range is unmapped.  When the guest's identity-mapped page tables reference
+GPAs in this range (e.g. during a TLB-miss page-table walk), the EPT lookup fails.
+
+**Fix**: After building passthrough_regions from the Limine map, explicitly add the
+ISA hole (0xA0000, 384 KiB) as a passthrough region and e820 RESERVED entry, unless
+it is already covered by an existing region.
+
+**Files**: `boot.rs` (inventory loop, after passthrough_regions construction).
+
+### BUG-5: #UD on INVPCID — secondary proc-based control bit 12 not set (FIXED)
+
+**Symptom**: Linux boots into `init_mem_mapping`, then hits `#UD` (exception 0x06)
+at `native_flush_tlb_global+0x3f` executing `INVPCID` (opcode `66 0f 38 82`).
+
+**Root cause**: Secondary proc-based VM-execution controls did not include bit 12
+(ENABLE_INVPCID).  Without this bit, `INVPCID` causes `#UD` in VMX non-root
+operation regardless of CPUID — but the guest sees INVPCID support via CPUID
+passthrough and uses it for TLB flushes.
+
+**Fix**: Added `(1 << 12)` (ENABLE_INVPCID) to `secondary_desired` in VMCS setup.
+The hardware capability MSR already advertises support (bit 12 of allowed-1 bits).
+
+**Files**: `vmcs.rs` (secondary_desired).
+
+
 ## Platform API / Unimplemented Features
 
 - [ ] **#U1** `UpdateBatch::snapshots` — rollback not implemented. _Deferred — future work._

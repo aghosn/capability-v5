@@ -2,22 +2,36 @@
 #![no_main]
 #![feature(naked_functions)]
 // Enable heap-allocated types (Vec, Box, BTreeMap, …) via the global allocator
-// declared below.  The allocator is *empty* at this stage; it is initialised
-// during Phase 1 boot once we have carved out a heap region from the Limine
-// memory map.
+// declared below.  The allocator is backed by a static BSS array (`HEAP`) that
+// Limine places and maps as part of the kernel binary — no runtime carving
+// of physical memory is required.
 extern crate alloc;
 
 use core::fmt;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use limine::request::{HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
+use limine::request::{ExecutableAddressRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
+
+pub(crate) const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Aligned wrapper so the heap array sits on a 16-byte boundary in .bss.
+#[repr(align(16))]
+struct AlignedHeap([u8; HEAP_SIZE]);
+
+/// Heap backing storage — placed in .bss by the linker, mapped by Limine.
+/// Limine loads the capavisor ELF and handles physical placement and page
+/// table setup for this array as part of the kernel binary.  The global
+/// allocator is initialised from this array at the very start of _start()
+/// before any heap-using boot code runs.
+static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
 
 mod acpi;
 mod boot;
 mod domain;
+mod gdt;
 mod guest;
 mod mem;
 mod pci;
@@ -70,12 +84,13 @@ macro_rules! serial_println {
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
-#[used] static BASE_REVISION:   BaseRevision       = BaseRevision::new();
-#[used] static MEMMAP_REQUEST:  MemoryMapRequest   = MemoryMapRequest::new();
-#[used] static HHDM_REQUEST:    HhdmRequest        = HhdmRequest::new();
-#[used] static RSDP_REQUEST:    RsdpRequest        = RsdpRequest::new();
-#[used] static MP_REQUEST:      MpRequest          = MpRequest::new();
-#[used] static MODULE_REQUEST:  ModuleRequest      = ModuleRequest::new();
+#[used] static BASE_REVISION:       BaseRevision            = BaseRevision::new();
+#[used] static MEMMAP_REQUEST:      MemoryMapRequest        = MemoryMapRequest::new();
+#[used] static HHDM_REQUEST:        HhdmRequest             = HhdmRequest::new();
+#[used] static RSDP_REQUEST:        RsdpRequest             = RsdpRequest::new();
+#[used] static MP_REQUEST:          MpRequest               = MpRequest::new();
+#[used] static MODULE_REQUEST:      ModuleRequest           = ModuleRequest::new();
+#[used] static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
@@ -88,6 +103,13 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 pub(crate) static AP_READY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Spinlock for serializing AP serial output.
 pub(crate) static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Physical and virtual base of the capavisor kernel binary.
+/// Set once at the top of _start() from KernelAddressRequest.
+/// Used by paging::ensure_table to correctly translate kernel-space heap
+/// VA → PA (BSS heap is at kernel VA, not HHDM VA, so virt - hhdm is wrong).
+pub(crate) static KERNEL_PHYS_BASE: AtomicU64 = AtomicU64::new(0);
+pub(crate) static KERNEL_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 
 // ── AP launch synchronization ────────────────────────────────────────────── //
 //
@@ -117,6 +139,17 @@ pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPl
 /// BSP entry point called by the Limine bootloader.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // Initialize the global heap allocator from the static BSS array.
+    // This MUST happen before any heap-allocating boot code.
+    unsafe { ALLOCATOR.lock().init(HEAP.0.as_mut_ptr(), HEAP_SIZE); }
+
+    // Store kernel phys/virt base so paging::ensure_table can correctly
+    // translate kernel-space heap VAs to physical addresses.
+    if let Some(r) = KERNEL_ADDR_REQUEST.get_response() {
+        KERNEL_PHYS_BASE.store(r.physical_base(), Ordering::Relaxed);
+        KERNEL_VIRT_BASE.store(r.virtual_base(), Ordering::Relaxed);
+    }
+
     SerialPort::init();
     assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
 

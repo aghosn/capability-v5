@@ -100,9 +100,18 @@ fn ensure_table(table: *mut u64, index: usize, hhdm: u64) -> u64 {
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null(), "OOM allocating page table page");
 
-    // Convert virtual heap address to physical.
+    // Convert virtual address to physical.
+    // The heap is backed by a BSS array in kernel VA space, not HHDM space.
+    // For kernel-space VAs (>= KERNEL_VIRT_BASE), use the kernel base offset;
+    // for HHDM-backed VAs, use the standard virt - hhdm formula.
     let virt_addr = ptr as u64;
-    let phys_addr = virt_addr - hhdm;
+    let kern_virt = crate::KERNEL_VIRT_BASE.load(core::sync::atomic::Ordering::Relaxed);
+    let phys_addr = if kern_virt != 0 && virt_addr >= kern_virt {
+        let kern_phys = crate::KERNEL_PHYS_BASE.load(core::sync::atomic::Ordering::Relaxed);
+        virt_addr - kern_virt + kern_phys
+    } else {
+        virt_addr - hhdm
+    };
 
     let new_entry = phys_addr | PRESENT | WRITABLE;
     unsafe { table.add(index).write_volatile(new_entry) };

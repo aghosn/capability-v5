@@ -26,6 +26,15 @@ use crate::{serial_print, serial_println, AP_READY_COUNT, SERIAL_LOCK};
 
 use core::sync::atomic::Ordering;
 
+/// Format a byte count as a human-readable KiB string.
+fn fmt_kib(bytes: u64) -> alloc::string::String {
+    if bytes >= 1024 * 1024 {
+        alloc::format!("{} MiB", bytes / (1024 * 1024))
+    } else {
+        alloc::format!("{} KiB", bytes / 1024)
+    }
+}
+
 // ── Output structs ────────────────────────────────────────────────────────── //
 
 /// Everything discovered during platform init (Phase 1a–1e).
@@ -49,9 +58,11 @@ pub struct PlatformInfo {
     /// must not be accessible to dom0 at the hardware level).
     pub passthrough_regions: Vec<PhysRegion>,
     /// Non-RAM e820 entries for the complete Linux e820 table.
-    /// Passed to `load_linux()`; combined with dom0_owned (RAM), meta_pool
-    /// (RESERVED hole), and the heap (RESERVED hole) to build boot_params.e820_table.
+    /// Passed to `load_linux()`; combined with dom0_owned (RAM) and
+    /// meta_regions (RESERVED holes) to build boot_params.e820_table.
     pub non_ram_e820: Vec<E820Entry>,
+    /// Physical ranges mapped into the capavisor page tables for ACPI access.
+    pub acpi_mapped: Vec<(u64, u64)>, // (base, length)
 }
 
 /// State after VMX init (Phase 2a–2b).
@@ -80,33 +91,13 @@ pub fn platform(
     cpus: &[&Cpu],
     bsp_lapic_id: u32,
 ) -> PlatformInfo {
-    // ── Phase 1a: Memory map + heap ──────────────────────────────────────── //
+    // ── Phase 1a: Memory map + inventory ────────────────────────────────────── //
 
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
-    serial_println!("Memory map: {} entries", entries.len());
 
-    for entry in entries.iter() {
-        let kind = match entry.entry_type {
-            limine::memory_map::EntryType::USABLE              => "usable",
-            limine::memory_map::EntryType::RESERVED            => "reserved",
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => "acpi-reclaim",
-            limine::memory_map::EntryType::ACPI_NVS            => "acpi-nvs",
-            limine::memory_map::EntryType::BAD_MEMORY          => "bad",
-            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader",
-            limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+modules",
-            limine::memory_map::EntryType::FRAMEBUFFER         => "framebuffer",
-            _ => "unknown",
-        };
-        serial_println!("  {:#012x}–{:#012x}  {:>8} KiB  {}",
-            entry.base, entry.base + entry.length, entry.length / 1024, kind);
-    }
-
-    let inventory = PhysicalInventory::from_limine(entries, hhdm_offset);
-    serial_println!();
+    let inventory = PhysicalInventory::from_limine(entries);
     serial_println!("Total usable RAM:  {} MiB", inventory.total_usable / (1024 * 1024));
-    serial_println!("Heap carved at:    {:#x} ({} MiB)",
-        inventory.heap_phys, inventory.heap_size / (1024 * 1024));
-    serial_println!("Remaining usable:  {} MiB ({} regions)",
+    serial_println!("Usable regions:    {} MiB ({} regions)",
         inventory.available_bytes() / (1024 * 1024),
         inventory.usable_regions().len());
 
@@ -118,7 +109,7 @@ pub fn platform(
 
     // ── Build UC range table from RESERVED + FRAMEBUFFER entries ─────────── //
     // These are device MMIO regions that must be mapped uncacheable in the EPT.
-    // BOOTLOADER_RECLAIMABLE and KERNEL_AND_MODULES are capavisor-internal and
+    // BOOTLOADER_RECLAIMABLE and EXECUTABLE_AND_MODULES are capavisor-internal and
     // must NOT be mapped in the EPT at all (not UC, just absent).
     let uc_ranges = alloc::sync::Arc::new(UncacheableRanges::new());
     for entry in entries.iter() {
@@ -134,7 +125,7 @@ pub fn platform(
 
     // ── Build non-RAM e820 entries and EPT passthrough region list ────────── //
     // USABLE entries are skipped here — they are replaced by explicit entries in
-    // load_linux(): dom0_owned as TYPE_RAM, meta_pool and heap as TYPE_RESERVED.
+    // load_linux(): dom0_owned as TYPE_RAM, meta_regions as TYPE_RESERVED.
     // All other Limine entry types are translated directly to e820 types.
     let mut non_ram_e820: Vec<E820Entry> = Vec::new();
     let mut passthrough_regions: Vec<PhysRegion> = Vec::new();
@@ -164,14 +155,28 @@ pub fn platform(
             _ => {}
         }
     }
-    // The heap is carved from a USABLE region and excluded from dom0_owned, so it
-    // doesn't appear in either list above.  Add it explicitly as RESERVED so Linux
-    // sees a contiguous picture and doesn't attempt to use those pages.
-    non_ram_e820.push(E820Entry {
-        addr:       inventory.heap_phys,
-        size:       inventory.heap_size,
-        entry_type: E820Entry::TYPE_RESERVED,
-    });
+
+    // ── Legacy ISA memory hole (0xA0000–0x100000) ────────────────────────── //
+    // Firmware typically does not report the legacy VGA/BIOS area in the memory
+    // map.  The guest's identity-mapped page tables cover this range, so the EPT
+    // must map it — otherwise page-table walks that touch GPA 0xC0000 (VGA BIOS)
+    // cause an EPT violation.  Also add it to e820 as RESERVED so Linux knows.
+    {
+        const ISA_HOLE_BASE: u64 = 0xA0000;
+        const ISA_HOLE_LEN:  u64 = 0x100000 - 0xA0000; // 384 KiB
+        // Only add if not already covered by an existing region.
+        let covered = passthrough_regions.iter().any(|r|
+            r.base <= ISA_HOLE_BASE && r.base + r.length >= ISA_HOLE_BASE + ISA_HOLE_LEN
+        );
+        if !covered {
+            passthrough_regions.push(PhysRegion { base: ISA_HOLE_BASE, length: ISA_HOLE_LEN });
+            non_ram_e820.push(E820Entry {
+                addr: ISA_HOLE_BASE, size: ISA_HOLE_LEN,
+                entry_type: E820Entry::TYPE_RESERVED,
+            });
+        }
+    }
+
     serial_println!("Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)", non_ram_e820.len());
     serial_println!("EPT passthrough:   {} regions (ACPI/NVS/MMIO)", passthrough_regions.len());
 
@@ -182,24 +187,10 @@ pub fn platform(
     serial_println!("CPUs: {} cores (BSP + {} APs)", num_cores, num_cores - 1);
 
     let partition = inventory.partition(num_cores as u64);
-
-    serial_println!();
-    serial_println!("Memory partitioning:");
-    serial_println!("  META pool:  {:#x}–{:#x}  ({} KiB, {} pages)",
-        partition.meta_pool.base,
-        partition.meta_pool.base + partition.meta_pool.length,
-        partition.meta_pool.length / 1024,
-        partition.meta_breakdown.total_pages);
-    serial_println!("    VMXON: {} pages  VMCS: {} pages  VAPIC: {} pages  EPT: {} pages",
-        partition.meta_breakdown.vmxon_pages,
-        partition.meta_breakdown.vmcs_pages,
-        partition.meta_breakdown.vapic_pages,
-        partition.meta_breakdown.ept_pages);
-
-    let dom0_total: u64 = partition.dom0_owned[..partition.dom0_owned_count]
-        .iter().map(|r| r.length).sum();
-    serial_println!("  dom0 owned: {} MiB ({} regions)",
-        dom0_total / (1024 * 1024), partition.dom0_owned_count);
+    // META regions are NOT added to non_ram_e820 here — load_linux() receives
+    // them via its `meta_regions` parameter and writes the TYPE_RESERVED entries
+    // directly into boot_params.e820_table.  Adding them here too would produce
+    // duplicate entries in the e820 table seen by Linux.
 
     // ── Phase 1c: SMP bootstrap ───────────────────────────────────────────── //
 
@@ -224,12 +215,14 @@ pub fn platform(
 
     serial_println!();
     // Map ACPI/reserved regions that Limine base revision 3 leaves unmapped.
+    let mut acpi_mapped: Vec<(u64, u64)> = Vec::new();
     for entry in entries.iter() {
         match entry.entry_type {
             limine::memory_map::EntryType::ACPI_RECLAIMABLE
             | limine::memory_map::EntryType::ACPI_NVS
             | limine::memory_map::EntryType::RESERVED => {
                 crate::mem::map_phys_range(entry.base, entry.length, hhdm_offset);
+                acpi_mapped.push((entry.base, entry.length));
             }
             _ => {}
         }
@@ -265,6 +258,162 @@ pub fn platform(
         serial_println!("PCI: no ECAM — skipping enumeration");
     }
 
+    // ── Comprehensive memory layout report ──────────────────────────────── //
+
+    // Get capavisor binary location from Limine KernelAddressRequest.
+    let (kernel_phys_base, kernel_virt_base) =
+        if let Some(r) = crate::KERNEL_ADDR_REQUEST.get_response() {
+            (r.physical_base(), r.virtual_base())
+        } else {
+            (0u64, 0u64)
+        };
+
+    // Compute HEAP virt/phys range.
+    let heap_virt_base = unsafe { crate::HEAP.0.as_ptr() as u64 };
+    let heap_virt_end  = heap_virt_base + crate::HEAP_SIZE as u64;
+    let heap_phys_base = if kernel_virt_base != 0 {
+        heap_virt_base - kernel_virt_base + kernel_phys_base
+    } else { 0 };
+    let heap_phys_end  = heap_phys_base + crate::HEAP_SIZE as u64;
+
+    serial_println!("=== P1: Physical memory layout ===");
+    serial_println!();
+
+    // 1. Capavisor layout
+    serial_println!("Capavisor layout:");
+    if kernel_phys_base != 0 {
+        serial_println!("  Binary:  virt [{:#018x}..{:#018x})",
+            kernel_virt_base, kernel_virt_base + (heap_virt_base - kernel_virt_base));
+        serial_println!("           phys [{:#011x}..{:#011x})  [KERNEL_AND_MODULES]",
+            kernel_phys_base, heap_phys_base);
+        serial_println!("  Heap:    virt [{:#018x}..{:#018x})  64 MiB BSS",
+            heap_virt_base, heap_virt_end);
+        serial_println!("           phys [{:#011x}..{:#011x})  [excluded from dom0]",
+            heap_phys_base, heap_phys_end);
+    } else {
+        serial_println!("  (KernelAddressRequest unavailable)");
+    }
+    serial_println!();
+
+    // 2. Original Limine memory map with META markers
+    serial_println!("Limine memory map ({} entries):", entries.len());
+    for entry in entries.iter() {
+        let type_str = match entry.entry_type {
+            limine::memory_map::EntryType::USABLE              => "usable      ",
+            limine::memory_map::EntryType::RESERVED            => "reserved    ",
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => "acpi-reclaim",
+            limine::memory_map::EntryType::ACPI_NVS            => "acpi-nvs    ",
+            limine::memory_map::EntryType::BAD_MEMORY          => "bad-memory  ",
+            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader  ",
+            limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => "kernel+mods ",
+            limine::memory_map::EntryType::FRAMEBUFFER         => "framebuffer ",
+            _                                                  => "other       ",
+        };
+        let entry_end = entry.base + entry.length;
+        // Check if this entry overlaps with any META region.
+        let mut marker = "";
+        'outer: for i in 0..partition.meta_count {
+            let m = &partition.meta_regions[i];
+            let m_end = m.base + m.length;
+            if m.base < entry_end && m_end > entry.base {
+                if m.base == entry.base && m_end == entry_end {
+                    marker = "  ← META [full]";
+                } else {
+                    marker = "  ← META [partial]";
+                }
+                break 'outer;
+            }
+        }
+        // Mark capavisor binary/heap entries.
+        let capa_marker = if kernel_phys_base != 0 {
+            let is_binary = entry.base < heap_phys_base
+                && entry_end > kernel_phys_base
+                && entry.base >= kernel_phys_base;
+            let is_heap = heap_phys_base > 0
+                && entry.base >= heap_phys_base
+                && entry_end <= heap_phys_end + 0x1000;
+            if is_binary { "  ← capavisor binary" }
+            else if is_heap { "  ← capavisor heap (BSS)" }
+            else { "" }
+        } else { "" };
+        serial_println!("  [{:#011x}..{:#011x})  {:>8}  {}{}{}",
+            entry.base, entry_end,
+            fmt_kib(entry.length),
+            type_str,
+            marker,
+            capa_marker,
+        );
+    }
+    serial_println!();
+
+    // 3. META pool summary
+    let meta_total_bytes: u64 = partition.meta_regions[..partition.meta_count]
+        .iter().map(|r| r.length).sum();
+    serial_println!("META pool: {} KiB across {} physical region(s):",
+        meta_total_bytes / 1024, partition.meta_count);
+    for i in 0..partition.meta_count {
+        let r = &partition.meta_regions[i];
+        serial_println!("  region [{}]: phys [{:#011x}..{:#011x})  {} KiB",
+            i, r.base, r.base + r.length, r.length / 1024);
+    }
+    serial_println!("  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT  ({} pages = {} KiB)",
+        partition.meta_breakdown.vmxon_pages,
+        partition.meta_breakdown.vmcs_pages,
+        partition.meta_breakdown.vapic_pages,
+        partition.meta_breakdown.ept_pages,
+        partition.meta_breakdown.total_pages,
+        partition.meta_breakdown.total_bytes() / 1024,
+    );
+    serial_println!();
+
+    // 4. ACPI regions mapped into capavisor page tables
+    serial_println!("ACPI/reserved regions mapped into capavisor PTs ({} entries):", acpi_mapped.len());
+    for (base, len) in &acpi_mapped {
+        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
+            base, base + len, len / 1024);
+    }
+    serial_println!();
+
+    // 5. dom0 RAM regions
+    serial_println!("dom0 RAM regions ({} entries, {} MiB total):",
+        partition.dom0_owned_count,
+        partition.dom0_owned[..partition.dom0_owned_count].iter().map(|r| r.length).sum::<u64>() / (1024*1024));
+    for r in &partition.dom0_owned[..partition.dom0_owned_count] {
+        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
+            r.base, r.base + r.length, r.length / 1024);
+    }
+    serial_println!();
+
+    // 6. Final dom0 e820 (what Linux will see): dom0 RAM + META RESERVED + non_ram_e820, sorted.
+    //    This mirrors exactly what load_linux() will write into boot_params.e820_table.
+    {
+        let mut e820_all: alloc::vec::Vec<(u64, u64, u32)> = alloc::vec::Vec::new();
+        for r in &partition.dom0_owned[..partition.dom0_owned_count] {
+            if r.length > 0 { e820_all.push((r.base, r.length, 1)); }
+        }
+        for i in 0..partition.meta_count {
+            let r = &partition.meta_regions[i];
+            if r.length > 0 { e820_all.push((r.base, r.length, 2)); }
+        }
+        for e in &non_ram_e820 {
+            if e.size > 0 { e820_all.push((e.addr, e.size, e.entry_type)); }
+        }
+        e820_all.sort_by_key(|e| e.0);
+        serial_println!("dom0 e820 table ({} entries, as seen by Linux):", e820_all.len());
+        for (base, size, typ) in &e820_all {
+            let type_str = match *typ {
+                1 => "RAM     ",
+                2 => "RESERVED",
+                3 => "ACPI    ",
+                4 => "NVS     ",
+                _ => "OTHER   ",
+            };
+            serial_println!("  type={} ({})  [{:#011x}..{:#011x})  {} KiB",
+                typ, type_str, base, base + size, size / 1024);
+        }
+        serial_println!();
+    }
+
     let cpu_lapic_ids: Vec<u32> = cpus.iter().map(|c| c.lapic_id).collect();
 
     PlatformInfo {
@@ -278,6 +427,7 @@ pub fn platform(
         uc_ranges,
         non_ram_e820,
         passthrough_regions,
+        acpi_mapped,
     }
 }
 
@@ -344,29 +494,27 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
     const ROOT_ID: DomainId = 0;
 
-    // Map the META pool into the HHDM before any allocations touch it.
-    crate::mem::map_phys_range(
-        info.partition.meta_pool.base,
-        info.partition.meta_pool.length,
-        info.hhdm_offset,
-    );
-
     let platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges));
     platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
-    // Hand the FULL meta_pool to the platform — all hardware allocations
-    // (VMXON, VMCS, VAPIC, EPT) come from this single pool.
-    platform.bootstrap_give_meta(ROOT_ID, info.partition.meta_pool);
 
-    serial_println!(
-        "ThemisPlatform: META pool {:#x}+{:#x} ({} KiB, {} pages total)",
-        info.partition.meta_pool.base,
-        info.partition.meta_pool.length,
-        info.partition.meta_pool.length / 1024,
-        info.partition.meta_pool.length / 4096,
-    );
-    serial_println!(
-        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
+    // Map META regions into HHDM and give them to the platform.
+    for i in 0..info.partition.meta_count {
+        let r = info.partition.meta_regions[i];
+        crate::mem::map_phys_range(r.base, r.length, info.hhdm_offset);
+        platform.bootstrap_give_meta(ROOT_ID, r);
+    }
+
+    serial_println!("ThemisPlatform: META pool {} KiB across {} region(s):",
+        info.partition.meta_regions[..info.partition.meta_count]
+            .iter().map(|r| r.length).sum::<u64>() / 1024,
+        info.partition.meta_count);
+    for i in 0..info.partition.meta_count {
+        let r = &info.partition.meta_regions[i];
+        serial_println!("  [{:#011x}..{:#011x})  {} KiB",
+            r.base, r.base + r.length, r.length / 1024);
+    }
+    serial_println!("  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
         info.partition.meta_breakdown.vmxon_pages,
         info.partition.meta_breakdown.vmcs_pages,
         info.partition.meta_breakdown.vapic_pages,
@@ -387,8 +535,8 @@ pub struct CapaState {
     pub platform: crate::platform::ThemisPlatform,
     pub root_domain: capability_engine::CapabilityRef<capability_engine::Domain>,
     pub mem_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
-    /// META capability for dom0: owns the hypervisor-internal pool (VMCS, EPT pages, etc.).
-    pub meta_cap: capability_engine::CapabilityRef<capability_engine::MemoryRegion>,
+    /// META capabilities for dom0: one per disjoint META physical region.
+    pub meta_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
 }
 
 // ── Phase 2c: Capability engine + EPT ────────────────────────────────────── //
@@ -442,7 +590,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     // ── Memory capabilities ────────────────────────────────────────────── //
 
     let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
-    let meta_cap;
+    let meta_caps;
     {
         let mut dom = root_domain.write();
         let mut sub = 1u64;
@@ -492,30 +640,33 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             sub += 1;
         }
 
-        // ── META capability ───────────────────────────────────────────── //
+        // ── META capabilities ─────────────────────────────────────────────── //
         //
-        // The META pool was already handed to the platform allocator in
+        // The META regions were already handed to the platform allocator in
         // bootstrap_give_meta().  Here we create the matching capability
-        // record so that dom0's capability state reflects ownership of those
-        // pages.  No GiveMetaMem update is needed — the allocator is already
-        // populated.
-        let meta = &info.partition.meta_pool;
-        let cap = Capability::new_root(
-            ROOT_ID,
-            sub,
-            MemoryRegion::new_root(meta.base, meta.length),
-        );
-        {
-            let mut c = cap.write();
-            c.owned.attributes = Attributes::from_bits(Attributes::META).canonicalize();
+        // records so that dom0's capability state reflects ownership of those
+        // pages.  One META-flagged MemoryRegion capability per physical META region.
+        let mut meta_caps_local: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
+        for i in 0..info.partition.meta_count {
+            let r = &info.partition.meta_regions[i];
+            let cap = Capability::new_root(
+                ROOT_ID,
+                sub,
+                MemoryRegion::new_root(r.base, r.length),
+            );
+            {
+                let mut c = cap.write();
+                c.owned.attributes = Attributes::from_bits(Attributes::META).canonicalize();
+            }
+            dom.data.add_memory_capability(sub, Arc::downgrade(&cap));
+            serial_println!(
+                "  meta cap #{}: [{:#011x}..{:#011x})  {} KiB  {} pages",
+                sub, r.base, r.base + r.length, r.length / 1024, r.length / 4096,
+            );
+            meta_caps_local.push(cap);
+            sub += 1;
         }
-        dom.data.add_memory_capability(sub, Arc::downgrade(&cap));
-        serial_println!(
-            "  meta cap #{}: {:#x}+{:#x} ({} KiB, {} pages)",
-            sub, meta.base, meta.length, meta.length / 1024,
-            meta.length / 4096,
-        );
-        meta_cap = cap;
+        meta_caps = meta_caps_local;
     }
 
     // ── Build EPT via UpdateBatch ──────────────────────────────────────── //
@@ -587,7 +738,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     );
     serial_println!("=== P2c: done ===");
 
-    CapaState { platform, root_domain, mem_caps, meta_cap }
+    CapaState { platform, root_domain, mem_caps, meta_caps }
 }
 
 // ── Phase 2d output ───────────────────────────────────────────────────────── //
@@ -619,6 +770,16 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
 
     serial_println!();
     serial_println!("=== P2d: VMCS setup ===");
+
+    // Set up our own GDT (null + code64 + data + per-core TSS) and load TR.
+    // Limine does not set TR, so `str` would return 0 without this step,
+    // causing VMLAUNCH error 8 ("VM entry with invalid host-state field(s)").
+    crate::gdt::init();
+    crate::gdt::load_for_core(0); // BSP = core 0
+    serial_println!("  GDT loaded: base={:#x}  TR selector={:#06x}  TR base={:#x}",
+        crate::gdt::gdtr_base(),
+        crate::gdt::tss_selector(0),
+        crate::gdt::tss_base(0));
 
     let num_vps = info.num_cores;
     let eptp = capa.platform.eptp(0)
@@ -767,7 +928,7 @@ pub fn linux(
         initrd_mod,
         info.hhdm_offset,
         &info.partition.dom0_owned[..info.partition.dom0_owned_count],
-        info.partition.meta_pool,
+        &info.partition.meta_regions[..info.partition.meta_count],
         &info.non_ram_e820,
         acpi_rsdp_addr,
         // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
