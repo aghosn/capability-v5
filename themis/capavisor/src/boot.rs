@@ -18,6 +18,7 @@ use limine::mp::Cpu;
 
 use crate::acpi::AcpiInfo;
 use crate::domain::Domain;
+use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
 use crate::pci::PciDevice;
 use crate::vmx::CpuFeatures;
@@ -41,6 +42,12 @@ pub struct PlatformInfo {
     /// Built from Limine RESERVED + FRAMEBUFFER entries during Phase 1a.
     /// Shared with `ThemisPlatform` via Arc to avoid copying.
     pub uc_ranges: alloc::sync::Arc<UncacheableRanges>,
+    /// Non-RAM e820 entries derived from the Limine memory map.
+    /// Includes RESERVED, FRAMEBUFFER, BOOTLOADER_RECLAIMABLE, KERNEL_AND_MODULES
+    /// (all as TYPE_RESERVED), ACPI_RECLAIMABLE (TYPE_ACPI), ACPI_NVS (TYPE_NVS),
+    /// and the capavisor heap region (TYPE_RESERVED).
+    /// Passed to `load_linux()` to build a complete e820 for dom0.
+    pub non_ram_e820: Vec<E820Entry>,
 }
 
 /// State after VMX init (Phase 2a–2b).
@@ -120,6 +127,34 @@ pub fn platform(
         }
     }
     serial_println!("UC ranges:         {} MMIO region(s) registered", uc_ranges.len());
+
+    // ── Build non-RAM e820 entries ────────────────────────────────────────── //
+    // USABLE entries are skipped here — they are replaced by explicit entries in
+    // load_linux(): dom0_owned as TYPE_RAM, meta_pool and heap as TYPE_RESERVED.
+    // All other Limine entry types are translated directly to e820 types.
+    let mut non_ram_e820: Vec<E820Entry> = Vec::new();
+    for entry in entries.iter() {
+        let e820_type = match entry.entry_type {
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE    => E820Entry::TYPE_ACPI,
+            limine::memory_map::EntryType::ACPI_NVS            => E820Entry::TYPE_NVS,
+            limine::memory_map::EntryType::RESERVED
+            | limine::memory_map::EntryType::FRAMEBUFFER
+            | limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
+            | limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => E820Entry::TYPE_RESERVED,
+            // USABLE and BAD_MEMORY handled separately; skip all others.
+            _ => continue,
+        };
+        non_ram_e820.push(E820Entry { addr: entry.base, size: entry.length, entry_type: e820_type });
+    }
+    // The heap is carved from a USABLE region and excluded from dom0_owned, so it
+    // doesn't appear in either list above.  Add it explicitly as RESERVED so Linux
+    // sees a contiguous picture and doesn't attempt to use those pages.
+    non_ram_e820.push(E820Entry {
+        addr:       inventory.heap_phys,
+        size:       inventory.heap_size,
+        entry_type: E820Entry::TYPE_RESERVED,
+    });
+    serial_println!("Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)", non_ram_e820.len());
 
     // ── Phase 1b: Memory partitioning ────────────────────────────────────── //
 
@@ -222,6 +257,7 @@ pub fn platform(
         acpi,
         pci_devices,
         uc_ranges,
+        non_ram_e820,
     }
 }
 
@@ -571,6 +607,8 @@ pub fn linux(
         initrd_mod,
         info.hhdm_offset,
         &info.partition.dom0_owned[..info.partition.dom0_owned_count],
+        info.partition.meta_pool,
+        &info.non_ram_e820,
         // intel_iommu=off: workaround until P7f-dmar strips the DMAR table.
         "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off",
     );

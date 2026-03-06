@@ -1861,7 +1861,7 @@ The following three invariants govern what dom0 sees and can access:
     range into WB and UC segments, mapping each sub-range with the correct
     `EptMemoryType`.  Called from the `ChangeRights` handler in `apply_update`.
 
-- [ ] **P7f-e820**: Build a complete e820 for dom0 from the full Limine memory map:
+- [x] **P7f-e820**: Build a complete e820 for dom0 from the full Limine memory map:
   - `dom0_owned` regions → `TYPE_RAM` (usable RAM for Linux).
   - `ACPI_RECLAIMABLE` → `TYPE_ACPI` (Linux reads ACPI tables from here).
   - `ACPI_NVS` → `TYPE_NVS` (firmware non-volatile storage; Linux must not overwrite).

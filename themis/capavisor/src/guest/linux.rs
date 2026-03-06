@@ -373,13 +373,17 @@ pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
 /// * `kernel`       — Limine module carrying the bzImage (already HHDM-mapped).
 /// * `initrd`       — Optional initrd Limine module.
 /// * `hhdm_offset`  — HHDM offset for phys → virt address conversion.
-/// * `dom0_regions` — dom0-owned physical regions; reported verbatim as e820 RAM.
+/// * `dom0_regions` — dom0-owned physical regions; reported as e820 TYPE_RAM.
+/// * `meta_pool`    — META pool region; reported as e820 TYPE_RESERVED (hole for Linux).
+/// * `non_ram`      — Non-RAM e820 entries (RESERVED/ACPI/NVS) from the Limine map.
 /// * `cmdline`      — Kernel command line (truncated to 255 bytes).
 pub fn load_linux(
     kernel: &ModuleInfo,
     initrd: Option<&ModuleInfo>,
     hhdm_offset: u64,
     dom0_regions: &[PhysRegion],
+    meta_pool: PhysRegion,
+    non_ram: &[E820Entry],
     cmdline: &str,
 ) -> LinuxLoadInfo {
     // ── Parse bzImage header ─────────────────────────────────────────────── //
@@ -436,24 +440,49 @@ pub fn load_linux(
     // TODO(P7f-dmar): replace with a DMAR-stripped RSDP pointer.
     bp.set_acpi_rsdp_addr(0);
 
-    // e820: report dom0-owned regions as usable RAM.
+    // ── Build complete e820 table ─────────────────────────────────────────── //
+    // Combine: dom0-owned RAM + META pool hole + all non-RAM entries (ACPI/NVS/RESERVED).
+    // Sort by base address so Linux sees a well-ordered map.
     let mut e820_buf = [E820Entry::default(); 128];
-    let count = dom0_regions.len().min(128);
-    for (i, r) in dom0_regions.iter().take(count).enumerate() {
-        e820_buf[i] = E820Entry {
-            addr:       r.base,
-            size:       r.length,
-            entry_type: E820Entry::TYPE_RAM,
-        };
+    let mut count = 0usize;
+
+    let push = |buf: &mut [E820Entry; 128], n: &mut usize, e: E820Entry| {
+        if *n < 128 { buf[*n] = e; *n += 1; }
+    };
+
+    for r in dom0_regions {
+        push(&mut e820_buf, &mut count, E820Entry {
+            addr: r.base, size: r.length, entry_type: E820Entry::TYPE_RAM,
+        });
     }
+    // META pool is carved from dom0_owned but owned by the hypervisor — mark reserved.
+    if meta_pool.length > 0 {
+        push(&mut e820_buf, &mut count, E820Entry {
+            addr: meta_pool.base, size: meta_pool.length, entry_type: E820Entry::TYPE_RESERVED,
+        });
+    }
+    for e in non_ram {
+        push(&mut e820_buf, &mut count, *e);
+    }
+
+    // Sort entries by base address (insertion sort — small N, no alloc needed).
+    let entries = &mut e820_buf[..count];
+    for i in 1..entries.len() {
+        let mut j = i;
+        while j > 0 && entries[j - 1].addr > entries[j].addr {
+            entries.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+
     bp.set_e820_table(&e820_buf[..count]);
 
     // Copy boot_params into guest physical memory via HHDM.
     let bp_dst = (BOOT_PARAMS_PHYS + hhdm_offset) as *mut u8;
     unsafe { core::ptr::copy_nonoverlapping(bp.as_bytes().as_ptr(), bp_dst, 4096); }
     serial_println!(
-        "  boot_params @ {:#x}  e820_entries={}",
-        BOOT_PARAMS_PHYS, count,
+        "  boot_params @ {:#x}  e820_entries={}  (RAM={} META=1 non-RAM={})",
+        BOOT_PARAMS_PHYS, count, dom0_regions.len(), non_ram.len(),
     );
 
     LinuxLoadInfo {
