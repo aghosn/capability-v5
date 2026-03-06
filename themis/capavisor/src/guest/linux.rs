@@ -360,6 +360,9 @@ pub struct LinuxLoadInfo {
 pub const BOOT_PARAMS_PHYS: u64  = 0x0_7000;
 pub const CMDLINE_PHYS: u64      = 0x0_8000;
 pub const INITIAL_RSP_PHYS: u64  = 0x0_8FF8;
+/// Destination for the DMAR-stripped RSDP + XSDT copies (4 KiB page).
+/// Layout: RSDP at +0x000, XSDT at +0x100.
+pub const ACPI_COPY_PHYS: u64    = 0x0_9000;
 pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
 
 /// Load a Linux bzImage into dom0 physical memory and write `struct boot_params`.
@@ -376,6 +379,8 @@ pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
 /// * `dom0_regions` — dom0-owned physical regions; reported as e820 TYPE_RAM.
 /// * `meta_pool`    — META pool region; reported as e820 TYPE_RESERVED (hole for Linux).
 /// * `non_ram`      — Non-RAM e820 entries (RESERVED/ACPI/NVS) from the Limine map.
+/// * `acpi_rsdp_addr` — physical address of the (DMAR-stripped) RSDP copy to
+///   pass to Linux; 0 means Linux will scan for the RSDP itself.
 /// * `cmdline`      — Kernel command line (truncated to 255 bytes).
 pub fn load_linux(
     kernel: &ModuleInfo,
@@ -384,6 +389,7 @@ pub fn load_linux(
     dom0_regions: &[PhysRegion],
     meta_pool: PhysRegion,
     non_ram: &[E820Entry],
+    acpi_rsdp_addr: u64,
     cmdline: &str,
 ) -> LinuxLoadInfo {
     // ── Parse bzImage header ─────────────────────────────────────────────── //
@@ -436,9 +442,8 @@ pub fn load_linux(
     if initrd_phys != 0 {
         bp.set_ramdisk(initrd_phys, initrd_size);
     }
-    // ACPI RSDP: 0 → Linux will scan for it.
-    // TODO(P7f-dmar): replace with a DMAR-stripped RSDP pointer.
-    bp.set_acpi_rsdp_addr(0);
+    // ACPI RSDP: point Linux at our DMAR-stripped copy, or 0 to let it scan.
+    bp.set_acpi_rsdp_addr(acpi_rsdp_addr);
 
     // ── Build complete e820 table ─────────────────────────────────────────── //
     // Combine: dom0-owned RAM + META pool hole + all non-RAM entries (ACPI/NVS/RESERVED).

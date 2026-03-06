@@ -701,6 +701,16 @@ pub fn linux(
         serial_println!("  (no dom0-initrd module)");
     }
 
+    // ── Strip DMAR from ACPI tables exposed to dom0 ──────────────────────── //
+    // Write DMAR-stripped RSDP + XSDT copies into dom0 memory so Linux never
+    // discovers VT-d hardware.  Falls back to 0 (Linux scans for RSDP) if there
+    // is no DMAR table or the platform uses ACPI 1.0.
+    let acpi_rsdp_addr = crate::acpi::strip_dmar(
+        info.acpi.rsdp_phys,
+        lx::ACPI_COPY_PHYS,
+        info.hhdm_offset,
+    ).unwrap_or(0);
+
     // ── Load kernel + initrd, write boot_params ──────────────────────────── //
     let load = lx::load_linux(
         kernel_mod,
@@ -709,7 +719,9 @@ pub fn linux(
         &info.partition.dom0_owned[..info.partition.dom0_owned_count],
         info.partition.meta_pool,
         &info.non_ram_e820,
-        // intel_iommu=off: workaround until P7f-dmar strips the DMAR table.
+        acpi_rsdp_addr,
+        // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
+        // is incomplete; can be removed once P7f-dmar is fully verified.
         "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off",
     );
 

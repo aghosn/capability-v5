@@ -177,6 +177,8 @@ pub struct Iso {
 
 /// Summary of all ACPI information needed by Themis.
 pub struct AcpiInfo {
+    /// Physical address of the RSDP as given by Limine.
+    pub rsdp_phys: u64,
     /// Processor topology from MADT (BSP + APs with LAPIC IDs).
     pub processors: Vec<ProcessorInfo>,
     /// I/O APICs from MADT.
@@ -260,6 +262,7 @@ impl AcpiInfo {
             .any(|(_, hdr)| hdr.signature == Signature::DMAR);
 
         Self {
+            rsdp_phys,
             processors,
             io_apics,
             isos,
@@ -268,4 +271,145 @@ impl AcpiInfo {
             has_dmar,
         }
     }
+}
+
+// ── DMAR stripping ─────────────────────────────────────────────────────── //
+
+/// Copy the RSDP and XSDT into `dest_phys` in dom0 memory, removing the DMAR
+/// table pointer so Linux never discovers VT-d hardware.
+///
+/// Layout at `dest_phys` after the call:
+/// ```text
+/// dest_phys + 0x000 : modified RSDP copy  (36 bytes, ACPI 2.0)
+/// dest_phys + 0x100 : modified XSDT copy  (≤ 3840 bytes)
+/// ```
+///
+/// Returns `Some(dest_phys)` on success (caller passes this to
+/// `boot_params.acpi_rsdp_addr`).  Returns `None` if there is no DMAR entry
+/// (nothing to strip) or if the RSDP is ACPI 1.0-only (no XSDT).
+///
+/// # Safety
+/// `dest_phys` must be a valid, writable dom0-owned physical page accessible
+/// via HHDM.  `rsdp_phys` must point to a valid ACPI RSDP.
+pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u64> {
+    use crate::serial_println;
+
+    // ── Read and validate the RSDP ───────────────────────────────────────── //
+    // ACPI 2.0 RSDP is exactly 36 bytes.
+    const RSDP_LEN:  usize = 36;
+    const SDT_HDR:   usize = 36; // SDT header size (same 36 bytes)
+    const XSDT_MAX:  usize = 4096 - 0x100; // max XSDT size we'll handle
+
+    let rsdp_virt = (rsdp_phys + hhdm_offset) as *const u8;
+    let mut rsdp_buf = [0u8; RSDP_LEN];
+    unsafe { core::ptr::copy_nonoverlapping(rsdp_virt, rsdp_buf.as_mut_ptr(), RSDP_LEN); }
+
+    if &rsdp_buf[..8] != b"RSD PTR " {
+        serial_println!("ACPI strip_dmar: bad RSDP signature — skipping");
+        return None;
+    }
+    let revision = rsdp_buf[15];
+    if revision < 2 {
+        // ACPI 1.0 has no XSDT; RSDT stripping is not implemented.
+        serial_println!("ACPI strip_dmar: ACPI 1.0 RSDP (no XSDT) — skipping");
+        return None;
+    }
+
+    // ── Read and validate the XSDT ───────────────────────────────────────── //
+    let xsdt_phys = unsafe {
+        (rsdp_virt.add(24) as *const u64).read_unaligned()
+    };
+    if xsdt_phys == 0 {
+        return None;
+    }
+
+    let xsdt_virt = (xsdt_phys + hhdm_offset) as *const u8;
+    let xsdt_len = unsafe {
+        (xsdt_virt.add(4) as *const u32).read_unaligned() as usize
+    };
+    if xsdt_len < SDT_HDR || xsdt_len > XSDT_MAX {
+        serial_println!("ACPI strip_dmar: XSDT length {} out of range — skipping", xsdt_len);
+        return None;
+    }
+
+    // Verify XSDT signature.
+    let xsdt_sig = unsafe { core::slice::from_raw_parts(xsdt_virt, 4) };
+    if xsdt_sig != b"XSDT" {
+        serial_println!("ACPI strip_dmar: unexpected XSDT signature — skipping");
+        return None;
+    }
+
+    // ── Copy XSDT into a stack buffer and strip DMAR ─────────────────────── //
+    let mut xsdt_buf = [0u8; XSDT_MAX];
+    unsafe { core::ptr::copy_nonoverlapping(xsdt_virt, xsdt_buf.as_mut_ptr(), xsdt_len); }
+
+    let num_entries = (xsdt_len - SDT_HDR) / 8;
+    let mut write_idx = 0usize;
+    let mut found_dmar = false;
+
+    for i in 0..num_entries {
+        let src_off = SDT_HDR + i * 8;
+        let table_phys = unsafe {
+            (xsdt_buf.as_ptr().add(src_off) as *const u64).read_unaligned()
+        };
+        if table_phys == 0 {
+            continue;
+        }
+        // Peek at the 4-byte signature of the pointed-to table.
+        let table_virt = (table_phys + hhdm_offset) as *const u8;
+        let sig = unsafe { core::slice::from_raw_parts(table_virt, 4) };
+        if sig == b"DMAR" {
+            found_dmar = true;
+            continue; // drop this entry
+        }
+        // Keep the entry, compacting the array.
+        let dst_off = SDT_HDR + write_idx * 8;
+        unsafe {
+            (xsdt_buf.as_mut_ptr().add(dst_off) as *mut u64)
+                .write_unaligned(table_phys);
+        }
+        write_idx += 1;
+    }
+
+    if !found_dmar {
+        return None; // no DMAR present — nothing to strip
+    }
+
+    // ── Update XSDT length and recompute checksum ────────────────────────── //
+    let new_xsdt_len = SDT_HDR + write_idx * 8;
+    // Zero the removed tail.
+    for b in &mut xsdt_buf[new_xsdt_len..xsdt_len] { *b = 0; }
+    // Write new length.
+    unsafe {
+        (xsdt_buf.as_mut_ptr().add(4) as *mut u32).write_unaligned(new_xsdt_len as u32);
+    }
+    // Recompute checksum (byte 9): sum of all table bytes must be 0 mod 256.
+    xsdt_buf[9] = 0;
+    let sum = xsdt_buf[..new_xsdt_len].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    xsdt_buf[9] = sum.wrapping_neg();
+
+    // ── Write XSDT copy to dest_phys + 0x100 ────────────────────────────── //
+    let xsdt_dest_phys = dest_phys + 0x100;
+    let xsdt_dest_virt = (xsdt_dest_phys + hhdm_offset) as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(xsdt_buf.as_ptr(), xsdt_dest_virt, new_xsdt_len); }
+
+    // ── Update RSDP copy: new XSDT address + extended checksum ───────────── //
+    unsafe {
+        (rsdp_buf.as_mut_ptr().add(24) as *mut u64).write_unaligned(xsdt_dest_phys);
+    }
+    // extended_checksum (offset 32) covers all 36 RSDP bytes.
+    rsdp_buf[32] = 0;
+    let sum = rsdp_buf.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    rsdp_buf[32] = sum.wrapping_neg();
+
+    // Write RSDP copy to dest_phys.
+    let rsdp_dest_virt = (dest_phys + hhdm_offset) as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(rsdp_buf.as_ptr(), rsdp_dest_virt, RSDP_LEN); }
+
+    serial_println!(
+        "ACPI: DMAR stripped — RSDP copy @ {:#x}, XSDT @ {:#x} ({} tables → {})",
+        dest_phys, xsdt_dest_phys, num_entries, write_idx,
+    );
+
+    Some(dest_phys)
 }

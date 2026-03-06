@@ -1885,7 +1885,7 @@ The following three invariants govern what dom0 sees and can access:
     Limine entries, emitting `ChangeRights` for mappable non-RAM regions.
     Requires `PlatformInfo` to carry the raw Limine entries.
 
-- [ ] **P7f-dmar**: Strip DMAR from the ACPI tables exposed to dom0:
+- [x] **P7f-dmar**: Strip DMAR from the ACPI tables exposed to dom0:
   - Copy the ACPI RSDP + XSDT (or RSDT) into dom0_owned memory.  Locate the
     DMAR entry in the XSDT pointer array and zero it out (or remove it by
     shifting remaining entries and decrementing the table length + recomputing
