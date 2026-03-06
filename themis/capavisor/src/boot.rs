@@ -18,7 +18,7 @@ use limine::mp::Cpu;
 
 use crate::acpi::AcpiInfo;
 use crate::domain::Domain;
-use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory};
+use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
 use crate::pci::PciDevice;
 use crate::vmx::CpuFeatures;
 use crate::{serial_print, serial_println, AP_READY_COUNT, SERIAL_LOCK};
@@ -37,6 +37,10 @@ pub struct PlatformInfo {
     pub cpu_lapic_ids: Vec<u32>,
     pub acpi: AcpiInfo,
     pub pci_devices: Option<Vec<PciDevice>>,
+    /// Physical ranges that must be mapped UC in any EPT (MMIO regions).
+    /// Built from Limine RESERVED + FRAMEBUFFER entries during Phase 1a.
+    /// Shared with `ThemisPlatform` via Arc to avoid copying.
+    pub uc_ranges: alloc::sync::Arc<UncacheableRanges>,
 }
 
 /// State after VMX init (Phase 2a–2b).
@@ -100,6 +104,22 @@ pub fn platform(
         v.push(4);
         serial_println!("Heap check:        alloc::vec![1,2,3,4] → len={} ✓", v.len());
     }
+
+    // ── Build UC range table from RESERVED + FRAMEBUFFER entries ─────────── //
+    // These are device MMIO regions that must be mapped uncacheable in the EPT.
+    // BOOTLOADER_RECLAIMABLE and KERNEL_AND_MODULES are capavisor-internal and
+    // must NOT be mapped in the EPT at all (not UC, just absent).
+    let uc_ranges = alloc::sync::Arc::new(UncacheableRanges::new());
+    for entry in entries.iter() {
+        match entry.entry_type {
+            limine::memory_map::EntryType::RESERVED
+            | limine::memory_map::EntryType::FRAMEBUFFER => {
+                uc_ranges.add(entry.base, entry.length);
+            }
+            _ => {}
+        }
+    }
+    serial_println!("UC ranges:         {} MMIO region(s) registered", uc_ranges.len());
 
     // ── Phase 1b: Memory partitioning ────────────────────────────────────── //
 
@@ -201,6 +221,7 @@ pub fn platform(
         cpu_lapic_ids,
         acpi,
         pci_devices,
+        uc_ranges,
     }
 }
 
@@ -269,7 +290,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         info.hhdm_offset,
     );
 
-    let platform = ThemisPlatform::new();
+    let platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges));
     platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
     // Hand the FULL meta_pool to the platform — all hardware allocations

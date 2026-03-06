@@ -46,7 +46,7 @@ use spin::{Mutex, RwLock};
 use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
 use ept::{EptEntryFlags, EptMapper, EptMemoryType};
 
-use crate::mem::{MetaAllocator, PhysRegion};
+use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
 
 // ── Constants ─────────────────────────────────────────────────────────────── //
 
@@ -196,6 +196,55 @@ impl PlatformDomain {
     }
 }
 
+// ── UC-aware EPT range mapping helper ─────────────────────────────────────── //
+
+/// Map `[gpa, gpa+size)` → `[hpa, hpa+size)` into `ept`, splitting the range at
+/// UC boundaries so that MMIO sub-ranges use [`EptMemoryType::UC`] and all other
+/// sub-ranges use [`EptMemoryType::WB`].
+///
+/// The split is O(k log n) where k is the number of UC sub-ranges that intersect
+/// the mapping and n is the total number of registered UC regions — typically a
+/// handful of iterations for any real `ChangeRights` update.
+fn map_range_typed(
+    ept:       &mut EptMapper,
+    meta:      &mut crate::mem::MetaAllocator,
+    gpa:       u64,
+    hpa:       u64,
+    size:      usize,
+    flags:     EptEntryFlags,
+    uc_ranges: &UncacheableRanges,
+) {
+    let mut cur_gpa  = gpa;
+    let mut cur_hpa  = hpa;
+    let mut remaining = size;
+
+    while remaining > 0 {
+        match uc_ranges.first_overlap(cur_hpa, remaining as u64) {
+            None => {
+                // Remainder is entirely cacheable.
+                ept.map_range(meta, cur_gpa, cur_hpa, remaining, flags, EptMemoryType::WB);
+                return;
+            }
+            Some((ov_start, ov_end)) => {
+                // Map any WB prefix before the UC overlap.
+                if ov_start > cur_hpa {
+                    let wb_size = (ov_start - cur_hpa) as usize;
+                    ept.map_range(meta, cur_gpa, cur_hpa, wb_size, flags, EptMemoryType::WB);
+                    cur_gpa   += wb_size as u64;
+                    cur_hpa   += wb_size as u64;
+                    remaining -= wb_size;
+                }
+                // Map the UC segment.
+                let uc_size = ((ov_end - cur_hpa) as usize).min(remaining);
+                ept.map_range(meta, cur_gpa, cur_hpa, uc_size, flags, EptMemoryType::UC);
+                cur_gpa   += uc_size as u64;
+                cur_hpa   += uc_size as u64;
+                remaining -= uc_size;
+            }
+        }
+    }
+}
+
 // ── ThemisPlatformInner (everything behind the single Mutex) ─────────────── //
 
 struct ThemisPlatformInner {
@@ -206,16 +255,20 @@ struct ThemisPlatformInner {
     lapic_ids:      Vec<u32>,
     /// Cached HHDM offset from the first registered domain.
     hhdm_offset:    u64,
+    /// MMIO physical ranges that must be mapped UC in the EPT.
+    /// Read-only after boot; shared via Arc with PlatformInfo.
+    uc_ranges:      alloc::sync::Arc<UncacheableRanges>,
 }
 
 impl ThemisPlatformInner {
-    fn new() -> Self {
+    fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
         ThemisPlatformInner {
             domains:        BTreeMap::new(),
             core_to_domain: BTreeMap::new(),
             domain_to_core: BTreeMap::new(),
             lapic_ids:      Vec::new(),
             hhdm_offset:    0,
+            uc_ranges,
         }
     }
 }
@@ -245,15 +298,16 @@ pub struct ThemisPlatform {
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
-    pub fn new() -> Self {
+    ///
+    /// `uc_ranges` is the table of MMIO physical ranges (built from the Limine
+    /// memory map during `boot::platform()`) that must be mapped UC in the EPT.
+    pub fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
         ThemisPlatform {
             op_lock:     RwLock::new(()),
             update_lock: AtomicBool::new(false),
             barriers:    [Barrier::new(), Barrier::new()],
-            // SAFETY: AtomicBool is guaranteed to have the same bit pattern as
-            // a zeroed `u8`; false == 0x00.
             ipi_pending: unsafe { core::mem::zeroed() },
-            inner:       Mutex::new(ThemisPlatformInner::new()),
+            inner:       Mutex::new(ThemisPlatformInner::new(uc_ranges)),
         }
     }
 
@@ -414,6 +468,9 @@ impl Platform for ThemisPlatform {
 
             Update::ChangeRights { domain, address, size, physical, rights, .. } => {
                 let mut g = self.inner.lock();
+                // Clone the Arc before the mutable domain borrow to avoid
+                // simultaneous mutable + immutable borrow of `g`.
+                let uc_ranges = alloc::sync::Arc::clone(&g.uc_ranges);
                 let d = g
                     .domains
                     .get_mut(domain)
@@ -427,16 +484,13 @@ impl Platform for ThemisPlatform {
                 } else {
                     d.ensure_ept();
                     let flags = rights_to_ept_flags(rights);
-                    // All normal RAM uses WB; MMIO regions will use UC once
-                    // device enumeration is in place (Phase 4).
-                    let ept = d.ept.as_mut().unwrap();
-                    ept.map_range(
-                        &mut d.meta,
-                        *address,
-                        *physical,
-                        *size as usize,
-                        flags,
-                        EptMemoryType::WB,
+                    let ept   = d.ept.as_mut().unwrap();
+                    // Map the range, splitting at UC boundaries so that MMIO
+                    // regions get EptMemoryType::UC and RAM regions get WB.
+                    map_range_typed(
+                        ept, &mut d.meta,
+                        *address, *physical, *size as usize,
+                        flags, &uc_ranges,
                     );
                     // TODO(P4): update IOMMU domain page table with same mapping.
                 }

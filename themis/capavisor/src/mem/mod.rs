@@ -10,7 +10,9 @@
 mod inventory;
 mod meta_alloc;
 mod paging;
+mod uncacheable;
 
 pub use inventory::{MemoryPartition, MetaBreakdown, PhysRegion, PhysicalInventory};
 pub use meta_alloc::MetaAllocator;
 pub use paging::map_phys_range;
+pub use uncacheable::UncacheableRanges;
