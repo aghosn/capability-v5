@@ -305,6 +305,8 @@ pub struct CapaState {
     pub platform: crate::platform::ThemisPlatform,
     pub root_domain: capability_engine::CapabilityRef<capability_engine::Domain>,
     pub mem_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
+    /// META capability for dom0: owns the hypervisor-internal pool (VMCS, EPT pages, etc.).
+    pub meta_cap: capability_engine::CapabilityRef<capability_engine::MemoryRegion>,
 }
 
 // ── Phase 2c: Capability engine + EPT ────────────────────────────────────── //
@@ -313,11 +315,13 @@ pub struct CapaState {
 ///
 /// Receives the already-bootstrapped `ThemisPlatform` (domain 0 registered, full
 /// META pool given).  Builds the capability tree and drives an `UpdateBatch` of
-/// `ChangeRights` to map every dom0-owned region into the EPT.
+/// `ChangeRights` to map every dom0-owned region into the EPT.  Also creates a
+/// META-flagged capability record for the META pool so that dom0's capability
+/// state correctly reflects ownership of the hypervisor-internal pages.
 pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> CapaState {
     use alloc::sync::Arc;
     use capability_engine::{
-        Capability, Domain as CapaDomain, DomainId, MemoryRegion, Rights, UpdateBatch,
+        Attributes, Capability, Domain as CapaDomain, DomainId, MemoryRegion, Rights, UpdateBatch,
     };
 
     const ROOT_ID: DomainId = 0;
@@ -336,6 +340,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     // ── Memory capabilities ────────────────────────────────────────────── //
 
     let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
+    let meta_cap;
     {
         let mut dom = root_domain.write();
         let mut sub = 1u64;
@@ -357,6 +362,31 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             mem_caps.push(mem_cap);
             sub += 1;
         }
+
+        // ── META capability ───────────────────────────────────────────── //
+        //
+        // The META pool was already handed to the platform allocator in
+        // bootstrap_give_meta().  Here we create the matching capability
+        // record so that dom0's capability state reflects ownership of those
+        // pages.  No GiveMetaMem update is needed — the allocator is already
+        // populated.
+        let meta = &info.partition.meta_pool;
+        let cap = Capability::new_root(
+            ROOT_ID,
+            sub,
+            MemoryRegion::new_root(meta.base, meta.length),
+        );
+        {
+            let mut c = cap.write();
+            c.owned.attributes = Attributes::from_bits(Attributes::META).canonicalize();
+        }
+        dom.data.add_memory_capability(sub, Arc::downgrade(&cap));
+        serial_println!(
+            "  meta cap #{}: {:#x}+{:#x} ({} KiB, {} pages)",
+            sub, meta.base, meta.length, meta.length / 1024,
+            meta.length / 4096,
+        );
+        meta_cap = cap;
     }
 
     // ── Build EPT via UpdateBatch ──────────────────────────────────────── //
@@ -395,7 +425,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     );
     serial_println!("=== P2c: done ===");
 
-    CapaState { platform, root_domain, mem_caps }
+    CapaState { platform, root_domain, mem_caps, meta_cap }
 }
 
 // ── Phase 2d output ───────────────────────────────────────────────────────── //
