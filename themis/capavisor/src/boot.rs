@@ -4,9 +4,11 @@
 //! here so the entry point stays readable.
 //!
 //! Phase flow:
-//!   platform()  → PlatformInfo  (memory, SMP, ACPI, PCI)
-//!   vmx()       → VmxState      (feature detect, dom0 Domain, VMXON on BSP)
-//!   capa()      → CapaState     (capability engine, root domain, EPT build)
+//!   platform()     → PlatformInfo   (memory, SMP, ACPI, PCI)
+//!   init_themis()  → ThemisPlatform (register domain 0, give full META pool)
+//!   vmx()          → VmxState       (feature detect, VMXON — allocates from ThemisPlatform)
+//!   capa()         → CapaState      (capability engine, EPT — also uses ThemisPlatform)
+//!   vmcs()         → VmcsState      (VMCS setup — also uses ThemisPlatform)
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -204,9 +206,12 @@ pub fn platform(
 
 // ── Phase 2a-b: VMX init ─────────────────────────────────────────────────── //
 
-/// Phase 2a–2b: detect VMX features, create dom0 Domain, allocate VMXON
-/// regions, execute VMXON on BSP.
-pub fn vmx(info: &PlatformInfo) -> VmxState {
+/// Phase 2a–2b: detect VMX features, allocate VMXON regions from the platform's
+/// META pool, and execute VMXON on the BSP.
+///
+/// `platform` must already have domain 0 registered and its META pool populated
+/// (call `init_themis` first).
+pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> VmxState {
     // P2a — CPU feature detection.
     let features = crate::vmx::detect_features(info.acpi.has_dmar);
 
@@ -222,22 +227,13 @@ pub fn vmx(info: &PlatformInfo) -> VmxState {
 
     assert!(features.vmx, "VMX not supported — cannot continue");
 
-    // P2b — Bootstrap dom0 Domain and run VMXON on BSP.
-    crate::mem::map_phys_range(
-        info.partition.meta_pool.base,
-        info.partition.meta_pool.length,
-        info.hhdm_offset,
-    );
-
-    let mut dom0 = Domain::new(0, info.partition.meta_pool, info.hhdm_offset);
-    dom0.alloc_vmxon_regions(info.num_cores, features.vmcs_revision_id);
+    // P2b — Allocate VMXON regions from ThemisPlatform META and run VMXON on BSP.
+    let mut dom0 = Domain::new(0, info.hhdm_offset);
+    dom0.alloc_vmxon_regions(platform, info.num_cores, features.vmcs_revision_id);
 
     serial_println!();
-    serial_println!("dom0: META pool {:#x}  total={} alloc={} free={}",
-        info.partition.meta_pool.base,
-        dom0.meta.total_pages(),
-        dom0.meta.allocated_pages(),
-        dom0.meta.free_pages());
+    serial_println!("dom0: allocated {} VMXON pages from META pool",
+        info.num_cores);
 
     let bsp_index = info.cpu_lapic_ids.iter()
         .position(|&id| id == info.bsp_lapic_id)
@@ -249,6 +245,52 @@ pub fn vmx(info: &PlatformInfo) -> VmxState {
         info.bsp_lapic_id, bsp_index);
 
     VmxState { features, dom0, bsp_index }
+}
+
+// ── ThemisPlatform init ───────────────────────────────────────────────────── //
+
+/// Create and bootstrap `ThemisPlatform` for dom0.
+///
+/// Registers domain 0 and hands it the **full** META pool.  All subsequent
+/// allocations (VMXON, VMCS, VAPIC, EPT page-table pages) come from this single
+/// pool via `ThemisPlatform::alloc_meta_frame()` or the EPT walker.
+///
+/// Must be called before `vmx()`.
+pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
+    use crate::platform::ThemisPlatform;
+    use capability_engine::DomainId;
+
+    const ROOT_ID: DomainId = 0;
+
+    // Map the META pool into the HHDM before any allocations touch it.
+    crate::mem::map_phys_range(
+        info.partition.meta_pool.base,
+        info.partition.meta_pool.length,
+        info.hhdm_offset,
+    );
+
+    let platform = ThemisPlatform::new();
+    platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
+    // Hand the FULL meta_pool to the platform — all hardware allocations
+    // (VMXON, VMCS, VAPIC, EPT) come from this single pool.
+    platform.bootstrap_give_meta(ROOT_ID, info.partition.meta_pool);
+
+    serial_println!(
+        "ThemisPlatform: META pool {:#x}+{:#x} ({} KiB, {} pages total)",
+        info.partition.meta_pool.base,
+        info.partition.meta_pool.length,
+        info.partition.meta_pool.length / 1024,
+        info.partition.meta_pool.length / 4096,
+    );
+    serial_println!(
+        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
+        info.partition.meta_breakdown.vmxon_pages,
+        info.partition.meta_breakdown.vmcs_pages,
+        info.partition.meta_breakdown.vapic_pages,
+        info.partition.meta_breakdown.ept_pages,
+    );
+
+    platform
 }
 
 // ── Phase 2c output ───────────────────────────────────────────────────────── //
@@ -268,42 +310,21 @@ pub struct CapaState {
 
 /// Phase P2c: initialise the capability engine for dom0.
 ///
-/// 1. Registers root domain (id = 0) on the platform and hands it the META pool.
-/// 2. Creates the root [`Domain`] capability (born Sealed, all cores).
-/// 3. Creates one [`MemoryRegion`] capability per `dom0_owned` region.
-/// 4. Drives an initial `UpdateBatch` of [`ChangeRights`] updates through
-///    [`execute`] so that `ThemisPlatform::apply_update` maps every dom0-owned
-///    region into the EPT (identity GPA = HPA, RWX).
-///
-/// No cross-core sync is needed: APs are still parked at this point.
-pub fn capa(info: &PlatformInfo) -> CapaState {
+/// Receives the already-bootstrapped `ThemisPlatform` (domain 0 registered, full
+/// META pool given).  Builds the capability tree and drives an `UpdateBatch` of
+/// `ChangeRights` to map every dom0-owned region into the EPT.
+pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> CapaState {
     use alloc::sync::Arc;
     use capability_engine::{
         Capability, Domain as CapaDomain, DomainId, MemoryRegion, Rights, UpdateBatch,
     };
-    use crate::platform::ThemisPlatform;
 
     const ROOT_ID: DomainId = 0;
 
     serial_println!();
     serial_println!("=== P2c: capability engine init ===");
 
-    // ── 1. Platform: register root domain + give it META ──────────────── //
-
-    let platform = ThemisPlatform::new();
-
-    platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
-    platform.bootstrap_give_meta(ROOT_ID, info.partition.meta_pool);
-
-    serial_println!(
-        "  META pool: {:#x}+{:#x} ({} KiB, {} pages)",
-        info.partition.meta_pool.base,
-        info.partition.meta_pool.length,
-        info.partition.meta_pool.length / 1024,
-        info.partition.meta_pool.length / 4096,
-    );
-
-    // ── 2. Root domain capability ──────────────────────────────────────── //
+    // ── Root domain capability ─────────────────────────────────────────── //
 
     let root_domain = Capability::new_root(
         ROOT_ID,
@@ -311,7 +332,7 @@ pub fn capa(info: &PlatformInfo) -> CapaState {
         CapaDomain::new_root(info.num_cores),
     );
 
-    // ── 3. Memory capabilities ─────────────────────────────────────────── //
+    // ── Memory capabilities ────────────────────────────────────────────── //
 
     let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
     {
@@ -337,11 +358,11 @@ pub fn capa(info: &PlatformInfo) -> CapaState {
         }
     }
 
-    // ── 4. Build EPT via UpdateBatch ───────────────────────────────────── //
+    // ── Build EPT via UpdateBatch ──────────────────────────────────────── //
     //
     // Emit one ChangeRights per dom0-owned region (identity GPA = HPA, RWX).
-    // execute() calls apply_update() for each entry, which maps the region into
-    // the domain's EPT (allocating the root lazily on the first call).
+    // execute() calls apply_update() for each entry; ThemisPlatform lazily
+    // allocates the EPT root page from the META pool on the first call.
 
     let batch = {
         let mut b = UpdateBatch::new();
@@ -351,11 +372,11 @@ pub fn capa(info: &PlatformInfo) -> CapaState {
             }
             b.add_change_rights(
                 ROOT_ID,
-                region.base,    // GPA (identity)
+                region.base,  // GPA (identity)
                 region.length,
-                region.base,    // HPA
+                region.base,  // HPA
                 Rights::RWX,
-                false,          // additive — no TLB shootdown needed
+                false,
             );
         }
         b
@@ -369,10 +390,82 @@ pub fn capa(info: &PlatformInfo) -> CapaState {
 
     serial_println!(
         "  EPT built for dom0: {} regions, EPTP = {:#x}",
-        info.partition.dom0_owned_count,
-        eptp,
+        info.partition.dom0_owned_count, eptp,
     );
     serial_println!("=== P2c: done ===");
 
     CapaState { platform, root_domain, mem_caps }
+}
+
+// ── Phase 2d output ───────────────────────────────────────────────────────── //
+
+/// State produced by VMCS setup (Phase P2d).
+pub struct VmcsState {
+    /// Per-VP host stacks (heap-allocated, one per VP).
+    /// Kept alive here to prevent deallocation.
+    pub host_stacks: Vec<alloc::boxed::Box<[u8; HOST_STACK_BYTES]>>,
+}
+
+/// Size of each per-VP host VMX stack in bytes.
+pub const HOST_STACK_BYTES: usize = 4096 * 4; // 16 KiB
+
+// ── Phase 2d: VMCS allocation and setup ──────────────────────────────────── //
+
+/// Phase P2d: allocate and initialise a VMCS for each dom0 VP.
+///
+/// - Allocates VMCS and VAPIC pages from `vmx.dom0.meta` (the VMX-fixed sub-pool).
+/// - Allocates per-VP host stacks from the heap.
+/// - Calls [`crate::vmcs::setup_vmcs_for_vp`] for each VP (BSP VP only for now).
+/// - Records all per-VP state in `VmcsState`.
+pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsState {
+    use alloc::boxed::Box;
+    use crate::vmcs::setup_vmcs_for_vp;
+
+    serial_println!();
+    serial_println!("=== P2d: VMCS setup ===");
+
+    let num_vps = info.num_cores;
+    let eptp = capa.platform.eptp(0)
+        .expect("P2d: EPT root not set up — run boot::capa() first");
+
+    // Allocate VMCS and VAPIC pages from the META pool via ThemisPlatform.
+    vmx.dom0.alloc_vmcs_regions(&capa.platform, num_vps, vmx.features.vmcs_revision_id);
+    vmx.dom0.alloc_vapic_regions(&capa.platform, num_vps);
+
+    serial_println!(
+        "  Allocated {} VMCS + {} VAPIC pages from META pool",
+        num_vps, num_vps,
+    );
+
+    // Per-VP host stacks (heap, not META — stacks need no physical-contiguity).
+    let mut host_stacks: Vec<Box<[u8; HOST_STACK_BYTES]>> = Vec::with_capacity(num_vps);
+    for _ in 0..num_vps {
+        host_stacks.push(Box::new([0u8; HOST_STACK_BYTES]));
+    }
+
+    // Set up the VMCS for the BSP VP (vp_index = bsp_index).
+    // APs get their VMCS loaded at VMLAUNCH time (P7g mailbox).
+    let vp = vmx.bsp_index;
+    let stack = &host_stacks[vp];
+    let stack_top = stack.as_ptr() as u64 + HOST_STACK_BYTES as u64;
+    // Align to 16 bytes (required by System V ABI for CALL).
+    let stack_top_aligned = stack_top & !0xF;
+
+    unsafe {
+        setup_vmcs_for_vp(
+            vmx.dom0.vmcs_phys(vp),
+            vmx.dom0.vapic_phys(vp),
+            stack_top_aligned,
+            eptp,
+            vp,
+        );
+    }
+
+    serial_println!(
+        "  BSP VMCS ready: vp={} vmcs={:#x} stack_top={:#x}",
+        vp, vmx.dom0.vmcs_phys(vp), stack_top_aligned,
+    );
+    serial_println!("=== P2d: done ===");
+
+    VmcsState { host_stacks }
 }

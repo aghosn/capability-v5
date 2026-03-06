@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(naked_functions)]
 // Enable heap-allocated types (Vec, Box, BTreeMap, …) via the global allocator
 // declared below.  The allocator is *empty* at this stage; it is initialised
 // during Phase 1 boot once we have carved out a heap region from the Limine
@@ -21,6 +22,8 @@ mod guest;
 mod mem;
 mod pci;
 mod platform;
+mod vmcs;
+mod vmexit;
 mod vmx;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
@@ -126,16 +129,25 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 1: Platform discovery ──────────────────────────────────────── //
     let platform = boot::platform(entries, hhdm_offset, rsdp_phys, cpus, bsp_lapic_id);
 
+    // ── ThemisPlatform init: register dom0, hand it the full META pool ──────── //
+    // Must happen before boot::vmx() so that VMXON pages can be allocated from
+    // ThemisPlatform's MetaAllocator.
+    let themis = boot::init_themis(&platform);
+
     // ── Phase 2a–b: VMX feature detection + VMXON on BSP ─────────────────── //
-    let _vmx = boot::vmx(&platform);
+    let mut vmx_state = boot::vmx(&platform, &themis);
 
     // ── Phase 2c: Capability engine + EPT build ───────────────────────────── //
-    let _capa = boot::capa(&platform);
+    // `themis` is consumed here; further access via `capa.platform`.
+    let capa = boot::capa(&platform, themis);
 
-    // ── Phase 2d+: VMCS setup, VMEXIT dispatch (coming next) ─────────────── //
+    // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
+    let _vmcs = boot::vmcs(&platform, &mut vmx_state, &capa);
+
+    // ── Phase 2e+: VMEXIT dispatch wired; VMLAUNCH deferred to P7g ───────── //
 
     serial_println!();
-    serial_println!("Halting — Phase 2d+ not yet implemented.");
+    serial_println!("Halting — VMLAUNCH (P7g) not yet implemented.");
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }

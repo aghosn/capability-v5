@@ -148,6 +148,19 @@ impl ThemisPlatform {
         let g = self.inner.lock();
         g.domains.get(&domain_id)?.ept.as_ref().map(|e| e.eptp())
     }
+
+    /// Allocate one META page (4 KiB, zeroed) from `domain_id`'s pool.
+    ///
+    /// Used by `domain::Domain` allocation helpers for VMXON, VMCS, VAPIC pages.
+    /// Panics if the domain is not registered or its pool is exhausted.
+    pub fn alloc_meta_frame(&self, domain_id: DomainId) -> u64 {
+        let mut g = self.inner.lock();
+        let d = g
+            .domains
+            .get_mut(&domain_id)
+            .expect("alloc_meta_frame: domain not registered");
+        d.meta.alloc_frame()
+    }
 }
 
 // ── Platform trait ────────────────────────────────────────────────────────── //
