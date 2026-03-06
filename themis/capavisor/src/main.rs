@@ -89,6 +89,29 @@ pub(crate) static AP_READY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Spinlock for serializing AP serial output.
 pub(crate) static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 
+// ── AP launch synchronization ────────────────────────────────────────────── //
+//
+// BSP populates VMXON_PHYS (one entry per core) and PLATFORM_PTR (pointer to
+// the live ThemisPlatform) with Relaxed stores, then sets AP_LAUNCH_READY with
+// a Release store.  APs spin on AP_LAUNCH_READY (Acquire); the Release/Acquire
+// edge makes VMXON_PHYS and PLATFORM_PTR visible.  APs derive their VMCS phys
+// from the ThemisPlatform via vp_vmcs_phys() — no duplication of state.
+
+pub(crate) static AP_LAUNCH_READY: AtomicBool = AtomicBool::new(false);
+
+/// Per-core VMXON physical addresses, indexed by cpu.id.
+/// Populated by boot::vmx() after VMXON region allocation, visible to APs
+/// after AP_LAUNCH_READY (Release) → AP_LAUNCH_READY.load(Acquire).
+pub(crate) static VMXON_PHYS: [core::sync::atomic::AtomicU64; crate::platform::MAX_CORES] = {
+    const INIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [INIT; crate::platform::MAX_CORES]
+};
+
+/// Pointer to the fully-initialized ThemisPlatform; set in _start() before
+/// AP_LAUNCH_READY (Release).  APs load this after the Acquire on AP_LAUNCH_READY.
+pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPlatform> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
 // ── BSP entry point ──────────────────────────────────────────────────────── //
 
 /// BSP entry point called by the Limine bootloader.
@@ -163,15 +186,8 @@ pub extern "C" fn _start() -> ! {
     let linux = boot::linux(&platform, &modules);
 
     // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
-    serial_println!();
-    serial_println!("Halting — VMLAUNCH (P7g) not yet implemented.");
-    serial_println!(
-        "(kernel_entry={:#x} boot_params={:#x})",
-        linux.kernel_entry_phys, linux.boot_params_phys,
-    );
-    loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
-    }
+    PLATFORM_PTR.store(&capa.platform as *const _ as *mut _, Ordering::Relaxed);
+    boot::launch(&linux);
 }
 
 // ── AP entry point ───────────────────────────────────────────────────────── //
@@ -189,9 +205,37 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
 
-    loop {
-        core::arch::asm!("hlt", options(nomem, nostack));
+    // ── Spin until BSP sets AP_LAUNCH_READY ──────────────────────────────── //
+    while !AP_LAUNCH_READY.load(Ordering::Acquire) {
+        core::hint::spin_loop();
     }
+
+    let id = cpu.id as usize;
+    let vmxon_phys = crate::VMXON_PHYS[id].load(Ordering::Relaxed);
+    let vmcs_phys = unsafe { &*crate::PLATFORM_PTR.load(Ordering::Relaxed) }
+        .vp_vmcs_phys(0, id)
+        .expect("AP: no VMCS");
+
+    // Enable VMX on this AP.
+    crate::vmx::enable_vmx_on_core(vmxon_phys)
+        .expect("AP VMXON failed");
+
+    // Load the VMCS pre-configured by BSP (wait-for-SIPI activity state).
+    x86::bits64::vmx::vmptrld(vmcs_phys)
+        .expect("AP VMPTRLD failed");
+
+    // VMLAUNCH into wait-for-SIPI: AP waits here until Linux sends SIPI.
+    let rflags: u64;
+    core::arch::asm!(
+        "vmlaunch",
+        "pushfq",
+        "pop {rflags}",
+        rflags = out(reg) rflags,
+    );
+
+    let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR)
+        .unwrap_or(0);
+    panic!("AP{} VMLAUNCH failed: rflags={:#x} VM_INSTRUCTION_ERROR={}", cpu.id, rflags, error);
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

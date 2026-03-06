@@ -15,6 +15,7 @@ use crate::{serial_println};
 
 pub const EXIT_REASON_EXCEPTION_NMI: u32 = 0;
 pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
+pub const EXIT_REASON_SIPI: u32 = 4;
 pub const EXIT_REASON_CPUID: u32 = 10;
 pub const EXIT_REASON_HLT: u32 = 12;
 pub const EXIT_REASON_VMCALL: u32 = 18;
@@ -119,6 +120,34 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
     let basic_reason = exit_reason & 0xFFFF;
 
     match basic_reason {
+        EXIT_REASON_SIPI => {
+            // Linux AP startup: BSP sent SIPI to wake this AP.
+            // The 8-bit vector V in exit qualification specifies the startup
+            // address: physical = V × 0x1000, CS.selector = V × 0x100,
+            // CS.base = V × 0x1000, RIP = 0.
+            let qual   = vmx::vmread(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+            let vector = qual & 0xFF;
+            let cs_base     = vector << 12;
+            let cs_selector = vector << 8;
+
+            // Real-mode CS: present, code, 16-bit, byte-granular (0x009B).
+            vmx::vmwrite(vmcs::guest::CS_SELECTOR,     cs_selector).expect("vmwrite CS_SELECTOR");
+            vmx::vmwrite(vmcs::guest::CS_BASE,         cs_base).expect("vmwrite CS_BASE");
+            vmx::vmwrite(vmcs::guest::CS_LIMIT,        0xFFFF).expect("vmwrite CS_LIMIT");
+            vmx::vmwrite(vmcs::guest::CS_ACCESS_RIGHTS, 0x009B).expect("vmwrite CS_ACCESS_RIGHTS");
+            vmx::vmwrite(vmcs::guest::RIP,             0).expect("vmwrite guest RIP");
+            // Switch guest to real mode (PE=0, ET=1).
+            vmx::vmwrite(vmcs::guest::CR0,             0x10).expect("vmwrite guest CR0");
+            // Activate the AP (leave wait-for-SIPI).
+            vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 0).expect("vmwrite ACTIVITY_STATE");
+
+            serial_println!(
+                "[VMEXIT] SIPI vector={:#x} startup={:#x} — AP activated",
+                vector, cs_base,
+            );
+            // Do NOT call next_instruction() — SIPI is not an executed instruction.
+        }
+
         EXIT_REASON_EXTERNAL_INTERRUPT => {
             // Physical interrupt delivered to host. Nothing to do here —
             // the interrupt was already handled by the host IDT before

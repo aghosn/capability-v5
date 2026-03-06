@@ -321,6 +321,11 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
     serial_println!("VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
         info.bsp_lapic_id, bsp_index);
 
+    // Populate VMXON_PHYS for all cores (visible to APs after AP_LAUNCH_READY Release).
+    for i in 0..info.num_cores {
+        crate::VMXON_PHYS[i].store(dom0.vmxon_phys(i), core::sync::atomic::Ordering::Relaxed);
+    }
+
     VmxState { features, dom0, bsp_index }
 }
 
@@ -603,11 +608,14 @@ pub const HOST_STACK_BYTES: usize = 4096 * 4; // 16 KiB
 ///
 /// - Allocates VMCS and VAPIC pages from `vmx.dom0.meta` (the VMX-fixed sub-pool).
 /// - Allocates per-VP host stacks from the heap.
-/// - Calls [`crate::vmcs::setup_vmcs_for_vp`] for each VP (BSP VP only for now).
+/// - Sets up the BSP VMCS fully; sets up AP VMCS with wait-for-SIPI activity state.
+/// - After return, BSP VMCS is the current VMCS on this core (P7f will patch RIP/RSP).
 /// - Records all per-VP state in `VmcsState`.
 pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsState {
     use alloc::boxed::Box;
     use crate::vmcs::setup_vmcs_for_vp;
+    use x86::bits64::vmx;
+    use x86::vmx::vmcs;
 
     serial_println!();
     serial_println!("=== P2d: VMCS setup ===");
@@ -632,11 +640,9 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     }
 
     // Set up the VMCS for the BSP VP (vp_index = bsp_index).
-    // APs get their VMCS loaded at VMLAUNCH time (P7g mailbox).
     let vp = vmx.bsp_index;
     let stack = &host_stacks[vp];
     let stack_top = stack.as_ptr() as u64 + HOST_STACK_BYTES as u64;
-    // Align to 16 bytes (required by System V ABI for CALL).
     let stack_top_aligned = stack_top & !0xF;
 
     unsafe {
@@ -648,11 +654,55 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             vp,
         );
     }
+    capa.platform.bootstrap_set_vp_hardware(0, vp, vmx.dom0.vmcs_phys(vp));
 
     serial_println!(
         "  BSP VMCS ready: vp={} vmcs={:#x} stack_top={:#x}",
         vp, vmx.dom0.vmcs_phys(vp), stack_top_aligned,
     );
+
+    // Set up VMCS for each AP VP.
+    // Each AP is configured with activity state = wait-for-SIPI (3) so it sits
+    // dormant until Linux sends INIT/SIPI.  After setup, the VMCS is stored
+    // to memory with VMCLEAR so the AP can load it with VMPTRLD at launch time.
+    for ap_vp in 0..num_vps {
+        if ap_vp == vmx.bsp_index {
+            continue;
+        }
+        let ap_stack = &host_stacks[ap_vp];
+        let ap_stack_top = (ap_stack.as_ptr() as u64 + HOST_STACK_BYTES as u64) & !0xF;
+        unsafe {
+            setup_vmcs_for_vp(
+                vmx.dom0.vmcs_phys(ap_vp),
+                vmx.dom0.vapic_phys(ap_vp),
+                ap_stack_top,
+                eptp,
+                ap_vp,
+            );
+            // Override activity state: AP must not enter the kernel entry point
+            // directly — it waits for a SIPI from the Linux BSP.
+            vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 3)
+                .expect("AP vmwrite ACTIVITY_STATE");
+            // Save VMCS state to memory and deactivate so the AP can load it
+            // with VMPTRLD independently.
+            vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp))
+                .expect("AP vmclear");
+        }
+        capa.platform.bootstrap_set_vp_hardware(0, ap_vp, vmx.dom0.vmcs_phys(ap_vp));
+        serial_println!(
+            "  AP VMCS ready:  vp={} vmcs={:#x} (wait-for-SIPI)",
+            ap_vp, vmx.dom0.vmcs_phys(ap_vp),
+        );
+    }
+
+    // Restore BSP VMCS as the current VMCS on this core so that P7f can
+    // vmwrite guest RIP/RSP into the correct VMCS.
+    if num_vps > 1 {
+        unsafe {
+            vmx::vmptrld(vmx.dom0.vmcs_phys(vmx.bsp_index))
+                .expect("BSP vmptrld restore");
+        }
+    }
     serial_println!("=== P2d: done ===");
 
     VmcsState { host_stacks }
@@ -745,5 +795,52 @@ pub fn linux(
     LinuxState {
         kernel_entry_phys: load.kernel_entry_phys,
         boot_params_phys:  load.boot_params_phys,
+    }
+}
+
+// ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────────── //
+
+/// Phase P7g: signal APs and execute VMLAUNCH on the BSP.
+///
+/// 1. Sets `AP_LAUNCH_READY` (Release) so each AP wakes up, enables VMX,
+///    loads its VMCS, and VMLAUNCHes into the wait-for-SIPI activity state.
+/// 2. BSP loads ESI = `boot_params_phys` and executes VMLAUNCH to enter
+///    dom0 at the Linux 32-bit PM kernel entry point.
+///
+/// This function never returns if VMLAUNCH succeeds.  It panics if the
+/// VMLAUNCH instruction fails, reporting rflags and the VMX error code.
+pub fn launch(linux: &LinuxState) -> ! {
+    use core::sync::atomic::Ordering;
+    use crate::AP_LAUNCH_READY;
+
+    serial_println!();
+    serial_println!("=== P7g: VMLAUNCH ===");
+
+    // Release store: VMXON_PHYS and PLATFORM_PTR writes are visible to any
+    // core that loads AP_LAUNCH_READY with Acquire ordering.
+    AP_LAUNCH_READY.store(true, Ordering::Release);
+    serial_println!("  APs signaled");
+
+    // ── BSP VMLAUNCH ─────────────────────────────────────────────────────── //
+    // RSI = boot_params_phys is required by the Linux 32-bit PM boot protocol.
+    // VMLAUNCH either succeeds (CPU enters guest mode, never returns here) or
+    // fails (CF or ZF set; we capture rflags and panic).
+    serial_println!("  BSP: RSI={:#x} → VMLAUNCH", linux.boot_params_phys);
+    unsafe {
+        let rflags: u64;
+        core::arch::asm!(
+            "vmlaunch",
+            "pushfq",
+            "pop {rflags}",
+            in("rsi") linux.boot_params_phys,
+            rflags = out(reg) rflags,
+        );
+        // VMLAUNCH failed — CPU did not enter guest mode.
+        let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR)
+            .unwrap_or(0);
+        panic!(
+            "P7g: BSP VMLAUNCH failed — rflags={:#x} VM_INSTRUCTION_ERROR={}",
+            rflags, error,
+        );
     }
 }

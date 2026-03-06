@@ -1914,8 +1914,92 @@ The following three invariants govern what dom0 sees and can access:
     into dom0's virtual address space layout.
   - **Prerequisite**: decide on kernel format policy (bzImage vs vmlinux vs EFI stub)
     before implementing.
-- [ ] **P7g**: Seal dom0; `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH
+- [x] **P7g**: Seal dom0; `switch_domain(root, dom0, 0)` → VMLAUNCH on BSP; APs VMLAUNCH
   via mailbox.
+  - BSP: fills `AP_VMXON_PHYS`/`AP_VMCS_PHYS` arrays (indexed by cpu.id), sets
+    `AP_LAUNCH_READY` (Release), then loads RSI = `boot_params_phys` and VMLAUNCHes.
+  - APs: spin on `AP_LAUNCH_READY` (Acquire), then VMXON + VMPTRLD + VMLAUNCH into
+    wait-for-SIPI activity state (pre-configured in boot::vmcs()).
+  - VMEXIT SIPI handler: sets CS.selector/CS.base/CS.limit/CS.AR, RIP=0, CR0=0x10
+    (real mode), ACTIVITY_STATE=0 (active) — AP starts executing Linux startup code.
+- [ ] **P7g-vmxon-global**: Extract per-core VMXON regions into a global static array.
+
+  VMXON is a per-physical-core resource — it is executed before any domain is active
+  and has no domain affiliation.  There is exactly one VMXON region per core for the
+  lifetime of the hypervisor; it is allocated during boot and never freed.
+
+  Implementation:
+  - Add `static VMXON_PHYS: [AtomicU64; MAX_CORES]` in `main.rs` (or `vmx.rs`),
+    where `MAX_CORES` is the compile-time upper bound on logical processors.
+  - During `boot::vmcs()` (BSP), after allocating VMXON for each core, write its
+    physical address into `VMXON_PHYS[cpu_id]` with `Relaxed` ordering (visibility is
+    guaranteed by the subsequent `Release` store to `AP_LAUNCH_READY`).
+  - Remove VMXON tracking from `VmxState` / domain structures; `VMXON_PHYS` is the
+    sole canonical record.
+  - In `ap_entry()`: after spinning on `AP_LAUNCH_READY` (Acquire), read
+    `VMXON_PHYS[cpu_id]` with `Relaxed`, call `enable_vmx_on_core(phys)`, then never
+    touch `VMXON_PHYS` again.
+
+  Design rationale: VMXON regions are not owned by any domain; tying them to domain
+  structures creates artificial coupling and complicates the domain-switching path.
+  A plain global array is the simplest correct design.
+
+- [ ] **P7g-platform-locking**: Refactor `ThemisPlatformInner` from a single
+  `Mutex<ThemisPlatformInner>` into a three-tier locking structure that allows cores
+  to operate concurrently on independent domains or their own per-core state.
+
+  **Tier 1 — per-core current state** (`[PerCoreCell; MAX_CORES]`):
+  - Each `PerCoreCell` holds `current_domain: AtomicU32` and `current_vp: AtomicU32`
+    (or a small `Mutex<PerCoreState>` if richer state is needed).
+  - A core only ever writes to its own cell; reads by other cores are observational
+    only (e.g. for IPI targeting).  No cross-core contention on the hot VMEXIT path.
+
+  **Tier 2 — per-domain state** (`BTreeMap<DomainId, Mutex<PlatformDomain>>`):
+  - `PlatformDomain` (EPT, meta allocator, `vps: Vec<VpHardware>`) moves behind its own
+    `Mutex`.  Core A in domain 1 and core B in domain 2 never contend.
+  - `VpHardware { vmcs_phys: u64, vmxon_phys: u64 }` replaces the `Vec<()>` placeholder
+    in `PlatformDomain`.  BSP populates all entries during `boot::vmcs()`; each AP reads
+    its entry once via `platform.vp_hardware(domain_id, vp_index)`.
+
+  **Tier 3 — global routing maps** (`RwLock<RoutingMaps>`):
+  - `RoutingMaps { core_to_domain, domain_to_core, lapic_ids }` behind a single
+    `RwLock`.  Read lock on every VMEXIT that needs to look up domain for a core;
+    write lock only on domain-switch / domain-create / domain-revoke.
+
+  The outer `ThemisPlatform` struct becomes a zero-sized wrapper that exposes methods
+  taking the right tier lock(s), making locking intent explicit at the call site.
+
+  **Compatibility note**: `get_current_core()` (reads x2APIC → CoreId, no lock needed)
+  and the existing `set_core_domain` / `clear_core_domain` / `domain_core` stubs must
+  be re-expressed in terms of Tier 1 + Tier 3 atomics.
+
+- [ ] **P7g-update-barriers**: Audit and document the interaction between multi-core
+  capability operations (UpdateBatch) and the new fine-grained platform locking.
+
+  **Background**: when the capability engine applies an `UpdateBatch` that modifies a
+  domain's EPT (e.g. `ChangeRights`, `GiveMetaMem`), it must ensure cores currently
+  executing in that domain see the new EPT state.  The existing update-barrier protocol
+  uses IPIs + per-core acknowledgment flags for this synchronization.
+
+  **Questions to verify** before closing this item:
+  1. **Lock ordering**: The barrier IPI handler runs on the remote core's exception
+     stack and must acquire the per-domain `Mutex<PlatformDomain>` to flush/update the
+     EPT.  The initiating core holds the same lock while sending IPIs.  Verify this
+     does not deadlock — the IPI handler must not try to re-acquire a lock held by the
+     caller, so EPT modification and IPI dispatch must be sequenced (modify EPT first,
+     release domain lock, then broadcast IPI for TLB shootdown).
+  2. **Tier 1 consistency**: a domain-switch (write to Tier 3 + Tier 1) that races
+     with an UpdateBatch (write to Tier 2) must be safe.  The domain-switch must
+     complete (including INVEPT) before the new domain's EPT is visible to the core.
+  3. **INVEPT scope**: after an EPT modification, INVEPT must be executed on all cores
+     that have the domain's EPT active (i.e. `core_to_domain[c] == domain_id`).  The
+     barrier currently shoots down all cores; confirm this is correct or narrow to only
+     affected cores.
+
+  **Outcome**: add a brief "locking and barrier invariants" section to
+  `docs/design/` (or inline in `platform.rs`) documenting the ordering rules so
+  future code changes can be audited against them.
+
 - [ ] **P7h**: Per-core VP run loop. Each core runs a tight loop that owns a `VpContext`
   carrying everything needed to dispatch exits:
 
@@ -1934,6 +2018,39 @@ The following three invariants govern what dom0 sees and can access:
   `handle_vmexit` currently has no context (stub); this phase wires in `VpContext`
   so every exit handler can read/write domain state, invoke the capability engine,
   and update VMCS fields before VMRESUME.
+
+- [ ] **P7i — Post-boot cleanup and VP-setup factoring**: After the first successful
+  dom0 serial output confirms the boot chain is working end-to-end, dedicate a pass
+  to clean, modularize, and future-proof the implementation before building on top of it.
+
+  **Scope**:
+
+  - **Code cleanup**: remove any remaining stale comments, dead code, resolved
+    `TODO(P*)` markers, and `#[allow(dead_code)]` suppressions. Fix `cargo clippy`
+    warnings.
+
+  - **VP-setup factoring**: extract the logic for provisioning a VP (VMXON region
+    allocation, VMCS allocation, VAPIC allocation, `setup_vmcs_for_vp`,
+    `bootstrap_set_vp_hardware`) into a single reusable path — something like
+    `Platform::provision_vp(domain_id, vp_index, stack_top, eptp) -> VpHardware`.
+    This is the same sequence needed when creating child domains in Phase 9
+    (`VMCALL_CREATE_DOMAIN`). Currently the logic is spread across `domain.rs`,
+    `boot.rs`, and `platform.rs`; centralising it ensures new domains get identical
+    correct initialisation to dom0 and avoids drift.
+
+  - **Domain struct ownership review**: `domain::Domain` carries `vmxon_regions`,
+    `vmcs_regions`, `vapic_regions` as parallel `Vec<u64>` fields used only during
+    bootstrap allocation tracking. After factoring, evaluate whether these collapse
+    into `PlatformDomain::vps: Vec<VpHardware>` exclusively, or whether a lightweight
+    `Domain` in `boot.rs` remains justified. Document the chosen model.
+
+  - **Module organisation**: if `platform.rs` has grown unwieldy (currently ~650
+    lines), split into sub-modules (`platform/barrier.rs`, `platform/domain_table.rs`,
+    `platform/routing.rs`).
+
+  - **VpContext definition**: pin `VpContext` in a stable location (`vp.rs` or
+    `vmexit.rs`) so that P7h and Phase 8 can depend on it without further structural
+    churn.
 
 ### Phase 8 — Hypercall Dispatch + Hypercall ABI
 

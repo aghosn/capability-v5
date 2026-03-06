@@ -11,7 +11,7 @@
 //!
 //! 1. `op_lock`     — RW spinlock for capability-tree operation serialisation.
 //! 2. `update_lock` — TAS atomic for the IPI / barrier / apply sequence.
-//! 3. `inner`       — `Mutex<ThemisPlatformInner>` for EPT / domain state.
+//! 3. per-domain `Mutex<PlatformDomain>` for EPT / domain state.
 //!
 //! ## Cross-core protocol (§5.2)
 //!
@@ -33,6 +33,38 @@
 //!   TODO(P3c): INVEPT     — flush stale TLB entries
 //!   sync_barrier(1, 0)    — signal "local flush done"
 //! ```
+//!
+//! ## Update barrier and locking invariants
+//!
+//! 1. **No deadlock between apply_update and barrier**: `apply_update` acquires
+//!    per-domain `Mutex<PlatformDomain>` AFTER barrier 0 (all affected cores have
+//!    stopped).  Responding cores (in `poll_and_respond_cross_core`) do NOT hold
+//!    domain locks when they call `sync_barrier(0, 0)`.  Therefore there is no
+//!    deadlock.
+//!
+//! 2. **Domain lock ordering**: `apply_update` must NOT acquire two domain locks
+//!    simultaneously (no such case today).  When this becomes necessary, locks must
+//!    be acquired in ascending DomainId order to prevent deadlock.
+//!
+//! 3. **Tier 1/3 consistency**: `set_core_domain` writes both
+//!    `cores[core_id].current_domain` (Tier 1, Release) and `routing.write()`
+//!    (Tier 3).  Readers of domain-for-core should prefer Tier 1 (lock-free) for
+//!    hot-path decisions (e.g., INVEPT targeting).  Tier 3 is authoritative for
+//!    reverse lookup (domain → core, needed for IPI targeting on domain switch).
+//!
+//! 4. **INVEPT scope optimization**: After barrier 0, before INVEPT (currently
+//!    TODO(P3c)), the initiating core can check
+//!    `cores[c].current_domain.load(Relaxed) == affected_domain` for each c to
+//!    send INVEPT only to affected cores, avoiding unnecessary shootdowns.  This
+//!    is safe because Tier 1 cells are written only by their owning core (under
+//!    the barrier protocol, all affected cores are stopped).
+//!
+//! 5. **Domain switch race with UpdateBatch**: A core performing a domain switch
+//!    must complete (Tier 1 + Tier 3 update + VMPTRLD of new VMCS) BEFORE
+//!    handling any VMEXIT that could trigger a new UpdateBatch for the new domain.
+//!    This is guaranteed because the switch is atomic from the perspective of the
+//!    barrier: the core is either "stopped at barrier" or "running in a domain".
+//!    A core cannot be simultaneously doing a switch and responding to a barrier.
 
 extern crate alloc;
 
@@ -40,7 +72,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
 use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
@@ -56,6 +88,9 @@ pub const MAX_CORES: usize = 256;
 /// x86 interrupt vector reserved for capability-engine cross-core IPIs.
 /// Must match the IDT entry installed in Phase P3b.
 pub const CAPA_IPI_VECTOR: u8 = 0xF2;
+
+const IDLE_DOMAIN: u64 = u64::MAX;
+const IDLE_VP:     u32 = u32::MAX;
 
 // ── Two-phase synchronisation barrier ─────────────────────────────────────── //
 
@@ -157,6 +192,28 @@ impl Drop for ExclusiveGuard {
 impl OpLockGuard for ExclusiveGuard {}
 unsafe impl Send for ExclusiveGuard {}
 
+// ── Per-VP hardware state ──────────────────────────────────────────────────── //
+
+pub struct VpHardware {
+    pub vmcs_phys: u64,
+}
+
+// ── Per-core cell (Tier 1) ────────────────────────────────────────────────── //
+
+pub struct PerCoreCell {
+    pub current_domain: AtomicU64,
+    pub current_vp:     AtomicU32,
+}
+
+impl PerCoreCell {
+    const fn new() -> Self {
+        PerCoreCell {
+            current_domain: AtomicU64::new(IDLE_DOMAIN),
+            current_vp:     AtomicU32::new(IDLE_VP),
+        }
+    }
+}
+
 // ── Per-domain hardware state ─────────────────────────────────────────────── //
 
 /// Hardware state owned by a single domain.
@@ -169,8 +226,8 @@ pub struct PlatformDomain {
     pub parent: Option<DomainId>,
     /// HHDM offset, cached here so EPT root allocation can use it.
     hhdm_offset: u64,
-    /// Per-VP hardware structures — placeholder until P2d.
-    pub vps: Vec<()>,
+    /// Per-VP hardware structures.
+    pub vps: Vec<VpHardware>,
 }
 
 impl PlatformDomain {
@@ -201,10 +258,6 @@ impl PlatformDomain {
 /// Map `[gpa, gpa+size)` → `[hpa, hpa+size)` into `ept`, splitting the range at
 /// UC boundaries so that MMIO sub-ranges use [`EptMemoryType::UC`] and all other
 /// sub-ranges use [`EptMemoryType::WB`].
-///
-/// The split is O(k log n) where k is the number of UC sub-ranges that intersect
-/// the mapping and n is the total number of registered UC regions — typically a
-/// handful of iterations for any real `ChangeRights` update.
 fn map_range_typed(
     ept:       &mut EptMapper,
     meta:      &mut crate::mem::MetaAllocator,
@@ -221,12 +274,10 @@ fn map_range_typed(
     while remaining > 0 {
         match uc_ranges.first_overlap(cur_hpa, remaining as u64) {
             None => {
-                // Remainder is entirely cacheable.
                 ept.map_range(meta, cur_gpa, cur_hpa, remaining, flags, EptMemoryType::WB);
                 return;
             }
             Some((ov_start, ov_end)) => {
-                // Map any WB prefix before the UC overlap.
                 if ov_start > cur_hpa {
                     let wb_size = (ov_start - cur_hpa) as usize;
                     ept.map_range(meta, cur_gpa, cur_hpa, wb_size, flags, EptMemoryType::WB);
@@ -234,7 +285,6 @@ fn map_range_typed(
                     cur_hpa   += wb_size as u64;
                     remaining -= wb_size;
                 }
-                // Map the UC segment.
                 let uc_size = ((ov_end - cur_hpa) as usize).min(remaining);
                 ept.map_range(meta, cur_gpa, cur_hpa, uc_size, flags, EptMemoryType::UC);
                 cur_gpa   += uc_size as u64;
@@ -245,30 +295,46 @@ fn map_range_typed(
     }
 }
 
-// ── ThemisPlatformInner (everything behind the single Mutex) ─────────────── //
+// ── Domain table (Tier 2) ─────────────────────────────────────────────────── //
 
-struct ThemisPlatformInner {
-    domains:        BTreeMap<DomainId, PlatformDomain>,
-    core_to_domain: BTreeMap<CoreId, DomainId>,
-    domain_to_core: BTreeMap<DomainId, CoreId>,
-    /// LAPIC IDs indexed by CoreId — populated by `bootstrap_set_lapic_ids`.
-    lapic_ids:      Vec<u32>,
-    /// Cached HHDM offset from the first registered domain.
-    hhdm_offset:    u64,
-    /// MMIO physical ranges that must be mapped UC in the EPT.
-    /// Read-only after boot; shared via Arc with PlatformInfo.
-    uc_ranges:      alloc::sync::Arc<UncacheableRanges>,
+struct DomainTable {
+    map: RwLock<BTreeMap<DomainId, alloc::sync::Arc<Mutex<PlatformDomain>>>>,
 }
 
-impl ThemisPlatformInner {
-    fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
-        ThemisPlatformInner {
-            domains:        BTreeMap::new(),
+impl DomainTable {
+    fn new() -> Self { DomainTable { map: RwLock::new(BTreeMap::new()) } }
+
+    fn get(&self, id: DomainId) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
+        self.map.read().get(&id).cloned()
+    }
+
+    fn insert(&self, id: DomainId, domain: PlatformDomain) {
+        self.map.write().insert(id, alloc::sync::Arc::new(Mutex::new(domain)));
+    }
+
+    fn remove(&self, id: DomainId) -> Option<PlatformDomain> {
+        self.map.write().remove(&id)
+            .and_then(|arc| alloc::sync::Arc::try_unwrap(arc).ok())
+            .map(|m| m.into_inner())
+    }
+
+    fn contains(&self, id: DomainId) -> bool {
+        self.map.read().contains_key(&id)
+    }
+}
+
+// ── Routing maps (Tier 3) ─────────────────────────────────────────────────── //
+
+struct RoutingMaps {
+    core_to_domain: BTreeMap<CoreId, DomainId>,
+    domain_to_core: BTreeMap<DomainId, CoreId>,
+}
+
+impl RoutingMaps {
+    fn new() -> Self {
+        RoutingMaps {
             core_to_domain: BTreeMap::new(),
             domain_to_core: BTreeMap::new(),
-            lapic_ids:      Vec::new(),
-            hhdm_offset:    0,
-            uc_ranges,
         }
     }
 }
@@ -276,100 +342,102 @@ impl ThemisPlatformInner {
 // ── ThemisPlatform ────────────────────────────────────────────────────────── //
 
 /// The Themis `Platform` implementation.
-///
-/// Fields outside `inner` are accessed on hot paths (IPI, barrier, lock) and
-/// must not require holding `inner` to prevent lock inversion.
 pub struct ThemisPlatform {
-    /// Capability-tree operation lock: shared for carve/alias/send, exclusive
-    /// for revoke.  Held for the entire duration of the capability operation.
-    op_lock:     RwLock<()>,
-    /// Update-application serialisation lock.  Only one core at a time may run
-    /// the IPI / barrier / `apply_update` sequence.
-    update_lock: AtomicBool,
-    /// Two-phase synchronisation barriers (index 0 = pre-update, 1 = post-update).
-    barriers:    [Barrier; 2],
-    /// Per-core IPI-pending flags.  The IPI handler (P3b) sets the flag for the
-    /// interrupted core; `poll_and_respond_cross_core` clears it and participates
-    /// in the barrier protocol.
+    // Hot path: no lock needed
+    op_lock:         RwLock<()>,
+    update_lock:     AtomicBool,
+    barriers:        [Barrier; 2],
     pub ipi_pending: [AtomicBool; MAX_CORES],
-    /// All mutable domain / EPT / core-tracking state.
-    inner:       Mutex<ThemisPlatformInner>,
+    // Immutable after bootstrap
+    hhdm_offset:     AtomicU64,
+    uc_ranges:       alloc::sync::Arc<UncacheableRanges>,
+    // Tier 1: per-core current state
+    cores:           [PerCoreCell; MAX_CORES],
+    // Tier 2: per-domain hardware state
+    domains:         DomainTable,
+    // Tier 3: global routing
+    routing:         RwLock<RoutingMaps>,
+    // LAPIC IDs: immutable after bootstrap
+    lapic_ids:       RwLock<Vec<u32>>,
 }
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
-    ///
-    /// `uc_ranges` is the table of MMIO physical ranges (built from the Limine
-    /// memory map during `boot::platform()`) that must be mapped UC in the EPT.
     pub fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
+        const C: PerCoreCell = PerCoreCell::new();
         ThemisPlatform {
             op_lock:     RwLock::new(()),
             update_lock: AtomicBool::new(false),
             barriers:    [Barrier::new(), Barrier::new()],
             ipi_pending: unsafe { core::mem::zeroed() },
-            inner:       Mutex::new(ThemisPlatformInner::new(uc_ranges)),
+            hhdm_offset: AtomicU64::new(0),
+            uc_ranges,
+            cores:       [C; MAX_CORES],
+            domains:     DomainTable::new(),
+            routing:     RwLock::new(RoutingMaps::new()),
+            lapic_ids:   RwLock::new(Vec::new()),
         }
     }
 
-    /// Register the LAPIC IDs for all physical cores.
-    ///
-    /// `ids[core_id]` is the x2APIC LAPIC ID for that core.  Must be called
-    /// during bootstrap (before any AP is released) so that `send_ipi` and
-    /// `get_current_core` work correctly.
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
-        self.inner.lock().lapic_ids = ids;
+        *self.lapic_ids.write() = ids;
     }
 
-    /// Give a domain its initial META region directly, bypassing the update
-    /// protocol.  Used during dom0 bootstrap before `execute()` is called.
     pub fn bootstrap_give_meta(&self, domain_id: DomainId, region: PhysRegion) {
-        let mut g = self.inner.lock();
-        if let Some(d) = g.domains.get_mut(&domain_id) {
-            d.meta.add_range(region);
-        } else {
-            panic!("bootstrap_give_meta: domain {} not registered", domain_id);
-        }
+        self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("bootstrap_give_meta: domain {} not registered", domain_id))
+            .lock()
+            .meta
+            .add_range(region);
     }
 
-    /// Register a domain directly (bypasses the update protocol).
-    /// Use during bootstrap before `execute()` is called.
     pub fn bootstrap_register_domain(
         &self,
         domain_id: DomainId,
         parent_id: Option<DomainId>,
         hhdm_offset: u64,
     ) {
-        let mut g = self.inner.lock();
-        g.hhdm_offset = hhdm_offset;
-        g.domains
-            .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
+        self.hhdm_offset.store(hhdm_offset, Ordering::Relaxed);
+        if !self.domains.contains(domain_id) {
+            self.domains.insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
+        }
     }
 
-    /// Return the EPTP value for `domain_id`, or `None` if no EPT root exists yet.
     pub fn eptp(&self, domain_id: DomainId) -> Option<u64> {
-        let g = self.inner.lock();
-        g.domains.get(&domain_id)?.ept.as_ref().map(|e| e.eptp())
+        self.domains.get(domain_id)?.lock().ept.as_ref().map(|e| e.eptp())
     }
 
-    /// Allocate one META page (4 KiB, zeroed) from `domain_id`'s pool.
-    ///
-    /// Used by `domain::Domain` allocation helpers for VMXON, VMCS, VAPIC pages.
-    /// Panics if the domain is not registered or its pool is exhausted.
     pub fn alloc_meta_frame(&self, domain_id: DomainId) -> u64 {
-        let mut g = self.inner.lock();
-        let d = g
-            .domains
-            .get_mut(&domain_id)
-            .expect("alloc_meta_frame: domain not registered");
-        d.meta.alloc_frame()
+        self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("alloc_meta_frame: domain not registered"))
+            .lock()
+            .meta
+            .alloc_frame()
+    }
+
+    pub fn bootstrap_set_vp_hardware(&self, domain_id: DomainId, vp_index: usize, vmcs_phys: u64) {
+        let arc = self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("bootstrap_set_vp_hardware: domain not registered"));
+        let mut d = arc.lock();
+        if d.vps.len() <= vp_index {
+            d.vps.resize_with(vp_index + 1, || VpHardware { vmcs_phys: 0 });
+        }
+        d.vps[vp_index].vmcs_phys = vmcs_phys;
+    }
+
+    pub fn vp_vmcs_phys(&self, domain_id: DomainId, vp_index: usize) -> Option<u64> {
+        let arc = self.domains.get(domain_id)?;
+        let d = arc.lock();
+        d.vps.get(vp_index).map(|v| v.vmcs_phys)
     }
 }
 
 // ── Platform trait ────────────────────────────────────────────────────────── //
 
 impl Platform for ThemisPlatform {
-    // ── Capability-tree operation lock ─────────────────────────────────── //
-
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
         Ok(Box::new(SharedGuard::new(&self.op_lock)))
     }
@@ -378,38 +446,20 @@ impl Platform for ThemisPlatform {
         Ok(Box::new(ExclusiveGuard::new(&self.op_lock)))
     }
 
-    // ── Cross-core synchronisation ────────────────────────────────────── //
-
-    /// Send a capability-engine sync IPI to `core_id` via x2APIC.
-    ///
-    /// Looks up the target LAPIC ID in the bootstrap-populated table and writes
-    /// the ICR MSR.  The receiving core's IPI handler (P3b) sets
-    /// `ipi_pending[core_id]` so `poll_and_respond_cross_core` can react.
     fn send_ipi(&self, core_id: CoreId) {
-        let lapic_id = {
-            let g = self.inner.lock();
-            *g.lapic_ids
-                .get(core_id as usize)
-                .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
-        };
-        // x2APIC ICR (MSR 0x830): bits[63:32]=dest, bit[14]=level(assert),
-        // bits[10:8]=delivery(000=fixed), bits[7:0]=vector.
+        let lapic_id = *self.lapic_ids
+            .read()
+            .get(core_id as usize)
+            .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id));
         let icr: u64 = ((lapic_id as u64) << 32)
-            | (1u64 << 14)              // level = assert
-            | (CAPA_IPI_VECTOR as u64); // fixed delivery, no shorthand
+            | (1u64 << 14)
+            | (CAPA_IPI_VECTOR as u64);
         unsafe { x86::msr::wrmsr(x86::msr::IA32_X2APIC_ICR, icr) };
     }
 
-    /// Two-phase synchronisation barrier.
-    ///
-    /// All participants (initiating core + IPI-responding cores) call this with
-    /// the same `id`.  The initiating core passes `participants` > 0; responding
-    /// cores pass 0 (the stored value is used instead).
     fn sync_barrier(&self, id: u8, participants: usize) {
         self.barriers[id as usize].wait(participants);
     }
-
-    // ── Update-application serialisation lock ─────────────────────────── //
 
     fn try_acquire_update_lock(&self) -> bool {
         self.update_lock
@@ -421,16 +471,6 @@ impl Platform for ThemisPlatform {
         self.update_lock.store(false, Ordering::Release);
     }
 
-    /// Poll for a pending cross-core IPI and participate in the barrier if one
-    /// is waiting.
-    ///
-    /// Called while spinning on `try_acquire_update_lock`.  If another core has
-    /// sent us a capability-engine IPI (set `ipi_pending[our_core]`), we
-    /// participate in its barrier so it can proceed.
-    ///
-    /// TODO(P3b): The IPI handler (IDT vector CAPA_IPI_VECTOR) must set
-    /// `ipi_pending[current_core]`.  Until P3b, IPIs may be missed if delivered
-    /// while the core is executing in the monitor with interrupts disabled.
     fn poll_and_respond_cross_core(&self) {
         let Some(core_id) = self.get_current_core() else { return };
         if core_id as usize >= MAX_CORES { return; }
@@ -440,15 +480,10 @@ impl Platform for ThemisPlatform {
         {
             return;
         }
-        // An initiating core sent us an IPI waiting at barrier 0.
-        // Signal "I have stopped" so it can proceed with hardware updates.
         self.barriers[0].wait(0);
         // TODO(P3c): INVEPT(single-context) here for TLB shootdown.
-        // Signal "local flush done" so the initiating core can release op_lock.
         self.barriers[1].wait(0);
     }
-
-    // ── Hardware state (apply_update) ─────────────────────────────────── //
 
     fn apply_update(&self, update: &Update) {
         match update {
@@ -457,38 +492,38 @@ impl Platform for ThemisPlatform {
             }
 
             Update::GiveMetaMem { domain_id, start, size } => {
-                let mut g = self.inner.lock();
-                let d = g
-                    .domains
-                    .get_mut(domain_id)
-                    .expect("GiveMetaMem: unknown domain");
-                d.meta.add_range(PhysRegion { base: *start, length: *size });
+                self.domains
+                    .get(*domain_id)
+                    .expect("GiveMetaMem: unknown domain")
+                    .lock()
+                    .meta
+                    .add_range(PhysRegion { base: *start, length: *size });
                 // TODO(P4): update IOMMU domain page table for this META region.
             }
 
             Update::ChangeRights { domain, address, size, physical, rights, .. } => {
-                let mut g = self.inner.lock();
-                // Clone the Arc before the mutable domain borrow to avoid
-                // simultaneous mutable + immutable borrow of `g`.
-                let uc_ranges = alloc::sync::Arc::clone(&g.uc_ranges);
-                let d = g
-                    .domains
-                    .get_mut(domain)
+                let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
+                let arc = self.domains
+                    .get(*domain)
                     .expect("ChangeRights: unknown domain");
+                let mut d = arc.lock();
+                // Split the MutexGuard borrow into disjoint field pointers so the
+                // borrow checker accepts simultaneous &mut ept and &mut meta.
+                let meta_ptr: *mut MetaAllocator = &mut d.meta;
 
                 if rights.bits() == 0 {
                     if let Some(ept) = d.ept.as_mut() {
-                        ept.unmap_range(&mut d.meta, *address, *size as usize);
+                        // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
+                        ept.unmap_range(unsafe { &mut *meta_ptr }, *address, *size as usize);
                     }
                     // TODO(P4): remove mapping from IOMMU domain page table.
                 } else {
                     d.ensure_ept();
                     let flags = rights_to_ept_flags(rights);
                     let ept   = d.ept.as_mut().unwrap();
-                    // Map the range, splitting at UC boundaries so that MMIO
-                    // regions get EptMemoryType::UC and RAM regions get WB.
                     map_range_typed(
-                        ept, &mut d.meta,
+                        // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
+                        ept, unsafe { &mut *meta_ptr },
                         *address, *physical, *size as usize,
                         flags, &uc_ranges,
                     );
@@ -497,92 +532,74 @@ impl Platform for ThemisPlatform {
             }
 
             Update::RevokeDomain { domain, .. } => {
-                // Free EPT structures while affected cores are paused (between
-                // the two barriers).  `on_domain_revoked` handles core redirect.
-                let mut g = self.inner.lock();
-                if let Some(mut d) = g.domains.remove(domain) {
+                if let Some(mut d) = self.domains.remove(*domain) {
                     if let Some(ept) = d.ept.take() {
                         ept.free_all(&mut d.meta);
                     }
                     // TODO(P4): free IOMMU domain page table.
-                    // META pages themselves belong to the parent's allocator and
-                    // are returned when the memory capability is revoked.
                 }
             }
 
             Update::ZeroMemory { address, size } => {
-                let g = self.inner.lock();
-                let hhdm = g.hhdm_offset;
-                drop(g);
+                let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
                 let virt = (address + hhdm) as *mut u8;
                 unsafe { core::ptr::write_bytes(virt, 0, *size as usize) };
             }
 
             Update::FlushTLB { .. } => {
                 // TODO(P3c): INVEPT(single-context) for the affected domain.
-                // For now, cores do a full INVEPT on VMRESUME via the barrier
-                // protocol once P3b/P3c are implemented.
             }
         }
     }
 
-    // ── Domain lifecycle ─────────────────────────────────────────────── //
-
     fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
-        let mut g = self.inner.lock();
-        if g.domains.contains_key(&domain_id) {
-            return; // Idempotent: bootstrap_register_domain already called.
+        if !self.domains.contains(domain_id) {
+            let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+            self.domains.insert(domain_id, PlatformDomain::new(hhdm, parent_id));
         }
-        let hhdm = g.hhdm_offset;
-        g.domains.insert(domain_id, PlatformDomain::new(hhdm, parent_id));
-        // TODO(P4): allocate IOMMU domain page table for domain_id.
     }
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
-        // EPT structures were freed in apply_update(RevokeDomain).
-        // Redirect any core running this domain to the fallback.
-        let mut g = self.inner.lock();
-        if let Some(&core_id) = g.domain_to_core.get(&domain_id) {
-            g.domain_to_core.remove(&domain_id);
-            g.core_to_domain.remove(&core_id);
+        let mut routing = self.routing.write();
+        if let Some(core_id) = routing.domain_to_core.remove(&domain_id) {
+            routing.core_to_domain.remove(&core_id);
+            self.cores[core_id as usize].current_domain.store(
+                fallback.unwrap_or(IDLE_DOMAIN),
+                Ordering::Release,
+            );
             if let Some(fb) = fallback {
-                g.core_to_domain.insert(core_id, fb);
-                g.domain_to_core.insert(fb, core_id);
+                routing.core_to_domain.insert(core_id, fb);
+                routing.domain_to_core.insert(fb, core_id);
             }
-            // TODO(P4): reassign devices belonging to domain_id to fallback/parent.
         }
-        // TODO(multi-VP): a domain can run on multiple cores; this only handles
-        // the single-VP (one core per domain) case.
     }
 
-    // ── Core tracking ─────────────────────────────────────────────────── //
-
     fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
-        let mut g = self.inner.lock();
-        if let Some(old_domain) = g.core_to_domain.remove(&core_id) {
-            g.domain_to_core.remove(&old_domain);
+        self.cores[core_id as usize].current_domain.store(domain_id, Ordering::Release);
+        let mut routing = self.routing.write();
+        if let Some(old_domain) = routing.core_to_domain.remove(&core_id) {
+            routing.domain_to_core.remove(&old_domain);
         }
-        g.core_to_domain.insert(core_id, domain_id);
-        g.domain_to_core.insert(domain_id, core_id);
+        routing.core_to_domain.insert(core_id, domain_id);
+        routing.domain_to_core.insert(domain_id, core_id);
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
-        let mut g = self.inner.lock();
-        if let Some(domain_id) = g.core_to_domain.remove(&core_id) {
-            g.domain_to_core.remove(&domain_id);
+        self.cores[core_id as usize].current_domain.store(IDLE_DOMAIN, Ordering::Release);
+        let mut routing = self.routing.write();
+        if let Some(domain_id) = routing.core_to_domain.remove(&core_id) {
+            routing.domain_to_core.remove(&domain_id);
         }
     }
 
     fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
-        self.inner.lock().domain_to_core.get(&domain_id).copied()
+        self.routing.read().domain_to_core.get(&domain_id).copied()
     }
 
-    /// Return the CoreId of the calling physical core by reading the x2APIC ID
-    /// and looking it up in the bootstrap-populated LAPIC ID table.
     fn get_current_core(&self) -> Option<CoreId> {
         let lapic_id = unsafe { x86::msr::rdmsr(x86::msr::IA32_X2APIC_APICID) as u32 };
-        let g = self.inner.lock();
-        g.lapic_ids
+        self.lapic_ids
+            .read()
             .iter()
             .position(|&id| id == lapic_id)
             .map(|i| i as CoreId)
@@ -592,9 +609,6 @@ impl Platform for ThemisPlatform {
 // ── Helpers ───────────────────────────────────────────────────────────────── //
 
 /// Convert capability-engine `Rights` to EPT entry permission flags.
-///
-/// Execute permission is split into `SUPERVISOR_EXECUTE | USER_EXECUTE` so
-/// that guest ring-3 code can execute — Intel SDM Vol 3C §29.3.2.
 fn rights_to_ept_flags(rights: &capability_engine::Rights) -> EptEntryFlags {
     let mut flags = EptEntryFlags::empty();
     if rights.read() {
