@@ -42,11 +42,15 @@ pub struct PlatformInfo {
     /// Built from Limine RESERVED + FRAMEBUFFER entries during Phase 1a.
     /// Shared with `ThemisPlatform` via Arc to avoid copying.
     pub uc_ranges: alloc::sync::Arc<UncacheableRanges>,
-    /// Non-RAM e820 entries derived from the Limine memory map.
-    /// Includes RESERVED, FRAMEBUFFER, BOOTLOADER_RECLAIMABLE, KERNEL_AND_MODULES
-    /// (all as TYPE_RESERVED), ACPI_RECLAIMABLE (TYPE_ACPI), ACPI_NVS (TYPE_NVS),
-    /// and the capavisor heap region (TYPE_RESERVED).
-    /// Passed to `load_linux()` to build a complete e820 for dom0.
+    /// Non-RAM regions to map in dom0's EPT for device/ACPI passthrough.
+    /// Includes RESERVED, FRAMEBUFFER (device MMIO, mapped UC via map_range_typed),
+    /// ACPI_RECLAIMABLE, and ACPI_NVS (mapped WB — regular DRAM holding ACPI tables).
+    /// Excludes BOOTLOADER_RECLAIMABLE and KERNEL_AND_MODULES (capavisor memory —
+    /// must not be accessible to dom0 at the hardware level).
+    pub passthrough_regions: Vec<PhysRegion>,
+    /// Non-RAM e820 entries for the complete Linux e820 table.
+    /// Passed to `load_linux()`; combined with dom0_owned (RAM), meta_pool
+    /// (RESERVED hole), and the heap (RESERVED hole) to build boot_params.e820_table.
     pub non_ram_e820: Vec<E820Entry>,
 }
 
@@ -128,11 +132,12 @@ pub fn platform(
     }
     serial_println!("UC ranges:         {} MMIO region(s) registered", uc_ranges.len());
 
-    // ── Build non-RAM e820 entries ────────────────────────────────────────── //
+    // ── Build non-RAM e820 entries and EPT passthrough region list ────────── //
     // USABLE entries are skipped here — they are replaced by explicit entries in
     // load_linux(): dom0_owned as TYPE_RAM, meta_pool and heap as TYPE_RESERVED.
     // All other Limine entry types are translated directly to e820 types.
     let mut non_ram_e820: Vec<E820Entry> = Vec::new();
+    let mut passthrough_regions: Vec<PhysRegion> = Vec::new();
     for entry in entries.iter() {
         let e820_type = match entry.entry_type {
             limine::memory_map::EntryType::ACPI_RECLAIMABLE    => E820Entry::TYPE_ACPI,
@@ -145,6 +150,19 @@ pub fn platform(
             _ => continue,
         };
         non_ram_e820.push(E820Entry { addr: entry.base, size: entry.length, entry_type: e820_type });
+
+        // EPT passthrough: map ACPI/NVS/RESERVED/FRAMEBUFFER but NOT capavisor memory.
+        match entry.entry_type {
+            limine::memory_map::EntryType::ACPI_RECLAIMABLE
+            | limine::memory_map::EntryType::ACPI_NVS
+            | limine::memory_map::EntryType::RESERVED
+            | limine::memory_map::EntryType::FRAMEBUFFER => {
+                passthrough_regions.push(PhysRegion { base: entry.base, length: entry.length });
+            }
+            // BOOTLOADER_RECLAIMABLE + EXECUTABLE_AND_MODULES: capavisor memory,
+            // must not be accessible to dom0 at the hardware level.
+            _ => {}
+        }
     }
     // The heap is carved from a USABLE region and excluded from dom0_owned, so it
     // doesn't appear in either list above.  Add it explicitly as RESERVED so Linux
@@ -155,6 +173,7 @@ pub fn platform(
         entry_type: E820Entry::TYPE_RESERVED,
     });
     serial_println!("Non-RAM e820:      {} entries (ACPI/NVS/RESERVED)", non_ram_e820.len());
+    serial_println!("EPT passthrough:   {} regions (ACPI/NVS/MMIO)", passthrough_regions.len());
 
     // ── Phase 1b: Memory partitioning ────────────────────────────────────── //
 
@@ -258,6 +277,7 @@ pub fn platform(
         pci_devices,
         uc_ranges,
         non_ram_e820,
+        passthrough_regions,
     }
 }
 
@@ -371,10 +391,30 @@ pub struct CapaState {
 /// Phase P2c: initialise the capability engine for dom0.
 ///
 /// Receives the already-bootstrapped `ThemisPlatform` (domain 0 registered, full
-/// META pool given).  Builds the capability tree and drives an `UpdateBatch` of
-/// `ChangeRights` to map every dom0-owned region into the EPT.  Also creates a
-/// META-flagged capability record for the META pool so that dom0's capability
-/// state correctly reflects ownership of the hypervisor-internal pages.
+/// META pool given).  Builds the capability tree and drives `UpdateBatch`es of
+/// `ChangeRights` to map dom0's memory into the EPT.
+///
+/// # Bootstrap inversion
+///
+/// During normal operation the capability engine drives hardware state: a
+/// capability is created first, then `ChangeRights` propagates it to the EPT.
+/// Bootstrap inverts this order — hardware structures (VMXON, META allocator, EPT
+/// root) are set up before the capability records exist.  The end result must be
+/// strictly equivalent: every region accessible to dom0 in the EPT has exactly
+/// one corresponding capability record, and every capability record has exactly
+/// one EPT mapping.  Any divergence is a security bug.
+///
+/// # Capability forest
+///
+/// dom0's memory capability tree is a **forest** of independent roots, one per
+/// disjoint physical region:
+/// - one root per `dom0_owned` RAM region
+/// - one root per passthrough region (MMIO / ACPI / NVS)
+/// - one META-flagged root for the META pool
+///
+/// There is no single root that covers all memory.  Attestation must walk every
+/// root; delegation produces sub-capabilities bounded by a single root's extent;
+/// revocation only affects the subtree of the revoked root.
 pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> CapaState {
     use alloc::sync::Arc;
     use capability_engine::{
@@ -414,6 +454,33 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             dom.data.add_memory_capability(sub, Arc::downgrade(&mem_cap));
             serial_println!(
                 "  mem cap #{}: {:#x}+{:#x} ({} KiB)",
+                sub, region.base, region.length, region.length / 1024,
+            );
+            mem_caps.push(mem_cap);
+            sub += 1;
+        }
+
+        // ── Passthrough capabilities (MMIO / ACPI / NVS) ─────────────────── //
+        //
+        // Every non-RAM region mapped in dom0's EPT must have a corresponding
+        // capability record so that the capability state fully reflects what
+        // dom0 can access.  Without these, attestation would be blind to all
+        // device MMIO and firmware table regions.
+        //
+        // These are regular (non-META) capabilities — MMIO regions ARE mapped
+        // in the EPT and are therefore visible to dom0, unlike META pages.
+        for region in &info.passthrough_regions {
+            if region.length == 0 {
+                continue;
+            }
+            let mem_cap = Capability::new_root(
+                ROOT_ID,
+                sub,
+                MemoryRegion::new_root(region.base, region.length),
+            );
+            dom.data.add_memory_capability(sub, Arc::downgrade(&mem_cap));
+            serial_println!(
+                "  passthrough cap #{}: {:#x}+{:#x} ({} KiB)",
                 sub, region.base, region.length, region.length / 1024,
             );
             mem_caps.push(mem_cap);
@@ -477,8 +544,41 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         .expect("P2c: EPT root not allocated after execute");
 
     serial_println!(
-        "  EPT built for dom0: {} regions, EPTP = {:#x}",
+        "  EPT built for dom0: {} RAM regions, EPTP = {:#x}",
         info.partition.dom0_owned_count, eptp,
+    );
+
+    // ── EPT passthrough: map non-RAM regions for device/ACPI access ───────── //
+    //
+    // RESERVED + FRAMEBUFFER regions are device MMIO (PCI BARs, LAPIC, IOAPIC,
+    // HPET, etc.) and are mapped UC by map_range_typed() via UncacheableRanges.
+    // ACPI_RECLAIMABLE + ACPI_NVS are normal DRAM (WB) holding firmware tables.
+    // BOOTLOADER_RECLAIMABLE and KERNEL_AND_MODULES are NOT mapped — capavisor
+    // memory is invisible to dom0 at the hardware level.
+    let passthrough_batch = {
+        let mut b = UpdateBatch::new();
+        for region in &info.passthrough_regions {
+            if region.length == 0 {
+                continue;
+            }
+            b.add_change_rights(
+                ROOT_ID,
+                region.base,   // GPA (identity)
+                region.length,
+                region.base,   // HPA
+                Rights::RW,    // no execute for MMIO/firmware regions
+                false,
+            );
+        }
+        b
+    };
+
+    capability_engine::execute(&platform, false, || Ok(((), passthrough_batch)))
+        .expect("P2c: passthrough EPT execute failed");
+
+    serial_println!(
+        "  EPT passthrough: {} non-RAM regions mapped (ACPI/NVS/MMIO)",
+        info.passthrough_regions.len(),
     );
     serial_println!("=== P2c: done ===");
 

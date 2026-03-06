@@ -1873,7 +1873,7 @@ The following three invariants govern what dom0 sees and can access:
   - The Limine memory map entries must be passed all the way from `PlatformInfo`
     to `load_linux()` (currently only dom0_owned is passed).
 
-- [ ] **P7f-ept-passthrough**: Map non-RAM regions in dom0's EPT for device passthrough:
+- [x] **P7f-ept-passthrough**: Map non-RAM regions in dom0's EPT for device passthrough:
   - `ACPI_RECLAIMABLE` + `ACPI_NVS`: map **read-write** so Linux can read (and
     the firmware can update) ACPI tables.  These use existing `ChangeRights` mechanism.
   - `RESERVED` regions that are device MMIO (PCI BARs, LAPIC, IOAPIC, HPET, etc.):
