@@ -134,8 +134,7 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             regs.rbx = result.ebx as u64;
             regs.rcx = result.ecx as u64;
             regs.rdx = result.edx as u64;
-            // Advance guest RIP past the CPUID instruction (2 bytes).
-            advance_rip(2);
+            next_instruction();
         }
 
         EXIT_REASON_HLT => {
@@ -152,7 +151,7 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             let opcode = regs.rax;
             serial_println!("[VMEXIT] VMCALL opcode={:#x} (stub — returning 0)", opcode);
             regs.rax = 0;
-            advance_rip(3); // VMCALL is 3 bytes (0F 01 C1)
+            next_instruction();
         }
 
         EXIT_REASON_CR_ACCESS => {
@@ -161,7 +160,7 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             let qual = vmx::vmread(vmcs::ro::EXIT_QUALIFICATION)
                 .unwrap_or(0);
             serial_println!("[VMEXIT] CR access qualification={:#x} (stub)", qual);
-            advance_rip(3); // MOV CR instructions vary; 3-byte estimate
+            next_instruction();
         }
 
         EXIT_REASON_EPT_VIOLATION => {
@@ -195,13 +194,21 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
 
-/// Advance guest RIP by `n` bytes (skip an instruction that caused the exit).
+/// Advance guest RIP by the length of the instruction that caused the VMEXIT.
+///
+/// The hardware records the instruction length in `VMEXIT_INSTRUCTION_LEN` for
+/// all instruction-based exits (CPUID, VMCALL, HLT, MOV CRn, …).  This mirrors
+/// vmxvmm's `VmxState::next_instruction()`.
 ///
 /// # Safety
 /// A VMCS must be loaded on the current core.
-unsafe fn advance_rip(n: u64) {
-    let rip = vmx::vmread(vmcs::guest::RIP).expect("vmread guest RIP");
-    vmx::vmwrite(vmcs::guest::RIP, rip + n).expect("vmwrite guest RIP");
+unsafe fn next_instruction() {
+    let len = vmx::vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
+        .expect("vmread VMEXIT_INSTRUCTION_LEN");
+    let rip = vmx::vmread(vmcs::guest::RIP)
+        .expect("vmread guest RIP");
+    vmx::vmwrite(vmcs::guest::RIP, rip + len)
+        .expect("vmwrite guest RIP");
 }
 
 /// Halt the current core forever.
