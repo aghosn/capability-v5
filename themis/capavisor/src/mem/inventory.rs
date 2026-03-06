@@ -70,60 +70,74 @@ impl PhysicalInventory {
     /// Parse the Limine memory map, carve out a heap, and initialize the global
     /// allocator.
     ///
+    /// The heap is taken from the **top** of the USABLE entry with the highest
+    /// physical end address that is large enough to hold the full heap.  This
+    /// places the heap as high in physical memory as possible, well above the
+    /// range where the Linux kernel and initrd are copied before VMLAUNCH
+    /// (typically < 128 MiB).  The approach is robust across different machine
+    /// sizes without requiring any hardcoded thresholds.
+    ///
+    /// The portion of the selected entry below the heap window is returned to
+    /// dom0 as normal RAM.  The heap itself is emitted as a TYPE_RESERVED hole
+    /// in the e820 table passed to Linux.
+    ///
     /// # Arguments
     /// * `entries` — memory map entries from `MemoryMapResponse::entries()`
     /// * `hhdm_offset` — Higher-Half Direct Map offset from `HhdmResponse::offset()`
     ///
     /// # Panics
-    /// Panics if no usable region is large enough for the heap.
+    /// Panics if no single usable region is large enough for the heap.
     pub fn from_limine(entries: &[&Entry], hhdm_offset: u64) -> Self {
         let mut total_usable: u64 = 0;
         let mut regions = [PhysRegion { base: 0, length: 0 }; Self::MAX_REGIONS];
         let mut count = 0;
 
-        // First pass: tally total usable memory and collect regions.
+        // First pass: tally total usable memory.
         for entry in entries {
             if entry.entry_type == EntryType::USABLE {
                 total_usable += entry.length;
             }
         }
 
-        // Find the largest usable region for the heap.
+        // Find the USABLE entry with the highest physical end address that is
+        // at least HEAP_SIZE bytes.  Taking the heap from the top of that entry
+        // ensures it sits as high in RAM as possible.
         let mut heap_region_idx: Option<usize> = None;
-        let mut heap_region_base: u64 = 0;
-        let mut heap_region_len: u64 = 0;
+        let mut heap_region_end: u64 = 0;
 
         for (i, entry) in entries.iter().enumerate() {
             if entry.entry_type == EntryType::USABLE && entry.length >= HEAP_SIZE {
-                if heap_region_idx.is_none() || entry.length > heap_region_len {
+                let end = entry.base + entry.length;
+                if heap_region_idx.is_none() || end > heap_region_end {
                     heap_region_idx = Some(i);
-                    heap_region_base = entry.base;
-                    heap_region_len = entry.length;
+                    heap_region_end = end;
                 }
             }
         }
 
         let heap_idx = heap_region_idx.expect("no usable region large enough for 64 MiB heap");
-        let heap_phys = heap_region_base;
+        // Carve the heap window from the TOP of the selected region.
+        let heap_phys = entries[heap_idx].base + entries[heap_idx].length - HEAP_SIZE;
 
         // Collect all usable regions, splitting the heap region as needed.
+        // The heap window itself is excluded from dom0_owned; only the portion
+        // below the window (if any) is kept as dom0 RAM.
         for (i, entry) in entries.iter().enumerate() {
             if entry.entry_type != EntryType::USABLE {
                 continue;
             }
 
             if i == heap_idx {
-                // The heap is carved from the start of this region.
-                let remainder_base = entry.base + HEAP_SIZE;
-                let remainder_len = entry.length - HEAP_SIZE;
-                if remainder_len > 0 {
+                // Lower portion [entry.base..heap_phys) goes to dom0 as RAM.
+                if heap_phys > entry.base {
                     assert!(count < Self::MAX_REGIONS, "too many usable memory regions");
                     regions[count] = PhysRegion {
-                        base: remainder_base,
-                        length: remainder_len,
+                        base: entry.base,
+                        length: heap_phys - entry.base,
                     };
                     count += 1;
                 }
+                // [heap_phys..entry.base+entry.length) is the heap — excluded.
             } else {
                 assert!(count < Self::MAX_REGIONS, "too many usable memory regions");
                 regions[count] = PhysRegion {
