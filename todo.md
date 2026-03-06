@@ -1663,12 +1663,16 @@ the EPT with no synchronization overhead.
   **Parent ID in PlatformDomain**: needed for `on_domain_revoked` when `fallback: None`
   (vital-memory revocation — platform must compute fallback from its own parent map).
 
-- [ ] **P2c**: Capability engine initialization:
+- [x] **P2c**: Capability engine initialization:
   - Create root domain capability (`Domain::new_root(num_cores)`).
   - Create initial memory capabilities from `partition.dom0_owned` regions
     (`MemoryRegion::new_root` per region).
+  - Create META capability for `meta_pool` (attributes `META|CLEAN|VITAL`); allocator
+    already populated by `bootstrap_give_meta` so no `GiveMetaMem` update needed.
   - Call `execute(platform, ...)` to apply resulting `UpdateBatch` → builds dom0 EPT.
   - No cross-core sync needed (bootstrap mode).
+  - dom0 capability state attested via `capability_engine::attest::attest_domain` after
+    P2c; report printed to serial so META caps are visible at boot.
 - [ ] **P2d**: VMCS allocation + minimal setup using `x86::bits64::vmx`:
   - VMCS pages allocated from dom0 META pool (one per VP).
   - Host state: capavisor CS/SS/DS, CR0/CR3/CR4, EFER, RSP/RIP → `vmexit_handler`.

@@ -141,6 +141,15 @@ pub extern "C" fn _start() -> ! {
     // `themis` is consumed here; further access via `capa.platform`.
     let capa = boot::capa(&platform, themis);
 
+    // ── Phase 2c attestation: dump dom0 capability state ─────────────────── //
+    {
+        let report = capability_engine::attest::attest_domain(&capa.root_domain);
+        serial_println!();
+        serial_println!("=== dom0 attestation ===");
+        serial_println!("{}", report.report);
+        serial_println!("=== end attestation ===");
+    }
+
     // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
     let _vmcs = boot::vmcs(&platform, &mut vmx_state, &capa);
 
