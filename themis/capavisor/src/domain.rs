@@ -25,6 +25,10 @@ pub struct Domain {
     pub vmcs_regions: Vec<u64>,
     /// Physical addresses of VAPIC pages, one per VP.
     pub vapic_regions: Vec<u64>,
+    /// I/O bitmap pages (shared by all VPs).
+    /// A = ports 0x0000–0x7FFF, B = ports 0x8000–0xFFFF.
+    pub io_bitmap_a: u64,
+    pub io_bitmap_b: u64,
 }
 
 impl Domain {
@@ -35,6 +39,8 @@ impl Domain {
             vmxon_regions: Vec::new(),
             vmcs_regions: Vec::new(),
             vapic_regions: Vec::new(),
+            io_bitmap_a: 0,
+            io_bitmap_b: 0,
         }
     }
 
@@ -83,6 +89,33 @@ impl Domain {
         for _ in 0..num_vps {
             // alloc_meta_frame already returns a zeroed page.
             self.vapic_regions.push(platform.alloc_meta_frame(self.id));
+        }
+    }
+
+    /// Allocate I/O bitmap pages and set bits for reset/shutdown ports.
+    ///
+    /// A zeroed bitmap = all ports pass through.  We set bits only for
+    /// ports that trigger machine reset/shutdown so the VMEXIT handler
+    /// can log them instead of letting QEMU silently exit.
+    pub fn alloc_io_bitmaps(
+        &mut self,
+        platform: &crate::platform::ThemisPlatform,
+    ) {
+        self.io_bitmap_a = platform.alloc_meta_frame(self.id);
+        self.io_bitmap_b = platform.alloc_meta_frame(self.id);
+
+        // Set intercepted port bits in bitmap A (ports 0x0000–0x7FFF).
+        let bitmap_a_ptr = (self.io_bitmap_a + self.hhdm_offset) as *mut u8;
+        unsafe {
+            // Port 0x64 — keyboard controller (cmd 0xFE = reset)
+            let byte = bitmap_a_ptr.add(0x64 / 8);
+            byte.write_volatile(byte.read_volatile() | (1 << (0x64 % 8)));
+            // Port 0xCF9 — reset control register
+            let byte = bitmap_a_ptr.add(0xCF9 / 8);
+            byte.write_volatile(byte.read_volatile() | (1 << (0xCF9 % 8)));
+            // Port 0x604 — PIIX4 ACPI power management (PM1a_CNT)
+            let byte = bitmap_a_ptr.add(0x604 / 8);
+            byte.write_volatile(byte.read_volatile() | (1 << (0x604 % 8)));
         }
     }
 

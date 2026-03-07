@@ -79,5 +79,6 @@ exec qemu-system-x86_64 \
     -serial stdio \
     -display none \
     -no-reboot \
+    -no-shutdown \
     ${DISK_ARGS} \
     ${QEMU_EXTRA_ARGS:-}

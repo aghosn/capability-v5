@@ -2317,12 +2317,17 @@ smpboot: Total of 4 processors activated (23961.69 BogoMIPS)
 12 bugs fixed (BUG-1 through BUG-12).  Linux boots through start_kernel,
 all 4 CPUs online, PCI/ACPI/x2apic/serial/networking/device-mapper all up.
 
-**Phase 1 — Boot bug triage**: ✅ COMPLETE.  See "Fixed Bugs" section below.
+**Phase 1 — Boot bug triage**: ✅ COMPLETE (BUG-1 through BUG-12).
+
+**Phase 1b — Userspace bringup**: 🔧 IN PROGRESS (BUG-13).
+- Kernel completes all initcalls through `dns_resolver registered`
+- Silent reboot before `free_initmem` / `/init` exec
+- Next test: `init=/bin/sh` with `-no-reboot -no-shutdown` (code built, ready to run)
 
 **Phase 2 — Post-clean-boot refactor**:  Harden bringup shortcuts:
 - **#U5 — vAPIC for all domains**: Replace LAPIC/IOAPIC EPT passthrough
   (BUG-6 shortcut) with proper Virtual-APIC support.
-- **Initramfs**: Fix ZSTD-compressed initrd loading (currently corrupt).
+- **#U6 — Enable XSAVES/XRSTORS**: Set secondary exec bit 20, handle IA32_XSS MSR.
 - Review all other shortcuts accumulated during Phase 1.
 
 
@@ -2535,20 +2540,84 @@ LAPIC IPI delivery (which works with our LAPIC passthrough).
 
 **Files**: `vmexit.rs` (VMCALL handler).
 
-### BUG-12: Userspace #UD in ld-linux — CPUID passthrough advertises unavailable features (IN PROGRESS)
+### BUG-12: Userspace #UD in ld-linux — CPUID passthrough advertises unavailable features (FIXED)
 
 **Symptom**: `traps: modprobe[N] trap invalid opcode` in `ld-linux-x86-64.so.2`
 at a fixed offset.  Multiple userspace processes crash on the same instruction.
 
-**Root cause**: The CPUID handler passes through host CPUID verbatim, advertising
-features (CET shadow stack, ENQCMD, etc.) that require VMX configuration Themis
-hasn't set up.  Userspace (glibc) detects these features and uses the
-corresponding instructions, which cause #UD.
+**Root cause (multi-part)**:
+1. CPUID handler passed through host CPUID verbatim, advertising AVX-512, PKU,
+   CET, WAITPKG, ENQCMD features that require VMX configuration Themis hasn't set up.
+2. CPUID leaf 0xD sub-leaf 0 reported XSAVE sizes including AVX-512 components
+   while the feature bits were masked → kernel `paranoid_xstate_size_valid()` WARNING
+   → inconsistent XSAVE state → userspace XGETBV #UD.
+3. CPUID leaf 0xD sub-leaf 1 advertised XSAVES/XRSTORS support, but secondary
+   exec control bit 20 is not enabled → XRSTORS #UD in `restore_fpregs_from_fpstate`.
+4. KVM PV IPI (CPUID 0x40000001 bit 11) was advertised but VMCALL returned -ENOSYS
+   → kernel's `static_branch_enable` inside `text_poke_bp_batch` caused recursive
+   text_mutex deadlock.
 
-**Fix**: Mask CPUID leaf 7 to clear feature bits that require unimplemented VMX
-support (CET_SS, CET_IBT, ENQCMD, WAITPKG, etc.).
+**Fix**: Aggressive CPUID filtering in `vmexit.rs`:
+- Leaf 7: mask all AVX-512, PKU, CET, WAITPKG, ENQCMD bits
+- Leaf 0xD sub-leaf 0: mask to x87+SSE+AVX only, fix EBX/ECX to 832 bytes
+- Leaf 0xD sub-leaf 1: clear XSAVES bit (bit 3), fix sizes, zero supervisor states
+- Leaf 0xD sub-leaves 5-7,9: zeroed (AVX-512/PKU XSAVE areas)
+- Leaf 0x40000001: whitelist only clocksource + NOP I/O delay KVM features
 
 **Files**: `vmexit.rs` (CPUID handler).
+
+
+### BUG-13: Silent reboot after `dns_resolver registered` — kernel→userspace transition (IN PROGRESS)
+
+**Symptom**: After the last initcall (`Key type dns_resolver registered`), the guest
+silently reboots — no kernel panic, no oops, no exception. The serial output jumps
+directly from `dns_resolver registered` to UEFI `BdsDxe: loading Boot0001` (Limine
+restart). Exception bitmap (#UD/#DF/#GP) does NOT fire at the crash point.
+
+**What happens after dns_resolver in 5.15 kernel**:
+1. `do_initcalls()` returns → `do_basic_setup()` returns → `kernel_init_freeable()`
+2. `wait_for_initramfs()` — waits for async rootfs unpacking completion
+3. `console_on_rootfs()` — opens /dev/console on the rootfs
+4. `kernel_init()` calls `free_initmem()` → prints "Freeing unused kernel image memory"
+5. `run_init_process("/sbin/init")` — or whatever `init=` says
+We never see "Freeing unused kernel image memory" so the crash is between
+`dns_resolver` and `free_initmem()`, or possibly in early initramfs `/init` exec.
+
+**What we tried**:
+- Exception bitmap: confirms no #UD/#DF at crash. Only routine #GP from MSR access.
+- I/O bitmap for reset ports (0xCF9, 0x64, 0x604): FAILED — port 0xCF9 shares I/O
+  bitmap byte with PCI config port 0xCF8 → broke PCI. Port 0x604 polled thousands of
+  times. Reverted.
+- `-no-shutdown` alone: guest reboots (Limine restarts) instead of QEMU exiting.
+  Still no panic message visible.
+
+**Current debug setup (ready to test next session)**:
+- QEMU flags set to `-no-reboot -no-shutdown` (both — QEMU should freeze on reset)
+- Kernel command line changed to `init=/bin/sh` — bypasses initramfs `/init`,
+  directly execs `/bin/sh` from rootfs. If shell works → issue is in initramfs init.
+  If shell doesn't work → issue is in kernel→userspace transition itself.
+- Code is BUILT and ready to run (`cargo build` succeeded).
+
+**Next steps if init=/bin/sh still crashes**:
+1. Check if the initramfs has `/init` — already extracted at `/tmp/initrd_extract/main/`
+2. Try `rdinit=/bin/sh` instead (targets initramfs rootfs rather than `root=` device)
+3. Add `panic=30` to kernel command line — gives panic message time to print
+4. Check if virtio drivers (virtio_pci, virtio_blk) are built-in or modules
+   (look in `/tmp/mnt/lib/modules/5.15.0-171-generic/`)
+5. Consider intercepting the reset port differently — maybe intercept only the
+   specific byte write to 0xCF9 (value 0x06=warm reset or 0x0E=cold reset) in the
+   existing I/O handler by checking the port number post-exit
+
+**Possible root causes**:
+- Kernel can't find `/init` in initramfs → panics but output lost in reset race
+- `/init` exec fails (missing interpreter, wrong arch, permission)
+- `wait_for_initramfs()` hangs or crashes
+- A deferred work item or timer fires between the last initcall and free_initmem
+- Triple fault on a different CPU that doesn't get logged (serial lock contention)
+
+**Files**: `vmexit.rs` (exception handler), `vmcs.rs` (exception bitmap),
+`boot.rs` (kernel cmdline — currently has `init=/bin/sh`),
+`scripts/run-qemu.sh` (now has both `-no-reboot -no-shutdown`).
 
 
 ## Platform API / Unimplemented Features
@@ -2557,3 +2626,4 @@ support (CET_SS, CET_IBT, ENQCMD, WAITPKG, etc.).
 - [ ] **#U2** `CapavisorAPI::ENUMERATE` / `enumerate_pending` — semantics TBD. _Deferred._
 - [ ] **#U3** Cache coloring — see `./2026/docs/design/address_translation.md`. _Phase 4–6 of address translation design._
 - [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note. _Post-clean-boot refactor._
+- [ ] **#U6** Enable XSAVES/XRSTORS — set secondary exec control bit 20, handle IA32_XSS MSR (0xDA0) read/write, configure VM-entry/exit IA32_XSS load controls.  Currently masked from CPUID 0xD:1 (BUG-12 workaround). _Post-clean-boot refactor._

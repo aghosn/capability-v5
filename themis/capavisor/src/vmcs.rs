@@ -101,6 +101,8 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // HLT_EXITING (bit 7), USE_MSR_BITMAPS (bit 28),
     // SECONDARY_CONTROLS (bit 31).
     // USE_IO_BITMAPS is NOT set: all guest I/O passes through directly.
+    // (Port 0xCF9 reset can't be intercepted without also catching PCI
+    // config address 0xCF8 which shares the same I/O bitmap byte.)
     let primary_desired: u64 =
         (1 << 7)   // HLT_EXITING
         | (1 << 28) // USE_MSR_BITMAPS
@@ -158,8 +160,10 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // VPID 0 is reserved for the VMX-root context; dom0 VPs get 1..=N.
     vmx::vmwrite(control::VPID as u32, (vp_index + 1) as u64).expect("vmwrite VPID");
 
-    // ── Exception bitmap: intercept nothing (pass all exceptions to guest) //
-    vmx::vmwrite(control::EXCEPTION_BITMAP, 0).expect("vmwrite exception bitmap");
+    // ── Exception bitmap: intercept #UD(6), #DF(8), #GP(13) for diagnostics //
+    // These are logged with full guest state, then re-injected into the guest.
+    let exception_bitmap: u64 = (1 << 6) | (1 << 8) | (1 << 13);
+    vmx::vmwrite(control::EXCEPTION_BITMAP, exception_bitmap).expect("vmwrite exception bitmap");
 
     // ── CR0/CR4 guest-host masks ──────────────────────────────────────────── //
     // CR0: mask the FIXED0 bits (except PE/PG which UNRESTRICTED_GUEST exempts).
@@ -191,6 +195,9 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // physical address space → valid per Intel SDM 26.2.1.1).
     // A zeroed page at phys 0 means no I/O intercepts and no MSR intercepts,
     // which is correct for a pass-through hypervisor at bootstrap time.
+    // ── I/O / MSR bitmap addresses ──────────────────────────────────── //
+    // USE_IO_BITMAPS is off, so I/O bitmap addresses are ignored.
+    // Write zeros for cleanliness (phys 0 is valid, zeroed = no intercepts).
     vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
     vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
     vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, 0).expect("vmwrite MSR bitmap");

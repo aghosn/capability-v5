@@ -222,11 +222,12 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                     edx  = 0;          // no upper-32 XCR0 bits
                 }
                 // Leaf 0xD sub-leaf 1: XSAVE capabilities.
-                // Clear supervisor-state components (ECX/EDX) — we don't
-                // virtualise IA32_XSS.  Fix EBX (current-XCR0|XSS size)
-                // to match the reduced feature set.
+                // Clear XSAVES/XRSTORS (bit 3) — these require secondary
+                // exec control bit 20 which we haven't enabled.  The
+                // kernel falls back to XRSTOR/XSAVEOPT/XSAVEC.
+                // Also clear supervisor-state components (ECX/EDX).
                 (0xD, 1) => {
-                    // EAX: XSAVEOPT / XSAVEC / XGETBV1 / XSAVES flags — keep
+                    eax &= !(1 << 3);  // hide XSAVES/XRSTORS
                     ebx = 0x340;       // size for XCR0|XSS = x87+SSE+AVX
                     ecx = 0;           // no supervisor state components
                     edx = 0;
@@ -238,6 +239,22 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                     ebx = 0;
                     ecx = 0;
                     edx = 0;
+                }
+                // Leaf 0x40000001: KVM paravirt features.
+                // Only keep clocksource + NOP I/O delay.  Mask PV IPI
+                // (bit 11) and other hypercall-based features we don't
+                // implement — returning -ENOSYS causes a deadlock when
+                // the kernel tries to static_branch_enable the fallback
+                // path from inside text_poke_bp_batch.
+                (0x40000001, _) => {
+                    const KVM_FEATURE_CLOCKSOURCE: u32     = 1 << 0;
+                    const KVM_FEATURE_NOP_IO_DELAY: u32    = 1 << 1;
+                    const KVM_FEATURE_CLOCKSOURCE2: u32    = 1 << 3;
+                    const KVM_FEATURE_CLOCKSOURCE_STABLE: u32 = 1 << 24;
+                    eax &= KVM_FEATURE_CLOCKSOURCE
+                         | KVM_FEATURE_NOP_IO_DELAY
+                         | KVM_FEATURE_CLOCKSOURCE2
+                         | KVM_FEATURE_CLOCKSOURCE_STABLE;
                 }
                 _ => {}
             }
@@ -289,9 +306,9 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
         }
 
         EXIT_REASON_IO_INSTRUCTION => {
-            // I/O instruction exit: with USE_IO_BITMAPS cleared in primary
-            // controls this should not occur; if it does (forced by must_be_1),
-            // skip the instruction and continue — dom0 gets direct I/O access.
+            // I/O instruction exit: USE_IO_BITMAPS is off, so this should
+            // only fire if UNCONDITIONAL_IO_EXITING is forced by must_be_1.
+            // Skip the instruction — dom0 gets direct I/O access.
             next_instruction();
         }
 
@@ -453,8 +470,42 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
 
         EXIT_REASON_EXCEPTION_NMI => {
             let info = vmx::vmread(vmcs::ro::VMEXIT_INTERRUPTION_INFO).unwrap_or(0);
-            serial_println!("[VMEXIT] exception/NMI info={:#x} — halting", info);
-            halt_forever();
+            let vector = (info & 0xFF) as u8;
+            let exc_type = ((info >> 8) & 0x7) as u8;  // 3 = hardware exception
+            let has_error_code = (info >> 11) & 1;
+            let rip = vmx::vmread(vmcs::guest::RIP).unwrap_or(0);
+
+            let name = match vector {
+                0 => "#DE", 1 => "#DB", 2 => "NMI", 3 => "#BP",
+                6 => "#UD", 8 => "#DF", 13 => "#GP", 14 => "#PF",
+                _ => "??",
+            };
+
+            // Only verbose dump for #UD and #DF (unexpected); #GP on MSR
+            // access is routine — one-liner only.
+            if vector == 6 || vector == 8 {
+                serial_println!("[VMEXIT] exception {} at RIP={:#018x}", name, rip);
+                let rsp = vmx::vmread(vmcs::guest::RSP).unwrap_or(0);
+                let cr3 = vmx::vmread(vmcs::guest::CR3).unwrap_or(0);
+                let cr4 = vmx::vmread(vmcs::guest::CR4).unwrap_or(0);
+                serial_println!("  RSP={:#018x}  CR3={:#010x}  CR4={:#010x}", rsp, cr3, cr4);
+                serial_println!("  RAX={:#018x}  RCX={:#018x}  RDX={:#018x}", regs.rax, regs.rcx, regs.rdx);
+            }
+
+            // Re-inject the exception into the guest so its own handler runs.
+            let inject = (1u64 << 31)
+                       | ((exc_type as u64) << 8)
+                       | (vector as u64)
+                       | (has_error_code << 11);
+            vmx::vmwrite(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject)
+                .expect("vmwrite inject exception");
+            if has_error_code == 1 {
+                let err = vmx::vmread(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE).unwrap_or(0);
+                vmx::vmwrite(control::VMENTRY_EXCEPTION_ERR_CODE, err)
+                    .expect("vmwrite inject error code");
+            }
+            vmx::vmwrite(control::VMENTRY_INSTRUCTION_LEN, 0)
+                .expect("vmwrite inject instr len");
         }
 
         other => {

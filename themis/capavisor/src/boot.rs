@@ -1130,7 +1130,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
         acpi_rsdp_addr,
         // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
         // is incomplete; can be removed once P7f-dmar is fully verified.
-        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off nokaslr root=/dev/vda1 rw",
+        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off nokaslr root=/dev/vda1 rw init=/bin/sh",
     );
 
     // ── Patch VMCS guest RIP and RSP ─────────────────────────────────────── //
