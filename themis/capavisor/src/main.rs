@@ -39,6 +39,7 @@ mod platform;
 mod vmcs;
 mod vmexit;
 mod vmx;
+pub mod vcpu;
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 
