@@ -53,10 +53,11 @@ fn vmx_ctrl_msr(basic_msr: u32, true_msr: u32) -> u64 {
 /// # Arguments
 /// * `vmcs_phys`  — physical address of the (already-initialised) VMCS page
 /// * `vapic_phys` — physical address of the VAPIC page for this VP
-/// * `host_stack_top` — top of the per-VP host stack (highest address, stack
-///   grows downward; must be 16-byte aligned)
 /// * `eptp`       — EPT pointer value from `EptMapper::eptp()`
 /// * `vp_index`   — VP index (used as VPID; 0 is reserved, so VPID = vp_index + 1)
+///
+/// HOST_RSP is set to 0 here (placeholder).  `ActiveVcpu::run()` overwrites it
+/// with the caller's RSP before every VMLAUNCH/VMRESUME.
 ///
 /// # Safety
 /// VMXON must already be active on this core.
@@ -64,7 +65,6 @@ pub unsafe fn setup_vmcs_for_vp(
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
-    host_stack_top: u64,
     eptp: u64,
     vp_index: usize,
 ) {
@@ -74,7 +74,7 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
     write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vp_index);
-    write_host_state(host_stack_top);
+    write_host_state();
     write_guest_state();
 
     serial_println!(
@@ -226,7 +226,7 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64,
 
 // ── Host state ────────────────────────────────────────────────────────────── //
 
-unsafe fn write_host_state(host_stack_top: u64) {
+unsafe fn write_host_state() {
     // Read current segment selectors (TI and RPL bits must be 0 in VMCS).
     let cs: u16;
     let ss: u16;
@@ -324,7 +324,9 @@ unsafe fn write_host_state(host_stack_top: u64) {
     vmx::vmwrite(host::IA32_SYSENTER_EIP, 0).expect("vmwrite host SYSENTER_EIP");
 
     // Host RSP and RIP.
-    vmx::vmwrite(host::RSP, host_stack_top).expect("vmwrite host RSP");
+    // RSP is set to 0 here — ActiveVcpu::run() overwrites it with the caller's
+    // RSP before every VMLAUNCH/VMRESUME via `vmwrite rsi, rsp`.
+    vmx::vmwrite(host::RSP, 0).expect("vmwrite host RSP");
     vmx::vmwrite(host::RIP, host_rip_stub as *const () as u64).expect("vmwrite host RIP");
 }
 

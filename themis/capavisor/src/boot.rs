@@ -939,30 +939,22 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 //allocated it's gonna eat up our heap super fast.
 /// State produced by VMCS setup (Phase P2d).
 pub struct VmcsState {
-    /// Per-VP host stacks (heap-allocated, one per VP).
-    /// Kept alive here to prevent deallocation.
-    /// TODO(R3): remove — vcpu.run() uses the caller's Limine stack instead.
-    pub host_stacks: Vec<alloc::boxed::Box<[u8; HOST_STACK_BYTES]>>,
     /// Pre-created InactiveVcpus, one per VP.  BSP takes its own from here;
     /// AP InactiveVcpus are moved to a global for AP consumption.
     pub vcpus: Vec<crate::vcpu::InactiveVcpu>,
 }
-
-/// Size of each per-VP host VMX stack in bytes.
-pub const HOST_STACK_BYTES: usize = 4096 * 4; // 16 KiB
 
 // ── Phase 2d: VMCS allocation and setup ──────────────────────────────────── //
 
 /// Phase P2d: allocate and initialise a VMCS for each dom0 VP.
 ///
 /// - Allocates VMCS and VAPIC pages from `vmx.dom0.meta` (the VMX-fixed sub-pool).
-/// - Allocates per-VP host stacks from the heap.
 /// - Sets up the BSP VMCS fully; sets up AP VMCS with wait-for-SIPI activity state.
 /// - After return, BSP VMCS is the current VMCS on this core (P7f will patch RIP/RSP).
 /// - Records all per-VP state in `VmcsState`.
+/// - HOST_RSP is not set here — `vcpu.run()` sets it dynamically to the caller's stack.
 pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsState {
     use crate::vmcs::setup_vmcs_for_vp;
-    use alloc::boxed::Box;
     use x86::bits64::vmx;
     use x86::vmx::vmcs;
 
@@ -999,24 +991,14 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         num_vps,
     );
 
-    // Per-VP host stacks (heap, not META — stacks need no physical-contiguity).
-    let mut host_stacks: Vec<Box<[u8; HOST_STACK_BYTES]>> = Vec::with_capacity(num_vps);
-    for _ in 0..num_vps {
-        host_stacks.push(Box::new([0u8; HOST_STACK_BYTES]));
-    }
-
     // Set up the VMCS for the BSP VP (vp_index = bsp_index).
     let vp = vmx.bsp_index;
-    let stack = &host_stacks[vp];
-    let stack_top = stack.as_ptr() as u64 + HOST_STACK_BYTES as u64;
-    let stack_top_aligned = stack_top & !0xF;
 
     unsafe {
         setup_vmcs_for_vp(
             vmx.dom0.vmcs_phys(vp),
             vmx.dom0.vapic_phys(vp),
             vmx.dom0.msr_bitmap_phys(),
-            stack_top_aligned,
             eptp,
             vp,
         );
@@ -1025,10 +1007,9 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         .bootstrap_set_vp_hardware(0, vp, vmx.dom0.vmcs_phys(vp));
 
     serial_println!(
-        "  BSP VMCS ready: vp={} vmcs={:#x} stack_top={:#x}",
+        "  BSP VMCS ready: vp={} vmcs={:#x}",
         vp,
         vmx.dom0.vmcs_phys(vp),
-        stack_top_aligned,
     );
 
     // Set up VMCS for each AP VP.
@@ -1046,14 +1027,11 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         if ap_vp == vmx.bsp_index {
             continue;
         }
-        let ap_stack = &host_stacks[ap_vp];
-        let ap_stack_top = (ap_stack.as_ptr() as u64 + HOST_STACK_BYTES as u64) & !0xF;
         unsafe {
             setup_vmcs_for_vp(
                 vmx.dom0.vmcs_phys(ap_vp),
                 vmx.dom0.vapic_phys(ap_vp),
                 vmx.dom0.msr_bitmap_phys(),
-                ap_stack_top,
                 eptp,
                 ap_vp,
             );
@@ -1091,7 +1069,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     }
     serial_println!("=== P2d: done ===");
 
-    VmcsState { host_stacks, vcpus }
+    VmcsState { vcpus }
 }
 
 // ── Phase 7f output ───────────────────────────────────────────────────────── //
