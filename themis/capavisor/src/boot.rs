@@ -940,27 +940,17 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     }
 }
 
-// ── Phase 2d output ───────────────────────────────────────────────────────── //
-
-//TODO(aghosn) Is this per domain then or not? If so, it's annoying to have so many stacks
-//allocated it's gonna eat up our heap super fast.
-/// State produced by VMCS setup (Phase P2d).
-pub struct VmcsState {
-    /// Pre-created InactiveVcpus, one per VP.  BSP takes its own from here;
-    /// AP InactiveVcpus are moved to a global for AP consumption.
-    pub vcpus: Vec<crate::vcpu::InactiveVcpu>,
-}
-
 // ── Phase 2d: VMCS allocation and setup ──────────────────────────────────── //
 
 /// Phase P2d: allocate and initialise a VMCS for each dom0 VP.
 ///
 /// - Allocates VMCS and VAPIC pages from `vmx.dom0.meta` (the VMX-fixed sub-pool).
 /// - Sets up the BSP VMCS fully; sets up AP VMCS with wait-for-SIPI activity state.
+/// - Stores AP InactiveVcpus directly into the ThemisPlatform's dom0 PlatformDomain.
+/// - BSP InactiveVcpu is created later in `launch()` after P7f patches RIP/RSP.
 /// - After return, BSP VMCS is the current VMCS on this core (P7f will patch RIP/RSP).
-/// - Records all per-VP state in `VmcsState`.
 /// - HOST_RSP is not set here — `vcpu.run()` sets it dynamically to the caller's stack.
-pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsState {
+pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     use crate::vmcs::setup_vmcs_for_vp;
     use x86::bits64::vmx;
     use x86::vmx::vmcs;
@@ -999,6 +989,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     );
 
     // Set up the VMCS for the BSP VP (vp_index = bsp_index).
+    // BSP's InactiveVcpu is created later in launch() after P7f patches RIP/RSP.
     let vp = vmx.bsp_index;
 
     unsafe {
@@ -1010,8 +1001,6 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             vp,
         );
     }
-    capa.platform
-        .bootstrap_set_vp_hardware(0, vp, vmx.dom0.vmcs_phys(vp));
 
     serial_println!(
         "  BSP VMCS ready: vp={} vmcs={:#x}",
@@ -1023,12 +1012,8 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     // Each AP is configured with activity state = wait-for-SIPI (3) so it sits
     // dormant until Linux sends INIT/SIPI.  After setup, the VMCS is stored
     // to memory with VMCLEAR so the AP can load it with VMPTRLD at launch time.
+    // AP InactiveVcpus are stored directly in the PlatformDomain.
     let msr_bitmap_phys = vmx.dom0.msr_bitmap_phys();
-    let mut vcpus: Vec<crate::vcpu::InactiveVcpu> = Vec::with_capacity(num_vps);
-    // Reserve slot for BSP (filled in launch() after P7f patches guest RIP/RSP).
-    for _ in 0..num_vps {
-        vcpus.push(crate::vcpu::InactiveVcpu::new(0, 0, 0, 0));
-    }
 
     for ap_vp in 0..num_vps {
         if ap_vp == vmx.bsp_index {
@@ -1051,15 +1036,14 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             // Save VMCS state to memory and deactivate.
             vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp)).expect("AP vmclear");
         }
-        // Create InactiveVcpu for this AP (VMCS is already VMCLEAR'd).
-        vcpus[ap_vp] = crate::vcpu::InactiveVcpu::new(
+        // Create InactiveVcpu and store directly in PlatformDomain (dom0, vp_id = ap_vp).
+        let vcpu = crate::vcpu::InactiveVcpu::new(
             vmx.dom0.vmcs_phys(ap_vp),
             vmx.dom0.vapic_phys(ap_vp),
             msr_bitmap_phys,
             (ap_vp + 1) as u16,
         );
-        capa.platform
-            .bootstrap_set_vp_hardware(0, ap_vp, vmx.dom0.vmcs_phys(ap_vp));
+        capa.platform.bootstrap_store_vcpu(0, ap_vp, vcpu);
         serial_println!(
             "  AP VMCS ready:  vp={} vmcs={:#x} (wait-for-SIPI)",
             ap_vp,
@@ -1075,8 +1059,6 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         }
     }
     serial_println!("=== P2d: done ===");
-
-    VmcsState { vcpus }
 }
 
 // ── Phase 7f output ───────────────────────────────────────────────────────── //
@@ -1176,7 +1158,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 ///    `boot_params_phys`, and enters the monitor loop.
 ///
 /// This function never returns.
-pub fn launch(linux: &LinuxState, vmx: &VmxState) -> ! {
+pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::ThemisPlatform) -> ! {
     use crate::AP_LAUNCH_READY;
     use crate::vcpu::{InactiveVcpu, Reg};
     use crate::vmexit::monitor_loop;
@@ -1205,7 +1187,7 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState) -> ! {
         );
     }
 
-    // ── Create ActiveVcpu for BSP ────────────────────────────────────────── //
+    // ── Create BSP InactiveVcpu, store in PlatformDomain, then take it ─── //
     let bsp_vmcs_phys = vmx.dom0.vmcs_phys(vmx.bsp_index);
     let bsp_vapic_phys = vmx.dom0.vapic_phys(vmx.bsp_index);
     let bsp_msr_bitmap_phys = vmx.dom0.msr_bitmap_phys();
@@ -1221,6 +1203,13 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState) -> ! {
 
     // Set RSI = boot_params_phys (Linux boot protocol requirement).
     inactive.set_reg(Reg::Rsi, linux.boot_params_phys);
+
+    // Store BSP vcpu in PlatformDomain, then immediately take it.
+    // This ensures the PlatformDomain has a complete VP table (all VP IDs
+    // are registered) even though the BSP VP is immediately active.
+    platform.bootstrap_store_vcpu(0, vmx.bsp_index, inactive);
+    let inactive = platform.take_vcpu(0, vmx.bsp_index)
+        .expect("BSP: failed to take vcpu from PlatformDomain");
 
     serial_println!("  BSP: RSI={:#x} → monitor_loop", linux.boot_params_phys);
 

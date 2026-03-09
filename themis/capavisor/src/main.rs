@@ -117,8 +117,8 @@ pub(crate) static KERNEL_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 // BSP populates VMXON_PHYS (one entry per core) and PLATFORM_PTR (pointer to
 // the live ThemisPlatform) with Relaxed stores, then sets AP_LAUNCH_READY with
 // a Release store.  APs spin on AP_LAUNCH_READY (Acquire); the Release/Acquire
-// edge makes VMXON_PHYS and PLATFORM_PTR visible.  APs derive their VMCS phys
-// from the ThemisPlatform via vp_vmcs_phys() — no duplication of state.
+// edge makes VMXON_PHYS and PLATFORM_PTR visible.  APs take their InactiveVcpus
+// from the PlatformDomain via take_vcpu().
 
 pub(crate) static AP_LAUNCH_READY: AtomicBool = AtomicBool::new(false);
 
@@ -134,14 +134,6 @@ pub(crate) static VMXON_PHYS: [core::sync::atomic::AtomicU64; crate::platform::M
 /// AP_LAUNCH_READY (Release).  APs load this after the Acquire on AP_LAUNCH_READY.
 pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPlatform> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-/// Per-VP InactiveVcpu pointers, populated by BSP before AP_LAUNCH_READY.
-/// Each AP takes its own via swap(null) — exactly-once consumption.
-pub(crate) static AP_VCPUS: [core::sync::atomic::AtomicPtr<vcpu::InactiveVcpu>; crate::platform::MAX_CORES] = {
-    const INIT: core::sync::atomic::AtomicPtr<vcpu::InactiveVcpu> =
-        core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-    [INIT; crate::platform::MAX_CORES]
-};
 
 // ── BSP entry point ──────────────────────────────────────────────────────── //
 
@@ -216,7 +208,8 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
-    let mut vmcs_state = boot::vmcs(&platform, &mut vmx_state, &capa);
+    // Vcpus are stored directly in the PlatformDomain (dom0).
+    boot::vmcs(&platform, &mut vmx_state, &capa);
 
     // ── Collect Limine modules for P7f ────────────────────────────────────── //
     let modules: alloc::vec::Vec<guest::ModuleInfo> = MODULE_REQUEST
@@ -227,25 +220,9 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 7f: Linux kernel loading + boot_params ──────────────────────── //
     let linux = boot::linux(&platform, &modules);
 
-    // ── Store AP InactiveVcpus in the global array ────────────────────────── //
-    // Each AP's InactiveVcpu is heap-allocated and stored as a raw pointer.
-    // The AP will take ownership via swap(null) after AP_LAUNCH_READY.
-    for (i, vcpu_slot) in vmcs_state.vcpus.iter_mut().enumerate() {
-        if i == vmx_state.bsp_index {
-            continue; // BSP vcpu is handled in launch()
-        }
-        // Only store non-placeholder vcpus (vmcs_phys != 0).
-        if vcpu_slot.vmcs_phys() != 0 {
-            let boxed = alloc::boxed::Box::new(
-                core::mem::replace(vcpu_slot, vcpu::InactiveVcpu::new(0, 0, 0, 0))
-            );
-            AP_VCPUS[i].store(alloc::boxed::Box::into_raw(boxed), Ordering::Relaxed);
-        }
-    }
-
     // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
     PLATFORM_PTR.store(&capa.platform as *const _ as *mut _, Ordering::Relaxed);
-    boot::launch(&linux, &vmx_state);
+    boot::launch(&linux, &vmx_state, &capa.platform);
 }
 
 // ── AP entry point ───────────────────────────────────────────────────────── //
@@ -291,10 +268,13 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
         );
     }
 
-    // Take the pre-created InactiveVcpu from the global (exactly-once).
-    let vcpu_ptr = AP_VCPUS[id].swap(core::ptr::null_mut(), Ordering::Relaxed);
-    assert!(!vcpu_ptr.is_null(), "AP{}: no InactiveVcpu in AP_VCPUS", id);
-    let inactive = *unsafe { alloc::boxed::Box::from_raw(vcpu_ptr) };
+    // Take the InactiveVcpu from PlatformDomain (dom0, vp_id = id).
+    let platform_ptr = PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null(), "AP{}: PLATFORM_PTR is null", id);
+    let platform = unsafe { &*platform_ptr };
+
+    let inactive = platform.take_vcpu(0, id)
+        .unwrap_or_else(|| panic!("AP{}: no InactiveVcpu in PlatformDomain", id));
 
     let mut active = inactive.activate().expect("AP activate failed");
 

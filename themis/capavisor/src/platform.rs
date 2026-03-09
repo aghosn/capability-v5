@@ -72,7 +72,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
 use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
@@ -192,10 +192,60 @@ impl Drop for ExclusiveGuard {
 impl OpLockGuard for ExclusiveGuard {}
 unsafe impl Send for ExclusiveGuard {}
 
-// ── Per-VP hardware state ──────────────────────────────────────────────────── //
+// ── Per-VP slot (atomic take/return for exclusive access) ──────────────────── //
 
-pub struct VpHardware {
-    pub vmcs_phys: u64,
+use crate::vcpu::InactiveVcpu;
+
+/// A slot holding an `InactiveVcpu` that can be atomically taken by one core
+/// at a time.  When a core wants to run a VP, it `take()`s the InactiveVcpu
+/// (leaving the slot empty), activates it, and runs.  When done, it
+/// deactivates and `return()`s the InactiveVcpu back to the slot.
+///
+/// An empty slot (null pointer) means the VP is currently active on some core.
+pub struct VcpuSlot {
+    ptr: AtomicPtr<InactiveVcpu>,
+}
+
+impl VcpuSlot {
+    /// Create an empty slot (no VP stored).
+    pub const fn empty() -> Self {
+        VcpuSlot {
+            ptr: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    /// Create a slot holding an InactiveVcpu.
+    pub fn with_vcpu(vcpu: InactiveVcpu) -> Self {
+        VcpuSlot {
+            ptr: AtomicPtr::new(Box::into_raw(Box::new(vcpu))),
+        }
+    }
+
+    /// Atomically take the InactiveVcpu from this slot.
+    /// Returns `Some(InactiveVcpu)` if the VP was available, `None` if already
+    /// taken by another core.
+    pub fn take(&self) -> Option<InactiveVcpu> {
+        let ptr = self.ptr.swap(core::ptr::null_mut(), Ordering::Acquire);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(*unsafe { Box::from_raw(ptr) })
+        }
+    }
+
+    /// Return an InactiveVcpu to this slot after deactivation.
+    ///
+    /// # Panics
+    /// Panics if the slot is not empty (double-return bug).
+    pub fn put(&self, vcpu: InactiveVcpu) {
+        let old = self.ptr.swap(Box::into_raw(Box::new(vcpu)), Ordering::Release);
+        assert!(old.is_null(), "VcpuSlot::put: slot was not empty (double-return bug)");
+    }
+
+    /// Check if the VP is currently available (not taken by any core).
+    pub fn is_available(&self) -> bool {
+        !self.ptr.load(Ordering::Relaxed).is_null()
+    }
 }
 
 // ── Per-core cell (Tier 1) ────────────────────────────────────────────────── //
@@ -226,8 +276,9 @@ pub struct PlatformDomain {
     pub parent: Option<DomainId>,
     /// HHDM offset, cached here so EPT root allocation can use it.
     hhdm_offset: u64,
-    /// Per-VP hardware structures.
-    pub vps: Vec<VpHardware>,
+    /// Per-VP slots.  Index = domain-local VP ID (0, 1, 2, ...).
+    /// Each slot holds an InactiveVcpu when the VP is not running.
+    pub vps: Vec<VcpuSlot>,
 }
 
 impl PlatformDomain {
@@ -417,21 +468,38 @@ impl ThemisPlatform {
             .alloc_frame()
     }
 
-    pub fn bootstrap_set_vp_hardware(&self, domain_id: DomainId, vp_index: usize, vmcs_phys: u64) {
+    /// Store an InactiveVcpu in a domain's VP slot during bootstrap.
+    ///
+    /// `vp_id` is the domain-local VP index (0, 1, 2, ...).
+    /// Extends the VP vector if needed.
+    pub fn bootstrap_store_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
         let arc = self.domains
             .get(domain_id)
-            .unwrap_or_else(|| panic!("bootstrap_set_vp_hardware: domain not registered"));
+            .unwrap_or_else(|| panic!("bootstrap_store_vcpu: domain not registered"));
         let mut d = arc.lock();
-        if d.vps.len() <= vp_index {
-            d.vps.resize_with(vp_index + 1, || VpHardware { vmcs_phys: 0 });
+        if d.vps.len() <= vp_id {
+            d.vps.resize_with(vp_id + 1, VcpuSlot::empty);
         }
-        d.vps[vp_index].vmcs_phys = vmcs_phys;
+        d.vps[vp_id].put(vcpu);
     }
 
-    pub fn vp_vmcs_phys(&self, domain_id: DomainId, vp_index: usize) -> Option<u64> {
+    /// Atomically take an InactiveVcpu from a domain's VP slot.
+    ///
+    /// Returns `None` if the VP is already active on another core.
+    pub fn take_vcpu(&self, domain_id: DomainId, vp_id: usize) -> Option<InactiveVcpu> {
         let arc = self.domains.get(domain_id)?;
         let d = arc.lock();
-        d.vps.get(vp_index).map(|v| v.vmcs_phys)
+        d.vps.get(vp_id).and_then(|slot| slot.take())
+    }
+
+    /// Return an InactiveVcpu to a domain's VP slot after deactivation.
+    pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
+        let arc = self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("return_vcpu: domain not registered"));
+        let d = arc.lock();
+        assert!(vp_id < d.vps.len(), "return_vcpu: vp_id out of range");
+        d.vps[vp_id].put(vcpu);
     }
 }
 
