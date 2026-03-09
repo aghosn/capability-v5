@@ -57,41 +57,43 @@ pub enum VmxError {
 // ── InactiveVcpu ─────────────────────────────────────────────────────────── //
 
 /// An inactive VCPU.  The VMCS has been vmclear'd and is safe to store,
-/// transfer between data structures, or (after appropriate flush) migrate
-/// to a different physical core.
+/// transfer between data structures, or migrate to a different physical core.
 ///
 /// Cannot vmread/vmwrite — must be activated first.
+///
+/// `Send` because a VMCLEAR'd VMCS is not bound to any core and can be
+/// safely transferred.  `!Sync` because concurrent access is not safe.
 pub struct InactiveVcpu {
     vmcs_phys: u64,
     vapic_phys: u64,
+    msr_bitmap_phys: u64,
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
-    /// !Send + !Sync — tied to the core that last ran it until explicitly
-    /// migrated (which requires VMCLEAR on the old core first).
-    _not_send: PhantomData<*const ()>,
 }
+
+// SAFETY: After VMCLEAR, the VMCS is flushed to memory and not bound to any
+// core.  It is safe to move an InactiveVcpu to another thread/core for
+// subsequent VMPTRLD there.
+unsafe impl Send for InactiveVcpu {}
 
 impl InactiveVcpu {
     /// Create a new inactive VCPU from freshly-allocated VMCS/VAPIC pages.
     /// The VMCS must have been vmclear'd by the caller.
-    pub fn new(vmcs_phys: u64, vapic_phys: u64, vpid: u16) -> Self {
+    pub fn new(vmcs_phys: u64, vapic_phys: u64, msr_bitmap_phys: u64, vpid: u16) -> Self {
         Self {
             vmcs_phys,
             vapic_phys,
+            msr_bitmap_phys,
             vpid,
             launched: false,
             regs: [0u64; REGFILE_SIZE],
-            _not_send: PhantomData,
         }
     }
 
     /// Load this VCPU's VMCS onto the current core (VMPTRLD) and return
     /// an `ActiveVcpu` that can vmread/vmwrite and run the guest.
     pub fn activate(self) -> Result<ActiveVcpu, VmxError> {
-        // SAFETY: caller must ensure the VMCS page is valid and was
-        // vmclear'd (or is being loaded on the same core it was last
-        // active on without an intervening vmclear — a "current" VMCS).
         unsafe {
             vmx::vmptrld(self.vmcs_phys)
                 .map_err(|_| VmxError::VmcsOperationFailed("vmptrld"))?;
@@ -99,6 +101,7 @@ impl InactiveVcpu {
         Ok(ActiveVcpu {
             vmcs_phys: self.vmcs_phys,
             vapic_phys: self.vapic_phys,
+            msr_bitmap_phys: self.msr_bitmap_phys,
             vpid: self.vpid,
             launched: self.launched,
             regs: self.regs,
@@ -106,20 +109,10 @@ impl InactiveVcpu {
         })
     }
 
-    /// Physical address of the VMCS page.
-    pub fn vmcs_phys(&self) -> u64 {
-        self.vmcs_phys
-    }
-
-    /// Physical address of the virtual-APIC page.
-    pub fn vapic_phys(&self) -> u64 {
-        self.vapic_phys
-    }
-
-    /// VPID assigned to this VCPU.
-    pub fn vpid(&self) -> u16 {
-        self.vpid
-    }
+    pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
+    pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
+    pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
+    pub fn vpid(&self) -> u16 { self.vpid }
 
     /// Read a guest GPR value.
     pub fn reg(&self, r: Reg) -> u64 {
@@ -138,9 +131,11 @@ impl InactiveVcpu {
 /// Provides vmread/vmwrite methods and `run()` to enter/exit the guest.
 ///
 /// Only one ActiveVcpu may exist per physical core at a time.
+/// `!Send` — bound to the core where VMPTRLD was issued.
 pub struct ActiveVcpu {
     vmcs_phys: u64,
     vapic_phys: u64,
+    msr_bitmap_phys: u64,
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
@@ -194,17 +189,10 @@ impl ActiveVcpu {
 
     // ── VCPU identity ────────────────────────────────────────────────── //
 
-    pub fn vmcs_phys(&self) -> u64 {
-        self.vmcs_phys
-    }
-
-    pub fn vapic_phys(&self) -> u64 {
-        self.vapic_phys
-    }
-
-    pub fn vpid(&self) -> u16 {
-        self.vpid
-    }
+    pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
+    pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
+    pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
+    pub fn vpid(&self) -> u16 { self.vpid }
 
     // ── Lifecycle ────────────────────────────────────────────────────── //
 
@@ -219,10 +207,10 @@ impl ActiveVcpu {
         Ok(InactiveVcpu {
             vmcs_phys: self.vmcs_phys,
             vapic_phys: self.vapic_phys,
+            msr_bitmap_phys: self.msr_bitmap_phys,
             vpid: self.vpid,
             launched: false, // VMCLEAR resets the launch state
             regs: self.regs,
-            _not_send: PhantomData,
         })
     }
 
@@ -256,126 +244,200 @@ impl ActiveVcpu {
     }
 }
 
-// ── Inline asm for guest entry ───────────────────────────────────────────── //
+// ── Naked VM-enter / VM-exit functions ───────────────────────────────────── //
 //
-// The macro stamps out the trampoline for both VMLAUNCH and VMRESUME.
-// The only difference is the final instruction.
+// Two naked functions (`vmlaunch_with_regs` / `vmresume_with_regs`) handle
+// the full guest-entry/exit cycle.  Using naked functions avoids issues with
+// inline asm labels and LTO (local labels in inline asm create anonymous
+// symbols that fail to link with LTO + codegen-units=1).
 //
-// Register allocation inside the asm block:
-//   RAX — regs pointer (in), guest RAX (saved manually), RFLAGS (out)
-//   RCX — HOST_RSP field encoding (in), guest RCX (out via inout)
-//   RDX — HOST_RIP field encoding (in), guest RDX (out via inout)
-//   RBX — host callee-save / temp for guest save
-//   RBP — host callee-save / temp for HOST_RIP address
-//   RSI,RDI,R8–R15 — guest values (via inout constraints)
+// Calling convention (System V x86_64):
+//   RDI = pointer to [u64; REGFILE_SIZE] (guest register file)
+//   RSI = HOST_RSP VMCS field encoding
+//   RDX = HOST_RIP VMCS field encoding
 //
-// HOST_RSP is set to the current RSP (caller's stack).
-// HOST_RIP is set to the VMEXIT return label inside the asm block.
-// After VMEXIT, execution resumes at that label and the function returns
-// normally — making vmlaunch/vmresume behave like a function call.
+// Return value:
+//   RAX = RFLAGS captured after VMLAUNCH/VMRESUME (caller checks CF/ZF)
+//
+// Stack layout at vm-enter (grows downward):
+//   [rsp+0]   regs_ptr (saved RDI)
+//   [rsp+8]   host RBP (callee-save)
+//   [rsp+16]  host RBX (callee-save)
+//   [rsp+24]  host R12 (callee-save)
+//   [rsp+32]  host R13 (callee-save)
+//   [rsp+40]  host R14 (callee-save)
+//   [rsp+48]  host R15 (callee-save)
+//   [rsp+56]  return address (from call instruction)
+//
+// HOST_RSP is set to current RSP (after pushes).  On VMEXIT, the CPU
+// restores RSP to this value and jumps to HOST_RIP (vmexit_return_point),
+// which saves guest GPRs to the regs array, captures RFLAGS, restores
+// host callee-saves, and returns to the Rust caller.
 
-macro_rules! vm_enter_asm {
-    ($regs:expr, $enter_insn:literal) => {{
-        let regs_ptr: u64 = $regs.as_mut_ptr() as u64;
-        let host_rsp_field: u64 = HOST_RSP_ENCODING;
-        let host_rip_field: u64 = HOST_RIP_ENCODING;
-        let flags_out: u64;
-
-        core::arch::asm!(
-            // ── Save host callee-saved registers ──
-            "push rbx",
-            "push rbp",
-            "push rax",                         // save regs_ptr for post-exit
-
-            // ── Set HOST_RSP = current RSP ──
-            "vmwrite rcx, rsp",
-
-            // ── Set HOST_RIP = VMEXIT return label ──
-            // RIP after lea points to label 1f.  Adding the distance
-            // (2f − 1f) gives the address of label 2f.
-            "lea rbp, [rip + 9f - 8f]",
-            "8:",
-            "vmwrite rdx, rbp",
-
-            // ── Load guest GPRs that are clobbered by our register use ──
-            "mov rbx, [rax + {rbx_off}]",       // guest RBX
-            "mov rcx, [rax + {rcx_off}]",       // guest RCX
-            "mov rdx, [rax + {rdx_off}]",       // guest RDX
-            "mov rbp, [rax + {rbp_off}]",       // guest RBP
-            "mov rax, [rax + {rax_off}]",       // guest RAX (last — clobbers ptr)
-
-            // ── Enter guest ──
-            $enter_insn,
-
-            // ── VMEXIT return point ──
-            "9:",
-
-            // ── Save guest GPRs that aren't covered by inout constraints ──
-            // At this point: RAX=guest, RBX=guest, RBP=guest, RCX=guest, RDX=guest
-            // RSI..R15 are captured by inout constraints.
-            // The regs_ptr is on the stack (third push).
-            "push rbx",                         // save guest RBX
-            "mov rbx, [rsp + 8]",               // reload regs_ptr from stack
-            "mov [rbx + {rbp_off}], rbp",       // save guest RBP
-            "mov [rbx + {rax_off}], rax",       // save guest RAX
-            "pop rbp",                          // pop guest RBX into RBP
-            "mov [rbx + {rbx_off}], rbp",       // save guest RBX
-
-            // ── Capture RFLAGS before any flag-modifying instruction ──
-            // push/pop/mov do NOT modify flags, so CF/ZF from a failed
-            // VMLAUNCH/VMRESUME are still intact here.
-            "pushfq",
-            "pop rax",                          // RAX = RFLAGS
-
-            // ── Restore host callee-saved registers ──
-            "pop rbx",                          // discard regs_ptr
-            "pop rbp",                          // restore host RBP
-            "pop rbx",                          // restore host RBX
-
-            // ── Register constraints ──
-            // IN:  regs_ptr / HOST_RSP field / HOST_RIP field
-            // OUT: RFLAGS (via RAX) / guest RCX / guest RDX
-            inout("rax") regs_ptr => flags_out,
-            inout("rcx") host_rsp_field => $regs[Reg::Rcx as usize],
-            inout("rdx") host_rip_field => $regs[Reg::Rdx as usize],
-
-            // Guest RSI, RDI, R8–R15: loaded on entry, captured on exit.
-            inout("rsi") $regs[Reg::Rsi as usize],
-            inout("rdi") $regs[Reg::Rdi as usize],
-            inout("r8")  $regs[Reg::R8  as usize],
-            inout("r9")  $regs[Reg::R9  as usize],
-            inout("r10") $regs[Reg::R10 as usize],
-            inout("r11") $regs[Reg::R11 as usize],
-            inout("r12") $regs[Reg::R12 as usize],
-            inout("r13") $regs[Reg::R13 as usize],
-            inout("r14") $regs[Reg::R14 as usize],
-            inout("r15") $regs[Reg::R15 as usize],
-
-            // Const offsets into the [u64; 16] register file.
-            rax_off = const (Reg::Rax as usize) * 8,
-            rbx_off = const (Reg::Rbx as usize) * 8,
-            rcx_off = const (Reg::Rcx as usize) * 8,
-            rdx_off = const (Reg::Rdx as usize) * 8,
-            rbp_off = const (Reg::Rbp as usize) * 8,
-        );
-
-        // Check RFLAGS: CF (bit 0) = VmFailInvalid, ZF (bit 6) = VmFailValid.
-        if flags_out & 1 != 0 {
-            Err(VmxError::VmFailInvalid)
-        } else if flags_out & 0x40 != 0 {
-            Err(VmxError::VmFailValid)
-        } else {
-            Ok(())
-        }
-    }};
+/// Shared VMEXIT return point — HOST_RIP target for both VMLAUNCH and VMRESUME.
+///
+/// On VMEXIT, all GPRs contain guest values.  The stack is at HOST_RSP
+/// with the layout described above.
+#[unsafe(naked)]
+unsafe extern "C" fn vmexit_return_point() {
+    core::arch::naked_asm!(
+        // Save guest RDI (need it as scratch to access regs_ptr)
+        "push rdi",
+        // regs_ptr was at [rsp+0] before we pushed; now at [rsp+8]
+        "mov rdi, [rsp + 8]",
+        // Save all guest GPRs to the register file
+        "mov [rdi + {rax_off}], rax",
+        "mov [rdi + {rbx_off}], rbx",
+        "mov [rdi + {rcx_off}], rcx",
+        "mov [rdi + {rdx_off}], rdx",
+        "mov [rdi + {rbp_off}], rbp",
+        "mov [rdi + {rsi_off}], rsi",
+        "mov [rdi + {r8_off}],  r8",
+        "mov [rdi + {r9_off}],  r9",
+        "mov [rdi + {r10_off}], r10",
+        "mov [rdi + {r11_off}], r11",
+        "mov [rdi + {r12_off}], r12",
+        "mov [rdi + {r13_off}], r13",
+        "mov [rdi + {r14_off}], r14",
+        "mov [rdi + {r15_off}], r15",
+        // Save guest RDI (currently on the stack)
+        "pop rax",
+        "mov [rdi + {rdi_off}], rax",
+        // Capture RFLAGS into RAX (return value).
+        // push/pop/mov don't modify flags, so CF/ZF are still intact.
+        "pushfq",
+        "pop rax",
+        // Restore host callee-saved registers + regs_ptr
+        "pop rdi",                          // discard regs_ptr
+        "pop rbp",
+        "pop rbx",
+        "pop r12",
+        "pop r13",
+        "pop r14",
+        "pop r15",
+        "ret",
+        rax_off = const (Reg::Rax as usize) * 8,
+        rbx_off = const (Reg::Rbx as usize) * 8,
+        rcx_off = const (Reg::Rcx as usize) * 8,
+        rdx_off = const (Reg::Rdx as usize) * 8,
+        rbp_off = const (Reg::Rbp as usize) * 8,
+        rsi_off = const (Reg::Rsi as usize) * 8,
+        rdi_off = const (Reg::Rdi as usize) * 8,
+        r8_off  = const (Reg::R8  as usize) * 8,
+        r9_off  = const (Reg::R9  as usize) * 8,
+        r10_off = const (Reg::R10 as usize) * 8,
+        r11_off = const (Reg::R11 as usize) * 8,
+        r12_off = const (Reg::R12 as usize) * 8,
+        r13_off = const (Reg::R13 as usize) * 8,
+        r14_off = const (Reg::R14 as usize) * 8,
+        r15_off = const (Reg::R15 as usize) * 8,
+    );
 }
+
+/// Macro to stamp out the VMLAUNCH / VMRESUME naked functions.
+/// The only difference between them is the final VM-enter instruction.
+macro_rules! naked_vm_enter {
+    ($fn_name:ident, $enter_insn:literal) => {
+        #[unsafe(naked)]
+        unsafe extern "C" fn $fn_name(
+            _regs: *mut u64,       // RDI
+            _host_rsp_field: u64,  // RSI  (HOST_RSP encoding)
+            _host_rip_field: u64,  // RDX  (HOST_RIP encoding)
+        ) -> u64 {
+            core::arch::naked_asm!(
+                // ── Save host callee-saved registers ──
+                "push r15",
+                "push r14",
+                "push r13",
+                "push r12",
+                "push rbx",
+                "push rbp",
+                "push rdi",                         // save regs_ptr
+
+                // ── Set HOST_RSP = current RSP ──
+                "vmwrite rsi, rsp",
+
+                // ── Set HOST_RIP = vmexit_return_point ──
+                "lea rax, [{vmexit_ret}]",
+                "vmwrite rdx, rax",
+
+                // ── Load all guest GPRs from the register file ──
+                "mov rax, [rdi + {rax_off}]",
+                "mov rbx, [rdi + {rbx_off}]",
+                "mov rcx, [rdi + {rcx_off}]",
+                "mov rdx, [rdi + {rdx_off}]",
+                "mov rbp, [rdi + {rbp_off}]",
+                "mov rsi, [rdi + {rsi_off}]",
+                "mov r8,  [rdi + {r8_off}]",
+                "mov r9,  [rdi + {r9_off}]",
+                "mov r10, [rdi + {r10_off}]",
+                "mov r11, [rdi + {r11_off}]",
+                "mov r12, [rdi + {r12_off}]",
+                "mov r13, [rdi + {r13_off}]",
+                "mov r14, [rdi + {r14_off}]",
+                "mov r15, [rdi + {r15_off}]",
+                // RDI must be loaded last (it holds the regs pointer)
+                "mov rdi, [rdi + {rdi_off}]",
+
+                // ── Enter guest ──
+                $enter_insn,
+
+                // ── VMLAUNCH/VMRESUME failed (didn't enter guest) ──
+                // CPU did not enter guest mode.  CF or ZF is set.
+                // All GPRs still hold guest values we loaded above.
+                // Jump to the shared return point to save state and return.
+                "jmp {vmexit_ret}",
+
+                vmexit_ret = sym vmexit_return_point,
+                rax_off = const (Reg::Rax as usize) * 8,
+                rbx_off = const (Reg::Rbx as usize) * 8,
+                rcx_off = const (Reg::Rcx as usize) * 8,
+                rdx_off = const (Reg::Rdx as usize) * 8,
+                rbp_off = const (Reg::Rbp as usize) * 8,
+                rsi_off = const (Reg::Rsi as usize) * 8,
+                rdi_off = const (Reg::Rdi as usize) * 8,
+                r8_off  = const (Reg::R8  as usize) * 8,
+                r9_off  = const (Reg::R9  as usize) * 8,
+                r10_off = const (Reg::R10 as usize) * 8,
+                r11_off = const (Reg::R11 as usize) * 8,
+                r12_off = const (Reg::R12 as usize) * 8,
+                r13_off = const (Reg::R13 as usize) * 8,
+                r14_off = const (Reg::R14 as usize) * 8,
+                r15_off = const (Reg::R15 as usize) * 8,
+            );
+        }
+    };
+}
+
+naked_vm_enter!(vmlaunch_with_regs, "vmlaunch");
+naked_vm_enter!(vmresume_with_regs, "vmresume");
 
 impl ActiveVcpu {
     unsafe fn vmlaunch_asm(regs: &mut [u64; REGFILE_SIZE]) -> Result<(), VmxError> {
-        vm_enter_asm!(regs, "vmlaunch")
+        let flags = vmlaunch_with_regs(
+            regs.as_mut_ptr(),
+            HOST_RSP_ENCODING,
+            HOST_RIP_ENCODING,
+        );
+        check_vm_flags(flags)
     }
 
     unsafe fn vmresume_asm(regs: &mut [u64; REGFILE_SIZE]) -> Result<(), VmxError> {
-        vm_enter_asm!(regs, "vmresume")
+        let flags = vmresume_with_regs(
+            regs.as_mut_ptr(),
+            HOST_RSP_ENCODING,
+            HOST_RIP_ENCODING,
+        );
+        check_vm_flags(flags)
+    }
+}
+
+fn check_vm_flags(flags: u64) -> Result<(), VmxError> {
+    if flags & 1 != 0 {
+        Err(VmxError::VmFailInvalid)
+    } else if flags & 0x40 != 0 {
+        Err(VmxError::VmFailValid)
+    } else {
+        Ok(())
     }
 }

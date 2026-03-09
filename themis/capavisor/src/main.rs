@@ -135,6 +135,14 @@ pub(crate) static VMXON_PHYS: [core::sync::atomic::AtomicU64; crate::platform::M
 pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPlatform> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// Per-VP InactiveVcpu pointers, populated by BSP before AP_LAUNCH_READY.
+/// Each AP takes its own via swap(null) — exactly-once consumption.
+pub(crate) static AP_VCPUS: [core::sync::atomic::AtomicPtr<vcpu::InactiveVcpu>; crate::platform::MAX_CORES] = {
+    const INIT: core::sync::atomic::AtomicPtr<vcpu::InactiveVcpu> =
+        core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+    [INIT; crate::platform::MAX_CORES]
+};
+
 // ── BSP entry point ──────────────────────────────────────────────────────── //
 
 /// BSP entry point called by the Limine bootloader.
@@ -208,7 +216,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
-    let _vmcs = boot::vmcs(&platform, &mut vmx_state, &capa);
+    let mut vmcs_state = boot::vmcs(&platform, &mut vmx_state, &capa);
 
     // ── Collect Limine modules for P7f ────────────────────────────────────── //
     let modules: alloc::vec::Vec<guest::ModuleInfo> = MODULE_REQUEST
@@ -219,9 +227,25 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 7f: Linux kernel loading + boot_params ──────────────────────── //
     let linux = boot::linux(&platform, &modules);
 
+    // ── Store AP InactiveVcpus in the global array ────────────────────────── //
+    // Each AP's InactiveVcpu is heap-allocated and stored as a raw pointer.
+    // The AP will take ownership via swap(null) after AP_LAUNCH_READY.
+    for (i, vcpu_slot) in vmcs_state.vcpus.iter_mut().enumerate() {
+        if i == vmx_state.bsp_index {
+            continue; // BSP vcpu is handled in launch()
+        }
+        // Only store non-placeholder vcpus (vmcs_phys != 0).
+        if vcpu_slot.vmcs_phys() != 0 {
+            let boxed = alloc::boxed::Box::new(
+                core::mem::replace(vcpu_slot, vcpu::InactiveVcpu::new(0, 0, 0, 0))
+            );
+            AP_VCPUS[i].store(alloc::boxed::Box::into_raw(boxed), Ordering::Relaxed);
+        }
+    }
+
     // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
     PLATFORM_PTR.store(&capa.platform as *const _ as *mut _, Ordering::Relaxed);
-    boot::launch(&linux);
+    boot::launch(&linux, &vmx_state);
 }
 
 // ── AP entry point ───────────────────────────────────────────────────────── //
@@ -246,22 +270,12 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 
     let id = cpu.id as usize;
     let vmxon_phys = crate::VMXON_PHYS[id].load(Ordering::Relaxed);
-    let vmcs_phys = unsafe { &*crate::PLATFORM_PTR.load(Ordering::Relaxed) }
-        .vp_vmcs_phys(0, id)
-        .expect("AP: no VMCS");
 
     // Enable VMX on this AP.
     crate::vmx::enable_vmx_on_core(vmxon_phys)
         .expect("AP VMXON failed");
 
-    // Load the VMCS pre-configured by BSP (wait-for-SIPI activity state).
-    x86::bits64::vmx::vmptrld(vmcs_phys)
-        .expect("AP VMPTRLD failed");
-
-    // Set XCR0 to full feature set before VMLAUNCH (same reasoning as BSP —
-    // in nested VMX, L2 inherits XCR0 from the CPU at VMLAUNCH time).
-    // CR4.OSXSAVE (bit 18) must be set before XSETBV; adjust_control_registers
-    // only sets VMX FIXED0/FIXED1 bits which don't include OSXSAVE.
+    // Set XCR0 to full feature set before VMLAUNCH.
     {
         let cr4 = x86::controlregs::cr4();
         x86::controlregs::cr4_write(cr4 | x86::controlregs::Cr4::CR4_ENABLE_OS_XSAVE);
@@ -277,18 +291,15 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
         );
     }
 
-    // VMLAUNCH into wait-for-SIPI: AP waits here until Linux sends SIPI.
-    let rflags: u64;
-    core::arch::asm!(
-        "vmlaunch",
-        "pushfq",
-        "pop {rflags}",
-        rflags = out(reg) rflags,
-    );
+    // Take the pre-created InactiveVcpu from the global (exactly-once).
+    let vcpu_ptr = AP_VCPUS[id].swap(core::ptr::null_mut(), Ordering::Relaxed);
+    assert!(!vcpu_ptr.is_null(), "AP{}: no InactiveVcpu in AP_VCPUS", id);
+    let inactive = *unsafe { alloc::boxed::Box::from_raw(vcpu_ptr) };
 
-    let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR)
-        .unwrap_or(0);
-    panic!("AP{} VMLAUNCH failed: rflags={:#x} VM_INSTRUCTION_ERROR={}", cpu.id, rflags, error);
+    let mut active = inactive.activate().expect("AP activate failed");
+
+    // Enter the monitor loop — never returns.
+    vmexit::monitor_loop(&mut active);
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

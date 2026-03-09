@@ -941,7 +941,11 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 pub struct VmcsState {
     /// Per-VP host stacks (heap-allocated, one per VP).
     /// Kept alive here to prevent deallocation.
+    /// TODO(R3): remove — vcpu.run() uses the caller's Limine stack instead.
     pub host_stacks: Vec<alloc::boxed::Box<[u8; HOST_STACK_BYTES]>>,
+    /// Pre-created InactiveVcpus, one per VP.  BSP takes its own from here;
+    /// AP InactiveVcpus are moved to a global for AP consumption.
+    pub vcpus: Vec<crate::vcpu::InactiveVcpu>,
 }
 
 /// Size of each per-VP host VMX stack in bytes.
@@ -1031,6 +1035,13 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     // Each AP is configured with activity state = wait-for-SIPI (3) so it sits
     // dormant until Linux sends INIT/SIPI.  After setup, the VMCS is stored
     // to memory with VMCLEAR so the AP can load it with VMPTRLD at launch time.
+    let msr_bitmap_phys = vmx.dom0.msr_bitmap_phys();
+    let mut vcpus: Vec<crate::vcpu::InactiveVcpu> = Vec::with_capacity(num_vps);
+    // Reserve slot for BSP (filled in launch() after P7f patches guest RIP/RSP).
+    for _ in 0..num_vps {
+        vcpus.push(crate::vcpu::InactiveVcpu::new(0, 0, 0, 0));
+    }
+
     for ap_vp in 0..num_vps {
         if ap_vp == vmx.bsp_index {
             continue;
@@ -1049,16 +1060,19 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             // Override activity state: AP must not enter the kernel entry point
             // directly — it waits for a SIPI from the Linux BSP.
             vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 3).expect("AP vmwrite ACTIVITY_STATE");
-            // Disable the preemption timer for wait-for-SIPI APs.  If left armed,
-            // the timer fires continuously causing VM exits on parked cores,
-            // starving the BSP and flooding serial output.
-            // We re-enable it in the SIPI handler when the AP actually starts.
+            // Disable the preemption timer for wait-for-SIPI APs.
             vmx::vmwrite(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, u64::MAX >> 32)
                 .expect("AP vmwrite preemption timer max");
-            // Save VMCS state to memory and deactivate so the AP can load it
-            // with VMPTRLD independently.
+            // Save VMCS state to memory and deactivate.
             vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp)).expect("AP vmclear");
         }
+        // Create InactiveVcpu for this AP (VMCS is already VMCLEAR'd).
+        vcpus[ap_vp] = crate::vcpu::InactiveVcpu::new(
+            vmx.dom0.vmcs_phys(ap_vp),
+            vmx.dom0.vapic_phys(ap_vp),
+            msr_bitmap_phys,
+            (ap_vp + 1) as u16,
+        );
         capa.platform
             .bootstrap_set_vp_hardware(0, ap_vp, vmx.dom0.vmcs_phys(ap_vp));
         serial_println!(
@@ -1077,7 +1091,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
     }
     serial_println!("=== P2d: done ===");
 
-    VmcsState { host_stacks }
+    VmcsState { host_stacks, vcpus }
 }
 
 // ── Phase 7f output ───────────────────────────────────────────────────────── //
@@ -1172,14 +1186,15 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 /// Phase P7g: signal APs and execute VMLAUNCH on the BSP.
 ///
 /// 1. Sets `AP_LAUNCH_READY` (Release) so each AP wakes up, enables VMX,
-///    loads its VMCS, and VMLAUNCHes into the wait-for-SIPI activity state.
-/// 2. BSP loads ESI = `boot_params_phys` and executes VMLAUNCH to enter
-///    dom0 at the Linux 32-bit PM kernel entry point.
+///    loads its VMCS, and enters the monitor loop.
+/// 2. BSP creates an `ActiveVcpu` from the loaded VMCS, sets RSI to
+///    `boot_params_phys`, and enters the monitor loop.
 ///
-/// This function never returns if VMLAUNCH succeeds.  It panics if the
-/// VMLAUNCH instruction fails, reporting rflags and the VMX error code.
-pub fn launch(linux: &LinuxState) -> ! {
+/// This function never returns.
+pub fn launch(linux: &LinuxState, vmx: &VmxState) -> ! {
     use crate::AP_LAUNCH_READY;
+    use crate::vcpu::{InactiveVcpu, Reg};
+    use crate::vmexit::monitor_loop;
     use core::sync::atomic::Ordering;
 
     serial_println!();
@@ -1191,18 +1206,9 @@ pub fn launch(linux: &LinuxState) -> ! {
     serial_println!("  APs signaled");
 
     // ── Set XCR0 before VMLAUNCH ────────────────────────────────────────── //
-    // In nested VMX (L0=KVM, L1=Themis, L2=dom0), XCR0 is NOT a VMCS field.
-    // When L2 does XSETBV, L0 intercepts and reflects to L1.  L1's handler
-    // does a real XSETBV, but that only updates L1's XCR0 — L0 restores L2's
-    // saved XCR0 (from before the exit) on VMRESUME, so L2's XCR0 never
-    // changes.  L2 inherits whatever XCR0 is on the CPU at VMLAUNCH time.
-    //
-    // Fix: read the maximum XCR0 from CPUID 0xD sub-leaf 0 and set L1's XCR0
-    // to that value before VMLAUNCH.  L2 then starts with the full feature set.
     unsafe {
         let cpuid_d = core::arch::x86_64::__cpuid_count(0xD, 0);
         let max_xcr0 = ((cpuid_d.edx as u64) << 32) | (cpuid_d.eax as u64);
-        // Bit 0 (x87) must always be 1.
         let max_xcr0 = max_xcr0 | 1;
         serial_println!("  BSP: setting XCR0={:#x} before VMLAUNCH", max_xcr0);
         core::arch::asm!(
@@ -1214,25 +1220,27 @@ pub fn launch(linux: &LinuxState) -> ! {
         );
     }
 
-    // ── BSP VMLAUNCH ─────────────────────────────────────────────────────── //
-    // RSI = boot_params_phys is required by the Linux 32-bit PM boot protocol.
-    // VMLAUNCH either succeeds (CPU enters guest mode, never returns here) or
-    // fails (CF or ZF set; we capture rflags and panic).
-    serial_println!("  BSP: RSI={:#x} → VMLAUNCH", linux.boot_params_phys);
+    // ── Create ActiveVcpu for BSP ────────────────────────────────────────── //
+    let bsp_vmcs_phys = vmx.dom0.vmcs_phys(vmx.bsp_index);
+    let bsp_vapic_phys = vmx.dom0.vapic_phys(vmx.bsp_index);
+    let bsp_msr_bitmap_phys = vmx.dom0.msr_bitmap_phys();
+    let bsp_vpid = (vmx.bsp_index + 1) as u16;
+
+    // VMCLEAR the currently-loaded BSP VMCS so we can wrap it in InactiveVcpu.
+    // InactiveVcpu::activate() will VMPTRLD it back.
     unsafe {
-        let rflags: u64;
-        core::arch::asm!(
-            "vmlaunch",
-            "pushfq",
-            "pop {rflags}",
-            in("rsi") linux.boot_params_phys,
-            rflags = out(reg) rflags,
-        );
-        // VMLAUNCH failed — CPU did not enter guest mode.
-        let error = x86::bits64::vmx::vmread(x86::vmx::vmcs::ro::VM_INSTRUCTION_ERROR).unwrap_or(0);
-        panic!(
-            "P7g: BSP VMLAUNCH failed — rflags={:#x} VM_INSTRUCTION_ERROR={}",
-            rflags, error,
-        );
+        x86::bits64::vmx::vmclear(bsp_vmcs_phys).expect("BSP vmclear for vcpu");
     }
+
+    let mut inactive = InactiveVcpu::new(bsp_vmcs_phys, bsp_vapic_phys, bsp_msr_bitmap_phys, bsp_vpid);
+
+    // Set RSI = boot_params_phys (Linux boot protocol requirement).
+    inactive.set_reg(Reg::Rsi, linux.boot_params_phys);
+
+    serial_println!("  BSP: RSI={:#x} → monitor_loop", linux.boot_params_phys);
+
+    let mut vcpu = inactive.activate().expect("BSP activate failed");
+
+    // Enter the monitor loop — never returns.
+    monitor_loop(&mut vcpu);
 }

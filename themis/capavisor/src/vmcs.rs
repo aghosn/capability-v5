@@ -8,7 +8,7 @@
 //!
 //! - Host state  : captured from the current CPU (CR0/CR3/CR4, segments, EFER,
 //!                 GDTR/IDTR base, TR base).  Host RSP → per-VP stack top.
-//!                 Host RIP → `vmexit_trampoline`.
+//!                 Host RIP → `host_rip_stub` (overwritten by `ActiveVcpu::run()`).
 //! - Guest state : protected mode stub (UNRESTRICTED_GUEST, no paging, PE only).
 //!                 RIP/RSP/CR3 left at 0; will be overwritten at P7f with Linux
 //!                 boot parameters.
@@ -20,7 +20,7 @@ use x86::msr;
 use x86::vmx::vmcs::{control, guest, host};
 
 use crate::serial_println;
-use crate::vmexit::vmexit_trampoline;
+use crate::vmexit::host_rip_stub;
 
 // ── MSR-capability–adjusted control helper ───────────────────────────────── //
 
@@ -325,7 +325,7 @@ unsafe fn write_host_state(host_stack_top: u64) {
 
     // Host RSP and RIP.
     vmx::vmwrite(host::RSP, host_stack_top).expect("vmwrite host RSP");
-    vmx::vmwrite(host::RIP, vmexit_trampoline as *const () as u64).expect("vmwrite host RIP");
+    vmx::vmwrite(host::RIP, host_rip_stub as *const () as u64).expect("vmwrite host RIP");
 }
 
 // ── Guest state ───────────────────────────────────────────────────────────── //
