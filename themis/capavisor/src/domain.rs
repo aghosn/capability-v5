@@ -29,6 +29,9 @@ pub struct Domain {
     /// A = ports 0x0000–0x7FFF, B = ports 0x8000–0xFFFF.
     pub io_bitmap_a: u64,
     pub io_bitmap_b: u64,
+    /// MSR bitmap page (shared by all VPs).
+    /// All-zeros = no MSR intercepts.
+    pub msr_bitmap: u64,
 }
 
 impl Domain {
@@ -41,6 +44,7 @@ impl Domain {
             vapic_regions: Vec::new(),
             io_bitmap_a: 0,
             io_bitmap_b: 0,
+            msr_bitmap: 0,
         }
     }
 
@@ -119,7 +123,19 @@ impl Domain {
         }
     }
 
+    /// Allocate the MSR bitmap page from META (shared by all VPs).
+    ///
+    /// A zeroed page means no MSR intercepts — all RDMSR/WRMSR pass through
+    /// to hardware.  alloc_meta_frame already returns a zeroed page.
+    pub fn alloc_msr_bitmap(
+        &mut self,
+        platform: &crate::platform::ThemisPlatform,
+    ) {
+        self.msr_bitmap = platform.alloc_meta_frame(self.id);
+    }
+
     pub fn vmxon_phys(&self, core_index: usize) -> u64 { self.vmxon_regions[core_index] }
     pub fn vmcs_phys(&self, vp_index: usize)   -> u64 { self.vmcs_regions[vp_index] }
     pub fn vapic_phys(&self, vp_index: usize)  -> u64 { self.vapic_regions[vp_index] }
+    pub fn msr_bitmap_phys(&self)              -> u64 { self.msr_bitmap }
 }

@@ -63,6 +63,7 @@ fn vmx_ctrl_msr(basic_msr: u32, true_msr: u32) -> u64 {
 pub unsafe fn setup_vmcs_for_vp(
     vmcs_phys: u64,
     vapic_phys: u64,
+    msr_bitmap_phys: u64,
     host_stack_top: u64,
     eptp: u64,
     vp_index: usize,
@@ -72,7 +73,7 @@ pub unsafe fn setup_vmcs_for_vp(
     // VMPTRLD makes this VMCS the current one for all subsequent vmread/vmwrite.
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, vp_index);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vp_index);
     write_host_state(host_stack_top);
     write_guest_state();
 
@@ -84,28 +85,23 @@ pub unsafe fn setup_vmcs_for_vp(
 
 // ── Control fields ────────────────────────────────────────────────────────── //
 
-unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
-    // ── Pin-based: NMI exiting only ─────────────────────────────────── //
-    // EXTERNAL_INTERRUPT_EXITING (bit 0) is intentionally OFF: with LAPIC
-    // passthrough, external interrupts must be delivered directly to the
-    // guest via its own IDT.  Enabling it would eat every interrupt and
-    // the guest would never receive timer ticks (silent hang).
-    let pin_desired: u64 =
-        (1 << 3);  // NMI_EXITING
+unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64, vp_index: usize) {
+    // ── Pin-based ──────────────────────────────────────────────────── //
+    // Enable VMX preemption timer (bit 6) for diagnostic heartbeat.
+    // dom0 has full trap permissions, so EXTERNAL_INTERRUPT_EXITING
+    // and NMI_EXITING are OFF — interrupts are delivered directly to
+    // the guest via its IDT.
+    let pin_desired: u64 = 1 << 6; // ACTIVATE_VMX_PREEMPTION_TIMER
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
     vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
         .expect("vmwrite pin-based");
 
     // ── Primary proc-based ────────────────────────────────────────────── //
-    // HLT_EXITING (bit 7), USE_MSR_BITMAPS (bit 28),
-    // SECONDARY_CONTROLS (bit 31).
-    // USE_IO_BITMAPS is NOT set: all guest I/O passes through directly.
-    // (Port 0xCF9 reset can't be intercepted without also catching PCI
-    // config address 0xCF8 which shares the same I/O bitmap byte.)
+    // Match vmxvmm: SECONDARY_CONTROLS + USE_MSR_BITMAPS only.
+    // No HLT_EXITING — guest HLT is handled by the hardware directly.
     let primary_desired: u64 =
-        (1 << 7)   // HLT_EXITING
-        | (1 << 28) // USE_MSR_BITMAPS
+        (1 << 28)  // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
     let primary_val = adjust(primary_desired, primary_msr);
@@ -130,12 +126,15 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     .expect("vmwrite secondary proc-based");
 
     // ── VM-exit controls ──────────────────────────────────────────────── //
-    // HOST_ADDRESS_SPACE_SIZE (bit 9), SAVE_IA32_EFER (bit 20),
-    // LOAD_IA32_EFER (bit 21).
+    // HOST_ADDRESS_SPACE_SIZE, SAVE/LOAD IA32_EFER and IA32_PAT,
+    // SAVE_VMX_PREEMPTION_TIMER (bit 22) — preserve timer across exits.
     let exit_desired: u64 =
         (1 << 9)   // HOST_ADDRESS_SPACE_SIZE
+        | (1 << 18) // SAVE_IA32_PAT
+        | (1 << 19) // LOAD_IA32_PAT
         | (1 << 20) // SAVE_IA32_EFER
-        | (1 << 21); // LOAD_IA32_EFER
+        | (1 << 21) // LOAD_IA32_EFER
+        | (1 << 22); // SAVE_VMX_PREEMPTION_TIMER
     let exit_msr = vmx_ctrl_msr(msr::IA32_VMX_EXIT_CTLS, msr::IA32_VMX_TRUE_EXIT_CTLS);
     let exit_val = adjust(exit_desired, exit_msr);
     vmx::vmwrite(control::VMEXIT_CONTROLS, exit_val)
@@ -147,7 +146,9 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // so the guest doesn't inherit the host's EFER (which has LMA=1).
     // Without this, the guest runs in an architecturally undefined state
     // (LMA=1 + CR0.PG=0).
-    let entry_desired: u64 = 1 << 15; // LOAD_IA32_EFER
+    let entry_desired: u64 =
+        (1 << 14)  // LOAD_IA32_PAT
+        | (1 << 15); // LOAD_IA32_EFER
     let entry_msr = vmx_ctrl_msr(msr::IA32_VMX_ENTRY_CTLS, msr::IA32_VMX_TRUE_ENTRY_CTLS);
     let entry_val = adjust(entry_desired, entry_msr);
     vmx::vmwrite(control::VMENTRY_CONTROLS, entry_val)
@@ -160,10 +161,9 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // VPID 0 is reserved for the VMX-root context; dom0 VPs get 1..=N.
     vmx::vmwrite(control::VPID as u32, (vp_index + 1) as u64).expect("vmwrite VPID");
 
-    // ── Exception bitmap: intercept #UD(6), #DF(8), #GP(13) for diagnostics //
-    // These are logged with full guest state, then re-injected into the guest.
-    let exception_bitmap: u64 = (1 << 6) | (1 << 8) | (1 << 13);
-    vmx::vmwrite(control::EXCEPTION_BITMAP, exception_bitmap).expect("vmwrite exception bitmap");
+    // ── Exception bitmap: do not intercept any exceptions ─────────────────── //
+    // All exceptions are handled by the guest's own IDT.
+    vmx::vmwrite(control::EXCEPTION_BITMAP, 0).expect("vmwrite exception bitmap");
 
     // ── CR0/CR4 guest-host masks ──────────────────────────────────────────── //
     // CR0: mask the FIXED0 bits (except PE/PG which UNRESTRICTED_GUEST exempts).
@@ -197,16 +197,22 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, vp_index: usize) {
     // which is correct for a pass-through hypervisor at bootstrap time.
     // ── I/O / MSR bitmap addresses ──────────────────────────────────── //
     // USE_IO_BITMAPS is off, so I/O bitmap addresses are ignored.
-    // Write zeros for cleanliness (phys 0 is valid, zeroed = no intercepts).
     vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
     vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
-    vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, 0).expect("vmwrite MSR bitmap");
+    // MSR bitmap: allocated from META pool, zeroed = no MSR intercepts.
+    vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, msr_bitmap_phys)
+        .expect("vmwrite MSR bitmap");
     vmx::vmwrite(control::VMENTRY_MSR_LOAD_COUNT as u32, 0)
         .expect("vmwrite vmentry msr load count");
     vmx::vmwrite(control::VMEXIT_MSR_STORE_COUNT as u32, 0)
         .expect("vmwrite vmexit msr store count");
     vmx::vmwrite(control::VMEXIT_MSR_LOAD_COUNT as u32, 0)
         .expect("vmwrite vmexit msr load count");
+
+    // ── VMX preemption timer ──────────────────────────────────────────── //
+    // Diagnostic heartbeat: fires every ~2s to sample guest RIP/RSP.
+    vmx::vmwrite(guest::VMX_PREEMPTION_TIMER_VALUE, crate::vmexit::PREEMPTION_TIMER_TICKS)
+        .expect("vmwrite preemption timer");
 
     // ── Debug: print MSR raw values and adjusted controls ─────────────── //
     serial_println!("  VMCS controls (VP{}):", vp_index);
@@ -289,6 +295,9 @@ unsafe fn write_host_state(host_stack_top: u64) {
     // EFER.
     let efer = msr::rdmsr(msr::IA32_EFER);
     vmx::vmwrite(host::IA32_EFER_FULL as u32, efer).expect("vmwrite host EFER");
+    // PAT.
+    let pat = msr::rdmsr(0x277); // IA32_PAT
+    vmx::vmwrite(host::IA32_PAT_FULL as u32, pat).expect("vmwrite host PAT");
 
     // GDTR base: use the GDT we loaded (authoritative, no sgdt ambiguity).
     // IDTR base: read from the processor (Limine set this up).
@@ -379,6 +388,9 @@ unsafe fn write_guest_state() {
 
     // ── EFER: 0 (no long mode in the stub; P7f sets LME+LMA for Linux) ── //
     vmx::vmwrite(guest::IA32_EFER_FULL, 0).expect("vmwrite guest EFER");
+    // ── PAT: default value (same as vmxvmm) ─────────────────────────── //
+    vmx::vmwrite(guest::IA32_PAT_FULL, 0x0007_0406_0007_0406u64)
+        .expect("vmwrite guest PAT");
 
     // ── General purpose / misc ────────────────────────────────────────── //
     vmx::vmwrite(guest::RIP, 0).expect("vmwrite guest RIP");

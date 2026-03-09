@@ -257,6 +257,25 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     x86::bits64::vmx::vmptrld(vmcs_phys)
         .expect("AP VMPTRLD failed");
 
+    // Set XCR0 to full feature set before VMLAUNCH (same reasoning as BSP —
+    // in nested VMX, L2 inherits XCR0 from the CPU at VMLAUNCH time).
+    // CR4.OSXSAVE (bit 18) must be set before XSETBV; adjust_control_registers
+    // only sets VMX FIXED0/FIXED1 bits which don't include OSXSAVE.
+    {
+        let cr4 = x86::controlregs::cr4();
+        x86::controlregs::cr4_write(cr4 | x86::controlregs::Cr4::CR4_ENABLE_OS_XSAVE);
+
+        let cpuid_d = core::arch::x86_64::__cpuid_count(0xD, 0);
+        let max_xcr0 = (((cpuid_d.edx as u64) << 32) | (cpuid_d.eax as u64)) | 1;
+        core::arch::asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("eax") max_xcr0 as u32,
+            in("edx") (max_xcr0 >> 32) as u32,
+            options(nomem, nostack),
+        );
+    }
+
     // VMLAUNCH into wait-for-SIPI: AP waits here until Linux sends SIPI.
     let rflags: u64;
     core::arch::asm!(

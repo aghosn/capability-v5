@@ -13,7 +13,43 @@ use x86::vmx::vmcs::control;
 
 use crate::{serial_println};
 
+// ── x2APIC MSR range (SDM Vol 3 §10.12.1) ──────────────────────────────── //
+// In x2APIC mode every APIC register is accessed via MSRs 0x800–0x83F.
+// We virtualise these through the VAPIC page rather than letting the guest
+// touch the real LAPIC.
+const X2APIC_MSR_BASE: u32 = 0x800;
+const X2APIC_MSR_END: u32  = 0x840; // exclusive
+
+// Notable x2APIC register offsets (MSR = BASE + offset/16).
+const X2APIC_ID:      u32 = 0x802;
+const X2APIC_VER:     u32 = 0x803;
+const X2APIC_TPR:     u32 = 0x808;
+const X2APIC_PPR:     u32 = 0x80A;
+const X2APIC_EOI:     u32 = 0x80B;
+const X2APIC_LDR:     u32 = 0x80D;
+const X2APIC_SVR:     u32 = 0x80F;
+const X2APIC_ISR0:    u32 = 0x810;
+const X2APIC_TMR0:    u32 = 0x818;
+const X2APIC_IRR0:    u32 = 0x820;
+const X2APIC_ESR:     u32 = 0x828;
+const X2APIC_ICR:     u32 = 0x830;
+const X2APIC_LVT_TIMER:   u32 = 0x832;
+const X2APIC_LVT_THERMAL: u32 = 0x833;
+const X2APIC_LVT_PERF:    u32 = 0x834;
+const X2APIC_LVT_LINT0:   u32 = 0x835;
+const X2APIC_LVT_LINT1:   u32 = 0x836;
+const X2APIC_LVT_ERROR:   u32 = 0x837;
+const X2APIC_TIMER_ICR:   u32 = 0x838;
+const X2APIC_TIMER_CCR:   u32 = 0x839;
+const X2APIC_TIMER_DCR:   u32 = 0x83E;
+const X2APIC_SELF_IPI:    u32 = 0x83F;
+
 // ── Exit reason constants (Intel SDM Vol 3C §27.9.1) ─────────────────────── //
+
+// VMX preemption timer: ~2 seconds at 3 GHz with TSC rate divisor = 5.
+// Timer ticks = desired_ns / (2^N * TSC_period_ns), where N = 5 (typical).
+// For ~2s at 3GHz: 2e9 / 2^5 ≈ 62.5M. Use a round value.
+pub const PREEMPTION_TIMER_TICKS: u64 = 60_000_000;
 
 pub const EXIT_REASON_EXCEPTION_NMI: u32 = 0;
 pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
@@ -28,6 +64,7 @@ pub const EXIT_REASON_WRMSR: u32 = 32;
 pub const EXIT_REASON_VMENTRY_INVALID_GUEST: u32 = 33;
 pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
 pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
+pub const EXIT_REASON_VMX_PREEMPTION_TIMER: u32 = 52;
 pub const EXIT_REASON_XSETBV: u32 = 55;
 pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
 
@@ -102,11 +139,23 @@ pub unsafe extern "C" fn vmexit_trampoline() -> ! {
         "pop rax",
         // VMRESUME to return to the guest
         "vmresume",
-        // vmresume failed — advance past any instruction and halt
+        // vmresume failed — diagnose the failure
+        "jc 3f",          // CF=1: VM_FAIL_INVALID (no current VMCS)
+        "jz 4f",          // ZF=1: VM_FAIL_VALID (error code in VMCS)
+        // Neither flag set — shouldn't happen
+        "mov rdi, 0",
+        "call {fail}",
+        "3:",
+        "mov rdi, 1",
+        "call {fail}",
+        "4:",
+        "mov rdi, 2",
+        "call {fail}",
         "2:",
         "hlt",
         "jmp 2b",
         handler = sym handle_vmexit,
+        fail = sym vmresume_failed,
     );
 }
 
@@ -121,11 +170,19 @@ pub unsafe extern "C" fn vmexit_trampoline() -> ! {
 /// Must only be called from `vmexit_trampoline` with a valid VMCS loaded.
 #[no_mangle]
 unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
+    static LAST_REASON: AtomicU64 = AtomicU64::new(0);
+
     let exit_reason = vmx::vmread(vmcs::ro::EXIT_REASON)
         .expect("vmread EXIT_REASON failed") as u32;
 
     // Bits[15:0] hold the basic exit reason; bits[31:16] hold flags.
     let basic_reason = exit_reason & 0xFFFF;
+
+    let count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_REASON.store(basic_reason as u64, Ordering::Relaxed);
+
 
     match basic_reason {
         EXIT_REASON_SIPI => {
@@ -149,6 +206,9 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             vmx::vmwrite(vmcs::guest::CR0,             0x30).expect("vmwrite guest CR0");
             // Activate the AP (leave wait-for-SIPI).
             vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 0).expect("vmwrite ACTIVITY_STATE");
+            // Reload the preemption timer now that the AP is active.
+            vmx::vmwrite(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS)
+                .expect("SIPI reload preemption timer");
 
             serial_println!(
                 "[VMEXIT] SIPI vector={:#x} startup={:#x} — AP activated",
@@ -158,14 +218,16 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
         }
 
         EXIT_REASON_EXTERNAL_INTERRUPT => {
-            // Physical interrupt delivered to host. Nothing to do here —
-            // the interrupt was already handled by the host IDT before
-            // the VMEXIT was reflected to us. VMRESUME to continue guest.
+            // With EXTERNAL_INTERRUPT_EXITING=0 for dom0, this should not
+            // fire.  If it does (forced by must_be_1 on this hardware),
+            // just VMRESUME — the interrupt is pending and will be delivered
+            // to the guest on VM entry.
         }
 
         EXIT_REASON_CPUID => {
-            // Execute host CPUID and pass result to guest, masking features
-            // that require VMX configuration Themis hasn't set up.
+            // Execute host CPUID and pass result to guest.
+            // Passthrough hypervisor: expose real hardware capabilities.
+            // Only mask hypervisor-presence bits to prevent L0 signature leaking.
             let leaf = regs.rax as u32;
             let sub_leaf = regs.rcx as u32;
             let result = core::arch::x86_64::__cpuid_count(leaf, sub_leaf);
@@ -175,86 +237,31 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
             let mut edx = result.edx;
 
             match (leaf, sub_leaf) {
-                // Leaf 7 sub-leaf 0: structured extended features.
-                // Mask AVX-512 (inconsistent XSAVE state causes userspace #UD),
-                // CET, WAITPKG, ENQCMD, PKU — all need VMX config we lack.
-                (0x7, 0) => {
-                    // EBX: clear AVX-512 family
-                    ebx &= !(1 << 16);  // AVX512F
-                    ebx &= !(1 << 17);  // AVX512DQ
-                    ebx &= !(1 << 21);  // AVX512_IFMA
-                    ebx &= !(1 << 26);  // AVX512PF
-                    ebx &= !(1 << 27);  // AVX512ER
-                    ebx &= !(1 << 28);  // AVX512CD
-                    ebx &= !(1 << 30);  // AVX512BW
-                    ebx &= !(1 << 31);  // AVX512VL
-                    // ECX: clear AVX-512 + unsupported features
-                    ecx &= !(1 << 1);   // AVX512_VBMI
-                    ecx &= !(1 << 4);   // OSPKE / PKU
-                    ecx &= !(1 << 5);   // WAITPKG
-                    ecx &= !(1 << 6);   // AVX512_VBMI2
-                    ecx &= !(1 << 7);   // CET_SS
-                    ecx &= !(1 << 11);  // AVX512_VNNI
-                    ecx &= !(1 << 12);  // AVX512_BITALG
-                    ecx &= !(1 << 14);  // AVX512_VPOPCNTDQ
-                    ecx &= !(1 << 29);  // ENQCMD
-                    // EDX: clear remaining
-                    edx &= !(1 << 8);   // AVX512_VP2INTERSECT
-                    edx &= !(1 << 20);  // CET_IBT
-                    edx &= !(1 << 23);  // AVX512_FP16
+                // Leaf 1: clear hypervisor-present bit (ECX bit 31).
+                // In nested VMX, L0 sets this; clearing it tells the guest
+                // it runs on bare metal, stopping the 0x4000xxxx scan loop.
+                (0x1, _) => {
+                    ecx &= !(1u32 << 31);
                 }
-                // Leaf 0xD sub-leaf 0: XSAVE supported features (XCR0).
-                // Keep only x87+SSE+AVX (bits 0,1,2).  Must also fix
-                // the size fields (EBX/ECX) so they match the reduced
-                // feature set, otherwise the kernel's
-                // paranoid_xstate_size_valid() fires and XSAVE state
-                // is left inconsistent → userspace #UD on XGETBV.
-                //
-                // x87+SSE+AVX XSAVE layout:
-                //   legacy area (x87+SSE) : 512 bytes
-                //   XSAVE header          :  64 bytes
-                //   AVX (YMM_Hi128)       : 256 bytes at offset 576
-                //   total                 = 832 bytes (0x340)
-                (0xD, 0) => {
-                    eax &= 0x7;        // keep x87 + SSE + AVX only
-                    ebx  = 0x340;      // required size for XCR0 = 0x7
-                    ecx  = 0x340;      // max size (same, no other features)
-                    edx  = 0;          // no upper-32 XCR0 bits
-                }
-                // Leaf 0xD sub-leaf 1: XSAVE capabilities.
-                // Clear XSAVES/XRSTORS (bit 3) — these require secondary
-                // exec control bit 20 which we haven't enabled.  The
-                // kernel falls back to XRSTOR/XSAVEOPT/XSAVEC.
-                // Also clear supervisor-state components (ECX/EDX).
+                // Leaf 0xD sub-leaf 1: clear XSAVES/XRSTORS (bit 3).
+                // These require secondary exec control bit 20 which we
+                // have not enabled; the kernel falls back to XSAVEOPT/XSAVEC.
                 (0xD, 1) => {
-                    eax &= !(1 << 3);  // hide XSAVES/XRSTORS
-                    ebx = 0x340;       // size for XCR0|XSS = x87+SSE+AVX
-                    ecx = 0;           // no supervisor state components
-                    edx = 0;
+                    eax &= !(1 << 3);
                 }
-                // Leaf 0xD sub-leaves 5,6,7,9: individual AVX-512 / PKU
-                // XSAVE areas.  Return zeros so kernel ignores them.
-                (0xD, 5..=7) | (0xD, 9) => {
-                    eax = 0;
-                    ebx = 0;
-                    ecx = 0;
-                    edx = 0;
+                // Hide ALL hypervisor CPUID leaves.  In nested VMX
+                // (L0=KVM on Hyper-V), pass-through exposes L0 signatures
+                // that trigger infinite init retry loops.  The guest boots
+                // as bare metal; nopv cmdline disables paravirt too.
+                (0x40000000..=0x4FFFFFFF, _) => {
+                    eax = 0; ebx = 0; ecx = 0; edx = 0;
                 }
-                // Leaf 0x40000001: KVM paravirt features.
-                // Only keep clocksource + NOP I/O delay.  Mask PV IPI
-                // (bit 11) and other hypercall-based features we don't
-                // implement — returning -ENOSYS causes a deadlock when
-                // the kernel tries to static_branch_enable the fallback
-                // path from inside text_poke_bp_batch.
-                (0x40000001, _) => {
-                    const KVM_FEATURE_CLOCKSOURCE: u32     = 1 << 0;
-                    const KVM_FEATURE_NOP_IO_DELAY: u32    = 1 << 1;
-                    const KVM_FEATURE_CLOCKSOURCE2: u32    = 1 << 3;
-                    const KVM_FEATURE_CLOCKSOURCE_STABLE: u32 = 1 << 24;
-                    eax &= KVM_FEATURE_CLOCKSOURCE
-                         | KVM_FEATURE_NOP_IO_DELAY
-                         | KVM_FEATURE_CLOCKSOURCE2
-                         | KVM_FEATURE_CLOCKSOURCE_STABLE;
+                // Themis trace: guest writes CPUID leaf 0xDEADxxxx to signal
+                // progress.  The low 16 bits are a trace code.
+                (0xDEAD0000..=0xDEADFFFF, _) => {
+                    let code = leaf & 0xFFFF;
+                    serial_println!("[TRACE] code={:#x}", code);
+                    eax = 0; ebx = 0; ecx = 0; edx = 0;
                 }
                 _ => {}
             }
@@ -281,13 +288,18 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                 let value = vmx::vmread(vmcs::guest::IA32_EFER_FULL).unwrap_or(0);
                 regs.rax = value & 0xFFFF_FFFF;
                 regs.rdx = (value >> 32) & 0xFFFF_FFFF;
-            } else {
-                // Pass-through: read the hardware MSR, return result in RAX:RDX.
+                next_instruction();
+            } else if msr_in_bitmap_range(ecx) {
+                // MSR is in the bitmap-covered range — safe to pass through.
                 let value = unsafe { msr::rdmsr(ecx) };
                 regs.rax = value & 0xFFFF_FFFF;
                 regs.rdx = (value >> 32) & 0xFFFF_FFFF;
+                next_instruction();
+            } else {
+                // MSR outside bitmap range (always causes VMEXIT).
+                // Inject #GP(0) — same as real hardware for nonexistent MSRs.
+                inject_gp();
             }
-            next_instruction();
         }
 
         EXIT_REASON_WRMSR => {
@@ -298,11 +310,15 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                 // LOAD_IA32_EFER on VM entry will apply this to the real MSR.
                 vmx::vmwrite(vmcs::guest::IA32_EFER_FULL, value)
                     .expect("vmwrite guest EFER");
-            } else {
-                // Pass-through: write RAX:RDX to the hardware MSR.
+                next_instruction();
+            } else if msr_in_bitmap_range(ecx) {
+                // MSR is in the bitmap-covered range — safe to pass through.
                 unsafe { msr::wrmsr(ecx, value) };
+                next_instruction();
+            } else {
+                // MSR outside bitmap range — inject #GP(0).
+                inject_gp();
             }
-            next_instruction();
         }
 
         EXIT_REASON_IO_INSTRUCTION => {
@@ -344,7 +360,12 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
         EXIT_REASON_XSETBV => {
             // Guest is writing XCR0 (ECX=0) to enable XSAVE feature bits.
             // XSETBV unconditionally causes a VM exit (SDM §25.1.1).
-            // Pass through: execute XSETBV with the guest's ECX, EDX:EAX.
+            //
+            // In nested VMX (L0=KVM), doing a real XSETBV here only changes
+            // L1's XCR0.  L2's XCR0 was set before VMLAUNCH and is saved/
+            // restored by L0 across exits.  We still do the real XSETBV to
+            // keep L1's XCR0 in sync (so our exit handler context has the
+            // right feature set for any XSAVE/XRSTOR we might do).
             let xcr = regs.rcx as u32;
             let val = (regs.rdx << 32) | (regs.rax & 0xFFFF_FFFF);
             if xcr == 0 {
@@ -366,6 +387,7 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                 let safe_val = val & host_xcr0;
                 // Bit 0 (x87) must always be 1 in XCR0.
                 let safe_val = safe_val | 1;
+                serial_println!("[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}", val, host_xcr0, safe_val);
                 unsafe {
                     core::arch::asm!(
                         "xsetbv",
@@ -508,6 +530,21 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
                 .expect("vmwrite inject instr len");
         }
 
+        EXIT_REASON_VMX_PREEMPTION_TIMER => {
+            // Diagnostic: periodically sample guest RIP/RSP to detect hangs.
+            let _rip = vmx::vmread(vmcs::guest::RIP).unwrap_or(0);
+            let _rsp = vmx::vmread(vmcs::guest::RSP).unwrap_or(0);
+            let _rflags = vmx::vmread(vmcs::guest::RFLAGS).unwrap_or(0);
+            let _cs = vmx::vmread(vmcs::guest::CS_SELECTOR as u32).unwrap_or(0);
+            let _cr3 = vmx::vmread(vmcs::guest::CR3).unwrap_or(0);
+            let _ifl = if _rflags & (1 << 9) != 0 { 1 } else { 0 };
+            // serial_println!("[HEARTBEAT] CS={:#06x} RIP={:#018x} RSP={:#018x} IF={} CR3={:#x}",
+            //                _cs, _rip, _rsp, _ifl, _cr3);
+            // Reload the preemption timer for the next sample.
+            vmx::vmwrite(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS)
+                .expect("reload preemption timer");
+        }
+
         other => {
             serial_println!("[VMEXIT] unhandled exit reason {} — halting", other);
             halt_forever();
@@ -525,6 +562,28 @@ unsafe extern "C" fn handle_vmexit(regs: &mut GuestRegs) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
+
+/// Check whether an MSR index is within the MSR-bitmap–covered ranges.
+/// The bitmap covers 0x00000000–0x00001FFF and 0xC0000000–0xC0001FFF.
+/// MSRs outside these ranges always cause VMEXITs regardless of the bitmap.
+fn msr_in_bitmap_range(ecx: u32) -> bool {
+    ecx <= 0x1FFF || (0xC000_0000..=0xC000_1FFF).contains(&ecx)
+}
+
+/// Inject #GP(0) into the guest.  Used when the guest accesses a nonexistent
+/// or out-of-range MSR — the real CPU would #GP, so we emulate that.
+/// Does NOT advance RIP; the #GP handler in the guest IDT will run at the
+/// faulting instruction.
+unsafe fn inject_gp() {
+    // VM-entry interruption-info: valid=1, type=3 (hw exception), vector=13, error_code=1
+    let info: u64 = (1 << 31) | (3 << 8) | 13 | (1 << 11);
+    vmx::vmwrite(control::VMENTRY_INTERRUPTION_INFO_FIELD, info)
+        .expect("vmwrite inject #GP info");
+    vmx::vmwrite(control::VMENTRY_EXCEPTION_ERR_CODE, 0)
+        .expect("vmwrite inject #GP error code");
+    vmx::vmwrite(control::VMENTRY_INSTRUCTION_LEN, 0)
+        .expect("vmwrite inject #GP instr len");
+}
 
 /// Advance guest RIP by the length of the instruction that caused the VMEXIT.
 ///
@@ -548,6 +607,32 @@ fn halt_forever() -> ! {
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
+}
+
+/// Called from the trampoline when VMRESUME fails.
+/// `kind`: 0 = neither CF nor ZF (impossible), 1 = CF (INVALID), 2 = ZF (VALID).
+unsafe extern "C" fn vmresume_failed(kind: u64) -> ! {
+    match kind {
+        1 => { serial_println!("[VMRESUME FAIL] VM_FAIL_INVALID (CF=1) — no current VMCS"); }
+        2 => {
+            let err = vmx::vmread(vmcs::ro::VM_INSTRUCTION_ERROR).unwrap_or(0xdead);
+            let rip = vmx::vmread(vmcs::guest::RIP).unwrap_or(0);
+            let rsp = vmx::vmread(vmcs::guest::RSP).unwrap_or(0);
+            let cr0 = vmx::vmread(vmcs::guest::CR0).unwrap_or(0);
+            let cr3 = vmx::vmread(vmcs::guest::CR3).unwrap_or(0);
+            let cr4 = vmx::vmread(vmcs::guest::CR4).unwrap_or(0);
+            let efer = vmx::vmread(vmcs::guest::IA32_EFER_FULL).unwrap_or(0);
+            let entry_ctl = vmx::vmread(control::VMENTRY_CONTROLS).unwrap_or(0);
+            let cs_ar = vmx::vmread(vmcs::guest::CS_ACCESS_RIGHTS).unwrap_or(0);
+            let cs_sel = vmx::vmread(vmcs::guest::CS_SELECTOR as u32).unwrap_or(0);
+            serial_println!("[VMRESUME FAIL] VM_FAIL_VALID (ZF=1) — VM_INSTRUCTION_ERROR={}", err);
+            serial_println!("  guest RIP={:#018x}  RSP={:#018x}", rip, rsp);
+            serial_println!("  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}", cr0, cr3, cr4, efer);
+            serial_println!("  ENTRY_CTL={:#010x}  CS_SEL={:#06x}  CS_AR={:#06x}", entry_ctl, cs_sel, cs_ar);
+        }
+        _ => { serial_println!("[VMRESUME FAIL] unexpected flags (kind={})", kind); }
+    }
+    halt_forever();
 }
 
 /// Read a guest GPR by the register index encoded in the CR-access exit

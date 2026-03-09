@@ -983,13 +983,14 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         .eptp(0)
         .expect("P2d: EPT root not set up — run boot::capa() first");
 
-    // Allocate VMCS and VAPIC pages from the META pool via ThemisPlatform.
+    // Allocate VMCS, VAPIC, and MSR bitmap pages from the META pool via ThemisPlatform.
     vmx.dom0
         .alloc_vmcs_regions(&capa.platform, num_vps, vmx.features.vmcs_revision_id);
     vmx.dom0.alloc_vapic_regions(&capa.platform, num_vps);
+    vmx.dom0.alloc_msr_bitmap(&capa.platform);
 
     serial_println!(
-        "  Allocated {} VMCS + {} VAPIC pages from META pool",
+        "  Allocated {} VMCS + {} VAPIC + 1 MSR-bitmap pages from META pool",
         num_vps,
         num_vps,
     );
@@ -1010,6 +1011,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
         setup_vmcs_for_vp(
             vmx.dom0.vmcs_phys(vp),
             vmx.dom0.vapic_phys(vp),
+            vmx.dom0.msr_bitmap_phys(),
             stack_top_aligned,
             eptp,
             vp,
@@ -1039,6 +1041,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             setup_vmcs_for_vp(
                 vmx.dom0.vmcs_phys(ap_vp),
                 vmx.dom0.vapic_phys(ap_vp),
+                vmx.dom0.msr_bitmap_phys(),
                 ap_stack_top,
                 eptp,
                 ap_vp,
@@ -1046,6 +1049,12 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) -> VmcsSt
             // Override activity state: AP must not enter the kernel entry point
             // directly — it waits for a SIPI from the Linux BSP.
             vmx::vmwrite(vmcs::guest::ACTIVITY_STATE, 3).expect("AP vmwrite ACTIVITY_STATE");
+            // Disable the preemption timer for wait-for-SIPI APs.  If left armed,
+            // the timer fires continuously causing VM exits on parked cores,
+            // starving the BSP and flooding serial output.
+            // We re-enable it in the SIPI handler when the AP actually starts.
+            vmx::vmwrite(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, u64::MAX >> 32)
+                .expect("AP vmwrite preemption timer max");
             // Save VMCS state to memory and deactivate so the AP can load it
             // with VMPTRLD independently.
             vmx::vmclear(vmx.dom0.vmcs_phys(ap_vp)).expect("AP vmclear");
@@ -1130,7 +1139,9 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
         acpi_rsdp_addr,
         // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
         // is incomplete; can be removed once P7f-dmar is fully verified.
-        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 intel_iommu=off nokaslr root=/dev/vda1 rw init=/bin/sh",
+        // systemd.mask=boot-efi.mount: the EFI partition (vda15) fails because
+        // the custom kernel lacks NLS iso8859-1; masking it avoids emergency mode.
+        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 keep_bootcon intel_iommu=off nokaslr nopv root=/dev/vda1 rw loglevel=8 ignore_loglevel systemd.mask=boot-efi.mount systemd.mask=multipathd.service",
     );
 
     // ── Patch VMCS guest RIP and RSP ─────────────────────────────────────── //
@@ -1178,6 +1189,30 @@ pub fn launch(linux: &LinuxState) -> ! {
     // core that loads AP_LAUNCH_READY with Acquire ordering.
     AP_LAUNCH_READY.store(true, Ordering::Release);
     serial_println!("  APs signaled");
+
+    // ── Set XCR0 before VMLAUNCH ────────────────────────────────────────── //
+    // In nested VMX (L0=KVM, L1=Themis, L2=dom0), XCR0 is NOT a VMCS field.
+    // When L2 does XSETBV, L0 intercepts and reflects to L1.  L1's handler
+    // does a real XSETBV, but that only updates L1's XCR0 — L0 restores L2's
+    // saved XCR0 (from before the exit) on VMRESUME, so L2's XCR0 never
+    // changes.  L2 inherits whatever XCR0 is on the CPU at VMLAUNCH time.
+    //
+    // Fix: read the maximum XCR0 from CPUID 0xD sub-leaf 0 and set L1's XCR0
+    // to that value before VMLAUNCH.  L2 then starts with the full feature set.
+    unsafe {
+        let cpuid_d = core::arch::x86_64::__cpuid_count(0xD, 0);
+        let max_xcr0 = ((cpuid_d.edx as u64) << 32) | (cpuid_d.eax as u64);
+        // Bit 0 (x87) must always be 1.
+        let max_xcr0 = max_xcr0 | 1;
+        serial_println!("  BSP: setting XCR0={:#x} before VMLAUNCH", max_xcr0);
+        core::arch::asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("eax") max_xcr0 as u32,
+            in("edx") (max_xcr0 >> 32) as u32,
+            options(nomem, nostack),
+        );
+    }
 
     // ── BSP VMLAUNCH ─────────────────────────────────────────────────────── //
     // RSI = boot_params_phys is required by the Linux 32-bit PM boot protocol.

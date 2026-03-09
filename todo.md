@@ -2319,10 +2319,32 @@ all 4 CPUs online, PCI/ACPI/x2apic/serial/networking/device-mapper all up.
 
 **Phase 1 — Boot bug triage**: ✅ COMPLETE (BUG-1 through BUG-12).
 
-**Phase 1b — Userspace bringup**: 🔧 IN PROGRESS (BUG-13).
-- Kernel completes all initcalls through `dns_resolver registered`
-- Silent reboot before `free_initmem` / `/init` exec
-- Next test: `init=/bin/sh` with `-no-reboot -no-shutdown` (code built, ready to run)
+**Phase 1b — Userspace bringup**: ✅ COMPLETE (BUG-13 resolved).
+- `init=/bin/sh` confirmed working — shell prompt reached
+- Full systemd boot reaches login prompt with two workarounds:
+  - `systemd.mask=boot-efi.mount` (custom kernel lacks NLS iso8859-1 for vda15 FAT ESP)
+  - `systemd.mask=multipathd.service` (no multipath devices in VM)
+- Long-term fix: use the stock kernel from the cloud image (has all modules)
+- Multi-CPU boot: ✅ FIXED (BUG-14)
+
+**What fixed BUG-13** (commit `00acb6c`):
+1. **MSR bitmap**: Allocated a proper zeroed META page instead of pointing at phys 0.
+   All-zeros = no MSR intercepts (full RDMSR/WRMSR passthrough).
+2. **CPUID passthrough**: Removed all AVX-512/XSAVE feature masking. Now passes
+   real hardware CPUID through, only hiding hypervisor-presence bit (leaf 1 ECX.31)
+   and zeroing hypervisor leaves (0x40000000+). Added CPUID-based trace mechanism
+   (leaf 0xDEADxxxx).
+3. **XCR0 before VMLAUNCH**: Set XCR0 to max feature set (from CPUID 0xD) on both
+   BSP and APs before VMLAUNCH. Critical for nested VMX where L2 inherits XCR0 at
+   launch time — without this, XSAVE state was inconsistent causing userspace #UD.
+4. **VMCS control field changes**:
+   - Removed HLT_EXITING — guest HLT handled directly by hardware
+   - Exception bitmap set to 0 — no exception interception, all handled by guest IDT
+   - Added IA32_PAT save/load on VM-entry/exit (prevents PAT mismatch crashes)
+   - Added VMX preemption timer for diagnostic heartbeat sampling
+   - Removed NMI_EXITING from pin-based controls
+5. **Kernel cmdline**: Added `keep_bootcon`, `nopv`, `loglevel=8`, `ignore_loglevel`
+   for full serial output visibility.
 
 **Phase 2 — Post-clean-boot refactor**:  Harden bringup shortcuts:
 - **#U5 — vAPIC for all domains**: Replace LAPIC/IOAPIC EPT passthrough
@@ -2567,57 +2589,78 @@ at a fixed offset.  Multiple userspace processes crash on the same instruction.
 **Files**: `vmexit.rs` (CPUID handler).
 
 
-### BUG-13: Silent reboot after `dns_resolver registered` — kernel→userspace transition (IN PROGRESS)
+### BUG-13: Silent reboot after `dns_resolver registered` — kernel→userspace transition (FIXED)
 
 **Symptom**: After the last initcall (`Key type dns_resolver registered`), the guest
 silently reboots — no kernel panic, no oops, no exception. The serial output jumps
 directly from `dns_resolver registered` to UEFI `BdsDxe: loading Boot0001` (Limine
 restart). Exception bitmap (#UD/#DF/#GP) does NOT fire at the crash point.
 
-**What happens after dns_resolver in 5.15 kernel**:
-1. `do_initcalls()` returns → `do_basic_setup()` returns → `kernel_init_freeable()`
-2. `wait_for_initramfs()` — waits for async rootfs unpacking completion
-3. `console_on_rootfs()` — opens /dev/console on the rootfs
-4. `kernel_init()` calls `free_initmem()` → prints "Freeing unused kernel image memory"
-5. `run_init_process("/sbin/init")` — or whatever `init=` says
-We never see "Freeing unused kernel image memory" so the crash is between
-`dns_resolver` and `free_initmem()`, or possibly in early initramfs `/init` exec.
+**Root cause**: Multiple interrelated issues prevented the kernel→userspace transition:
+1. MSR bitmap pointed at phys 0 instead of a properly allocated zeroed page
+2. Aggressive CPUID feature masking (AVX-512, XSAVE) created inconsistent state
+   between what the kernel detected and what hardware provided
+3. XCR0 was not set before VMLAUNCH — in nested VMX, L2 inherits XCR0 at launch
+   time, so the guest started with a minimal feature set while the kernel expected
+   the full set, causing XSAVE state corruption and userspace #UD
+4. Missing IA32_PAT save/load on VM-entry/exit caused memory type mismatches
 
-**What we tried**:
-- Exception bitmap: confirms no #UD/#DF at crash. Only routine #GP from MSR access.
-- I/O bitmap for reset ports (0xCF9, 0x64, 0x604): FAILED — port 0xCF9 shares I/O
-  bitmap byte with PCI config port 0xCF8 → broke PCI. Port 0x604 polled thousands of
-  times. Reverted.
-- `-no-shutdown` alone: guest reboots (Limine restarts) instead of QEMU exiting.
-  Still no panic message visible.
+**Fix** (commit `00acb6c`): See Phase 1b notes above for the full list of changes.
+With `init=/bin/sh`, the guest reaches a shell prompt. With the default init
+(systemd), the guest reaches the login prompt after masking
+`boot-efi.mount` (kernel lacks NLS iso8859-1 for the vda15 FAT EFI partition)
+and `multipathd.service`.
 
-**Current debug setup (ready to test next session)**:
-- QEMU flags set to `-no-reboot -no-shutdown` (both — QEMU should freeze on reset)
-- Kernel command line changed to `init=/bin/sh` — bypasses initramfs `/init`,
-  directly execs `/bin/sh` from rootfs. If shell works → issue is in initramfs init.
-  If shell doesn't work → issue is in kernel→userspace transition itself.
-- Code is BUILT and ready to run (`cargo build` succeeded).
 
-**Next steps if init=/bin/sh still crashes**:
-1. Check if the initramfs has `/init` — already extracted at `/tmp/initrd_extract/main/`
-2. Try `rdinit=/bin/sh` instead (targets initramfs rootfs rather than `root=` device)
-3. Add `panic=30` to kernel command line — gives panic message time to print
-4. Check if virtio drivers (virtio_pci, virtio_blk) are built-in or modules
-   (look in `/tmp/mnt/lib/modules/5.15.0-171-generic/`)
-5. Consider intercepting the reset port differently — maybe intercept only the
-   specific byte write to 0xCF9 (value 0x06=warm reset or 0x0E=cold reset) in the
-   existing I/O handler by checking the port number post-exit
+### BUG-14: Multi-CPU boot hangs at VMLAUNCH — AP XSETBV #UD (FIXED)
 
-**Possible root causes**:
-- Kernel can't find `/init` in initramfs → panics but output lost in reset race
-- `/init` exec fails (missing interpreter, wrong arch, permission)
-- `wait_for_initramfs()` hangs or crashes
-- A deferred work item or timer fires between the last initcall and free_initmem
-- Triple fault on a different CPU that doesn't get logged (serial lock contention)
+**Symptom**: With 4 CPUs, the system hangs immediately after `AP_LAUNCH_READY`
+is set. Serial output truncates mid-line ("APs sig..."). Single-CPU boot works
+fine.
 
-**Files**: `vmexit.rs` (exception handler), `vmcs.rs` (exception bitmap),
-`boot.rs` (kernel cmdline — currently has `init=/bin/sh`),
-`scripts/run-qemu.sh` (now has both `-no-reboot -no-shutdown`).
+**Root cause**: The AP entry code (added in `00acb6c`) does `XSETBV` to set XCR0
+to the full feature set before VMLAUNCH. However, `XSETBV` requires `CR4.OSXSAVE`
+(bit 18) to be set. The BSP had this bit set (inherited from Limine), but APs
+did not — `adjust_control_registers()` only sets VMX FIXED0/FIXED1 bits, which
+don't include `CR4.OSXSAVE`. The `XSETBV` on each AP raised `#UD`, which
+cascaded to double fault → triple fault → VM reset (silent, no serial output
+because the capavisor has no IDT fault handlers for host-mode exceptions).
+
+**Additional fix**: The VMX preemption timer was armed in all AP VMCSes
+(wait-for-SIPI activity state). While not the primary cause, this would have
+caused continuous timer exits on parked APs. Fixed by setting the timer to
+max value (`0xFFFFFFFF`) before VMCLEAR, then reloading normal ticks in the
+SIPI handler when the AP actually starts.
+
+**Fix**: Set `CR4.OSXSAVE` on each AP before `XSETBV` in `ap_entry()`.
+Set preemption timer to max for wait-for-SIPI VMCSes.
+
+**Files**: `main.rs` (AP entry — CR4.OSXSAVE + XSETBV), `boot.rs` (AP VMCS
+preemption timer), `vmexit.rs` (SIPI handler — reload timer on activation).
+
+### BUG-15: Stock kernel silent death after `dns_resolver` — RDMSR #GP crash (FIXED)
+
+**Symptom**: With the stock Ubuntu 5.15.0-171-generic kernel (from the cloud
+image), the system goes completely silent after `Key type dns_resolver registered`.
+No triple fault, no VMRESUME failure, no heartbeat — Themis itself dies.
+Custom-built 5.15.0+ kernel was unaffected.
+
+**Root cause**: The MSR bitmap (4 KiB, all zeros) only covers MSR ranges
+0x00000000–0x00001FFF and 0xC0000000–0xC0001FFF. MSRs outside these ranges
+**always** cause VMEXITs regardless of bitmap contents (SDM §25.1.3). The stock
+kernel probes `MSR_AMD64_DE_CFG` (0xC0011029) — an AMD-specific MSR outside
+the bitmap range. This triggered an RDMSR VMEXIT, and the handler did a blind
+pass-through `rdmsr(0xC0011029)` in host context. On Intel hardware, this MSR
+doesn't exist → #GP in Themis → triple fault → silent death (Themis has no
+host-mode IDT). The custom kernel never read MSRs outside the bitmap range.
+
+**Fix**: For RDMSR/WRMSR VMEXITs where the MSR index is outside the bitmap-
+covered ranges, inject `#GP(0)` into the guest instead of passing through.
+This matches real hardware behavior for nonexistent MSRs. The Linux kernel
+handles this gracefully via its `unchecked MSR access error` exception path.
+
+**Files**: `vmexit.rs` (RDMSR/WRMSR handlers — bitmap range check + #GP
+injection; added `msr_in_bitmap_range()` and `inject_gp()` helpers).
 
 
 ## Platform API / Unimplemented Features
