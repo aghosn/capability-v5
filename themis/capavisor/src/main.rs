@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 // Enable heap-allocated types (Vec, Box, BTreeMap, …) via the global allocator
 // declared below.  The allocator is backed by a static BSS array (`HEAP`) that
 // Limine places and maps as part of the kernel binary — no runtime carving
@@ -38,8 +37,12 @@ mod pci;
 mod platform;
 mod vmcs;
 mod vmexit;
-mod vmx;
-pub mod vcpu;
+mod vmx {
+    pub use ::vmx::features::*;
+}
+pub mod vcpu {
+    pub use ::vmx::vcpu::*;
+}
 
 // ── Serial console (COM1, 0x3F8) ────────────────────────────────────────── //
 

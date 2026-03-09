@@ -22,3 +22,4 @@ vtd          = { workspace = true }
 themis-abi   = { workspace = true }
 ept          = { workspace = true }
 capavisor-pt = { workspace = true }
+vmx          = { workspace = true }

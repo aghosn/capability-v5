@@ -1,16 +1,11 @@
-//! VT-x (VMX) initialization and management.
-//!
-//! Phase 2 of the Themis boot sequence:
-//! - P2a: CPUID / MSR feature detection
-//! - P2b: VMXON on BSP + APs
-//! - P2c: VMCS setup (deferred to Phase 7 when dom0 is created)
+//! VT-x (VMX) CPU feature detection and VMXON enable.
 
 use x86::controlregs::{self, Cr4};
 use x86::msr;
 
-// ── CPU feature detection (P2a) ─────────────────────────────────────────── //
+// ── CPU feature detection ───────────────────────────────────────────────── //
 
-/// Hardware virtualisation features detected at boot.
+/// Hardware virtualisation features detected via CPUID and MSRs.
 #[derive(Debug, Clone)]
 pub struct CpuFeatures {
     /// VMX (VT-x) supported.
@@ -118,15 +113,14 @@ pub fn detect_features(has_dmar: bool) -> CpuFeatures {
     features
 }
 
-// ── VMXON (P2b) ─────────────────────────────────────────────────────────── //
+// ── VMXON ───────────────────────────────────────────────────────────────── //
 
 /// Enable VMX operation on the current core.
 ///
-/// `vmxon_region_phys` must point to a 4 KiB-aligned, zeroed page with the
-/// VMCS revision ID written at offset 0.  The caller must have already set
-/// CR4.VMXE.
+/// Sets CR4.VMXE, adjusts CR0/CR4 for VMX fixed bits, and executes VMXON.
 ///
-/// Returns `Ok(())` on success, or the VMX error on failure.
+/// `vmxon_region_phys` must point to a 4 KiB-aligned, zeroed page with the
+/// VMCS revision ID written at offset 0.
 pub fn enable_vmx_on_core(vmxon_region_phys: u64) -> Result<(), &'static str> {
     // Set CR4.VMXE (bit 13).
     unsafe {
@@ -164,4 +158,3 @@ fn adjust_control_registers() {
         controlregs::cr4_write(Cr4::from_bits_truncate(cr4 as usize));
     }
 }
-

@@ -66,6 +66,7 @@ dependencies = [
  "pci_types",
  "spin 0.10.0",
  "themis-abi",
+ "vmx",
  "vtd",
  "x2apic",
  "x86",
@@ -191,6 +192,13 @@ dependencies = [
 [[package]]
 name = "themis-abi"
 version = "0.1.0"
+
+[[package]]
+name = "vmx"
+version = "0.1.0"
+dependencies = [
+ "x86",
+]
 
 [[package]]
 name = "volatile"

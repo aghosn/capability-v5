@@ -5,6 +5,7 @@ members = [
     "crates/themis-abi",
     "crates/ept",
     "crates/capavisor-pt",
+    "crates/vmx",
 ]
 # xtask is a host-side build helper; keep it OUT of the bare-metal workspace
 # so that plain `cargo check/build` does not try to compile it for x86_64-unknown-none.
@@ -30,6 +31,7 @@ vtd          = { path = "crates/vtd" }
 themis-abi   = { path = "crates/themis-abi" }
 ept          = { path = "crates/ept" }
 capavisor-pt = { path = "crates/capavisor-pt" }
+vmx          = { path = "crates/vmx" }
 
 # Profiles must be defined at the workspace root (non-root package profiles are ignored).
 # No unwinding on bare metal — panic = abort everywhere.
