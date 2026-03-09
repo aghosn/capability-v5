@@ -138,6 +138,53 @@ pub fn enable_vmx_on_core(vmxon_region_phys: u64) -> Result<(), &'static str> {
     }
 }
 
+// ── INVEPT / INVVPID ────────────────────────────────────────────────────── //
+
+/// INVEPT type: invalidate mappings for a single EPTP value.
+pub const INVEPT_SINGLE_CONTEXT: u64 = 1;
+/// INVEPT type: invalidate all EPT-derived mappings across all EPTPs.
+pub const INVEPT_GLOBAL: u64 = 2;
+
+/// Execute INVEPT (Invalidate EPT-Derived Entries).
+///
+/// `inv_type` selects single-context (1) or global (2).
+/// For single-context, `eptp` must be the 64-bit EPTP value (root | flags).
+///
+/// # Safety
+/// Must be called in VMX root mode on a core that has executed VMXON.
+#[inline]
+pub unsafe fn invept(inv_type: u64, eptp: u64) {
+    // INVEPT descriptor: 128 bits — EPTP in [63:0], reserved zeros in [127:64].
+    let descriptor: [u64; 2] = [eptp, 0];
+    core::arch::asm!(
+        "invept {inv_type}, [{desc}]",
+        inv_type = in(reg) inv_type,
+        desc = in(reg) descriptor.as_ptr(),
+        options(nostack, preserves_flags),
+    );
+}
+
+/// INVVPID type: invalidate all mappings for a single VPID.
+pub const INVVPID_SINGLE_CONTEXT: u64 = 1;
+/// INVVPID type: invalidate all VPID-tagged mappings except VPID 0.
+pub const INVVPID_ALL_CONTEXT: u64 = 2;
+
+/// Execute INVVPID (Invalidate VPID-Tagged TLB Entries).
+///
+/// # Safety
+/// Must be called in VMX root mode on a core that has executed VMXON.
+#[inline]
+pub unsafe fn invvpid(inv_type: u64, vpid: u16) {
+    // INVVPID descriptor: 128 bits — VPID in [15:0], rest zero.
+    let descriptor: [u64; 2] = [vpid as u64, 0];
+    core::arch::asm!(
+        "invvpid {inv_type}, [{desc}]",
+        inv_type = in(reg) inv_type,
+        desc = in(reg) descriptor.as_ptr(),
+        options(nostack, preserves_flags),
+    );
+}
+
 /// Adjust CR0 and CR4 so that all VMX-required fixed bits are set/cleared.
 fn adjust_control_registers() {
     unsafe {

@@ -30,7 +30,7 @@
 //! responding core (via poll_and_respond_cross_core / P3b IDT handler):
 //!   clear ipi_pending[self]
 //!   sync_barrier(0, 0)    — signal "I have stopped"
-//!   TODO(P3c): INVEPT     — flush stale TLB entries
+//!   INVEPT(single-context) — flush stale EPT TLB entries for current domain
 //!   sync_barrier(1, 0)    — signal "local flush done"
 //! ```
 //!
@@ -506,6 +506,20 @@ impl ThemisPlatform {
         assert!(vp_id < d.vps.len(), "return_vcpu: vp_id out of range");
         d.vps[vp_id].put(vcpu);
     }
+
+    /// Execute INVEPT(single-context) for the given domain's EPTP on the
+    /// current core.  If the domain has no EPT (not yet mapped), this is a
+    /// no-op since there can be no cached translations.
+    fn invept_for_domain(&self, domain_id: DomainId) {
+        if let Some(arc) = self.domains.get(domain_id) {
+            let d = arc.lock();
+            if let Some(ept) = d.ept.as_ref() {
+                unsafe {
+                    crate::vmx::invept(crate::vmx::INVEPT_SINGLE_CONTEXT, ept.eptp());
+                }
+            }
+        }
+    }
 }
 
 // ── Platform trait ────────────────────────────────────────────────────────── //
@@ -554,7 +568,11 @@ impl Platform for ThemisPlatform {
             return;
         }
         self.barriers[0].wait(0);
-        // TODO(P3c): INVEPT(single-context) here for TLB shootdown.
+        // Flush EPT TLB for the domain this core is currently running.
+        let dom = self.cores[core_id as usize].current_domain.load(Ordering::Relaxed);
+        if dom != IDLE_DOMAIN {
+            self.invept_for_domain(dom);
+        }
         self.barriers[1].wait(0);
     }
 
@@ -619,8 +637,8 @@ impl Platform for ThemisPlatform {
                 unsafe { core::ptr::write_bytes(virt, 0, *size as usize) };
             }
 
-            Update::FlushTLB { .. } => {
-                // TODO(P3c): INVEPT(single-context) for the affected domain.
+            Update::FlushTLB { domain } => {
+                self.invept_for_domain(*domain);
             }
         }
     }
