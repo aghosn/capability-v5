@@ -83,8 +83,14 @@ const CODE64: u64 = 0x00af9b000000ffff;
 /// 64-bit data segment: G=1, P=1, DPL=0, type=0x93 (read/write/accessed).
 const DATA64: u64 = 0x00af93000000ffff;
 
-// SAFETY: all mutations happen exactly once (while GDT_INITIALIZED is false),
-// before any concurrent core can call load_for_core().
+// SAFETY: GDT and TSS_ARRAY are mutable statics because they must be
+// written once during init() (BSP-only, guarded by GDT_INITIALIZED CAS)
+// and then read by every core via load_for_core()/gdtr_base()/tss_base().
+// After init() completes, no further mutations occur — all subsequent
+// accesses are read-only pointer/address computations.  We use
+// addr_of!/addr_of_mut! at each access site to avoid creating Rust
+// references to mutable statics (which would be instant UB under
+// Stacked Borrows).
 static mut GDT: [u64; GDT_SIZE] = [0u64; GDT_SIZE];
 static mut TSS_ARRAY: [Tss64; MAX_CORES] = [const { empty_tss() }; MAX_CORES];
 
@@ -104,14 +110,16 @@ pub fn init() {
     }
 
     unsafe {
-        GDT[0] = 0;       // null
-        GDT[1] = CODE64;  // selector 0x08 — code64
-        GDT[2] = DATA64;  // selector 0x10 — data
+        let gdt = core::ptr::addr_of_mut!(GDT);
+        let tss = core::ptr::addr_of!(TSS_ARRAY);
+        (*gdt)[0] = 0;       // null
+        (*gdt)[1] = CODE64;  // selector 0x08 — code64
+        (*gdt)[2] = DATA64;  // selector 0x10 — data
 
         for i in 0..MAX_CORES {
-            let (lo, hi) = make_tss_descriptor(&TSS_ARRAY[i]);
-            GDT[GDT_FIXED + 2 * i]     = lo;
-            GDT[GDT_FIXED + 2 * i + 1] = hi;
+            let (lo, hi) = make_tss_descriptor(&(*tss)[i]);
+            (*gdt)[GDT_FIXED + 2 * i]     = lo;
+            (*gdt)[GDT_FIXED + 2 * i + 1] = hi;
         }
     }
 }
@@ -125,7 +133,7 @@ pub fn init() {
 pub fn load_for_core(cpu_id: usize) {
     assert!(cpu_id < MAX_CORES, "gdt::load_for_core: cpu_id out of range");
 
-    let gdt_base  = unsafe { GDT.as_ptr() as u64 };
+    let gdt_base  = core::ptr::addr_of!(GDT) as u64;
     let gdt_limit = (core::mem::size_of::<[u64; GDT_SIZE]>() - 1) as u16;
     let tss_sel   = tss_selector(cpu_id);
 
@@ -162,14 +170,14 @@ pub fn tss_selector(cpu_id: usize) -> u16 {
 #[inline]
 pub fn tss_base(cpu_id: usize) -> u64 {
     assert!(cpu_id < MAX_CORES);
-    unsafe { &TSS_ARRAY[cpu_id] as *const Tss64 as u64 }
+    unsafe { core::ptr::addr_of!(TSS_ARRAY).cast::<Tss64>().add(cpu_id) as u64 }
 }
 
 /// Return a reference to the GDT base and limit suitable for writing to
 /// `HOST_GDTR_BASE` in the VMCS.
 #[inline]
 pub fn gdtr_base() -> u64 {
-    unsafe { GDT.as_ptr() as u64 }
+    core::ptr::addr_of!(GDT) as u64
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────── //

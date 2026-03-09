@@ -18,7 +18,7 @@ pub(crate) const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Aligned wrapper so the heap array sits on a 16-byte boundary in .bss.
 #[repr(align(16))]
-struct AlignedHeap([u8; HEAP_SIZE]);
+struct AlignedHeap(#[allow(dead_code)] [u8; HEAP_SIZE]);
 
 /// Heap backing storage — placed in .bss by the linker, mapped by Limine.
 /// Limine loads the capavisor ELF and handles physical placement and page
@@ -143,9 +143,9 @@ pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPl
 /// BSP entry point called by the Limine bootloader.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // Initialize the global heap allocator from the static BSS array.
-    // This MUST happen before any heap-allocating boot code.
-    unsafe { ALLOCATOR.lock().init(HEAP.0.as_mut_ptr(), HEAP_SIZE); }
+    // SAFETY: HEAP is only mutated here (once, BSP-only, before any AP runs).
+    // We use addr_of_mut! to get a raw pointer without creating a Rust reference.
+    unsafe { ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE); }
 
     // Store kernel phys/virt base so paging::ensure_table can correctly
     // translate kernel-space heap VAs to physical addresses.

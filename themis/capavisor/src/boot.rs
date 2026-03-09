@@ -357,7 +357,7 @@ pub fn platform(
         };
 
     // Compute HEAP virt/phys range.
-    let heap_virt_base = unsafe { crate::HEAP.0.as_ptr() as u64 };
+    let heap_virt_base = core::ptr::addr_of!(crate::HEAP) as u64;
     let heap_virt_end = heap_virt_base + crate::HEAP_SIZE as u64;
     let heap_phys_base = if kernel_virt_base != 0 {
         heap_virt_base - kernel_virt_base + kernel_phys_base
