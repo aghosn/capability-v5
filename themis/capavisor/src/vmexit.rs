@@ -187,7 +187,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     ecx &= !(1u32 << 31);
                 }
                 (0xD, 1) => {
-                    eax &= !(1 << 3);
+                    // XSAVES (bit 3): passed through — ENABLE_XSAVES is
+                    // set in secondary proc-based controls.
                 }
                 (0x40000000..=0x4FFFFFFF, _) => {
                     eax = 0; ebx = 0; ecx = 0; edx = 0;

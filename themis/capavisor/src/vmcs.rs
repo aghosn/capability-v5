@@ -110,13 +110,14 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64,
 
     // ── Secondary proc-based ──────────────────────────────────────────── //
     // ENABLE_RDTSCP (bit 3), ENABLE_EPT (bit 1), ENABLE_VPID (bit 5),
-    // UNRESTRICTED_GUEST (bit 7).
+    // UNRESTRICTED_GUEST (bit 7), ENABLE_XSAVES (bit 20).
     let secondary_desired: u64 =
         (1 << 1)  // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
-        | (1 << 12); // ENABLE_INVPCID
+        | (1 << 12) // ENABLE_INVPCID
+        | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
     let secondary_val = adjust(secondary_desired, secondary_msr);
     vmx::vmwrite(
@@ -124,6 +125,13 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64,
         secondary_val,
     )
     .expect("vmwrite secondary proc-based");
+
+    // XSS-exiting bitmap: only valid when ENABLE_XSAVES (bit 20) is active.
+    if secondary_val & (1 << 20) != 0 {
+        // 0 = no XSAVES/XRSTORS cause VM exits; all execute natively.
+        vmx::vmwrite(control::XSS_EXITING_BITMAP_FULL, 0)
+            .expect("vmwrite XSS-exiting bitmap");
+    }
 
     // ── VM-exit controls ──────────────────────────────────────────────── //
     // HOST_ADDRESS_SPACE_SIZE, SAVE/LOAD IA32_EFER and IA32_PAT,
