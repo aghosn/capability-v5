@@ -615,9 +615,20 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
 
     assert!(features.vmx, "VMX not supported — cannot continue");
 
-    // P2b — Allocate VMXON regions from ThemisPlatform META and run VMXON on BSP.
-    let mut dom0 = Domain::new(0, info.hhdm_offset);
-    dom0.alloc_vmxon_regions(platform, info.num_cores, features.vmcs_revision_id);
+    // P2b — Allocate VMXON regions directly into the per-core global array
+    // and run VMXON on BSP.  VMXON is a per-physical-core resource, not
+    // per-domain, so it lives in the global VMXON_PHYS array.
+    let hhdm = info.hhdm_offset;
+    let rev_id = features.vmcs_revision_id;
+    for i in 0..info.num_cores {
+        let phys = platform.alloc_meta_frame(0); // domain 0
+        let virt = (phys + hhdm) as *mut u32;
+        unsafe { virt.write_volatile(rev_id & 0x7FFF_FFFF) };
+        crate::VMXON_PHYS[i].store(phys, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Create dom0 Domain (VMCS/VAPIC/bitmaps allocated later in vmcs()).
+    let dom0 = Domain::new(0, info.hhdm_offset);
 
     serial_println!();
     serial_println!(
@@ -631,17 +642,13 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
         .position(|&id| id == info.bsp_lapic_id)
         .expect("BSP LAPIC ID not found in CPU list");
 
-    crate::vmx::enable_vmx_on_core(dom0.vmxon_phys(bsp_index)).expect("VMXON failed on BSP");
+    let bsp_vmxon = crate::VMXON_PHYS[bsp_index].load(core::sync::atomic::Ordering::Relaxed);
+    crate::vmx::enable_vmx_on_core(bsp_vmxon).expect("VMXON failed on BSP");
     serial_println!(
         "VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
         info.bsp_lapic_id,
         bsp_index
     );
-
-    // Populate VMXON_PHYS for all cores (visible to APs after AP_LAUNCH_READY Release).
-    for i in 0..info.num_cores {
-        crate::VMXON_PHYS[i].store(dom0.vmxon_phys(i), core::sync::atomic::Ordering::Relaxed);
-    }
 
     VmxState {
         features,
