@@ -215,6 +215,7 @@ impl VcpuSlot {
     }
 
     /// Create a slot holding an InactiveVcpu.
+    #[allow(dead_code)]
     pub fn with_vcpu(vcpu: InactiveVcpu) -> Self {
         VcpuSlot {
             ptr: AtomicPtr::new(Box::into_raw(Box::new(vcpu))),
@@ -243,6 +244,7 @@ impl VcpuSlot {
     }
 
     /// Check if the VP is currently available (not taken by any core).
+    #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         !self.ptr.load(Ordering::Relaxed).is_null()
     }
@@ -252,6 +254,7 @@ impl VcpuSlot {
 
 pub struct PerCoreCell {
     pub current_domain: AtomicU64,
+    #[allow(dead_code)]
     pub current_vp:     AtomicU32,
 }
 
@@ -273,6 +276,7 @@ pub struct PlatformDomain {
     /// META page allocator — populated via `GiveMetaMem` updates.
     pub meta: MetaAllocator,
     /// Parent domain ID, stored for vital-memory revocation fallback.
+    #[allow(dead_code)]
     pub parent: Option<DomainId>,
     /// HHDM offset, cached here so EPT root allocation can use it.
     hhdm_offset: u64,
@@ -493,6 +497,7 @@ impl ThemisPlatform {
     }
 
     /// Return an InactiveVcpu to a domain's VP slot after deactivation.
+    #[allow(dead_code)]
     pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
         let arc = self.domains
             .get(domain_id)

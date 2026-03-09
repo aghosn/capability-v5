@@ -18,6 +18,7 @@ pub struct ModuleInfo {
     /// The `module_cmdline` tag (e.g. `"dom0-kernel"`).  Empty if none was set.
     pub cmdline: &'static str,
     /// The path Limine used to locate the module on disk.
+    #[allow(dead_code)]
     pub path: &'static str,
 }
 

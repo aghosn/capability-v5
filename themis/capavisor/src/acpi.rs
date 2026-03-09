@@ -152,6 +152,7 @@ impl Handler for HhdmHandler {
 // ── Parsed ACPI info ────────────────────────────────────────────────────── //
 
 /// Processor descriptor extracted from the MADT.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessorInfo {
     pub processor_uid: u32,
@@ -159,6 +160,7 @@ pub struct ProcessorInfo {
 }
 
 /// I/O APIC descriptor extracted from the MADT.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct IoApic {
     pub id: u8,
@@ -167,6 +169,7 @@ pub struct IoApic {
 }
 
 /// Interrupt Source Override from the MADT.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct Iso {
     pub bus: u8,
@@ -184,8 +187,10 @@ pub struct AcpiInfo {
     /// I/O APICs from MADT.
     pub io_apics: Vec<IoApic>,
     /// Interrupt source overrides from MADT.
+    #[allow(dead_code)]
     pub isos: Vec<Iso>,
     /// Whether the platform has legacy 8259 PICs.
+    #[allow(dead_code)]
     pub has_legacy_pics: bool,
     /// PCIe ECAM regions from MCFG (segment → base address + bus range).
     pub pci_config_regions: Option<PciConfigRegions>,

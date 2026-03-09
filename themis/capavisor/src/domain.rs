@@ -28,7 +28,9 @@ pub struct Domain {
     pub vapic_regions: Vec<u64>,
     /// I/O bitmap pages (shared by all VPs).
     /// A = ports 0x0000–0x7FFF, B = ports 0x8000–0xFFFF.
+    #[allow(dead_code)]
     pub io_bitmap_a: u64,
+    #[allow(dead_code)]
     pub io_bitmap_b: u64,
     /// MSR bitmap page (shared by all VPs).
     /// All-zeros = no MSR intercepts.
@@ -82,6 +84,7 @@ impl Domain {
     /// A zeroed bitmap = all ports pass through.  We set bits only for
     /// ports that trigger machine reset/shutdown so the VMEXIT handler
     /// can log them instead of letting QEMU silently exit.
+    #[allow(dead_code)]
     pub fn alloc_io_bitmaps(
         &mut self,
         platform: &crate::platform::ThemisPlatform,

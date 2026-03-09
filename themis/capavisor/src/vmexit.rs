@@ -16,31 +16,55 @@ use crate::vcpu::{ActiveVcpu, Reg, VmxError};
 // In x2APIC mode every APIC register is accessed via MSRs 0x800–0x83F.
 // We virtualise these through the VAPIC page rather than letting the guest
 // touch the real LAPIC.
+#[allow(dead_code)]
 const X2APIC_MSR_BASE: u32 = 0x800;
+#[allow(dead_code)]
 const X2APIC_MSR_END: u32  = 0x840; // exclusive
 
 // Notable x2APIC register offsets (MSR = BASE + offset/16).
+#[allow(dead_code)]
 const X2APIC_ID:      u32 = 0x802;
+#[allow(dead_code)]
 const X2APIC_VER:     u32 = 0x803;
+#[allow(dead_code)]
 const X2APIC_TPR:     u32 = 0x808;
+#[allow(dead_code)]
 const X2APIC_PPR:     u32 = 0x80A;
+#[allow(dead_code)]
 const X2APIC_EOI:     u32 = 0x80B;
+#[allow(dead_code)]
 const X2APIC_LDR:     u32 = 0x80D;
+#[allow(dead_code)]
 const X2APIC_SVR:     u32 = 0x80F;
+#[allow(dead_code)]
 const X2APIC_ISR0:    u32 = 0x810;
+#[allow(dead_code)]
 const X2APIC_TMR0:    u32 = 0x818;
+#[allow(dead_code)]
 const X2APIC_IRR0:    u32 = 0x820;
+#[allow(dead_code)]
 const X2APIC_ESR:     u32 = 0x828;
+#[allow(dead_code)]
 const X2APIC_ICR:     u32 = 0x830;
+#[allow(dead_code)]
 const X2APIC_LVT_TIMER:   u32 = 0x832;
+#[allow(dead_code)]
 const X2APIC_LVT_THERMAL: u32 = 0x833;
+#[allow(dead_code)]
 const X2APIC_LVT_PERF:    u32 = 0x834;
+#[allow(dead_code)]
 const X2APIC_LVT_LINT0:   u32 = 0x835;
+#[allow(dead_code)]
 const X2APIC_LVT_LINT1:   u32 = 0x836;
+#[allow(dead_code)]
 const X2APIC_LVT_ERROR:   u32 = 0x837;
+#[allow(dead_code)]
 const X2APIC_TIMER_ICR:   u32 = 0x838;
+#[allow(dead_code)]
 const X2APIC_TIMER_CCR:   u32 = 0x839;
+#[allow(dead_code)]
 const X2APIC_TIMER_DCR:   u32 = 0x83E;
+#[allow(dead_code)]
 const X2APIC_SELF_IPI:    u32 = 0x83F;
 
 // ── Exit reason constants (Intel SDM Vol 3C §27.9.1) ─────────────────────── //

@@ -79,21 +79,25 @@ impl MetaAllocator {
     }
 
     /// Return the virtual (HHDM) address corresponding to a physical address.
+    #[allow(dead_code)]
     pub fn phys_to_virt(&self, phys: u64) -> *mut u8 {
         (phys + self.hhdm_offset) as *mut u8
     }
 
     /// Number of pages currently allocated.
+    #[allow(dead_code)]
     pub fn allocated_pages(&self) -> u64 {
         self.allocated
     }
 
     /// Number of free pages remaining.
+    #[allow(dead_code)]
     pub fn free_pages(&self) -> u64 {
         self.free_stack.len() as u64
     }
 
     /// Total capacity in pages.
+    #[allow(dead_code)]
     pub fn total_pages(&self) -> u64 {
         self.total
     }

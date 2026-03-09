@@ -2353,111 +2353,70 @@ previous one.  Design inspiration drawn from `../../vmxvmm/crates/vmx/`
 (ActiveVmcs/VmcsRegion pattern, vmrun-as-function-call trampoline), adapted
 for Themis's allocator-backed model (no static globals needed).
 
-### R1 — ActiveVcpu / InactiveVcpu abstraction  ⬅ TOP PRIORITY
+### R1 — ActiveVcpu / InactiveVcpu abstraction  ✅ DONE
 
 **Goal**: A clean type-state VCPU that enforces the VMCS lifecycle at compile
 time, encapsulates register state, and provides `run()` as a function-call
 abstraction.
 
-**Design**:
-- `InactiveVcpu`: owns the VMCS physical address, VAPIC phys, VPID, and the
-  guest GPR array (`[u64; 16]`).  Cannot vmread/vmwrite.  Produced by
-  `vmclear`.  Stored in `PlatformDomain::vcpus`.
-- `ActiveVcpu`: produced by `InactiveVcpu::activate()` (issues `VMPTRLD`).
-  Provides `fn get(&self, field) -> u64` and `fn set(&mut self, field, val)`.
-  Only one `ActiveVcpu` can exist per core at a time.
-- `ActiveVcpu::run(&mut self) -> Result<VmxExitReason, VmxError>`:
-  Enters the guest (VMLAUNCH on first call, VMRESUME thereafter) and returns
-  after every VMEXIT — like a normal function call.  Inline asm sets
-  HOST_RSP = current RSP, HOST_RIP = return label.  Guest GPRs saved/restored
-  via asm `inout` constraints + manual save for clobbered regs.  This replaces
-  the current naked `vmexit_trampoline` that never returns.
-- Both types are `!Send` via `PhantomData<*const ()>`.  Migrating a VCPU to
-  another core requires: `deactivate()` (VMCLEAR on old core) → transfer
-  `InactiveVcpu` → `activate()` (VMPTRLD on new core).
-- Register state is fully encapsulated: the GPR array is internal to the VCPU
-  and accessed via methods (e.g., `vcpu.rax()`, `vcpu.set_rax(val)`), not
-  exposed as a raw public array.
+**Implemented**:
+- `InactiveVcpu` (`Send`): owns VMCS phys, VAPIC phys, MSR bitmap phys,
+  VPID, launched flag, and guest GPR array (`[u64; 16]`).  Cannot vmread/vmwrite.
+- `ActiveVcpu` (`!Send`): produced by `activate()` (VMPTRLD).
+  Provides `get(field) -> u64`, `set(field, val)`, `reg(Reg) -> u64`,
+  `set_reg(Reg, val)`, and `run() -> Result<u32, VmxError>`.
+- `run()` uses naked functions (`vmlaunch_with_regs`/`vmresume_with_regs`)
+  that are LTO-safe (no inline asm labels — uses `sym` references).
+  `vmexit_return_point` saves all 15 GPRs + RFLAGS on VMEXIT.
+- `monitor_loop(vcpu)` in vmexit.rs: natural Rust loop calling `vcpu.run()`.
+- All `handle_vmexit` dispatch rewritten for `&mut ActiveVcpu`.
 
-**Key benefit**: After `run()` returns, the caller has `&mut ActiveVcpu` with
-full Rust context on the stack — per-core state, domain policy, etc. are
-local variables, not globals.  The monitor loop becomes a natural Rust loop.
+**Files**: `crates/vmx/src/vcpu.rs`, `capavisor/src/vmexit.rs`.
 
-**Files**: new `vcpu.rs` module.  Retire `vmexit_trampoline` from `vmexit.rs`.
+### R2 — Per-core monitor loop  ✅ DONE (merged with R1)
 
-### R2 — Per-core monitor loop
+Implemented as part of R1.  `monitor_loop(vcpu: &mut ActiveVcpu)` calls
+`vcpu.run()` in a loop and dispatches via `handle_vmexit(vcpu, reason)`.
 
-**Goal**: After VMLAUNCH, each core runs a loop:
-```rust
-fn monitor_loop(vcpu: &mut ActiveVcpu, domain: &PlatformDomain) -> ! {
-    let mut regs = vcpu.regs_mut();
-    let reason = unsafe { vcpu.launch(&mut regs) }.expect("VMLAUNCH");
-    loop {
-        handle_vmexit(vcpu, &reason, &mut regs, domain);
-        let reason = unsafe { vcpu.resume(&mut regs) }.expect("VMRESUME");
-    }
-}
-```
-- `handle_vmexit` becomes a regular function taking `&mut ActiveVcpu` +
-  context — no global state needed.
-- Per-core state (current domain, VP index) is function arguments, not
-  atomics.
-- The existing `match basic_reason { ... }` dispatch stays but operates on
-  `ActiveVcpu` methods instead of raw vmread/vmwrite.
+### R3 — Host stack cleanup  ✅ DONE
 
-**Files**: refactor `vmexit.rs` handler to take `ActiveVcpu` param.
+Removed `HOST_STACK_BYTES`, `VmcsState::host_stacks`, and `host_stack_top`
+parameter from `setup_vmcs_for_vp()`/`write_host_state()`.  HOST_RSP is set
+dynamically by `vcpu.run()` to the caller's Limine stack (64 KiB/core).
 
-### R3 — Host stack cleanup
+### R4 — VMXON as global per-core state  ✅ DONE
 
-**Goal**: Stop heap-allocating 16 KiB host stacks.  Use Limine-provided
-per-core stacks instead.
+VMXON regions allocated directly into global `VMXON_PHYS` array in
+`boot::vmx()`.  Removed `vmxon_regions`, `alloc_vmxon_regions()`,
+`vmxon_phys()` from `Domain`.
 
-**Rationale**: Each core already has a stack from Limine's SMP trampoline.
-With R2 (vmrun-as-function-call), HOST_RSP is set to the current RSP inside
-the asm block — the caller's stack is reused naturally.  No separate
-host-stack allocation needed.
+### R5 — Consolidate Domain / PlatformDomain  ✅ DONE
 
-**Files**: remove `VmcsState::host_stacks` from `boot.rs`, remove
-`HOST_STACK_BYTES`, simplify `setup_vmcs_for_vp()`.
+Replaced `VpHardware` with `VcpuSlot` (atomic take/return via
+`AtomicPtr<InactiveVcpu>`).  Each VP has a domain-local ID (0, 1, 2, ...).
+Added `take_vcpu()`, `return_vcpu()`, `bootstrap_store_vcpu()` to
+`ThemisPlatform`.  Removed `AP_VCPUS` global and `VmcsState` struct.
 
-### R4 — VMXON as global per-core state
+### R6 — VMX crate extraction  ✅ DONE
 
-**Goal**: VMXON regions are per-physical-core, not per-domain.  Move them out
-of `Domain` into a global per-core array allocated at boot.
+Created `crates/vmx/` with:
+- `features.rs`: CPU feature detection (CPUID/MSR), VMXON enable.
+- `vcpu.rs`: ActiveVcpu/InactiveVcpu type-state, naked asm entry/exit.
 
-**Files**: `boot.rs` (allocation), `main.rs` (global storage), remove from
-`domain.rs`.
+`vmcs.rs` stays in capavisor (Themis-specific policy).
+Capavisor re-exports via thin module aliases (`crate::vmx::`, `crate::vcpu::`).
 
-### R5 — Consolidate Domain / PlatformDomain
+### R7 — Code cleanup pass  ✅ DONE
 
-**Goal**: Merge boot-only `Domain` struct into `PlatformDomain`.  The domain
-table holds `Vec<InactiveVcpu>` per domain instead of `Vec<VpHardware>` +
-parallel `Domain` vecs.
-
-**Files**: delete `domain.rs`, update `platform.rs`, update `boot.rs`.
-
-### R6 — VMX crate extraction
-
-**Goal**: Move all generic VMX code (VCPU types, vmread/vmwrite wrappers,
-VMCS field definitions, VMX enable, control field helpers) into a separate
-`vmx` crate under `themis/`.  The capavisor depends on `vmx` for hardware
-abstraction but the `vmx` crate has no Themis-specific policy.
-
-**Boundary**: `vmx` crate = ActiveVcpu, InactiveVcpu, Vmxon, VMCS fields,
-raw instructions, control bit helpers.  Capavisor = monitor loop, VMEXIT
-policy, domain table, capability engine, EPT, boot sequence.
-
-**Files**: new `themis/vmx/` crate, move code from `vcpu.rs`, `vmx.rs`,
-`vmcs.rs`.
-
-### R7 — Code cleanup pass
-
-**Goal**: After structural refactoring is done, sweep for:
-- Dead code, stale `TODO(P*)` markers, `#[allow(dead_code)]`
-- Missing `// SAFETY:` comments on unsafe blocks
-- `cargo clippy` warnings
-- Diagnostic `serial_println!` guarded by `cfg(debug_assertions)`
-- Remove boot-only `Domain` struct if not already done in R6
+- Removed unused imports (`serial_print`, `SERIAL_LOCK`, `MAX_META_REGIONS`,
+  `MetaBreakdown`).
+- Fixed unused `pci_bar_regions` assignment.
+- Fixed redundant field names in pci.rs.
+- Removed unnecessary `unsafe` blocks in features.rs.
+- Added `#[allow(dead_code)]` for future-use items (ACPI structs, PCI fields,
+  x2APIC constants, `return_vcpu`, etc.).
+- Removed `#![feature(naked_functions)]` (stable since rustc 1.88).
+- Clippy warnings reduced from 112 to 56 (remaining are in ept/vtd crates).
 
 ### Deferred (post-refactor)
 

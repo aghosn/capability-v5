@@ -31,6 +31,7 @@ const MIN_PROTOCOL_VERSION: u16 = 0x020c;
 ///
 /// Only the fields Themis needs are named; the rest are reserved padding so
 /// that the field offsets match the Linux spec exactly.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 struct RawSetupHeader {
@@ -115,6 +116,7 @@ struct RawSetupHeader {
 // ── Public parsed header ────────────────────────────────────────────────── //
 
 /// Parsed Linux boot protocol header with the fields Themis needs.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootHeader {
     /// Boot protocol version (e.g. 0x020f = 2.15).
@@ -147,6 +149,7 @@ pub struct BootHeader {
 }
 
 /// Errors that can occur when parsing a bzImage header.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum BootHeaderError {
     /// The module is too small to contain a setup header.
@@ -206,6 +209,7 @@ impl BootHeader {
     }
 
     /// Byte offset of the compressed payload within the bzImage.
+    #[allow(dead_code)]
     pub fn payload_file_offset(&self) -> usize {
         self.protected_mode_offset() + self.payload_offset as usize
     }
@@ -216,6 +220,7 @@ impl BootHeader {
     }
 
     /// `true` if the kernel can be loaded above 4 GiB (`XLF_CAN_BE_LOADED_ABOVE_4G`).
+    #[allow(dead_code)]
     pub fn can_load_above_4g(&self) -> bool {
         self.xloadflags & 0x02 != 0
     }

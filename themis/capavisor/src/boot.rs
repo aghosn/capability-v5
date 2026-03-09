@@ -22,7 +22,7 @@ use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
 use crate::pci::PciDevice;
 use crate::vmx::CpuFeatures;
-use crate::{serial_print, serial_println, AP_READY_COUNT, SERIAL_LOCK};
+use crate::{serial_println, AP_READY_COUNT};
 
 use core::sync::atomic::Ordering;
 
@@ -46,6 +46,7 @@ pub struct PlatformInfo {
     /// LAPIC IDs for all cores, indexed by Limine cpu.id.
     pub cpu_lapic_ids: Vec<u32>,
     pub acpi: AcpiInfo,
+    #[allow(dead_code)]
     pub pci_devices: Option<Vec<PciDevice>>,
     /// Physical ranges that must be mapped UC in any EPT (MMIO regions).
     /// Built from Limine RESERVED + FRAMEBUFFER entries during Phase 1a.
@@ -62,6 +63,7 @@ pub struct PlatformInfo {
     /// meta_regions (RESERVED holes) to build boot_params.e820_table.
     pub non_ram_e820: Vec<E820Entry>,
     /// Physical ranges mapped into the capavisor page tables for ACPI access.
+    #[allow(dead_code)]
     pub acpi_mapped: Vec<(u64, u64)>, // (base, length)
 }
 
@@ -298,7 +300,7 @@ pub fn platform(
     serial_println!();
     let pci_result = crate::pci::enumerate(&acpi, hhdm_offset);
     let pci_devices;
-    let pci_bar_regions;
+    let _pci_bar_regions;
     if let Some((devices, bars)) = pci_result {
         serial_println!(
             "PCI: {} device(s) found, {} memory BAR(s)",
@@ -336,12 +338,12 @@ pub fn platform(
                 length: bar.size,
             });
         }
-        pci_bar_regions = Some(bars);
+        _pci_bar_regions = Some(bars);
         pci_devices = Some(devices);
     } else {
         serial_println!("PCI: no ECAM — skipping enumeration");
         pci_devices = None;
-        pci_bar_regions = None;
+        _pci_bar_regions = None;
     }
 
     // ── Comprehensive memory layout report ──────────────────────────────── //
@@ -722,8 +724,10 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 pub struct CapaState {
     pub platform: crate::platform::ThemisPlatform,
     pub root_domain: capability_engine::CapabilityRef<capability_engine::Domain>,
+    #[allow(dead_code)]
     pub mem_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
     /// META capabilities for dom0: one per disjoint META physical region.
+    #[allow(dead_code)]
     pub meta_caps: Vec<capability_engine::CapabilityRef<capability_engine::MemoryRegion>>,
 }
 
@@ -1067,6 +1071,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
 pub struct LinuxState {
     /// Physical address of the kernel's protected-mode entry (`code32_start`).
     /// Written to VMCS `guest::RIP`.
+    #[allow(dead_code)]
     pub kernel_entry_phys: u64,
     /// Physical address of `struct boot_params`.
     /// Must be placed in **ESI** immediately before VMLAUNCH (P7g) — ESI is a

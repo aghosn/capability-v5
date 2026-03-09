@@ -64,7 +64,9 @@ pub struct PciDevice {
     pub class: u8,
     pub subclass: u8,
     pub interface: u8,
+    #[allow(dead_code)]
     pub revision: u8,
+    #[allow(dead_code)]
     pub header_type: HeaderType,
 }
 
@@ -156,7 +158,7 @@ pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<(Vec<PciDevic
                                 if address != 0 && size != 0 {
                                     bar_regions.push(PciBarRegion {
                                         base: address,
-                                        size: size,
+                                        size,
                                     });
                                 }
                                 slot += 2; // 64-bit BARs consume two slots

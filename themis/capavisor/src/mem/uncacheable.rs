@@ -148,6 +148,7 @@ impl UncacheableRanges {
     }
 
     /// Returns `true` if any part of `[start, start+size)` is uncacheable.
+    #[allow(dead_code)]
     #[inline]
     pub fn any_overlap(&self, start: u64, size: u64) -> bool {
         self.first_overlap(start, size).is_some()
