@@ -341,20 +341,127 @@ The capavisor handles the entire doorbell notification in the VMEXIT handler and
 resumes the child.  This is what makes it fast — the child doesn't wait for the
 parent to process the event.
 
-### 4.6 ThemIC Registration VMCALLs
+### 4.6 ThemIC Page Allocation: COMM Capability Redesign
+
+ThemIC pages are parent-owned memory shared with the capavisor.  This is
+exactly the COMM use-case — monitor↔domain shared memory — but the current COMM
+design doesn't fit: it is one-shot per domain, implies VITAL (revoking it kills
+the domain), and has no notion of binding to a child domain.
+
+**COMM redesign** (minimal, 4 changes to the capability engine):
+
+1. **COMM no longer implies VITAL** — change `canonicalize()`: COMM → CLEAN only.
+   Revoking a COMM page zeros it but does not kill anyone.
+
+2. **Allow multiple COMM per domain** — remove the single-slot `comm_cap: Option<...>`
+   from `Domain`.  COMM is tracked purely by the attribute flag on individual
+   capabilities and by the child-side binding list (see below).
+
+3. **Add binding target to `register_comm`**:
+   ```rust
+   pub fn register_comm(
+       caller: &CapabilityRef<Domain>,
+       handle: LocalHandle,              // memory cap in caller's table
+       child_domain_handle: LocalHandle, // child domain in caller's domain table
+       vp_id: u32,                       // which VP this page is for
+   ) -> Result<UpdateBatch>
+   ```
+   Caller (parent) still must own the memory capability.  The engine resolves
+   `child_domain_handle` to the child domain, validates the caller owns both
+   capabilities, marks the memory capability as COMM, and records the binding.
+
+4. **Auto-release on child revocation** — when a child domain is revoked but the
+   parent survives, iterate the child's `comm_bindings` (weak refs to parent memory
+   capabilities), upgrade each, clear the COMM attribute and binding, emit
+   `UncommRegion` updates.  The parent gets its memory back.
+
+**Data model changes:**
+
+```rust
+// In MemoryRegion — add binding target:
+pub struct MemoryRegion {
+    pub kind: RegionKind,
+    pub status: RegionStatus,
+    pub access: Access,
+    pub comm_binding: Option<CommBinding>,  // NEW: set when COMM attribute is applied
+}
+
+pub struct CommBinding {
+    pub target_domain_id: DomainId,
+    pub vp_id: u32,
+}
+
+// In Domain — replace single comm_cap with binding list on the child side:
+pub struct Domain {
+    // ... existing fields ...
+    // REMOVE: pub comm_cap: Option<CapabilityWeak<MemoryRegion>>,
+    // ADD: weak refs from child to parent's COMM caps bound to this domain
+    pub comm_bindings: Vec<CapabilityWeak<MemoryRegion>>,
+}
+```
+
+**Cleanup on child revocation:**
+```rust
+// In revoke_recursive, when revoking a child domain:
+fn cleanup_comm_bindings(child: &mut Domain) {
+    for weak in child.comm_bindings.drain(..) {
+        if let Some(cap_ref) = weak.upgrade() {
+            let mut cap = cap_ref.write();
+            let phys = cap.data.access.start;
+            let size = cap.data.access.size;
+            // Clear COMM attribute → parent can carve/alias/send again
+            cap.owned.attributes = Attributes::NONE;
+            cap.data.comm_binding = None;
+            // Emit UncommRegion so platform unmaps from HHDM
+            batch.add_uncomm_region(child.id, phys, size);
+        }
+        // If upgrade fails → parent already revoked, nothing to do
+    }
+}
+```
+
+**CommRegion update extended:**
+```rust
+CommRegion {
+    domain_id: DomainId,    // parent (owner of the COMM cap)
+    target_domain_id: DomainId, // child this page is bound to
+    vp_id: u32,
+    phys: u64,
+    size: u64,
+}
+```
+
+**register_comm flow:**
+```
+Parent calls: register_comm(dom0, themic_msg_handle, child_handle, vp_id=0)
+  1. Resolve child_handle → child domain capability (must be owned by caller)
+  2. Resolve themic_msg_handle → memory capability (must be owned by caller,
+     Carve, Exclusive, not already COMM)
+  3. Set COMM attribute (implies CLEAN via canonicalize)
+  4. Set comm_binding = Some(CommBinding { target_domain_id: child.id, vp_id: 0 })
+  5. Push weak ref to child.comm_bindings
+  6. Emit CommRegion { domain_id: dom0.id, target_domain_id: child.id, vp_id: 0,
+                       phys, size }
+  7. Platform maps via HHDM, records as ThemIC page for child VP 0
+```
+
+### 4.7 ThemIC Registration VMCALLs
+
+With the COMM redesign, ThemIC registration uses `register_comm` for the pages
+and adds only doorbell-specific VMCALLs:
 
 ```
-VMCALL_REGISTER_THEMIC(domain_handle, vp_id, msg_page_cap, flag_page_cap, doorbell_table_cap)
-  Register ThemIC pages for a child VP.  The pages are META memory capabilities
-  that the parent has carved and sent to the child domain.  The capavisor maps
-  them for direct access.
+VMCALL_REGISTER_COMM(mem_cap_handle, child_domain_handle, vp_id)
+  Existing API (extended).  Parent registers a memory capability as COMM
+  bound to a child VP.  Used for ThemIC message pages, event flag pages.
+  The capavisor receives CommRegion update and maps via HHDM.
 
-VMCALL_REGISTER_DOORBELL(domain_handle, vp_id, gpa, size, datamatch, flags) → doorbell_id
-  Register a doorbell entry in the child's doorbell table.  Returns a doorbell_id
-  for later deregistration.  The capavisor adds this to the doorbell table and
-  will fast-path matching writes.
+VMCALL_REGISTER_DOORBELL(child_domain_handle, vp_id, gpa, size, datamatch, flags)
+  → doorbell_id
+  Register a doorbell entry for a child VP.  The capavisor adds this to the
+  child's doorbell table and will fast-path matching guest writes.
 
-VMCALL_UNREGISTER_DOORBELL(domain_handle, vp_id, doorbell_id)
+VMCALL_UNREGISTER_DOORBELL(child_domain_handle, vp_id, doorbell_id)
   Remove a doorbell entry.
 
 VMCALL_SET_THEMIC_VECTOR(vector)
@@ -362,22 +469,26 @@ VMCALL_SET_THEMIC_VECTOR(vector)
   Called once during driver init.  Default: 0xF0.
 ```
 
-### 4.7 ThemIC vs SynIC Mapping
+No new monitor API — `register_comm` already exists; we extend its signature
+with `child_domain_handle` and `vp_id`.  The doorbell calls are platform-level
+(capavisor only), not capability engine API.
+
+### 4.8 ThemIC vs SynIC Mapping
 
 | SynIC concept | ThemIC equivalent | Notes |
 |--------------|-------------------|-------|
-| SIMP (message page, per-VP) | `themic_message_page` | Same layout concept; capability-backed META memory |
-| SIEFP (event flag page) | `themic_event_flag_page` | Simpler: 64 bits per channel vs 256 flags per SINT |
+| SIMP (message page, per-VP) | `themic_message_page` | Parent-owned COMM capability bound to child VP |
+| SIEFP (event flag page) | `themic_event_flag_page` | Parent-owned COMM capability bound to child VP |
 | SINT[0] (interception) | `THEMIC_CHAN_INTERCEPT` | VP exit messages |
 | SINT[5] (doorbell) | `THEMIC_CHAN_DOORBELL` | Doorbell event messages |
-| Event ring | Inline in message slot | Single message per channel (not a ring); sufficient for 1:1 VP:thread model |
+| Event ring | Inline in message slot | Single message per channel; sufficient for 1:1 VP:thread model |
 | HYPERVISOR_CALLBACK_VECTOR | `THEMIC_VECTOR` (0xF0) | Fixed IDT vector, not intercepted for dom0 |
-| MSR-based SINT config | VMCALL-based registration | Capability-gated, not MSR-based |
+| MSR-based SINT config | `register_comm` + VMCALL | Capability-gated, not MSR-based |
 | Auto-EOI | x2APIC EOI in ISR | Standard EOI; no synthetic auto-EOI needed |
-| SynIC enable (SCONTROL MSR) | `VMCALL_REGISTER_THEMIC` | Explicit registration, not MSR |
+| SynIC enable (SCONTROL MSR) | `register_comm(handle, child, vp)` | Per-VP COMM binding |
 | Doorbell port/connection | `VMCALL_REGISTER_DOORBELL` | Same concept: {GPA, data, size} → fast-path |
 
-### 4.8 ThemIC in Synchronous vs Asynchronous Mode
+### 4.9 ThemIC in Synchronous vs Asynchronous Mode
 
 **Synchronous mode**: ThemIC is **not used for VP intercepts**.  The `VMCALL_SWITCH`
 call blocks the dom0 VP and returns directly with the exit reason in registers.
@@ -1135,10 +1246,11 @@ struct mshv_themis_mem_region {
 
 - `MSHV_CREATE_VP`:
   1. Validate vp_index < num_vps.
-  2. Allocate ThemIC pages for this VP:
-     a. Allocate 3 pages (message, event flag, doorbell table) from dom0 memory.
-     b. `VMCALL_REGISTER_THEMIC(domain, vp_id, msg_cap, flag_cap, doorbell_cap)`.
-     c. Map pages into kernel VA for ISR access.
+  2. Allocate ThemIC pages for this VP from dom0 memory:
+     a. Allocate pages (message page, event flag page).
+     b. `VMCALL_REGISTER_COMM(msg_page_handle, child_domain_handle, vp_id)`.
+     c. `VMCALL_REGISTER_COMM(flag_page_handle, child_domain_handle, vp_id)`.
+     d. Map pages into kernel VA for ISR access.
   3. Initialise `exit_wq`, `exit_pending` for async mode.
   4. Return vp fd.
 
@@ -1279,7 +1391,7 @@ fork of `hypervisor/src/mshv/` with these changes:
 
 3. **SynIC → ThemIC**: strip SynIC initialisation code (Themis uses ThemIC instead).
    The existing MSHV backend calls `MSHV_ENABLE_PARTITION_VTL` and sets up SynIC
-   pages — these are replaced with ThemIC page registration (`VMCALL_REGISTER_THEMIC`)
+   pages — these are replaced with ThemIC page registration (`register_comm` bindings)
    and doorbell setup.  The `enable_hyperv_synic()` method becomes a no-op.
 
 4. **Exit handling**: map Themis exit reasons to `VcpuExit` enum.  Most mappings
@@ -1350,18 +1462,19 @@ fork of `hypervisor/src/mshv/` with these changes:
 
 Capavisor dependencies:
   P15c depends on: P9a (CREATE_DOMAIN), P9c (SEAL)
+  P15d depends on: COMM redesign (register_comm with child binding)
   P15e depends on: P9b (CARVE+SEND to child)
   P15f (sync) depends on: P9c (SWITCH)
-  P15f (async) depends on: P11 (ThemIC), new START_VP/RESUME_VP VMCALLs
+  P15f (async) depends on: ThemIC (COMM pages + doorbell IPI), START_VP/RESUME_VP VMCALLs
   P15g depends on: interrupt injection VMCALLs
-  P15h depends on: P11 (ThemIC doorbell registration)
+  P15h depends on: VMCALL_REGISTER_DOORBELL (capavisor doorbell table)
   P15i depends on: P4 (VT-d IOMMU)
 
 Parallel work:
   P15b (driver skeleton) can start NOW — no capavisor dependency.
   P16 (CH backend) can start NOW — stub missing ioctls with -ENOSYS.
+  COMM redesign can start NOW — small change to capability engine.
   P10 (META pages) is nice-to-have; driver falls back to VMCALL_GET/SET_REG.
-  P11 (ThemIC) is required for async mode and doorbell fast-path.
   P15f sync mode can work WITHOUT ThemIC (VMCALL_SWITCH returns exit info directly).
 ```
 
