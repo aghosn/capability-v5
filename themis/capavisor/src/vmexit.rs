@@ -12,6 +12,8 @@ use x86::vmx::vmcs::control;
 use crate::serial_println;
 use crate::vcpu::{ActiveVcpu, Reg, VmxError};
 
+use capability_engine::Platform;
+
 // ── x2APIC MSR range (SDM Vol 3 §10.12.1) ──────────────────────────────── //
 // In x2APIC mode every APIC register is accessed via MSRs 0x800–0x83F.
 // We virtualise these through the VAPIC page rather than letting the guest
@@ -76,6 +78,8 @@ pub const PREEMPTION_TIMER_TICKS: u64 = 60_000_000;
 
 pub const EXIT_REASON_EXCEPTION_NMI: u32 = 0;
 pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
+pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
+pub const EXIT_REASON_INIT_SIGNAL: u32 = 3;
 pub const EXIT_REASON_SIPI: u32 = 4;
 pub const EXIT_REASON_CPUID: u32 = 10;
 pub const EXIT_REASON_HLT: u32 = 12;
@@ -89,7 +93,6 @@ pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
 pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
 pub const EXIT_REASON_VMX_PREEMPTION_TIMER: u32 = 52;
 pub const EXIT_REASON_XSETBV: u32 = 55;
-pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
@@ -145,6 +148,21 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
 
     match basic_reason {
+        EXIT_REASON_INIT_SIGNAL => {
+            // Cross-core preemption: the initiating core sent an INIT assert
+            // to force a VMEXIT from non-root mode.  The actual work (drain
+            // the per-core update queue, INVEPT, etc.) happens in
+            // poll_and_respond_cross_core via the PLATFORM_PTR global.
+            use crate::PLATFORM_PTR;
+            use core::sync::atomic::Ordering;
+            let ptr = PLATFORM_PTR.load(Ordering::Acquire);
+            if !ptr.is_null() {
+                let platform = unsafe { &*ptr };
+                platform.poll_and_respond_cross_core();
+            }
+            // Do NOT advance RIP — INIT is not an instruction-based exit.
+        }
+
         EXIT_REASON_SIPI => {
             let qual   = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let vector = qual & 0xFF;

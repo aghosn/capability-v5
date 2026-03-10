@@ -69,7 +69,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -85,14 +85,51 @@ use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
 // ── Constants ─────────────────────────────────────────────────────────────── //
 
 /// Maximum number of physical cores supported.
+/// Used only for compile-time statics (GDT, VMXON_PHYS) that cannot be
+/// heap-allocated.  ThemisPlatform itself sizes its per-core arrays to
+/// the actual core count discovered at boot.
 pub const MAX_CORES: usize = 256;
-
-/// x86 interrupt vector reserved for capability-engine cross-core IPIs.
-/// Must match the IDT entry installed in Phase P3b.
-pub const CAPA_IPI_VECTOR: u8 = 0xF2;
 
 const IDLE_DOMAIN: u64 = u64::MAX;
 const IDLE_VP:     u32 = u32::MAX;
+
+// ── Per-core update command ───────────────────────────────────────────────── //
+
+/// Command pushed by the initiating core into a target core's update queue,
+/// consumed by that core between barriers 0 and 1 in `poll_and_respond_cross_core`.
+///
+/// `TlbShootdown` is the only variant used today.  `Switch` and `Revoke` are
+/// stubs for Phase 9 (domain switching / revocation).
+#[derive(Clone)]
+pub enum CoreUpdate {
+    /// Flush EPT TLB (INVEPT single-context) for the domain on this core.
+    TlbShootdown,
+    /// Switch this core to a different domain/VP (Phase 9).
+    Switch {
+        domain_cap: CapabilityRef<Domain>,
+        vp_id: u32,
+    },
+    /// Domain was revoked; switch to fallback (Phase 9).
+    Revoke {
+        revoked: DomainId,
+        fallback_cap: CapabilityRef<Domain>,
+        fallback_vp: u32,
+    },
+}
+
+impl core::fmt::Debug for CoreUpdate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CoreUpdate::TlbShootdown => write!(f, "TlbShootdown"),
+            CoreUpdate::Switch { vp_id, .. } => {
+                write!(f, "Switch {{ vp_id: {} }}", vp_id)
+            }
+            CoreUpdate::Revoke { revoked, fallback_vp, .. } => {
+                write!(f, "Revoke {{ revoked: {:?}, fallback_vp: {} }}", revoked, fallback_vp)
+            }
+        }
+    }
+}
 
 // ── Two-phase synchronisation barrier ─────────────────────────────────────── //
 
@@ -419,12 +456,16 @@ pub struct ThemisPlatform {
     op_lock:         RwLock<()>,
     update_lock:     AtomicBool,
     barriers:        [Barrier; 2],
-    pub ipi_pending: [AtomicBool; MAX_CORES],
+    pub ipi_pending: Box<[AtomicBool]>,
+    // Per-core update queue: written by initiating core (under update_lock),
+    // drained by the local core in poll_and_respond_cross_core.
+    core_updates:    Box<[Mutex<VecDeque<CoreUpdate>>]>,
     // Immutable after bootstrap
+    num_cores:       usize,
     hhdm_offset:     AtomicU64,
     uc_ranges:       alloc::sync::Arc<UncacheableRanges>,
     // Tier 1: per-core scheduling state
-    cores:           [CoreContext; MAX_CORES],
+    cores:           Box<[CoreContext]>,
     // Tier 2: per-domain hardware state
     domains:         DomainTable,
     // Tier 3: global routing
@@ -433,25 +474,60 @@ pub struct ThemisPlatform {
     lapic_ids:       RwLock<Vec<u32>>,
     // Tree root anchor — keeps dom0's capability tree alive.
     dom0_cap:        Mutex<Option<CapabilityRef<Domain>>>,
+    // Per-core VMXON physical addresses; written once by BSP, read by each AP.
+    vmxon_phys:      Vec<u64>,
 }
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
-    pub fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
-        const C: CoreContext = CoreContext::new();
+    ///
+    /// `num_cores` is the physical core count discovered at boot (from Limine MP).
+    pub fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>, num_cores: usize) -> Self {
+        let ipi_pending: Box<[AtomicBool]> = (0..num_cores)
+            .map(|_| AtomicBool::new(false))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let core_updates: Box<[Mutex<VecDeque<CoreUpdate>>]> = (0..num_cores)
+            .map(|_| Mutex::new(VecDeque::new()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let cores: Box<[CoreContext]> = (0..num_cores)
+            .map(|_| CoreContext::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         ThemisPlatform {
-            op_lock:     RwLock::new(()),
-            update_lock: AtomicBool::new(false),
-            barriers:    [Barrier::new(), Barrier::new()],
-            ipi_pending: unsafe { core::mem::zeroed() },
-            hhdm_offset: AtomicU64::new(0),
+            op_lock:      RwLock::new(()),
+            update_lock:  AtomicBool::new(false),
+            barriers:     [Barrier::new(), Barrier::new()],
+            ipi_pending,
+            core_updates,
+            num_cores,
+            hhdm_offset:  AtomicU64::new(0),
             uc_ranges,
-            cores:       [C; MAX_CORES],
-            domains:     DomainTable::new(),
-            routing:     RwLock::new(RoutingMaps::new()),
-            lapic_ids:   RwLock::new(Vec::new()),
-            dom0_cap:    Mutex::new(None),
+            cores,
+            domains:      DomainTable::new(),
+            routing:      RwLock::new(RoutingMaps::new()),
+            lapic_ids:    RwLock::new(Vec::new()),
+            dom0_cap:     Mutex::new(None),
+            vmxon_phys:   Vec::new(),
         }
+    }
+
+    /// Number of physical cores (set at boot from Limine MP response).
+    pub fn num_cores(&self) -> usize {
+        self.num_cores
+    }
+
+    /// Store per-core VMXON physical addresses (called once by BSP before
+    /// AP_LAUNCH_READY).
+    pub fn bootstrap_set_vmxon_phys(&mut self, phys: Vec<u64>) {
+        self.vmxon_phys = phys;
+    }
+
+    /// Get VMXON physical address for a core (called by APs after Acquire
+    /// on AP_LAUNCH_READY).
+    pub fn vmxon_phys(&self, core_index: usize) -> u64 {
+        self.vmxon_phys[core_index]
     }
 
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
@@ -583,6 +659,42 @@ impl ThemisPlatform {
     pub fn get_core_vp(&self, core_id: usize) -> u32 {
         self.cores[core_id].vp_id.load(Ordering::Acquire)
     }
+
+    // ── Per-core update queue ─────────────────────────────────────────── //
+
+    /// Push a `CoreUpdate` to a target core's queue.
+    ///
+    /// Called by the initiating core (under `update_lock`) before sending
+    /// the INIT assert.
+    pub fn push_core_update(&self, core_id: CoreId, update: CoreUpdate) {
+        self.core_updates[core_id as usize].lock().push_back(update);
+    }
+
+    /// Drain and apply all pending `CoreUpdate`s for the current core.
+    ///
+    /// Called between barriers 0 and 1 in `poll_and_respond_cross_core`.
+    /// Returns `true` if any update was processed.
+    fn apply_local_core_updates(&self, core_id: CoreId) {
+        let mut queue = self.core_updates[core_id as usize].lock();
+        while let Some(update) = queue.pop_front() {
+            match update {
+                CoreUpdate::TlbShootdown => {
+                    let dom = self.cores[core_id as usize]
+                        .domain_id
+                        .load(Ordering::Relaxed);
+                    if dom != IDLE_DOMAIN {
+                        self.invept_for_domain(dom);
+                    }
+                }
+                CoreUpdate::Switch { .. } => {
+                    todo!("P9: cross-core domain switch");
+                }
+                CoreUpdate::Revoke { .. } => {
+                    todo!("P9: cross-core domain revocation");
+                }
+            }
+        }
+    }
 } //
 
 impl Platform for ThemisPlatform {
@@ -595,13 +707,22 @@ impl Platform for ThemisPlatform {
     }
 
     fn send_ipi(&self, core_id: CoreId) {
+        // Push TlbShootdown to target's queue before signaling.
+        self.push_core_update(core_id, CoreUpdate::TlbShootdown);
+
+        // Set the flag so the target core (if polling) can respond.
+        self.ipi_pending[core_id as usize].store(true, Ordering::Release);
+
+        // Send INIT assert: delivery mode 0x5, level assert (bit 14), edge.
+        // INIT always causes VMEXIT(EXIT_REASON_INIT_SIGNAL = 3) from
+        // non-root mode, regardless of pin-based controls.
         let lapic_id = *self.lapic_ids
             .read()
             .get(core_id as usize)
             .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id));
         let icr: u64 = ((lapic_id as u64) << 32)
-            | (1u64 << 14)
-            | (CAPA_IPI_VECTOR as u64);
+            | (1u64 << 14)   // level = assert
+            | (0x5u64 << 8); // delivery mode = INIT
         unsafe { x86::msr::wrmsr(x86::msr::IA32_X2APIC_ICR, icr) };
     }
 
@@ -621,19 +742,18 @@ impl Platform for ThemisPlatform {
 
     fn poll_and_respond_cross_core(&self) {
         let Some(core_id) = self.get_current_core() else { return };
-        if core_id as usize >= MAX_CORES { return; }
+        if core_id as usize >= self.num_cores { return; }
         if self.ipi_pending[core_id as usize]
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
         {
             return;
         }
+        // Barrier 0: rendezvous with initiator.
         self.barriers[0].wait(0);
-        // Flush EPT TLB for the domain this core is currently running.
-        let dom = self.cores[core_id as usize].domain_id.load(Ordering::Relaxed);
-        if dom != IDLE_DOMAIN {
-            self.invept_for_domain(dom);
-        }
+        // Drain per-core update queue between the two barriers.
+        self.apply_local_core_updates(core_id);
+        // Barrier 1: signal completion.
         self.barriers[1].wait(0);
     }
 
@@ -700,6 +820,10 @@ impl Platform for ThemisPlatform {
 
             Update::FlushTLB { domain } => {
                 self.invept_for_domain(*domain);
+            }
+
+            Update::CommRegion { .. } | Update::UncommRegion { .. } => {
+                // TODO(P7): shared-memory regions.
             }
         }
     }

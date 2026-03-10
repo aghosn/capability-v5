@@ -591,7 +591,7 @@ pub fn platform(
 ///
 /// `platform` must already have domain 0 registered and its META pool populated
 /// (call `init_themis` first).
-pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> VmxState {
+pub fn vmx(info: &PlatformInfo, platform: &mut crate::platform::ThemisPlatform) -> VmxState {
     // P2a — CPU feature detection.
     let features = crate::vmx::detect_features(info.acpi.has_dmar);
 
@@ -617,16 +617,16 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
 
     assert!(features.vmx, "VMX not supported — cannot continue");
 
-    // P2b — Allocate VMXON regions directly into the per-core global array
-    // and run VMXON on BSP.  VMXON is a per-physical-core resource, not
-    // per-domain, so it lives in the global VMXON_PHYS array.
+    // P2b — Allocate VMXON regions and store in the platform.
+    // VMXON is a per-physical-core resource, not per-domain.
     let hhdm = info.hhdm_offset;
     let rev_id = features.vmcs_revision_id;
-    for i in 0..info.num_cores {
+    let mut vmxon_addrs = Vec::with_capacity(info.num_cores);
+    for _i in 0..info.num_cores {
         let phys = platform.alloc_meta_frame(0); // domain 0
         let virt = (phys + hhdm) as *mut u32;
         unsafe { virt.write_volatile(rev_id & 0x7FFF_FFFF) };
-        crate::VMXON_PHYS[i].store(phys, core::sync::atomic::Ordering::Relaxed);
+        vmxon_addrs.push(phys);
     }
 
     // Create dom0 Domain (VMCS/VAPIC/bitmaps allocated later in vmcs()).
@@ -644,7 +644,9 @@ pub fn vmx(info: &PlatformInfo, platform: &crate::platform::ThemisPlatform) -> V
         .position(|&id| id == info.bsp_lapic_id)
         .expect("BSP LAPIC ID not found in CPU list");
 
-    let bsp_vmxon = crate::VMXON_PHYS[bsp_index].load(core::sync::atomic::Ordering::Relaxed);
+    let bsp_vmxon = vmxon_addrs[bsp_index];
+    platform.bootstrap_set_vmxon_phys(vmxon_addrs);
+
     crate::vmx::enable_vmx_on_core(bsp_vmxon).expect("VMXON failed on BSP");
     serial_println!(
         "VMX: VMXON on BSP (LAPIC {}, index {}) ✓",
@@ -674,7 +676,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
     const ROOT_ID: DomainId = 0;
 
-    let platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges));
+    let platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
     platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
 
@@ -1172,8 +1174,9 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
     serial_println!();
     serial_println!("=== P7g: VMLAUNCH ===");
 
-    // Release store: VMXON_PHYS and PLATFORM_PTR writes are visible to any
-    // core that loads AP_LAUNCH_READY with Acquire ordering.
+    // Release store: PLATFORM_PTR writes (including vmxon_phys inside the
+    // platform) are visible to any core that loads AP_LAUNCH_READY with
+    // Acquire ordering.
     AP_LAUNCH_READY.store(true, Ordering::Release);
     serial_println!("  APs signaled");
 

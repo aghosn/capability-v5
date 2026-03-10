@@ -118,21 +118,13 @@ pub(crate) static KERNEL_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 
 // ── AP launch synchronization ────────────────────────────────────────────── //
 //
-// BSP populates VMXON_PHYS (one entry per core) and PLATFORM_PTR (pointer to
-// the live ThemisPlatform) with Relaxed stores, then sets AP_LAUNCH_READY with
-// a Release store.  APs spin on AP_LAUNCH_READY (Acquire); the Release/Acquire
-// edge makes VMXON_PHYS and PLATFORM_PTR visible.  APs take their InactiveVcpus
-// from the PlatformDomain via take_vcpu().
+// BSP populates PLATFORM_PTR (pointer to the live ThemisPlatform, which holds
+// per-core VMXON addresses) with a Relaxed store, then sets AP_LAUNCH_READY
+// with a Release store.  APs spin on AP_LAUNCH_READY (Acquire); the
+// Release/Acquire edge makes PLATFORM_PTR visible.  APs take their
+// InactiveVcpus from the PlatformDomain via take_vcpu().
 
 pub(crate) static AP_LAUNCH_READY: AtomicBool = AtomicBool::new(false);
-
-/// Per-core VMXON physical addresses, indexed by cpu.id.
-/// Populated by boot::vmx() after VMXON region allocation, visible to APs
-/// after AP_LAUNCH_READY (Release) → AP_LAUNCH_READY.load(Acquire).
-pub(crate) static VMXON_PHYS: [core::sync::atomic::AtomicU64; crate::platform::MAX_CORES] = {
-    const INIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    [INIT; crate::platform::MAX_CORES]
-};
 
 /// Pointer to the fully-initialized ThemisPlatform; set in _start() before
 /// AP_LAUNCH_READY (Release).  APs load this after the Acquire on AP_LAUNCH_READY.
@@ -193,10 +185,10 @@ pub extern "C" fn _start() -> ! {
     // ── ThemisPlatform init: register dom0, hand it the full META pool ──────── //
     // Must happen before boot::vmx() so that VMXON pages can be allocated from
     // ThemisPlatform's MetaAllocator.
-    let themis = boot::init_themis(&platform);
+    let mut themis = boot::init_themis(&platform);
 
     // ── Phase 2a–b: VMX feature detection + VMXON on BSP ─────────────────── //
-    let mut vmx_state = boot::vmx(&platform, &themis);
+    let mut vmx_state = boot::vmx(&platform, &mut themis);
 
     // ── Phase 2c: Capability engine + EPT build ───────────────────────────── //
     // `themis` is consumed here; further access via `capa.platform`.
@@ -261,7 +253,13 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     }
 
     let id = cpu.id as usize;
-    let vmxon_phys = crate::VMXON_PHYS[id].load(Ordering::Relaxed);
+
+    // Take the InactiveVcpu from PlatformDomain (dom0, vp_id = id).
+    let platform_ptr = PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null(), "AP{}: PLATFORM_PTR is null", id);
+    let platform = unsafe { &*platform_ptr };
+
+    let vmxon_phys = platform.vmxon_phys(id);
 
     // Enable VMX on this AP.
     crate::vmx::enable_vmx_on_core(vmxon_phys)
@@ -282,11 +280,6 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
             options(nomem, nostack),
         );
     }
-
-    // Take the InactiveVcpu from PlatformDomain (dom0, vp_id = id).
-    let platform_ptr = PLATFORM_PTR.load(Ordering::Relaxed);
-    assert!(!platform_ptr.is_null(), "AP{}: PLATFORM_PTR is null", id);
-    let platform = unsafe { &*platform_ptr };
 
     let inactive = platform.take_vcpu(0, id)
         .unwrap_or_else(|| panic!("AP{}: no InactiveVcpu in PlatformDomain", id));
