@@ -387,7 +387,7 @@ The following three invariants govern what dom0 sees and can access:
   4. For dom0 (no parent), the violation is a fatal error — halt is correct.
   Design to be resolved when Phase 9 (multi-domain) is implemented.
 
-- [ ] **P7i — Post-boot cleanup and VP-setup factoring**:
+- [x] **P7i — Post-boot cleanup and VP-setup factoring**:
   - **Code cleanup**: remove stale comments, dead code, resolved `TODO(P*)` markers.
   - **VP-setup factoring**: extract VP provisioning (VMXON, VMCS, VAPIC allocation +
     `setup_vmcs_for_vp`) into a single reusable `Platform::provision_vp()` path.
@@ -399,7 +399,7 @@ The following three invariants govern what dom0 sees and can access:
 ### Phase 8 — Hypercall Dispatch + Hypercall ABI
 
 - [ ] **P8a**: `crates/themis-abi/`: opcode constants, `VpRegister` enum, error codes.
-  Shared between capavisor and `libtyche` guest library.
+  Shared between capavisor and `libthemis` guest library.
 - [ ] **P8b**: `hypercall.rs`: decode RAX, call `execute(||...)`, encode result.
 - [ ] **P8c**: Implement all CapavisorAPI hypercall handlers listed in the Hypercall ABI table,
   including: `VMCALL_CARVE`, `VMCALL_ALIAS`, `VMCALL_SEND`, `VMCALL_ACCEPT`, `VMCALL_REJECT`,
@@ -409,8 +409,9 @@ The following three invariants govern what dom0 sees and can access:
   Stubs for `VMCALL_REGISTER_VP_META` and `VMCALL_REGISTER_DOORBELL` (implemented in
   Phases 10–11).
 - [ ] **P8d**: `VMCALL_ASSIGN_DEVICE`: validate caller, reprogram IOMMU + I/O APIC.
-- [ ] **P8e**: `libtyche` guest library (`crates/libtyche/`): `no_std` VMCALL wrappers.
-  Usable from Linux kernel module (`std`) via FFI or from a bare-metal child domain.
+- [x] **P8e**: `libthemis` guest library (`crates/libthemis/`): `no_std` VMCALL wrappers.
+  Covers all 23 opcodes from `themis-abi`. Usable from Linux kernel module via FFI
+  or from a bare-metal child domain.
 
 ### Phase 9 — Multi-Domain Support
 

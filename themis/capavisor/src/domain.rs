@@ -5,8 +5,8 @@
 //! entirely inside `ThemisPlatform`.  This struct just tracks the physical
 //! addresses that were allocated for this domain.
 //!
-//! VMXON regions are per-physical-core (not per-domain) and live in the
-//! global `VMXON_PHYS` array in `main.rs`.
+//! VMXON regions are per-physical-core (not per-domain) and live in
+//! `ThemisPlatform::vmxon_phys`.
 
 extern crate alloc;
 use alloc::vec::Vec;

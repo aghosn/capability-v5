@@ -85,9 +85,8 @@ use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
 // ── Constants ─────────────────────────────────────────────────────────────── //
 
 /// Maximum number of physical cores supported.
-/// Used only for compile-time statics (GDT, VMXON_PHYS) that cannot be
-/// heap-allocated.  ThemisPlatform itself sizes its per-core arrays to
-/// the actual core count discovered at boot.
+/// Used only for compile-time statics (GDT/TSS) that cannot be
+/// heap-allocated.  ThemisPlatform sizes its per-core arrays dynamically.
 pub const MAX_CORES: usize = 256;
 
 const IDLE_DOMAIN: u64 = u64::MAX;

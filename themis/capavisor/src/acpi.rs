@@ -108,7 +108,7 @@ impl Handler for HhdmHandler {
     }
 
     fn read_pci_u8(&self, _address: acpi::PciAddress, _offset: u16) -> u8 {
-        // PCI config space reads via ECAM MMIO will be implemented in P1e.
+        // TODO: PCI config space reads via ECAM MMIO (needed for full ACPI parsing).
         0
     }
     fn read_pci_u16(&self, _address: acpi::PciAddress, _offset: u16) -> u16 { 0 }
