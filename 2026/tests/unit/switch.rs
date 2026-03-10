@@ -44,12 +44,11 @@ fn fixture() -> (
     let root = Capability::new_root(0, 0, Domain::new_root(4));
     let root_id = root.read().data.id;
     platform.register_domain(root_id, None);
-    platform.set_core_domain(0, root_id);
+    platform.set_core_context(0, &root, 0);
     platform.set_current_core(Some(0));
 
     // VP[0] of root is Running on core 0
     init_vp_running(&root, 0, 0);
-    platform.set_core_vp(0, Some(0));
 
     let (child, child_h) = make_sealed_child(&root);
     let child_id = child.read().data.id;
@@ -173,10 +172,9 @@ fn test_vp_nested_switch_and_return() {
     let root = Capability::new_root(0, 0, Domain::new_root(4));
     let root_id = root.read().data.id;
     platform.register_domain(root_id, None);
-    platform.set_core_domain(0, root_id);
+    platform.set_core_context(0, &root, 0);
     platform.set_current_core(Some(0));
     init_vp_running(&root, 0, 0);
-    platform.set_core_vp(0, Some(0));
 
     // child1 under root
     let child1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
@@ -272,7 +270,7 @@ fn test_vp_switch_core_not_allowed() {
     let root = Capability::new_root(0, 0, Domain::new_root(4));
     let root_id = root.read().data.id;
     platform.register_domain(root_id, None);
-    platform.set_core_domain(0, root_id);
+    platform.set_core_context(0, &root, 0);
     platform.set_current_core(Some(1)); // core 1
     init_vp_running(&root, 1, 1); // root VP[1] Running on core 1
 
@@ -556,9 +554,8 @@ fn setup_3domain_chain() -> (
     let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
     let dom0_id = dom0.read().data.id;
     platform.register_domain(dom0_id, None);
-    platform.set_core_domain(0, dom0_id);
+    platform.set_core_context(0, &dom0, 0);
     init_vp_running(&dom0, 0, 0);
-    platform.set_core_vp(0, Some(0));
 
     // dom1: child of dom0, REPORT policy — intermediate
     let (dom1, dom1_h) = make_sealed_child(&dom0);
@@ -837,9 +834,8 @@ fn setup_4domain_chain() -> (
     let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
     let dom0_id = dom0.read().data.id;
     platform.register_domain(dom0_id, None);
-    platform.set_core_domain(0, dom0_id);
+    platform.set_core_context(0, &dom0, 0);
     init_vp_running(&dom0, 0, 0);
-    platform.set_core_vp(0, Some(0));
 
     let (dom1, dom1_h) = make_sealed_child(&dom0);
     let dom1_id = dom1.read().data.id;

@@ -83,6 +83,15 @@ impl CliPlatform {
     pub fn get_core(&self, core_id: u64) -> Result<Arc<capability_engine::CoreContext>> {
         self.inner.lock().switch_manager.get_core(core_id).cloned()
     }
+
+    /// CLI-only helper: set core domain by DomainId (no CapabilityRef needed).
+    /// Used for non-VP interrupt fallback where only the DomainId is known.
+    pub fn set_core_domain_by_id(&self, core_id: CoreId, domain_id: DomainId) {
+        let inner = self.inner.lock();
+        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
+            *core_ref.state.write() = CoreState::Running(domain_id);
+        }
+    }
 }
 
 impl Platform for CliPlatform {
@@ -155,10 +164,17 @@ impl Platform for CliPlatform {
         });
     }
 
-    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
+    fn set_core_context(
+        &self,
+        core_id: CoreId,
+        domain_cap: &CapabilityRef<Domain>,
+        vp_id: u64,
+    ) {
+        let domain_id = domain_cap.read().data.id;
         let inner = self.inner.lock();
         if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
             *core_ref.state.write() = CoreState::Running(domain_id);
+            *core_ref.running_vp.write() = Some(vp_id);
         }
     }
 
@@ -176,13 +192,6 @@ impl Platform for CliPlatform {
 
     fn get_current_core(&self) -> Option<CoreId> {
         self.inner.lock().current_core
-    }
-
-    fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
-        let inner = self.inner.lock();
-        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
-            *core_ref.running_vp.write() = vp_id;
-        }
     }
 
     fn register_count(&self) -> u64 {

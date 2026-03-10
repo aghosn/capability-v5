@@ -34,7 +34,7 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CapaError, CoreId, DomainId, OpLockGuard, Platform, Result, Update,
+    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Update,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,7 +205,8 @@ impl Platform for TestPlatform {
         );
     }
 
-    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
+    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
+        let domain_id = domain_cap.read().data.id;
         let mut inner = self.inner.lock();
         // Remove any old mapping for this core
         if let Some(old_domain) = inner.core_to_domain.remove(&core_id) {
@@ -213,6 +214,7 @@ impl Platform for TestPlatform {
         }
         inner.core_to_domain.insert(core_id, domain_id);
         inner.domain_to_core.insert(domain_id, core_id);
+        inner.core_to_vp.insert(core_id, vp_id);
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
@@ -239,15 +241,6 @@ impl Platform for TestPlatform {
 
     fn get_current_core(&self) -> Option<CoreId> {
         self.inner.lock().current_core
-    }
-
-    fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
-        let mut inner = self.inner.lock();
-        if let Some(id) = vp_id {
-            inner.core_to_vp.insert(core_id, id);
-        } else {
-            inner.core_to_vp.remove(&core_id);
-        }
     }
 
     // poll_and_respond_cross_core: default no-op is correct for TestPlatform

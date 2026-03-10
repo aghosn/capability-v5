@@ -251,7 +251,7 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
 
     if vp_delivery.is_err() && handler_id != interrupted_id {
         // Non-VP fallback: just redirect the core to the handler domain.
-        state.platform.set_core_domain(core, handler_id);
+        state.platform.set_core_domain_by_id(core, handler_id);
     }
 
     // Record command

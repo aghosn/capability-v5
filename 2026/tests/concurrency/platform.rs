@@ -70,21 +70,30 @@ fn test_execute_apply_update_is_called() {
 #[test]
 fn test_execute_revoke_redirects_core_to_fallback() {
     let platform = TestPlatform::new();
-    const ROOT_ID: DomainId = 0;
-    const CHILD_ID: DomainId = 1;
     const CORE_0: CoreId = 0;
 
-    reg(&platform, ROOT_ID, None);
-    reg(&platform, CHILD_ID, Some(ROOT_ID));
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+
+    let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let child_h = Capability::create(&root, child_policy).unwrap().0;
+    Capability::seal(&root, child_h).unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    let child_id = child.read().data.id;
+
+    reg(&platform, root_id, None);
+    reg(&platform, child_id, Some(root_id));
 
     // Simulate core 0 running the child domain
-    platform.set_core_domain(CORE_0, CHILD_ID);
-    assert_eq!(platform.get_core_domain(CORE_0), Some(CHILD_ID));
+    platform.set_core_context(CORE_0, &child, 0);
+    assert_eq!(platform.get_core_domain(CORE_0), Some(child_id));
 
     // Execute a "revoke child domain" operation
     execute(&platform, false, || {
         let mut batch = capability_engine::UpdateBatch::new();
-        batch.add_revoke_domain_with_fallback(CHILD_ID, Some(ROOT_ID));
+        batch.add_revoke_domain_with_fallback(child_id, Some(root_id));
         Ok(((), batch))
     })
     .expect("revoke should succeed");
@@ -92,13 +101,13 @@ fn test_execute_revoke_redirects_core_to_fallback() {
     // After revocation, core 0 should now be running the parent (fallback)
     assert_eq!(
         platform.get_core_domain(CORE_0),
-        Some(ROOT_ID),
+        Some(root_id),
         "core should have switched to the fallback domain"
     );
 
     // Child domain should be marked as revoked
     assert!(
-        platform.is_domain_revoked(CHILD_ID),
+        platform.is_domain_revoked(child_id),
         "child domain should be marked revoked"
     );
 }
@@ -164,19 +173,28 @@ fn test_execute_exclusive_blocks_shared() {
 #[test]
 fn test_execute_vital_revoke_none_fallback_uses_parent_map() {
     let platform = TestPlatform::new();
-    const ROOT_ID: DomainId = 0;
-    const CHILD_ID: DomainId = 2;
     const CORE_0: CoreId = 0;
 
-    reg(&platform, ROOT_ID, None);
-    reg(&platform, CHILD_ID, Some(ROOT_ID)); // parent stored in platform registry
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
 
-    platform.set_core_domain(CORE_0, CHILD_ID);
+    let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let child_h = Capability::create(&root, child_policy).unwrap().0;
+    Capability::seal(&root, child_h).unwrap();
+    let child = root.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    let child_id = child.read().data.id;
+
+    reg(&platform, root_id, None);
+    reg(&platform, child_id, Some(root_id)); // parent stored in platform registry
+
+    platform.set_core_context(CORE_0, &child, 0);
 
     // Vital memory revocation: fallback=None, platform walks parent map
     execute(&platform, true, || {
         let mut batch = capability_engine::UpdateBatch::new();
-        batch.add_revoke_domain_with_fallback(CHILD_ID, None);
+        batch.add_revoke_domain_with_fallback(child_id, None);
         Ok(((), batch))
     })
     .expect("vital revoke should succeed");
@@ -184,7 +202,7 @@ fn test_execute_vital_revoke_none_fallback_uses_parent_map() {
     // Platform should have redirected core to the parent (from its own map)
     assert_eq!(
         platform.get_core_domain(CORE_0),
-        Some(ROOT_ID),
+        Some(root_id),
         "core should have fallen back to the registered parent"
     );
 }

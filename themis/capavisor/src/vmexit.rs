@@ -267,8 +267,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_VMCALL => {
-            let _opcode = vcpu.reg(Reg::Rax);
-            vcpu.set_reg(Reg::Rax, (-38_i64) as u64); // -ENOSYS
+            let result = crate::hypercall::handle_vmcall(vcpu);
+            vcpu.set_reg(Reg::Rax, result.rax);
+            vcpu.set_reg(Reg::Rdi, result.rdi);
+            vcpu.set_reg(Reg::Rsi, result.rsi);
+            vcpu.set_reg(Reg::Rdx, result.rdx);
             next_instruction(vcpu);
         }
 

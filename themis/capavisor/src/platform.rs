@@ -46,15 +46,15 @@
 //!    simultaneously (no such case today).  When this becomes necessary, locks must
 //!    be acquired in ascending DomainId order to prevent deadlock.
 //!
-//! 3. **Tier 1/3 consistency**: `set_core_domain` writes both
-//!    `cores[core_id].current_domain` (Tier 1, Release) and `routing.write()`
+//! 3. **Tier 1/3 consistency**: `set_core_context` writes both
+//!    `cores[core_id].domain_id` (Tier 1, Release) and `routing.write()`
 //!    (Tier 3).  Readers of domain-for-core should prefer Tier 1 (lock-free) for
 //!    hot-path decisions (e.g., INVEPT targeting).  Tier 3 is authoritative for
 //!    reverse lookup (domain → core, needed for IPI targeting on domain switch).
 //!
 //! 4. **INVEPT scope optimization**: After barrier 0, before INVEPT (currently
 //!    TODO(P3c)), the initiating core can check
-//!    `cores[c].current_domain.load(Relaxed) == affected_domain` for each c to
+//!    `cores[c].domain_id.load(Relaxed) == affected_domain` for each c to
 //!    send INVEPT only to affected cores, avoiding unnecessary shootdowns.  This
 //!    is safe because Tier 1 cells are written only by their owning core (under
 //!    the barrier protocol, all affected cores are stopped).
@@ -75,7 +75,9 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
-use capability_engine::{CoreId, DomainId, OpLockGuard, Platform, Result, Update};
+use capability_engine::{
+    CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Update,
+};
 use ept::{EptEntryFlags, EptMapper, EptMemoryType};
 
 use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
@@ -250,19 +252,34 @@ impl VcpuSlot {
     }
 }
 
-// ── Per-core cell (Tier 1) ────────────────────────────────────────────────── //
+// ── Per-core scheduling state (Tier 1) ────────────────────────────────────── //
 
-pub struct PerCoreCell {
-    pub current_domain: AtomicU64,
-    #[allow(dead_code)]
-    pub current_vp:     AtomicU32,
+/// Per-core scheduling state: identifies what domain and VP are currently
+/// executing on this physical core.
+///
+/// **Invariants**:
+/// - A core only writes to its own `CoreContext`.
+/// - Cross-core reads happen under the `execute()` barrier protocol
+///   (IPI + sync_barrier), so the `domain_cap` Mutex is never truly contended.
+/// - `domain_id` is a cached copy of the domain ID for fast lock-free
+///   observational reads (e.g., `domain_core()` routing lookups).
+pub struct CoreContext {
+    /// Cached domain ID — lock-free observational reads by other cores.
+    pub domain_id: AtomicU64,
+    /// Current VP index within the domain (dom0: VP i = core i, fixed).
+    pub vp_id: AtomicU32,
+    /// Capability reference to the currently-scheduled domain.
+    /// The VMCALL handler's entry point into the capability tree.
+    /// `None` only during early boot before dom0 is initialised.
+    pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
 }
 
-impl PerCoreCell {
+impl CoreContext {
     const fn new() -> Self {
-        PerCoreCell {
-            current_domain: AtomicU64::new(IDLE_DOMAIN),
-            current_vp:     AtomicU32::new(IDLE_VP),
+        CoreContext {
+            domain_id: AtomicU64::new(IDLE_DOMAIN),
+            vp_id: AtomicU32::new(IDLE_VP),
+            domain_cap: Mutex::new(None),
         }
     }
 }
@@ -406,20 +423,22 @@ pub struct ThemisPlatform {
     // Immutable after bootstrap
     hhdm_offset:     AtomicU64,
     uc_ranges:       alloc::sync::Arc<UncacheableRanges>,
-    // Tier 1: per-core current state
-    cores:           [PerCoreCell; MAX_CORES],
+    // Tier 1: per-core scheduling state
+    cores:           [CoreContext; MAX_CORES],
     // Tier 2: per-domain hardware state
     domains:         DomainTable,
     // Tier 3: global routing
     routing:         RwLock<RoutingMaps>,
     // LAPIC IDs: immutable after bootstrap
     lapic_ids:       RwLock<Vec<u32>>,
+    // Tree root anchor — keeps dom0's capability tree alive.
+    dom0_cap:        Mutex<Option<CapabilityRef<Domain>>>,
 }
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
     pub fn new(uc_ranges: alloc::sync::Arc<UncacheableRanges>) -> Self {
-        const C: PerCoreCell = PerCoreCell::new();
+        const C: CoreContext = CoreContext::new();
         ThemisPlatform {
             op_lock:     RwLock::new(()),
             update_lock: AtomicBool::new(false),
@@ -431,6 +450,7 @@ impl ThemisPlatform {
             domains:     DomainTable::new(),
             routing:     RwLock::new(RoutingMaps::new()),
             lapic_ids:   RwLock::new(Vec::new()),
+            dom0_cap:    Mutex::new(None),
         }
     }
 
@@ -520,9 +540,50 @@ impl ThemisPlatform {
             }
         }
     }
-}
 
-// ── Platform trait ────────────────────────────────────────────────────────── //
+    // ── CoreContext access ─────────────────────────────────────────────── //
+
+    /// Store the dom0 `CapabilityRef<Domain>` as the tree root anchor.
+    ///
+    /// Must be called exactly once during boot.  Keeps the entire capability
+    /// tree alive for the lifetime of the capavisor.
+    pub fn set_dom0_cap(&self, cap: CapabilityRef<Domain>) {
+        *self.dom0_cap.lock() = Some(cap);
+    }
+
+    /// Get the dom0 `CapabilityRef<Domain>` (tree root anchor).
+    #[allow(dead_code)]
+    pub fn dom0_cap(&self) -> CapabilityRef<Domain> {
+        self.dom0_cap
+            .lock()
+            .as_ref()
+            .expect("dom0_cap not yet initialised")
+            .clone()
+    }
+
+    /// Set the per-core scheduling state: domain capability ref and VP index.
+    ///
+    /// Called during bootstrap (BSP and AP init) and on domain switch.
+    pub fn set_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
+        let dom_id = cap.read().data.id;
+        self.cores[core_id].domain_id.store(dom_id, Ordering::Release);
+        self.cores[core_id].vp_id.store(vp_id, Ordering::Release);
+        *self.cores[core_id].domain_cap.lock() = Some(cap);
+    }
+
+    /// Get the `CapabilityRef<Domain>` for the domain running on `core_id`.
+    ///
+    /// Returns `None` during early boot before the core is initialised.
+    pub fn get_core_cap(&self, core_id: usize) -> Option<CapabilityRef<Domain>> {
+        self.cores[core_id].domain_cap.lock().clone()
+    }
+
+    /// Get the VP index currently running on `core_id`.
+    #[allow(dead_code)]
+    pub fn get_core_vp(&self, core_id: usize) -> u32 {
+        self.cores[core_id].vp_id.load(Ordering::Acquire)
+    }
+} //
 
 impl Platform for ThemisPlatform {
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
@@ -569,7 +630,7 @@ impl Platform for ThemisPlatform {
         }
         self.barriers[0].wait(0);
         // Flush EPT TLB for the domain this core is currently running.
-        let dom = self.cores[core_id as usize].current_domain.load(Ordering::Relaxed);
+        let dom = self.cores[core_id as usize].domain_id.load(Ordering::Relaxed);
         if dom != IDLE_DOMAIN {
             self.invept_for_domain(dom);
         }
@@ -654,10 +715,12 @@ impl Platform for ThemisPlatform {
         let mut routing = self.routing.write();
         if let Some(core_id) = routing.domain_to_core.remove(&domain_id) {
             routing.core_to_domain.remove(&core_id);
-            self.cores[core_id as usize].current_domain.store(
+            self.cores[core_id as usize].domain_id.store(
                 fallback.unwrap_or(IDLE_DOMAIN),
                 Ordering::Release,
             );
+            // TODO(Phase 9): also update CoreContext.domain_cap to the fallback's
+            // CapabilityRef once on_domain_revoked carries it (switch-based unification).
             if let Some(fb) = fallback {
                 routing.core_to_domain.insert(core_id, fb);
                 routing.domain_to_core.insert(fb, core_id);
@@ -665,8 +728,16 @@ impl Platform for ThemisPlatform {
         }
     }
 
-    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
-        self.cores[core_id as usize].current_domain.store(domain_id, Ordering::Release);
+    fn set_core_context(
+        &self,
+        core_id: CoreId,
+        domain_cap: &CapabilityRef<Domain>,
+        vp_id: u64,
+    ) {
+        let domain_id = domain_cap.read().data.id;
+        self.cores[core_id as usize].domain_id.store(domain_id, Ordering::Release);
+        self.cores[core_id as usize].vp_id.store(vp_id as u32, Ordering::Release);
+        *self.cores[core_id as usize].domain_cap.lock() = Some(domain_cap.clone());
         let mut routing = self.routing.write();
         if let Some(old_domain) = routing.core_to_domain.remove(&core_id) {
             routing.domain_to_core.remove(&old_domain);
@@ -676,7 +747,9 @@ impl Platform for ThemisPlatform {
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
-        self.cores[core_id as usize].current_domain.store(IDLE_DOMAIN, Ordering::Release);
+        self.cores[core_id as usize].domain_id.store(IDLE_DOMAIN, Ordering::Release);
+        self.cores[core_id as usize].vp_id.store(IDLE_VP, Ordering::Release);
+        *self.cores[core_id as usize].domain_cap.lock() = None;
         let mut routing = self.routing.write();
         if let Some(domain_id) = routing.core_to_domain.remove(&core_id) {
             routing.domain_to_core.remove(&domain_id);

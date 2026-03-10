@@ -2,34 +2,115 @@
 //!
 //! This crate is `no_std` so it can be linked into the bare-metal capavisor,
 //! a Linux kernel module (`themis-vmm.ko`), and userspace VMMs alike.
+//!
+//! # Register convention (System V AMD64-style)
+//!
+//! ```text
+//! IN:   RAX = opcode
+//!       RDI = arg0,  RSI = arg1,  RDX = arg2,  RCX = arg3,  R8 = arg4
+//!
+//! OUT:  RAX = error code (0 = SUCCESS, see `errors` module)
+//!       RDI = result0,  RSI = result1,  RDX = result2
+//! ```
 
 #![no_std]
 
 // ── Hypercall opcodes (RAX) ──────────────────────────────────────────────── //
 
 pub mod opcodes {
+    /// Carve an exclusive sub-region from a parent memory capability.
+    /// IN:  RDI = parent_handle, RSI = start, RDX = size, RCX = rights
+    /// OUT: RDI = new_handle, RSI = sub_handle
     pub const THEMIS_CARVE:               u64 = 0x01;
+
+    /// Alias a shared sub-region from a parent memory capability.
+    /// IN:  RDI = parent_handle, RSI = start, RDX = size, RCX = rights
+    /// OUT: RDI = new_handle, RSI = sub_handle
     pub const THEMIS_ALIAS:               u64 = 0x02;
+
+    /// Send a memory capability to a receiver domain.
+    /// IN:  RDI = cap_handle, RSI = receiver_domain_handle, RDX = attributes
     pub const THEMIS_SEND:                u64 = 0x03;
+
+    /// Accept a pending memory capability.
+    /// IN:  RDI = pending_id
+    /// OUT: RDI = new_handle
     pub const THEMIS_ACCEPT:              u64 = 0x04;
+
+    /// Reject a pending memory capability.
+    /// IN:  RDI = pending_id
     pub const THEMIS_REJECT:              u64 = 0x05;
+
+    /// Create a new child domain.
+    /// IN:  RDI = cores_bitmask, RSI = api_flags, RDX = num_vps
+    /// OUT: RDI = domain_handle
     pub const THEMIS_CREATE_DOMAIN:       u64 = 0x06;
+
+    /// Seal a domain (transition Unsealed → Sealed).
+    /// IN:  RDI = domain_handle
     pub const THEMIS_SEAL:                u64 = 0x07;
+
+    /// Revoke a child of a memory capability.
+    /// IN:  RDI = parent_handle, RSI = child_sub_handle
     pub const THEMIS_REVOKE_MEM:          u64 = 0x08;
+
+    /// Revoke an entire child domain.
+    /// IN:  RDI = child_domain_handle
     pub const THEMIS_REVOKE_DOMAIN:       u64 = 0x09;
+
+    /// Switch to a target domain's VP (or return to caller).
+    /// IN:  RDI = target_domain_handle (0 = return), RSI = target_vp_id
     pub const THEMIS_SWITCH:              u64 = 0x0A;
+
+    /// Get a channel capability to a domain.
+    /// IN:  RDI = domain_handle
+    /// OUT: RDI = channel_handle
     pub const THEMIS_GET_CHAN:            u64 = 0x0B;
+
+    /// Attest the current domain (self-attestation).
+    /// OUT: RDI = hash_lo, RSI = hash_hi  (first 16 bytes of SHA-256)
     pub const THEMIS_ATTEST_SELF:         u64 = 0x0C;
+
+    /// Attest another domain (remote attestation).
+    /// IN:  RDI = domain_handle
+    /// OUT: RDI = hash_lo, RSI = hash_hi
     pub const THEMIS_ATTEST:              u64 = 0x0D;
+
+    /// Read a VP register from a child domain.
+    /// IN:  RDI = domain_handle, RSI = vp_id, RDX = register_id
+    /// OUT: RDI = value
     pub const THEMIS_GET_REG:             u64 = 0x0E;
+
+    /// Write a VP register of a child domain.
+    /// IN:  RDI = domain_handle, RSI = vp_id, RDX = register_id, RCX = value
     pub const THEMIS_SET_REG:             u64 = 0x0F;
+
+    /// Set per-vector interrupt policy for a domain.
+    /// IN:  RDI = domain_handle, RSI = vector, RDX = policy
     pub const THEMIS_SET_INTR_POLICY:     u64 = 0x10;
+
+    /// Set default interrupt policy for a domain.
+    /// IN:  RDI = domain_handle, RSI = policy
     pub const THEMIS_SET_DEF_INTR_POLICY: u64 = 0x11;
+
+    /// Assign a PCI device to a domain.
+    /// IN:  RDI = domain_handle, RSI = pci_bdf
     pub const THEMIS_ASSIGN_DEVICE:       u64 = 0x12;
+
+    /// Enumerate pending capabilities / domain tree.
     pub const THEMIS_ENUMERATE:           u64 = 0x13;
+
+    /// Register a VP META state page.
+    /// IN:  RDI = domain_handle, RSI = vp_id, RDX = meta_cap_handle
     pub const THEMIS_REGISTER_VP_META:    u64 = 0x14;
+
+    /// Register a doorbell page.
     pub const THEMIS_REGISTER_DOORBELL:   u64 = 0x15;
+
+    /// Register an event flags page.
     pub const THEMIS_REGISTER_EVENT_FLAGS:u64 = 0x16;
+
+    /// Register an interrupt channel.
     pub const THEMIS_REGISTER_INTR_CHAN:  u64 = 0x17;
 }
 

@@ -44,13 +44,12 @@ pub fn cmd_init(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let num_cores = state.num_cores as u64;
     state.platform.register_domain(0, None);
     for core_id in 0..num_cores {
-        state.platform.set_core_domain(core_id, 0); // Root domain ID is 0
+        state.platform.set_core_context(core_id, &root, core_id);
 
         // Mark root VP[core_id] as Running on core_id so VP-aware switches work.
         let vp = root.read().data.policy.vprocessor_states.get(core_id as usize).cloned();
         if let Some(vp_arc) = vp {
             *vp_arc.run_state.write() = VpRunState::Running { core: core_id, caller: None };
-            state.platform.set_core_vp(core_id, Some(core_id));
         }
     }
 

@@ -42,6 +42,8 @@
 //! ensures that by the time a revoke operation completes and releases the lock,
 //! no other thread is accessing the revoked domains.
 
+use crate::capability::CapabilityRef;
+use crate::domain::Domain;
 use crate::error::Result;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 use alloc::boxed::Box;
@@ -200,8 +202,23 @@ pub trait Platform: Send + Sync {
     // Core state tracking
     // -----------------------------------------------------------------------
 
-    /// Record that `domain_id` is now executing on `core_id`.
-    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId);
+    /// Update the full per-core scheduling context after a domain switch.
+    ///
+    /// Called by [`Capability::switch`] (forward, return, and interrupt-delivery
+    /// paths) after VP state transitions.  The platform must update:
+    /// - Which domain is running on `core_id` (for IPI targeting / routing).
+    /// - Which VP of that domain is active.
+    /// - The domain's `CapabilityRef` (so the VMCALL handler can access the
+    ///   capability tree without a lookup).
+    ///
+    /// **Default implementation** is a no-op.
+    fn set_core_context(
+        &self,
+        _core_id: CoreId,
+        _domain_cap: &CapabilityRef<Domain>,
+        _vp_id: u64,
+    ) {
+    }
 
     /// Record that `core_id` is no longer executing any domain (idle).
     fn clear_core_domain(&self, core_id: CoreId);
@@ -222,14 +239,6 @@ pub trait Platform: Send + Sync {
     fn get_current_core(&self) -> Option<CoreId> {
         None
     }
-
-    /// Update the VP currently executing on `core_id`.
-    ///
-    /// Called by [`Capability::switch`] (both forward and return paths) after
-    /// every VP-level context switch so that `CoreContext::running_vp` stays consistent.
-    ///
-    /// **Default implementation** is a no-op.
-    fn set_core_vp(&self, _core_id: CoreId, _vp_id: Option<u64>) {}
 
     // -----------------------------------------------------------------------
     // VP register access (platform-managed register file)

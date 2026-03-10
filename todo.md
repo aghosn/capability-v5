@@ -237,9 +237,10 @@ The following three invariants govern what dom0 sees and can access:
   `Mutex<ThemisPlatformInner>` into a three-tier locking structure that allows cores
   to operate concurrently on independent domains or their own per-core state.
 
-  **Tier 1 — per-core current state** (`[PerCoreCell; MAX_CORES]`):
-  - Each `PerCoreCell` holds `current_domain: AtomicU32` and `current_vp: AtomicU32`.
-  - A core only ever writes to its own cell; reads by other cores are observational only.
+  **Tier 1 — per-core scheduling state** (`[CoreContext; MAX_CORES]`):
+  - See `CoreContext` definition in #U7.  Each core owns its cell; reads by
+    other cores happen only under the `execute()` barrier protocol or via the
+    cached `domain_id` atomic (observational, lock-free).
 
   **Tier 2 — per-domain state** (`BTreeMap<DomainId, Mutex<PlatformDomain>>`):
   - `PlatformDomain` (EPT, meta allocator, `vps: Vec<VpHardware>`) moves behind its own `Mutex`.
@@ -387,4 +388,119 @@ Replace stock minimal Linux with purpose-built dom0 image. Deferred until Phase 
 - [ ] **#U3** Cache coloring — see `./2026/docs/design/address_translation.md`. _Phase 4–6 of address translation design._
 - [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note. _Post-clean-boot refactor._
 - [x] **#U6** Enable XSAVES/XRSTORS — ✅ DONE.  Set secondary exec control bit 20 (ENABLE_XSAVES_XRSTORS), write XSS-exiting bitmap = 0 (all XSAVES/XRSTORS execute natively), removed CPUID 0xD:1 bit 3 mask.  IA32_XSS (0xDA0) passes through via zeroed MSR bitmap.  Tested: dom0 boots to login prompt.
-- [ ] **#U7** Capability API plumbing (themis_abi ↔ capability engine) — wire up VMCALL handling in `vmexit.rs` to dispatch `themis_abi` opcodes (CARVE, SEND, SEAL, REVOKE, SWITCH, etc.) into the capability engine (`apply_update` / `UpdateBatch`).  Currently all VMCALLs return `-ENOSYS`.  Requires: defining the ABI register convention (RAX=opcode, RDI/RSI/RDX=args), looking up the calling domain's capability table, translating ABI args into `CapavisorAPI` operations, and returning results.  Prerequisite for dom0 driver and child domain creation.
+- [ ] **#U7** Capability API plumbing (themis_abi ↔ capability engine)
+
+  Wire up VMCALL handling in `vmexit.rs` to dispatch `themis_abi` opcodes into
+  the capability engine.  Currently all VMCALLs return `-ENOSYS`.
+
+  **Design principles**:
+  1. The capability tree is the **single source of truth** — no parallel
+     `DomainId → CapabilityRef` maps.  All domain references derive from the tree.
+  2. Each core keeps a **`CoreContext`** that holds the `CapabilityRef<Domain>` and
+     VP index of the currently-scheduled domain.  The VMCALL handler reads the
+     core's own `CoreContext` directly — no lookup, no map.
+  3. **Switch is the universal transition primitive** — forward switch, return, and
+     `on_domain_revoked` all reduce to "update the core's `CoreContext`".
+  4. **Dom0's `CapabilityRef<Domain>` is global** — it's the tree root anchor;
+     without it the entire capability tree would be dropped.
+
+  #### `CoreContext` — per-core scheduling state
+
+  Replaces the current `PerCoreCell` (which only holds `AtomicU64` domain ID and
+  `AtomicU32` vp_id).  Encapsulates everything the VMCALL handler needs to know
+  about what is currently running on this physical core.
+
+  ```rust
+  /// Per-core scheduling state.
+  ///
+  /// Invariants:
+  /// - A core only writes to its own CoreContext.
+  /// - Cross-core reads happen under the execute() barrier protocol
+  ///   (IPI + sync_barrier), so the Mutex is never truly contended.
+  /// - `domain_id` is a cached copy of `domain_cap.read().data.id` for
+  ///   fast lock-free observational reads (e.g., `domain_core()` lookups).
+  pub struct CoreContext {
+      /// Cached domain ID — lock-free observational reads by other cores.
+      pub domain_id: AtomicU64,
+      /// Current VP index within the domain (dom0: VP i = core i, fixed).
+      pub vp_id: AtomicU32,
+      /// Capability reference to the currently-scheduled domain.
+      /// The VMCALL handler's entry point into the capability tree.
+      /// `None` only during early boot before dom0 is initialised.
+      pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
+  }
+  ```
+
+  `CoreContext` lives inside `ThemisPlatform.cores: [CoreContext; MAX_CORES]`.
+  For dom0 the VP-to-core mapping is **fixed** (VP i runs on core i).
+  For child domains, VPs may be scheduled on any allowed core.
+
+  When SWITCH is implemented (Phase 9), all transitions — forward switch, return,
+  and revocation redirect — update the target core's `CoreContext` through the same
+  code path.  `SwitchContext` (or the switch return type) will be extended to carry
+  the target `CapabilityRef<Domain>` so the handler can update `domain_cap`.
+  For return, the parent's ref is already in the VP call chain (`VpCallContext.domain`
+  weak ref) — just needs to be surfaced.
+
+  #### Register convention (System V AMD64-style)
+
+  ```
+  IN:   RAX = opcode
+        RDI = arg0,  RSI = arg1,  RDX = arg2,  RCX = arg3,  R8 = arg4
+
+  OUT:  RAX = error code (0 = SUCCESS)
+        RDI = result0, RSI = result1, RDX = result2
+  ```
+
+  #### Implementation steps
+
+  - [ ] **U7a** — Define `CoreContext` struct, replace `PerCoreCell` in `platform.rs`.
+    Add `get_core_cap(core_id) -> Option<CapabilityRef<Domain>>` and
+    `set_core_cap(core_id, cap_ref, vp_id)` to `ThemisPlatform`.
+    Add a `dom0_cap: Mutex<Option<CapabilityRef<Domain>>>` field on `ThemisPlatform`
+    (or a global static) as the tree root anchor.
+
+  - [ ] **U7b** — Initialise per-core state during boot (`main.rs`).
+    After `boot::capa()` returns `CapaState`, store `root_domain.clone()` as the
+    global dom0 anchor.  BSP: set core 0 to `(root_domain, vp=0)`.
+    Before `AP_LAUNCH_READY`: pre-populate each AP core i's `CoreContext` with
+    `(root_domain.clone(), vp=i)`, or have each AP set its own cell.
+
+  - [ ] **U7c** — Document register convention in `themis_abi::opcodes`.
+    Add doc comments to each opcode constant documenting which registers carry
+    arguments and which carry return values.
+
+  - [ ] **U7d** — Create `hypercall.rs` dispatch module.
+    `pub fn handle_vmcall(vcpu: &mut ActiveVcpu)`:
+    1. Load `PLATFORM_PTR`, call `get_current_core()`, read `CoreContext`.
+    2. Match on opcode (RAX), extract args from RDI/RSI/RDX/RCX/R8.
+    3. Call `execute(&platform, exclusive, || Capability::op(...))`.
+    4. Map `CapaError` → `themis_abi::errors` (see mapping below).
+    5. Write return code to RAX, results to RDI/RSI/RDX.
+
+    **CapaError → ABI error mapping**:
+    | CapaError                                       | ABI code     |
+    |-------------------------------------------------|--------------|
+    | InvalidAccess, InvalidOperation, RegionOverlap  | ERR_INVALID  |
+    | PermissionDenied, CannotAliasCarved, Monotonicity, TreeLocked | ERR_NOPERM |
+    | NotFound, ParentRevoked, DomainRevoked          | ERR_NOTFOUND |
+    | DomainSealed, DomainNotSealed, ApiNotAllowed    | ERR_BADSTATE |
+    | NotSupported                                    | ERR_UNIMPL   |
+
+    **Implemented opcodes** (pure capability — no control-flow change):
+    CARVE, ALIAS, SEND, ACCEPT, REJECT, CREATE_DOMAIN, SEAL,
+    REVOKE_MEM, REVOKE_DOMAIN, ATTEST_SELF.
+
+    **Stubbed opcodes** (return `ERR_UNIMPL`):
+    SWITCH (Phase 9), GET_CHAN, ATTEST, GET/SET_REG (Phase 10),
+    SET_INTR_POLICY/SET_DEF_INTR_POLICY (Phase 6),
+    ASSIGN_DEVICE (Phase 4), ENUMERATE, REGISTER_VP_META (Phase 10),
+    REGISTER_DOORBELL/EVENT_FLAGS/INTR_CHAN (Phase 11).
+
+  - [ ] **U7e** — Wire VMCALL handler in `vmexit.rs`.
+    Replace the `-ENOSYS` stub at line 269 with a call to
+    `hypercall::handle_vmcall(vcpu)`.  Advance RIP via `next_instruction()`.
+
+  - [ ] **U7f** — Build + boot test.  Verify dom0 still boots to login prompt.
+    VMCALLs won't be exercised until `themis-vmm.ko` is loaded, but the
+    dispatch code must compile and the boot path must be regression-free.

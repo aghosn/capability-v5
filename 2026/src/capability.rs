@@ -2230,8 +2230,7 @@ impl Capability<Domain> {
         };
         *caller_vp_arc.run_state.write() = VpRunState::Available;
 
-        platform.set_core_domain(core_id, prev_domain_id);
-        platform.set_core_vp(core_id, Some(prev_vp_id));
+        platform.set_core_context(core_id, &prev_domain_ref, prev_vp_id);
 
         Ok(SwitchContext {
             from_domain: caller_id,
@@ -2385,8 +2384,7 @@ impl Capability<Domain> {
             prev_caller: caller_prev_caller,
         };
 
-        platform.set_core_domain(core_id, to_domain_id);
-        platform.set_core_vp(core_id, Some(to_vp_id));
+        platform.set_core_context(core_id, &to_domain_ref, to_vp_id);
 
         Ok(SwitchContext {
             from_domain: caller_id,
@@ -2577,8 +2575,7 @@ impl Capability<Domain> {
         };
 
         // Update platform core tracking.
-        platform.set_core_domain(core_id, handler_domain_id);
-        platform.set_core_vp(core_id, Some(handler_vp_id));
+        platform.set_core_context(core_id, &chain[n - 1].0, handler_vp_id);
 
         Ok(VpInterruptContext {
             interrupted_domain_id,

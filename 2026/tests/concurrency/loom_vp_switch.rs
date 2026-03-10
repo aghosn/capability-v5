@@ -104,12 +104,11 @@ impl Platform for LoomPlatform {
     fn on_domain_revoked(&self, _: DomainId, _: Option<DomainId>) {}
     fn register_domain(&self, _: DomainId, _: Option<DomainId>) {}
 
-    fn set_core_domain(&self, core_id: CoreId, domain_id: DomainId) {
-        self.state
-            .lock()
-            .unwrap()
-            .core_to_domain
-            .insert(core_id, domain_id);
+    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
+        let domain_id = domain_cap.read().data.id;
+        let mut st = self.state.lock().unwrap();
+        st.core_to_domain.insert(core_id, domain_id);
+        st.core_to_vp.insert(core_id, vp_id);
     }
     fn clear_core_domain(&self, core_id: CoreId) {
         self.state.lock().unwrap().core_to_domain.remove(&core_id);
@@ -127,17 +126,6 @@ impl Platform for LoomPlatform {
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<CoreId> {
         Some(self.current_core)
-    }
-    fn set_core_vp(&self, core_id: CoreId, vp_id: Option<u64>) {
-        let mut st = self.state.lock().unwrap();
-        match vp_id {
-            Some(id) => {
-                st.core_to_vp.insert(core_id, id);
-            }
-            None => {
-                st.core_to_vp.remove(&core_id);
-            }
-        }
     }
 }
 

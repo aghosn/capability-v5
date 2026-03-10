@@ -32,6 +32,7 @@ mod boot;
 mod domain;
 mod gdt;
 mod guest;
+mod hypercall;
 mod mem;
 mod pci;
 mod platform;
@@ -225,6 +226,17 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
     PLATFORM_PTR.store(&capa.platform as *const _ as *mut _, Ordering::Relaxed);
+
+    // ── Initialise per-core scheduling state (CoreContext) ────────────────── //
+    // Store dom0's CapabilityRef as the tree root anchor, then pre-populate
+    // every core's CoreContext with (root_domain, vp=core_id).  This must
+    // happen before AP_LAUNCH_READY so APs can read their CoreContext.
+    capa.platform.set_dom0_cap(capa.root_domain.clone());
+    let num_cores = cpus.len();
+    for core_id in 0..num_cores {
+        capa.platform.set_core_context(core_id, capa.root_domain.clone(), core_id as u32);
+    }
+
     boot::launch(&linux, &vmx_state, &capa.platform);
 }
 

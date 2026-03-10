@@ -274,7 +274,7 @@ fn test_sandbox_inside_cvm() {
     let platform = common::TestPlatform::new();
     platform.register_domain(cvm_id, None);
     platform.register_domain(sandbox_id, Some(cvm_id));
-    platform.set_core_domain(0, cvm_id);
+    platform.set_core_context(0, &cvm, 0);
     platform.set_current_core(Some(0));
 
     // Initialise CVM VP[0] as Running on core 0
@@ -287,7 +287,6 @@ fn test_sandbox_inside_cvm() {
             caller: None,
         };
     }
-    platform.set_core_vp(0, Some(0));
 
     // VP-aware switch from CVM to sandbox (sandbox VP[0])
     let switch_ctx = Capability::switch(&cvm, sandbox_h, 0, &platform).unwrap();
