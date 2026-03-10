@@ -3,7 +3,7 @@
 #
 # Usage:
 #   cargo resize-disk <image> <+sizeG>
-#   bash scripts/resize-disk.sh guest/ubuntu-24.04-server-cloudimg-amd64.img 10
+#   bash scripts/resize-disk.sh guest/<image-name>.img 10
 #
 # After resizing, boot the guest and run inside it:
 #   sudo growpart /dev/vda 1
@@ -19,6 +19,7 @@ if [[ $# -lt 2 ]]; then
     echo ""
     echo "Example:"
     echo "  $0 guest/ubuntu-24.04-server-cloudimg-amd64.img 10"
+    echo "  $0 guest/jammy-server-cloudimg-amd64.img 10"
     exit 1
 fi
 

@@ -38,16 +38,18 @@ themis/
 │
 ├── guest/
 │   ├── dom0/           # Provenance records for dom0 artifacts
-│   ├── ubuntu-24.04-server-cloudimg-amd64.img  # Ubuntu root disk [gitignored; cargo fetch-dom0]
+│   ├── <image>.img     # Ubuntu cloud image [gitignored; cargo fetch-dom0]
 │   └── seed.img        # Cloud-init seed  [gitignored; cargo fetch-dom0]
 │
 ├── scripts/
-│   ├── build-iso.sh    # Build capavisor ELF → Limine-bootable ISO (target/themis.iso)
-│   ├── run-qemu.sh     # Build ISO and boot under QEMU/KVM
-│   ├── debug.sh        # Boot QEMU with -s -S and attach rust-gdb
-│   ├── fetch-dom0.sh   # Download dom0 root disk + create cloud-init seed
-│   ├── resize-disk.sh  # Grow a QCOW2 disk image by N GB
-│   └── setup-limine.sh # Clone and build Limine v8.7.0 into tools/limine/
+│   ├── build-iso.sh       # Build capavisor ELF → Limine-bootable ISO (target/themis.iso)
+│   ├── run-qemu.sh        # Build ISO and boot under QEMU/KVM
+│   ├── debug.sh           # Boot QEMU with -s -S and attach rust-gdb
+│   ├── fetch-dom0.sh      # Download dom0 root disk + create cloud-init seed
+│   ├── resize-disk.sh     # Grow a QCOW2 disk image by N GB
+│   ├── setup-limine.sh    # Clone and build Limine v8.7.0 into tools/limine/
+│   ├── dom0-versions.conf # Registry of tested dom0 Ubuntu versions
+│   └── dom0-lib.sh        # Shell library for version selection / auto-detection
 │
 ├── tools/
 │   └── limine/         # Local Limine clone [gitignored; cargo setup-limine]
@@ -226,31 +228,80 @@ runs only on the first seeded boot.
 
 ### dom0 disk
 
-```sh
-cargo fetch-dom0             # download Ubuntu Noble 24.04 cloud image + create seed.img
-                             # output: guest/ubuntu-24.04-server-cloudimg-amd64.img  guest/seed.img
-FORCE=1 cargo fetch-dom0     # re-download even if already present
+Multiple Ubuntu versions are supported. The version is selected via `DOM0_VERSION`:
 
-cargo resize-disk guest/ubuntu-24.04-server-cloudimg-amd64.img 10   # grow disk by 10 GB
+```sh
+cargo fetch-dom0                         # download default version (Noble 24.04)
+DOM0_VERSION=noble cargo fetch-dom0      # explicit Noble
+DOM0_VERSION=jammy cargo fetch-dom0      # download Jammy 22.04 instead
+FORCE=1 cargo fetch-dom0                 # re-download even if already present
+cargo fetch-dom0 --list                  # list available tested versions
 ```
 
-After resizing, boot the guest and expand the filesystem:
+#### First boot (cloud-init provisioning)
+
+The cloud image ships unpersonalised. The first boot must attach the cloud-init
+seed so it creates the login user and sets the hostname:
 
 ```sh
+SEED=1 cargo dom0                        # boot with seed — provisions user, then shut down
+cargo dom0                               # subsequent boots — no seed needed
+```
+
+`run-dom0.sh` remembers that seeding was done (creates `guest/.dom0-seeded`).
+If you re-download the image with `FORCE=1`, delete the marker to re-seed.
+
+#### Resizing the disk
+
+Cloud images ship small (~2 GB). Grow the QCOW2 file and then expand the
+filesystem from inside the guest:
+
+```sh
+# Host: grow the QCOW2 virtual size by 10 GB
+cargo resize-disk guest/ubuntu-24.04-server-cloudimg-amd64.img 10
+# or for Jammy:
+cargo resize-disk guest/jammy-server-cloudimg-amd64.img 10
+
+# Guest: expand the partition and filesystem (after booting)
 sudo growpart /dev/vda 1
 sudo resize2fs /dev/vda1
 ```
 
-The dom0 kernel and initrd are **not** downloaded separately — Limine reads them
-directly from the disk's BOOT partition at boot time:
+#### Mounting / unmounting the disk (host-side inspection)
 
+To inspect or modify the disk image without booting a VM:
+
+```sh
+# Mount (requires root):
+sudo bash scripts/mount-guest.sh                                  # auto-detect
+sudo bash scripts/mount-guest.sh guest/jammy-server-cloudimg-amd64.img  # explicit path
+sudo DOM0_VERSION=jammy bash scripts/mount-guest.sh               # by version name
+ls /tmp/mnt/                             # browse the root filesystem
+
+# Unmount:
+sudo umount /tmp/mnt
+sudo qemu-nbd -d /dev/nbd0
 ```
-module_path: fslabel(BOOT):/vmlinuz
-module_path: fslabel(BOOT):/initrd.img
-```
+
+`mount-guest.sh` auto-detects which image is present (respects `DOM0_VERSION`).
+It mounts the root partition; to access the boot partition on Noble, mount
+`/dev/nbd0p16` (the partition labeled `BOOT`) separately.
+
+#### Boot paths and Limine configuration
+
+The dom0 kernel and initrd are **not** downloaded separately — Limine reads them
+directly from the disk at boot time. The boot paths vary by Ubuntu version and
+are configured automatically via `scripts/dom0-versions.conf`:
+
+| Version | Kernel path | Notes |
+|---------|-------------|-------|
+| Noble 24.04 | `fslabel(BOOT):/vmlinuz` | Separate BOOT partition |
+| Jammy 22.04 | `fslabel(cloudimg-rootfs):/boot/vmlinuz` | Single root partition |
 
 The disk is attached as a virtio-blk drive under UEFI (OVMF includes virtio
 drivers). Limine accesses it via EFI block I/O protocols before the OS loads.
+`build-iso.sh` auto-detects which image is present and generates the correct
+Limine configuration.
 
 #### dom0 login credentials
 
@@ -266,6 +317,52 @@ The user has passwordless `sudo`. Password authentication over SSH is enabled
 (`ssh_pwauth: True`). These are **development-only** credentials — change them
 before any non-local use.
 
+#### dom0 version management
+
+All dom0 scripts share a version registry (`scripts/dom0-versions.conf`) and a
+shell helper library (`scripts/dom0-lib.sh`).  This keeps image names, download
+URLs, and Limine boot paths in one place.
+
+**Selecting a version:**
+
+```sh
+# Explicit — set DOM0_VERSION for any command:
+DOM0_VERSION=noble cargo fetch-dom0     # fetch Noble 24.04 (default)
+DOM0_VERSION=jammy cargo fetch-dom0     # fetch Jammy 22.04
+DOM0_VERSION=noble cargo themis         # build ISO with Noble boot paths
+DOM0_VERSION=jammy cargo themis         # build ISO with Jammy boot paths
+
+# Auto-detect — if DOM0_VERSION is unset, scripts check guest/ for a known
+# image and use its version.  The default version (noble) is preferred when
+# multiple images are present.
+cargo themis                            # auto-selects noble if its image exists
+```
+
+**Listing versions:**
+
+```sh
+$ cargo fetch-dom0 --list
+Registered dom0 versions:
+  jammy       22.04  jammy-server-cloudimg-amd64.img
+  noble       24.04  ubuntu-24.04-server-cloudimg-amd64.img (default)
+```
+
+**Adding a new version** — append a block to `scripts/dom0-versions.conf`:
+
+```sh
+VERSION_plucky_CODENAME="plucky"
+VERSION_plucky_RELEASE="25.04"
+VERSION_plucky_IMAGE="ubuntu-25.04-server-cloudimg-amd64.img"
+VERSION_plucky_URL="https://cloud-images.ubuntu.com/releases/25.04/release/ubuntu-25.04-server-cloudimg-amd64.img"
+VERSION_plucky_KERNEL="fslabel(BOOT):/vmlinuz"        # check partition layout!
+VERSION_plucky_INITRD="fslabel(BOOT):/initrd.img"
+VERSION_plucky_NOTES="Not yet tested"
+```
+
+Then fetch and test: `DOM0_VERSION=plucky cargo fetch-dom0 && DOM0_VERSION=plucky cargo themis`.
+
+To change the default, edit `DOM0_DEFAULT_VERSION` at the top of the conf file.
+
 ---
 
 ## Boot flow (summary)
@@ -274,8 +371,8 @@ before any non-local use.
 Power on
   └─ Limine (BIOS/UEFI)
        ├─ loads  capavisor   from ISO
-       ├─ loads  vmlinuz     from disk /boot/vmlinuz    (Limine module)
-       └─ loads  initrd.img  from disk /boot/initrd.img (Limine module)
+       ├─ loads  vmlinuz     from disk (path varies by version, see dom0-versions.conf)
+       └─ loads  initrd.img  from disk
 
 capavisor _start  (BSP, interrupts off)
   ├─ Phase 1: parse memory map, init heap, serial, ACPI, PCI

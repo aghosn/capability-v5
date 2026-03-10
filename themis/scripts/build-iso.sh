@@ -3,8 +3,9 @@
 #                Limine BIOS/UEFI-bootable ISO image.
 #
 # Usage:
-#   cargo iso                    # from the workspace root
-#   bash scripts/build-iso.sh    # directly
+#   cargo iso                                  # from the workspace root
+#   DOM0_VERSION=jammy cargo iso               # Jammy boot paths
+#   bash scripts/build-iso.sh                  # directly
 #
 # Output:  target/themis.iso
 #
@@ -18,6 +19,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/dom0-lib.sh"
 
 # ── Prerequisites ──────────────────────────────────────────────────────────
 
@@ -105,17 +108,35 @@ serial: yes
     kernel_path: boot():/boot/capavisor
 CONF
 
-# Only include dom0 modules if the disk image is present.
+# Auto-detect which dom0 image is present and select its boot paths.
+# Priority: DOM0_VERSION env var > auto-detect from guest/ > default.
+if [[ -n "${DOM0_VERSION:-}" ]]; then
+    dom0_select "$DOM0_VERSION"
+elif _detected=$(dom0_detect_from_guest_dir "$WORKSPACE_ROOT/guest"); then
+    dom0_select "$_detected"
+else
+    dom0_select ""
+fi
+
+# Only include dom0 modules if a disk image is present.
 # Without these lines Limine boots the capavisor alone (useful for testing).
-# Noble 24.04 places the kernel/initrd on a separate ext4 boot partition
-# labeled "BOOT" (Jammy kept them on the cloudimg-rootfs root partition).
-if [[ -f "$WORKSPACE_ROOT/guest/ubuntu-24.04-server-cloudimg-amd64.img" ]]; then
-    cat >> "$ISO_ROOT/boot/limine/limine.conf" <<'CONF'
-    module_path: fslabel(BOOT):/vmlinuz
+# The kernel/initrd paths vary by Ubuntu release — dom0-versions.conf has
+# the correct fslabel + path for each tested version.
+_found_image=""
+for _var in $(compgen -v | grep '^VERSION_.*_IMAGE$'); do
+    if [[ -f "$WORKSPACE_ROOT/guest/${!_var}" ]]; then
+        _found_image="${!_var}"
+        break
+    fi
+done
+if [[ -n "$_found_image" ]]; then
+    cat >> "$ISO_ROOT/boot/limine/limine.conf" <<CONF
+    module_path: ${DOM0_KERNEL_PATH}
     module_cmdline: dom0-kernel
-    module_path: fslabel(BOOT):/initrd.img
+    module_path: ${DOM0_INITRD_PATH}
     module_cmdline: dom0-initrd
 CONF
+    echo "  Limine dom0 modules: ${DOM0_VERSION_NICK} (${DOM0_KERNEL_PATH})"
 fi
 
 # Copy UEFI loader (BOOTX64.EFI) for fallback/hard-disk boot.

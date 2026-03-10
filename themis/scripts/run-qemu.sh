@@ -60,12 +60,24 @@ echo "→ Booting $ISO (${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM)"
 
 # ── Optional dom0 disk ──────────────────────────────────────────────────────
 # Present when scripts/fetch-dom0.sh has been run and image has been seeded.
-IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
+# Must match the version used by build-iso.sh for Limine config consistency.
+source "$SCRIPT_DIR/dom0-lib.sh"
 DISK_ARGS=""
-if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
-    DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=none "
+if [[ -n "${DOM0_VERSION:-}" ]]; then
+    dom0_select "$DOM0_VERSION"
+    if [[ -f "$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME" ]]; then
+        DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME,format=qcow2,if=none "
+        DISK_ARGS+="-device virtio-blk-pci,drive=dom0 "
+        echo "  + virtio disk: guest/$DOM0_IMAGE_NAME  (${DOM0_VERSION_NICK})"
+    else
+        echo "  WARNING: DOM0_VERSION=$DOM0_VERSION but guest/$DOM0_IMAGE_NAME not found"
+        echo "           Run: DOM0_VERSION=$DOM0_VERSION cargo fetch-dom0"
+    fi
+elif _detected=$(dom0_detect_from_guest_dir "$WORKSPACE_ROOT/guest"); then
+    dom0_select "$_detected"
+    DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME,format=qcow2,if=none "
     DISK_ARGS+="-device virtio-blk-pci,drive=dom0 "
-    echo "  + virtio disk: guest/$IMAGE_NAME  (Limine reads /boot/vmlinuz from here)"
+    echo "  + virtio disk: guest/$DOM0_IMAGE_NAME  (${DOM0_VERSION_NICK})"
 fi
 
 exec qemu-system-x86_64 \

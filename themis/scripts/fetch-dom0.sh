@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # fetch-dom0.sh — Download the dom0 root disk and create a cloud-init seed.
 #
-# Downloads the standard Ubuntu Noble cloud image and creates a cloud-init
-# seed ISO following the standard QEMU cloud-image workflow:
-#   https://cloud-images.ubuntu.com/
+# Downloads a tested Ubuntu cloud image and creates a cloud-init seed ISO
+# following the standard QEMU cloud-image workflow.
 #
-# The image is kept with its original filename so we know exactly what
-# version we're running. The dom0 kernel and initrd live on the BOOT
-# ext4 partition (/vmlinuz, /initrd.img) — Limine loads them directly
-# from the disk at boot time via fslabel(BOOT)://.
+# The version is selected via the DOM0_VERSION environment variable
+# (defaults to the default in dom0-versions.conf).  Run with --list to
+# see available versions.
 #
 # Output:
-#   guest/ubuntu-24.04-server-cloudimg-amd64.img   Ubuntu root disk (QCOW2)
-#   guest/seed.img                                 Cloud-init seed (ISO9660 CIDATA)
-#   guest/dom0/version.txt                         provenance record
+#   guest/<image-name>.img    Ubuntu root disk (QCOW2)
+#   guest/seed.img            Cloud-init seed (ISO9660 CIDATA)
+#   guest/dom0/version.txt    provenance record
 #
 # Usage:
-#   cargo fetch-dom0                       # download everything
-#   FORCE=1 cargo fetch-dom0               # re-download even if present
+#   cargo fetch-dom0                       # download default version
+#   DOM0_VERSION=jammy cargo fetch-dom0    # download Jammy instead
+#   FORCE=1 cargo fetch-dom0              # re-download even if present
+#   cargo fetch-dom0 --list               # list available versions
 #
 # Requirements: curl, qemu-img, cloud-localds (cloud-image-utils)
 #   sudo apt install qemu-utils cloud-image-utils
@@ -31,10 +31,18 @@ DOM0_DIR="$GUEST_DIR/dom0"
 
 FORCE="${FORCE:-0}"
 
-# ── Image ──────────────────────────────────────────────────────────────────
+# ── Version selection ──────────────────────────────────────────────────────
+source "$SCRIPT_DIR/dom0-lib.sh"
 
-IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
-IMAGE_URL="https://cloud-images.ubuntu.com/releases/24.04/release/${IMAGE_NAME}"
+if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
+    dom0_list_versions
+    exit 0
+fi
+
+dom0_select "${DOM0_VERSION:-}"
+
+IMAGE_NAME="$DOM0_IMAGE_NAME"
+IMAGE_URL="$DOM0_IMAGE_URL"
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -54,7 +62,7 @@ mkdir -p "$DOM0_DIR"
 # ── 1. Root disk ───────────────────────────────────────────────────────────
 
 echo ""
-echo "=== [1/2] Root disk (Ubuntu Noble 24.04) ==="
+echo "=== [1/2] Root disk (Ubuntu ${DOM0_CODENAME^} ${DOM0_RELEASE}) ==="
 if [[ -f "$GUEST_DIR/$IMAGE_NAME" && "$FORCE" != "1" ]]; then
     echo "  ✔ $IMAGE_NAME already present (set FORCE=1 to re-download)"
 else
@@ -101,11 +109,12 @@ fi
 # ── Provenance ─────────────────────────────────────────────────────────────
 
 cat > "$DOM0_DIR/version.txt" <<EOF
+version:  ${DOM0_VERSION_NICK} (Ubuntu ${DOM0_CODENAME^} ${DOM0_RELEASE})
 image:    ${IMAGE_NAME}
 url:      ${IMAGE_URL}
 fetched:  $(date -u +%Y-%m-%dT%H:%M:%SZ)
-kernel:   loaded at runtime from fslabel(BOOT)://vmlinuz
-initrd:   loaded at runtime from fslabel(BOOT)://initrd.img
+kernel:   ${DOM0_KERNEL_PATH}
+initrd:   ${DOM0_INITRD_PATH}
 EOF
 
 echo ""

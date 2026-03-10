@@ -563,9 +563,11 @@ availability, and newer kernel APIs.
   guards to TRIPLE_FAULT, EPT_VIOLATION, EPT_MISCONFIG, and
   VMENTRY_INVALID_GUEST handlers to prevent garbled multi-core output.
   Added VP id, CS/SS state, IDTR, entry controls to dumps.
-- [ ] **P14.5e** — Multi-version support: parameterize the image name and boot
-  partition layout so that both Jammy and Noble (and future releases) can be
-  used without editing scripts.  Consider a `dom0.conf` or env-var override.
+- [x] **P14.5e** — ✅ DONE.  Multi-version support: `scripts/dom0-versions.conf`
+  registry with per-version image name, URL, and Limine boot paths.
+  `scripts/dom0-lib.sh` provides `dom0_select` / `dom0_detect_from_guest_dir`.
+  All scripts auto-detect which image is present and generate the correct
+  Limine config.  Select explicitly via `DOM0_VERSION=jammy cargo themis`.
 
 ### Phase 15 — `mshv-themis` Linux Kernel Driver (mshv-compatible)
 

@@ -24,8 +24,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
-DOM0_DISK="$WORKSPACE_ROOT/guest/$IMAGE_NAME"
+source "$SCRIPT_DIR/dom0-lib.sh"
+
+# Auto-detect or use DOM0_VERSION env var.
+if [[ -n "${DOM0_VERSION:-}" ]]; then
+    dom0_select "$DOM0_VERSION"
+elif _detected=$(dom0_detect_from_guest_dir "$WORKSPACE_ROOT/guest"); then
+    dom0_select "$_detected"
+else
+    dom0_select ""
+fi
+
+DOM0_DISK="$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME"
 SEED_IMG="$WORKSPACE_ROOT/guest/seed.img"
 SEEDED_MARKER="$WORKSPACE_ROOT/guest/.dom0-seeded"
 
@@ -75,7 +85,7 @@ if [[ "${QEMU_NET:-1}" == "1" ]]; then
     NET_ARGS="-netdev user,id=n0,${NET_FWD} -device virtio-net-pci,netdev=n0"
 fi
 
-echo "→ Booting guest/$IMAGE_NAME directly (no Themis) — ${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM"
+echo "→ Booting guest/$DOM0_IMAGE_NAME directly (no Themis) — ${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM"
 echo "  Login: cloud / cloud123"
 [[ -n "$NET_ARGS" ]] && echo "  + networking: virtio-net (SLIRP), SSH → localhost:2222"
 echo ""

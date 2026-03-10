@@ -53,10 +53,17 @@ fi
 
 echo "→ Starting QEMU (GDB stub on :1234) ..."
 
-IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
+source "$SCRIPT_DIR/dom0-lib.sh"
 DISK_ARGS=""
-if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
-    DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=none "
+if [[ -n "${DOM0_VERSION:-}" ]]; then
+    dom0_select "$DOM0_VERSION"
+    if [[ -f "$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME" ]]; then
+        DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME,format=qcow2,if=none "
+        DISK_ARGS+="-device virtio-blk-pci,drive=dom0 "
+    fi
+elif _detected=$(dom0_detect_from_guest_dir "$WORKSPACE_ROOT/guest"); then
+    dom0_select "$_detected"
+    DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME,format=qcow2,if=none "
     DISK_ARGS+="-device virtio-blk-pci,drive=dom0 "
 fi
 
