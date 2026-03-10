@@ -1561,3 +1561,93 @@ Parallel work:
    - Verify partition A cannot access partition B's memory.
    - Verify revocation zeros memory (CLEAN attribute).
    - Verify capability rights monotonicity (child ≤ parent).
+
+---
+
+## 18. Future Work: Monitor-Provided Hypercall Library
+
+### Motivation
+
+The mshv-themis kernel driver needs to issue VMCALLs to the capavisor for all
+capability operations (create domain, carve, alias, send, etc.).  These wrappers
+already exist in `libthemis` (a no\_std Rust crate).  Maintaining a second
+implementation in the kernel driver — whether in C inline assembly or via FFI —
+creates a versioning coupling: the driver must be compiled against the same ABI
+version as the running capavisor.
+
+### Proposal: COMM-Injected Hypercall Stubs
+
+Use the COMM page mechanism to have the capavisor provide a pre-compiled
+hypercall stub library to the parent domain at runtime:
+
+1. **Parent registers a COMM page** with the capavisor (via `register_comm`),
+   bound to a well-known VP slot reserved for this purpose.
+
+2. **Capavisor writes libthemis code** into the COMM page.  Since the monitor
+   has write access to COMM pages, it can populate the page with a
+   position-independent flat binary containing the VMCALL wrappers.
+
+3. **Parent maps the page executable** and calls into it at known offsets.
+   A function table at offset 0 provides entry points for each operation
+   (create\_domain, carve, alias, send, etc.).
+
+4. **Version match is guaranteed**: the capavisor always provides stubs matching
+   its own ABI — no compile-time coupling between driver and capavisor.
+
+### Design Considerations
+
+- **Position-independent code**: libthemis must be compiled as a flat PIC binary
+  (e.g., `cargo rustc --crate-type=cdylib` with a custom linker script) so it
+  can be loaded at any GPA chosen by the parent.
+
+- **Function discovery**: the first bytes of the page should contain a jump table
+  or function descriptor array at well-known offsets, keyed by opcode.  Example
+  layout:
+
+  ```
+  Offset 0x000: magic (u64)       — identifies the page as a Themis stub library
+  Offset 0x008: version (u64)     — ABI version
+  Offset 0x010: entry[0] (u64)    — offset to carve()
+  Offset 0x018: entry[1] (u64)    — offset to alias()
+  ...
+  Offset 0x100: <code begins>
+  ```
+
+- **Size**: libthemis functions are thin wrappers (~20 instructions each).  The
+  entire library should fit in 1–2 pages.  If it exceeds one page, the parent
+  registers a contiguous COMM region.
+
+- **Trust model**: the parent already trusts the capavisor (it is the TCB).
+  Executing capavisor-provided code is no different from executing a VMCALL
+  instruction that traps into the capavisor.
+
+- **COMM semantics**: COMM pages are currently designed for data buffers (message
+  slots, event flags).  Using them for executable code is a semantic stretch.
+  An alternative is a dedicated `VMCALL_MAP_HYPERCALL_PAGE` that maps a
+  capavisor-owned read-only+execute page into the caller's address space,
+  similar to Hyper-V's hypercall page mechanism.
+
+### Alternative Approaches
+
+Before implementing the COMM-injection approach, simpler alternatives should be
+evaluated:
+
+1. **Rust kernel module**: write mshv-themis in Rust (Linux ≥ 6.1) and depend
+   on `libthemis` directly as a crate.  Zero duplication, compile-time ABI match.
+
+2. **FFI static library**: add `#[no_mangle] pub extern "C"` wrappers to
+   libthemis, compile as `libthemis.a`, link into the C kernel module.  Same
+   build tree ensures version match.
+
+3. **Hyper-V-style hypercall page**: capavisor maps a single read-only page
+   (discovered via CPUID) containing `mov rax, OPCODE; vmcall; ret` stubs.
+   Simpler than full libthemis but still capavisor-provided.
+
+4. **Generated C header**: auto-generate a C header from `themis-abi` constants
+   at build time.  The inline assembly is trivial (~5 lines) and stable; only
+   opcode numbers need updating.
+
+### Status
+
+**Deferred** — explore in Phase 18 after the core driver (Phase 15) and
+cloud-hypervisor backend (Phase 16) are functional.

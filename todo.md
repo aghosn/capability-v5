@@ -655,6 +655,25 @@ kernel config and QEMU/bare-metal setup needed for a working NIC.
 - [ ] **P17e** — **Validation**: SSH into dom0, `curl` an external URL,
   `apt`/`apk` package install over the network.
 
+### Phase 18 — Monitor-Provided Hypercall Library (Exploratory)
+
+Explore having the capavisor provide a pre-compiled hypercall stub library
+(libthemis) to the parent domain at runtime, eliminating the need for the
+kernel driver to maintain its own VMCALL wrappers and ensuring ABI version
+match with the running capavisor.  See `2026/docs/design/mshv_themis/mshv_themis.md`
+§18 for full design discussion.
+
+- [ ] **P18a** — Evaluate approach: COMM-injected PIC binary vs Hyper-V-style
+  hypercall page vs Rust kernel module vs FFI static library.  Select approach.
+- [ ] **P18b** — If COMM/hypercall-page approach chosen: compile libthemis as
+  flat PIC binary with function table header.  Validate size fits in 1–2 pages.
+- [ ] **P18c** — Capavisor-side: populate COMM page (or map hypercall page) with
+  compiled stubs at domain boot or on first `VMCALL_MAP_HYPERCALL_PAGE`.
+- [ ] **P18d** — Driver-side: discover and map the stub page, call into it
+  instead of issuing inline VMCALL assembly.
+- [ ] **P18e** — Validation: verify round-trip for all capability operations
+  through the injected stubs.
+
 ---
 
 ## Platform API / Unimplemented Features
