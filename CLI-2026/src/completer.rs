@@ -332,7 +332,7 @@ impl Completer for CliHelper {
 
         // Determine what we're completing
         let cmd = parts.first().copied().unwrap_or("");
-        let arg_index = if trailing_space { word_count } else { word_count - 1 };
+        let arg_index = if trailing_space { word_count } else { word_count.saturating_sub(1) };
 
         // If we're typing the first argument of a filename command, do path completion.
         if word_count >= 1 && FILENAME_COMMANDS.contains(&cmd) && arg_index == 1 {
