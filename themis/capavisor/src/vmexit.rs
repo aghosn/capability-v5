@@ -186,6 +186,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 (0x1, _) => {
                     ecx &= !(1u32 << 31);
                 }
+                (0x7, 0) => {
+                    // Hide WAITPKG (tpause/umonitor/umwait): ECX bit 5.
+                    ecx &= !(1u32 << 5);
+                }
                 (0xD, 1) => {
                     // XSAVES (bit 3): passed through — ENABLE_XSAVES is
                     // set in secondary proc-based controls.
