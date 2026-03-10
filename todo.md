@@ -454,34 +454,26 @@ are parent-owned COMM capabilities bound to child VPs.  Depends on COMM redesign
 
 **COMM Redesign** (capability engine change, prerequisite for ThemIC):
 
-- [ ] **P11-comm-a**: Drop VITAL from COMM — in `memory.rs` `canonicalize()`, COMM
-  implies CLEAN only (not VITAL).  Revoking a COMM page zeros memory but does not
+- [x] **P11-comm-a**: ✅ DONE.  Drop VITAL from COMM — `canonicalize()` now sets
+  `COMM | CLEAN` (not VITAL).  Revoking a COMM page zeros memory but does not
   kill the owning domain.
-- [ ] **P11-comm-b**: Allow multiple COMM per domain — remove `comm_cap: Option<...>`
-  single-slot from `Domain` in `domain.rs`.  Add `comm_bindings: Vec<CapabilityWeak<MemoryRegion>>`
-  to `Domain` (child-side list of parent COMM caps bound to this domain).
-- [ ] **P11-comm-c**: Extend `register_comm` signature in `capability.rs`:
-  `register_comm(caller, handle, child_domain_handle: LocalHandle, vp_id: u32)`.
-  Caller (parent) registers its own memory capability as COMM bound to a child VP.
-  Add `comm_binding: Option<CommBinding>` field to `MemoryRegion` where
-  `CommBinding = { target_domain_id: DomainId, vp_id: u32 }`.
-  Push weak ref into child domain's `comm_bindings`.
-  Extend `CommRegion` update with `target_domain_id` and `vp_id`.
-- [ ] **P11-comm-d**: Auto-release on child revocation — in the revocation path,
-  iterate child's `comm_bindings` weak refs; for each that upgrades, clear COMM
-  attribute + `comm_binding`, emit `UncommRegion`.  If parent already revoked
-  (upgrade fails), skip.
-- [ ] **P11-comm-e**: Update COMM unit tests in `2026/tests/integration/comm.rs`
-  (12 existing tests).  All `register_comm` calls need `child_domain_handle` +
-  `vp_id` params.  Add new tests: multiple COMM per domain, no VITAL kill,
-  binding to child VP, auto-release on child revocation.
-- [ ] **P11-comm-f**: Update CLI-2026 for new `register_comm` signature:
-  - `CLI-2026/src/commands/memory.rs`: `cmd_register_comm()` — accept 3 args
-    (`<mem> <child_domain> <vp_id>`) instead of 1.
-  - `CLI-2026/src/session.rs`: `Command::RegisterComm` enum — add `child_domain`
-    and `vp_id` fields; update serialization and unit-test export logic.
-  - `CLI-2026/tutos/09-comm-page.txt` and `CLI-2026/examples/comm_page.txt`:
-    update example commands.
+- [x] **P11-comm-b**: ✅ DONE.  Allow multiple COMM per domain — `Domain` now has
+  `comm_bindings: Vec<CapabilityWeak<MemoryRegion>>` (child-side list of parent
+  COMM caps bound to this domain).
+- [x] **P11-comm-c**: ✅ DONE.  `register_comm(caller, handle, child_domain_handle, vp_id)`
+  implemented.  `MemoryRegion` carries `comm_binding: Option<CommBinding>` where
+  `CommBinding = { target_domain_id, vp_id }`.  Weak ref pushed into child's
+  `comm_bindings`.  `CommRegion` update includes target domain and VP ID.
+- [x] **P11-comm-d**: ✅ DONE.  Auto-release on child revocation — revocation path
+  iterates child's `comm_bindings`; clears COMM attribute + binding, emits
+  `UncommRegion`.
+- [x] **P11-comm-e**: ✅ DONE.  13 integration tests in `2026/tests/integration/comm.rs`:
+  basic registration, carve/alias/send rejection, re-register rejection, multiple
+  COMM per domain, VP ID validation, revocation emits UncommRegion, no domain
+  revocation (no VITAL), zeroes memory (CLEAN), child revocation releases bindings.
+- [x] **P11-comm-f**: ✅ DONE.  CLI-2026 updated for new `register_comm` signature:
+  `cmd_register_comm()` accepts 3 args (`<mem> <child_domain> <vp_id>`),
+  `Command::RegisterComm` has `child_domain` and `vp_id` fields.
 
 **ThemIC protocol** (capavisor + driver, after COMM redesign):
 
@@ -571,8 +563,13 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
    GPA space; Themis uses explicit capability grants), the driver provides the
    adaptation glue.
 
-- [ ] **P15a** — CPUID hypervisor leaf: return Themis vendor string + `mshv`-compatible
-  feature flags on leaf `0x40000000`–`0x40000005`.
+- [x] **P15a** — ✅ DONE.  CPUID hypervisor leaves implemented in `vmexit.rs`:
+  leaf `0x40000000` returns "ThemisCapa" vendor string + max leaf `0x40000003`;
+  leaf `0x40000001` returns feature flags (bit 0: sync scheduling);
+  leaf `0x40000003` returns capacity limits (256 VPs, 1024 partitions, 4096 mem regions).
+  `THEMIS_REGISTER_COMM` opcode (0x18) wired in `hypercall.rs`.
+  VP register profile (`VpGpRegs`, `VpSregs`, `SegmentReg`, `DescriptorTableReg`,
+  `VpCommPage`) defined in `themis-abi/src/regs.rs`.
 - [ ] **P15b** — Character device `/dev/mshv`: `file_operations` with `open`, `release`,
   `unlocked_ioctl`, `mmap`.  Module init detects Themis via CPUID leaf.
 - [ ] **P15c** — Partition ioctls: `MSHV_CREATE_PARTITION` → `VMCALL_CREATE_DOMAIN`,
