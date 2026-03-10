@@ -1,8 +1,8 @@
 # CLI Tutorials
 
-The CLI includes 14 interactive tutorials that demonstrate capability engine concepts from basic operations to real-world architectures. Run them with `tutos <number>`.
+The CLI includes 15 interactive tutorials that demonstrate capability engine concepts from basic operations to real-world architectures. Run them with `tutos <number>`.
 
-## Basic Tutorials (1–8)
+## Basic Tutorials (1–9)
 
 These cover the fundamental building blocks of the capability model.
 
@@ -16,19 +16,20 @@ These cover the fundamental building blocks of the capability model.
 | 6 | `06-pending-capabilities.txt` | Pending Capabilities | RECEIVE_AFTER_SEAL, pending queue, accept/reject lifecycle |
 | 7 | `07-meta-regions.txt` | META Regions | Monitor-private memory, attestation visibility, forbidden operations |
 | 8 | `08-gpa-mapping.txt` | GPA Address Translation | Non-identity GPA, send_at, accept_at, view-aware insert, blocked gaps |
+| 9 | `09-comm-page.txt` | COMM Page | Domain-owned monitor communication buffer, one-shot registration, CLEAN+VITAL |
 
-## Advanced Tutorials (9–14)
+## Advanced Tutorials (10–15)
 
 These build on the basics to demonstrate realistic system architectures.
 
 | # | File | Topic | Concepts |
 |---|------|-------|----------|
-| 9 | `09-cvm-virtio.txt` | CVM with VirtIO | Confidential VM, shared I/O buffer, attestation |
-| 10 | `10-nested-enclave.txt` | Nested Enclaves | CVM with inner enclave, hierarchical isolation |
-| 11 | `11-sandbox.txt` | Sandboxed Execution | Aliased memory sandbox, limited permissions |
-| 12 | `12-encapsulation.txt` | Domain Encapsulation | Isolation boundaries, parent-mediated communication |
-| 13 | `13-sibling-attestation.txt` | Sibling Attestation | Channels between enclaves, cross-attestation, shared memory |
-| 14 | `14-driver-channels.txt` | Driver Channels | Channel-based driver isolation, CVM ↔ device communication |
+| 10 | `10-cvm-virtio.txt` | CVM with VirtIO | Confidential VM, shared I/O buffer, attestation |
+| 11 | `11-nested-enclave.txt` | Nested Enclaves | CVM with inner enclave, hierarchical isolation |
+| 12 | `12-sandbox.txt` | Sandboxed Execution | Aliased memory sandbox, limited permissions |
+| 13 | `13-encapsulation.txt` | Domain Encapsulation | Isolation boundaries, parent-mediated communication |
+| 14 | `14-sibling-attestation.txt` | Sibling Attestation | Channels between enclaves, cross-attestation, shared memory |
+| 15 | `15-driver-channels.txt` | Driver Channels | Channel-based driver isolation, CVM ↔ device communication |
 
 ## Writing Tutorials
 
@@ -43,8 +44,8 @@ Register new tutorials in `index.txt` (pipe-delimited: `filename|title|descripti
 
 ## Related Documentation
 
-- [Memory semantics](../semantics/memory.md) — carve, alias, rights, attributes (tutorials 1–3, 7)
-- [Domain semantics](../semantics/domain.md) — lifecycle, channels, pending caps, attestation (tutorials 4–6, 9–14)
+- [Memory semantics](../semantics/memory.md) — carve, alias, rights, attributes (tutorials 1–3, 7, 9)
+- [Domain semantics](../semantics/domain.md) — lifecycle, channels, pending caps, attestation (tutorials 4–6, 10–15)
 - [Translation semantics](../semantics/translation.md) — GPA/HPA, AddressMap, send_at/accept_at (tutorial 8)
 - [API walkthrough](../semantics/api.md) — end-to-end operation flow
 - [Switch and interrupts](../implementation/switch.md) — VP states, interrupt routing (tutorial 5)

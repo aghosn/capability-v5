@@ -278,3 +278,58 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 
     Ok(())
 }
+
+/// Register a memory capability as the domain's COMM page.
+///
+/// Usage: `register-comm <mem>`
+///
+/// The named memory region must be an exclusive carve owned by the calling
+/// domain.  The engine sets COMM|CLEAN|VITAL on the capability.  Calling
+/// this command again replaces the current COMM page.
+pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 1 {
+        return Err("Usage: register-comm <mem>".to_string());
+    }
+
+    let mem_name = args[0];
+    let mem = state
+        .memories
+        .get(mem_name)
+        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?
+        .clone();
+
+    let owner_id = mem.read().owned.owner;
+    let owner = state
+        .get_domain_cap_by_id(owner_id)
+        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let mem_handle = find_memory_handle(&owner, &mem)
+        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", mem_name))?;
+
+    let platform = state.platform.clone();
+    let (_, batch) = execute(&*platform, false, || {
+        Capability::<Domain>::register_comm(&owner, mem_handle)
+            .map(|b| ((), b))
+    })
+    .map_err(|e| format!("register-comm failed: {:?}", e))?;
+
+    process_updates(state, &batch);
+
+    state.session.add_command(Command::RegisterComm {
+        mem: mem_name.to_string(),
+    });
+
+    let owner_name = state
+        .domain_id_to_name
+        .get(&owner_id)
+        .cloned()
+        .unwrap_or_else(|| format!("<id:{}>", owner_id));
+
+    println!(
+        "{} '{}' registered as COMM page for domain '{}'",
+        "✓".bright_green().bold(),
+        mem_name.bright_white(),
+        owner_name.bright_white(),
+    );
+
+    Ok(())
+}

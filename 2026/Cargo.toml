@@ -116,6 +116,10 @@ path = "tests/integration/send_bugs.rs"
 name = "integration_meta"
 path = "tests/integration/meta.rs"
 
+[[test]]
+name = "integration_comm"
+path = "tests/integration/comm.rs"
+
 # ── concurrency tests ─────────────────────────────────────────────────────────
 [[test]]
 name = "concurrency_platform"

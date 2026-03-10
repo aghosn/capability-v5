@@ -387,6 +387,7 @@ impl Capability<MemoryRegion> {
         let clean = capa.owned.attributes.clean();
         let vital = capa.owned.attributes.vital();
         let meta = capa.owned.attributes.meta();
+        let comm = capa.owned.attributes.comm();
 
         #[cfg(feature = "address_translation")]
         let child_domain_weak = capa.owned.owner_domain.clone();
@@ -500,6 +501,12 @@ impl Capability<MemoryRegion> {
                     }
                 }
             }
+        }
+
+        // Notify the platform that its access to the COMM region is gone.
+        // Emitted before RevokeDomain so the platform can unmap before tearing down.
+        if comm {
+            updates.add_uncomm_region(child_owner, hpa_start, hpa_size);
         }
 
         if vital {
@@ -888,8 +895,8 @@ impl Capability<Domain> {
                 if p.owned.owner != owner_id {
                     return Err(CapaError::PermissionDenied);
                 }
-                // META regions may not be carved.
-                if p.owned.attributes.meta() {
+                // META and COMM regions may not be carved.
+                if p.owned.attributes.meta() || p.owned.attributes.comm() {
                     return Err(CapaError::PermissionDenied);
                 }
                 let parent_rights = p.data.access.rights;
@@ -982,8 +989,8 @@ impl Capability<Domain> {
                 if p.owned.owner != owner_id {
                     return Err(CapaError::PermissionDenied);
                 }
-                // META regions may not be aliased.
-                if p.owned.attributes.meta() {
+                // META and COMM regions may not be aliased.
+                if p.owned.attributes.meta() || p.owned.attributes.comm() {
                     return Err(CapaError::PermissionDenied);
                 }
                 p.owned.clone()
@@ -1099,8 +1106,8 @@ impl Capability<Domain> {
             // (caller.read() already dropped above, so no overlapping lock).
             let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
             let c = cap_ref.read();
-            // A region already marked META cannot be re-sent.
-            if c.owned.attributes.meta() {
+            // A region already marked META or COMM cannot be sent.
+            if c.owned.attributes.meta() || c.owned.attributes.comm() {
                 return Err(CapaError::PermissionDenied);
             }
             // Only exclusive (unbroken chain of carves) regions may be sent as META.
@@ -1937,6 +1944,91 @@ impl Capability<Domain> {
         // LocalHandle is reclaimed by allocate_domain_handle.
         caller.write().data.remove_domain_capability(child_handle);
         Ok(updates)
+    }
+
+    /// Register a COMM page for the caller domain.
+    ///
+    /// The capability at `handle` becomes the domain's communication buffer shared
+    /// with the monitor.  It must be a **carve** with **exclusive** status and must
+    /// not already carry the `COMM` attribute.  The engine sets `COMM|CLEAN|VITAL`
+    /// on the capability so that it cannot be carved, aliased, or sent, and so that
+    /// its revocation tears down the domain.
+    ///
+    /// This is a **one-shot** operation.  A domain may register a COMM page only
+    /// once.  Replacement is not allowed because the COMM|CLEAN|VITAL attributes
+    /// of the old page cannot be safely unwound (restoring original attributes is
+    /// ambiguous and revoking it would tear down the domain).  To use a different
+    /// COMM page, revoke the domain and create a new one.
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`]         — `handle` not in caller's memory table.
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, not owned by caller,
+    ///                                     not a carve, or not exclusive.
+    /// - [`CapaError::InvalidOperation`] — a COMM page is already registered for
+    ///                                     this domain, or the capability already
+    ///                                     carries the `COMM` attribute.
+    pub fn register_comm(
+        caller: &CapabilityRef<Domain>,
+        handle: LocalHandle,
+    ) -> Result<UpdateBatch> {
+        let owner_id: DomainId;
+        let cap_ref: CapabilityRef<MemoryRegion>;
+
+        // Pre-flight: resolve handle, check domain has no COMM page yet.
+        {
+            let r = caller.read();
+            if r.data.is_memory_handle_frozen(handle) {
+                return Err(CapaError::PermissionDenied);
+            }
+            owner_id = r.data.id;
+            // One-shot: reject if a COMM page is already registered.
+            if r.data.comm_cap.as_ref().and_then(|w| w.upgrade()).is_some() {
+                return Err(CapaError::InvalidOperation(
+                    "COMM page already registered; revoke the domain to change it".into(),
+                ));
+            }
+            let cap_weak = r
+                .data
+                .get_memory_capability(handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        }
+
+        // Validate cap: must be Carve, Exclusive, owned by caller, not already COMM.
+        {
+            let c = cap_ref.read();
+            if c.owned.owner != owner_id {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.data.kind != RegionKind::Carve {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.data.status != RegionStatus::Exclusive {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.owned.attributes.comm() {
+                return Err(CapaError::InvalidOperation(
+                    "capability already carries the COMM attribute".into(),
+                ));
+            }
+        }
+
+        // Mutation: domain write lock → cap write lock.
+        let (new_phys, new_size) = {
+            let mut w = caller.write();
+            let mut c = cap_ref.write();
+            let phys = c.data.access.start;
+            let size = c.data.access.size;
+            c.owned.attributes = Attributes::from_bits(Attributes::COMM).canonicalize();
+            w.data.comm_cap = Some(Arc::downgrade(&cap_ref));
+            (phys, size)
+        };
+
+        let mut batch = UpdateBatch::new();
+        batch.add_comm_region(owner_id, new_phys, new_size);
+        Ok(batch)
     }
 
     /// Attest the caller domain itself.

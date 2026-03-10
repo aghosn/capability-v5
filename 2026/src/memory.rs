@@ -105,12 +105,15 @@ impl Attributes {
     pub const VITAL: u8 = 1 << 2;
     /// Region is used for metadata storage
     pub const META: u8 = 1 << 3;
+    /// Region is the domain's COMM page (monitor↔domain shared communication buffer).
+    /// Implies CLEAN + VITAL; cannot be carved, aliased, or sent once set.
+    pub const COMM: u8 = 1 << 4;
 
     pub const NONE: Self = Attributes { bits: 0 };
 
     /// Create Attributes from raw bits
     pub const fn from_bits(bits: u8) -> Self {
-        Attributes { bits: bits & 0x0F } // Mask to 4 bits
+        Attributes { bits: bits & 0x1F } // Mask to 5 bits
     }
 
     /// Get raw bits
@@ -140,10 +143,14 @@ impl Attributes {
         self.has(Self::META)
     }
 
-    /// Canonicalize: META implies CLEAN + VITAL, so materialize those flags.
-    /// Call this once at send time to avoid scattered checks in the revocation path.
+    pub const fn comm(&self) -> bool {
+        self.has(Self::COMM)
+    }
+
+    /// Canonicalize: META and COMM both imply CLEAN + VITAL; materialize those flags.
+    /// Call this once at registration/send time to avoid scattered checks in the revocation path.
     pub const fn canonicalize(self) -> Self {
-        if self.meta() {
+        if self.meta() || self.comm() {
             Attributes { bits: self.bits | Self::CLEAN | Self::VITAL }
         } else {
             self
@@ -171,6 +178,9 @@ impl fmt::Display for Attributes {
         }
         if self.meta() {
             attrs.push("META");
+        }
+        if self.comm() {
+            attrs.push("COMM");
         }
         write!(f, "{}", attrs.join("|"))
     }

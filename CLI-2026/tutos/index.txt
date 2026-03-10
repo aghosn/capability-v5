@@ -11,11 +11,12 @@
 06-pending-capabilities.txt|Pending Capabilities and RECEIVE_AFTER_SEAL|Accept or reject capabilities sent to a sealed domain
 07-meta-regions.txt|META Regions — Monitor Metadata Memory|Send monitor-private memory that is invisible to the domain but visible in attestation
 08-gpa-mapping.txt|GPA Address Translation|Non-identity GPA mapping with send_at, accept_at, and view-aware insert
+09-comm-page.txt|COMM Page — Domain Communication Buffer|Register a shared memory channel between domain and monitor; one-shot, CLEAN+VITAL
 
 # Advanced Tutorials - Real-World Use Cases
-09-cvm-virtio.txt|Confidential VM with VirtIO Buffer|Create a CVM with shared I/O communication
-10-nested-enclave.txt|Nested Enclave Architecture|Create a CVM with a nested secure enclave
-11-sandbox.txt|Sandboxed Execution Environment|Create a sandbox with aliased memory
-12-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
-13-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels
-14-driver-channels.txt|Channels — Driver Isolation with CVM|Hypervisor creates driver and CVM, CVM attests and shares memory via channel
+10-cvm-virtio.txt|Confidential VM with VirtIO Buffer|Create a CVM with shared I/O communication
+11-nested-enclave.txt|Nested Enclave Architecture|Create a CVM with a nested secure enclave
+12-sandbox.txt|Sandboxed Execution Environment|Create a sandbox with aliased memory
+13-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
+14-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels
+15-driver-channels.txt|Channels — Driver Isolation with CVM|Hypervisor creates driver and CVM, CVM attests and shares memory via channel

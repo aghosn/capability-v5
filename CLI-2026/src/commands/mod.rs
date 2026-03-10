@@ -34,6 +34,7 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "carve" => memory::cmd_carve(state, args),
         "alias" => memory::cmd_alias(state, args),
         "send" => memory::cmd_send(state, args),
+        "register-comm" => memory::cmd_register_comm(state, args),
 
         // Information commands
         "attest" => info::cmd_attest(state, args),

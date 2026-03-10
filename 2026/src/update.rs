@@ -71,6 +71,23 @@ pub enum Update {
         start: u64,
         size: u64,
     },
+
+    /// A COMM region was registered by `domain_id`.
+    /// The platform must map `[phys, phys+size)` into its own address space
+    /// (e.g. via HHDM) so it can read/write the domain's communication buffer.
+    CommRegion {
+        domain_id: DomainId,
+        phys: u64,
+        size: u64,
+    },
+
+    /// A COMM region was unregistered or revoked for `domain_id`.
+    /// The platform must unmap its own access to `[phys, phys+size)`.
+    UncommRegion {
+        domain_id: DomainId,
+        phys: u64,
+        size: u64,
+    },
 }
 
 impl Update {
@@ -82,6 +99,9 @@ impl Update {
             | Update::FlushTLB { domain } => Some(*domain),
             Update::CreateDomain { domain_id, .. }
             | Update::GiveMetaMem { domain_id, .. } => Some(*domain_id),
+            // CommRegion/UncommRegion affect only the platform's own mappings,
+            // not the domain's EPT — no IPI needed.
+            Update::CommRegion { .. } | Update::UncommRegion { .. } => None,
             Update::ZeroMemory { .. } => None,
         }
     }
@@ -166,6 +186,16 @@ impl UpdateBatch {
     /// Add a give-meta-mem update.
     pub fn add_give_meta_mem(&mut self, domain_id: DomainId, start: u64, size: u64) {
         self.add(Update::GiveMetaMem { domain_id, start, size });
+    }
+
+    /// Add a comm-region update (COMM page registered by a domain).
+    pub fn add_comm_region(&mut self, domain_id: DomainId, phys: u64, size: u64) {
+        self.add(Update::CommRegion { domain_id, phys, size });
+    }
+
+    /// Add an uncomm-region update (COMM page unregistered or revoked).
+    pub fn add_uncomm_region(&mut self, domain_id: DomainId, phys: u64, size: u64) {
+        self.add(Update::UncommRegion { domain_id, phys, size });
     }
 
     /// Get all updates in the batch

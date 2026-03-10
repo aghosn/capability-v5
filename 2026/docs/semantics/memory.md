@@ -33,14 +33,15 @@ Rights are a three-bit bitmap:
 
 ## Ownership Attributes
 
-Attributes are per-ownership metadata set at `send` time. They affect behaviour at revocation:
+Attributes are per-ownership metadata. `CLEAN`, `VITAL`, `HASH`, and `META` are set at `send` time. `COMM` is set by `register_comm`. They affect behaviour at revocation:
 
-| Attribute | Effect at revocation |
-|-----------|---------------------|
-| `CLEAN` | Zero physical memory before restoring parent access |
-| `VITAL` | Also revoke the domain that owns this capability |
-| `HASH` | Region content is/should be hashed for attestation |
-| `META` | Monitor metadata: excluded from address space; implies `CLEAN` + `VITAL` at revocation |
+| Attribute | How set | Effect at revocation |
+|-----------|---------|---------------------|
+| `CLEAN` | `send` | Zero physical memory before restoring parent access |
+| `VITAL` | `send` | Also revoke the domain that owns this capability |
+| `HASH` | `send` | Region content is/should be hashed for attestation |
+| `META` | `send` | Monitor metadata: excluded from address space; implies `CLEAN` + `VITAL` |
+| `COMM` | `register_comm` | Domain COMM page: implies `CLEAN` + `VITAL`; emits `UncommRegion` before domain teardown |
 
 ---
 
@@ -102,6 +103,69 @@ Revoking a META region triggers the same sequence as `CLEAN | VITAL`:
 ```
 cap> revoke r0 monitor_scratch
 ✓ Zeroed [0x500000..0x510000). Domain 'app' revoked (META implies VITAL).
+```
+
+---
+
+## COMM — Domain Communication Buffer
+
+A domain registers a COMM page to establish a **shared memory channel between itself and the monitor**. Unlike META (which is sent by the parent and hidden from the domain), a COMM page is:
+
+- **Registered by the domain itself**, using a cap it already owns.
+- **Stayed mapped in the domain's address space** — the domain can read and write it.
+- **Also accessible to the monitor** — the platform maps its physical address (e.g. via HHDM) after receiving the `CommRegion` update.
+
+| Property | Behaviour |
+|----------|-----------|
+| Registration | Domain calls `register_comm(handle)` on an exclusive carve it owns |
+| Source requirement | Must be `RegionKind::Carve` with `RegionStatus::Exclusive` |
+| Attributes set | `COMM \| CLEAN \| VITAL` (canonicalized at registration time) |
+| Carved / aliased / sent | **Rejected** once COMM is set |
+| One-shot | A domain may register a COMM page **exactly once**; replacement is not allowed |
+| Revocation — `UncommRegion` | Emitted **before** `RevokeDomain` so the monitor unmaps its access first |
+| Revocation — `ZeroMemory` | Emitted because CLEAN is implied |
+| Revocation — `RevokeDomain` | Emitted because VITAL is implied |
+
+### One-shot semantics
+
+Replacing a COMM page is intentionally disallowed. The COMM attribute implies VITAL; revoking the old cap to replace it would tear down the domain. Restoring the original attributes of the old cap is also ambiguous (they were discarded when COMM was applied). The safe design is: register once, replace by revoking the domain and creating a new one.
+
+### ✓ Success: register a COMM page
+
+```
+cap> carve child_ram comm0 0x0 0x1000 RW
+cap> register-comm comm0
+✓ 'comm0' registered as COMM page for domain 'child'
+  ℹ COMM: 1 page(s) registered with monitor
+```
+
+`comm0` now carries `COMM|CLEAN|VITAL`. The monitor receives a `CommRegion` update and maps `[0x0, 0x1000)` for its own access.
+
+### ✗ Failure: second register-comm call rejected
+
+```
+cap> register-comm comm0
+✗ Error: InvalidOperation — COMM page already registered; revoke the domain to change it
+```
+
+### ✗ Failure: carve or alias a COMM cap
+
+```
+cap> carve comm0 sub 0x0 0x100 R
+✗ Error: PermissionDenied — COMM regions cannot be carved, aliased, or sent
+```
+
+### Revocation
+
+Revoking the COMM cap (by the parent that owns the memory tree) produces three updates in order:
+
+1. `UncommRegion` — monitor unmaps its access to the COMM page.
+2. `ZeroMemory` — physical range is zeroed (CLEAN).
+3. `RevokeDomain` — the domain that registered the COMM page is revoked (VITAL).
+
+```
+cap> revoke child_ram comm0
+✓ Revoked 'comm0'. Monitor unmapped COMM page. Memory zeroed. Domain 'child' revoked.
 ```
 
 ---

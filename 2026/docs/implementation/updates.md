@@ -36,6 +36,17 @@ pub enum Update {
     /// (the platform must look up the parent from its own domain-parent map).
     RevokeDomain { domain: DomainId, fallback: Option<DomainId> },
 
+    /// Monitor maps its own access to a domain's COMM page (via HHDM).
+    /// Emitted by `register_comm`. Carries no `affected_domain` — the
+    /// platform applies this to its own internal mappings only; no IPI is needed.
+    CommRegion { domain_id: DomainId, phys: u64, size: u64 },
+
+    /// Monitor unmaps its access to a domain's COMM page.
+    /// Emitted during revocation of a COMM-attributed capability, BEFORE the
+    /// corresponding `RevokeDomain` update so the monitor safely relinquishes
+    /// its mapping before the domain is torn down.
+    UncommRegion { domain_id: DomainId, phys: u64, size: u64 },
+
     /// Flush TLB entries for a domain.
     FlushTLB { domain: DomainId },
 }
@@ -50,6 +61,8 @@ pub enum Update {
 | `ChangeRights` (rights downgraded) | Access rights are narrowed on an existing mapping | `true` |
 | `ZeroMemory` | A `CLEAN`-attributed capability is revoked | n/a — physical op |
 | `RevokeDomain` | A domain is revoked (explicit or via `VITAL` trigger) | n/a |
+| `CommRegion` | `register_comm` — monitor maps its HHDM access to the COMM page | n/a — platform-internal |
+| `UncommRegion` | COMM-attributed revocation — monitor unmaps its HHDM access (emitted before `RevokeDomain`) | n/a — platform-internal |
 | `FlushTLB` | Platform must invalidate TLB entries for a domain | n/a |
 
 `Rights` is a bitfield with constants `Rights::NONE`, `Rights::R`, `Rights::RW`, `Rights::RX`, and `Rights::RWX` (bits: read=0, write=1, execute=2).
@@ -80,15 +93,20 @@ Convenience constructors on `UpdateBatch`:
 | `add_zero_memory(address, size)` | `ZeroMemory` entry |
 | `add_revoke_domain(domain)` | `RevokeDomain` with `fallback: None` |
 | `add_revoke_domain_with_fallback(domain, fallback)` | `RevokeDomain` with explicit fallback |
+| `add_comm_region(domain_id, phys, size)` | `CommRegion` entry (monitor maps HHDM access) |
+| `add_uncomm_region(domain_id, phys, size)` | `UncommRegion` entry (monitor unmaps HHDM access) |
 
 ### Ordering guarantees within a revocation batch
 
 For any subtree node, updates appear in this order:
 
 1. All updates from the node's children (recursive, leaves first).
-2. `ZeroMemory` for this node (if `CLEAN`).
-3. `ChangeRights` pair — remove access from the loser, restore access to the winner (if `Carve` and ownership transferred).
-4. `RevokeDomain` for the owning domain (if `VITAL`).
+2. `UncommRegion` for this node (if `COMM`).
+3. `ZeroMemory` for this node (if `CLEAN`).
+4. `ChangeRights` pair — remove access from the loser, restore access to the winner (if `Carve` and ownership transferred).
+5. `RevokeDomain` for the owning domain (if `VITAL`).
+
+`UncommRegion` is placed before `ZeroMemory` and `RevokeDomain` so the monitor relinquishes its own HHDM mapping before the physical memory is zeroed and before the domain is torn down.
 
 ---
 

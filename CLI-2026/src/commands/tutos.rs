@@ -255,7 +255,7 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
         println!("\n{}", "Available Tutorials:".bright_cyan().bold());
         println!();
         println!("{}", "Basic Tutorials:".bright_yellow().bold());
-        for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i < 5) {
+        for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i < 9) {
             println!(
                 "  {} {} - {}",
                 format!("[{}]", i + 1).bright_green(),
@@ -265,7 +265,7 @@ pub fn cmd_tutos(state: &mut CliState, args: &[&str]) -> Result<(), String> {
         }
         println!();
         println!("{}", "Advanced Tutorials:".bright_yellow().bold());
-        for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i >= 5) {
+        for (i, tutorial) in tutorials.iter().enumerate().filter(|(i, _)| *i >= 9) {
             println!(
                 "  {} {} - {}",
                 format!("[{}]", i + 1).bright_green(),

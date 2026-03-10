@@ -105,31 +105,36 @@ fn tutorial_08_gpa_mapping() {
 }
 
 #[test]
-fn tutorial_09_cvm_virtio() {
-    run_tuto("09-cvm-virtio.txt").unwrap();
+fn tutorial_09_comm_page() {
+    run_tuto("09-comm-page.txt").unwrap();
 }
 
 #[test]
-fn tutorial_10_nested_enclave() {
-    run_tuto("10-nested-enclave.txt").unwrap();
+fn tutorial_10_cvm_virtio() {
+    run_tuto("10-cvm-virtio.txt").unwrap();
 }
 
 #[test]
-fn tutorial_11_sandbox() {
-    run_tuto("11-sandbox.txt").unwrap();
+fn tutorial_11_nested_enclave() {
+    run_tuto("11-nested-enclave.txt").unwrap();
 }
 
 #[test]
-fn tutorial_12_encapsulation() {
-    run_tuto("12-encapsulation.txt").unwrap();
+fn tutorial_12_sandbox() {
+    run_tuto("12-sandbox.txt").unwrap();
 }
 
 #[test]
-fn tutorial_13_sibling_attestation() {
-    run_tuto("13-sibling-attestation.txt").unwrap();
+fn tutorial_13_encapsulation() {
+    run_tuto("13-encapsulation.txt").unwrap();
 }
 
 #[test]
-fn tutorial_14_driver_channels() {
-    run_tuto("14-driver-channels.txt").unwrap();
+fn tutorial_14_sibling_attestation() {
+    run_tuto("14-sibling-attestation.txt").unwrap();
+}
+
+#[test]
+fn tutorial_15_driver_channels() {
+    run_tuto("15-driver-channels.txt").unwrap();
 }

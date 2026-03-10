@@ -88,6 +88,9 @@ pub enum Command {
         receiver: String,
         pending_id: u64,
     },
+    RegisterComm {
+        mem: String,
+    },
 }
 
 /// Session recorder that can export commands as unit tests
@@ -181,6 +184,9 @@ impl Session {
                 }
                 Command::RejectChannel { receiver, pending_id } => {
                     format!("reject-channel {} {}", receiver, pending_id)
+                }
+                Command::RegisterComm { mem } => {
+                    format!("register-comm {}", mem)
                 }
             };
             writeln!(file, "{}", line)?;
@@ -514,6 +520,19 @@ impl Session {
 
                     writeln!(file, "    // reject-channel: {receiver} rejects pending channel {pending_id}")?;
                     writeln!(file, "    Capability::<Domain>::reject_channel(&{recv_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file)?;
+                }
+
+                Command::RegisterComm { mem } => {
+                    let mem_arc = arc_map.get(mem)
+                        .cloned().unwrap_or_else(|| sanitize_name(mem));
+                    let owner_id_var = format!("{mem_arc}_owner_id");
+
+                    writeln!(file, "    // register-comm: register '{mem}' as COMM page")?;
+                    writeln!(file, "    let {owner_id_var} = {mem_arc}.read().owned.owner;")?;
+                    writeln!(file, "    let {mem_arc}_owner = domains.get(&{owner_id_var}).unwrap().clone();")?;
+                    writeln!(file, "    let {mem_arc}_handle = find_memory_handle(&{mem_arc}_owner, &{mem_arc}).unwrap();")?;
+                    writeln!(file, "    Capability::<Domain>::register_comm(&{mem_arc}_owner, {mem_arc}_handle).unwrap();")?;
                     writeln!(file)?;
                 }
             }

@@ -466,6 +466,10 @@ pub struct Domain {
     /// Handles that have been frozen (sent but not yet accepted/rejected)
     pub frozen_handles: BTreeSet<LocalHandle>,
 
+    /// The domain's currently registered COMM capability (weak; stays in memory_capabilities).
+    /// `None` until the domain calls `register_comm`.
+    pub comm_cap: Option<CapabilityWeak<MemoryRegion>>,
+
     /// Cached address-space view (kept up-to-date by all capability mutations)
     pub cached_view: AddressSpaceView,
 
@@ -490,6 +494,7 @@ impl Domain {
             pending_capabilities: BTreeMap::new(),
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
+            comm_cap: None,
             cached_view: AddressSpaceView::new(id),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
@@ -510,6 +515,7 @@ impl Domain {
             pending_capabilities: BTreeMap::new(),
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
+            comm_cap: None,
             cached_view: AddressSpaceView::new(0),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
@@ -534,6 +540,7 @@ impl Domain {
             pending_capabilities: BTreeMap::new(),
             pending_domain_capabilities: BTreeMap::new(),
             frozen_handles: BTreeSet::new(),
+            comm_cap: None,
             cached_view: AddressSpaceView::new(u64::MAX),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),

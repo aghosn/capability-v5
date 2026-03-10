@@ -1,0 +1,47 @@
+# COMM page example session
+#
+# Demonstrates registering a domain's COMM communication buffer.
+# COMM registration is one-shot: a domain registers its COMM page once
+# and cannot replace it.  To change the COMM page, revoke the domain
+# and create a new one.
+#
+# Replay with: load examples/comm_page.txt
+
+# 1. Set up root domain with a memory region
+init root 0x100000
+
+# 2. Create a child domain and seal it
+create-domain root child 0xf all
+seal child
+
+# 3. Send a chunk of memory to the child so it can use it
+carve root child_ram 0x0 0x10000 rwx
+send child_ram child
+
+# Child accepts the memory
+enumerate-pending child
+accept-capability child 0
+
+# 4. Carve a single page from the child's RAM as its COMM buffer
+carve child_ram comm0 0x0 0x1000 rw
+
+# 5. Register it — monitor now maps [0x0, 0x1000) for its own access
+#    Batch shows: 1 CommRegion update
+register-comm comm0
+
+# 6. Inspect: comm0 now carries COMM|CLEAN|VITAL; it is a one-shot binding
+list
+
+# 7. Attempting a second register-comm is rejected (one-shot semantics)
+# register-comm comm0   ← would fail: InvalidOperation
+
+# 8. Attempting to carve or alias a COMM cap is also rejected
+# carve comm0 bad_carve 0x0 0x100 r   ← would fail: PermissionDenied
+# alias comm0 bad_alias 0x0 0x100 r   ← would fail: PermissionDenied
+# send  comm0 root                    ← would fail: PermissionDenied
+
+# 9. Revoking the COMM cap (from root, which owns the memory tree) will:
+#     - emit UncommRegion (monitor unmaps its access to the COMM page)
+#     - emit ZeroMemory   (CLEAN: content wiped before returning to root)
+#     - emit RevokeDomain (VITAL: child torn down)
+revoke child_ram comm0

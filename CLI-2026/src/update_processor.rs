@@ -34,16 +34,24 @@ pub fn process_updates(state: &mut CliState, updates: &UpdateBatch) {
     }
 
     // Print MMU update summary
-    let (mut maps, mut unmaps, mut zeros) = (0, 0, 0);
+    let (mut maps, mut unmaps, mut zeros, mut comms, mut uncomms) = (0, 0, 0, 0, 0);
     for update in updates.updates() {
         match update {
             Update::ChangeRights { rights, .. } if *rights == capability_engine::Rights::NONE => unmaps += 1,
             Update::ChangeRights { .. } => maps += 1,
             Update::ZeroMemory { .. } => zeros += 1,
+            Update::CommRegion { .. } => comms += 1,
+            Update::UncommRegion { .. } => uncomms += 1,
             _ => {}
         }
     }
     if maps + unmaps + zeros > 0 {
         println!("  ℹ MMU updates: {} map(s), {} unmap(s), {} zero(s)", maps, unmaps, zeros);
+    }
+    if comms > 0 {
+        println!("  ℹ COMM: {} page(s) registered with monitor", comms);
+    }
+    if uncomms > 0 {
+        println!("  ℹ COMM: {} page(s) unregistered from monitor", uncomms);
     }
 }
