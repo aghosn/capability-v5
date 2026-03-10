@@ -540,6 +540,33 @@ Replace stock minimal Linux with purpose-built dom0 image. Deferred until Phase 
 - [ ] **P14d** — Build script `scripts/build-dom0.sh`: fetch kernel, apply config, build, assemble initrd.
 - [ ] **P14e** — Validation: boot under QEMU, verify driver loads, run child-domain smoke test.
 
+### Phase 14.5 — Dom0 Image Upgrade (Jammy → Noble)
+
+Upgraded the stock dom0 cloud image from Ubuntu Jammy 22.04 (kernel 5.15) to
+Ubuntu Noble 24.04 (kernel 6.8) for better hardware support, Rust toolchain
+availability, and newer kernel APIs.
+
+- [x] **P14.5a** — ✅ DONE.  Image upgrade: updated `IMAGE_NAME` across 8 scripts
+  (`fetch-dom0.sh`, `run-dom0.sh`, `run-qemu.sh`, `themis-debug.sh`, `build-iso.sh`,
+  `mount-guest.sh`, `resize-disk.sh`, `README.md`) from `jammy-server-cloudimg-amd64.img`
+  to `ubuntu-24.04-server-cloudimg-amd64.img`.
+- [x] **P14.5b** — ✅ DONE.  Limine boot path fix: Noble splits `/boot` into a
+  separate partition (`LABEL=BOOT`).  Changed Limine `module_path` from
+  `fslabel(cloudimg-rootfs):/boot/vmlinuz` to `fslabel(BOOT):/vmlinuz`.
+- [x] **P14.5c** — ✅ DONE.  AP triple-fault fix: Noble's 6.8 kernel trampoline
+  writes `CR0_STATE & ~PG` (includes ET|NE) instead of just `PE`, causing extra
+  CR_ACCESS VMEXITs during the 32-bit→64-bit transition.  Fixed
+  `sync_ia32e_mode_guest()` in `vmexit.rs`: removed incorrect CS.L forcing
+  that corrupted guest state when a VMEXIT hit the brief compatibility-mode
+  window (LMA=1, CS.L=0) between enabling paging and the far jump.
+- [x] **P14.5d** — ✅ DONE.  Improved VMEXIT diagnostics: added serial-lock
+  guards to TRIPLE_FAULT, EPT_VIOLATION, EPT_MISCONFIG, and
+  VMENTRY_INVALID_GUEST handlers to prevent garbled multi-core output.
+  Added VP id, CS/SS state, IDTR, entry controls to dumps.
+- [ ] **P14.5e** — Multi-version support: parameterize the image name and boot
+  partition layout so that both Jammy and Noble (and future releases) can be
+  used without editing scripts.  Consider a `dom0.conf` or env-var override.
+
 ### Phase 15 — `mshv-themis` Linux Kernel Driver (mshv-compatible)
 
 Capability-aware `/dev/mshv` replacement.  Exposes Themis's capability operations

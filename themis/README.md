@@ -242,11 +242,11 @@ sudo resize2fs /dev/vda1
 ```
 
 The dom0 kernel and initrd are **not** downloaded separately — Limine reads them
-directly from the disk at boot time:
+directly from the disk's BOOT partition at boot time:
 
 ```
-module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
-module_path: fslabel(cloudimg-rootfs):/boot/initrd.img
+module_path: fslabel(BOOT):/vmlinuz
+module_path: fslabel(BOOT):/initrd.img
 ```
 
 The disk is attached as a virtio-blk drive under UEFI (OVMF includes virtio

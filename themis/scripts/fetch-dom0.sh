@@ -6,9 +6,9 @@
 #   https://cloud-images.ubuntu.com/
 #
 # The image is kept with its original filename so we know exactly what
-# version we're running. The dom0 kernel and initrd live inside the disk
-# image (/boot/vmlinuz, /boot/initrd.img) — Limine loads them directly
-# from the disk at boot time via fslabel(cloudimg-rootfs)://.
+# version we're running. The dom0 kernel and initrd live on the BOOT
+# ext4 partition (/vmlinuz, /initrd.img) — Limine loads them directly
+# from the disk at boot time via fslabel(BOOT)://.
 #
 # Output:
 #   guest/ubuntu-24.04-server-cloudimg-amd64.img   Ubuntu root disk (QCOW2)
@@ -104,8 +104,8 @@ cat > "$DOM0_DIR/version.txt" <<EOF
 image:    ${IMAGE_NAME}
 url:      ${IMAGE_URL}
 fetched:  $(date -u +%Y-%m-%dT%H:%M:%SZ)
-kernel:   loaded at runtime from fslabel(cloudimg-rootfs)://boot/vmlinuz
-initrd:   loaded at runtime from fslabel(cloudimg-rootfs)://boot/initrd.img
+kernel:   loaded at runtime from fslabel(BOOT)://vmlinuz
+initrd:   loaded at runtime from fslabel(BOOT)://initrd.img
 EOF
 
 echo ""

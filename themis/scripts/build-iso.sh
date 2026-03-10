@@ -107,11 +107,13 @@ CONF
 
 # Only include dom0 modules if the disk image is present.
 # Without these lines Limine boots the capavisor alone (useful for testing).
+# Noble 24.04 places the kernel/initrd on a separate ext4 boot partition
+# labeled "BOOT" (Jammy kept them on the cloudimg-rootfs root partition).
 if [[ -f "$WORKSPACE_ROOT/guest/ubuntu-24.04-server-cloudimg-amd64.img" ]]; then
     cat >> "$ISO_ROOT/boot/limine/limine.conf" <<'CONF'
-    module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
+    module_path: fslabel(BOOT):/vmlinuz
     module_cmdline: dom0-kernel
-    module_path: fslabel(cloudimg-rootfs):/boot/initrd.img
+    module_path: fslabel(BOOT):/initrd.img
     module_cmdline: dom0-initrd
 CONF
 fi

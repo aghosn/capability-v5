@@ -332,6 +332,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_VMENTRY_INVALID_GUEST => {
+            while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
             let qual   = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let rip    = vcpu.get(vmcs::guest::RIP);
             let rsp    = vcpu.get(vmcs::guest::RSP);
@@ -340,12 +343,17 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let cr4    = vcpu.get(vmcs::guest::CR4);
             let efer   = vcpu.get(vmcs::guest::IA32_EFER_FULL);
             let rflags = vcpu.get(vmcs::guest::RFLAGS);
-            serial_println!("[VMEXIT] EXIT REASON 33: VM-entry failure (invalid guest state)");
-            serial_println!("  qual(IA32_DEBUGCTL)={:#018x}", qual);
+            let cs_ar  = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+            let entry_ctl = vcpu.get(control::VMENTRY_CONTROLS);
+            serial_println!("===== VM-ENTRY FAILURE (vpid={}) =====", vcpu.vpid());
+            serial_println!("  qual={:#018x}", qual);
             serial_println!("  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}", rip, rsp, rflags);
             serial_println!("  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}", cr0, cr3, cr4, efer);
+            serial_println!("  CS_AR={:#06x}  entry_ctl={:#010x}", cs_ar, entry_ctl);
             serial_println!("  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
                 vcpu.reg(Reg::Rax), vcpu.reg(Reg::Rbx), vcpu.reg(Reg::Rcx));
+            serial_println!("==========================================");
+            crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
 
@@ -432,6 +440,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_TRIPLE_FAULT => {
+            // Acquire serial lock to prevent garbled output from concurrent cores.
+            while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+
             let rip    = vcpu.get(vmcs::guest::RIP);
             let rsp    = vcpu.get(vmcs::guest::RSP);
             let cr0    = vcpu.get(vmcs::guest::CR0);
@@ -439,29 +452,64 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let cr4    = vcpu.get(vmcs::guest::CR4);
             let efer   = vcpu.get(vmcs::guest::IA32_EFER_FULL);
             let rflags = vcpu.get(vmcs::guest::RFLAGS);
-            serial_println!("[VMEXIT] TRIPLE FAULT — guest state at fault:");
+            let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
+            let cs_base = vcpu.get(vmcs::guest::CS_BASE);
+            let cs_ar  = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+            let ss_sel = vcpu.get(vmcs::guest::SS_SELECTOR);
+            let ss_ar  = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
+            let entry_ctl = vcpu.get(control::VMENTRY_CONTROLS);
+            let act    = vcpu.get(vmcs::guest::ACTIVITY_STATE);
+            let interruptibility = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+            let idtr_base = vcpu.get(vmcs::guest::IDTR_BASE);
+            let idtr_limit = vcpu.get(vmcs::guest::IDTR_LIMIT);
+
+            serial_println!("===== TRIPLE FAULT (vpid={}) =====", vcpu.vpid());
             serial_println!("  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}", rip, rsp, rflags);
             serial_println!("  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}", cr0, cr3, cr4, efer);
+            serial_println!("  CS: sel={:#06x} base={:#010x} ar={:#06x}  SS: sel={:#06x} ar={:#06x}",
+                cs_sel, cs_base, cs_ar, ss_sel, ss_ar);
+            serial_println!("  IDTR: base={:#018x} limit={:#06x}", idtr_base, idtr_limit);
+            serial_println!("  entry_ctl={:#010x}  activity={} interruptibility={:#x}",
+                entry_ctl, act, interruptibility);
             serial_println!("  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
                 vcpu.reg(Reg::Rax), vcpu.reg(Reg::Rbx), vcpu.reg(Reg::Rcx));
             serial_println!("  RDX={:#018x}  RSI={:#018x}  RDI={:#018x}",
                 vcpu.reg(Reg::Rdx), vcpu.reg(Reg::Rsi), vcpu.reg(Reg::Rdi));
+            serial_println!("  R8 ={:#018x}  R9 ={:#018x}  R10={:#018x}",
+                vcpu.reg(Reg::R8), vcpu.reg(Reg::R9), vcpu.reg(Reg::R10));
+            serial_println!("  RBP={:#018x}  R12={:#018x}  R13={:#018x}",
+                vcpu.reg(Reg::Rbp), vcpu.reg(Reg::R12), vcpu.reg(Reg::R13));
+            serial_println!("=================================");
+
+            crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
 
         EXIT_REASON_EPT_VIOLATION => {
+            while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let rip = vcpu.get(vmcs::guest::RIP);
+            let cr3 = vcpu.get(vmcs::guest::CR3);
             serial_println!(
-                "[VMEXIT] EPT violation GPA={:#x} qual={:#x} — halting",
-                gpa, qual
+                "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
+                vcpu.vpid(), gpa, qual, rip, cr3
             );
+            crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
 
         EXIT_REASON_EPT_MISCONFIG => {
+            while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-            serial_println!("[VMEXIT] EPT misconfig GPA={:#x} — halting", gpa);
+            let rip = vcpu.get(vmcs::guest::RIP);
+            serial_println!("[VMEXIT] EPT misconfig vpid={} GPA={:#x} RIP={:#x}",
+                vcpu.vpid(), gpa, rip);
+            crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
 
@@ -610,14 +658,5 @@ fn sync_ia32e_mode_guest(vcpu: &mut ActiveVcpu) {
             entry & !ia32e_bit
         };
         vcpu.set(control::VMENTRY_CONTROLS, new_entry);
-
-        if lma == 1 {
-            let cs_ar = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
-            let cs_l = (cs_ar >> 13) & 1;
-            if cs_l == 0 {
-                let new_ar = (cs_ar | (1 << 13)) & !(1 << 14);
-                vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, new_ar);
-            }
-        }
     }
 }
