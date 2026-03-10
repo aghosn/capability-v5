@@ -53,7 +53,7 @@ fi
 
 echo "→ Starting QEMU (GDB stub on :1234) ..."
 
-IMAGE_NAME="jammy-server-cloudimg-amd64.img"
+IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
 DISK_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
     DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=none "

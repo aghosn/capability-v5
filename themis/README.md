@@ -38,7 +38,7 @@ themis/
 │
 ├── guest/
 │   ├── dom0/           # Provenance records for dom0 artifacts
-│   ├── jammy-server-cloudimg-amd64.img  # Ubuntu root disk [gitignored; cargo fetch-dom0]
+│   ├── ubuntu-24.04-server-cloudimg-amd64.img  # Ubuntu root disk [gitignored; cargo fetch-dom0]
 │   └── seed.img        # Cloud-init seed  [gitignored; cargo fetch-dom0]
 │
 ├── scripts/
@@ -227,11 +227,11 @@ runs only on the first seeded boot.
 ### dom0 disk
 
 ```sh
-cargo fetch-dom0             # download Ubuntu Jammy cloud image + create seed.img
-                             # output: guest/jammy-server-cloudimg-amd64.img  guest/seed.img
+cargo fetch-dom0             # download Ubuntu Noble 24.04 cloud image + create seed.img
+                             # output: guest/ubuntu-24.04-server-cloudimg-amd64.img  guest/seed.img
 FORCE=1 cargo fetch-dom0     # re-download even if already present
 
-cargo resize-disk guest/jammy-server-cloudimg-amd64.img 10   # grow disk by 10 GB
+cargo resize-disk guest/ubuntu-24.04-server-cloudimg-amd64.img 10   # grow disk by 10 GB
 ```
 
 After resizing, boot the guest and expand the filesystem:

@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-IMAGE_NAME="jammy-server-cloudimg-amd64.img"
+IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
 DOM0_DISK="$WORKSPACE_ROOT/guest/$IMAGE_NAME"
 SEED_IMG="$WORKSPACE_ROOT/guest/seed.img"
 SEEDED_MARKER="$WORKSPACE_ROOT/guest/.dom0-seeded"

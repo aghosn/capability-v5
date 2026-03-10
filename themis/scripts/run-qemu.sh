@@ -60,7 +60,7 @@ echo "→ Booting $ISO (${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM)"
 
 # ── Optional dom0 disk ──────────────────────────────────────────────────────
 # Present when scripts/fetch-dom0.sh has been run and image has been seeded.
-IMAGE_NAME="jammy-server-cloudimg-amd64.img"
+IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
 DISK_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/$IMAGE_NAME" ]]; then
     DISK_ARGS+="-drive id=dom0,file=$WORKSPACE_ROOT/guest/$IMAGE_NAME,format=qcow2,if=none "

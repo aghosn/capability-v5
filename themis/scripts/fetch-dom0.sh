@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fetch-dom0.sh — Download the dom0 root disk and create a cloud-init seed.
 #
-# Downloads the standard Ubuntu Jammy cloud image and creates a cloud-init
+# Downloads the standard Ubuntu Noble cloud image and creates a cloud-init
 # seed ISO following the standard QEMU cloud-image workflow:
 #   https://cloud-images.ubuntu.com/
 #
@@ -11,9 +11,9 @@
 # from the disk at boot time via fslabel(cloudimg-rootfs)://.
 #
 # Output:
-#   guest/jammy-server-cloudimg-amd64.img   Ubuntu root disk (QCOW2)
-#   guest/seed.img                          Cloud-init seed (ISO9660 CIDATA)
-#   guest/dom0/version.txt                  provenance record
+#   guest/ubuntu-24.04-server-cloudimg-amd64.img   Ubuntu root disk (QCOW2)
+#   guest/seed.img                                 Cloud-init seed (ISO9660 CIDATA)
+#   guest/dom0/version.txt                         provenance record
 #
 # Usage:
 #   cargo fetch-dom0                       # download everything
@@ -33,8 +33,8 @@ FORCE="${FORCE:-0}"
 
 # ── Image ──────────────────────────────────────────────────────────────────
 
-IMAGE_NAME="jammy-server-cloudimg-amd64.img"
-IMAGE_URL="https://cloud-images.ubuntu.com/jammy/current/${IMAGE_NAME}"
+IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
+IMAGE_URL="https://cloud-images.ubuntu.com/releases/24.04/release/${IMAGE_NAME}"
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ mkdir -p "$DOM0_DIR"
 # ── 1. Root disk ───────────────────────────────────────────────────────────
 
 echo ""
-echo "=== [1/2] Root disk (Ubuntu Jammy) ==="
+echo "=== [1/2] Root disk (Ubuntu Noble 24.04) ==="
 if [[ -f "$GUEST_DIR/$IMAGE_NAME" && "$FORCE" != "1" ]]; then
     echo "  ✔ $IMAGE_NAME already present (set FORCE=1 to re-download)"
 else

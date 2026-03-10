@@ -3,7 +3,7 @@
 # Usage: sudo bash scripts/mount-guest.sh
 set -euo pipefail
 
-IMG="$(cd "$(dirname "$0")/.." && pwd)/guest/jammy-server-cloudimg-amd64.img"
+IMG="$(cd "$(dirname "$0")/.." && pwd)/guest/ubuntu-24.04-server-cloudimg-amd64.img"
 MNT="/tmp/mnt"
 
 modprobe nbd max_part=8

@@ -107,7 +107,7 @@ CONF
 
 # Only include dom0 modules if the disk image is present.
 # Without these lines Limine boots the capavisor alone (useful for testing).
-if [[ -f "$WORKSPACE_ROOT/guest/jammy-server-cloudimg-amd64.img" ]]; then
+if [[ -f "$WORKSPACE_ROOT/guest/ubuntu-24.04-server-cloudimg-amd64.img" ]]; then
     cat >> "$ISO_ROOT/boot/limine/limine.conf" <<'CONF'
     module_path: fslabel(cloudimg-rootfs):/boot/vmlinuz
     module_cmdline: dom0-kernel
