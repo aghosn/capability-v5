@@ -34,6 +34,7 @@ mod gdt;
 mod guest;
 mod hypercall;
 mod mem;
+mod msr_virt;
 mod pci;
 mod platform;
 mod vmcs;

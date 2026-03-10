@@ -33,7 +33,7 @@ pub struct Domain {
     #[allow(dead_code)]
     pub io_bitmap_b: u64,
     /// MSR bitmap page (shared by all VPs).
-    /// All-zeros = no MSR intercepts.
+    /// Initialized to trap perf-monitoring MSRs; rest is passthrough.
     pub msr_bitmap: u64,
 }
 
@@ -107,15 +107,18 @@ impl Domain {
         }
     }
 
-    /// Allocate the MSR bitmap page from META (shared by all VPs).
+    /// Allocate the MSR bitmap page from META (shared by all VPs) and
+    /// initialize it to trap MSRs that must be virtualized.
     ///
-    /// A zeroed page means no MSR intercepts — all RDMSR/WRMSR pass through
-    /// to hardware.  alloc_meta_frame already returns a zeroed page.
+    /// See [`crate::msr_virt`] for the list of trapped ranges and the
+    /// VMEXIT emulation handlers.
     pub fn alloc_msr_bitmap(
         &mut self,
         platform: &crate::platform::ThemisPlatform,
     ) {
         self.msr_bitmap = platform.alloc_meta_frame(self.id);
+        let virt = (self.msr_bitmap + self.hhdm_offset) as *mut u8;
+        crate::msr_virt::init_bitmap(virt);
     }
 
     pub fn vmcs_phys(&self, vp_index: usize)   -> u64 { self.vmcs_regions[vp_index] }

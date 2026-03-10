@@ -241,13 +241,27 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
                 vcpu.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
                 next_instruction(vcpu);
-            } else if msr_in_bitmap_range(ecx) {
-                let value = msr::rdmsr(ecx);
-                vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
-                vcpu.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
-                next_instruction(vcpu);
             } else {
-                inject_gp(vcpu);
+                match crate::msr_virt::handle_rdmsr(ecx) {
+                    crate::msr_virt::MsrResult::Emulated(v) => {
+                        vcpu.set_reg(Reg::Rax, v & 0xFFFF_FFFF);
+                        vcpu.set_reg(Reg::Rdx, (v >> 32) & 0xFFFF_FFFF);
+                        next_instruction(vcpu);
+                    }
+                    crate::msr_virt::MsrResult::Passthrough => {
+                        if crate::msr_virt::in_bitmap_range(ecx) {
+                            let value = msr::rdmsr(ecx);
+                            vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
+                            vcpu.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
+                            next_instruction(vcpu);
+                        } else {
+                            inject_gp(vcpu);
+                        }
+                    }
+                    crate::msr_virt::MsrResult::GpFault => {
+                        inject_gp(vcpu);
+                    }
+                }
             }
         }
 
@@ -258,11 +272,23 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             if ecx == msr::IA32_EFER {
                 vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
                 next_instruction(vcpu);
-            } else if msr_in_bitmap_range(ecx) {
-                msr::wrmsr(ecx, value);
-                next_instruction(vcpu);
             } else {
-                inject_gp(vcpu);
+                match crate::msr_virt::handle_wrmsr(ecx, value) {
+                    crate::msr_virt::MsrResult::Emulated(_) => {
+                        next_instruction(vcpu);
+                    }
+                    crate::msr_virt::MsrResult::Passthrough => {
+                        if crate::msr_virt::in_bitmap_range(ecx) {
+                            msr::wrmsr(ecx, value);
+                            next_instruction(vcpu);
+                        } else {
+                            inject_gp(vcpu);
+                        }
+                    }
+                    crate::msr_virt::MsrResult::GpFault => {
+                        inject_gp(vcpu);
+                    }
+                }
             }
         }
 
@@ -462,11 +488,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
-
-/// Check whether an MSR index is within the MSR-bitmap–covered ranges.
-fn msr_in_bitmap_range(ecx: u32) -> bool {
-    ecx <= 0x1FFF || (0xC000_0000..=0xC000_1FFF).contains(&ecx)
-}
 
 /// Inject #GP(0) into the guest.
 fn inject_gp(vcpu: &mut ActiveVcpu) {

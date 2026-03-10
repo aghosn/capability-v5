@@ -207,7 +207,7 @@ unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64,
     // USE_IO_BITMAPS is off, so I/O bitmap addresses are ignored.
     vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
     vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
-    // MSR bitmap: allocated from META pool, zeroed = no MSR intercepts.
+    // MSR bitmap: allocated from META pool, initialized to trap perf MSRs.
     vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, msr_bitmap_phys)
         .expect("vmwrite MSR bitmap");
     vmx::vmwrite(control::VMENTRY_MSR_LOAD_COUNT as u32, 0)
