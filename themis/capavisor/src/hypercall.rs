@@ -117,6 +117,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
         opcodes::THEMIS_REVOKE_MEM => do_revoke_mem(platform, &caller, arg0, arg1),
         opcodes::THEMIS_REVOKE_DOMAIN => do_revoke_domain(platform, &caller, arg0),
         opcodes::THEMIS_ATTEST_SELF => do_attest_self(&caller),
+        opcodes::THEMIS_REGISTER_COMM => do_register_comm(platform, &caller, arg0, arg1, arg2),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_SWITCH
@@ -295,4 +296,24 @@ fn do_attest_self(caller: &CapabilityRef<Domain>) -> HypercallResult {
     // passed through registers — a future GET_REG-based approach will
     // allow retrieval of the full attestation blob.
     HypercallResult::success_1(report.domain_id)
+}
+
+/// REGISTER_COMM (0x18): register a COMM page bound to a child domain's VP.
+///
+/// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
+fn do_register_comm(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    mem_cap_handle: u64,
+    child_domain_handle: u64,
+    vp_id: u64,
+) -> HypercallResult {
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::register_comm(&caller, mem_cap_handle, child_domain_handle, vp_id as u32)
+            .map(|batch| ((), batch))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
 }

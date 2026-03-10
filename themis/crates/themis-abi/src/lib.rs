@@ -112,6 +112,10 @@ pub mod opcodes {
 
     /// Register an interrupt channel.
     pub const THEMIS_REGISTER_INTR_CHAN:  u64 = 0x17;
+
+    /// Register a COMM page owned by the caller, bound to a child VP.
+    /// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
+    pub const THEMIS_REGISTER_COMM:       u64 = 0x18;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //
@@ -126,38 +130,16 @@ pub mod errors {
     pub const ERR_UNIMPL:     u64 = u64::MAX;
 }
 
-// ── VP register indices (used with THEMIS_GET_REG / THEMIS_SET_REG) ─────── //
+// ── VP register profile ───────────────────────────────────────────────────── //
+//
+// `VpGpRegs`, `VpSregs`, `SegmentReg`, `DescriptorTableReg`, and `VpRegister`
+// are defined in the `regs` submodule and re-exported here for convenience.
 
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VpRegister {
-    // General-purpose registers — saved/restored in the VMEXIT handler stub.
-    Rax = 0x00, Rbx = 0x01, Rcx = 0x02, Rdx = 0x03,
-    Rsi = 0x04, Rdi = 0x05, Rbp = 0x06,
-    R8  = 0x07, R9  = 0x08, R10 = 0x09, R11 = 0x0A,
-    R12 = 0x0B, R13 = 0x0C, R14 = 0x0D, R15 = 0x0E,
-    // VMCS guest-state fields — committed at VMLAUNCH; read via VMREAD.
-    Rip    = 0x20,
-    Rsp    = 0x21,
-    Rflags = 0x22,
-    Cr0    = 0x23,
-    Cr3    = 0x24,
-    Cr4    = 0x25,
-    Efer   = 0x26,
-    // Segment selectors / bases
-    Cs = 0x30, Ds = 0x31, Es = 0x32, Fs = 0x33,
-    Gs = 0x34, Ss = 0x35, Tr = 0x36, Ldtr = 0x37,
-    FsBase = 0x38, GsBase = 0x39, KernelGsBase = 0x3A,
-    // SYSENTER MSRs
-    SysenterCs  = 0x40,
-    SysenterEsp = 0x41,
-    SysenterEip = 0x42,
-    // APIC
-    ApicBase = 0x50,
-    // Virtual APIC state — readable by parent via GET; written by Themis.
-    Tpr = 0x60,
-    Ppr = 0x61,
-}
+pub mod regs;
+
+pub use regs::{
+    DescriptorTableReg, SegmentReg, VpCommPage, VpGpRegs, VpRegister, VpSregs,
+};
 
 // ── META VP-state page layout (Phase 10) ────────────────────────────────── //
 //

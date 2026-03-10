@@ -212,6 +212,41 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     // XSAVES (bit 3): passed through — ENABLE_XSAVES is
                     // set in secondary proc-based controls.
                 }
+                // Themis hypervisor identification leaves.
+                // Leaf 0x40000000: vendor string "ThemisCapa" (10 bytes) in
+                //   EBX:ECX:EDX, matching Hyper-V convention for 12-byte strings
+                //   (we pad the last 2 bytes with spaces).
+                //   EAX = max hypervisor leaf (0x40000003).
+                //
+                // Leaf 0x40000001: feature flags.
+                //   EAX[0] = sync scheduling (VMCALL_SWITCH) supported.
+                //   EAX[1] = async scheduling (START_VP/RESUME_VP) supported.
+                //   EAX[2] = META VP-state pages available (Phase 10).
+                //   EAX[3] = ThemIC (event flags + doorbell) available.
+                //   EAX[4] = device assignment (VT-d) available.
+                //
+                // Leaf 0x40000003: capacity limits.
+                //   EAX = max VPs per partition, EBX = max partitions,
+                //   ECX = max memory regions.
+                //
+                // All other leaves in the range: zero.
+                (0x40000000, _) => {
+                    // "Them" "isCa" "pa  "  (each chunk is little-endian u32)
+                    eax = 0x40000003;
+                    ebx = u32::from_le_bytes(*b"Them");
+                    ecx = u32::from_le_bytes(*b"isCa");
+                    edx = u32::from_le_bytes(*b"pa  ");
+                }
+                (0x40000001, _) => {
+                    eax = 0b00001; // bit 0: sync scheduling supported
+                    ebx = 0; ecx = 0; edx = 0;
+                }
+                (0x40000003, _) => {
+                    eax = 256;  // max VPs per partition
+                    ebx = 1024; // max partitions
+                    ecx = 4096; // max memory regions
+                    edx = 0;
+                }
                 (0x40000000..=0x4FFFFFFF, _) => {
                     eax = 0; ebx = 0; ecx = 0; edx = 0;
                 }
