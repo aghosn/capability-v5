@@ -607,9 +607,11 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   RUN_VP/GET/SET_VP_STATE/mmap stubs), `hvthemis_hvcall.c` (VMCALL inline asm wrapper
   with Themis error→errno translation), `Makefile` + `Kbuild` (out-of-tree build).
   All ioctls return `-ENOSYS`; data structures fully wired.
-- [ ] **P15c** — Partition ioctls: `MSHV_CREATE_PARTITION` → `VMCALL_CREATE_DOMAIN`,
-  `MSHV_DELETE_PARTITION` → `VMCALL_REVOKE_DOMAIN`.  Partition fd tracks domain
-  handle (capability ref index returned by `CREATE_DOMAIN`).
+- [x] **P15c** — ✅ DONE.  Partition ioctls wired to capavisor:
+  `MSHV_CREATE_PARTITION` → `themis_create_domain(~0, ~0, num_vps)` stores
+  domain handle; `MSHV_INITIALIZE_PARTITION` → `themis_seal(handle)` with
+  local `sealed` guard; partition destroy → `themis_revoke_domain(handle)`.
+  Error path in create properly revokes domain if fd allocation fails.
 - [ ] **P15d** — VP ioctls: `MSHV_CREATE_VP` → allocate VP slot in domain,
   `MSHV_SET_VP_REGISTERS` / `MSHV_GET_VP_REGISTERS` → `VMCALL_SET_REG` / `VMCALL_GET_REG`
   (or META page direct access if Phase 10 is available).

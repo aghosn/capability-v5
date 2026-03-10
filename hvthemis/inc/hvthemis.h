@@ -85,8 +85,8 @@
 /* ── UAPI structures ──────────────────────────────────────────────────────── */
 
 struct mshv_create_partition {
-	__u64 pt_flags;
-	__u64 pt_isolation;
+	__u64 cores_mask;     /* Allowed physical cores (bitmap); ~0 = all */
+	__u64 api_flags;      /* Allowed monitor API calls (MonitorAPI bits); ~0 = all */
 	__u32 sched_policy;   /* HVTHEMIS_SCHED_SYNC or HVTHEMIS_SCHED_ASYNC */
 	__u32 num_vps;        /* Number of VPs to allocate */
 };

@@ -20,9 +20,16 @@ static void hvthemis_partition_destroy(struct kref *ref)
 {
 	struct hvthemis_partition *part =
 		container_of(ref, struct hvthemis_partition, refcount);
+	int ret;
 	u32 i;
 
-	/* TODO(P15c): VMCALL_REVOKE_DOMAIN(part->domain_handle) */
+	/* Revoke the domain in the capavisor (recursively tears down children). */
+	if (part->domain_handle) {
+		ret = themis_revoke_domain(part->domain_handle);
+		if (ret)
+			pr_warn("hvthemis: REVOKE_DOMAIN 0x%llx failed (%d)\n",
+				part->domain_handle, ret);
+	}
 
 	if (part->vps) {
 		for (i = 0; i < part->num_vps; i++)
@@ -42,11 +49,19 @@ static long hvthemis_part_ioctl(struct file *file, unsigned int cmd,
 {
 	struct hvthemis_partition *part = file->private_data;
 	void __user *uarg = (void __user *)arg;
+	int ret;
 
 	switch (cmd) {
 	case MSHV_INITIALIZE_PARTITION:
-		/* TODO(P15c): VMCALL_SEAL(part->domain_handle) */
-		return -ENOSYS;
+		if (part->sealed)
+			return -EBUSY;
+		ret = themis_seal(part->domain_handle);
+		if (ret)
+			return ret;
+		part->sealed = true;
+		pr_debug("hvthemis: sealed domain 0x%llx\n",
+			 part->domain_handle);
+		return 0;
 
 	case MSHV_CREATE_VP:
 		return hvthemis_vp_create(part, uarg);
@@ -135,16 +150,23 @@ long hvthemis_partition_create(struct file *dev_file, void __user *uarg)
 	}
 
 	/*
-	 * TODO(P15c): Issue VMCALL_CREATE_DOMAIN here.
-	 *   ret = hvthemis_hcall(THEMIS_HC_CREATE_DOMAIN,
-	 *                        num_vps, cores_bitmap, api_flags,
-	 *                        &part->domain_handle, &part->domain_id, NULL);
+	 * Issue VMCALL_CREATE_DOMAIN.
+	 * The capavisor intersects cores_mask/api_flags with the parent's
+	 * policy, enforcing monotonicity.
 	 */
+	ret = themis_create_domain(cp.cores_mask, cp.api_flags, cp.num_vps,
+				   &part->domain_handle);
+	if (ret) {
+		pr_err("hvthemis: CREATE_DOMAIN failed (%d)\n", ret);
+		goto err_free_vps;
+	}
+	pr_debug("hvthemis: created domain handle 0x%llx (%u VPs)\n",
+		 part->domain_handle, cp.num_vps);
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		ret = fd;
-		goto err_free_vps;
+		goto err_revoke;
 	}
 
 	file = anon_inode_getfile("mshv-partition", &hvthemis_partition_fops,
@@ -160,6 +182,8 @@ long hvthemis_partition_create(struct file *dev_file, void __user *uarg)
 
 err_put_fd:
 	put_unused_fd(fd);
+err_revoke:
+	themis_revoke_domain(part->domain_handle);
 err_free_vps:
 	kfree(part->vps);
 err_free_part:
