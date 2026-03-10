@@ -41,7 +41,7 @@ Attributes are per-ownership metadata. `CLEAN`, `VITAL`, `HASH`, and `META` are 
 | `VITAL` | `send` | Also revoke the domain that owns this capability |
 | `HASH` | `send` | Region content is/should be hashed for attestation |
 | `META` | `send` | Monitor metadata: excluded from address space; implies `CLEAN` + `VITAL` |
-| `COMM` | `register_comm` | Domain COMM page: implies `CLEAN` + `VITAL`; emits `UncommRegion` before domain teardown |
+| `COMM` | `register_comm` | Parent-owned COMM page bound to child VP: implies `CLEAN`; emits `UncommRegion` on revocation. Does NOT imply `VITAL`. |
 
 ---
 
@@ -107,45 +107,48 @@ cap> revoke r0 monitor_scratch
 
 ---
 
-## COMM — Domain Communication Buffer
+## COMM — Parent-Owned Communication Buffer
 
-A domain registers a COMM page to establish a **shared memory channel between itself and the monitor**. Unlike META (which is sent by the parent and hidden from the domain), a COMM page is:
+A parent domain registers a COMM page to establish a **shared memory buffer bound to a child domain's VP**. Unlike META (which is sent by the parent and hidden from the domain), a COMM page is:
 
-- **Registered by the domain itself**, using a cap it already owns.
-- **Stayed mapped in the domain's address space** — the domain can read and write it.
-- **Also accessible to the monitor** — the platform maps its physical address (e.g. via HHDM) after receiving the `CommRegion` update.
+- **Registered by the parent**, targeting a specific child domain VP.
+- **NOT mapped in the child's address space** — only the monitor (capavisor) accesses it via HHDM.
+- **Multiple pages per child** are allowed (e.g. one per VP, or separate pages for messages and event flags).
 
 | Property | Behaviour |
 |----------|-----------|
-| Registration | Domain calls `register_comm(handle)` on an exclusive carve it owns |
+| Registration | Parent calls `register_comm(handle, child_domain_handle, vp_id)` on an exclusive carve it owns |
 | Source requirement | Must be `RegionKind::Carve` with `RegionStatus::Exclusive` |
-| Attributes set | `COMM \| CLEAN \| VITAL` (canonicalized at registration time) |
-| Carved / aliased / sent | **Rejected** once COMM is set |
-| One-shot | A domain may register a COMM page **exactly once**; replacement is not allowed |
-| Revocation — `UncommRegion` | Emitted **before** `RevokeDomain` so the monitor unmaps its access first |
+| Attributes set | `COMM \| CLEAN` (canonicalized at registration time; NOT VITAL) |
+| Carved / aliased / sent | **Rejected** while COMM binding is active |
+| Multiple per domain | Allowed; one binding per `(child, vp_id)` |
+| Revocation — `UncommRegion` | Emitted so the monitor unmaps its access |
 | Revocation — `ZeroMemory` | Emitted because CLEAN is implied |
-| Revocation — `RevokeDomain` | Emitted because VITAL is implied |
-
-### One-shot semantics
-
-Replacing a COMM page is intentionally disallowed. The COMM attribute implies VITAL; revoking the old cap to replace it would tear down the domain. Restoring the original attributes of the old cap is also ambiguous (they were discarded when COMM was applied). The safe design is: register once, replace by revoking the domain and creating a new one.
+| Child revocation | Bindings auto-released: COMM attribute cleared, `UncommRegion` emitted |
 
 ### ✓ Success: register a COMM page
 
 ```
-cap> carve child_ram comm0 0x0 0x1000 RW
-cap> register-comm comm0
-✓ 'comm0' registered as COMM page for domain 'child'
-  ℹ COMM: 1 page(s) registered with monitor
+cap> carve r0 comm0 0x0 0x1000 rw
+cap> register-comm comm0 child 0
+✓ 'comm0' registered as COMM page for domain 'child' VP 0
 ```
 
-`comm0` now carries `COMM|CLEAN|VITAL`. The monitor receives a `CommRegion` update and maps `[0x0, 0x1000)` for its own access.
+`comm0` now carries `COMM|CLEAN`. The monitor receives a `CommRegion` update with `target_domain_id` and `vp_id`, and maps `[0x0, 0x1000)` for its own access.
 
-### ✗ Failure: second register-comm call rejected
+### ✓ Multiple COMM pages
 
 ```
-cap> register-comm comm0
-✗ Error: InvalidOperation — COMM page already registered; revoke the domain to change it
+cap> carve r0 comm1 0x1000 0x1000 rw
+cap> register-comm comm1 child 1
+✓ 'comm1' registered as COMM page for domain 'child' VP 1
+```
+
+### ✗ Failure: re-register same cap
+
+```
+cap> register-comm comm0 child 0
+✗ Error: InvalidOperation — capability already carries the COMM attribute
 ```
 
 ### ✗ Failure: carve or alias a COMM cap
@@ -157,16 +160,21 @@ cap> carve comm0 sub 0x0 0x100 R
 
 ### Revocation
 
-Revoking the COMM cap (by the parent that owns the memory tree) produces three updates in order:
+Revoking a COMM cap produces two updates (not three — COMM does not imply VITAL):
 
 1. `UncommRegion` — monitor unmaps its access to the COMM page.
 2. `ZeroMemory` — physical range is zeroed (CLEAN).
-3. `RevokeDomain` — the domain that registered the COMM page is revoked (VITAL).
+
+The owning domain is **not** revoked (no `RevokeDomain`).
 
 ```
-cap> revoke child_ram comm0
-✓ Revoked 'comm0'. Monitor unmapped COMM page. Memory zeroed. Domain 'child' revoked.
+cap> revoke r0 comm0
+✓ Revoked 'comm0'. Monitor unmapped COMM page. Memory zeroed.
 ```
+
+### Child revocation auto-releases bindings
+
+When a child domain is revoked, any parent-owned COMM pages bound to it are automatically released: the `COMM` attribute and `comm_binding` are cleared, and `UncommRegion` updates are emitted. The parent retains the underlying memory capability with no special attributes.
 
 ---
 

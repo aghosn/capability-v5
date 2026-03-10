@@ -7,7 +7,7 @@ use crate::domain::{
     VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
-use crate::memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus};
+use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
 use crate::platform::Platform;
 use crate::switch::{SwitchContext, VpInterruptContext};
 use crate::sync::RwLock;
@@ -388,6 +388,7 @@ impl Capability<MemoryRegion> {
         let vital = capa.owned.attributes.vital();
         let meta = capa.owned.attributes.meta();
         let comm = capa.owned.attributes.comm();
+        let comm_binding = capa.data.comm_binding;
 
         #[cfg(feature = "address_translation")]
         let child_domain_weak = capa.owned.owner_domain.clone();
@@ -506,7 +507,11 @@ impl Capability<MemoryRegion> {
         // Notify the platform that its access to the COMM region is gone.
         // Emitted before RevokeDomain so the platform can unmap before tearing down.
         if comm {
-            updates.add_uncomm_region(child_owner, hpa_start, hpa_size);
+            let (target_id, vp) = match comm_binding {
+                Some(b) => (b.target_domain_id, b.vp_id),
+                None => (child_owner, 0),
+            };
+            updates.add_uncomm_region(child_owner, target_id, vp, hpa_start, hpa_size);
         }
 
         if vital {
@@ -754,6 +759,32 @@ impl Capability<Domain> {
             domain.owned.pending_receiver = None;
         }
 
+        // Clean up COMM bindings: this domain is about to be revoked.
+        // Any parent-owned COMM capabilities bound to this child must have
+        // their COMM attribute and binding cleared.
+        let comm_bindings = mem::take(&mut domain.data.comm_bindings);
+        let revoked_domain_id = domain.data.id;
+        drop(domain);
+
+        for weak in &comm_bindings {
+            if let Some(cap_ref) = weak.upgrade() {
+                let mut c = cap_ref.write();
+                if c.owned.attributes.comm() {
+                    let phys = c.data.access.start;
+                    let size = c.data.access.size;
+                    let (target_id, vp) = match c.data.comm_binding {
+                        Some(b) => (b.target_domain_id, b.vp_id),
+                        None => (revoked_domain_id, 0),
+                    };
+                    // Strip COMM (and the implied CLEAN) from attributes.
+                    c.owned.attributes = Attributes::NONE;
+                    c.data.comm_binding = None;
+                    updates.add_uncomm_region(c.owned.owner, target_id, vp, phys, size);
+                }
+            }
+        }
+
+        let mut domain = domain_ref.write();
         domain.data.revoke();
         updates.add_revoke_domain_with_fallback(domain.data.id, fallback);
 
@@ -1946,55 +1977,61 @@ impl Capability<Domain> {
         Ok(updates)
     }
 
-    /// Register a COMM page for the caller domain.
+    /// Register a COMM page owned by `caller`, bound to a child domain's VP.
     ///
-    /// The capability at `handle` becomes the domain's communication buffer shared
-    /// with the monitor.  It must be a **carve** with **exclusive** status and must
-    /// not already carry the `COMM` attribute.  The engine sets `COMM|CLEAN|VITAL`
-    /// on the capability so that it cannot be carved, aliased, or sent, and so that
-    /// its revocation tears down the domain.
+    /// The capability at `handle` becomes a shared communication buffer that the
+    /// monitor can read/write on behalf of the child's VP.  It must be a **carve**
+    /// with **exclusive** status and must not already carry the `COMM` attribute.
+    /// The engine sets `COMM|CLEAN` on the capability (no VITAL — revoking a COMM
+    /// page does not kill the owning domain) and records a [`CommBinding`] linking
+    /// it to `(child_domain, vp_id)`.
     ///
-    /// This is a **one-shot** operation.  A domain may register a COMM page only
-    /// once.  Replacement is not allowed because the COMM|CLEAN|VITAL attributes
-    /// of the old page cannot be safely unwound (restoring original attributes is
-    /// ambiguous and revoking it would tear down the domain).  To use a different
-    /// COMM page, revoke the domain and create a new one.
+    /// Multiple COMM pages may be registered for the same child domain (e.g. one
+    /// per VP, or separate pages for messages vs event flags).  A weak reference
+    /// is pushed into the child domain's `comm_bindings` so that the binding can
+    /// be automatically cleaned up when the child is revoked.
     ///
     /// # Errors
-    /// - [`CapaError::NotFound`]         — `handle` not in caller's memory table.
+    /// - [`CapaError::NotFound`]         — `handle` or `child_domain_handle` not found.
     /// - [`CapaError::PermissionDenied`] — handle is frozen, not owned by caller,
     ///                                     not a carve, or not exclusive.
-    /// - [`CapaError::InvalidOperation`] — a COMM page is already registered for
-    ///                                     this domain, or the capability already
-    ///                                     carries the `COMM` attribute.
+    /// - [`CapaError::InvalidOperation`] — capability already carries `COMM`.
     pub fn register_comm(
         caller: &CapabilityRef<Domain>,
         handle: LocalHandle,
+        child_domain_handle: LocalHandle,
+        vp_id: u32,
     ) -> Result<UpdateBatch> {
         let owner_id: DomainId;
         let cap_ref: CapabilityRef<MemoryRegion>;
+        let child_ref: CapabilityRef<Domain>;
 
-        // Pre-flight: resolve handle, check domain has no COMM page yet.
+        // Pre-flight: resolve memory handle and child domain handle.
         {
             let r = caller.read();
             if r.data.is_memory_handle_frozen(handle) {
                 return Err(CapaError::PermissionDenied);
             }
             owner_id = r.data.id;
-            // One-shot: reject if a COMM page is already registered.
-            if r.data.comm_cap.as_ref().and_then(|w| w.upgrade()).is_some() {
-                return Err(CapaError::InvalidOperation(
-                    "COMM page already registered; revoke the domain to change it".into(),
-                ));
-            }
+
             let cap_weak = r
                 .data
                 .get_memory_capability(handle)
                 .ok_or(CapaError::NotFound)?
                 .clone();
+
+            let child_weak = r
+                .data
+                .get_domain_capability(child_domain_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+
             drop(r);
             cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
         }
+
+        let child_domain_id: DomainId;
 
         // Validate cap: must be Carve, Exclusive, owned by caller, not already COMM.
         {
@@ -2015,19 +2052,39 @@ impl Capability<Domain> {
             }
         }
 
-        // Mutation: domain write lock → cap write lock.
+        // Read child domain ID and validate VP index.
+        {
+            let child_r = child_ref.read();
+            child_domain_id = child_r.data.id;
+            if vp_id as usize >= child_r.data.policy.num_vprocessors {
+                return Err(CapaError::InvalidOperation(
+                    "vp_id exceeds child domain VP count".into(),
+                ));
+            }
+        }
+
+        // Mutation: set COMM attribute + binding on the memory cap,
+        // push weak ref into child domain's comm_bindings.
         let (new_phys, new_size) = {
-            let mut w = caller.write();
             let mut c = cap_ref.write();
             let phys = c.data.access.start;
             let size = c.data.access.size;
             c.owned.attributes = Attributes::from_bits(Attributes::COMM).canonicalize();
-            w.data.comm_cap = Some(Arc::downgrade(&cap_ref));
+            c.data.comm_binding = Some(CommBinding {
+                target_domain_id: child_domain_id,
+                vp_id,
+            });
             (phys, size)
         };
 
+        // Record weak ref on the child domain for cleanup on revocation.
+        {
+            let mut child_w = child_ref.write();
+            child_w.data.comm_bindings.push(Arc::downgrade(&cap_ref));
+        }
+
         let mut batch = UpdateBatch::new();
-        batch.add_comm_region(owner_id, new_phys, new_size);
+        batch.add_comm_region(owner_id, child_domain_id, vp_id, new_phys, new_size);
         Ok(batch)
     }
 

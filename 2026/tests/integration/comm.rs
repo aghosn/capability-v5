@@ -1,17 +1,18 @@
 //! Integration tests for COMM region semantics.
 //!
-//! A COMM region is a per-domain communication buffer shared between the domain
-//! and the monitor.  Its properties:
+//! A COMM region is a parent-owned communication buffer bound to a child
+//! domain's VP.  Its properties:
 //!
 //! | Property                        | Behaviour                                               |
 //! |--------------------------------|---------------------------------------------------------|
-//! | Registration                   | Domain-mediated: `register_comm(handle)`               |
+//! | Registration                   | Parent-mediated: `register_comm(handle, child_h, vp)`  |
 //! | Prerequisite                   | Must be a `RegionKind::Carve` with `Exclusive` status  |
-//! | Attributes set at registration | `COMM | CLEAN | VITAL`                                 |
+//! | Attributes set at registration | `COMM | CLEAN` (NOT VITAL)                             |
 //! | Carved / aliased / sent        | Rejected once COMM attribute is set                    |
-//! | Replacement                    | Allowed; emits `UncommRegion` (old) + `CommRegion` (new)|
-//! | Revocation                     | Emits `UncommRegion` before `RevokeDomain` (VITAL)     |
+//! | Multiple per domain            | Allowed; one per (child, vp) binding                   |
+//! | Revocation of cap              | Emits `UncommRegion`; does NOT kill the owning domain  |
 //! | Memory on revocation           | Zeroed (`ZeroMemory`) because CLEAN is implied         |
+//! | Child revocation               | Auto-releases bindings, clears COMM on parent caps     |
 
 use capability_engine::memory::Rights;
 use capability_engine::*;
@@ -66,22 +67,44 @@ fn register_root_mem(
     cap
 }
 
+/// Create a parent domain with root memory and a child domain properly
+/// registered via `Capability::create` (so the capability tree is intact).
+/// Returns (parent, child, child_domain_handle, root_mem_arc).
+/// The root_mem_arc must be kept alive for memory Weak refs to remain valid.
+fn setup_parent_child() -> (CapabilityRef<Domain>, CapabilityRef<Domain>, LocalHandle, CapabilityRef<MemoryRegion>) {
+    let parent = make_domain();
+    let root = register_root_mem(&parent, 1);
+
+    let (child_dh, _) =
+        Capability::create(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let child = parent
+        .read()
+        .data
+        .get_domain_capability(child_dh)
+        .unwrap()
+        .upgrade()
+        .unwrap();
+    (parent, child, child_dh, root)
+}
+
 // ── 1. Basic registration ─────────────────────────────────────────────────────
 
-/// Registering a carved exclusive region succeeds, sets COMM|CLEAN|VITAL, and
-/// emits exactly one CommRegion update with the correct phys/size.
+/// Registering a carved exclusive region succeeds, sets COMM|CLEAN (not VITAL),
+/// emits exactly one CommRegion update with the correct fields.
 #[test]
 fn test_comm_register_basic() {
-    let dom = make_domain();
-    let dom_id = dom.read().data.id;
-    let _root = register_root_mem(&dom, 1);
+    let (parent, child, child_dh, _root) = setup_parent_child();
+    let parent_id = parent.read().data.id;
+    let child_id = child.read().data.id;
 
     let (carved_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
 
-    let batch = Capability::<Domain>::register_comm(&dom, carved_h).unwrap();
+    let batch =
+        Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0).unwrap();
 
-    // Exactly one CommRegion, no UncommRegion (no previous COMM).
+    // Exactly one CommRegion, no UncommRegion.
     let comm_updates: Vec<_> = batch
         .updates()
         .iter()
@@ -93,19 +116,21 @@ fn test_comm_register_basic() {
         .filter(|u| matches!(u, Update::UncommRegion { .. }))
         .collect();
     assert_eq!(comm_updates.len(), 1, "must emit exactly one CommRegion");
-    assert_eq!(uncomm_updates.len(), 0, "must not emit UncommRegion on first registration");
+    assert_eq!(uncomm_updates.len(), 0, "must not emit UncommRegion on registration");
 
     match comm_updates[0] {
-        Update::CommRegion { domain_id, phys, size } => {
-            assert_eq!(*domain_id, dom_id);
+        Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
+            assert_eq!(*domain_id, parent_id);
+            assert_eq!(*target_domain_id, child_id);
+            assert_eq!(*vp_id, 0);
             assert_eq!(*phys, 0x0);
             assert_eq!(*size, 0x1000);
         }
         _ => unreachable!(),
     }
 
-    // COMM|CLEAN|VITAL must be set on the cap.
-    let cap_ref = dom
+    // COMM|CLEAN must be set; VITAL must NOT be set.
+    let cap_ref = parent
         .read()
         .data
         .get_memory_capability(carved_h)
@@ -113,21 +138,23 @@ fn test_comm_register_basic() {
         .upgrade()
         .unwrap();
     let attrs = cap_ref.read().owned.attributes;
-    assert!(attrs.comm(),  "COMM must be set");
-    assert!(attrs.clean(), "CLEAN must be set (implied by COMM)");
-    assert!(attrs.vital(), "VITAL must be set (implied by COMM)");
+    assert!(attrs.comm(),   "COMM must be set");
+    assert!(attrs.clean(),  "CLEAN must be set (implied by COMM)");
+    assert!(!attrs.vital(), "VITAL must NOT be set (COMM no longer implies VITAL)");
 
-    // domain.comm_cap must point to the registered cap.
-    let stored = dom
-        .read()
-        .data
-        .comm_cap
-        .as_ref()
-        .and_then(|w| w.upgrade());
-    assert!(stored.is_some(), "domain.comm_cap must be populated");
+    // comm_binding must record the child domain + VP.
+    let binding = cap_ref.read().data.comm_binding;
+    assert!(binding.is_some(), "comm_binding must be populated");
+    let b = binding.unwrap();
+    assert_eq!(b.target_domain_id, child_id);
+    assert_eq!(b.vp_id, 0);
+
+    // Child's comm_bindings vec must contain a weak ref to this cap.
+    let child_bindings = &child.read().data.comm_bindings;
+    assert_eq!(child_bindings.len(), 1, "child must have 1 comm_binding");
     assert!(
-        Arc::ptr_eq(&stored.unwrap(), &cap_ref),
-        "domain.comm_cap must point to the registered cap"
+        Arc::ptr_eq(&child_bindings[0].upgrade().unwrap(), &cap_ref),
+        "child comm_binding must point to the registered cap"
     );
 }
 
@@ -135,14 +162,13 @@ fn test_comm_register_basic() {
 
 #[test]
 fn test_comm_cannot_be_carved() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+    let (parent, _child, child_dh, _root) = setup_parent_child();
     let (comm_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    Capability::<Domain>::register_comm(&dom, comm_h).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, comm_h, child_dh, 0).unwrap();
 
     let result =
-        Capability::<Domain>::carve(&dom, comm_h, Access::new(0x0, 0x100, Rights::R));
+        Capability::<Domain>::carve(&parent, comm_h, Access::new(0x0, 0x100, Rights::R));
     assert_eq!(
         result.unwrap_err(),
         CapaError::PermissionDenied,
@@ -154,14 +180,13 @@ fn test_comm_cannot_be_carved() {
 
 #[test]
 fn test_comm_cannot_be_aliased() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+    let (parent, _child, child_dh, _root) = setup_parent_child();
     let (comm_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    Capability::<Domain>::register_comm(&dom, comm_h).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, comm_h, child_dh, 0).unwrap();
 
     let result =
-        Capability::<Domain>::alias(&dom, comm_h, Access::new(0x0, 0x100, Rights::R));
+        Capability::<Domain>::alias(&parent, comm_h, Access::new(0x0, 0x100, Rights::R));
     assert_eq!(
         result.unwrap_err(),
         CapaError::PermissionDenied,
@@ -173,20 +198,19 @@ fn test_comm_cannot_be_aliased() {
 
 #[test]
 fn test_comm_cannot_be_sent() {
-    let sender = make_domain();
+    let (parent, _child, child_dh, _root) = setup_parent_child();
     let receiver = make_domain();
-    let _root = register_root_mem(&sender, 1);
     let (comm_h, _, _) =
-        Capability::<Domain>::carve(&sender, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    Capability::<Domain>::register_comm(&sender, comm_h).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, comm_h, child_dh, 0).unwrap();
 
-    sender
+    parent
         .write()
         .data
         .add_domain_capability(10, Arc::downgrade(&receiver));
 
     let result =
-        Capability::<Domain>::send(&sender, comm_h, 10, Attributes::NONE);
+        Capability::<Domain>::send(&parent, comm_h, 10, Attributes::NONE);
     assert_eq!(
         result.unwrap_err(),
         CapaError::PermissionDenied,
@@ -196,17 +220,14 @@ fn test_comm_cannot_be_sent() {
 
 // ── 5. COMM requires a Carve (alias kind rejected) ───────────────────────────
 
-/// An aliased cap (RegionKind::Alias) cannot be registered as COMM.
 #[test]
 fn test_comm_requires_carve_kind() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+    let (parent, _child, child_dh, _root) = setup_parent_child();
 
-    // alias_h has kind == Alias.
     let (alias_h, _) =
-        Capability::<Domain>::alias(&dom, 1, Access::new(0x0, 0x1000, Rights::R)).unwrap();
+        Capability::<Domain>::alias(&parent, 1, Access::new(0x0, 0x1000, Rights::R)).unwrap();
 
-    let result = Capability::<Domain>::register_comm(&dom, alias_h);
+    let result = Capability::<Domain>::register_comm(&parent, alias_h, child_dh, 0);
     assert_eq!(
         result.unwrap_err(),
         CapaError::PermissionDenied,
@@ -216,20 +237,16 @@ fn test_comm_requires_carve_kind() {
 
 // ── 6. COMM requires Exclusive status ────────────────────────────────────────
 
-/// A carve from an aliased parent inherits Aliased status and must be rejected.
 #[test]
 fn test_comm_requires_exclusive_status() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+    let (parent, _child, child_dh, _root) = setup_parent_child();
 
-    // Alias from root → Aliased status.
     let (alias_h, _) =
-        Capability::<Domain>::alias(&dom, 1, Access::new(0x0, 0x4000, Rights::R)).unwrap();
-    // Carve from the aliased cap → inherits Aliased status.
+        Capability::<Domain>::alias(&parent, 1, Access::new(0x0, 0x4000, Rights::R)).unwrap();
     let (carved_from_alias_h, _, _) =
-        Capability::<Domain>::carve(&dom, alias_h, Access::new(0x0, 0x1000, Rights::R)).unwrap();
+        Capability::<Domain>::carve(&parent, alias_h, Access::new(0x0, 0x1000, Rights::R)).unwrap();
 
-    let result = Capability::<Domain>::register_comm(&dom, carved_from_alias_h);
+    let result = Capability::<Domain>::register_comm(&parent, carved_from_alias_h, child_dh, 0);
     assert_eq!(
         result.unwrap_err(),
         CapaError::PermissionDenied,
@@ -237,142 +254,130 @@ fn test_comm_requires_exclusive_status() {
     );
 }
 
-// ── 7. Re-registering the same handle is also rejected ───────────────────────
+// ── 7. Re-registering the same handle is rejected ────────────────────────────
 
-/// Once register_comm succeeds, calling it again on the same handle must also
-/// be rejected (domain already has a COMM page).
+/// Once register_comm succeeds, calling it again on the same handle fails
+/// because the cap already carries the COMM attribute.
 #[test]
 fn test_comm_same_handle_re_register_rejected() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+    let (parent, _child, child_dh, _root) = setup_parent_child();
     let (comm_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    Capability::<Domain>::register_comm(&dom, comm_h).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, comm_h, child_dh, 0).unwrap();
 
-    // Same handle again — domain already has a COMM page.
-    let result = Capability::<Domain>::register_comm(&dom, comm_h);
+    let result = Capability::<Domain>::register_comm(&parent, comm_h, child_dh, 0);
     assert!(
         matches!(result.unwrap_err(), CapaError::InvalidOperation(_)),
         "re-registering the same handle must return InvalidOperation"
     );
 }
 
-// ── 8. Replacing COMM is rejected (one-shot semantics) ───────────────────────
+// ── 8. Multiple COMM pages allowed (no one-shot) ─────────────────────────────
 
-/// register_comm is a one-shot operation.  Calling it again after a COMM page
-/// is already registered must be rejected, regardless of which handle is used.
+/// Multiple COMM pages can be registered for the same child domain (one per VP,
+/// or separate pages for messages vs event flags).
 #[test]
-fn test_comm_cannot_replace() {
-    let dom = make_domain();
-    let _root = register_root_mem(&dom, 1);
+fn test_comm_multiple_pages_allowed() {
+    let (parent, child, child_dh, _root) = setup_parent_child();
+    let child_id = child.read().data.id;
 
-    let (first_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    Capability::<Domain>::register_comm(&dom, first_h).unwrap();
+    let (h1, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (h2, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
 
-    // Carve a second page and try to replace — must fail.
-    let (second_h, _, _) =
-        Capability::<Domain>::carve(&dom, 1, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
-    let result = Capability::<Domain>::register_comm(&dom, second_h);
+    // First COMM page for VP 0.
+    Capability::<Domain>::register_comm(&parent, h1, child_dh, 0).unwrap();
+    // Second COMM page for VP 1.
+    let batch = Capability::<Domain>::register_comm(&parent, h2, child_dh, 1).unwrap();
+
+    // Both caps should have COMM set.
+    let c1 = parent.read().data.get_memory_capability(h1).unwrap().upgrade().unwrap();
+    let c2 = parent.read().data.get_memory_capability(h2).unwrap().upgrade().unwrap();
+    assert!(c1.read().owned.attributes.comm());
+    assert!(c2.read().owned.attributes.comm());
+
+    // Second CommRegion update should carry VP 1.
+    match &batch.updates()[0] {
+        Update::CommRegion { target_domain_id, vp_id, .. } => {
+            assert_eq!(*target_domain_id, child_id);
+            assert_eq!(*vp_id, 1);
+        }
+        _ => panic!("expected CommRegion"),
+    }
+
+    // Child should have 2 comm_bindings.
+    assert_eq!(child.read().data.comm_bindings.len(), 2);
+}
+
+// ── 9. Invalid VP ID rejected ────────────────────────────────────────────────
+
+#[test]
+fn test_comm_invalid_vp_id_rejected() {
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+    let (h, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // Child has num_vprocessors = popcount(0b1111) = 4, so VP 99 is invalid.
+    let result = Capability::<Domain>::register_comm(&parent, h, child_dh, 99);
     assert!(
         matches!(result.unwrap_err(), CapaError::InvalidOperation(_)),
-        "replacing a COMM page must return InvalidOperation"
+        "VP index beyond child's VP count must be rejected"
     );
-
-    // First cap must still have COMM set — it was not disturbed.
-    let first_cap = dom
-        .read()
-        .data
-        .get_memory_capability(first_h)
-        .unwrap()
-        .upgrade()
-        .unwrap();
-    assert!(first_cap.read().owned.attributes.comm(), "original COMM cap must be unchanged");
 }
 
-// ── 9. Revoking the COMM cap emits UncommRegion ──────────────────────────────
+// ── 10. Revoking the COMM cap emits UncommRegion ─────────────────────────────
 
-/// The parent revoking the COMM capability must produce an UncommRegion update
-/// so the monitor can unmap its access before the domain is torn down.
 #[test]
 fn test_comm_revocation_emits_uncomm_region() {
-    let root = make_domain();
-    let child = make_unsealed_domain();
-    let child_id = child.read().data.id;
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+    let parent_id = parent.read().data.id;
 
-    let _root_mem = register_root_mem(&root, 1);
-    // Carve a sub-region for the child's COMM page.
     let (carved_h, carved_sub, _) =
-        Capability::<Domain>::carve(&root, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0).unwrap();
 
-    // Send to child (unsealed send: immediate transfer).
-    root.write()
-        .data
-        .add_domain_capability(5, Arc::downgrade(&child));
-    Capability::<Domain>::send(&root, carved_h, 5, Attributes::NONE).unwrap();
-
-    // Child registers the received cap as its COMM page.
-    let child_comm_h = *child.read().data.memory_capabilities.keys().next().unwrap();
-    Capability::<Domain>::register_comm(&child, child_comm_h).unwrap();
-
-    // Root revokes the COMM cap by its SubHandle.
-    let batch = Capability::<Domain>::revoke(&root, 1, carved_sub).unwrap();
+    let batch = Capability::<Domain>::revoke(&parent, 1, carved_sub).unwrap();
 
     let has_uncomm = batch.updates().iter().any(|u| {
-        matches!(u, Update::UncommRegion { domain_id, phys, size }
-            if *domain_id == child_id && *phys == 0x0 && *size == 0x1000)
+        matches!(u, Update::UncommRegion { domain_id, phys, size, .. }
+            if *domain_id == parent_id && *phys == 0x0 && *size == 0x1000)
     });
-    assert!(has_uncomm, "revoking a COMM cap must emit UncommRegion for the owner domain");
+    assert!(has_uncomm, "revoking a COMM cap must emit UncommRegion");
 }
 
-// ── 10. Revoking COMM triggers domain revocation (VITAL) ─────────────────────
+// ── 11. Revoking COMM does NOT trigger domain revocation ─────────────────────
 
+/// COMM no longer implies VITAL, so revoking a COMM cap must NOT produce
+/// a RevokeDomain update for the owning domain.
 #[test]
-fn test_comm_revocation_triggers_domain_revoke() {
-    let root = make_domain();
-    let child = make_unsealed_domain();
-    let child_id = child.read().data.id;
+fn test_comm_revocation_does_not_trigger_domain_revoke() {
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+    let parent_id = parent.read().data.id;
 
-    let _root_mem = register_root_mem(&root, 1);
     let (carved_h, carved_sub, _) =
-        Capability::<Domain>::carve(&root, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0).unwrap();
 
-    root.write()
-        .data
-        .add_domain_capability(5, Arc::downgrade(&child));
-    Capability::<Domain>::send(&root, carved_h, 5, Attributes::NONE).unwrap();
-
-    let child_comm_h = *child.read().data.memory_capabilities.keys().next().unwrap();
-    Capability::<Domain>::register_comm(&child, child_comm_h).unwrap();
-
-    let batch = Capability::<Domain>::revoke(&root, 1, carved_sub).unwrap();
+    let batch = Capability::<Domain>::revoke(&parent, 1, carved_sub).unwrap();
 
     let has_revoke = batch.updates().iter().any(|u| {
-        matches!(u, Update::RevokeDomain { domain, .. } if *domain == child_id)
+        matches!(u, Update::RevokeDomain { domain, .. } if *domain == parent_id)
     });
-    assert!(has_revoke, "revoking a COMM cap must generate RevokeDomain (VITAL)");
+    assert!(!has_revoke, "revoking a COMM cap must NOT generate RevokeDomain (no VITAL)");
 }
 
-// ── 11. Revoking COMM zeroes the region (CLEAN) ───────────────────────────────
+// ── 12. Revoking COMM zeroes the region (CLEAN) ───────────────────────────────
 
 #[test]
 fn test_comm_revocation_zeroes_memory() {
-    let root = make_domain();
-    let child = make_unsealed_domain();
+    let (parent, _child, child_dh, _root) = setup_parent_child();
 
-    let _root_mem = register_root_mem(&root, 1);
     let (carved_h, carved_sub, _) =
-        Capability::<Domain>::carve(&root, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0).unwrap();
 
-    root.write()
-        .data
-        .add_domain_capability(5, Arc::downgrade(&child));
-    Capability::<Domain>::send(&root, carved_h, 5, Attributes::NONE).unwrap();
-
-    let child_comm_h = *child.read().data.memory_capabilities.keys().next().unwrap();
-    Capability::<Domain>::register_comm(&child, child_comm_h).unwrap();
-
-    let batch = Capability::<Domain>::revoke(&root, 1, carved_sub).unwrap();
+    let batch = Capability::<Domain>::revoke(&parent, 1, carved_sub).unwrap();
 
     let has_zero = batch.updates().iter().any(|u| {
         matches!(u, Update::ZeroMemory { address, size } if *address == 0x0 && *size == 0x1000)
@@ -380,41 +385,46 @@ fn test_comm_revocation_zeroes_memory() {
     assert!(has_zero, "revoking a COMM cap must emit ZeroMemory (CLEAN)");
 }
 
-// ── 12. UncommRegion is ordered before RevokeDomain ─────────────────────────
+// ── 13. Child revocation auto-releases COMM bindings ─────────────────────────
 
-/// The platform needs to unmap its COMM access before the domain is torn down.
+/// When a child domain is revoked, all parent-owned COMM pages bound to it
+/// must have their COMM attribute and comm_binding cleared, and UncommRegion
+/// updates emitted.
 #[test]
-fn test_comm_uncomm_before_revoke_domain_in_batch() {
-    let root = make_domain();
-    let child = make_unsealed_domain();
+fn test_comm_child_revocation_releases_bindings() {
+    let (parent, child, child_dh, _root) = setup_parent_child();
+    let parent_id = parent.read().data.id;
     let child_id = child.read().data.id;
 
-    let _root_mem = register_root_mem(&root, 1);
-    let (carved_h, carved_sub, _) =
-        Capability::<Domain>::carve(&root, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    // Register two COMM pages bound to child.
+    let (h1, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (h2, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+    Capability::<Domain>::register_comm(&parent, h1, child_dh, 0).unwrap();
+    Capability::<Domain>::register_comm(&parent, h2, child_dh, 1).unwrap();
 
-    root.write()
-        .data
-        .add_domain_capability(5, Arc::downgrade(&child));
-    Capability::<Domain>::send(&root, carved_h, 5, Attributes::NONE).unwrap();
+    // Verify COMM is set on both.
+    let c1 = parent.read().data.get_memory_capability(h1).unwrap().upgrade().unwrap();
+    let c2 = parent.read().data.get_memory_capability(h2).unwrap().upgrade().unwrap();
+    assert!(c1.read().owned.attributes.comm());
+    assert!(c2.read().owned.attributes.comm());
 
-    let child_comm_h = *child.read().data.memory_capabilities.keys().next().unwrap();
-    Capability::<Domain>::register_comm(&child, child_comm_h).unwrap();
+    // Revoke child domain via its domain handle.
+    let batch = Capability::<Domain>::revoke_domain(&parent, child_dh).unwrap();
 
-    let batch = Capability::<Domain>::revoke(&root, 1, carved_sub).unwrap();
+    // COMM must be cleared on both parent caps.
+    assert!(!c1.read().owned.attributes.comm(), "COMM must be cleared on c1 after child revoke");
+    assert!(!c2.read().owned.attributes.comm(), "COMM must be cleared on c2 after child revoke");
 
-    let updates = batch.updates();
-    let uncomm_pos = updates.iter().position(|u| {
-        matches!(u, Update::UncommRegion { domain_id, .. } if *domain_id == child_id)
-    });
-    let revoke_pos = updates.iter().position(|u| {
-        matches!(u, Update::RevokeDomain { domain, .. } if *domain == child_id)
-    });
+    // comm_binding must be None.
+    assert!(c1.read().data.comm_binding.is_none());
+    assert!(c2.read().data.comm_binding.is_none());
 
-    assert!(uncomm_pos.is_some(), "UncommRegion must be present");
-    assert!(revoke_pos.is_some(), "RevokeDomain must be present");
-    assert!(
-        uncomm_pos.unwrap() < revoke_pos.unwrap(),
-        "UncommRegion must appear before RevokeDomain in the batch"
-    );
+    // Batch must contain UncommRegion for both.
+    let uncomm_count = batch.updates().iter().filter(|u| {
+        matches!(u, Update::UncommRegion { domain_id, target_domain_id, .. }
+            if *domain_id == parent_id && *target_domain_id == child_id)
+    }).count();
+    assert_eq!(uncomm_count, 2, "must emit UncommRegion for each released COMM binding");
 }

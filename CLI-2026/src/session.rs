@@ -90,6 +90,8 @@ pub enum Command {
     },
     RegisterComm {
         mem: String,
+        child_domain: String,
+        vp_id: u32,
     },
 }
 
@@ -185,8 +187,8 @@ impl Session {
                 Command::RejectChannel { receiver, pending_id } => {
                     format!("reject-channel {} {}", receiver, pending_id)
                 }
-                Command::RegisterComm { mem } => {
-                    format!("register-comm {}", mem)
+                Command::RegisterComm { mem, child_domain, vp_id } => {
+                    format!("register-comm {} {} {}", mem, child_domain, vp_id)
                 }
             };
             writeln!(file, "{}", line)?;
@@ -523,16 +525,19 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::RegisterComm { mem } => {
+                Command::RegisterComm { mem, child_domain, vp_id } => {
                     let mem_arc = arc_map.get(mem)
                         .cloned().unwrap_or_else(|| sanitize_name(mem));
+                    let child_arc = arc_map.get(child_domain)
+                        .cloned().unwrap_or_else(|| sanitize_name(child_domain));
                     let owner_id_var = format!("{mem_arc}_owner_id");
 
-                    writeln!(file, "    // register-comm: register '{mem}' as COMM page")?;
+                    writeln!(file, "    // register-comm: register '{mem}' as COMM page for '{child_domain}' VP {vp_id}")?;
                     writeln!(file, "    let {owner_id_var} = {mem_arc}.read().owned.owner;")?;
                     writeln!(file, "    let {mem_arc}_owner = domains.get(&{owner_id_var}).unwrap().clone();")?;
                     writeln!(file, "    let {mem_arc}_handle = find_memory_handle(&{mem_arc}_owner, &{mem_arc}).unwrap();")?;
-                    writeln!(file, "    Capability::<Domain>::register_comm(&{mem_arc}_owner, {mem_arc}_handle).unwrap();")?;
+                    writeln!(file, "    let {child_arc}_handle = find_domain_handle(&{mem_arc}_owner, &{child_arc}).unwrap();")?;
+                    writeln!(file, "    Capability::<Domain>::register_comm(&{mem_arc}_owner, {mem_arc}_handle, {child_arc}_handle, {vp_id}).unwrap();")?;
                     writeln!(file)?;
                 }
             }

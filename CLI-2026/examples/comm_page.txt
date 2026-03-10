@@ -1,9 +1,7 @@
 # COMM page example session
 #
-# Demonstrates registering a domain's COMM communication buffer.
-# COMM registration is one-shot: a domain registers its COMM page once
-# and cannot replace it.  To change the COMM page, revoke the domain
-# and create a new one.
+# Demonstrates registering a parent-owned COMM page bound to a child
+# domain's VP.  Multiple COMM pages per child are allowed.
 #
 # Replay with: load examples/comm_page.txt
 
@@ -14,34 +12,29 @@ init root 0x100000
 create-domain root child 0xf all
 seal child
 
-# 3. Send a chunk of memory to the child so it can use it
-carve root child_ram 0x0 0x10000 rwx
-send child_ram child
+# 3. Carve a page from root's memory for the COMM buffer
+carve r0 comm0 0x0 0x1000 rw
 
-# Child accepts the memory
-enumerate-pending child
-accept-capability child 0
+# 4. Register it bound to child VP 0 — monitor now maps [0x0, 0x1000)
+#    Batch shows: 1 CommRegion update with target_domain_id and vp_id
+register-comm comm0 child 0
 
-# 4. Carve a single page from the child's RAM as its COMM buffer
-carve child_ram comm0 0x0 0x1000 rw
-
-# 5. Register it — monitor now maps [0x0, 0x1000) for its own access
-#    Batch shows: 1 CommRegion update
-register-comm comm0
-
-# 6. Inspect: comm0 now carries COMM|CLEAN|VITAL; it is a one-shot binding
+# 5. Inspect: comm0 now carries COMM|CLEAN (not VITAL)
 list
 
-# 7. Attempting a second register-comm is rejected (one-shot semantics)
-# register-comm comm0   ← would fail: InvalidOperation
+# 6. Register a second COMM page for VP 1 — multiple are allowed
+carve r0 comm1 0x1000 0x1000 rw
+register-comm comm1 child 1
 
-# 8. Attempting to carve or alias a COMM cap is also rejected
+# 7. Attempting to re-register a cap that already has COMM is rejected
+# register-comm comm0 child 0   ← would fail: InvalidOperation
+
+# 8. Attempting to carve, alias, or send a COMM cap is rejected
 # carve comm0 bad_carve 0x0 0x100 r   ← would fail: PermissionDenied
 # alias comm0 bad_alias 0x0 0x100 r   ← would fail: PermissionDenied
-# send  comm0 root                    ← would fail: PermissionDenied
 
-# 9. Revoking the COMM cap (from root, which owns the memory tree) will:
+# 9. Revoking the COMM cap (from root) will:
 #     - emit UncommRegion (monitor unmaps its access to the COMM page)
 #     - emit ZeroMemory   (CLEAN: content wiped before returning to root)
-#     - emit RevokeDomain (VITAL: child torn down)
-revoke child_ram comm0
+#     - NOT emit RevokeDomain (COMM does not imply VITAL)
+revoke r0 comm0

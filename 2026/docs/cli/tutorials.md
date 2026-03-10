@@ -16,7 +16,7 @@ These cover the fundamental building blocks of the capability model.
 | 6 | `06-pending-capabilities.txt` | Pending Capabilities | RECEIVE_AFTER_SEAL, pending queue, accept/reject lifecycle |
 | 7 | `07-meta-regions.txt` | META Regions | Monitor-private memory, attestation visibility, forbidden operations |
 | 8 | `08-gpa-mapping.txt` | GPA Address Translation | Non-identity GPA, send_at, accept_at, view-aware insert, blocked gaps |
-| 9 | `09-comm-page.txt` | COMM Page | Domain-owned monitor communication buffer, one-shot registration, CLEAN+VITAL |
+| 9 | `09-comm-page.txt` | COMM Page | Parent-owned communication buffer bound to child VP, multiple allowed, CLEAN (not VITAL) |
 
 ## Advanced Tutorials (10–15)
 

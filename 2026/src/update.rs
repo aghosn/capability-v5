@@ -72,19 +72,24 @@ pub enum Update {
         size: u64,
     },
 
-    /// A COMM region was registered by `domain_id`.
+    /// A COMM region was registered by `domain_id` (the parent/owner).
+    /// `target_domain_id` is the child domain it is bound to, `vp_id` is the VP index.
     /// The platform must map `[phys, phys+size)` into its own address space
     /// (e.g. via HHDM) so it can read/write the domain's communication buffer.
     CommRegion {
         domain_id: DomainId,
+        target_domain_id: DomainId,
+        vp_id: u32,
         phys: u64,
         size: u64,
     },
 
-    /// A COMM region was unregistered or revoked for `domain_id`.
+    /// A COMM region was unregistered or revoked for `domain_id` (the parent/owner).
     /// The platform must unmap its own access to `[phys, phys+size)`.
     UncommRegion {
         domain_id: DomainId,
+        target_domain_id: DomainId,
+        vp_id: u32,
         phys: u64,
         size: u64,
     },
@@ -188,14 +193,28 @@ impl UpdateBatch {
         self.add(Update::GiveMetaMem { domain_id, start, size });
     }
 
-    /// Add a comm-region update (COMM page registered by a domain).
-    pub fn add_comm_region(&mut self, domain_id: DomainId, phys: u64, size: u64) {
-        self.add(Update::CommRegion { domain_id, phys, size });
+    /// Add a comm-region update (COMM page registered by a domain, bound to a child VP).
+    pub fn add_comm_region(
+        &mut self,
+        domain_id: DomainId,
+        target_domain_id: DomainId,
+        vp_id: u32,
+        phys: u64,
+        size: u64,
+    ) {
+        self.add(Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size });
     }
 
     /// Add an uncomm-region update (COMM page unregistered or revoked).
-    pub fn add_uncomm_region(&mut self, domain_id: DomainId, phys: u64, size: u64) {
-        self.add(Update::UncommRegion { domain_id, phys, size });
+    pub fn add_uncomm_region(
+        &mut self,
+        domain_id: DomainId,
+        target_domain_id: DomainId,
+        vp_id: u32,
+        phys: u64,
+        size: u64,
+    ) {
+        self.add(Update::UncommRegion { domain_id, target_domain_id, vp_id, phys, size });
     }
 
     /// Get all updates in the batch

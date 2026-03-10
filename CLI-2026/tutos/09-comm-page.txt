@@ -1,21 +1,17 @@
 # Tutorial 9: COMM Page — Domain Communication Buffer
 # =====================================================
-# Demonstrates the COMM attribute: a shared memory channel between a
-# domain and the monitor. Unlike META (hidden from the domain), a COMM
-# page stays mapped in the domain's EPT so the domain can read/write it
-# while the monitor also maps it via HHDM.
+# Demonstrates the COMM attribute: a parent-owned shared memory page bound to
+# a child domain's VP.  The monitor can read/write the page on behalf of the
+# child's VP (e.g. for ThemIC intercept messages, event flags, etc.).
 
 @msg ━━━ Tutorial 9: COMM Page — Domain Communication Buffer ━━━
 @msg
-@msg A COMM page is shared memory between a domain and the monitor.
-@msg   • Registered by the domain itself (not sent by the parent)
-@msg   • Stays mapped in the domain's address space — the domain can use it
-@msg   • Monitor also accesses it (via HHDM / direct physical map)
-@msg   • One-shot: once registered it cannot be replaced
-@msg   • Implies CLEAN + VITAL: zeroed and domain revoked on revocation
-@msg
-@msg Compare with META: META is monitor-owned and HIDDEN from the domain.
-@msg COMM is domain-owned and VISIBLE to both domain and monitor.
+@msg A COMM page is parent-owned memory bound to a child domain's VP.
+@msg   • Registered by the parent via register-comm <mem> <child> <vp_id>
+@msg   • NOT mapped in the child's EPT — only the monitor (capavisor) accesses it
+@msg   • Multiple COMM pages per child domain are allowed
+@msg   • Implies CLEAN (zeroed on revoke); does NOT imply VITAL
+@msg   • Cannot be carved, aliased, or sent while the binding is active
 @msg
 
 # ── Step 1: Initialize ────────────────────────────────────────────────────────
@@ -24,70 +20,70 @@ init root 0x40000
 
 @msg
 
-# ── Step 2: Create and seal a child domain ────────────────────────────────────
-@msg 📋 Step 2: Create a child domain and send it 64 KB of RAM
+# ── Step 2: Create a child domain ─────────────────────────────────────────────
+@msg 📋 Step 2: Create a child domain
 create-domain root child 0b1111 all
 seal child
 
 @msg
-
-# Give child some RAM to work with
-carve r0 child_ram 0x0 0x10000 rwx
-send child_ram child
-enumerate-pending child
-accept-capability child 0
-
-@msg
-@msg ✓ 'child' is sealed and owns [0x0..0x10000)
+@msg ✓ 'child' is sealed
 @msg
 
-# ── Step 3: Carve the COMM page from child's RAM ──────────────────────────────
-@msg 📋 Step 3: Carve a 4 KB COMM buffer from child's allocation
+# ── Step 3: Carve the COMM page from root's RAM ──────────────────────────────
+@msg 📋 Step 3: Carve a 4 KB COMM buffer from root's memory
 @msg
 @msg The COMM page must be:
 @msg   • Carved (not aliased) — exclusive derivation chain required
 @msg   • Exclusive status (no alias in its ancestry)
-@msg   • Not already carrying the COMM attribute
-carve child_ram comm0 0x0 0x1000 rw
+@msg   • Owned by the registering domain (the parent)
+carve r0 comm0 0x0 0x1000 rw
 
 @msg
 @msg ✓ 'comm0' carved: kind=Carve, status=Exclusive, rights=RW
 @msg
 
-# ── Step 4: Register the COMM page ───────────────────────────────────────────
-@msg 📋 Step 4: Register comm0 as the domain's COMM page
+# ── Step 4: Register the COMM page bound to child VP 0 ───────────────────────
+@msg 📋 Step 4: Register comm0 as a COMM page for child's VP 0
 @msg
 @msg After this call:
-@msg   • comm0 carries COMM|CLEAN|VITAL
-@msg   • The monitor receives a CommRegion update and maps the physical page
-@msg   • child's EPT still maps [0x0..0x1000) — the domain retains access
-register-comm comm0
+@msg   • comm0 carries COMM|CLEAN (not VITAL)
+@msg   • The monitor receives a CommRegion update with target_domain_id and vp_id
+@msg   • The page is NOT in child's EPT — only the monitor maps it
+register-comm comm0 child 0
 
 @msg
 @msg ✓ CommRegion update emitted: monitor now maps the COMM page
 @msg
 
 # ── Step 5: Inspect the registered COMM cap ──────────────────────────────────
-@msg 📋 Step 5: List all capabilities — comm0 now shows COMM|CLEAN|VITAL
+@msg 📋 Step 5: List all capabilities — comm0 now shows COMM|CLEAN
 list
 
 @msg
 
-# ── Step 6: One-shot semantics — second register-comm is rejected ─────────────
-@msg 📋 Step 6: Trying to register a second COMM page (must fail)
+# ── Step 6: Multiple COMM pages allowed ──────────────────────────────────────
+@msg 📋 Step 6: Register a second COMM page for the same child (VP 1)
 @msg
-@msg A domain may register its COMM page exactly once.
-@msg To change it, revoke the domain and create a fresh one.
+@msg Unlike the old one-shot design, multiple COMM pages are allowed.
+carve r0 comm1 0x1000 0x1000 rw
+register-comm comm1 child 1
+
+@msg
+@msg ✓ Second COMM page registered for VP 1
+@msg
+
+# ── Step 7: Re-registering the same cap is rejected ──────────────────────────
+@msg 📋 Step 7: Re-registering a cap that already has COMM must fail
 
 # EXPECT_FAIL
-register-comm comm0
+register-comm comm0 child 0
 
 @msg
-@msg ✗ InvalidOperation — COMM page already registered
+@msg ✗ InvalidOperation — capability already carries the COMM attribute
 @msg
 
-# ── Step 7: Forbidden derivations on a COMM cap ──────────────────────────────
-@msg 📋 Step 7: Carve, alias, or send of a COMM cap must be rejected
+# ── Step 8: Forbidden derivations on a COMM cap ──────────────────────────────
+@msg 📋 Step 8: Carve, alias, or send of a COMM cap must be rejected
 
 # EXPECT_FAIL
 carve comm0 bad_carve 0x0 0x100 r
@@ -100,41 +96,33 @@ alias comm0 bad_alias 0x0 0x100 r
 
 @msg
 @msg ✗ PermissionDenied — COMM regions cannot be aliased
-
-# EXPECT_FAIL
-send comm0 root
-
-@msg
-@msg ✗ PermissionDenied — COMM regions cannot be sent
 @msg
 
-# ── Step 8: Revocation sequence ──────────────────────────────────────────────
-@msg 📋 Step 8: Revoke the COMM cap from root (which owns child_ram)
+# ── Step 9: Revocation — COMM does not kill owning domain ────────────────────
+@msg 📋 Step 9: Revoke comm0 from root
 @msg
-@msg Three updates are produced in order:
-@msg   1. UncommRegion — monitor unmaps its HHDM access to the COMM page
-@msg   2. ZeroMemory   — physical range [0x0..0x1000) is zeroed (CLEAN)
-@msg   3. RevokeDomain — 'child' is revoked (VITAL)
-revoke child_ram comm0
+@msg Two updates are produced (no RevokeDomain — COMM is not VITAL):
+@msg   1. UncommRegion — monitor unmaps its access to the COMM page
+@msg   2. ZeroMemory   — physical range zeroed (CLEAN)
+revoke r0 comm0
 
 @msg
-@msg ✓ Monitor unmapped COMM page. Memory zeroed. Domain 'child' revoked.
+@msg ✓ Monitor unmapped COMM page. Memory zeroed. Root domain is still alive.
 @msg
 
-# ── Step 9: Final state ───────────────────────────────────────────────────────
-@msg 📋 Step 9: Final state — child is gone, root regains memory
+# ── Step 10: Final state ──────────────────────────────────────────────────────
+@msg 📋 Step 10: Final state — root is alive, child is still alive
 list
 
 @msg
 @msg 📖 Key Takeaways:
-@msg   • COMM is domain-owned shared memory between domain and monitor
-@msg   • Registered with register-comm; requires Carve + Exclusive source
-@msg   • Stays mapped in domain EPT — unlike META which is hidden
-@msg   • One-shot: cannot be replaced; revoke the domain to change it
-@msg   • Implies CLEAN (zero on revoke) + VITAL (domain revoked on revoke)
-@msg   • Revocation emits UncommRegion BEFORE RevokeDomain so the monitor
-@msg     safely unmaps its access before the domain is torn down
+@msg   • COMM is parent-owned memory bound to a child domain's VP
+@msg   • Registered with register-comm <mem> <child> <vp_id>
+@msg   • NOT mapped in child EPT — only monitor accesses it via HHDM
+@msg   • Multiple COMM pages per child are allowed (one per VP, or more)
+@msg   • Implies CLEAN (zero on revoke) but NOT VITAL (domain survives)
+@msg   • Bindings auto-release when the child domain is revoked
 @msg
-@msg 💡 Use case: pass hypercall arguments, status flags, or event queues
-@msg    through the COMM page without needing additional capability operations.
+@msg 💡 Use case: ThemIC pages (intercept messages, event flags, doorbell
+@msg    tables) are COMM pages bound to child VPs.
 @msg

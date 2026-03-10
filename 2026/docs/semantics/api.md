@@ -81,18 +81,17 @@ Sending to an unsealed domain is the normal setup path. Sending to a **sealed** 
 
 > 📖 **Try it:** [Tutorial 9 — COMM Page](../cli/tutorials.md) walks through the full registration and revocation lifecycle interactively.
 
-A sealed domain can register a **COMM page** — a shared memory channel between itself and the monitor. The region stays mapped in the domain's address space (unlike META, which is hidden from the domain) and is also accessible to the monitor via its HHDM mapping. Registration is one-shot: it cannot be replaced without revoking the domain.
+A parent domain registers a **COMM page** — a shared memory buffer bound to a child domain's VP. The region is NOT mapped in the child's EPT; apart from the parent, only the monitor (capavisor) accesses it via its HHDM mapping. Multiple COMM pages may be registered per child domain.
 
 ```
-cap> carve child_ram comm0 0x0 0x1000 rw
-cap> register-comm comm0
-✓ 'comm0' registered as COMM page for domain 'child'
-  ℹ COMM: 1 page(s) registered with monitor
+cap> carve r0 comm0 0x0 0x1000 rw
+cap> register-comm comm0 child 0
+✓ 'comm0' registered as COMM page for domain 'child' VP 0
 ```
 
-`comm0` now carries `COMM|CLEAN|VITAL`. The monitor receives a `CommRegion` update and establishes its own mapping to the physical page.
+`comm0` now carries `COMM|CLEAN` (not VITAL). The monitor receives a `CommRegion` update with the target domain ID and VP index, and establishes its own mapping to the physical page.
 
-**Preconditions**: the capability must be a `Carve`-kind region with `Exclusive` status, owned by the calling domain, and not already carrying the `COMM` attribute.
+**Preconditions**: the capability must be a `Carve`-kind region with `Exclusive` status, owned by the calling domain, and not already carrying the `COMM` attribute. The child domain handle and VP index must be valid.
 
 ---
 
@@ -214,8 +213,8 @@ init
  └─ carve / alias        (parent memory must exist)
      ├─ send             (memory region + target domain must exist)
      │   └─ revoke       (parent must hold the REVOKE permission)
-     └─ register-comm    (domain registers its own COMM page; one-shot)
-         └─ revoke       (emits UncommRegion → ZeroMemory → RevokeDomain)
+     └─ register-comm    (parent binds COMM page to child VP; multiple allowed)
+         └─ revoke       (emits UncommRegion → ZeroMemory; no RevokeDomain)
 ```
 
 All capability operations (carve, alias, send, revoke on memory; create-domain, revoke on domains) require the **operating domain** to be sealed and to hold the corresponding `MonitorAPI` permission bit. Root domain capabilities bypass this check (root is always sealed with all permissions).

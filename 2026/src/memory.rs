@@ -105,8 +105,9 @@ impl Attributes {
     pub const VITAL: u8 = 1 << 2;
     /// Region is used for metadata storage
     pub const META: u8 = 1 << 3;
-    /// Region is the domain's COMM page (monitor↔domain shared communication buffer).
-    /// Implies CLEAN + VITAL; cannot be carved, aliased, or sent once set.
+    /// Region is a COMM page (parent↔monitor shared buffer bound to a child VP).
+    /// Implies CLEAN (zeroed on revocation); does NOT imply VITAL.
+    /// Cannot be carved, aliased, or sent while the binding is active.
     pub const COMM: u8 = 1 << 4;
 
     pub const NONE: Self = Attributes { bits: 0 };
@@ -147,11 +148,13 @@ impl Attributes {
         self.has(Self::COMM)
     }
 
-    /// Canonicalize: META and COMM both imply CLEAN + VITAL; materialize those flags.
+    /// Canonicalize: META implies CLEAN + VITAL; COMM implies CLEAN only.
     /// Call this once at registration/send time to avoid scattered checks in the revocation path.
     pub const fn canonicalize(self) -> Self {
-        if self.meta() || self.comm() {
+        if self.meta() {
             Attributes { bits: self.bits | Self::CLEAN | Self::VITAL }
+        } else if self.comm() {
+            Attributes { bits: self.bits | Self::CLEAN }
         } else {
             self
         }
@@ -184,6 +187,15 @@ impl fmt::Display for Attributes {
         }
         write!(f, "{}", attrs.join("|"))
     }
+}
+
+/// Describes which child domain + VP a COMM capability is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommBinding {
+    /// Domain ID of the child this COMM page targets.
+    pub target_domain_id: u64,
+    /// Virtual processor index within that child.
+    pub vp_id: u32,
 }
 
 /// Status of a memory region
@@ -263,6 +275,8 @@ pub struct MemoryRegion {
     pub access: Access,
     /// Hash of region content (if hash attribute is set)
     pub content_hash: Option<[u8; 32]>,
+    /// If this region is a COMM page, which child domain + VP it is bound to.
+    pub comm_binding: Option<CommBinding>,
     /// Authorized cache colors for this region.
     #[cfg(feature = "cache_coloring")]
     pub color_bitmap: Option<crate::translation::ColorBitmap>,
@@ -276,6 +290,7 @@ impl MemoryRegion {
             status: RegionStatus::Exclusive,
             access: Access::new(start, size, Rights::RWX),
             content_hash: None,
+            comm_binding: None,
             #[cfg(feature = "cache_coloring")]
             color_bitmap: None,
         }
@@ -298,6 +313,7 @@ impl MemoryRegion {
             status: RegionStatus::Aliased,
             access,
             content_hash: None,
+            comm_binding: None,
             #[cfg(feature = "cache_coloring")]
             color_bitmap: None,
         })
@@ -321,6 +337,7 @@ impl MemoryRegion {
             status: self.status,
             access,
             content_hash: None,
+            comm_binding: None,
             #[cfg(feature = "cache_coloring")]
             color_bitmap: None,
         })

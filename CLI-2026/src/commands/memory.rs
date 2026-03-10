@@ -279,19 +279,25 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     Ok(())
 }
 
-/// Register a memory capability as the domain's COMM page.
+/// Register a memory capability as a COMM page bound to a child domain's VP.
 ///
-/// Usage: `register-comm <mem>`
+/// Usage: `register-comm <mem> <child_domain> <vp_id>`
 ///
 /// The named memory region must be an exclusive carve owned by the calling
-/// domain.  The engine sets COMM|CLEAN|VITAL on the capability.  Calling
-/// this command again replaces the current COMM page.
+/// domain.  The engine sets COMM|CLEAN on the capability and binds it to
+/// the specified VP of the child domain.  Multiple COMM pages can be
+/// registered for the same child.
 pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
-    if args.len() != 1 {
-        return Err("Usage: register-comm <mem>".to_string());
+    if args.len() != 3 {
+        return Err("Usage: register-comm <mem> <child_domain> <vp_id>".to_string());
     }
 
     let mem_name = args[0];
+    let child_domain_name = args[1];
+    let vp_id: u32 = args[2]
+        .parse()
+        .map_err(|_| format!("Invalid vp_id: '{}'", args[2]))?;
+
     let mem = state
         .memories
         .get(mem_name)
@@ -305,9 +311,20 @@ pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Re
     let mem_handle = find_memory_handle(&owner, &mem)
         .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", mem_name))?;
 
+    let child = state
+        .domains
+        .get(child_domain_name)
+        .ok_or_else(|| format!("Child domain '{}' not found", child_domain_name))?
+        .clone();
+    let child_domain_handle = find_domain_handle(&owner, &child)
+        .ok_or_else(|| format!(
+            "Child domain '{}' not found in owner's capability table",
+            child_domain_name
+        ))?;
+
     let platform = state.platform.clone();
     let (_, batch) = execute(&*platform, false, || {
-        Capability::<Domain>::register_comm(&owner, mem_handle)
+        Capability::<Domain>::register_comm(&owner, mem_handle, child_domain_handle, vp_id)
             .map(|b| ((), b))
     })
     .map_err(|e| format!("register-comm failed: {:?}", e))?;
@@ -316,19 +333,16 @@ pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Re
 
     state.session.add_command(Command::RegisterComm {
         mem: mem_name.to_string(),
+        child_domain: child_domain_name.to_string(),
+        vp_id,
     });
 
-    let owner_name = state
-        .domain_id_to_name
-        .get(&owner_id)
-        .cloned()
-        .unwrap_or_else(|| format!("<id:{}>", owner_id));
-
     println!(
-        "{} '{}' registered as COMM page for domain '{}'",
+        "{} '{}' registered as COMM page for domain '{}' VP {}",
         "✓".bright_green().bold(),
         mem_name.bright_white(),
-        owner_name.bright_white(),
+        child_domain_name.bright_white(),
+        vp_id,
     );
 
     Ok(())
