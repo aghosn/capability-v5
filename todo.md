@@ -53,12 +53,197 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 - [x] **P3a**: ✅ DONE.  All 9 Platform trait methods implemented: acquire_shared/exclusive_lock
   (spin::RwLock), apply_update (6 variants), register_domain, on_domain_revoked,
-  send_ipi (x2APIC ICR, vector 0xF2), sync_barrier (two-phase AtomicUsize),
+  send_ipi (x2APIC INIT assert), sync_barrier (two-phase AtomicUsize),
   try_acquire_update_lock / release_update_lock, poll_and_respond_cross_core.
   Helper methods: set_core_context, clear_core_domain, domain_core.
-- [ ] **P3b**: IPI handler (IDT vector): software side ready (`ipi_pending` array,
-  `poll_and_respond_cross_core`).  **Missing**: IDT gate installation for vector 0xF2
-  (~10–20 lines of bootstrap code to register the interrupt handler).
+- [ ] **P3b**: Cross-core preemption via INIT signal.
+
+  **Design (revised):**  The original plan used a fixed-vector IPI (0xF2) with an IDT
+  handler.  This is wrong: `EXTERNAL_INTERRUPT_EXITING = 0` in the dom0 VMCS means
+  a fixed IPI is delivered to the *guest* IDT, not to Themis.  Even if we set
+  `EXTERNAL_INTERRUPT_EXITING = 1`, an IDT handler in VMX root would risk preempting
+  capavisor code while interrupts are disabled or locks are held.
+
+  The correct approach (matching vmxvmm) uses **INIT assert**: the INIT signal always
+  causes `VMEXIT(EXIT_REASON_INIT_SIGNAL = 3)` from non-root mode, regardless of
+  pin-based controls.  If the target core is already in VMX root mode, INIT is latched
+  and triggers an immediate VMEXIT on the next VMRESUME.  No IDT handler required.
+
+  **Concurrency story:**
+
+  Two paths cause a core to respond to a cross-core update request:
+
+  1. *Core is in non-root mode (running a domain):*
+     Initiating core sets `ipi_pending[target] = true`, then sends INIT assert.
+     Target takes VMEXIT(INIT_SIGNAL) → `handle_vmexit` dispatches to the INIT_SIGNAL
+     handler → calls `poll_and_respond_cross_core()` → barrier 0 (signal stopped) →
+     INVEPT → barrier 1 (signal flushed) → VMRESUME.
+
+  2. *Core is in VMX root mode (spinning on `update_lock`):*
+     The spin loop already calls `poll_and_respond_cross_core()` on every iteration
+     (`2026/src/platform.rs:372-373`).  It sees `ipi_pending[self] = true` (set by the
+     initiating core before sending INIT), clears it, and enters the barrier dance.
+     The latched INIT fires harmlessly on the next VMRESUME (handler sees
+     `ipi_pending = false`, returns immediately).
+
+  In both cases, `ipi_pending` is the *signaling* mechanism; INIT is the *preemption*
+  mechanism that kicks a core out of guest mode.  The barrier protocol is unchanged.
+
+  **Per-core update queue design:**
+
+  In vmxvmm, the per-core `CoreUpdate` queue handles three operations that *must*
+  execute on the affected core itself (the VMCS is per-physical-CPU):
+
+  1. `TlbShootdown` — core reloads EPTP and flushes local EPT TLB.
+  2. `Switch` — cross-core domain switch: target core loads new domain VMCS/context.
+  3. `DomainRevocation` — core running a revoked domain must VMPTRLD the fallback
+     domain's VMCS, switch register context, update `current_domain`.
+
+  Themis adopts the same pattern, adapted for our heap-backed environment:
+
+  ```rust
+  /// Per-core update command, pushed by initiating core, consumed by target.
+  #[derive(Debug, Clone)]
+  pub enum CoreUpdate {
+      /// Flush EPT TLB for the domain currently loaded on this core.
+      TlbShootdown,
+      /// Switch this core to a different domain/VP.
+      Switch {
+          domain_cap: CapabilityRef<Domain>,
+          vp_id: u32,
+      },
+      /// Domain was revoked; switch to fallback domain.
+      Revoke {
+          revoked: DomainId,
+          fallback_cap: CapabilityRef<Domain>,
+          fallback_vp: u32,
+      },
+  }
+  ```
+
+  `Switch` and `Revoke` carry a **`CapabilityRef<Domain>`** (= `Arc<RwLock<…>>`,
+  Clone+Send+Sync) for the new/fallback domain.  The responding core needs this to
+  call `set_core_context(core_id, &cap_ref, vp_id)` and update its `CoreContext`
+  with the correct capability reference — matching how the engine's own
+  `switch_domain_forward` / `switch_domain_return` pass the cap ref.
+
+  **Storage:** `Mutex<VecDeque<CoreUpdate>>` per core, inside `ThemisPlatform`:
+
+  ```rust
+  pub struct ThemisPlatform {
+      // ... existing fields ...
+      core_updates: [Mutex<VecDeque<CoreUpdate>>; MAX_CORES],
+  }
+  ```
+
+  `Mutex<VecDeque>` is simple and correct.  Contention is minimal — only the
+  initiating core writes (under `update_lock`), only the local core reads
+  (in `poll_and_respond_cross_core` or the monitor loop).  The VecDeque grows
+  dynamically via the heap, unlike vmxvmm's fixed 128-entry ring buffer.
+
+  **Who pushes CoreUpdates:**  Currently the capability engine calls only
+  `platform.send_ipi(core_id)` — it doesn't tell the platform *what kind*
+  of per-core action is needed (the platform hardcodes INVEPT).
+
+  For P3b, the platform's `send_ipi()` unconditionally pushes `TlbShootdown`.
+  For P9, the platform (or a new Platform trait method like
+  `preempt_core(core_id, update)`) will push `Revoke` or `Switch` with the
+  CapabilityRef.  The engine already has the cap ref at revocation time —
+  it can pass it via the update batch or a dedicated platform call.
+
+  **Protocol (revised with queue):**
+
+  ```
+  Initiating core:                     Responding core:
+    acquire update_lock
+    determine affected cores
+    for each target:
+      push CoreUpdate to                (written before INIT)
+        core_updates[target]
+      set ipi_pending[target]
+      send INIT assert
+                                         VMEXIT(INIT_SIGNAL) or poll loop
+                                         clear ipi_pending[self]
+    sync_barrier(0, n+1) ─────────────── barriers[0].wait(0)
+    │                                    │
+    │ apply_update (EPT changes)         │ drain core_updates[self]:
+    │                                    │   TlbShootdown → INVEPT
+    │                                    │   Switch → deactivate old VMCS,
+    │                                    │     activate new from VcpuSlot,
+    │                                    │     set_core_context(cap_ref, vp)
+    │                                    │   Revoke → same + mark interrupted
+    │                                    │
+    sync_barrier(1, n+1) ─────────────── barriers[1].wait(0)
+    on_domain_revoked (cleanup)
+    release update_lock                  resume (possibly different domain)
+  ```
+
+  **Ordering constraint for revocation:**  Between barriers 0 and 1, the
+  initiating core's `apply_update(RevokeDomain)` frees the old domain's EPT.
+  The responding core must VMCLEAR its old VMCS (releasing the EPT reference)
+  *before* the EPT is freed.  This is safe in the concurrent phase because:
+  (a) VMCLEAR is a local CPU operation that completes immediately, and
+  (b) the responding core drains its CoreUpdate queue *before* calling
+  `barriers[1].wait(0)`, so the VMCS switch completes before the initiator
+  can proceed past barrier 1 to `on_domain_revoked`.  If tighter ordering
+  proves necessary, a third barrier can be inserted (switch → barrier_1a →
+  free EPT → barrier_1b → resume).
+
+  Between barriers 0 and 1, the initiating core modifies EPT structures while
+  responding cores apply their per-core updates.  This is safe because:
+  - `TlbShootdown`: INVEPT invalidates TLB cache only, no page-table walk race.
+  - `Switch/Revoke`: responding core deactivates its old VMCS (VMCLEAR) and
+    activates the new domain's VMCS (VMPTRLD) — different VMCS from what the
+    initiator touches.  The new domain's EPT is already set up (it's an existing
+    domain).
+
+  **monitor_loop refactor (needed for Switch/Revoke):**
+
+  Currently `monitor_loop(vcpu: &mut ActiveVcpu) -> !` holds a single
+  `ActiveVcpu` forever.  For domain switching, it must manage VCPU lifetime:
+
+  ```rust
+  pub fn monitor_loop(initial_vcpu: ActiveVcpu, platform: &ThemisPlatform) -> ! {
+      let mut vcpu = initial_vcpu;
+      loop {
+          let exit_reason = vcpu.run();
+          handle_vmexit(&mut vcpu, exit_reason, platform);
+          // Drain per-core updates — may replace `vcpu` with a different domain's
+          if let Some(new_vcpu) = platform.drain_core_updates(&mut vcpu) {
+              vcpu = new_vcpu;
+          }
+      }
+  }
+  ```
+
+  `drain_core_updates` returns `Some(new_vcpu)` when a Switch or Revoke
+  deactivated the old VMCS and activated a new one.  The old `ActiveVcpu`
+  is converted back to `InactiveVcpu` and stored in the old domain's `VcpuSlot`.
+
+  **Implementation checklist:**
+
+  - [ ] **P3b-1**: Define `CoreUpdate` enum and add `core_updates: [Mutex<VecDeque<CoreUpdate>>;
+    MAX_CORES]` to `ThemisPlatform`.  Add `push_core_update(core, update)` and
+    `drain_core_updates(core)` helper methods.
+  - [ ] **P3b-2**: `send_ipi()` — set `ipi_pending[core] = true` (store Release)
+    *before* sending INIT assert (delivery mode `0x5`, level assert, edge).
+    Remove `CAPA_IPI_VECTOR` constant.
+  - [ ] **P3b-3**: `vmexit.rs` — add `EXIT_REASON_INIT_SIGNAL = 3` handler:
+    call `platform.poll_and_respond_cross_core()`.  Needs access to `ThemisPlatform`
+    from the VMEXIT handler (pass via a global `OnceCell` or per-core ref).
+  - [ ] **P3b-4**: Revise `poll_and_respond_cross_core()` to drain `core_updates[self]`
+    between barriers 0 and 1 instead of hardcoding INVEPT.  For now only
+    `TlbShootdown` is pushed; `Switch` and `Revoke` handlers are stubs that panic
+    with `todo!("P9")`.
+  - [ ] **P3b-5**: Refactor `monitor_loop` signature to take ownership of `ActiveVcpu`
+    and accept a `&ThemisPlatform` reference.  After each VMEXIT cycle, call
+    `drain_core_updates` — if it returns a new `ActiveVcpu` (domain switch), replace
+    the current one.  Wire up `handle_vmexit` to also receive `&ThemisPlatform`.
+  - [ ] **P3b-6**: Clean up stale references to vector 0xF2 / IDT gate in comments
+    (`platform.rs` header, `vmcs.rs` host IDTR comment).
+  - [ ] **P3b-7**: Validate: two-core QEMU run, trigger a capability mutation (e.g.
+    `carve` from dom0 hypercall or a test harness), confirm INIT_SIGNAL VMEXIT fires
+    on the remote core and the barrier protocol completes without deadlock.
 - [x] **P3c**: ✅ DONE (EPT side).  `invept_for_domain()` calls INVEPT single-context
   after EPT updates and in `poll_and_respond_cross_core`.  IOTLB invalidation
   deferred to Phase 4 (VT-d).
