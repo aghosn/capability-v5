@@ -443,18 +443,62 @@ PI descriptor colocation, and the cross-core interrupt routing channel. Depends 
 - [ ] **P10f**: Update cross-core interrupt routing (P6e step 5) to use META page fields.
 - [ ] **P10g**: Resolve write-back timing: generation counter + benchmark overhead.
 
-### Phase 11 — TychIC: Doorbell and Event Flag Pages
+### Phase 11 — ThemIC: Doorbell and Event Flag Pages
 
-Implements the SynIC-inspired cross-domain notification protocol. Depends on Phase 10.
+> **Renamed from TychIC.**  Redesigned to use generalized COMM capabilities
+> (see COMM redesign below) instead of META pages.  See
+> `2026/docs/design/mshv_themis/mshv_themis.md` §4 for the full ThemIC design.
 
-- [ ] **P11a**: Define event flag page layout in `crates/themis-abi/`: 4 KB page, each bit = notification slot.
-- [ ] **P11b**: `VMCALL_REGISTER_EVENT_FLAGS(domain_handle, vp_id, meta_cap_handle)`:
-  register event flag page, map into root mode + child EPT.
-- [ ] **P11c**: `VMCALL_REGISTER_DOORBELL(domain_handle, vp_id, gpa, slot, vector)`:
-  register doorbell — EPT violation on write sets event flag + posts interrupt to target VP.
+Implements the SynIC-inspired cross-domain notification protocol.  ThemIC pages
+are parent-owned COMM capabilities bound to child VPs.  Depends on COMM redesign.
+
+**COMM Redesign** (capability engine change, prerequisite for ThemIC):
+
+- [ ] **P11-comm-a**: Drop VITAL from COMM — in `memory.rs` `canonicalize()`, COMM
+  implies CLEAN only (not VITAL).  Revoking a COMM page zeros memory but does not
+  kill the owning domain.
+- [ ] **P11-comm-b**: Allow multiple COMM per domain — remove `comm_cap: Option<...>`
+  single-slot from `Domain` in `domain.rs`.  Add `comm_bindings: Vec<CapabilityWeak<MemoryRegion>>`
+  to `Domain` (child-side list of parent COMM caps bound to this domain).
+- [ ] **P11-comm-c**: Extend `register_comm` signature in `capability.rs`:
+  `register_comm(caller, handle, child_domain_handle: LocalHandle, vp_id: u32)`.
+  Caller (parent) registers its own memory capability as COMM bound to a child VP.
+  Add `comm_binding: Option<CommBinding>` field to `MemoryRegion` where
+  `CommBinding = { target_domain_id: DomainId, vp_id: u32 }`.
+  Push weak ref into child domain's `comm_bindings`.
+  Extend `CommRegion` update with `target_domain_id` and `vp_id`.
+- [ ] **P11-comm-d**: Auto-release on child revocation — in the revocation path,
+  iterate child's `comm_bindings` weak refs; for each that upgrades, clear COMM
+  attribute + `comm_binding`, emit `UncommRegion`.  If parent already revoked
+  (upgrade fails), skip.
+- [ ] **P11-comm-e**: Update COMM unit tests in `2026/tests/integration/comm.rs`
+  (12 existing tests).  All `register_comm` calls need `child_domain_handle` +
+  `vp_id` params.  Add new tests: multiple COMM per domain, no VITAL kill,
+  binding to child VP, auto-release on child revocation.
+- [ ] **P11-comm-f**: Update CLI-2026 for new `register_comm` signature:
+  - `CLI-2026/src/commands/memory.rs`: `cmd_register_comm()` — accept 3 args
+    (`<mem> <child_domain> <vp_id>`) instead of 1.
+  - `CLI-2026/src/session.rs`: `Command::RegisterComm` enum — add `child_domain`
+    and `vp_id` fields; update serialization and unit-test export logic.
+  - `CLI-2026/tutos/09-comm-page.txt` and `CLI-2026/examples/comm_page.txt`:
+    update example commands.
+
+**ThemIC protocol** (capavisor + driver, after COMM redesign):
+
+- [ ] **P11a**: Define ThemIC message/event-flag/doorbell structs in `crates/themis-abi/`:
+  `themic_message_page` (16 channels × 256 B), `themic_event_flag_page`,
+  `themic_doorbell_entry`, `themic_intercept_message`, `themic_doorbell_message`.
+- [ ] **P11b**: `VMCALL_REGISTER_DOORBELL(child_domain_handle, vp_id, gpa, size, datamatch, flags)`
+  → doorbell_id.  Capavisor stores doorbell table per child domain.
+- [ ] **P11c**: `VMCALL_UNREGISTER_DOORBELL(child_domain_handle, vp_id, doorbell_id)`.
 - [ ] **P11d**: EPT_VIOLATION handler: check faulting GPA against registered doorbells.
-- [ ] **P11e**: Interrupt channel registration: `VMCALL_REGISTER_INTR_CHANNEL(child, vp_id, slot, vector)`.
-- [ ] **P11f**: TychIC vs raw APIC exposure: decide whether doorbell/event-flag is invisible to Linux.
+  Match → write `themic_doorbell_message` to COMM page, set event flag, send doorbell
+  IPI to parent core, advance child RIP, VMRESUME child (fast-path, child not stopped).
+- [ ] **P11e**: `VMCALL_SET_THEMIC_VECTOR(vector)`: configure which IDT vector the
+  capavisor uses for doorbell IPIs to dom0.  Default 0xF0.
+- [ ] **P11f**: Intercept notification path (async mode): on child VP exit, write
+  `themic_intercept_message` to COMM page channel 0, set event flag, send doorbell
+  IPI to parent core.  Park child core waiting for resume/recover decision.
 
 ### Phase 12 — `themis-vmm.ko` Linux Kernel Driver *(superseded by Phase 15)*
 
