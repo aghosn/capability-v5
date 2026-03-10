@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+obj-m += hvthemis.o
+hvthemis-objs := src/hvthemis_main.o src/hvthemis_hvcall.o src/hvthemis_part.o src/hvthemis_vp.o
+
+ccflags-y += -I$(src)/inc
+
+# Link the Rust static library (built by the outer Makefile).
+LIBTHEMIS_DIR := $(src)/../themis/crates/libthemis
+LIBTHEMIS_A   := $(LIBTHEMIS_DIR)/target/x86_64-unknown-none/release/liblibthemis.a
+KBUILD_EXTRA_LDFLAGS += $(LIBTHEMIS_A)

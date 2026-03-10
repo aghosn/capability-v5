@@ -3,5 +3,9 @@ name    = "libthemis"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+ffi     = []       # Enable C-FFI shims for linking into kernel modules
+
 [dependencies]
 themis-abi = { path = "../themis-abi" }

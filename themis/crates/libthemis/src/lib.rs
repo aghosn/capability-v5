@@ -19,6 +19,9 @@
 
 use themis_abi::{errors, opcodes};
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 // ── Raw VMCALL primitive ────────────────────────────────────────────────── //
 
 /// Issue a VMCALL with up to 5 arguments.
@@ -262,5 +265,12 @@ pub fn register_intr_chan(
 ) -> Result<(), u64> {
     let (rax, _, _, _) =
         unsafe { vmcall4(opcodes::THEMIS_REGISTER_INTR_CHAN, child, vp_id, slot, vector) };
+    check(rax)
+}
+
+/// Register a COMM page owned by the caller, bound to a child domain's VP.
+pub fn register_comm(cap: u64, child_domain: u64, vp_id: u64) -> Result<(), u64> {
+    let (rax, _, _, _) =
+        unsafe { vmcall3(opcodes::THEMIS_REGISTER_COMM, cap, child_domain, vp_id) };
     check(rax)
 }

@@ -570,8 +570,14 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   `THEMIS_REGISTER_COMM` opcode (0x18) wired in `hypercall.rs`.
   VP register profile (`VpGpRegs`, `VpSregs`, `SegmentReg`, `DescriptorTableReg`,
   `VpCommPage`) defined in `themis-abi/src/regs.rs`.
-- [ ] **P15b** — Character device `/dev/mshv`: `file_operations` with `open`, `release`,
-  `unlocked_ioctl`, `mmap`.  Module init detects Themis via CPUID leaf.
+- [x] **P15b** — ✅ DONE.  `hvthemis/` kernel module skeleton:
+  `hvthemis.h` (ioctl numbers magic 0xB8, uapi structs, internal driver structs),
+  `hvthemis_main.c` (module init, CPUID "ThemisCapa" detection, misc_register `/dev/mshv`,
+  device-level ioctl dispatch), `hvthemis_part.c` (partition fd via `anon_inode_getfile`,
+  full lifecycle with kref, partition-level ioctl stubs), `hvthemis_vp.c` (VP fd lifecycle,
+  RUN_VP/GET/SET_VP_STATE/mmap stubs), `hvthemis_hvcall.c` (VMCALL inline asm wrapper
+  with Themis error→errno translation), `Makefile` + `Kbuild` (out-of-tree build).
+  All ioctls return `-ENOSYS`; data structures fully wired.
 - [ ] **P15c** — Partition ioctls: `MSHV_CREATE_PARTITION` → `VMCALL_CREATE_DOMAIN`,
   `MSHV_DELETE_PARTITION` → `VMCALL_REVOKE_DOMAIN`.  Partition fd tracks domain
   handle (capability ref index returned by `CREATE_DOMAIN`).
