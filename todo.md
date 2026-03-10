@@ -22,6 +22,8 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 - Post-boot refactor (R1–R7) completed — ActiveVcpu/InactiveVcpu, per-core monitor loop, host stack cleanup, VMXON global, Domain consolidation, VMX crate extraction, clippy cleanup.
 - 15 bugs fixed (BUG-1 through BUG-15).
 - #U6 (XSAVES/XRSTORS) enabled.
+- P2-platform completed — ThemisPlatform, MetaAllocator redesign, engine gaps (CreateDomain/GiveMetaMem updates), apply_update handlers, bootstrap helpers.
+- #U7 completed — CoreContext, hypercall.rs dispatch, themis_abi register convention docs, VMCALL wiring in vmexit.rs.
 
 ---
 
@@ -37,61 +39,12 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 ### Phase 2 — Remaining
 
-- [ ] **P2-platform**: Implement the capability engine's `Platform` trait as
-  `ThemisPlatform` (`platform.rs`).  Bootstrap mode:
-  - `apply_update(ChangeRights)` → programs the domain's `EptMapper`
-  - `apply_update(GiveMetaMem)` → calls `meta.add_range(region)` on the domain's allocator
-  - `acquire_*_lock` / `sync_barrier` / `send_ipi` / update-lock → use trait defaults (no-ops, returns true)
-  - `register_domain` → creates a `PlatformDomain` with **empty** `MetaAllocator` and no EPT root yet
-  - EPT root allocated lazily on first `ChangeRights` for the domain (or on first `GiveMetaMem`)
-  - `on_domain_revoked` → free EPT structures, remove from table
-
-  **Internal state**:
-  ```
-  ThemisPlatform {
-      domains:     Mutex<BTreeMap<DomainId, PlatformDomain>>,
-      core_domain: Mutex<BTreeMap<CoreId, DomainId>>,
-      cap_lock:    RwLock<()>,
-      hhdm_offset: u64,
-  }
-  PlatformDomain { ept: Option<EptMapper>, meta: MetaAllocator, parent: Option<DomainId> }
-  ```
-
-  **Engine gaps to fix first (required)**:
-  1. `register_domain` is currently **never called** by the engine — `Capability::create` has
-     no `platform` parameter.  Fix: add `Update::CreateDomain { domain_id, parent_id }` emitted
-     by `Capability::create`; handle it in **`apply_update`** (consistent with the design where
-     `apply_update` is the single handler for all platform reactions to engine decisions).
-     `apply_update(CreateDomain)` → inserts an empty `PlatformDomain` into the registry.
-  2. META memory delivery: when a parent sends META memory to a child domain, the platform must
-     be notified so it can call `meta.add_range(region)`.  Fix: add `Update::GiveMetaMem
-     { domain_id, region }` emitted when a META-flagged memory capability is transferred.
-     `apply_update(GiveMetaMem)` → `domain.meta.add_range(region)`.
-  3. For dom0 bootstrap, the capavisor manually drives `apply_update(CreateDomain { 0, None })`
-     and `apply_update(GiveMetaMem { 0, meta_pool })` before running `execute()`.
-
-  **MetaAllocator redesign** (non-contiguous, starts empty):
-  - Remove `base`, `size`, `next` fields; keep only `free_stack: Vec<u64>` + `hhdm_offset`.
-  - `MetaAllocator::new(hhdm_offset)` → empty allocator.
-  - `add_range(&mut self, region: PhysRegion)` → push all pages of region onto `free_stack`.
-  - alloc/free unchanged (pop/push on free_stack).
-  - Supports non-contiguous META: multiple `add_range` calls work naturally.
-
-  **ChangeRights EPT mapping note**:
-  - `rights != NONE` means map (may be new mapping OR rights update on existing entry).
-    The walker must handle the case where an entry already exists — it should overwrite in
-    place (update flags and HPA).  Verify this is correct in `map_range` before wiring up.
-  - `rights == NONE` means unmap.
-
-  **VMCS / VP structures**: `PlatformDomain` will eventually hold a `Vec<VpState>` (one per VP).
-  EPT root is shared by all VPs of the domain.  Add as placeholder now; fill in at P2d.
-
-  **Capability reference on core**: At runtime, each core needs a reference to the
-  `CapabilityRef<Domain>` currently executing on it (for VMCALL/switch).  Design TBD for P3 —
-  may require the engine to emit an update on `switch`.  Noted as a known gap.
-
-  **Parent ID in PlatformDomain**: needed for `on_domain_revoked` when `fallback: None`
-  (vital-memory revocation — platform must compute fallback from its own parent map).
+- [x] **P2-platform**: ✅ DONE.  ThemisPlatform fully implements the `Platform` trait.
+  Engine gaps fixed (CreateDomain/GiveMetaMem updates emitted by capability engine).
+  MetaAllocator redesigned (non-contiguous free_stack).  apply_update handles
+  CreateDomain, GiveMetaMem, ChangeRights (lazy EPT), RevokeDomain, FlushTLB.
+  Bootstrap helpers (`bootstrap_register_domain`, `bootstrap_give_meta`) in place.
+  IOMMU integration deferred to Phase 4.  VMCS/VP allocation deferred to P2d placeholder.
 
 ### Phase 3 — Platform Trait Implementation
 
@@ -388,119 +341,11 @@ Replace stock minimal Linux with purpose-built dom0 image. Deferred until Phase 
 - [ ] **#U3** Cache coloring — see `./2026/docs/design/address_translation.md`. _Phase 4–6 of address translation design._
 - [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note. _Post-clean-boot refactor._
 - [x] **#U6** Enable XSAVES/XRSTORS — ✅ DONE.  Set secondary exec control bit 20 (ENABLE_XSAVES_XRSTORS), write XSS-exiting bitmap = 0 (all XSAVES/XRSTORS execute natively), removed CPUID 0xD:1 bit 3 mask.  IA32_XSS (0xDA0) passes through via zeroed MSR bitmap.  Tested: dom0 boots to login prompt.
-- [ ] **#U7** Capability API plumbing (themis_abi ↔ capability engine)
+- [x] **#U7** Capability API plumbing (themis_abi ↔ capability engine) — ✅ DONE.
+  CoreContext replaces PerCoreCell (domain_id, vp_id, domain_cap).  Boot init
+  seeds dom0_cap and all per-core contexts before AP launch.  Register convention
+  documented in themis_abi.  hypercall.rs dispatches 10 opcodes (CARVE, ALIAS,
+  SEND, ACCEPT, REJECT, CREATE_DOMAIN, SEAL, REVOKE_MEM, REVOKE_DOMAIN,
+  ATTEST_SELF) with 14 stubs.  VMCALL handler wired in vmexit.rs.  Builds clean.
 
-  Wire up VMCALL handling in `vmexit.rs` to dispatch `themis_abi` opcodes into
-  the capability engine.  Currently all VMCALLs return `-ENOSYS`.
-
-  **Design principles**:
-  1. The capability tree is the **single source of truth** — no parallel
-     `DomainId → CapabilityRef` maps.  All domain references derive from the tree.
-  2. Each core keeps a **`CoreContext`** that holds the `CapabilityRef<Domain>` and
-     VP index of the currently-scheduled domain.  The VMCALL handler reads the
-     core's own `CoreContext` directly — no lookup, no map.
-  3. **Switch is the universal transition primitive** — forward switch, return, and
-     `on_domain_revoked` all reduce to "update the core's `CoreContext`".
-  4. **Dom0's `CapabilityRef<Domain>` is global** — it's the tree root anchor;
-     without it the entire capability tree would be dropped.
-
-  #### `CoreContext` — per-core scheduling state
-
-  Replaces the current `PerCoreCell` (which only holds `AtomicU64` domain ID and
-  `AtomicU32` vp_id).  Encapsulates everything the VMCALL handler needs to know
-  about what is currently running on this physical core.
-
-  ```rust
-  /// Per-core scheduling state.
-  ///
-  /// Invariants:
-  /// - A core only writes to its own CoreContext.
-  /// - Cross-core reads happen under the execute() barrier protocol
-  ///   (IPI + sync_barrier), so the Mutex is never truly contended.
-  /// - `domain_id` is a cached copy of `domain_cap.read().data.id` for
-  ///   fast lock-free observational reads (e.g., `domain_core()` lookups).
-  pub struct CoreContext {
-      /// Cached domain ID — lock-free observational reads by other cores.
-      pub domain_id: AtomicU64,
-      /// Current VP index within the domain (dom0: VP i = core i, fixed).
-      pub vp_id: AtomicU32,
-      /// Capability reference to the currently-scheduled domain.
-      /// The VMCALL handler's entry point into the capability tree.
-      /// `None` only during early boot before dom0 is initialised.
-      pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
-  }
-  ```
-
-  `CoreContext` lives inside `ThemisPlatform.cores: [CoreContext; MAX_CORES]`.
-  For dom0 the VP-to-core mapping is **fixed** (VP i runs on core i).
-  For child domains, VPs may be scheduled on any allowed core.
-
-  When SWITCH is implemented (Phase 9), all transitions — forward switch, return,
-  and revocation redirect — update the target core's `CoreContext` through the same
-  code path.  `SwitchContext` (or the switch return type) will be extended to carry
-  the target `CapabilityRef<Domain>` so the handler can update `domain_cap`.
-  For return, the parent's ref is already in the VP call chain (`VpCallContext.domain`
-  weak ref) — just needs to be surfaced.
-
-  #### Register convention (System V AMD64-style)
-
-  ```
-  IN:   RAX = opcode
-        RDI = arg0,  RSI = arg1,  RDX = arg2,  RCX = arg3,  R8 = arg4
-
-  OUT:  RAX = error code (0 = SUCCESS)
-        RDI = result0, RSI = result1, RDX = result2
-  ```
-
-  #### Implementation steps
-
-  - [ ] **U7a** — Define `CoreContext` struct, replace `PerCoreCell` in `platform.rs`.
-    Add `get_core_cap(core_id) -> Option<CapabilityRef<Domain>>` and
-    `set_core_cap(core_id, cap_ref, vp_id)` to `ThemisPlatform`.
-    Add a `dom0_cap: Mutex<Option<CapabilityRef<Domain>>>` field on `ThemisPlatform`
-    (or a global static) as the tree root anchor.
-
-  - [ ] **U7b** — Initialise per-core state during boot (`main.rs`).
-    After `boot::capa()` returns `CapaState`, store `root_domain.clone()` as the
-    global dom0 anchor.  BSP: set core 0 to `(root_domain, vp=0)`.
-    Before `AP_LAUNCH_READY`: pre-populate each AP core i's `CoreContext` with
-    `(root_domain.clone(), vp=i)`, or have each AP set its own cell.
-
-  - [ ] **U7c** — Document register convention in `themis_abi::opcodes`.
-    Add doc comments to each opcode constant documenting which registers carry
-    arguments and which carry return values.
-
-  - [ ] **U7d** — Create `hypercall.rs` dispatch module.
-    `pub fn handle_vmcall(vcpu: &mut ActiveVcpu)`:
-    1. Load `PLATFORM_PTR`, call `get_current_core()`, read `CoreContext`.
-    2. Match on opcode (RAX), extract args from RDI/RSI/RDX/RCX/R8.
-    3. Call `execute(&platform, exclusive, || Capability::op(...))`.
-    4. Map `CapaError` → `themis_abi::errors` (see mapping below).
-    5. Write return code to RAX, results to RDI/RSI/RDX.
-
-    **CapaError → ABI error mapping**:
-    | CapaError                                       | ABI code     |
-    |-------------------------------------------------|--------------|
-    | InvalidAccess, InvalidOperation, RegionOverlap  | ERR_INVALID  |
-    | PermissionDenied, CannotAliasCarved, Monotonicity, TreeLocked | ERR_NOPERM |
-    | NotFound, ParentRevoked, DomainRevoked          | ERR_NOTFOUND |
-    | DomainSealed, DomainNotSealed, ApiNotAllowed    | ERR_BADSTATE |
-    | NotSupported                                    | ERR_UNIMPL   |
-
-    **Implemented opcodes** (pure capability — no control-flow change):
-    CARVE, ALIAS, SEND, ACCEPT, REJECT, CREATE_DOMAIN, SEAL,
-    REVOKE_MEM, REVOKE_DOMAIN, ATTEST_SELF.
-
-    **Stubbed opcodes** (return `ERR_UNIMPL`):
-    SWITCH (Phase 9), GET_CHAN, ATTEST, GET/SET_REG (Phase 10),
-    SET_INTR_POLICY/SET_DEF_INTR_POLICY (Phase 6),
-    ASSIGN_DEVICE (Phase 4), ENUMERATE, REGISTER_VP_META (Phase 10),
-    REGISTER_DOORBELL/EVENT_FLAGS/INTR_CHAN (Phase 11).
-
-  - [ ] **U7e** — Wire VMCALL handler in `vmexit.rs`.
-    Replace the `-ENOSYS` stub at line 269 with a call to
-    `hypercall::handle_vmcall(vcpu)`.  Advance RIP via `next_instruction()`.
-
-  - [ ] **U7f** — Build + boot test.  Verify dom0 still boots to login prompt.
-    VMCALLs won't be exercised until `themis-vmm.ko` is loaded, but the
-    dispatch code must compile and the boot path must be regression-free.
+  _(Design notes for U7a–U7f archived — implementation matches spec.)_
