@@ -46,6 +46,7 @@ themis/
 │   ├── run-qemu.sh     # Build ISO and boot under QEMU/KVM
 │   ├── debug.sh        # Boot QEMU with -s -S and attach rust-gdb
 │   ├── fetch-dom0.sh   # Download dom0 root disk + create cloud-init seed
+│   ├── resize-disk.sh  # Grow a QCOW2 disk image by N GB
 │   └── setup-limine.sh # Clone and build Limine v8.7.0 into tools/limine/
 │
 ├── tools/
@@ -229,6 +230,15 @@ runs only on the first seeded boot.
 cargo fetch-dom0             # download Ubuntu Jammy cloud image + create seed.img
                              # output: guest/jammy-server-cloudimg-amd64.img  guest/seed.img
 FORCE=1 cargo fetch-dom0     # re-download even if already present
+
+cargo resize-disk guest/jammy-server-cloudimg-amd64.img 10   # grow disk by 10 GB
+```
+
+After resizing, boot the guest and expand the filesystem:
+
+```sh
+sudo growpart /dev/vda 1
+sudo resize2fs /dev/vda1
 ```
 
 The dom0 kernel and initrd are **not** downloaded separately — Limine reads them

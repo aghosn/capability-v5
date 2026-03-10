@@ -25,7 +25,7 @@ fn main() {
         Some(t) => t,
         None => {
             eprintln!("usage: cargo run -p xtask -- <task> [args...]");
-            eprintln!("tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine");
+            eprintln!("tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk");
             std::process::exit(1);
         }
     };
@@ -46,7 +46,7 @@ fn main() {
             task,
             script.display()
         );
-        eprintln!("available tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine");
+        eprintln!("available tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk");
         std::process::exit(1);
     }
 

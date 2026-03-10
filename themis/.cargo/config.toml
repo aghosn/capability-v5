@@ -28,3 +28,4 @@ gdb           = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_
 fetch-dom0    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-dom0"]
 dom0          = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-dom0"]
 setup-limine  = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "setup-limine"]
+resize-disk   = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "resize-disk"]

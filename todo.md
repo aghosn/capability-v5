@@ -25,6 +25,8 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 - P2-platform completed — ThemisPlatform, MetaAllocator redesign, engine gaps (CreateDomain/GiveMetaMem updates), apply_update handlers, bootstrap helpers.
 - #U7 completed — CoreContext, hypercall.rs dispatch, themis_abi register convention docs, VMCALL wiring in vmexit.rs.
 - P7g completed — VMXON global array, three-tier platform locking, update barrier protocol.
+- P7h completed — monitor_loop on all cores, VMCALL dispatch, EPT violation policy documented.
+- Phase 3 (P3a, P3c) mostly completed — all Platform trait methods, INVEPT.  P3b IDT handler pending.
 
 ---
 
@@ -49,18 +51,17 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 ### Phase 3 — Platform Trait Implementation
 
-- [ ] **P3a**: `TychePlatform` with all `Platform` methods:
-  - `acquire_shared_lock` / `acquire_exclusive_lock`: `spin::RwLock<()>`.
-  - `apply_update`: EPT + IOMMU map/unmap/zero/flush as described above.
-  - `register_domain`: allocate EPT root + IOMMU domain PT; insert into `domains` map.
-  - `on_domain_revoked`: redirect cores, free EPT + IOMMU structures, release devices.
-  - `set_core_domain` / `clear_core_domain` / `domain_core`.
-  - `send_ipi` (x2APIC), `sync_barrier` (two AtomicUsize counters per barrier phase).
-  - `try_acquire_update_lock` / `release_update_lock` / `poll_and_respond_cross_core`.
-- [ ] **P3b**: IPI handler (IDT vector): set per-core `ipi_pending` flag;
-  `poll_and_respond_cross_core` checks flag and participates in barrier.
-- [ ] **P3c**: TLB shootdown: `INVEPT` (single-context) after each EPT update;
-  `IOTLB` invalidation after each IOMMU update.
+- [x] **P3a**: ✅ DONE.  All 9 Platform trait methods implemented: acquire_shared/exclusive_lock
+  (spin::RwLock), apply_update (6 variants), register_domain, on_domain_revoked,
+  send_ipi (x2APIC ICR, vector 0xF2), sync_barrier (two-phase AtomicUsize),
+  try_acquire_update_lock / release_update_lock, poll_and_respond_cross_core.
+  Helper methods: set_core_context, clear_core_domain, domain_core.
+- [ ] **P3b**: IPI handler (IDT vector): software side ready (`ipi_pending` array,
+  `poll_and_respond_cross_core`).  **Missing**: IDT gate installation for vector 0xF2
+  (~10–20 lines of bootstrap code to register the interrupt handler).
+- [x] **P3c**: ✅ DONE (EPT side).  `invept_for_domain()` calls INVEPT single-context
+  after EPT updates and in `poll_and_respond_cross_core`.  IOTLB invalidation
+  deferred to Phase 4 (VT-d).
 
 ### Phase 4 — VT-d IOMMU Initialization
 
@@ -187,20 +188,25 @@ The following three invariants govern what dom0 sees and can access:
   implemented in platform.rs (lines 1–67).  Lock ordering, deadlock prevention,
   per-core INVEPT on responding cores, INVEPT scope optimization noted.
 
-- [ ] **P7h**: Per-core VP run loop. Each core runs a tight loop that owns a `VpContext`
-  carrying everything needed to dispatch exits:
+- [x] **P7h**: ✅ DONE (core loop functional).  `monitor_loop` runs on all cores (BSP + APs).
+  VMCALL dispatches to capability engine via `hypercall::handle_vmcall`.  HLT advances RIP.
+  CoreContext + ActiveVcpu carry per-core state (no formal `VpContext` struct — not needed).
 
-  ```
-  per-core loop:
-    vmlaunch / vmresume
-      → VMEXIT → trampoline saves GPRs
-      → handle_vmexit(&mut VpContext, &mut GuestRegs)
-           VpContext = { domain_id, vp_index, &platform, &vmx_state, ... }
-      → dispatch: VMCALL  → capability_engine::execute(...)
-                  EPT vio  → platform.remap(...)
-                  HLT      → park/yield VP
-      → loop
-  ```
+  **EPT violation policy**: EPT violations should not occur under normal operation —
+  all memory accessible to a domain is pre-mapped via capability `ChangeRights` updates.
+  An EPT violation indicates either a capability engine bug (missing mapping) or a guest
+  accessing memory it does not own.  The current handler halts (`halt_forever()`).
+
+  **TODO (semantics TBD)**: EPT violations need to be surfaced as a reportable event
+  to the parent domain rather than halting the hypervisor.  Open questions:
+  1. Should the violation be reported via the META VP-state page (Phase 10) as an
+     exit reason the parent can inspect?
+  2. Should it trigger an automatic domain kill / revocation, or should the parent
+     decide the policy?
+  3. How does this integrate with capabilities — is there a `Fault` update type, or
+     does the parent's VMCALL_RUN_VP simply return with an error code?
+  4. For dom0 (no parent), the violation is a fatal error — halt is correct.
+  Design to be resolved when Phase 9 (multi-domain) is implemented.
 
 - [ ] **P7i — Post-boot cleanup and VP-setup factoring**:
   - **Code cleanup**: remove stale comments, dead code, resolved `TODO(P*)` markers.
@@ -270,7 +276,12 @@ Implements the SynIC-inspired cross-domain notification protocol. Depends on Pha
 - [ ] **P11e**: Interrupt channel registration: `VMCALL_REGISTER_INTR_CHANNEL(child, vp_id, slot, vector)`.
 - [ ] **P11f**: TychIC vs raw APIC exposure: decide whether doorbell/event-flag is invisible to Linux.
 
-### Phase 12 — `themis-vmm.ko` Linux Kernel Driver
+### Phase 12 — `themis-vmm.ko` Linux Kernel Driver *(superseded by Phase 15)*
+
+> **Note**: Phase 15 (`mshv-themis`) replaces this phase with an mshv-compatible
+> driver that reuses the well-known `/dev/mshv` ioctl ABI, enabling cloud-hypervisor
+> integration.  The items below are retained for reference but should not be
+> implemented independently.
 
 Thin Linux kernel module that exposes `/dev/themis` to userspace. Depends on Phase 8.
 
@@ -312,6 +323,113 @@ Replace stock minimal Linux with purpose-built dom0 image. Deferred until Phase 
 - [ ] **P14c** — Minimal rootfs: Alpine mini rootfs or BusyBox static; auto-load `themis-vmm.ko`.
 - [ ] **P14d** — Build script `scripts/build-dom0.sh`: fetch kernel, apply config, build, assemble initrd.
 - [ ] **P14e** — Validation: boot under QEMU, verify driver loads, run child-domain smoke test.
+
+### Phase 15 — `mshv-themis` Linux Kernel Driver (mshv-compatible)
+
+Capability-aware `/dev/mshv` replacement.  Exposes Themis's capability operations
+through an ioctl interface modelled on Microsoft's `mshv` (Hyper-V) kernel driver,
+so that existing VMM userspace (cloud-hypervisor) can target Themis with a thin
+backend swap.  Replaces Phase 12's custom `/dev/themis` driver with a well-known
+ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
+  SET_REG) will surface as stubs; the driver and cloud-hypervisor work can
+  progress in parallel with the capavisor roadmap.
+
+**Design principles**:
+1. The driver is a **thin translation layer** — every ioctl maps to one or more
+   Themis VMCALLs (capability operations).  No policy lives in the driver.
+2. The ioctl surface mirrors `mshv`'s partition/VP model: create partition
+   (= `CREATE_DOMAIN` + `SEAL`), map GPA (= `CARVE` + `SEND` + `ChangeRights`),
+   set/get VP registers, run VP (= `SWITCH`).
+3. Memory mapping uses capability transfer: userspace `mmap`s guest memory,
+   driver issues `CARVE` to split the region and `SEND` to grant it to the child
+   domain.  The capability engine enforces all access-control invariants.
+4. Where `mshv` semantics diverge from capabilities (e.g., `mshv` assumes a flat
+   GPA space; Themis uses explicit capability grants), the driver provides the
+   adaptation glue.
+
+- [ ] **P15a** — CPUID hypervisor leaf: return Themis vendor string + `mshv`-compatible
+  feature flags on leaf `0x40000000`–`0x40000005`.
+- [ ] **P15b** — Character device `/dev/mshv`: `file_operations` with `open`, `release`,
+  `unlocked_ioctl`, `mmap`.  Module init detects Themis via CPUID leaf.
+- [ ] **P15c** — Partition ioctls: `MSHV_CREATE_PARTITION` → `VMCALL_CREATE_DOMAIN`,
+  `MSHV_DELETE_PARTITION` → `VMCALL_REVOKE_DOMAIN`.  Partition fd tracks domain
+  handle (capability ref index returned by `CREATE_DOMAIN`).
+- [ ] **P15d** — VP ioctls: `MSHV_CREATE_VP` → allocate VP slot in domain,
+  `MSHV_SET_VP_REGISTERS` / `MSHV_GET_VP_REGISTERS` → `VMCALL_SET_REG` / `VMCALL_GET_REG`
+  (or META page direct access if Phase 10 is available).
+- [ ] **P15e** — Memory mapping ioctls: `MSHV_MAP_GUEST_MEMORY` → `VMCALL_CARVE` +
+  `VMCALL_SEND` to transfer memory capabilities to child domain.
+  `MSHV_UNMAP_GUEST_MEMORY` → `VMCALL_REVOKE_MEM`.
+- [ ] **P15f** — `MSHV_RUN_VP` → `VMCALL_SWITCH`.  Returns exit reason from META page
+  (or from VMCALL return registers if Phase 10 not available).  Handle intercept
+  types: HLT, I/O port, MMIO, CPUID, MSR, shutdown.
+- [ ] **P15g** — Interrupt injection: `MSHV_ASSERT_INTERRUPT` → `VMCALL` or posted
+  interrupt path.  `MSHV_IRQFD` → eventfd + workqueue → PI descriptor write.
+- [ ] **P15h** — `mmap` for VP state: userspace maps META page (Phase 10) for
+  zero-copy register access and exit reason inspection.
+- [ ] **P15i** — Device assignment: `MSHV_ASSIGN_DEVICE` → `VMCALL_ASSIGN_DEVICE`
+  (Phase 4 IOMMU required).
+
+### Phase 16 — Cloud-Hypervisor Themis Backend
+
+Add a Themis/mshv-themis hypervisor backend to cloud-hypervisor, enabling it to
+create and run VMs on top of Themis via capability operations.  Can be started
+in parallel with Phase 15 (stub missing ioctls); both phases progress alongside
+the capavisor roadmap.
+
+**Approach**: cloud-hypervisor already supports KVM and MSHV backends via the
+`hypervisor` crate abstraction.  The Themis backend plugs into the same trait
+hierarchy (`Hypervisor`, `Vm`, `Vcpu`) using `/dev/mshv` ioctls from Phase 15.
+
+- [ ] **P16a** — Fork/branch cloud-hypervisor; add `hypervisor/src/themis/` module
+  implementing the `Hypervisor` trait.  `Themis::new()` opens `/dev/mshv` and
+  verifies the Themis CPUID vendor string.
+- [ ] **P16b** — `ThemisVm` implementing the `Vm` trait: wraps a partition fd.
+  `create_vm()` → `MSHV_CREATE_PARTITION`.  `set_memory_region()` →
+  `MSHV_MAP_GUEST_MEMORY`.  `create_irq_chip()` / `set_irq_routing()` → Themis
+  interrupt policy VMCALLs.
+- [ ] **P16c** — `ThemisVcpu` implementing the `Vcpu` trait: wraps a VP fd.
+  `run()` → `MSHV_RUN_VP`, decode exit reason, return `VcpuExit` enum.
+  `set_regs()` / `get_regs()` → `MSHV_SET_VP_REGISTERS` / `MSHV_GET_VP_REGISTERS`.
+- [ ] **P16d** — Memory management: adapt `GuestMemoryMmap` regions to
+  `MSHV_MAP_GUEST_MEMORY` calls.  Handle capability-specific constraints
+  (alignment, region splitting).
+- [ ] **P16e** — Device passthrough: PCI device assignment via `MSHV_ASSIGN_DEVICE`.
+  VFIO integration if needed for userspace device access.
+- [ ] **P16f** — virtio device backends: verify virtio-blk, virtio-net, virtio-console
+  work over the Themis backend (they should — virtio is guest-kernel ↔ VMM
+  userspace, independent of hypervisor backend).
+- [ ] **P16g** — Boot integration: kernel + initrd loading, boot parameter setup.
+  Adapt cloud-hypervisor's direct kernel boot or firmware boot paths to use
+  Themis VP register setup.
+- [ ] **P16h** — End-to-end validation: boot a Linux guest under cloud-hypervisor
+  running on Themis.  Test: serial console, virtio-blk root disk, SSH.
+
+### Phase 17 — Dom0 Networking
+
+Enable network connectivity for the dom0 Linux guest.  Can be started at any
+time — the dom0 kernel already boots to a login prompt; this phase adds the
+kernel config and QEMU/bare-metal setup needed for a working NIC.
+
+- [ ] **P17a** — **QEMU networking (without Themis)**: Validate dom0 kernel has
+  network driver support (e1000/virtio-net).  Run dom0 under QEMU with
+  `-netdev user,id=n0 -device virtio-net-pci,netdev=n0` (or e1000).
+  Verify `ip link` shows the interface, DHCP works, `ping` succeeds.
+  Document the working QEMU command line.
+- [ ] **P17b** — **Kernel config for networking**: Ensure dom0 kernel config
+  includes `CONFIG_VIRTIO_NET=y`, `CONFIG_E1000=y` (or `=m`), TCP/IP stack,
+  DHCP client support.  If using a minimal initrd, include `dhclient` or
+  `udhcpc`.
+- [ ] **P17c** — **Networking under Themis**: Boot dom0 under Themis with
+  QEMU NIC passthrough.  Verify the NIC's MMIO BAR is EPT-mapped (should
+  happen automatically via PCI BAR enumeration in boot.rs).  Verify
+  interrupts are delivered (MSI/MSI-X or INTx via IOAPIC passthrough).
+  Debug any missing EPT mappings or interrupt delivery issues.
+- [ ] **P17d** — **Bare-metal networking**: On real hardware, identify the
+  physical NIC, verify its MMIO BARs and MSI-X vectors are EPT-mapped.
+  If the NIC requires IOMMU (VT-d) for DMA, this depends on Phase 4.
+- [ ] **P17e** — **Validation**: SSH into dom0, `curl` an external URL,
+  `apt`/`apk` package install over the network.
 
 ---
 

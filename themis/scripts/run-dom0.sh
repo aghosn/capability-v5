@@ -13,6 +13,8 @@
 #   QEMU_CPUS=4       number of vCPUs (default: 2)
 #   QEMU_MEM=2G       guest RAM (default: 2G)
 #   QEMU_ENABLE_KVM=1 use KVM acceleration (default: 1 if available)
+#   QEMU_NET=1        enable user-mode networking (default: 1)
+#   QEMU_NET_FWD      extra port forwards (e.g. "hostfwd=tcp::2222-:22")
 #   QEMU_EXTRA_ARGS   additional arguments appended to the QEMU command
 #
 # Login: user=cloud  password=cloud123  (provisioned by cloud-init seed)
@@ -63,8 +65,19 @@ elif [[ ! -f "$SEEDED_MARKER" ]]; then
     echo ""
 fi
 
+# ── Networking ───────────────────────────────────────────────────────────────
+# User-mode (SLIRP) networking with virtio-net.  Guest gets DHCP 10.0.2.x,
+# host-to-guest SSH on localhost:2222.
+NET_ARGS=""
+if [[ "${QEMU_NET:-1}" == "1" ]]; then
+    NET_FWD="hostfwd=tcp::2222-:22"
+    [[ -n "${QEMU_NET_FWD:-}" ]] && NET_FWD+=",${QEMU_NET_FWD}"
+    NET_ARGS="-netdev user,id=n0,${NET_FWD} -device virtio-net-pci,netdev=n0"
+fi
+
 echo "→ Booting guest/$IMAGE_NAME directly (no Themis) — ${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM"
 echo "  Login: cloud / cloud123"
+[[ -n "$NET_ARGS" ]] && echo "  + networking: virtio-net (SLIRP), SSH → localhost:2222"
 echo ""
 
 qemu-system-x86_64 \
@@ -73,6 +86,7 @@ qemu-system-x86_64 \
     -m "$QEMU_MEM" \
     -drive if=virtio,format=qcow2,file="$DOM0_DISK" \
     $SEED_ARG \
+    $NET_ARGS \
     -nographic \
     -no-reboot \
     ${QEMU_EXTRA_ARGS:-}
