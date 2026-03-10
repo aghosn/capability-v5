@@ -24,6 +24,7 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 - #U6 (XSAVES/XRSTORS) enabled.
 - P2-platform completed — ThemisPlatform, MetaAllocator redesign, engine gaps (CreateDomain/GiveMetaMem updates), apply_update handlers, bootstrap helpers.
 - #U7 completed — CoreContext, hypercall.rs dispatch, themis_abi register convention docs, VMCALL wiring in vmexit.rs.
+- P7g completed — VMXON global array, three-tier platform locking, update barrier protocol.
 
 ---
 
@@ -174,37 +175,17 @@ The following three invariants govern what dom0 sees and can access:
   - **Prerequisite**: decide on kernel format policy (bzImage vs vmlinux vs EFI stub)
     before implementing.
 
-- [ ] **P7g-vmxon-global**: Extract per-core VMXON regions into a global static array.
+- [x] **P7g-vmxon-global**: ✅ DONE.  Global `VMXON_PHYS: [AtomicU64; MAX_CORES]` in
+  main.rs.  Allocated in boot.rs, stored per core.  No VMXON fields in VmxState/Domain.
+  APs load from the global array after AP_LAUNCH_READY.
 
-  VMXON is a per-physical-core resource — it is executed before any domain is active
-  and has no domain affiliation.  There is exactly one VMXON region per core for the
-  lifetime of the hypervisor; it is allocated during boot and never freed.
+- [x] **P7g-platform-locking**: ✅ DONE.  Three-tier locking in ThemisPlatform:
+  Tier 1 CoreContext (lock-free atomics), Tier 2 per-domain `Arc<Mutex<PlatformDomain>>`
+  inside `RwLock<BTreeMap>`, Tier 3 `RwLock<RoutingMaps>`.  No single-Mutex wrapper.
 
-  Implementation:
-  - Add `static VMXON_PHYS: [AtomicU64; MAX_CORES]` in `main.rs` (or `vmx.rs`).
-  - During `boot::vmcs()` (BSP), write physical address into `VMXON_PHYS[cpu_id]`.
-  - Remove VMXON tracking from `VmxState` / domain structures.
-  - In `ap_entry()`: read `VMXON_PHYS[cpu_id]`, call `enable_vmx_on_core(phys)`.
-
-- [ ] **P7g-platform-locking**: Refactor `ThemisPlatformInner` from a single
-  `Mutex<ThemisPlatformInner>` into a three-tier locking structure that allows cores
-  to operate concurrently on independent domains or their own per-core state.
-
-  **Tier 1 — per-core scheduling state** (`[CoreContext; MAX_CORES]`):
-  - See `CoreContext` definition in #U7.  Each core owns its cell; reads by
-    other cores happen only under the `execute()` barrier protocol or via the
-    cached `domain_id` atomic (observational, lock-free).
-
-  **Tier 2 — per-domain state** (`BTreeMap<DomainId, Mutex<PlatformDomain>>`):
-  - `PlatformDomain` (EPT, meta allocator, `vps: Vec<VpHardware>`) moves behind its own `Mutex`.
-  - `VpHardware { vmcs_phys: u64, vmxon_phys: u64 }` replaces the `Vec<()>` placeholder.
-
-  **Tier 3 — global routing maps** (`RwLock<RoutingMaps>`):
-  - `RoutingMaps { core_to_domain, domain_to_core, lapic_ids }` behind a single `RwLock`.
-
-- [ ] **P7g-update-barriers**: Audit and document the interaction between multi-core
-  capability operations (UpdateBatch) and the new fine-grained platform locking.
-  Verify lock ordering, Tier 1 consistency, and INVEPT scope.
+- [x] **P7g-update-barriers**: ✅ DONE.  Two-phase barrier protocol documented and
+  implemented in platform.rs (lines 1–67).  Lock ordering, deadlock prevention,
+  per-core INVEPT on responding cores, INVEPT scope optimization noted.
 
 - [ ] **P7h**: Per-core VP run loop. Each core runs a tight loop that owns a `VpContext`
   carrying everything needed to dispatch exits:
