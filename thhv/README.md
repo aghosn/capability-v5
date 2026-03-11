@@ -42,22 +42,58 @@ thhv/
 
 ## Building
 
-```bash
-# Build against running kernel (requires kernel headers + Rust nightly):
-cd thhv && make
+### Against the running kernel
 
-# Build against a specific kernel tree:
-cd thhv && make KDIR=/path/to/kernel/build
+```bash
+cd thhv && make                     # requires kernel headers + Rust nightly
+cd thhv && make KDIR=/path/to/build # explicit kernel tree
+```
+
+### Against a dom0 guest disk (cross-build)
+
+The `build-guest.sh` script mounts a dom0 cloud image, finds the kernel
+headers inside it, and builds `thhv.ko` without needing root for the
+compilation itself.
+
+```bash
+# 1. Mount the disk (requires sudo, only once)
+sudo bash themis/scripts/mount-guest.sh                # auto-detect (Noble)
+sudo DOM0_VERSION=jammy bash themis/scripts/mount-guest.sh  # explicit version
+
+# 2. Build (no sudo needed — disk is already mounted at /tmp/mnt)
+cd thhv
+bash build-guest.sh                                     # auto-detect disk
+DOM0_VERSION=jammy bash build-guest.sh                  # Jammy disk
+bash build-guest.sh ../themis/guest/ubuntu-24.04-server-cloudimg-amd64.img  # explicit path
+
+# 3. Build + copy .ko onto the guest filesystem
+COPY_TO_GUEST=/root bash build-guest.sh                 # copies to /root/thhv.ko
+
+# 4. Unmount when done
+sudo bash themis/scripts/umount-guest.sh
+```
+
+Or via `make`:
+
+```bash
+make guest                          # auto-detect, disk must be mounted
+make guest COPY_TO_GUEST=/root      # build + copy to guest
 ```
 
 The Makefile automatically builds `libthemis.a` via Cargo before invoking kbuild.
 
 ## Status
 
-**Skeleton** — all ioctls return `-ENOSYS`.  The three-level fd hierarchy,
-data structures, and libthemis FFI linkage are fully wired.
+- **Device ioctls**: `THHV_CREATE_PARTITION` (→ `CREATE_DOMAIN`),
+  `THHV_QUERY` (META budget queries)
+- **Partition ioctls**: `THHV_INITIALIZE_PARTITION` (pins shared META pages
+  + `SEAL`), `THHV_CREATE_VP`, partition cleanup (→ `REVOKE_DOMAIN`)
+- **VP ioctls**: `THHV_CREATE_VP` (pins per-VP META + COMM pages),
+  `THHV_GET_VP_STATE` / `THHV_SET_VP_STATE` (→ `GET_REG` / `SET_REG`)
+- **Remaining stubs**: `THHV_RUN_VP`, `THHV_SET_GUEST_MEMORY`, `THHV_IRQFD`,
+  `THHV_IOEVENTFD`, VP `mmap()`
 
-See `todo.md` (Phase 15) for the implementation roadmap.
+See `todo.md` (Phase 15) for the full implementation roadmap.
 
 ## Design
 

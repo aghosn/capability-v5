@@ -99,6 +99,12 @@ cd "$SCRIPT_DIR"
 
 # ── Build thhv.ko ─────────────────────────────────────────────────────────── #
 
+# Clean stale objects from previous builds (possibly against a different kernel).
+rm -f "$SCRIPT_DIR"/src/*.o "$SCRIPT_DIR"/*.o "$SCRIPT_DIR"/*.ko \
+      "$SCRIPT_DIR"/*.mod* "$SCRIPT_DIR"/Module.symvers \
+      "$SCRIPT_DIR"/modules.order 2>/dev/null
+find "$SCRIPT_DIR" -name '.*.cmd' -delete 2>/dev/null
+
 echo "→ Building thhv.ko..."
 make -C "$HEADERS_DIR" M="$SCRIPT_DIR" modules 2>&1 | \
     grep -v '^warning: the compiler differs' | \
@@ -114,6 +120,12 @@ if [[ ! -f "$SCRIPT_DIR/thhv.ko" ]]; then
     echo "ERROR: build failed — thhv.ko not produced" >&2
     exit 1
 fi
+
+# Clean intermediate objects, keep only thhv.ko.
+rm -f "$SCRIPT_DIR"/src/*.o "$SCRIPT_DIR"/thhv.o "$SCRIPT_DIR"/thhv.mod.o \
+      "$SCRIPT_DIR"/thhv.mod.c "$SCRIPT_DIR"/thhv.mod \
+      "$SCRIPT_DIR"/Module.symvers "$SCRIPT_DIR"/modules.order
+find "$SCRIPT_DIR" -name '.*.cmd' -delete 2>/dev/null
 
 echo "→ Built: thhv.ko ($(du -h "$SCRIPT_DIR/thhv.ko" | cut -f1))"
 
