@@ -89,14 +89,6 @@ KVER=$(basename "$HEADERS_DIR" | sed 's/^linux-headers-//')
 echo "→ Kernel headers: $KVER"
 echo "→ Headers path:   $HEADERS_DIR"
 
-# ── Build libthemis.a ─────────────────────────────────────────────────────── #
-
-echo "→ Building libthemis.a..."
-LIBTHEMIS_DIR="$SCRIPT_DIR/../themis/crates/libthemis"
-cd "$LIBTHEMIS_DIR"
-cargo build --release --features ffi --target x86_64-unknown-none --quiet
-cd "$SCRIPT_DIR"
-
 # ── Build thhv.ko ─────────────────────────────────────────────────────────── #
 
 # Clean stale objects from previous builds (possibly against a different kernel).

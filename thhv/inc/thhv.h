@@ -76,6 +76,33 @@
 #define THEMIS_HC_REGISTER_INTR_CHAN 0x17
 #define THEMIS_HC_REGISTER_COMM      0x18
 
+/* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
+
+#define THEMIS_OP_CARVE               0x01
+#define THEMIS_OP_ALIAS               0x02
+#define THEMIS_OP_SEND                0x03
+#define THEMIS_OP_ACCEPT              0x04
+#define THEMIS_OP_REJECT              0x05
+#define THEMIS_OP_CREATE_DOMAIN       0x06
+#define THEMIS_OP_SEAL                0x07
+#define THEMIS_OP_REVOKE_MEM          0x08
+#define THEMIS_OP_REVOKE_DOMAIN       0x09
+#define THEMIS_OP_SWITCH              0x0A
+#define THEMIS_OP_GET_CHAN             0x0B
+#define THEMIS_OP_ATTEST_SELF         0x0C
+#define THEMIS_OP_ATTEST              0x0D
+#define THEMIS_OP_GET_REG             0x0E
+#define THEMIS_OP_SET_REG             0x0F
+#define THEMIS_OP_SET_INTR_POLICY     0x10
+#define THEMIS_OP_SET_DEF_INTR_POLICY 0x11
+#define THEMIS_OP_ASSIGN_DEVICE       0x12
+#define THEMIS_OP_ENUMERATE           0x13
+#define THEMIS_OP_REGISTER_VP_META    0x14
+#define THEMIS_OP_REGISTER_DOORBELL   0x15
+#define THEMIS_OP_REGISTER_EVENT_FLAGS 0x16
+#define THEMIS_OP_REGISTER_INTR_CHAN  0x17
+#define THEMIS_OP_REGISTER_COMM       0x18
+
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
 #define THEMIS_SUCCESS       0
@@ -85,6 +112,49 @@
 #define THEMIS_ERR_BADSTATE  4
 #define THEMIS_ERR_NOTFOUND  5
 #define THEMIS_ERR_UNIMPL    (~0ULL)
+
+/*
+ * Raw VMCALL primitive — 5 inputs, 3 outputs.
+ *
+ * Register convention (matches themis_abi):
+ *   IN:  RAX = opcode, RDI = a0, RSI = a1, RDX = a2, RCX = a3, R8 = a4
+ *   OUT: RAX = status,  RDI = r0, RSI = r1, RDX = r2
+ */
+static inline u64 __themis_vmcall(u64 opcode,
+				  u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+				  u64 *r0, u64 *r1, u64 *r2)
+{
+	u64 status, o0, o1, o2;
+
+	register u64 _a4 asm("r8") = a4;
+
+	asm volatile("vmcall"
+		: "=a"(status), "=D"(o0), "=S"(o1), "=d"(o2)
+		: "a"(opcode), "D"(a0), "S"(a1), "d"(a2),
+		  "c"(a3), "r"(_a4)
+		: "r9", "r10", "r11", "memory", "cc"
+	);
+
+	if (r0) *r0 = o0;
+	if (r1) *r1 = o1;
+	if (r2) *r2 = o2;
+	return status;
+}
+
+/* Map Themis return code to negative errno. */
+static inline int __themis_to_errno(u64 status)
+{
+	switch (status) {
+	case THEMIS_SUCCESS:      return 0;
+	case THEMIS_ERR_INVALID:  return -EINVAL;
+	case THEMIS_ERR_NOPERM:   return -EPERM;
+	case THEMIS_ERR_NOMEM:    return -ENOMEM;
+	case THEMIS_ERR_BADSTATE: return -EBUSY;
+	case THEMIS_ERR_NOTFOUND: return -ENOENT;
+	case THEMIS_ERR_UNIMPL:   return -ENOSYS;
+	default:                  return -EIO;
+	}
+}
 
 /* ── UAPI structures ──────────────────────────────────────────────────────── */
 
@@ -782,34 +852,32 @@ int thhv_hcall(u64 opcode, u64 arg0, u64 arg1, u64 arg2,
 		   u64 *out0, u64 *out1, u64 *out2);
 
 /*
- * Typed Rust FFI wrappers (from libthemis.a, feature = "ffi").
+ * Typed C wrappers around __themis_vmcall (thhv_hvcall.c).
  * All return 0 on success, negative errno on failure.
- * Prefer these over thhv_hcall() for type safety and sync with
- * the capavisor's ABI definitions.
  */
-extern int themis_create_domain(u64 cores_mask, u64 api_flags, u64 num_vps,
+int themis_create_domain(u64 cores_mask, u64 api_flags, u64 num_vps,
 				u64 *out_handle);
-extern int themis_seal(u64 domain);
-extern int themis_revoke_domain(u64 domain);
-extern int themis_revoke_mem(u64 parent, u64 child_sub);
-extern int themis_carve(u64 parent, u64 start, u64 size, u64 rights,
+int themis_seal(u64 domain);
+int themis_revoke_domain(u64 domain);
+int themis_revoke_mem(u64 parent, u64 child_sub);
+int themis_carve(u64 parent, u64 start, u64 size, u64 rights,
 			u64 *out_handle, u64 *out_sub);
-extern int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
+int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
 			u64 *out_handle, u64 *out_sub);
-extern int themis_send(u64 cap, u64 receiver, u64 attrs);
-extern int themis_send_at(u64 cap, u64 receiver, u64 attrs, u64 child_gpa);
-extern int themis_accept(u64 pending_id, u64 *out_handle);
-extern int themis_reject(u64 pending_id);
-extern int themis_switch(u64 target_domain, u64 vp_id);
-extern int themis_get_chan(u64 domain, u64 *out_handle);
-extern int themis_attest_self(u64 *out_lo, u64 *out_hi);
-extern int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
-extern int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);
-extern int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value);
-extern int themis_set_intr_policy(u64 domain, u64 vector, u64 policy);
-extern int themis_set_def_intr_policy(u64 domain, u64 policy);
-extern int themis_assign_device(u64 domain, u64 pci_bdf);
-extern int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
+int themis_send(u64 cap, u64 receiver, u64 attrs);
+int themis_send_at(u64 cap, u64 receiver, u64 attrs, u64 child_gpa);
+int themis_accept(u64 pending_id, u64 *out_handle);
+int themis_reject(u64 pending_id);
+int themis_switch(u64 target_domain, u64 vp_id);
+int themis_get_chan(u64 domain, u64 *out_handle);
+int themis_attest_self(u64 *out_lo, u64 *out_hi);
+int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
+int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);
+int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value);
+int themis_set_intr_policy(u64 domain, u64 vector, u64 policy);
+int themis_set_def_intr_policy(u64 domain, u64 policy);
+int themis_assign_device(u64 domain, u64 pci_bdf);
+int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 
 /* thhv_part.c */
 long thhv_partition_create(struct file *dev_file, void __user *uarg);
