@@ -222,13 +222,22 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 
 		for (i = 0; i < nr_segs; i++) {
 			u64 cap_handle, cap_sub;
+			u64 parent_handle;
+
+			ret = thhv_find_parent_handle(segs[i].hpa_start,
+						      segs[i].size,
+						      &parent_handle);
+			if (ret)
+				goto err_revoke_partial;
 
 			if (gm.flags & THHV_MEM_F_ALIAS)
-				ret = themis_alias(0, segs[i].hpa_start,
+				ret = themis_alias(parent_handle,
+						   segs[i].hpa_start,
 						   segs[i].size, gm.rights,
 						   &cap_handle, &cap_sub);
 			else
-				ret = themis_carve(0, segs[i].hpa_start,
+				ret = themis_carve(parent_handle,
+						   segs[i].hpa_start,
 						   segs[i].size, gm.rights,
 						   &cap_handle, &cap_sub);
 			if (ret)

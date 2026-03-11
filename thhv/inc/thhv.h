@@ -896,6 +896,7 @@ int thhv_translate_range(u64 gpa_start, u64 size,
 int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
 			 struct thhv_hpa_segment **out_segs,
 			 unsigned int *out_nr_segs);
+int thhv_find_parent_handle(u64 hpa, u64 size, u64 *out_handle);
 void thhv_pa_map_cleanup(void);
 
 /*

@@ -360,14 +360,26 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 		goto err_free_vp;
 
 	/*
-	 * CARVE the COMM page from dom0's root capability, then
+	 * CARVE the COMM page from dom0's parent capability, then
 	 * REGISTER_COMM to bind it to this VP in the child domain.
 	 * The capavisor marks the capability with COMM|CLEAN attributes
 	 * and records the (child_domain, vp_id) binding internally.
 	 */
-	ret = themis_carve(0, vp->comm_phys, PAGE_SIZE,
-			   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
-			   &vp->comm_cap_handle, &vp->comm_cap_sub);
+	{
+		u64 parent_handle;
+
+		ret = thhv_find_parent_handle(vp->comm_phys, PAGE_SIZE,
+					      &parent_handle);
+		if (ret) {
+			pr_err("thhv: no parent cap for COMM HPA 0x%llx\n",
+			       vp->comm_phys);
+			goto err_unpin;
+		}
+
+		ret = themis_carve(parent_handle, vp->comm_phys, PAGE_SIZE,
+				   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
+				   &vp->comm_cap_handle, &vp->comm_cap_sub);
+	}
 	if (ret) {
 		pr_err("thhv: CARVE COMM page HPA 0x%llx failed (%d)\n",
 		       vp->comm_phys, ret);
