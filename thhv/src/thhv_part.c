@@ -216,28 +216,45 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	}
 	region->nr_caps = nr_segs;
 
-	/* CARVE/ALIAS + SEND each HPA segment. */
-	for (i = 0; i < nr_segs; i++) {
-		u64 cap_handle, cap_sub;
+	/* CARVE/ALIAS + SEND_AT each HPA segment with child GPA. */
+	{
+		u64 child_gpa_cursor = gm.guest_pfn << PAGE_SHIFT;
 
-		if (gm.flags & THHV_MEM_F_ALIAS)
-			ret = themis_alias(0, segs[i].hpa_start, segs[i].size,
-					   gm.rights, &cap_handle, &cap_sub);
-		else
-			ret = themis_carve(0, segs[i].hpa_start, segs[i].size,
-					   gm.rights, &cap_handle, &cap_sub);
-		if (ret)
-			goto err_revoke_partial;
+		for (i = 0; i < nr_segs; i++) {
+			u64 cap_handle, cap_sub;
 
-		region->caps[i].cap_handle = cap_handle;
-		region->caps[i].cap_sub = cap_sub;
-		region->caps[i].hpa_start = segs[i].hpa_start;
-		region->caps[i].size = segs[i].size;
+			if (gm.flags & THHV_MEM_F_ALIAS)
+				ret = themis_alias(0, segs[i].hpa_start,
+						   segs[i].size, gm.rights,
+						   &cap_handle, &cap_sub);
+			else
+				ret = themis_carve(0, segs[i].hpa_start,
+						   segs[i].size, gm.rights,
+						   &cap_handle, &cap_sub);
+			if (ret)
+				goto err_revoke_partial;
 
-		ret = themis_send(cap_handle, part->domain_handle, gm.attrs);
-		if (ret) {
-			themis_revoke_mem(cap_handle, cap_sub);
-			goto err_revoke_partial;
+			region->caps[i].cap_handle = cap_handle;
+			region->caps[i].cap_sub = cap_sub;
+			region->caps[i].hpa_start = segs[i].hpa_start;
+			region->caps[i].size = segs[i].size;
+
+			/*
+			 * send_at: place this HPA segment at the correct
+			 * child GPA offset.  The child GPA cursor advances
+			 * by each segment's size so multi-segment mappings
+			 * are contiguous in the child's address space.
+			 */
+			ret = themis_send_at(cap_handle,
+					     part->domain_handle,
+					     gm.attrs,
+					     child_gpa_cursor);
+			if (ret) {
+				themis_revoke_mem(cap_handle, cap_sub);
+				goto err_revoke_partial;
+			}
+
+			child_gpa_cursor += segs[i].size;
 		}
 	}
 

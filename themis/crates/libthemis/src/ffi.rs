@@ -65,6 +65,16 @@ pub extern "C" fn themis_send(cap: u64, receiver: u64, attrs: u64) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn themis_send_at(
+    cap: u64, receiver: u64, attrs: u64, child_gpa: u64,
+) -> i32 {
+    match send_at(cap, receiver, attrs, child_gpa) {
+        Ok(()) => 0,
+        Err(e) => to_errno(e),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn themis_accept(pending_id: u64, out_handle: *mut u64) -> i32 {
     match accept(pending_id) {
         Ok(h) => { unsafe { write_out(out_handle, h); } 0 }

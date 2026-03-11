@@ -127,6 +127,16 @@ pub fn send(cap: u64, receiver: u64, attrs: u64) -> Result<(), u64> {
     check(rax)
 }
 
+/// Send a memory capability with a GPA hint for the receiver.
+///
+/// `child_gpa` specifies where the region appears in the receiver's guest
+/// address space.  If 0, the capavisor uses identity mapping (GPA = HPA).
+pub fn send_at(cap: u64, receiver: u64, attrs: u64, child_gpa: u64) -> Result<(), u64> {
+    let (rax, _, _, _) =
+        unsafe { vmcall4(opcodes::THEMIS_SEND, cap, receiver, attrs, child_gpa) };
+    check(rax)
+}
+
 /// Accept a pending memory capability.
 ///
 /// Returns the new capability handle.

@@ -623,12 +623,13 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   COMM page (`VpCommPage`) will be the fast path once REGISTER_COMM + SWITCH are wired.
   Capavisor GET_REG/SET_REG handlers still return ERR_UNIMPL — needs P15e first.
 - [x] **P15e** — ✅ DONE (driver side).  Memory mapping via `THHV_SET_GUEST_MEMORY`:
-  userspace provides GPA, host VA, size + flags (UNMAP, ALIAS), rights (R/W/X),
-  and Themis-specific attrs (HASH, CLEAN, VITAL, META).
-  Driver pins pages, translates dom0 GPA→HPA via `thhv_translate_pages()`,
-  then CARVE/ALIAS + SEND per HPA segment.  Multi-segment support for
-  non-contiguous GPA→HPA mappings.  `THHV_SET_PA_MAP` ioctl loads the
-  attestation-derived GPA→HPA map; identity passthrough when no map loaded.
+  userspace provides child GPA (`guest_pfn`), host VA, size + flags, rights, attrs.
+  Driver: pins pages → translates dom0 GPA→HPA via `thhv_translate_pages()` →
+  CARVE/ALIAS per HPA segment → `themis_send_at(cap, child, attrs, child_gpa)` to
+  place each segment at the correct child GPA offset.
+  Multi-segment support for non-contiguous GPA→HPA mappings.
+  PA map: driver-internal, populated from attestation at init (currently identity
+  passthrough until attestation mechanism is designed — see P15-translate below).
   COMM page: CARVE + REGISTER_COMM wired at CREATE_VP time.
   META pages: CARVE + SEND deferred until capavisor EPT allocation from META pool.
 - [x] **P15f** — ✅ DONE (driver side).  `THHV_RUN_VP` with sync and async paths:
@@ -636,10 +637,50 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   info area (offset 512+), formats `thhv_exit_msg` for userspace.
   Async: parks thread on `exit_wq` (TODO: actual async kick + doorbell/eventfd
   notification mechanism).
-  Exit types: HLT, IO, MMIO, CPUID, MSR, SHUTDOWN, INTR.
-  VMX exit reason → THHV_EXIT_* mapping.  COMM page exit info layout defined
-  (exit_reason, exit_qualification, instruction length/info, GPA).
+  Exit types (PROVISIONAL): HLT, IO, MMIO, CPUID, MSR, SHUTDOWN, INTR,
+  MEMORY_FAULT, EXCEPTION, HYPERCALL.  Exit type taxonomy needs design review —
+  depends on which exits the capavisor handles internally vs forwards to parent.
+  VMX reason mapper uses `<asm/vmx.h>` constants but the capavisor may translate
+  exit reasons via its platform abstraction before the driver sees them.
   Capavisor SWITCH handler still stubbed (ERR_UNIMPL) — needs implementation.
+
+#### P15-translate — GPA→HPA Translation & Domain-Level COMM (Design TODO)
+
+  The driver maintains a GPA→HPA translation map (`thhv_translate.c`) so that
+  `SET_GUEST_MEMORY` can translate pinned pages' dom0 GPAs to real HPAs before
+  issuing CARVE/ALIAS capability operations.
+
+  **Memory mapping flow** (userspace perspective):
+  1. Userspace `mmap()`s a region, gets a VA
+  2. Userspace calls `THHV_SET_GUEST_MEMORY(va, child_gpa, size, flags, rights, attrs)`
+  3. Driver: pins pages (VA → struct page → dom0 GPA via `page_to_pfn`)
+  4. Driver: translates dom0 GPA → HPA via the PA map (from attestation)
+  5. Driver: `themis_carve(0, HPA, size, rights)` → capability on real physical memory
+  6. Driver: `themis_send_at(cap, child, attrs, child_gpa)` → maps at correct child GPA
+
+  **PA map population** (currently a stub — identity passthrough):
+  The PA map must be populated from the capavisor's attestation data automatically
+  at driver init time.  **Userspace should NOT manage the PA map.**
+  Options under consideration:
+  - **(a) Domain-level COMM page**: A shared page between dom0 and the capavisor
+    (not tied to any child VP) where the capavisor writes the attestation report
+    including GPA→HPA memory map entries.  The driver reads this at init.
+    This COMM page would also serve for domain-wide communication: interrupt
+    routing tables, event notifications, etc.
+    Requires extending `REGISTER_COMM` with a type parameter to distinguish
+    VP-level COMM from domain-level COMM, or adding a new `REGISTER_DOMAIN_COMM`
+    hypercall.
+  - **(b) ENUMERATE_MEMORY hypercall**: A new opcode that returns PA map entries
+    iteratively (start_index → entry).
+  - **(c) ATTEST_SELF + parsing**: Use the existing attestation report to extract
+    memory capability ranges and derive GPA→HPA from the capability tree.
+
+  **send_at ABI extension**:
+  `themis_send_at(cap, receiver, attrs, child_gpa)` added to libthemis FFI.
+  Uses VMCALL arg3 (RCX) for the child GPA hint.  The capavisor's `do_send`
+  handler needs updating to pass this 4th argument to `Capability::send_at()`.
+  Currently the capavisor ignores RCX in SEND — TODO.
+
 - [ ] **P15g** — Interrupt injection: `THHV_ASSERT_INTERRUPT` → `VMCALL` or posted
   interrupt path.  `THHV_IRQFD` → eventfd + workqueue → PI descriptor write.
 - [ ] **P15h** — `mmap` for VP state: userspace maps COMM page for

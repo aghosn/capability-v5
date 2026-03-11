@@ -327,6 +327,32 @@ int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
 	}
 }
 
+/* ── Attestation-based init ─────────────────────────────────────────────────── */
+
+/*
+ * thhv_pa_map_init_from_attestation — populate the PA map from attestation.
+ *
+ * Called at module init after detecting the Themis capavisor.  Reads the
+ * attestation report (which contains dom0's GPA→HPA memory map) and
+ * populates the global PA map.
+ *
+ * TODO: The mechanism for reading the attestation data is not yet
+ * designed.  Options include:
+ *   (a) A domain-level COMM page where the capavisor writes the
+ *       attestation report (including PA map entries) at boot.
+ *   (b) A dedicated ENUMERATE_MEMORY hypercall that returns PA map
+ *       entries iteratively.
+ *   (c) ATTEST_SELF + parsing the report to extract memory ranges.
+ *
+ * Until this is implemented, the PA map remains empty and all
+ * translations fall through as identity (GPA == HPA).
+ */
+int thhv_pa_map_init_from_attestation(void)
+{
+	pr_info("thhv: PA map init — identity passthrough (attestation not yet wired)\n");
+	return 0;
+}
+
 /* ── Module cleanup ────────────────────────────────────────────────────────── */
 
 void thhv_pa_map_cleanup(void)

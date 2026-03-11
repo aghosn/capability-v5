@@ -83,8 +83,12 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 	case THHV_QUERY:
 		return thhv_dev_query(uarg);
 
-	case THHV_SET_PA_MAP:
-		return thhv_set_pa_map(uarg);
+	/*
+	 * THHV_SET_PA_MAP is intentionally not exposed here.
+	 * The PA map should be populated automatically by the driver
+	 * from the capavisor's attestation data at init time.
+	 * See thhv_pa_map_init_from_attestation() in thhv_translate.c.
+	 */
 
 	default:
 		return -ENOTTY;
@@ -127,6 +131,12 @@ static int __init thhv_init(void)
 
 	if (!thhv_detect())
 		return -ENODEV;
+
+	ret = thhv_pa_map_init_from_attestation();
+	if (ret) {
+		pr_err("thhv: PA map init failed (%d)\n", ret);
+		return ret;
+	}
 
 	ret = misc_register(&thhv_misc);
 	if (ret) {

@@ -567,6 +567,7 @@ extern int themis_carve(u64 parent, u64 start, u64 size, u64 rights,
 extern int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
 			u64 *out_handle, u64 *out_sub);
 extern int themis_send(u64 cap, u64 receiver, u64 attrs);
+extern int themis_send_at(u64 cap, u64 receiver, u64 attrs, u64 child_gpa);
 extern int themis_accept(u64 pending_id, u64 *out_handle);
 extern int themis_reject(u64 pending_id);
 extern int themis_switch(u64 target_domain, u64 vp_id);
@@ -590,6 +591,7 @@ extern const struct file_operations thhv_vp_fops;
 
 /* thhv_translate.c — GPA→HPA address translation */
 int thhv_set_pa_map(void __user *uarg);
+int thhv_pa_map_init_from_attestation(void);
 int thhv_translate_range(u64 gpa_start, u64 size,
 			 struct thhv_hpa_segment **out_segs,
 			 unsigned int *out_nr_segs);
