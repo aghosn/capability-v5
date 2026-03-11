@@ -448,22 +448,26 @@ pub fn load_linux(
     // well away from the kernel decompressor. The kernel uses init_size bytes
     // around the load address for decompression; placing the initrd right at
     // that boundary is fragile. Putting it high avoids all overlap issues.
+    //
+    // boot_params.ramdisk_image is u32, so the initrd MUST be placed below 4 GiB.
     let (initrd_phys, initrd_size): (u32, u32) = if let Some(rd) = initrd {
-        // Find the highest dom0 RAM region that can fit the initrd.
         let rd_len = rd.size;
         let mut best_end: u64 = 0;
         for r in dom0_regions {
-            let region_end = r.base + r.length;
-            if r.length >= rd_len && region_end > best_end {
+            // Cap at 4 GiB: ramdisk_image is u32 in boot_params.
+            let region_end = (r.base + r.length).min(0x1_0000_0000);
+            let usable = region_end.saturating_sub(r.base);
+            if usable >= rd_len && region_end > best_end {
                 best_end = region_end;
             }
         }
-        assert!(best_end > 0, "load_linux: no dom0 region large enough for initrd");
+        assert!(best_end > 0, "load_linux: no dom0 region below 4 GiB large enough for initrd");
         // Page-align downward to fit the initrd at the top of the region.
         let start = (best_end - rd_len) & !0xFFF;
+        assert!(start + rd_len <= 0x1_0000_0000, "initrd placement overflows 32-bit address");
         let rd_dst = (start + hhdm_offset) as *mut u8;
         unsafe { core::ptr::copy_nonoverlapping(rd.base, rd_dst, rd.size as usize); }
-        serial_println!("  Initrd:    {:#x} bytes → phys {:#x} (top of RAM)", rd.size, start);
+        serial_println!("  Initrd:    {:#x} bytes → phys {:#x} (top of sub-4G RAM)", rd.size, start);
         // Debug: dump first 32 bytes of source and destination to verify integrity
         unsafe {
             let src = core::slice::from_raw_parts(rd.base, 32.min(rd.size as usize));
