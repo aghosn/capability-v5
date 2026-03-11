@@ -148,8 +148,10 @@ pub fn platform(
             limine::memory_map::EntryType::ACPI_NVS => E820Entry::TYPE_NVS,
             limine::memory_map::EntryType::RESERVED
             | limine::memory_map::EntryType::FRAMEBUFFER
-            | limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
-            | limine::memory_map::EntryType::EXECUTABLE_AND_MODULES => E820Entry::TYPE_RESERVED,
+            | limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => E820Entry::TYPE_RESERVED,
+            // EXECUTABLE_AND_MODULES: capavisor binary — do NOT report in e820
+            // and do NOT map in EPT.  Gaps in the e820 map are normal; Linux
+            // handles them by not creating direct mappings for those addresses.
             // USABLE and BAD_MEMORY handled separately; skip all others.
             _ => continue,
         };
@@ -159,19 +161,30 @@ pub fn platform(
             entry_type: e820_type,
         });
 
-        // EPT passthrough: map ACPI/NVS/RESERVED/FRAMEBUFFER but NOT capavisor memory.
+        // EPT passthrough: map regions that appear in e820 and may be touched
+        // by Linux's direct physical mapping (page-table walks, firmware reads).
+        //
+        // BOOTLOADER_RECLAIMABLE: stale Limine data + ramdisk fragments.  The
+        // capavisor does NOT reuse these (META comes from USABLE only).  Safe to
+        // identity-map — Linux's GB-page direct mapping spans these addresses
+        // and page-table walks will fault without EPT entries.
+        //
+        // EXECUTABLE_AND_MODULES: the capavisor binary.  Must NOT be mapped in
+        // dom0's EPT — that would leak capavisor code/data.  Instead, omit from
+        // e820 entirely so Linux doesn't know about these address ranges.
         match entry.entry_type {
             limine::memory_map::EntryType::ACPI_RECLAIMABLE
             | limine::memory_map::EntryType::ACPI_NVS
             | limine::memory_map::EntryType::RESERVED
-            | limine::memory_map::EntryType::FRAMEBUFFER => {
+            | limine::memory_map::EntryType::FRAMEBUFFER
+            | limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => {
                 passthrough_regions.push(PhysRegion {
                     base: entry.base,
                     length: entry.length,
                 });
             }
-            // BOOTLOADER_RECLAIMABLE + EXECUTABLE_AND_MODULES: capavisor memory,
-            // must not be accessible to dom0 at the hardware level.
+            // EXECUTABLE_AND_MODULES: capavisor memory, must not be accessible
+            // to dom0 at the hardware level.
             _ => {}
         }
     }
