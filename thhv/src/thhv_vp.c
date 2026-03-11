@@ -13,90 +13,24 @@
 #include <linux/uaccess.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
-#include <asm/vmx.h>
 
 #include "thhv.h"
 
-/* ── COMM page exit info helpers ────────────────────────────────────────────── */
+/* ── ThemIC intercept message reader ────────────────────────────────────────── */
 
 /*
- * Read a value from the COMM page at a given byte offset.
- * The COMM page is kernel-mapped at vp->comm_kaddr.
- */
-static inline u32 comm_read32(struct thhv_vp *vp, unsigned int off)
-{
-	return *(volatile u32 *)((u8 *)vp->comm_kaddr + off);
-}
-
-static inline u64 comm_read64(struct thhv_vp *vp, unsigned int off)
-{
-	return *(volatile u64 *)((u8 *)vp->comm_kaddr + off);
-}
-
-/*
- * Map VMX exit reason to THHV_EXIT_* type.
+ * Read the ThemIC intercept message from the message page slot 0.
+ * The capavisor writes a themic_intercept_message there on VP exit.
  *
- * PROVISIONAL — The capavisor's platform abstraction will likely
- * translate raw VMX exit reasons before the parent sees them.
- * This mapper may be replaced entirely once the SWITCH handler
- * and exit delivery mechanism are designed.  Using linux/vmx.h
- * constants for now as a reference; the actual exit codes the
- * driver receives may be Themis-specific, not raw VMX reasons.
+ * TODO: The ThemIC message page is not yet allocated / registered
+ * as a separate page.  For now this reads from the COMM page padding
+ * area (offset 512+) as a transitional measure.  Once ThemIC pages
+ * are wired, this reads from the actual message page slot 0.
  */
-static u32 vmx_reason_to_thhv_exit(u32 reason)
+static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
 {
-	switch (reason) {
-	case EXIT_REASON_EXCEPTION_NMI:    return THHV_EXIT_EXCEPTION;
-	case EXIT_REASON_EXTERNAL_INTERRUPT: return THHV_EXIT_INTR;
-	case EXIT_REASON_TRIPLE_FAULT:     return THHV_EXIT_SHUTDOWN;
-	case EXIT_REASON_CPUID:            return THHV_EXIT_CPUID;
-	case EXIT_REASON_HLT:             return THHV_EXIT_HLT;
-	case EXIT_REASON_VMCALL:          return THHV_EXIT_HYPERCALL;
-	case EXIT_REASON_IO_INSTRUCTION:  return THHV_EXIT_IO;
-	case EXIT_REASON_MSR_READ:        return THHV_EXIT_MSR;
-	case EXIT_REASON_MSR_WRITE:       return THHV_EXIT_MSR;
-	case EXIT_REASON_EPT_VIOLATION:   return THHV_EXIT_MEMORY_FAULT;
-	case EXIT_REASON_EPT_MISCONFIG:   return THHV_EXIT_MEMORY_FAULT;
-	default:                          return THHV_EXIT_UNKNOWN;
-	}
-}
-
-/*
- * Parse the COMM page exit info into a thhv_exit_msg for userspace.
- */
-static void thhv_build_exit_msg(struct thhv_vp *vp, struct thhv_exit_msg *msg)
-{
-	u32 vmx_reason;
-	u64 exit_qual;
-
-	memset(msg, 0, sizeof(*msg));
-
-	vmx_reason = comm_read32(vp, THHV_COMM_EXIT_REASON_OFF);
-	exit_qual  = comm_read64(vp, THHV_COMM_EXIT_QUAL_OFF);
-	msg->instr_len = comm_read32(vp, THHV_COMM_EXIT_INSTR_LEN_OFF);
-	msg->exit_type = vmx_reason_to_thhv_exit(vmx_reason);
-
-	switch (msg->exit_type) {
-	case THHV_EXIT_IO:
-		/* Exit qual bits: [15:0] port, [2:0] size, [3] direction */
-		msg->io.port = (u16)(exit_qual >> 16);
-		msg->io.access_size = (exit_qual & 0x7) + 1;
-		msg->io.is_write = !(exit_qual & (1 << 3));
-		break;
-	case THHV_EXIT_MMIO:
-		msg->mmio.gpa = comm_read64(vp, THHV_COMM_EXIT_GPA_OFF);
-		msg->mmio.is_write = !!(exit_qual & (1 << 1)); /* EPT write */
-		break;
-	case THHV_EXIT_CPUID:
-		/* Leaf/subleaf come from guest RCX:RAX in COMM page regs. */
-		break;
-	case THHV_EXIT_MSR:
-		/* MSR index in ECX, direction depends on vmx_reason (31=RD, 32=WR). */
-		msg->msr.is_write = (vmx_reason == 32);
-		break;
-	default:
-		break;
-	}
+	/* Copy the intercept slot (256 bytes) from comm page offset 512. */
+	memcpy(out_buf, (u8 *)vp->comm_kaddr + 512, THEMIC_MSG_SLOT_SIZE);
 }
 
 /* ── THHV_RUN_VP handler ──────────────────────────────────────────────────── */
@@ -104,7 +38,7 @@ static void thhv_build_exit_msg(struct thhv_vp *vp, struct thhv_exit_msg *msg)
 static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 {
 	struct thhv_partition *part = vp->partition;
-	struct thhv_exit_msg msg;
+	u8 msg_buf[THEMIC_MSG_SLOT_SIZE];
 	int ret;
 
 	if (!part->sealed)
@@ -119,8 +53,8 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		/*
 		 * Sync mode: the calling thread's VP is "donated" to the
 		 * child — we block in themis_switch() until the child
-		 * exits.  On return, the capavisor has written exit info
-		 * into the COMM page.
+		 * exits.  On return, the capavisor has written a
+		 * themic_intercept_message to the intercept slot.
 		 */
 		ret = themis_switch(part->domain_handle, vp->vp_index);
 		if (ret) {
@@ -128,19 +62,17 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 			return ret;
 		}
 
-		thhv_build_exit_msg(vp, &msg);
+		thhv_read_intercept_msg(vp, msg_buf);
 
 	} else {
 		/*
 		 * Async mode: the child VP runs on its own core.
-		 * We park the calling thread until an exit event arrives.
+		 * Park until an exit event arrives via the DomainComm
+		 * RX ring (capavisor enqueues DOMCOMM_MSG_VP_EXIT and
+		 * sends an IPI; the handler sets exit_pending and wakes us).
 		 *
-		 * TODO: The actual async start mechanism (VMCALL or
-		 * platform-specific kick) and the doorbell / eventfd
-		 * notification that wakes us up are not yet designed.
-		 * For now, park on the waitqueue until exit_pending is
-		 * set (which will be done by the exit notification path
-		 * once implemented).
+		 * TODO: Wire the DomainComm RX ring → IPI handler →
+		 * exit_pending path.  For now, park on the waitqueue.
 		 */
 		ret = wait_event_interruptible(vp->exit_wq,
 					       atomic_read(&vp->exit_pending));
@@ -150,12 +82,12 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		}
 
 		atomic_set(&vp->exit_pending, 0);
-		thhv_build_exit_msg(vp, &msg);
+		thhv_read_intercept_msg(vp, msg_buf);
 	}
 
 	mutex_unlock(&vp->run_lock);
 
-	if (copy_to_user(uarg, &msg, sizeof(msg)))
+	if (copy_to_user(uarg, msg_buf, THEMIC_MSG_SLOT_SIZE))
 		return -EFAULT;
 
 	return 0;

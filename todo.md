@@ -644,7 +644,7 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   exit reasons via its platform abstraction before the driver sees them.
   Capavisor SWITCH handler still stubbed (ERR_UNIMPL) — needs implementation.
 
-#### P15-translate — GPA→HPA Translation & Domain-Level COMM (Design TODO)
+#### P15-translate — GPA→HPA Translation & DomainComm
 
   The driver maintains a GPA→HPA translation map (`thhv_translate.c`) so that
   `SET_GUEST_MEMORY` can translate pinned pages' dom0 GPAs to real HPAs before
@@ -658,22 +658,24 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   5. Driver: `themis_carve(0, HPA, size, rights)` → capability on real physical memory
   6. Driver: `themis_send_at(cap, child, attrs, child_gpa)` → maps at correct child GPA
 
-  **PA map population** (currently a stub — identity passthrough):
-  The PA map must be populated from the capavisor's attestation data automatically
-  at driver init time.  **Userspace should NOT manage the PA map.**
-  Options under consideration:
-  - **(a) Domain-level COMM page**: A shared page between dom0 and the capavisor
-    (not tied to any child VP) where the capavisor writes the attestation report
-    including GPA→HPA memory map entries.  The driver reads this at init.
-    This COMM page would also serve for domain-wide communication: interrupt
-    routing tables, event notifications, etc.
-    Requires extending `REGISTER_COMM` with a type parameter to distinguish
-    VP-level COMM from domain-level COMM, or adding a new `REGISTER_DOMAIN_COMM`
-    hypercall.
-  - **(b) ENUMERATE_MEMORY hypercall**: A new opcode that returns PA map entries
-    iteratively (start_index → entry).
-  - **(c) ATTEST_SELF + parsing**: Use the existing attestation report to extract
-    memory capability ranges and derive GPA→HPA from the capability tree.
+  **PA map population** — Derived from binary attestation report:
+  The PA map is part of the binary attestation (DOMCOMM_MSG_ATTEST) delivered
+  via the DomainComm RX ring at boot.  The driver parses the attestation to
+  populate the `thhv_translate.c` rb-tree, learn capability handles, and
+  configure domain policies.  See `thhv/docs/domain-comm-v0.2.md` for the full
+  DomainComm design.
+
+  **DomainComm bootstrap (dom0)**:
+  - Capavisor pre-allocates DomainComm pages during dom0 creation
+  - Pages marked as e820 type 2 (reserved); GPA reported via CPUID leaf 0x40000002
+  - RX ring pre-populated with binary attestation (capability handles, PA map entries)
+  - Driver reads CPUID → `memremap()` → dequeue attestation → bootstrapped
+
+  **Capability engine stays clean**: REGISTER_COMM is unchanged (no COMM subtypes).
+  The platform layer distinguishes DomainComm (self-ref: target == owner) from
+  VP-level COMM (target != owner) based on the CommBinding.  Rings are growable
+  via CARVE + GROW messages after bootstrap.  Recursive design: same API for
+  dom0, children, grandchildren.
 
   **send_at ABI extension**:
   `themis_send_at(cap, receiver, attrs, child_gpa)` added to libthemis FFI.

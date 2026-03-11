@@ -241,100 +241,133 @@ struct thhv_vp_registers {
 #define THHV_VP_REG_INTERRUPTIBILITY_STATE 0xB1
 #define THHV_VP_REG_PAT                   0xB2
 
-/* ── VM-exit types (PROVISIONAL — needs design review) ─────────────────────── */
+/* ── ThemIC — Themis Message Interface for Cloud-Hypervisor ─────────────────── */
 /*
- * These are placeholders.  The final set must account for:
- *   - EPT violations (wrong permissions, unmapped GPA) vs MMIO intercepts
- *   - Guest exceptions/faults (#GP, #PF, #UD, etc.) with vector + error code
- *   - VMCALL from guest (hypercall)
- *   - CR/DR access, XSETBV, INVLPG, WBINVD
- *   - Interrupt window / preemption timer
- *   - Which exits the capavisor handles internally vs forwards to parent
+ * ThemIC is the capability-aware notification system.  Three shared pages
+ * per child VP carry structured messages between capavisor and parent:
+ *   - Message Page (4 KiB): 16 × 256-byte channel slots
+ *   - Event Flag Page (4 KiB): pending-bit bitmap per channel
+ *   - Doorbell Table (4 KiB): GPA/datamatch fast-path entries
  *
- * TODO: Finalize exit type taxonomy and COMM page exit info layout.
+ * A fourth page type — Domain Management Page — carries domain-wide
+ * messages (attestation, PA map) not tied to a child VP.
+ *
+ * See 2026/docs/design/mshv_themis/mshv_themis.md §4 for full design.
  */
 
-#define THHV_EXIT_NONE       0   /* No exit (should not happen) */
-#define THHV_EXIT_HLT        1   /* Guest executed HLT */
-#define THHV_EXIT_IO         2   /* I/O port access */
-#define THHV_EXIT_MMIO       3   /* MMIO access (EPT violation, data path) */
-#define THHV_EXIT_CPUID      4   /* CPUID instruction */
-#define THHV_EXIT_MSR        5   /* MSR read/write */
-#define THHV_EXIT_SHUTDOWN   6   /* Triple fault / shutdown */
-#define THHV_EXIT_INTR       7   /* External interrupt (for injection) */
-#define THHV_EXIT_MEMORY_FAULT 8 /* EPT violation — access rights / unmapped */
-#define THHV_EXIT_EXCEPTION  9   /* Guest exception (vector + error code) */
-#define THHV_EXIT_HYPERCALL  10  /* Guest VMCALL */
-#define THHV_EXIT_UNKNOWN    0xFF
+#define THEMIC_NUM_CHANNELS       16
+#define THEMIC_MSG_SLOT_SIZE      256   /* bytes per slot */
+#define THEMIC_MAX_DOORBELLS      128
+
+/* Channel indices (slots in the message page). */
+#define THEMIC_CHAN_INTERCEPT      0     /* VP exit / intercept messages */
+#define THEMIC_CHAN_DOORBELL       1     /* Doorbell event notifications */
+#define THEMIC_CHAN_IRQ_ACK        2     /* Interrupt injection acks */
+/* 3–15 reserved */
+
+/* Message types (in themic_message_header.message_type). */
+#define THEMIC_MSG_NONE           0x0000
+#define THEMIC_MSG_VP_INTERCEPT   0x0001  /* VP exit: IO, MMIO, CPUID, MSR, HLT, etc. */
+#define THEMIC_MSG_DOORBELL       0x0002  /* Doorbell write detected */
+#define THEMIC_MSG_IRQ_ACK        0x0003  /* Interrupt delivery acknowledged */
+#define THEMIC_MSG_SHUTDOWN       0x0004  /* Domain shutdown / triple fault */
+
+struct themic_message_header {
+	__u32 message_type;           /* THEMIC_MSG_* */
+	__u32 payload_size;           /* bytes of payload following header */
+	__u64 sequence;               /* monotonic counter for ordering */
+};
 
 /*
- * Exit message written to thhv_run_vp.msg_buf (256 bytes).
- * The driver reads exit info from the COMM page and formats it here.
+ * Intercept message — written by capavisor to slot 0 on VP exit.
+ * This is the canonical exit info format.  The driver copies it
+ * directly into thhv_run_vp.msg_buf for userspace.
+ *
+ * Fields are a superset: not all are valid for every exit reason.
+ * The exit_reason field carries the capavisor-translated exit reason
+ * (may differ from raw VMX exit reasons).
  */
-struct thhv_exit_msg {
-	__u32 exit_type;       /* THHV_EXIT_* */
-	__u32 instr_len;       /* Faulting instruction length (0 if N/A) */
+struct themic_intercept_message {
+	struct themic_message_header header;
+	__u32 exit_reason;            /* VMX / capavisor exit reason */
+	__u32 instruction_length;
+	__u64 exit_qualification;
+	__u64 guest_physical_address;
+	__u64 guest_rip;
+	__u64 guest_rflags;
+	/* I/O port intercept fields */
+	__u16 port_number;
+	__u8  access_size;            /* 1, 2, 4 */
+	__u8  is_write;
+	__u32 reserved;
+	__u64 rax;                    /* I/O data */
+	/* MMIO intercept fields */
+	__u8  instruction_bytes[16];  /* faulting instruction for emulation */
+	/* CPUID intercept fields */
+	__u64 cpuid_rax, cpuid_rcx;
+	/* MSR intercept fields */
+	__u32 msr_number;
+	__u32 rsvd2;
+	__u64 msr_value;
+};
+
+struct themic_doorbell_message {
+	struct themic_message_header header;
+	__u32 doorbell_id;
+	__u32 rsvd;
+	__u64 gpa;
+	__u64 value;
+	__u32 size;
+	__u32 rsvd2;
+};
+
+/* === Message Page === */
+
+struct themic_message_page {
 	union {
 		struct {
-			__u16 port;
-			__u8  is_write;
-			__u8  access_size;  /* 1, 2, or 4 bytes */
-			__u32 rsvd;
-			__u64 data;
-		} io;
-		struct {
-			__u64 gpa;
-			__u8  is_write;
-			__u8  access_size;
-			__u8  rsvd[6];
-			__u64 data;
-		} mmio;
-		struct {
-			__u32 leaf;
-			__u32 subleaf;
-		} cpuid;
-		struct {
-			__u32 msr;
-			__u8  is_write;
-			__u8  rsvd[3];
-			__u64 data;
-		} msr;
-		struct {
-			__u64 gpa;         /* Faulting GPA */
-			__u64 flags;       /* EPT violation qualification bits */
-		} memory_fault;
-		struct {
-			__u32 vector;      /* Exception vector (0-31) */
-			__u32 error_code;  /* Error code (0 if N/A) */
-			__u8  has_error_code;
-			__u8  rsvd[7];
-			__u64 cr2;         /* For #PF */
-		} exception;
-		struct {
-			__u64 nr;          /* Hypercall number (guest RAX) */
-			__u64 args[3];     /* Guest RBX, RCX, RDX */
-		} hypercall;
-		__u8 raw[240];     /* Pad union to fill 256 total */
+			__u8 slot_data[THEMIC_MSG_SLOT_SIZE];
+		} slots[THEMIC_NUM_CHANNELS];
 	};
+	/* 16 × 256 = 4096 bytes = 1 page */
 };
 
-struct thhv_run_vp {
-	__u8 msg_buf[256];     /* Contains struct thhv_exit_msg on return */
+/* === Event Flag Page === */
+
+struct themic_event_flag_page {
+	__u64 flags[THEMIC_NUM_CHANNELS];
+	__u8  reserved[4096 - THEMIC_NUM_CHANNELS * 8];
+};
+
+/* === Doorbell Table === */
+
+#define THEMIC_DOORBELL_FLAG_TRIGGER_ANY_VALUE  (1 << 0)
+#define THEMIC_DOORBELL_FLAG_TRIGGER_SIZE_ANY   (1 << 1)
+#define THEMIC_DOORBELL_FLAG_PIO                (1 << 2)
+
+struct themic_doorbell_entry {
+	__u64 gpa;
+	__u64 datamatch;
+	__u32 size;
+	__u32 flags;                  /* THEMIC_DOORBELL_FLAG_* */
+	__u32 doorbell_id;
+	__u32 reserved;
+};
+
+struct themic_doorbell_table {
+	__u32 count;
+	__u32 capacity;
+	struct themic_doorbell_entry entries[THEMIC_MAX_DOORBELLS];
 };
 
 /*
- * COMM page exit info area: offsets within the 4 KiB COMM page.
- *
- * The capavisor writes VM-exit information here (after the register
- * area at offset 512) before returning from SWITCH.  The driver reads
- * these fields and formats them into a thhv_exit_msg for userspace.
+ * RUN_VP ioctl: on return, msg_buf contains a themic_intercept_message
+ * (256 bytes = one message slot) copied from the ThemIC message page
+ * slot 0 (THEMIC_CHAN_INTERCEPT).
  */
-#define THHV_COMM_EXIT_REASON_OFF      512   /* u32: VMX exit reason */
-#define THHV_COMM_EXIT_QUAL_OFF        516   /* u64: exit qualification */
-#define THHV_COMM_EXIT_INSTR_LEN_OFF   524   /* u32: instruction length */
-#define THHV_COMM_EXIT_INSTR_INFO_OFF  528   /* u32: instruction info */
-#define THHV_COMM_EXIT_GPA_OFF         532   /* u64: guest physical address */
-#define THHV_COMM_EXIT_PENDING_OFF     540   /* u32: set to 1 when exit info valid */
+struct thhv_run_vp {
+	__u8 msg_buf[THEMIC_MSG_SLOT_SIZE];
+};
 
 struct thhv_irqfd {
 	__s32 fd;
