@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Out-of-tree build for hvthemis.ko
+# Out-of-tree build for thhv.ko
 #
 # Builds libthemis.a (Rust FFI static lib) then links it into the kernel module.
 #

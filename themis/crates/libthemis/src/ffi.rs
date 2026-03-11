@@ -1,4 +1,4 @@
-//! C-FFI shims for `libthemis` — called from the `hvthemis` kernel module.
+//! C-FFI shims for `libthemis` — called from the `thhv` kernel module.
 //!
 //! Each function is `#[no_mangle] pub extern "C"` and returns a C-friendly
 //! error code: 0 on success, negative errno-style values on failure.

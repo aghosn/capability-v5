@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * hvthemis_part.c — Partition fd lifecycle and ioctl dispatch.
+ * thhv_part.c — Partition fd lifecycle and ioctl dispatch.
  *
- * A partition fd is returned by MSHV_CREATE_PARTITION on the device fd.
+ * A partition fd is returned by THHV_CREATE_PARTITION on the device fd.
  * It wraps a Themis domain and tracks VPs, memory mappings, IRQfds, etc.
  */
 
@@ -12,14 +12,14 @@
 #include <linux/anon_inodes.h>
 #include <linux/uaccess.h>
 
-#include "hvthemis.h"
+#include "thhv.h"
 
 /* ── Partition cleanup ─────────────────────────────────────────────────────── */
 
-static void hvthemis_partition_destroy(struct kref *ref)
+static void thhv_partition_destroy(struct kref *ref)
 {
-	struct hvthemis_partition *part =
-		container_of(ref, struct hvthemis_partition, refcount);
+	struct thhv_partition *part =
+		container_of(ref, struct thhv_partition, refcount);
 	int ret;
 	u32 i;
 
@@ -27,7 +27,7 @@ static void hvthemis_partition_destroy(struct kref *ref)
 	if (part->domain_handle) {
 		ret = themis_revoke_domain(part->domain_handle);
 		if (ret)
-			pr_warn("hvthemis: REVOKE_DOMAIN 0x%llx failed (%d)\n",
+			pr_warn("thhv: REVOKE_DOMAIN 0x%llx failed (%d)\n",
 				part->domain_handle, ret);
 	}
 
@@ -44,45 +44,45 @@ static void hvthemis_partition_destroy(struct kref *ref)
 
 /* ── Partition-level ioctl dispatch ────────────────────────────────────────── */
 
-static long hvthemis_part_ioctl(struct file *file, unsigned int cmd,
+static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
-	struct hvthemis_partition *part = file->private_data;
+	struct thhv_partition *part = file->private_data;
 	void __user *uarg = (void __user *)arg;
 	int ret;
 
 	switch (cmd) {
-	case MSHV_INITIALIZE_PARTITION:
+	case THHV_INITIALIZE_PARTITION:
 		if (part->sealed)
 			return -EBUSY;
 		ret = themis_seal(part->domain_handle);
 		if (ret)
 			return ret;
 		part->sealed = true;
-		pr_debug("hvthemis: sealed domain 0x%llx\n",
+		pr_debug("thhv: sealed domain 0x%llx\n",
 			 part->domain_handle);
 		return 0;
 
-	case MSHV_CREATE_VP:
-		return hvthemis_vp_create(part, uarg);
+	case THHV_CREATE_VP:
+		return thhv_vp_create(part, uarg);
 
-	case MSHV_SET_GUEST_MEMORY:
+	case THHV_SET_GUEST_MEMORY:
 		/* TODO(P15e): CARVE + SEND / REVOKE_MEM */
 		return -ENOSYS;
 
-	case MSHV_IRQFD:
+	case THHV_IRQFD:
 		/* TODO(P15g): eventfd → VMCALL_ASSERT_INTERRUPT */
 		return -ENOSYS;
 
-	case MSHV_IOEVENTFD:
+	case THHV_IOEVENTFD:
 		/* TODO(P15h): VMCALL_REGISTER_DOORBELL */
 		return -ENOSYS;
 
-	case MSHV_SET_MSI_ROUTING:
+	case THHV_SET_MSI_ROUTING:
 		/* TODO(P15g): build GSI → MSI table */
 		return -ENOSYS;
 
-	case MSHV_GET_GPAP_ACCESS_BITMAP:
+	case THHV_GET_GPAP_ACCESS_BITMAP:
 		/* TODO(P15e): dirty page tracking */
 		return -ENOSYS;
 
@@ -93,33 +93,33 @@ static long hvthemis_part_ioctl(struct file *file, unsigned int cmd,
 
 /* ── Partition fd file_operations ──────────────────────────────────────────── */
 
-static int hvthemis_part_release(struct inode *inode, struct file *file)
+static int thhv_part_release(struct inode *inode, struct file *file)
 {
-	struct hvthemis_partition *part = file->private_data;
+	struct thhv_partition *part = file->private_data;
 
-	kref_put(&part->refcount, hvthemis_partition_destroy);
+	kref_put(&part->refcount, thhv_partition_destroy);
 	return 0;
 }
 
-const struct file_operations hvthemis_partition_fops = {
+const struct file_operations thhv_partition_fops = {
 	.owner          = THIS_MODULE,
-	.release        = hvthemis_part_release,
-	.unlocked_ioctl = hvthemis_part_ioctl,
+	.release        = thhv_part_release,
+	.unlocked_ioctl = thhv_part_ioctl,
 };
 
-/* ── MSHV_CREATE_PARTITION handler (called from device ioctl) ──────────────── */
+/* ── THHV_CREATE_PARTITION handler (called from device ioctl) ──────────────── */
 
-long hvthemis_partition_create(struct file *dev_file, void __user *uarg)
+long thhv_partition_create(struct file *dev_file, void __user *uarg)
 {
-	struct mshv_create_partition cp;
-	struct hvthemis_partition *part;
+	struct thhv_create_partition cp;
+	struct thhv_partition *part;
 	struct file *file;
 	int fd, ret;
 
 	if (copy_from_user(&cp, uarg, sizeof(cp)))
 		return -EFAULT;
 
-	if (cp.sched_policy > HVTHEMIS_SCHED_ASYNC)
+	if (cp.sched_policy > THHV_SCHED_ASYNC)
 		return -EINVAL;
 	if (cp.num_vps == 0 || cp.num_vps > 256)
 		return -EINVAL;
@@ -157,10 +157,10 @@ long hvthemis_partition_create(struct file *dev_file, void __user *uarg)
 	ret = themis_create_domain(cp.cores_mask, cp.api_flags, cp.num_vps,
 				   &part->domain_handle);
 	if (ret) {
-		pr_err("hvthemis: CREATE_DOMAIN failed (%d)\n", ret);
+		pr_err("thhv: CREATE_DOMAIN failed (%d)\n", ret);
 		goto err_free_vps;
 	}
-	pr_debug("hvthemis: created domain handle 0x%llx (%u VPs)\n",
+	pr_debug("thhv: created domain handle 0x%llx (%u VPs)\n",
 		 part->domain_handle, cp.num_vps);
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
@@ -169,7 +169,7 @@ long hvthemis_partition_create(struct file *dev_file, void __user *uarg)
 		goto err_revoke;
 	}
 
-	file = anon_inode_getfile("mshv-partition", &hvthemis_partition_fops,
+	file = anon_inode_getfile("thhv-partition", &thhv_partition_fops,
 				  part, O_RDWR | O_CLOEXEC);
 	if (IS_ERR(file)) {
 		ret = PTR_ERR(file);

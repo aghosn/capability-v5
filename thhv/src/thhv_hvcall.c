@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * hvthemis_hvcall.c — Thin C shims around libthemis FFI functions.
+ * thhv_hvcall.c — Thin C shims around libthemis FFI functions.
  *
  * The actual VMCALL inline assembly lives in the Rust crate
  * `themis/crates/libthemis` (compiled as libthemis.a with feature "ffi").
@@ -13,7 +13,7 @@
  */
 
 #include <linux/module.h>
-#include "hvthemis.h"
+#include "thhv.h"
 
 /*
  * Extern declarations for the Rust FFI symbols (from libthemis.a).
@@ -34,14 +34,14 @@ extern int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value);
 extern int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 
 /*
- * hvthemis_hcall() — General-purpose VMCALL wrapper.
+ * thhv_hcall() — General-purpose VMCALL wrapper.
  *
  * This is a fallback for opcodes that don't have dedicated FFI wrappers.
  * It issues a raw VMCALL using inline assembly (same convention as
  * libthemis but duplicated here for cases where we need to call an
  * opcode not yet exposed by libthemis's FFI surface).
  */
-int hvthemis_hcall(u64 opcode, u64 arg0, u64 arg1, u64 arg2,
+int thhv_hcall(u64 opcode, u64 arg0, u64 arg1, u64 arg2,
 		   u64 *out0, u64 *out1, u64 *out2)
 {
 	u64 status, o0, o1, o2;

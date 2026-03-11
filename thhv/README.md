@@ -1,15 +1,15 @@
-# hvthemis — Capability-Aware `/dev/mshv` Kernel Driver
+# thhv — Capability-Aware `/dev/thhv` Kernel Driver
 
 Out-of-tree Linux kernel module that exposes Themis capability operations
-through an ioctl interface modelled on Microsoft's MSHV driver, enabling
+through an ioctl interface modelled on Microsoft's THHV driver, enabling
 **cloud-hypervisor** to target the Themis capavisor with a thin backend swap.
 
 ## Architecture
 
 ```
-/dev/mshv  (device fd)       ← hvthemis_main.c
-  └─ partition fd            ← hvthemis_part.c   (1 per child domain)
-       └─ vp fd              ← hvthemis_vp.c     (1 per virtual processor)
+/dev/thhv  (device fd)       ← thhv_main.c
+  └─ partition fd            ← thhv_part.c   (1 per child domain)
+       └─ vp fd              ← thhv_vp.c     (1 per virtual processor)
 ```
 
 Each fd level has its own `file_operations` and ioctl dispatch.
@@ -19,17 +19,17 @@ Every ioctl translates to one or more Themis VMCALLs issued through
 ## Layout
 
 ```
-hvthemis/
+thhv/
 ├── README.md
 ├── Makefile          # out-of-tree kbuild (also builds libthemis.a)
 ├── Kbuild            # kbuild object list + libthemis link flags
 ├── inc/
-│   └── hvthemis.h    # ioctl numbers (magic 0xB8), uapi structs, driver structs
+│   └── thhv.h    # ioctl numbers (magic 0xB8), uapi structs, driver structs
 └── src/
-    ├── hvthemis_main.c    # module init/exit, CPUID detection, /dev/mshv chardev
-    ├── hvthemis_hvcall.c  # C shims + extern decls for libthemis FFI symbols
-    ├── hvthemis_part.c    # partition fd lifecycle, partition-level ioctl stubs
-    └── hvthemis_vp.c      # VP fd lifecycle, VP-level ioctl stubs
+    ├── thhv_main.c    # module init/exit, CPUID detection, /dev/thhv chardev
+    ├── thhv_hvcall.c  # C shims + extern decls for libthemis FFI symbols
+    ├── thhv_part.c    # partition fd lifecycle, partition-level ioctl stubs
+    └── thhv_vp.c      # VP fd lifecycle, VP-level ioctl stubs
 ```
 
 ## Dependencies
@@ -44,10 +44,10 @@ hvthemis/
 
 ```bash
 # Build against running kernel (requires kernel headers + Rust nightly):
-cd hvthemis && make
+cd thhv && make
 
 # Build against a specific kernel tree:
-cd hvthemis && make KDIR=/path/to/kernel/build
+cd thhv && make KDIR=/path/to/kernel/build
 ```
 
 The Makefile automatically builds `libthemis.a` via Cargo before invoking kbuild.
@@ -61,4 +61,4 @@ See `todo.md` (Phase 15) for the implementation roadmap.
 
 ## Design
 
-Full design document: `2026/docs/design/mshv_themis/mshv_themis.md`
+Full design document: `2026/docs/design/thhv_themis/thhv_themis.md`

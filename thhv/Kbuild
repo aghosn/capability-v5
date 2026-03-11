@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
-obj-m += hvthemis.o
-hvthemis-objs := src/hvthemis_main.o src/hvthemis_hvcall.o src/hvthemis_part.o src/hvthemis_vp.o
+obj-m += thhv.o
+thhv-objs := src/thhv_main.o src/thhv_hvcall.o src/thhv_part.o src/thhv_vp.o
 
 ccflags-y += -I$(src)/inc
 
