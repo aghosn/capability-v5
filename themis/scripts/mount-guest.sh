@@ -29,12 +29,56 @@ if [[ ! -f "$IMG" ]]; then
     exit 1
 fi
 
+# Resolve to absolute path so qemu-nbd works regardless of cwd.
+IMG="$(realpath "$IMG")"
+
 MNT="/tmp/mnt"
 
-modprobe nbd max_part=8
+modprobe nbd max_part=16
+
+# Clean up any stale nbd0 session from a previous run.
+umount "$MNT" &>/dev/null || true
+qemu-nbd -d /dev/nbd0 &>/dev/null || true
+sleep 0.5
+
 qemu-nbd -c /dev/nbd0 "$IMG"
-sleep 1                       # wait for partition scan
+
+# Wait for the kernel to discover partitions (up to 5 seconds).
+for i in $(seq 1 10); do
+    if ls /dev/nbd0p* &>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+
+if ! ls /dev/nbd0p* &>/dev/null; then
+    echo "ERROR: no partitions found on $IMG" >&2
+    qemu-nbd -d /dev/nbd0
+    exit 1
+fi
+
 mkdir -p "$MNT"
-mount /dev/nbd0p1 "$MNT" 2>/dev/null || mount /dev/nbd0p2 "$MNT"
+
+# Find the root partition: try the largest ext4/xfs partition.
+ROOT_PART=""
+for part in /dev/nbd0p*; do
+    if mount -o ro "$part" "$MNT" &>/dev/null; then
+        if [[ -d "$MNT/etc" ]]; then
+            ROOT_PART="$part"
+            umount "$MNT"
+            break
+        fi
+        umount "$MNT"
+    fi
+done
+
+if [[ -z "$ROOT_PART" ]]; then
+    echo "ERROR: could not find root partition in $IMG" >&2
+    echo "Available partitions: $(ls /dev/nbd0p*)" >&2
+    qemu-nbd -d /dev/nbd0
+    exit 1
+fi
+
+mount "$ROOT_PART" "$MNT"
 echo "Mounted $(basename "$IMG") at $MNT"
 echo "Unmount with:  sudo umount $MNT && sudo qemu-nbd -d /dev/nbd0"

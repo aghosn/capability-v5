@@ -14,6 +14,15 @@ use crate::vcpu::{ActiveVcpu, Reg, VmxError};
 
 use capability_engine::Platform;
 
+// ── DomainComm discovery statics (written once at boot, read by CPUID handler) ─ //
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicU32;
+
+/// Dom0 DomainComm region GPA (set by init_themis, read by CPUID leaf 0x40000002).
+pub static DOMCOMM_GPA: AtomicU64 = AtomicU64::new(0);
+/// Dom0 DomainComm region size in pages.
+pub static DOMCOMM_PAGES: AtomicU32 = AtomicU32::new(0);
+
 // ── x2APIC MSR range (SDM Vol 3 §10.12.1) ──────────────────────────────── //
 // In x2APIC mode every APIC register is accessed via MSRs 0x800–0x83F.
 // We virtualise these through the VAPIC page rather than letting the guest
@@ -240,6 +249,16 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 (0x40000001, _) => {
                     eax = 0b00001; // bit 0: sync scheduling supported
                     ebx = 0; ecx = 0; edx = 0;
+                }
+                (0x40000002, _) => {
+                    // DomainComm discovery: GPA and page count.
+                    // Set by init_themis → bootstrap_init_domcomm.
+                    let gpa = DOMCOMM_GPA.load(Ordering::Relaxed);
+                    let pages = DOMCOMM_PAGES.load(Ordering::Relaxed);
+                    eax = gpa as u32;          // GPA low 32 bits
+                    ebx = (gpa >> 32) as u32;  // GPA high 32 bits
+                    ecx = pages;               // region size in pages
+                    edx = 0;
                 }
                 (0x40000003, _) => {
                     eax = 256;  // max VPs per partition

@@ -383,6 +383,8 @@ pub struct LinuxLoadInfo {
 /// | `0x0_7000`  | `struct boot_params` (4 KiB)    |
 /// | `0x0_8000`  | Kernel command-line string       |
 /// | `0x0_8FF8`  | Initial guest stack top          |
+/// | `0x0_9000`  | ACPI RSDP+XSDT copy (4 KiB)     |
+/// | `0x0_E000`  | DomainComm region (4 pages, 16 KiB) |
 /// | `0x10_0000` | Protected-mode kernel image      |
 /// | after kern  | Initrd, 4-KiB aligned (if any)  |
 pub const BOOT_PARAMS_PHYS: u64  = 0x0_7000;
@@ -416,6 +418,7 @@ pub fn load_linux(
     hhdm_offset: u64,
     dom0_regions: &[PhysRegion],
     meta_regions: &[PhysRegion],
+    comm_region: &PhysRegion,
     non_ram: &[E820Entry],
     acpi_rsdp_addr: u64,
     cmdline: &str,
@@ -527,6 +530,13 @@ pub fn load_linux(
     for e in non_ram {
         push(&mut e820_buf, &mut count, *e);
     }
+    // DomainComm region: reserved so Linux doesn't allocate from it.
+    // The thhv driver discovers it via CPUID leaf 0x40000002 and uses memremap().
+    push(&mut e820_buf, &mut count, E820Entry {
+        addr: comm_region.base,
+        size: comm_region.length,
+        entry_type: E820Entry::TYPE_RESERVED,
+    });
 
     // Sort entries by base address (insertion sort — small N, no alloc needed).
     let entries = &mut e820_buf[..count];

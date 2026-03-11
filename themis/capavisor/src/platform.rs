@@ -336,6 +336,22 @@ pub struct PlatformDomain {
     /// Per-VP slots.  Index = domain-local VP ID (0, 1, 2, ...).
     /// Each slot holds an InactiveVcpu when the VP is not running.
     pub vps: Vec<VcpuSlot>,
+
+    /// DomainComm region: per-domain message ring with the capavisor.
+    /// `None` until `init_domcomm()` allocates it.
+    pub domcomm: Option<DomainCommState>,
+}
+
+/// Per-domain DomainComm region state (capavisor-side bookkeeping).
+pub struct DomainCommState {
+    /// Physical addresses of each page in the region.
+    pub page_hpas: Vec<u64>,
+    /// Total number of pages (header + RX + TX).
+    pub total_pages: u32,
+    /// GPA at which this region is visible to the domain.
+    /// For dom0: chosen by the capavisor at boot.
+    /// For children: TBD (parent allocates).
+    pub gpa: u64,
 }
 
 impl PlatformDomain {
@@ -346,7 +362,145 @@ impl PlatformDomain {
             parent,
             hhdm_offset,
             vps: Vec::new(),
+            domcomm: None,
         }
+    }
+
+    /// Initialize DomainComm pages for this domain.
+    ///
+    /// For dom0 the pages live at a fixed GPA inside the identity-mapped RAM
+    /// region (marked TYPE_RESERVED in e820 so Linux won't use them).  The
+    /// caller passes the contiguous base HPA and page count; no META allocation
+    /// is needed because the pages are ordinary DRAM already EPT-mapped.
+    ///
+    /// For child domains the caller will CARVE pages and pass their HPAs.
+    fn init_domcomm(&mut self, base_hpa: u64, nr_pages: u32, gpa: u64) -> &DomainCommState {
+        use themis_abi::domcomm;
+
+        assert!(nr_pages >= 2, "DomainComm needs at least 2 pages (header + 1 ring)");
+
+        let page_hpas: Vec<u64> = (0..nr_pages as u64)
+            .map(|i| base_hpa + i * 0x1000)
+            .collect();
+
+        // Write header to page 0 via HHDM.
+        let hdr_virt = (page_hpas[0] + self.hhdm_offset) as *mut domcomm::Header;
+        // The rx ring gets all pages except header and 1 TX page.
+        let rx_page_count = (nr_pages - 1).saturating_sub(1).max(1);
+        let tx_page_count = nr_pages - 1 - rx_page_count;
+
+        unsafe {
+            let hdr = &mut *hdr_virt;
+            hdr.magic = domcomm::DOMCOMM_MAGIC;
+            hdr.version_major = domcomm::DOMCOMM_VERSION_MAJOR;
+            hdr.version_minor = domcomm::DOMCOMM_VERSION_MINOR;
+            hdr.total_pages = nr_pages;
+            hdr.flags = 0;
+
+            // RX ring: pages 1..(1+rx_page_count)
+            hdr.rx = domcomm::RingMeta {
+                head: 0,
+                tail: 0,
+                page_offset: 1,
+                page_count: rx_page_count,
+            };
+
+            // TX ring: pages (1+rx_page_count)..(nr_pages)
+            hdr.tx = domcomm::RingMeta {
+                head: 0,
+                tail: 0,
+                page_offset: 1 + rx_page_count,
+                page_count: tx_page_count,
+            };
+
+            hdr.notify_vector = 0;
+            hdr.notify_flags = 0;
+        }
+
+        self.domcomm = Some(DomainCommState {
+            page_hpas,
+            total_pages: nr_pages,
+            gpa,
+        });
+        self.domcomm.as_ref().unwrap()
+    }
+
+    /// Write a message to the RX ring of this domain's DomainComm.
+    ///
+    /// The capavisor is the sole producer of the RX ring.
+    /// Returns the number of bytes written (including header), or 0 if ring full.
+    fn domcomm_rx_enqueue(&self, msg_type: u32, payload: &[u8]) -> usize {
+        use themis_abi::domcomm;
+
+        let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
+        let hdr_virt = (dc.page_hpas[0] + self.hhdm_offset) as *mut domcomm::Header;
+
+        let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
+        let total_size = ((msg_hdr_size + payload.len() + 7) / 8) * 8; // 8-byte align
+
+        unsafe {
+            let hdr = &mut *hdr_virt;
+            let rx = &mut hdr.rx;
+            let capacity = (rx.page_count as usize) * 4096;
+            let head = rx.head as usize;
+            let tail = rx.tail as usize;
+
+            // Check space.
+            let used = if head >= tail { head - tail } else { capacity - tail + head };
+            if capacity - used < total_size {
+                return 0; // Ring full
+            }
+
+            // Find the page and offset within the page.
+            let page_idx = (head / 4096) + rx.page_offset as usize;
+            let page_off = head % 4096;
+
+            // Check if message fits in current page.
+            if page_off + total_size > 4096 {
+                // Write padding message to fill rest of page.
+                let pad_size = 4096 - page_off;
+                let pad_page_hpa = dc.page_hpas[page_idx];
+                let pad_virt = (pad_page_hpa + self.hhdm_offset) as *mut u8;
+                let pad_hdr = pad_virt.add(page_off) as *mut domcomm::MsgHeader;
+                (*pad_hdr).message_type = domcomm::msg_types::NONE;
+                (*pad_hdr).total_size = pad_size as u32;
+                (*pad_hdr).sequence = 0;
+
+                // Advance head past padding.
+                let new_head = ((head + pad_size) % capacity) as u32;
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+                rx.head = new_head;
+
+                // Recurse with the new head position.
+                return self.domcomm_rx_enqueue(msg_type, payload);
+            }
+
+            // Write message within current page.
+            let ring_page_hpa = dc.page_hpas[page_idx];
+            let ring_page_virt = (ring_page_hpa + self.hhdm_offset) as *mut u8;
+            let msg_ptr = ring_page_virt.add(page_off);
+
+            // Write payload first, then header (producer protocol).
+            if !payload.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    payload.as_ptr(),
+                    msg_ptr.add(msg_hdr_size),
+                    payload.len(),
+                );
+            }
+
+            // Write header.
+            let msg_hdr_ptr = msg_ptr as *mut domcomm::MsgHeader;
+            (*msg_hdr_ptr).message_type = msg_type;
+            (*msg_hdr_ptr).total_size = total_size as u32;
+            (*msg_hdr_ptr).sequence = 0; // TODO: monotonic counter per ring
+
+            // Memory barrier + advance head.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            rx.head = ((head + total_size) % capacity) as u32;
+        }
+
+        total_size
     }
 
     /// Ensure an EPT root page exists, allocating from `self.meta` if needed.
@@ -540,6 +694,59 @@ impl ThemisPlatform {
             .lock()
             .meta
             .add_range(region);
+    }
+
+    /// Allocate and initialize the DomainComm region for a domain.
+    ///
+    /// For dom0 this is called during boot before the domain starts.
+    /// Allocates `nr_pages` from the domain's META pool, writes the header
+    /// and optionally pre-populates the RX ring with an attestation message.
+    ///
+    /// For dom0 the base HPA equals the GPA (identity mapping).  For child
+    /// domains the caller provides HPAs from CARVEd pages.
+    ///
+    /// Returns `(gpa, nr_pages)` — the domain's e820/CPUID should be updated
+    /// to reflect this reserved region.
+    pub fn bootstrap_init_domcomm(
+        &self,
+        domain_id: DomainId,
+        base_hpa: u64,
+        gpa: u64,
+        nr_pages: u32,
+    ) -> (u64, u32) {
+        let arc = self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("bootstrap_init_domcomm: domain not registered"));
+        let mut d = arc.lock();
+        d.init_domcomm(base_hpa, nr_pages, gpa);
+        (gpa, nr_pages)
+    }
+
+    /// Write a binary attestation message to a domain's DomainComm RX ring.
+    ///
+    /// The attestation payload is a `domcomm::AttestReport` header followed by
+    /// packed arrays of mem_cap, dom_cap, and pa_map entries.
+    ///
+    /// Must be called after `bootstrap_init_domcomm`.
+    pub fn bootstrap_write_attestation(
+        &self,
+        domain_id: DomainId,
+        payload: &[u8],
+    ) {
+        use themis_abi::domcomm;
+        let arc = self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("bootstrap_write_attestation: domain not registered"));
+        let d = arc.lock();
+        let wrote = d.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, payload);
+        assert!(wrote > 0, "bootstrap_write_attestation: RX ring full or too small");
+    }
+
+    /// Get the DomainComm GPA and page count for a domain (for CPUID / e820).
+    pub fn domcomm_info(&self, domain_id: DomainId) -> Option<(u64, u32)> {
+        let arc = self.domains.get(domain_id)?;
+        let d = arc.lock();
+        d.domcomm.as_ref().map(|dc| (dc.gpa, dc.total_pages))
     }
 
     pub fn bootstrap_register_domain(

@@ -694,10 +694,10 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
 
   Incremental implementation with validation at each milestone:
 
-- [ ] **P15-dc-m0** — Binary attestation format: Define `domcomm_*` structs in
+- [x] **P15-dc-m0** — Binary attestation format: Define `domcomm_*` structs in
   `thhv.h` (C) and capavisor (Rust).  DomainComm header, message header,
   attestation report with mem_cap/dom_cap/pa_map entries.
-- [ ] **P15-dc-m1** — Capavisor pre-allocation: Allocate 4 DomainComm pages for
+- [x] **P15-dc-m1** — Capavisor pre-allocation: Allocate 4 DomainComm pages for
   dom0 at domain creation, e820 reserved, CPUID leaf 0x40000002, write header +
   binary attestation to RX ring.  **Test**: `cargo themis` boots normally.
 - [ ] **P15-dc-m2** — Driver discovery + parsing: CPUID discovery, `memremap()`,

@@ -8,6 +8,9 @@ const EPT_ENTRIES_PER_TABLE: u64 = 512;
 /// Maximum number of META physical regions (spanning multiple disjoint e820 entries).
 pub const MAX_META_REGIONS: usize = 16;
 
+/// Default number of DomainComm pages per domain (header + RX + TX).
+pub const DOMCOMM_NR_PAGES: u32 = 4;
+
 /// A contiguous physical memory region.
 #[derive(Debug, Clone, Copy)]
 pub struct PhysRegion {
@@ -39,6 +42,9 @@ pub struct MemoryPartition {
     pub meta_count: usize,
     /// Breakdown of META pool usage.
     pub meta_breakdown: MetaBreakdown,
+    /// DomainComm region for dom0 — contiguous, carved from the bottom of the
+    /// first usable region.  Excluded from dom0_owned.
+    pub comm_region: PhysRegion,
 }
 
 /// Breakdown of how the META pool is sized.
@@ -183,6 +189,33 @@ impl PhysicalInventory {
             "not enough usable memory for META pool ({} KiB needed)",
             meta_size / 1024);
 
+        // ── Reserve DomainComm pages from the BOTTOM of the first usable region ── //
+        //
+        // Unlike META (carved from the top), COMM is a single contiguous block
+        // taken from the lowest available address.  dom0 uses identity mapping
+        // (GPA == HPA), so the physical address IS the guest-visible address.
+        let comm_size = (DOMCOMM_NR_PAGES as u64) * PAGE_SIZE;
+        assert!(dom0_owned_count > 0 && dom0_owned[0].length >= comm_size,
+            "first usable region too small for DomainComm ({} KiB needed)",
+            comm_size / 1024);
+
+        let comm_region = PhysRegion {
+            base: dom0_owned[0].base,
+            length: comm_size,
+        };
+        // Shrink the first dom0_owned entry from the bottom.
+        dom0_owned[0].base += comm_size;
+        dom0_owned[0].length -= comm_size;
+        if dom0_owned[0].length == 0 {
+            // Entire entry consumed (unlikely with 16 KiB) — remove it.
+            let mut j = 0;
+            while j + 1 < dom0_owned_count {
+                dom0_owned[j] = dom0_owned[j + 1];
+                j += 1;
+            }
+            dom0_owned_count -= 1;
+        }
+
         MemoryPartition {
             dom0_owned,
             dom0_owned_count,
@@ -195,6 +228,7 @@ impl PhysicalInventory {
                 ept_pages,
                 total_pages: meta_pages,
             },
+            comm_region,
         }
     }
 }

@@ -522,6 +522,16 @@ pub fn platform(
     }
     serial_println!();
 
+    // 5b. COMM region
+    serial_println!(
+        "DomainComm region: [{:#011x}..{:#011x})  {} KiB  ({} pages)",
+        partition.comm_region.base,
+        partition.comm_region.base + partition.comm_region.length,
+        partition.comm_region.length / 1024,
+        partition.comm_region.length / 4096,
+    );
+    serial_println!();
+
     // 6. Final dom0 e820 (what Linux will see): dom0 RAM + META RESERVED + non_ram_e820, sorted.
     //    This mirrors exactly what load_linux() will write into boot_params.e820_table.
     {
@@ -542,6 +552,8 @@ pub fn platform(
                 e820_all.push((e.addr, e.size, e.entry_type));
             }
         }
+        // COMM region (TYPE_RESERVED)
+        e820_all.push((partition.comm_region.base, partition.comm_region.length, 2));
         e820_all.sort_by_key(|e| e.0);
         serial_println!(
             "dom0 e820 table ({} entries, as seen by Linux):",
@@ -713,6 +725,32 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         info.partition.meta_breakdown.ept_pages,
     );
 
+    // ── DomainComm header init for dom0 ──────────────────────────────────── //
+    //
+    // The COMM region was reserved during partition() (separate from META).
+    // Write the DomainComm header and ring metadata.  Identity mapping:
+    // base HPA == GPA for dom0.  The binary attestation message is written
+    // later in capa() after the capability engine is initialized.
+    {
+        let cr = &info.partition.comm_region;
+        let nr_pages = (cr.length / 4096) as u32;
+
+        // Ensure the pages are HHDM-mapped so init_domcomm can write to them.
+        crate::mem::map_phys_range(cr.base, cr.length, info.hhdm_offset);
+
+        // Dom0 uses identity mapping: base HPA == GPA.
+        platform.bootstrap_init_domcomm(ROOT_ID, cr.base, cr.base, nr_pages);
+
+        // Set CPUID statics for the vmexit handler.
+        crate::vmexit::DOMCOMM_GPA.store(cr.base, core::sync::atomic::Ordering::Relaxed);
+        crate::vmexit::DOMCOMM_PAGES.store(nr_pages, core::sync::atomic::Ordering::Relaxed);
+
+        serial_println!(
+            "  DomainComm: {} pages at {:#x} (e820 reserved, CPUID 0x40000002)",
+            nr_pages, cr.base,
+        );
+    }
+
     platform
 }
 
@@ -781,6 +819,8 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 
     let mut mem_caps: Vec<capability_engine::CapabilityRef<MemoryRegion>> = Vec::new();
     let meta_caps;
+    let comm_root_handle: u64;
+    let self_domain_cap_handle: u64;
     {
         let mut dom = root_domain.write();
         let mut sub = 1u64;
@@ -865,6 +905,41 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             sub += 1;
         }
         meta_caps = meta_caps_local;
+
+        // ── COMM root capability ──────────────────────────────────────────── //
+        //
+        // The COMM region is a contiguous block carved out during partition().
+        // We create a root capability as the tree anchor; the actual COMM
+        // capability will be obtained by carving from this root (see below).
+        let cr = &info.partition.comm_region;
+        let comm_root = Capability::new_root(
+            ROOT_ID,
+            sub,
+            MemoryRegion::new_root(cr.base, cr.length),
+        );
+        comm_root_handle = sub;
+        dom.data
+            .add_memory_capability(sub, Arc::downgrade(&comm_root));
+        serial_println!(
+            "  comm root cap #{}: {:#x}+{:#x} ({} KiB)",
+            sub, cr.base, cr.length, cr.length / 1024,
+        );
+        // Keep the Arc alive past this block so CARVE can find it.
+        mem_caps.push(comm_root);
+        sub += 1;
+
+        // ── Self-referencing domain capability ────────────────────────────── //
+        //
+        // dom0 needs a domain capability pointing to itself so that
+        // register_comm() can resolve the child_domain_handle.  For dom0's
+        // DomainComm, target_domain_id == owner_id (self-referential).
+        self_domain_cap_handle = sub;
+        dom.data.add_domain_capability(
+            self_domain_cap_handle,
+            Arc::downgrade(&root_domain),
+        );
+        serial_println!("  self domain cap #{}: dom0 → dom0", sub);
+        // sub += 1; // not needed — last handle allocation in this block
     }
 
     // ── Build EPT via UpdateBatch ──────────────────────────────────────── //
@@ -888,6 +963,9 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
                 false,
             );
         }
+        // COMM region is also identity-mapped — dom0 needs read/write access.
+        let cr = &info.partition.comm_region;
+        b.add_change_rights(ROOT_ID, cr.base, cr.length, cr.base, Rights::RW, false);
         b
     };
 
@@ -936,6 +1014,156 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         "  EPT passthrough: {} non-RAM regions mapped (ACPI/NVS/MMIO)",
         info.passthrough_regions.len(),
     );
+
+    // ── COMM capability: CARVE + REGISTER_COMM ────────────────────────────── //
+    //
+    // The COMM root capability is the tree anchor.  We carve a child covering
+    // the entire region so it satisfies register_comm's "must be a Carve"
+    // precondition.  Then register_comm binds it as dom0's DomainComm page
+    // (target_domain == self, vp_id = 0 by convention for domain-level COMM).
+    let _comm_child_handle = {
+        use capability_engine::Access;
+        let cr = &info.partition.comm_region;
+        let access = Access::new(cr.base, cr.length, Rights::RW);
+
+        let ((child_handle, _sub_handle), carve_batch) = capability_engine::execute(
+            &platform, false, || {
+                Capability::carve(&root_domain, comm_root_handle, access)
+                    .map(|(h, s, batch)| ((h, s), batch))
+            },
+        )
+        .expect("P2c: COMM carve failed");
+
+        serial_println!(
+            "  COMM carve: child handle {} from root {}",
+            child_handle, comm_root_handle,
+        );
+
+        let _ = carve_batch; // EPT already mapped in the RAM batch above.
+
+        // register_comm: bind to dom0 itself (self-referential DomainComm).
+        capability_engine::execute(&platform, false, || {
+            Capability::register_comm(
+                &root_domain,
+                child_handle,
+                self_domain_cap_handle,
+                0, // vp_id 0 = domain-level COMM
+            )
+            .map(|batch| ((), batch))
+        })
+        .expect("P2c: COMM register failed");
+
+        serial_println!(
+            "  COMM registered: handle {} → dom0 DomainComm at {:#x}",
+            child_handle, cr.base,
+        );
+        child_handle
+    };
+
+    // ── Write binary attestation to dom0's DomainComm RX ring ────────────── //
+    //
+    // Now that the capability engine is initialized, we know dom0's capability
+    // handles and memory ranges.  Serialize a binary attestation report and
+    // enqueue it to the pre-allocated DomainComm RX ring so the thhv driver
+    // can parse it at init time.
+    {
+        use themis_abi::domcomm;
+
+        let mut payload = Vec::new();
+
+        // Build the attestation header.
+        let nr_mem_caps = mem_caps.len() as u32 + meta_caps.len() as u32;
+        let nr_pa_entries = info.partition.dom0_owned_count as u32;
+        let report = domcomm::AttestReport {
+            domain_id: ROOT_ID,
+            flags: 0, // dom0 is not sealed at boot
+            num_vps: info.num_cores as u32,
+            api_flags: u32::MAX, // dom0 has all API flags
+            nr_mem_caps,
+            nr_dom_caps: 0, // no child domains at boot
+            nr_pa_entries,
+            chunk_index: 0,
+            total_chunks: 1,
+            reserved: 0,
+        };
+
+        // Write report header.
+        let report_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &report as *const domcomm::AttestReport as *const u8,
+                core::mem::size_of::<domcomm::AttestReport>(),
+            )
+        };
+        payload.extend_from_slice(report_bytes);
+
+        // Write memory capability entries (dom0-owned RAM + passthrough).
+        for cap_ref in mem_caps.iter() {
+            let c = cap_ref.read();
+            let entry = domcomm::MemCapEntry {
+                handle: c.sub_handle,
+                gpa_start: c.data.access.start,  // identity mapping: GPA == HPA
+                size: c.data.access.size,
+                rights: c.data.access.rights.bits() as u32,
+                attributes: c.owned.attributes.bits() as u32,
+                hpa_start: c.data.access.start,  // identity for dom0
+            };
+            let entry_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &entry as *const domcomm::MemCapEntry as *const u8,
+                    core::mem::size_of::<domcomm::MemCapEntry>(),
+                )
+            };
+            payload.extend_from_slice(entry_bytes);
+        }
+
+        // Write META capability entries.
+        for cap_ref in meta_caps.iter() {
+            let c = cap_ref.read();
+            let entry = domcomm::MemCapEntry {
+                handle: c.sub_handle,
+                gpa_start: c.data.access.start,
+                size: c.data.access.size,
+                rights: c.data.access.rights.bits() as u32,
+                attributes: c.owned.attributes.bits() as u32,
+                hpa_start: c.data.access.start,
+            };
+            let entry_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &entry as *const domcomm::MemCapEntry as *const u8,
+                    core::mem::size_of::<domcomm::MemCapEntry>(),
+                )
+            };
+            payload.extend_from_slice(entry_bytes);
+        }
+
+        // No dom_cap entries at boot.
+
+        // Write PA map entries (identity mapping for dom0: GPA == HPA).
+        for region in &info.partition.dom0_owned[..info.partition.dom0_owned_count] {
+            if region.length == 0 {
+                continue;
+            }
+            let entry = domcomm::PaMapEntry {
+                gpa_start: region.base,
+                hpa_start: region.base,  // identity
+                size: region.length,
+            };
+            let entry_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &entry as *const domcomm::PaMapEntry as *const u8,
+                    core::mem::size_of::<domcomm::PaMapEntry>(),
+                )
+            };
+            payload.extend_from_slice(entry_bytes);
+        }
+
+        platform.bootstrap_write_attestation(ROOT_ID, &payload);
+        serial_println!(
+            "  DomainComm: attestation written ({} bytes, {} mem_caps, {} pa_entries)",
+            payload.len(), nr_mem_caps, nr_pa_entries,
+        );
+    }
+
     serial_println!("=== P2c: done ===");
 
     CapaState {
@@ -1123,6 +1351,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
         info.hhdm_offset,
         &info.partition.dom0_owned[..info.partition.dom0_owned_count],
         &info.partition.meta_regions[..info.partition.meta_count],
+        &info.partition.comm_region,
         &info.non_ram_e820,
         acpi_rsdp_addr,
         // intel_iommu=off kept as belt-and-suspenders in case DMAR stripping
