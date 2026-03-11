@@ -332,25 +332,144 @@ int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
 /*
  * thhv_pa_map_init_from_attestation — populate the PA map from attestation.
  *
- * Called at module init after detecting the Themis capavisor.  Reads the
- * attestation report (which contains dom0's GPA→HPA memory map) and
- * populates the global PA map.
+ * Called at module init after detecting the Themis capavisor.
  *
- * TODO: The mechanism for reading the attestation data is not yet
- * designed.  Options include:
- *   (a) A domain-level COMM page where the capavisor writes the
- *       attestation report (including PA map entries) at boot.
- *   (b) A dedicated ENUMERATE_MEMORY hypercall that returns PA map
- *       entries iteratively.
- *   (c) ATTEST_SELF + parsing the report to extract memory ranges.
- *
- * Until this is implemented, the PA map remains empty and all
- * translations fall through as identity (GPA == HPA).
+ * 1. Initialize DomainComm (CPUID discovery, memremap, validate header).
+ * 2. Dequeue the DOMCOMM_MSG_ATTEST message from the RX ring.
+ * 3. Parse the binary attestation report:
+ *    - Extract mem_cap entries → store capability handles.
+ *    - Extract pa_map entries → populate the GPA→HPA rb-tree.
  */
 int thhv_pa_map_init_from_attestation(void)
 {
-	pr_info("thhv: PA map init — identity passthrough (attestation not yet wired)\n");
-	return 0;
+	u8 *buf;
+	u32 msg_type, payload_size;
+	struct domcomm_attest_report *report;
+	struct domcomm_mem_cap_entry *mem_caps;
+	struct domcomm_pa_map_entry *pa_entries;
+	u8 *cursor;
+	unsigned int i;
+	int ret;
+
+	ret = domcomm_init();
+	if (ret == -ENODEV) {
+		pr_info("thhv: PA map init — identity passthrough (no DomainComm)\n");
+		return 0;
+	}
+	if (ret)
+		return ret;
+
+	/* Allocate buffer for the attestation message payload. */
+	buf = kzalloc(DOMCOMM_MAX_PAYLOAD, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	/* Dequeue the pre-populated attestation message. */
+	ret = domcomm_rx_dequeue(&thhv_domcomm.rx, buf, DOMCOMM_MAX_PAYLOAD,
+				 &msg_type, &payload_size);
+	if (ret) {
+		pr_err("thhv: no attestation message on RX ring (%d)\n", ret);
+		goto out_free;
+	}
+
+	if (msg_type != DOMCOMM_MSG_ATTEST) {
+		pr_err("thhv: unexpected first message type %#x (expected ATTEST %#x)\n",
+		       msg_type, DOMCOMM_MSG_ATTEST);
+		ret = -EPROTO;
+		goto out_free;
+	}
+
+	if (payload_size < sizeof(struct domcomm_attest_report)) {
+		pr_err("thhv: attestation payload too small (%u < %zu)\n",
+		       payload_size, sizeof(struct domcomm_attest_report));
+		ret = -EPROTO;
+		goto out_free;
+	}
+
+	report = (struct domcomm_attest_report *)buf;
+
+	pr_info("thhv: attestation: domain_id=%llu flags=%#x vps=%u "
+		"mem_caps=%u dom_caps=%u pa_entries=%u\n",
+		report->domain_id, report->flags, report->num_vps,
+		report->nr_mem_caps, report->nr_dom_caps, report->nr_pa_entries);
+
+	/* Validate payload size against reported counts. */
+	{
+		size_t expected = sizeof(struct domcomm_attest_report)
+			+ (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry)
+			+ (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry)
+			+ (size_t)report->nr_pa_entries * sizeof(struct domcomm_pa_map_entry);
+		if (payload_size < expected) {
+			pr_err("thhv: attestation payload too small for declared entries "
+			       "(%u < %zu)\n", payload_size, expected);
+			ret = -EPROTO;
+			goto out_free;
+		}
+	}
+
+	/* Parse mem_cap entries (for capability handles). */
+	cursor = buf + sizeof(struct domcomm_attest_report);
+	mem_caps = (struct domcomm_mem_cap_entry *)cursor;
+
+	for (i = 0; i < report->nr_mem_caps; i++) {
+		pr_info("thhv:   mem_cap[%u]: handle=%llu gpa=%#llx hpa=%#llx "
+			"size=%#llx rights=%#x attr=%#x\n",
+			i, mem_caps[i].handle,
+			mem_caps[i].gpa_start, mem_caps[i].hpa_start,
+			mem_caps[i].size, mem_caps[i].rights,
+			mem_caps[i].attributes);
+	}
+
+	/* Skip past dom_cap entries. */
+	cursor += (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry);
+	cursor += (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry);
+
+	/* Parse PA map entries → populate the GPA→HPA rb-tree. */
+	pa_entries = (struct domcomm_pa_map_entry *)cursor;
+
+	write_lock(&pa_map_lock);
+	pa_map_clear();
+
+	for (i = 0; i < report->nr_pa_entries; i++) {
+		struct thhv_pa_range *r;
+
+		r = kzalloc(sizeof(*r), GFP_ATOMIC);
+		if (!r) {
+			ret = -ENOMEM;
+			pa_map_clear();
+			write_unlock(&pa_map_lock);
+			goto out_free;
+		}
+
+		r->gpa_start = pa_entries[i].gpa_start;
+		r->hpa_start = pa_entries[i].hpa_start;
+		r->size      = pa_entries[i].size;
+
+		ret = pa_range_insert(r);
+		if (ret) {
+			pr_err("thhv: PA map insert failed for entry %u "
+			       "(gpa=%#llx hpa=%#llx size=%#llx): %d\n",
+			       i, r->gpa_start, r->hpa_start, r->size, ret);
+			kfree(r);
+			pa_map_clear();
+			write_unlock(&pa_map_lock);
+			goto out_free;
+		}
+
+		pr_info("thhv:   pa_map[%u]: gpa=%#llx → hpa=%#llx  size=%#llx (%llu MiB)\n",
+			i, r->gpa_start, r->hpa_start, r->size,
+			r->size / (1024 * 1024));
+	}
+
+	write_unlock(&pa_map_lock);
+
+	pr_info("thhv: PA map loaded (%u entries from attestation)\n",
+		report->nr_pa_entries);
+	ret = 0;
+
+out_free:
+	kfree(buf);
+	return ret;
 }
 
 /* ── Module cleanup ────────────────────────────────────────────────────────── */
@@ -360,4 +479,5 @@ void thhv_pa_map_cleanup(void)
 	write_lock(&pa_map_lock);
 	pa_map_clear();
 	write_unlock(&pa_map_lock);
+	domcomm_cleanup();
 }

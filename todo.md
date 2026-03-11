@@ -700,7 +700,7 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
 - [x] **P15-dc-m1** — Capavisor pre-allocation: Allocate 4 DomainComm pages for
   dom0 at domain creation, e820 reserved, CPUID leaf 0x40000002, write header +
   binary attestation to RX ring.  **Test**: `cargo themis` boots normally.
-- [ ] **P15-dc-m2** — Driver discovery + parsing: CPUID discovery, `memremap()`,
+- [x] **P15-dc-m2** — Driver discovery + parsing: CPUID discovery, `memremap()`,
   header validation, page-aware RX dequeue, parse attestation → PA map rb-tree +
   capability handles.  **Test**: `thhv-test-attest` userspace tool queries
   parsed info via ioctl.
