@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 obj-m += thhv.o
-thhv-objs := src/thhv_main.o src/thhv_hvcall.o src/thhv_part.o src/thhv_vp.o
+thhv-objs := src/thhv_main.o src/thhv_hvcall.o src/thhv_part.o src/thhv_vp.o src/thhv_translate.o
 
 ccflags-y += -I$(src)/inc
 

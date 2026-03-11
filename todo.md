@@ -622,10 +622,14 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   `themis_get_reg`/`themis_set_reg` as slow-path fallback.
   COMM page (`VpCommPage`) will be the fast path once REGISTER_COMM + SWITCH are wired.
   Capavisor GET_REG/SET_REG handlers still return ERR_UNIMPL — needs P15e first.
-- [ ] **P15e** — Memory mapping: `THHV_SET_GUEST_MEMORY` → `VMCALL_CARVE` +
-  `VMCALL_SEND` to transfer memory capabilities to child domain.
-  Also: CARVE + SEND the META pages (per-VP + shared) to child with META attribute,
-  and REGISTER_COMM for the COMM pages.  Unmap → `VMCALL_REVOKE_MEM`.
+- [x] **P15e** — ✅ DONE (driver side).  Memory mapping via `THHV_SET_GUEST_MEMORY`:
+  userspace provides GPA, host VA, size + flags (UNMAP, ALIAS), rights (R/W/X),
+  and Themis-specific attrs (HASH, CLEAN, VITAL, META).
+  Driver pins pages, calls `themis_carve`/`themis_alias` + `themis_send`, tracks
+  regions in per-partition rb-tree.  Unmap path: `themis_revoke_mem` + unpin.
+  Partition destroy walks rb-tree and frees all regions.
+  Capavisor-side CARVE/SEND/META handling still needed.
+  REGISTER_COMM for COMM pages still TODO.
 - [ ] **P15f** — `THHV_RUN_VP` → `VMCALL_SWITCH`.  COMM page sync: capavisor
   flushes dirty registers to child VMCS before entry, fills COMM from VMCS on exit.
   Handle intercept types: HLT, I/O port, MMIO, CPUID, MSR, shutdown.

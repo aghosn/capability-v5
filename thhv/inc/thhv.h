@@ -109,13 +109,27 @@ struct thhv_initialize_partition {
 
 struct thhv_set_guest_memory {
 	__u64 guest_pfn;       /* GPA >> 12 */
-	__u64 userspace_addr;
-	__u64 size;            /* bytes */
-	__u32 flags;           /* map=0, unmap=1 */
-	__u32 rsvd;
+	__u64 userspace_addr;  /* Host VA (page-aligned) */
+	__u64 size;            /* bytes (page-aligned) */
+	__u32 flags;           /* THHV_MEM_F_* bitmask */
+	__u32 rights;          /* THHV_MEM_R_* bitmask (R/W/X) */
+	__u64 attrs;           /* THHV_MEM_A_* bitmask (HASH/CLEAN/VITAL/META) */
 };
 
-#define THHV_SET_MEM_FLAG_UNMAP  1
+/* flags — operation type */
+#define THHV_MEM_F_UNMAP     (1U << 0)  /* Unmap (revoke) instead of map */
+#define THHV_MEM_F_ALIAS     (1U << 1)  /* Alias (shared) instead of carve (exclusive) */
+
+/* rights — access permissions on the capability */
+#define THHV_MEM_R_READ      (1U << 0)
+#define THHV_MEM_R_WRITE     (1U << 1)
+#define THHV_MEM_R_EXEC      (1U << 2)
+
+/* attrs — capability attributes (set on SEND) */
+#define THHV_MEM_A_HASH      (1U << 0)  /* Content is hashed/verified */
+#define THHV_MEM_A_CLEAN     (1U << 1)  /* Zeroed on revocation */
+#define THHV_MEM_A_VITAL     (1U << 2)  /* Revocation kills the domain */
+#define THHV_MEM_A_META      (1U << 3)  /* Capavisor internal allocator (implies CLEAN+VITAL) */
 
 struct thhv_reg_name_value {
 	__u64 name;            /* VpRegister discriminant (THHV_VP_REG_*) */
@@ -258,6 +272,26 @@ struct thhv_check_extension {
 };
 
 /*
+ * GPA → HPA translation map (derived from attestation).
+ *
+ * dom0 runs as a guest; page_to_pfn() yields Guest Physical Addresses.
+ * The capavisor's attestation report tells dom0 how its GPAs map to real
+ * Host Physical Addresses.  This map must be loaded before any memory
+ * operations (CARVE/ALIAS/SEND) so the driver can translate.
+ */
+struct thhv_pa_map_entry {
+	__u64 gpa;     /* Guest Physical Address start (page-aligned) */
+	__u64 hpa;     /* Host Physical Address start (page-aligned) */
+	__u64 size;    /* Range size in bytes (page-aligned) */
+};
+
+struct thhv_set_pa_map {
+	__u32 nr_entries;
+	__u32 rsvd;
+	__u64 entries;  /* Userspace pointer to nr_entries × thhv_pa_map_entry */
+};
+
+/*
  * Generic query ioctl.  The query_type selects what information is returned.
  * New query types can be added without defining new ioctls.
  */
@@ -282,6 +316,8 @@ struct thhv_query {
 	_IOWR(THHV_IOCTL_MAGIC, 0x02, struct thhv_check_extension)
 #define THHV_QUERY \
 	_IOWR(THHV_IOCTL_MAGIC, 0x03, struct thhv_query)
+#define THHV_SET_PA_MAP \
+	_IOW(THHV_IOCTL_MAGIC, 0x04, struct thhv_set_pa_map)
 
 /* ── Partition-level ioctls ────────────────────────────────────────────────── */
 
@@ -386,15 +422,34 @@ struct thhv_vp {
 	struct file *file;
 };
 
-/* Memory region tracking node (rb-tree). */
+/* Per-capability handle (one per HPA segment within a memory region). */
+struct thhv_mem_cap {
+	u64 cap_handle;
+	u64 cap_sub;
+	u64 hpa_start;
+	u64 size;
+};
+
+/* Memory region tracking node (rb-tree, keyed by guest_pfn). */
 struct thhv_mem_region {
 	struct rb_node node;
 	u64 guest_pfn;
 	u64 nr_pages;
 	u64 userspace_addr;
-	u64 cap_handle;
-	struct page **pages;
-	u8 flags;
+	struct page **pages;   /* Pinned userspace pages */
+	u32 flags;             /* THHV_MEM_F_* */
+	u32 rights;            /* THHV_MEM_R_* */
+	u64 attrs;             /* THHV_MEM_A_* */
+
+	/* One capability per contiguous HPA segment (after GPA→HPA translation). */
+	unsigned int  nr_caps;
+	struct thhv_mem_cap *caps;
+};
+
+/* HPA segment produced by GPA→HPA translation. */
+struct thhv_hpa_segment {
+	u64 hpa_start;
+	u64 size;
 };
 
 /* ── Functions exported between translation units ──────────────────────────── */
@@ -439,6 +494,16 @@ extern const struct file_operations thhv_partition_fops;
 /* thhv_vp.c */
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg);
 extern const struct file_operations thhv_vp_fops;
+
+/* thhv_translate.c — GPA→HPA address translation */
+int thhv_set_pa_map(void __user *uarg);
+int thhv_translate_range(u64 gpa_start, u64 size,
+			 struct thhv_hpa_segment **out_segs,
+			 unsigned int *out_nr_segs);
+int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
+			 struct thhv_hpa_segment **out_segs,
+			 unsigned int *out_nr_segs);
+void thhv_pa_map_cleanup(void);
 
 #endif /* __KERNEL__ */
 

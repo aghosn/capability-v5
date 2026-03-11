@@ -83,6 +83,9 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 	case THHV_QUERY:
 		return thhv_dev_query(uarg);
 
+	case THHV_SET_PA_MAP:
+		return thhv_set_pa_map(uarg);
+
 	default:
 		return -ENOTTY;
 	}
@@ -139,6 +142,7 @@ static int __init thhv_init(void)
 static void __exit thhv_exit(void)
 {
 	misc_deregister(&thhv_misc);
+	thhv_pa_map_cleanup();
 	pr_info("thhv: /dev/%s unregistered\n", THHV_DEV_NAME);
 }
 
