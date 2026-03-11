@@ -132,6 +132,12 @@ static void thhv_vp_unpin_pages(struct thhv_vp *vp)
 {
 	unsigned int i;
 
+	/* Revoke COMM capability (unbinds in the capavisor). */
+	if (vp->comm_registered) {
+		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
+		vp->comm_registered = false;
+	}
+
 	if (vp->comm_kaddr) {
 		kunmap(vp->comm_page);
 		vp->comm_kaddr = NULL;
@@ -154,6 +160,8 @@ static int thhv_vp_pin_pages(struct thhv_vp *vp,
 			     u64 meta_uaddr, unsigned int meta_nr_pages,
 			     u64 comm_uaddr)
 {
+	struct thhv_hpa_segment *segs = NULL;
+	unsigned int nr_segs = 0;
 	int ret;
 
 	/* Pin META pages. */
@@ -186,10 +194,21 @@ static int thhv_vp_pin_pages(struct thhv_vp *vp,
 	}
 
 	vp->comm_kaddr = kmap(vp->comm_page);
-	vp->comm_phys = (u64)page_to_pfn(vp->comm_page) << PAGE_SHIFT;
+
+	/* Translate COMM page dom0 GPA → HPA. */
+	ret = thhv_translate_pages(&vp->comm_page, 1, &segs, &nr_segs);
+	if (ret)
+		goto err_unmap_comm;
+	vp->comm_phys = segs[0].hpa_start;
+	kfree(segs);
 
 	return 0;
 
+err_unmap_comm:
+	kunmap(vp->comm_page);
+	vp->comm_kaddr = NULL;
+	unpin_user_pages(&vp->comm_page, 1);
+	vp->comm_page = NULL;
 err_unpin_meta:
 	unpin_user_pages(vp->meta_pages, vp->meta_nr_pages);
 	vp->meta_nr_pages = 0;
@@ -265,14 +284,38 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 		goto err_free_vp;
 
 	/*
-	 * TODO(P15e): CARVE + SEND META pages to child domain.
-	 * TODO(P15e): REGISTER_COMM for the COMM page.
+	 * CARVE the COMM page from dom0's root capability, then
+	 * REGISTER_COMM to bind it to this VP in the child domain.
+	 * The capavisor marks the capability with COMM|CLEAN attributes
+	 * and records the (child_domain, vp_id) binding internally.
+	 */
+	ret = themis_carve(0, vp->comm_phys, PAGE_SIZE,
+			   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
+			   &vp->comm_cap_handle, &vp->comm_cap_sub);
+	if (ret) {
+		pr_err("thhv: CARVE COMM page HPA 0x%llx failed (%d)\n",
+		       vp->comm_phys, ret);
+		goto err_unpin;
+	}
+
+	ret = themis_register_comm(vp->comm_cap_handle,
+				   part->domain_handle, vp->vp_index);
+	if (ret) {
+		pr_err("thhv: REGISTER_COMM vp %u failed (%d)\n",
+		       vp->vp_index, ret);
+		goto err_revoke_comm;
+	}
+	vp->comm_registered = true;
+
+	/*
+	 * TODO: CARVE + SEND META pages to child domain (deferred until
+	 * EPT allocation from META pool is implemented in the capavisor).
 	 */
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		ret = fd;
-		goto err_unpin;
+		goto err_revoke_comm;
 	}
 
 	file = anon_inode_getfile("thhv-vp", &thhv_vp_fops,
@@ -289,6 +332,13 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 
 err_put_fd:
 	put_unused_fd(fd);
+err_revoke_comm:
+	if (vp->comm_registered) {
+		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
+		vp->comm_registered = false;
+	} else if (vp->comm_cap_handle) {
+		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
+	}
 err_unpin:
 	thhv_vp_unpin_pages(vp);
 err_free_vp:

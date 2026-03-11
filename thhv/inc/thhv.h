@@ -416,7 +416,9 @@ struct thhv_vp {
 	/* COMM page: pinned from userspace, shared with capavisor. */
 	struct page  *comm_page;
 	void         *comm_kaddr;      /* kernel mapping */
-	u64           comm_phys;       /* physical address */
+	u64           comm_phys;       /* HPA (after GPA→HPA translation) */
+	u64           comm_cap_handle; /* CARVE capability handle */
+	u64           comm_cap_sub;    /* CARVE capability sub-handle */
 	bool          comm_registered; /* REGISTER_COMM done */
 
 	struct file *file;
