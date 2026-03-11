@@ -194,3 +194,13 @@ int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id)
 				     NULL, NULL, NULL);
 	return __themis_to_errno(status);
 }
+
+/* ── DomainComm TX ring notification ─────────────────────────────────── */
+
+int themis_domcomm_notify(void)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_DOMCOMM_NOTIFY,
+				     0, 0, 0, 0, 0,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}

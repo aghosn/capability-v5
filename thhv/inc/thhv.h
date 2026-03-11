@@ -102,6 +102,7 @@
 #define THEMIS_OP_REGISTER_EVENT_FLAGS 0x16
 #define THEMIS_OP_REGISTER_INTR_CHAN  0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
+#define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -894,6 +895,7 @@ int themis_set_intr_policy(u64 domain, u64 vector, u64 policy);
 int themis_set_def_intr_policy(u64 domain, u64 policy);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
+int themis_domcomm_notify(void);
 
 /* thhv_part.c */
 long thhv_partition_create(struct file *dev_file, void __user *uarg);
@@ -906,6 +908,7 @@ extern const struct file_operations thhv_vp_fops;
 /* thhv_translate.c — GPA→HPA translation + capability table */
 int thhv_set_pa_map(void __user *uarg);
 int thhv_pa_map_init_from_attestation(void);
+u64 thhv_gpa_to_hpa(u64 gpa);
 int thhv_translate_range(u64 gpa_start, u64 size,
 			 struct thhv_hpa_segment **out_segs,
 			 unsigned int *out_nr_segs);
@@ -943,6 +946,7 @@ struct domcomm_state {
 	u64                   gpa;     /* GPA of the region (from CPUID) */
 	unsigned int          total_pages;
 	bool                  initialized;
+	u64                   self_domain_handle; /* for REGISTER_COMM self-ref */
 };
 
 /* domcomm ring helpers (thhv_domcomm.c) */
@@ -952,6 +956,7 @@ int  domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 			u32 buf_size, u32 *out_type, u32 *out_payload_size);
 int  domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
 			const void *payload, u32 payload_size);
+int  domcomm_request_grow(bool grow_rx, u32 nr_pages);
 
 /* Global DomainComm instance. */
 extern struct domcomm_state thhv_domcomm;

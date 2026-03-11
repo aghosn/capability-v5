@@ -78,6 +78,8 @@ use spin::{Mutex, RwLock};
 use capability_engine::{
     CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Update,
 };
+
+use crate::serial_println;
 use ept::{EptEntryFlags, EptMapper, EptMemoryType};
 
 use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
@@ -342,16 +344,34 @@ pub struct PlatformDomain {
     pub domcomm: Option<DomainCommState>,
 }
 
+/// Per-ring page tracking for DomainComm growth.
+pub struct DomainCommRing {
+    /// Physical addresses of the ring's backing pages (growable).
+    pub page_hpas: Vec<u64>,
+}
+
+impl DomainCommRing {
+    fn new() -> Self {
+        DomainCommRing { page_hpas: Vec::new() }
+    }
+
+    fn capacity(&self) -> usize {
+        self.page_hpas.len() * 0x1000
+    }
+}
+
 /// Per-domain DomainComm region state (capavisor-side bookkeeping).
 pub struct DomainCommState {
-    /// Physical addresses of each page in the region.
-    pub page_hpas: Vec<u64>,
-    /// Total number of pages (header + RX + TX).
-    pub total_pages: u32,
+    /// Physical address of the header page (page 0).
+    pub header_hpa: u64,
+    /// RX ring pages (capavisor→domain, capavisor is producer).
+    pub rx: DomainCommRing,
+    /// TX ring pages (domain→capavisor, capavisor is consumer).
+    pub tx: DomainCommRing,
     /// GPA at which this region is visible to the domain.
-    /// For dom0: chosen by the capavisor at boot.
-    /// For children: TBD (parent allocates).
     pub gpa: u64,
+    /// HHDM offset, cached for ring access.
+    pub hhdm_offset: u64,
 }
 
 impl PlatformDomain {
@@ -379,15 +399,22 @@ impl PlatformDomain {
 
         assert!(nr_pages >= 2, "DomainComm needs at least 2 pages (header + 1 ring)");
 
-        let page_hpas: Vec<u64> = (0..nr_pages as u64)
-            .map(|i| base_hpa + i * 0x1000)
-            .collect();
+        let header_hpa = base_hpa;
 
         // Write header to page 0 via HHDM.
-        let hdr_virt = (page_hpas[0] + self.hhdm_offset) as *mut domcomm::Header;
-        // The rx ring gets all pages except header and 1 TX page.
+        let hdr_virt = (header_hpa + self.hhdm_offset) as *mut domcomm::Header;
         let rx_page_count = (nr_pages - 1).saturating_sub(1).max(1);
         let tx_page_count = nr_pages - 1 - rx_page_count;
+
+        // Build per-ring page HPA lists.
+        let mut rx_ring = DomainCommRing::new();
+        for i in 0..rx_page_count {
+            rx_ring.page_hpas.push(base_hpa + (1 + i as u64) * 0x1000);
+        }
+        let mut tx_ring = DomainCommRing::new();
+        for i in 0..tx_page_count {
+            tx_ring.page_hpas.push(base_hpa + (1 + rx_page_count as u64 + i as u64) * 0x1000);
+        }
 
         unsafe {
             let hdr = &mut *hdr_virt;
@@ -397,7 +424,6 @@ impl PlatformDomain {
             hdr.total_pages = nr_pages;
             hdr.flags = 0;
 
-            // RX ring: pages 1..(1+rx_page_count)
             hdr.rx = domcomm::RingMeta {
                 head: 0,
                 tail: 0,
@@ -405,7 +431,6 @@ impl PlatformDomain {
                 page_count: rx_page_count,
             };
 
-            // TX ring: pages (1+rx_page_count)..(nr_pages)
             hdr.tx = domcomm::RingMeta {
                 head: 0,
                 tail: 0,
@@ -418,9 +443,11 @@ impl PlatformDomain {
         }
 
         self.domcomm = Some(DomainCommState {
-            page_hpas,
-            total_pages: nr_pages,
+            header_hpa,
+            rx: rx_ring,
+            tx: tx_ring,
             gpa,
+            hhdm_offset: self.hhdm_offset,
         });
         self.domcomm.as_ref().unwrap()
     }
@@ -429,11 +456,11 @@ impl PlatformDomain {
     ///
     /// The capavisor is the sole producer of the RX ring.
     /// Returns the number of bytes written (including header), or 0 if ring full.
-    fn domcomm_rx_enqueue(&self, msg_type: u32, payload: &[u8]) -> usize {
+    pub fn domcomm_rx_enqueue(&self, msg_type: u32, payload: &[u8]) -> usize {
         use themis_abi::domcomm;
 
         let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
-        let hdr_virt = (dc.page_hpas[0] + self.hhdm_offset) as *mut domcomm::Header;
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
 
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
         let total_size = ((msg_hdr_size + payload.len() + 7) / 8) * 8; // 8-byte align
@@ -441,7 +468,7 @@ impl PlatformDomain {
         unsafe {
             let hdr = &mut *hdr_virt;
             let rx = &mut hdr.rx;
-            let capacity = (rx.page_count as usize) * 4096;
+            let capacity = dc.rx.capacity();
             let head = rx.head as usize;
             let tail = rx.tail as usize;
 
@@ -451,16 +478,16 @@ impl PlatformDomain {
                 return 0; // Ring full
             }
 
-            // Find the page and offset within the page.
-            let page_idx = (head / 4096) + rx.page_offset as usize;
+            // Page index within the ring's page array.
+            let ring_page_idx = (head % capacity) / 4096;
             let page_off = head % 4096;
 
             // Check if message fits in current page.
             if page_off + total_size > 4096 {
                 // Write padding message to fill rest of page.
                 let pad_size = 4096 - page_off;
-                let pad_page_hpa = dc.page_hpas[page_idx];
-                let pad_virt = (pad_page_hpa + self.hhdm_offset) as *mut u8;
+                let pad_page_hpa = dc.rx.page_hpas[ring_page_idx];
+                let pad_virt = (pad_page_hpa + dc.hhdm_offset) as *mut u8;
                 let pad_hdr = pad_virt.add(page_off) as *mut domcomm::MsgHeader;
                 (*pad_hdr).message_type = domcomm::msg_types::NONE;
                 (*pad_hdr).total_size = pad_size as u32;
@@ -476,8 +503,8 @@ impl PlatformDomain {
             }
 
             // Write message within current page.
-            let ring_page_hpa = dc.page_hpas[page_idx];
-            let ring_page_virt = (ring_page_hpa + self.hhdm_offset) as *mut u8;
+            let ring_page_hpa = dc.rx.page_hpas[ring_page_idx];
+            let ring_page_virt = (ring_page_hpa + dc.hhdm_offset) as *mut u8;
             let msg_ptr = ring_page_virt.add(page_off);
 
             // Write payload first, then header (producer protocol).
@@ -501,6 +528,71 @@ impl PlatformDomain {
         }
 
         total_size
+    }
+
+    /// Read one message from the TX ring (domain→capavisor, we are consumer).
+    ///
+    /// Returns `Some((msg_type, payload))` on success, `None` if ring is empty.
+    /// Handles padding messages transparently.
+    pub fn domcomm_tx_dequeue(&self, buf: &mut [u8]) -> Option<(u32, usize)> {
+        use themis_abi::domcomm;
+
+        let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
+
+        let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
+
+        unsafe {
+            let hdr = &mut *hdr_virt;
+            let tx = &mut hdr.tx;
+            let capacity = dc.tx.capacity();
+            if capacity == 0 {
+                return None;
+            }
+
+            // Read head (producer = domain) with acquire.
+            let head = core::ptr::read_volatile(&tx.head) as usize;
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            let tail = tx.tail as usize;
+
+            if head == tail {
+                return None;
+            }
+
+            // Read message header.
+            let ring_page_idx = (tail % capacity) / 4096;
+            let page_off = tail % 4096;
+            let page_hpa = dc.tx.page_hpas[ring_page_idx];
+            let page_virt = (page_hpa + dc.hhdm_offset) as *const u8;
+            let msg_hdr_ptr = page_virt.add(page_off) as *const domcomm::MsgHeader;
+            let msg_hdr = core::ptr::read_volatile(msg_hdr_ptr);
+
+            // Skip padding.
+            if msg_hdr.message_type == domcomm::msg_types::NONE {
+                let pad_size = msg_hdr.total_size as usize;
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+                tx.tail = ((tail + pad_size) % capacity) as u32;
+                return self.domcomm_tx_dequeue(buf);
+            }
+
+            let payload_size = msg_hdr.total_size as usize - msg_hdr_size;
+            if payload_size > buf.len() {
+                serial_println!("[domcomm] TX message too large ({} > {})", payload_size, buf.len());
+                return None;
+            }
+
+            // Read payload.
+            if payload_size > 0 {
+                let payload_src = page_virt.add(page_off + msg_hdr_size);
+                core::ptr::copy_nonoverlapping(payload_src, buf.as_mut_ptr(), payload_size);
+            }
+
+            // Advance tail with release.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            tx.tail = ((tail + msg_hdr.total_size as usize) % capacity) as u32;
+
+            Some((msg_hdr.message_type, payload_size))
+        }
     }
 
     /// Ensure an EPT root page exists, allocating from `self.meta` if needed.
@@ -746,7 +838,10 @@ impl ThemisPlatform {
     pub fn domcomm_info(&self, domain_id: DomainId) -> Option<(u64, u32)> {
         let arc = self.domains.get(domain_id)?;
         let d = arc.lock();
-        d.domcomm.as_ref().map(|dc| (dc.gpa, dc.total_pages))
+        d.domcomm.as_ref().map(|dc| {
+            let total = 1 + dc.rx.page_hpas.len() as u32 + dc.tx.page_hpas.len() as u32;
+            (dc.gpa, total)
+        })
     }
 
     pub fn bootstrap_register_domain(
@@ -858,6 +953,13 @@ impl ThemisPlatform {
     /// Returns `None` during early boot before the core is initialised.
     pub fn get_core_cap(&self, core_id: usize) -> Option<CapabilityRef<Domain>> {
         self.cores[core_id].domain_cap.lock().clone()
+    }
+
+    /// Get the `PlatformDomain` for a given domain ID.
+    pub fn get_platform_domain(&self, id: DomainId)
+        -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>>
+    {
+        self.domains.get(id)
     }
 
     /// Get the VP index currently running on `core_id`.
@@ -1028,8 +1130,32 @@ impl Platform for ThemisPlatform {
                 self.invept_for_domain(*domain);
             }
 
-            Update::CommRegion { .. } | Update::UncommRegion { .. } => {
-                // TODO(P7): shared-memory regions.
+            Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
+                if *domain_id == *target_domain_id {
+                    // Self-ref COMM: DomainComm ring growth page.
+                    // No-op for now — capavisor has HHDM, so it can access
+                    // any HPA.  The GROW message handler reads HPAs from the
+                    // capability directly.  When we restrict the capavisor's
+                    // page tables later, this will become a real mapping op.
+                    serial_println!(
+                        "[apply] CommRegion self-ref: dom={} phys={:#x} size={:#x}",
+                        domain_id, phys, size,
+                    );
+                } else {
+                    // VP-level COMM: wire to child VP.
+                    // TODO(P7): map COMM page, associate with child VP.
+                    serial_println!(
+                        "[apply] CommRegion VP-comm: dom={} target={} vp={} phys={:#x} size={:#x}",
+                        domain_id, target_domain_id, vp_id, phys, size,
+                    );
+                }
+            }
+            Update::UncommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
+                serial_println!(
+                    "[apply] UncommRegion: dom={} target={} vp={} phys={:#x} size={:#x}",
+                    domain_id, target_domain_id, vp_id, phys, size,
+                );
+                // TODO(P7): unmap COMM page.
             }
         }
     }

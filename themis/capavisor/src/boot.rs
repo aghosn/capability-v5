@@ -1093,7 +1093,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             num_vps: info.num_cores as u32,
             api_flags: u32::MAX, // dom0 has all API flags
             nr_mem_caps,
-            nr_dom_caps: 0, // no child domains at boot
+            nr_dom_caps: 1, // self-referencing domain capability for REGISTER_COMM
             nr_pa_entries,
             chunk_index: 0,
             total_chunks: 1,
@@ -1149,7 +1149,22 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
             payload.extend_from_slice(entry_bytes);
         }
 
-        // No dom_cap entries at boot.
+        // Write self-referencing domain capability entry.
+        // The driver needs this handle to call REGISTER_COMM(cap, self, 0)
+        // for ring growth pages (self-ref COMM).
+        {
+            let entry = domcomm::DomCapEntry {
+                handle: self_domain_cap_handle,
+                domain_id: ROOT_ID,
+            };
+            let entry_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &entry as *const domcomm::DomCapEntry as *const u8,
+                    core::mem::size_of::<domcomm::DomCapEntry>(),
+                )
+            };
+            payload.extend_from_slice(entry_bytes);
+        }
 
         // Write PA map entries (identity mapping for dom0: GPA == HPA).
         for region in &info.partition.dom0_owned[..info.partition.dom0_owned_count] {
@@ -1172,7 +1187,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 
         platform.bootstrap_write_attestation(ROOT_ID, &payload);
         serial_println!(
-            "  DomainComm: attestation written ({} bytes, {} mem_caps, {} pa_entries)",
+            "  DomainComm: attestation written ({} bytes, {} mem_caps, 1 dom_cap, {} pa_entries)",
             payload.len(), nr_mem_caps, nr_pa_entries,
         );
     }

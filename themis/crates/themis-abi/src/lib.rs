@@ -116,6 +116,10 @@ pub mod opcodes {
     /// Register a COMM page owned by the caller, bound to a child VP.
     /// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
     pub const THEMIS_REGISTER_COMM:       u64 = 0x18;
+
+    /// Notify the capavisor to process the caller's DomainComm TX ring.
+    /// IN:  (no arguments)
+    pub const THEMIS_DOMCOMM_NOTIFY:      u64 = 0x19;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

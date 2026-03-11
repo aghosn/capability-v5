@@ -262,6 +262,35 @@ err_clear:
 	return ret;
 }
 
+/* ── Simple GPA→HPA lookup ──────────────────────────────────────────────────── */
+
+/*
+ * thhv_gpa_to_hpa — translate a single GPA to HPA.
+ *
+ * Returns the HPA, or (u64)-1 if not in PA map.
+ */
+u64 thhv_gpa_to_hpa(u64 gpa)
+{
+	struct thhv_pa_range *r;
+	u64 hpa;
+
+	read_lock(&pa_map_lock);
+	if (RB_EMPTY_ROOT(&pa_map)) {
+		read_unlock(&pa_map_lock);
+		return gpa;  /* identity passthrough */
+	}
+
+	r = pa_range_find(gpa);
+	if (!r) {
+		read_unlock(&pa_map_lock);
+		return (u64)-1;
+	}
+
+	hpa = r->hpa_start + (gpa - r->gpa_start);
+	read_unlock(&pa_map_lock);
+	return hpa;
+}
+
 /* ── Translation: contiguous GPA range → HPA segments ──────────────────────── */
 
 /*
@@ -576,9 +605,31 @@ int thhv_pa_map_init_from_attestation(void)
 	pr_info("thhv: capability table loaded (%u entries from attestation)\n",
 		report->nr_mem_caps);
 
-	/* Skip past dom_cap entries. */
+	/* Skip past dom_cap entries, but extract the self-domain handle. */
 	cursor += (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry);
-	cursor += (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry);
+	{
+		struct domcomm_dom_cap_entry *dom_caps =
+			(struct domcomm_dom_cap_entry *)cursor;
+
+		thhv_domcomm.self_domain_handle = 0;
+		for (i = 0; i < report->nr_dom_caps; i++) {
+			pr_info("thhv:   dom_cap[%u]: handle=%llu domain_id=%llu\n",
+				i, dom_caps[i].handle, dom_caps[i].domain_id);
+			/* Self-referencing cap: domain_id == our own domain_id. */
+			if (dom_caps[i].domain_id == report->domain_id)
+				thhv_domcomm.self_domain_handle =
+					dom_caps[i].handle;
+		}
+
+		if (thhv_domcomm.self_domain_handle)
+			pr_info("thhv: self-domain handle = %llu\n",
+				thhv_domcomm.self_domain_handle);
+		else
+			pr_warn("thhv: no self-referencing domain capability found\n");
+
+		cursor += (size_t)report->nr_dom_caps *
+			  sizeof(struct domcomm_dom_cap_entry);
+	}
 
 	/* Parse PA map entries → populate the GPA→HPA rb-tree. */
 	pa_entries = (struct domcomm_pa_map_entry *)cursor;

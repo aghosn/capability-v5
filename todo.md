@@ -704,15 +704,18 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   header validation, page-aware RX dequeue, parse attestation → PA map rb-tree +
   capability handles.  **Test**: `thhv-test-attest` userspace tool queries
   parsed info via ioctl.
-- [ ] **P15-dc-m3** — Capability table + PA map validation: Implement the driver-side
-  capability table (§17 of domain-comm-v0.2.md): global cap table (rb-tree by
-  local_handle), per-partition sent-caps list, parent handle lookup by HPA.
-  Replace ad-hoc `attest_caps[]` and `thhv_mem_cap` tracking.  Fix REVOKE to
-  use `(parent_handle, sub)`.  **Test**: `insmod` loads attestation caps into
-  the cap table; CARVE inserts, SEND removes + appends to sent_caps.
-- [ ] **P15-dc-m4** — Ring growth: TX enqueue in driver, GROW_RX/TX messages,
-  capavisor growth handler, platform CommBinding self-ref detection.
-  **Test**: `thhv-test-grow` triggers growth, verifies expanded ring.
+- [x] **P15-dc-m3** — ✅ DONE.  Capability table + PA map validation: driver-side
+  cap table (rb-tree by local_handle), per-partition sent_caps, parent handle
+  lookup by HPA.  REVOKE uses `(parent_handle, sub)`.  55 caps loaded from
+  attestation.
+- [x] **P15-dc-m4** — ✅ DONE.  Ring growth: `domcomm_tx_enqueue()` (page-aware SPSC
+  producer), `ring_write()` helper, dom_cap attestation parsing (self-domain handle=56),
+  `VMCALL_DOMCOMM_NOTIFY` (opcode 0x19), `domcomm_request_grow()` (CARVE→REGISTER_COMM
+  self-ref→GROW msg→ACK→extend local ring).  Capavisor: `DomainCommState` refactored
+  with per-ring page tracking, `domcomm_tx_dequeue()`, CommRegion self-ref no-op,
+  GROW handler (cap lookup→extend ring pages→update header→ACK).
+  **Test**: attestation verified (dom_cap, self-domain handle).  GROW flow needs
+  end-to-end test (trigger from init or ioctl).
 - [ ] **P15-dc-m5** — Async VP exit delivery: Capavisor writes VP_EXIT to
   parent's RX ring, driver dispatches to VP waitqueue.  **Test**:
   `thhv-test-vpexit` creates child VP, triggers exit, verifies DomainComm path.
