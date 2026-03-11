@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/anon_inodes.h>
 #include <linux/uaccess.h>
+#include <linux/mm.h>
 
 #include "thhv.h"
 
@@ -37,6 +38,13 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->vps);
 	}
 
+	/* Unpin shared META pages. */
+	if (part->shared_meta_pages) {
+		unpin_user_pages(part->shared_meta_pages,
+				 part->shared_meta_nr_pages);
+		kfree(part->shared_meta_pages);
+	}
+
 	/* TODO: free mem regions rb-tree, irqfds, ioeventfds */
 
 	kfree(part);
@@ -52,16 +60,59 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 	int ret;
 
 	switch (cmd) {
-	case THHV_INITIALIZE_PARTITION:
+	case THHV_INITIALIZE_PARTITION: {
+		struct thhv_initialize_partition ip;
+
 		if (part->sealed)
 			return -EBUSY;
-		ret = themis_seal(part->domain_handle);
-		if (ret)
+		if (copy_from_user(&ip, uarg, sizeof(ip)))
+			return -EFAULT;
+		if (ip.meta_size != (u64)THHV_META_PAGES_SHARED * PAGE_SIZE)
+			return -EINVAL;
+		if (!ip.meta_uaddr || (ip.meta_uaddr & ~PAGE_MASK))
+			return -EINVAL;
+
+		/* Pin shared META pages (MSR bitmap + IO bitmaps). */
+		part->shared_meta_pages = kcalloc(THHV_META_PAGES_SHARED,
+						  sizeof(struct page *),
+						  GFP_KERNEL);
+		if (!part->shared_meta_pages)
+			return -ENOMEM;
+
+		ret = pin_user_pages_fast(ip.meta_uaddr, THHV_META_PAGES_SHARED,
+					  FOLL_WRITE | FOLL_LONGTERM,
+					  part->shared_meta_pages);
+		if (ret < 0) {
+			kfree(part->shared_meta_pages);
+			part->shared_meta_pages = NULL;
 			return ret;
+		}
+		if (ret != THHV_META_PAGES_SHARED) {
+			unpin_user_pages(part->shared_meta_pages, ret);
+			kfree(part->shared_meta_pages);
+			part->shared_meta_pages = NULL;
+			return -EFAULT;
+		}
+		part->shared_meta_nr_pages = THHV_META_PAGES_SHARED;
+
+		/*
+		 * TODO(P15e): CARVE + SEND shared META pages to child domain.
+		 */
+
+		ret = themis_seal(part->domain_handle);
+		if (ret) {
+			unpin_user_pages(part->shared_meta_pages,
+					 part->shared_meta_nr_pages);
+			kfree(part->shared_meta_pages);
+			part->shared_meta_pages = NULL;
+			part->shared_meta_nr_pages = 0;
+			return ret;
+		}
 		part->sealed = true;
-		pr_debug("thhv: sealed domain 0x%llx\n",
-			 part->domain_handle);
+		pr_debug("thhv: sealed domain 0x%llx (%u shared META pages)\n",
+			 part->domain_handle, part->shared_meta_nr_pages);
 		return 0;
+	}
 
 	case THHV_CREATE_VP:
 		return thhv_vp_create(part, uarg);

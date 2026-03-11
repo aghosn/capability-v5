@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/anon_inodes.h>
 #include <linux/uaccess.h>
+#include <linux/mm.h>
 
 #include "thhv.h"
 
@@ -116,12 +117,85 @@ static long thhv_vp_ioctl(struct file *file, unsigned int cmd,
 	}
 }
 
-/* ── VP fd mmap (META page mapping) ────────────────────────────────────────── */
+/* ── VP fd mmap (COMM page mapping) ────────────────────────────────────────── */
 
 static int thhv_vp_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	/* TODO(P15h): remap_pfn_range for META VP-state page */
 	return -ENOSYS;
+}
+
+/* ── Page pinning helpers ──────────────────────────────────────────────────── */
+
+static void thhv_vp_unpin_pages(struct thhv_vp *vp)
+{
+	unsigned int i;
+
+	if (vp->comm_kaddr) {
+		kunmap(vp->comm_page);
+		vp->comm_kaddr = NULL;
+	}
+	if (vp->comm_page) {
+		unpin_user_pages(&vp->comm_page, 1);
+		vp->comm_page = NULL;
+	}
+	if (vp->meta_pages) {
+		unpin_user_pages(vp->meta_pages, vp->meta_nr_pages);
+		for (i = 0; i < vp->meta_nr_pages; i++)
+			vp->meta_pages[i] = NULL;
+		kfree(vp->meta_pages);
+		vp->meta_pages = NULL;
+		vp->meta_nr_pages = 0;
+	}
+}
+
+static int thhv_vp_pin_pages(struct thhv_vp *vp,
+			     u64 meta_uaddr, unsigned int meta_nr_pages,
+			     u64 comm_uaddr)
+{
+	int ret;
+
+	/* Pin META pages. */
+	vp->meta_pages = kcalloc(meta_nr_pages, sizeof(struct page *),
+				 GFP_KERNEL);
+	if (!vp->meta_pages)
+		return -ENOMEM;
+
+	ret = pin_user_pages_fast(meta_uaddr, meta_nr_pages,
+				  FOLL_WRITE | FOLL_LONGTERM,
+				  vp->meta_pages);
+	if (ret < 0)
+		goto err;
+	if (ret != (int)meta_nr_pages) {
+		unpin_user_pages(vp->meta_pages, ret);
+		ret = -EFAULT;
+		goto err;
+	}
+	vp->meta_nr_pages = meta_nr_pages;
+
+	/* Pin COMM page. */
+	ret = pin_user_pages_fast(comm_uaddr, 1,
+				  FOLL_WRITE | FOLL_LONGTERM,
+				  &vp->comm_page);
+	if (ret < 0)
+		goto err_unpin_meta;
+	if (ret != 1) {
+		ret = -EFAULT;
+		goto err_unpin_meta;
+	}
+
+	vp->comm_kaddr = kmap(vp->comm_page);
+	vp->comm_phys = page_to_phys(vp->comm_page);
+
+	return 0;
+
+err_unpin_meta:
+	unpin_user_pages(vp->meta_pages, vp->meta_nr_pages);
+	vp->meta_nr_pages = 0;
+err:
+	kfree(vp->meta_pages);
+	vp->meta_pages = NULL;
+	return ret;
 }
 
 /* ── VP fd file_operations ─────────────────────────────────────────────────── */
@@ -131,11 +205,9 @@ static int thhv_vp_release(struct inode *inode, struct file *file)
 	struct thhv_vp *vp = file->private_data;
 	struct thhv_partition *part = vp->partition;
 
-	/*
-	 * TODO(P15d): Stop VP if running (async mode), cleanup ThemIC pages.
-	 * The VP slot in part->vps[vp->vp_index] is freed here; the partition
-	 * refcount is dropped when the partition fd is closed.
-	 */
+	/* TODO: Stop VP if running (async mode). */
+
+	thhv_vp_unpin_pages(vp);
 
 	part->vps[vp->vp_index] = NULL;
 	kfree(vp);
@@ -156,6 +228,7 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	struct thhv_create_vp cv;
 	struct thhv_vp *vp;
 	struct file *file;
+	unsigned int meta_nr;
 	int fd, ret;
 
 	if (copy_from_user(&cv, uarg, sizeof(cv)))
@@ -163,9 +236,17 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 
 	if (cv.vp_index >= part->num_vps)
 		return -EINVAL;
-
 	if (part->vps[cv.vp_index])
 		return -EEXIST;
+
+	/* Validate META size. */
+	meta_nr = THHV_META_PAGES_PER_VP;
+	if (cv.meta_size != (u64)meta_nr * PAGE_SIZE)
+		return -EINVAL;
+	if (!cv.meta_uaddr || !cv.comm_uaddr)
+		return -EINVAL;
+	if (cv.meta_uaddr & ~PAGE_MASK || cv.comm_uaddr & ~PAGE_MASK)
+		return -EINVAL;
 
 	vp = kzalloc(sizeof(*vp), GFP_KERNEL);
 	if (!vp)
@@ -177,15 +258,20 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	init_waitqueue_head(&vp->exit_wq);
 	atomic_set(&vp->exit_pending, 0);
 
+	/* Pin META + COMM pages from userspace. */
+	ret = thhv_vp_pin_pages(vp, cv.meta_uaddr, meta_nr, cv.comm_uaddr);
+	if (ret)
+		goto err_free_vp;
+
 	/*
-	 * TODO(P15d): Allocate ThemIC pages, register COMM pages via
-	 * VMCALL_REGISTER_COMM for this VP.
+	 * TODO(P15e): CARVE + SEND META pages to child domain.
+	 * TODO(P15e): REGISTER_COMM for the COMM page.
 	 */
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		ret = fd;
-		goto err_free_vp;
+		goto err_unpin;
 	}
 
 	file = anon_inode_getfile("thhv-vp", &thhv_vp_fops,
@@ -202,6 +288,8 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 
 err_put_fd:
 	put_unused_fd(fd);
+err_unpin:
+	thhv_vp_unpin_pages(vp);
 err_free_vp:
 	kfree(vp);
 	return ret;

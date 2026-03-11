@@ -38,11 +38,10 @@ static bool thhv_detect(void)
 /* ── Device-level ioctl dispatch ───────────────────────────────────────────── */
 
 /*
- * META pages needed per VP: VMCS (1) + VAPIC (1).
+ * META pages needed per VP is defined in thhv.h (THHV_META_PAGES_PER_VP).
  * Shared per-domain pages (MSR bitmap, IO bitmaps, EPT) are accounted
  * separately by userspace or via additional query types.
  */
-#define THHV_META_PAGES_PER_VP  2
 
 static long thhv_dev_query(void __user *uarg)
 {
@@ -54,6 +53,9 @@ static long thhv_dev_query(void __user *uarg)
 	switch (q.query_type) {
 	case THHV_QUERY_META_PAGES_PER_VP:
 		q.result = THHV_META_PAGES_PER_VP;
+		break;
+	case THHV_QUERY_META_PAGES_SHARED:
+		q.result = THHV_META_PAGES_SHARED;
 		break;
 	default:
 		return -EINVAL;

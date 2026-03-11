@@ -45,6 +45,9 @@
 #define THHV_SCHED_SYNC   0
 #define THHV_SCHED_ASYNC  1
 
+/* META pages the capavisor needs per VP (VMCS + VAPIC). */
+#define THHV_META_PAGES_PER_VP  2
+
 /* ── Themis hypercall opcodes (RAX) ────────────────────────────────────────── */
 
 #define THEMIS_HC_CARVE              0x01
@@ -94,6 +97,14 @@ struct thhv_create_partition {
 struct thhv_create_vp {
 	__u32 vp_index;
 	__u32 rsvd;
+	__u64 meta_uaddr;     /* Userspace VA of META pages (query size first) */
+	__u64 meta_size;      /* Size in bytes (must be PAGE_SIZE * META_PAGES_PER_VP) */
+	__u64 comm_uaddr;     /* Userspace VA of COMM page (PAGE_SIZE) */
+};
+
+struct thhv_initialize_partition {
+	__u64 meta_uaddr;     /* Userspace VA of shared META pages */
+	__u64 meta_size;      /* Size in bytes (must be PAGE_SIZE * META_PAGES_SHARED) */
 };
 
 struct thhv_set_guest_memory {
@@ -257,7 +268,11 @@ struct thhv_query {
 };
 
 /* Query types for THHV_QUERY. */
-#define THHV_QUERY_META_PAGES_PER_VP  1   /* META pages needed per VP */
+#define THHV_QUERY_META_PAGES_PER_VP     1  /* META pages needed per VP (VMCS+VAPIC) */
+#define THHV_QUERY_META_PAGES_SHARED     2  /* Shared META pages per partition (MSR+IO bitmaps) */
+
+/* Shared META page count: MSR bitmap (1) + IO bitmap A (1) + IO bitmap B (1). */
+#define THHV_META_PAGES_SHARED  3
 
 /* ── Device-level ioctls ───────────────────────────────────────────────────── */
 
@@ -271,7 +286,7 @@ struct thhv_query {
 /* ── Partition-level ioctls ────────────────────────────────────────────────── */
 
 #define THHV_INITIALIZE_PARTITION \
-	_IO(THHV_IOCTL_MAGIC, 0x10)
+	_IOW(THHV_IOCTL_MAGIC, 0x10, struct thhv_initialize_partition)
 #define THHV_CREATE_VP \
 	_IOWR(THHV_IOCTL_MAGIC, 0x11, struct thhv_create_vp)
 #define THHV_SET_GUEST_MEMORY \
@@ -321,6 +336,10 @@ struct thhv_partition {
 
 	struct thhv_vp **vps;
 
+	/* Shared META pages: MSR bitmap + IO bitmaps A & B.  Pinned at INITIALIZE. */
+	struct page **shared_meta_pages;
+	unsigned int  shared_meta_nr_pages;
+
 	/* Memory capability tracking: guest_pfn → cap_handle. */
 	struct {
 		spinlock_t lock;
@@ -353,6 +372,16 @@ struct thhv_vp {
 
 	/* Exit info buffer for userspace. */
 	u8 exit_msg[256];
+
+	/* META pages: pinned from userspace, for capavisor internal alloc. */
+	struct page **meta_pages;
+	unsigned int  meta_nr_pages;
+
+	/* COMM page: pinned from userspace, shared with capavisor. */
+	struct page  *comm_page;
+	void         *comm_kaddr;      /* kernel mapping */
+	u64           comm_phys;       /* physical address */
+	bool          comm_registered; /* REGISTER_COMM done */
 
 	struct file *file;
 };
