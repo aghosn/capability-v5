@@ -241,9 +241,100 @@ struct thhv_vp_registers {
 #define THHV_VP_REG_INTERRUPTIBILITY_STATE 0xB1
 #define THHV_VP_REG_PAT                   0xB2
 
-struct thhv_run_vp {
-	__u8 msg_buf[256];     /* THHV intercept message on return */
+/* ── VM-exit types (PROVISIONAL — needs design review) ─────────────────────── */
+/*
+ * These are placeholders.  The final set must account for:
+ *   - EPT violations (wrong permissions, unmapped GPA) vs MMIO intercepts
+ *   - Guest exceptions/faults (#GP, #PF, #UD, etc.) with vector + error code
+ *   - VMCALL from guest (hypercall)
+ *   - CR/DR access, XSETBV, INVLPG, WBINVD
+ *   - Interrupt window / preemption timer
+ *   - Which exits the capavisor handles internally vs forwards to parent
+ *
+ * TODO: Finalize exit type taxonomy and COMM page exit info layout.
+ */
+
+#define THHV_EXIT_NONE       0   /* No exit (should not happen) */
+#define THHV_EXIT_HLT        1   /* Guest executed HLT */
+#define THHV_EXIT_IO         2   /* I/O port access */
+#define THHV_EXIT_MMIO       3   /* MMIO access (EPT violation, data path) */
+#define THHV_EXIT_CPUID      4   /* CPUID instruction */
+#define THHV_EXIT_MSR        5   /* MSR read/write */
+#define THHV_EXIT_SHUTDOWN   6   /* Triple fault / shutdown */
+#define THHV_EXIT_INTR       7   /* External interrupt (for injection) */
+#define THHV_EXIT_MEMORY_FAULT 8 /* EPT violation — access rights / unmapped */
+#define THHV_EXIT_EXCEPTION  9   /* Guest exception (vector + error code) */
+#define THHV_EXIT_HYPERCALL  10  /* Guest VMCALL */
+#define THHV_EXIT_UNKNOWN    0xFF
+
+/*
+ * Exit message written to thhv_run_vp.msg_buf (256 bytes).
+ * The driver reads exit info from the COMM page and formats it here.
+ */
+struct thhv_exit_msg {
+	__u32 exit_type;       /* THHV_EXIT_* */
+	__u32 instr_len;       /* Faulting instruction length (0 if N/A) */
+	union {
+		struct {
+			__u16 port;
+			__u8  is_write;
+			__u8  access_size;  /* 1, 2, or 4 bytes */
+			__u32 rsvd;
+			__u64 data;
+		} io;
+		struct {
+			__u64 gpa;
+			__u8  is_write;
+			__u8  access_size;
+			__u8  rsvd[6];
+			__u64 data;
+		} mmio;
+		struct {
+			__u32 leaf;
+			__u32 subleaf;
+		} cpuid;
+		struct {
+			__u32 msr;
+			__u8  is_write;
+			__u8  rsvd[3];
+			__u64 data;
+		} msr;
+		struct {
+			__u64 gpa;         /* Faulting GPA */
+			__u64 flags;       /* EPT violation qualification bits */
+		} memory_fault;
+		struct {
+			__u32 vector;      /* Exception vector (0-31) */
+			__u32 error_code;  /* Error code (0 if N/A) */
+			__u8  has_error_code;
+			__u8  rsvd[7];
+			__u64 cr2;         /* For #PF */
+		} exception;
+		struct {
+			__u64 nr;          /* Hypercall number (guest RAX) */
+			__u64 args[3];     /* Guest RBX, RCX, RDX */
+		} hypercall;
+		__u8 raw[240];     /* Pad union to fill 256 total */
+	};
 };
+
+struct thhv_run_vp {
+	__u8 msg_buf[256];     /* Contains struct thhv_exit_msg on return */
+};
+
+/*
+ * COMM page exit info area: offsets within the 4 KiB COMM page.
+ *
+ * The capavisor writes VM-exit information here (after the register
+ * area at offset 512) before returning from SWITCH.  The driver reads
+ * these fields and formats them into a thhv_exit_msg for userspace.
+ */
+#define THHV_COMM_EXIT_REASON_OFF      512   /* u32: VMX exit reason */
+#define THHV_COMM_EXIT_QUAL_OFF        516   /* u64: exit qualification */
+#define THHV_COMM_EXIT_INSTR_LEN_OFF   524   /* u32: instruction length */
+#define THHV_COMM_EXIT_INSTR_INFO_OFF  528   /* u32: instruction info */
+#define THHV_COMM_EXIT_GPA_OFF         532   /* u64: guest physical address */
+#define THHV_COMM_EXIT_PENDING_OFF     540   /* u32: set to 1 when exit info valid */
 
 struct thhv_irqfd {
 	__s32 fd;

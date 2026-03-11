@@ -625,14 +625,21 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
 - [x] **P15e** — ✅ DONE (driver side).  Memory mapping via `THHV_SET_GUEST_MEMORY`:
   userspace provides GPA, host VA, size + flags (UNMAP, ALIAS), rights (R/W/X),
   and Themis-specific attrs (HASH, CLEAN, VITAL, META).
-  Driver pins pages, calls `themis_carve`/`themis_alias` + `themis_send`, tracks
-  regions in per-partition rb-tree.  Unmap path: `themis_revoke_mem` + unpin.
-  Partition destroy walks rb-tree and frees all regions.
-  Capavisor-side CARVE/SEND/META handling still needed.
-  REGISTER_COMM for COMM pages still TODO.
-- [ ] **P15f** — `THHV_RUN_VP` → `VMCALL_SWITCH`.  COMM page sync: capavisor
-  flushes dirty registers to child VMCS before entry, fills COMM from VMCS on exit.
-  Handle intercept types: HLT, I/O port, MMIO, CPUID, MSR, shutdown.
+  Driver pins pages, translates dom0 GPA→HPA via `thhv_translate_pages()`,
+  then CARVE/ALIAS + SEND per HPA segment.  Multi-segment support for
+  non-contiguous GPA→HPA mappings.  `THHV_SET_PA_MAP` ioctl loads the
+  attestation-derived GPA→HPA map; identity passthrough when no map loaded.
+  COMM page: CARVE + REGISTER_COMM wired at CREATE_VP time.
+  META pages: CARVE + SEND deferred until capavisor EPT allocation from META pool.
+- [x] **P15f** — ✅ DONE (driver side).  `THHV_RUN_VP` with sync and async paths:
+  Sync: `themis_switch(domain, vp)` blocks until VM-exit, reads COMM page exit
+  info area (offset 512+), formats `thhv_exit_msg` for userspace.
+  Async: parks thread on `exit_wq` (TODO: actual async kick + doorbell/eventfd
+  notification mechanism).
+  Exit types: HLT, IO, MMIO, CPUID, MSR, SHUTDOWN, INTR.
+  VMX exit reason → THHV_EXIT_* mapping.  COMM page exit info layout defined
+  (exit_reason, exit_qualification, instruction length/info, GPA).
+  Capavisor SWITCH handler still stubbed (ERR_UNIMPL) — needs implementation.
 - [ ] **P15g** — Interrupt injection: `THHV_ASSERT_INTERRUPT` → `VMCALL` or posted
   interrupt path.  `THHV_IRQFD` → eventfd + workqueue → PI descriptor write.
 - [ ] **P15h** — `mmap` for VP state: userspace maps COMM page for

@@ -13,8 +13,153 @@
 #include <linux/uaccess.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <asm/vmx.h>
 
 #include "thhv.h"
+
+/* ── COMM page exit info helpers ────────────────────────────────────────────── */
+
+/*
+ * Read a value from the COMM page at a given byte offset.
+ * The COMM page is kernel-mapped at vp->comm_kaddr.
+ */
+static inline u32 comm_read32(struct thhv_vp *vp, unsigned int off)
+{
+	return *(volatile u32 *)((u8 *)vp->comm_kaddr + off);
+}
+
+static inline u64 comm_read64(struct thhv_vp *vp, unsigned int off)
+{
+	return *(volatile u64 *)((u8 *)vp->comm_kaddr + off);
+}
+
+/*
+ * Map VMX exit reason to THHV_EXIT_* type.
+ *
+ * PROVISIONAL — The capavisor's platform abstraction will likely
+ * translate raw VMX exit reasons before the parent sees them.
+ * This mapper may be replaced entirely once the SWITCH handler
+ * and exit delivery mechanism are designed.  Using linux/vmx.h
+ * constants for now as a reference; the actual exit codes the
+ * driver receives may be Themis-specific, not raw VMX reasons.
+ */
+static u32 vmx_reason_to_thhv_exit(u32 reason)
+{
+	switch (reason) {
+	case EXIT_REASON_EXCEPTION_NMI:    return THHV_EXIT_EXCEPTION;
+	case EXIT_REASON_EXTERNAL_INTERRUPT: return THHV_EXIT_INTR;
+	case EXIT_REASON_TRIPLE_FAULT:     return THHV_EXIT_SHUTDOWN;
+	case EXIT_REASON_CPUID:            return THHV_EXIT_CPUID;
+	case EXIT_REASON_HLT:             return THHV_EXIT_HLT;
+	case EXIT_REASON_VMCALL:          return THHV_EXIT_HYPERCALL;
+	case EXIT_REASON_IO_INSTRUCTION:  return THHV_EXIT_IO;
+	case EXIT_REASON_MSR_READ:        return THHV_EXIT_MSR;
+	case EXIT_REASON_MSR_WRITE:       return THHV_EXIT_MSR;
+	case EXIT_REASON_EPT_VIOLATION:   return THHV_EXIT_MEMORY_FAULT;
+	case EXIT_REASON_EPT_MISCONFIG:   return THHV_EXIT_MEMORY_FAULT;
+	default:                          return THHV_EXIT_UNKNOWN;
+	}
+}
+
+/*
+ * Parse the COMM page exit info into a thhv_exit_msg for userspace.
+ */
+static void thhv_build_exit_msg(struct thhv_vp *vp, struct thhv_exit_msg *msg)
+{
+	u32 vmx_reason;
+	u64 exit_qual;
+
+	memset(msg, 0, sizeof(*msg));
+
+	vmx_reason = comm_read32(vp, THHV_COMM_EXIT_REASON_OFF);
+	exit_qual  = comm_read64(vp, THHV_COMM_EXIT_QUAL_OFF);
+	msg->instr_len = comm_read32(vp, THHV_COMM_EXIT_INSTR_LEN_OFF);
+	msg->exit_type = vmx_reason_to_thhv_exit(vmx_reason);
+
+	switch (msg->exit_type) {
+	case THHV_EXIT_IO:
+		/* Exit qual bits: [15:0] port, [2:0] size, [3] direction */
+		msg->io.port = (u16)(exit_qual >> 16);
+		msg->io.access_size = (exit_qual & 0x7) + 1;
+		msg->io.is_write = !(exit_qual & (1 << 3));
+		break;
+	case THHV_EXIT_MMIO:
+		msg->mmio.gpa = comm_read64(vp, THHV_COMM_EXIT_GPA_OFF);
+		msg->mmio.is_write = !!(exit_qual & (1 << 1)); /* EPT write */
+		break;
+	case THHV_EXIT_CPUID:
+		/* Leaf/subleaf come from guest RCX:RAX in COMM page regs. */
+		break;
+	case THHV_EXIT_MSR:
+		/* MSR index in ECX, direction depends on vmx_reason (31=RD, 32=WR). */
+		msg->msr.is_write = (vmx_reason == 32);
+		break;
+	default:
+		break;
+	}
+}
+
+/* ── THHV_RUN_VP handler ──────────────────────────────────────────────────── */
+
+static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
+{
+	struct thhv_partition *part = vp->partition;
+	struct thhv_exit_msg msg;
+	int ret;
+
+	if (!part->sealed)
+		return -EINVAL;
+	if (!vp->comm_registered)
+		return -EINVAL;
+
+	if (!mutex_trylock(&vp->run_lock))
+		return -EBUSY;
+
+	if (part->sched_policy == THHV_SCHED_SYNC) {
+		/*
+		 * Sync mode: the calling thread's VP is "donated" to the
+		 * child — we block in themis_switch() until the child
+		 * exits.  On return, the capavisor has written exit info
+		 * into the COMM page.
+		 */
+		ret = themis_switch(part->domain_handle, vp->vp_index);
+		if (ret) {
+			mutex_unlock(&vp->run_lock);
+			return ret;
+		}
+
+		thhv_build_exit_msg(vp, &msg);
+
+	} else {
+		/*
+		 * Async mode: the child VP runs on its own core.
+		 * We park the calling thread until an exit event arrives.
+		 *
+		 * TODO: The actual async start mechanism (VMCALL or
+		 * platform-specific kick) and the doorbell / eventfd
+		 * notification that wakes us up are not yet designed.
+		 * For now, park on the waitqueue until exit_pending is
+		 * set (which will be done by the exit notification path
+		 * once implemented).
+		 */
+		ret = wait_event_interruptible(vp->exit_wq,
+					       atomic_read(&vp->exit_pending));
+		if (ret) {
+			mutex_unlock(&vp->run_lock);
+			return -EINTR;
+		}
+
+		atomic_set(&vp->exit_pending, 0);
+		thhv_build_exit_msg(vp, &msg);
+	}
+
+	mutex_unlock(&vp->run_lock);
+
+	if (copy_to_user(uarg, &msg, sizeof(msg)))
+		return -EFAULT;
+
+	return 0;
+}
 
 /* ── VP-level ioctl dispatch ───────────────────────────────────────────────── */
 
@@ -104,8 +249,7 @@ static long thhv_vp_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case THHV_RUN_VP:
-		/* TODO(P15f): VMCALL_SWITCH (sync) or START_VP + wait (async) */
-		return -ENOSYS;
+		return thhv_run_vp(vp, uarg);
 
 	case THHV_GET_VP_STATE:
 		return thhv_vp_get_state(vp, uarg);
