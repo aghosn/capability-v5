@@ -753,6 +753,24 @@ struct thhv_query {
 struct thhv_partition;
 struct thhv_vp;
 
+/* Per-capability entry in the driver's local capability table (§17). */
+struct thhv_cap_entry {
+	struct rb_node node;         /* keyed by local_handle */
+	u64 local_handle;            /* domain-local handle (from engine) */
+	u64 parent_handle;           /* 0 for attestation roots */
+	u64 sub_handle;              /* for REVOKE(parent, sub) */
+	u64 hpa_start;
+	u64 size;
+};
+
+/* Tracks a capability sent to a child domain (for revocation on teardown). */
+struct thhv_sent_cap {
+	struct list_head list;
+	u64 parent_handle;           /* parent in OUR cap table */
+	u64 sub_handle;              /* child sub-handle for REVOKE */
+	u64 region_key;              /* guest_pfn of the mapping (for per-region unmap) */
+};
+
 /* Per-partition state. */
 struct thhv_partition {
 	u64 domain_handle;
@@ -767,11 +785,17 @@ struct thhv_partition {
 	struct page **shared_meta_pages;
 	unsigned int  shared_meta_nr_pages;
 
-	/* Memory capability tracking: guest_pfn → cap_handle. */
+	/* Memory region tracking: guest_pfn → pinned pages (for unpin on cleanup). */
 	struct {
 		spinlock_t lock;
 		struct rb_root regions;
 	} mem;
+
+	/* Capabilities sent to this child domain (for revocation on teardown). */
+	struct {
+		spinlock_t lock;
+		struct list_head list;
+	} sent_caps;
 
 	/* IRQfd tracking. */
 	struct list_head irqfds;
@@ -808,22 +832,18 @@ struct thhv_vp {
 	struct page  *comm_page;
 	void         *comm_kaddr;      /* kernel mapping */
 	u64           comm_phys;       /* HPA (after GPA→HPA translation) */
-	u64           comm_cap_handle; /* CARVE capability handle */
-	u64           comm_cap_sub;    /* CARVE capability sub-handle */
-	bool          comm_registered; /* REGISTER_COMM done */
+	u64           comm_parent_handle; /* parent cap used for CARVE */
+	u64           comm_cap_handle;    /* carved child handle */
+	u64           comm_cap_sub;       /* sub-handle for REVOKE(parent, sub) */
+	bool          comm_registered;    /* REGISTER_COMM done */
 
 	struct file *file;
 };
 
-/* Per-capability handle (one per HPA segment within a memory region). */
-struct thhv_mem_cap {
-	u64 cap_handle;
-	u64 cap_sub;
-	u64 hpa_start;
-	u64 size;
-};
-
-/* Memory region tracking node (rb-tree, keyed by guest_pfn). */
+/* Memory region tracking node (rb-tree, keyed by guest_pfn).
+ * Tracks pinned pages for cleanup.  Capability revocation is handled
+ * by the per-partition sent_caps list (see thhv_sent_cap).
+ */
 struct thhv_mem_region {
 	struct rb_node node;
 	u64 guest_pfn;
@@ -833,10 +853,6 @@ struct thhv_mem_region {
 	u32 flags;             /* THHV_MEM_F_* */
 	u32 rights;            /* THHV_MEM_R_* */
 	u64 attrs;             /* THHV_MEM_A_* */
-
-	/* One capability per contiguous HPA segment (after GPA→HPA translation). */
-	unsigned int  nr_caps;
-	struct thhv_mem_cap *caps;
 };
 
 /* HPA segment produced by GPA→HPA translation. */
@@ -887,7 +903,7 @@ extern const struct file_operations thhv_partition_fops;
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg);
 extern const struct file_operations thhv_vp_fops;
 
-/* thhv_translate.c — GPA→HPA address translation */
+/* thhv_translate.c — GPA→HPA translation + capability table */
 int thhv_set_pa_map(void __user *uarg);
 int thhv_pa_map_init_from_attestation(void);
 int thhv_translate_range(u64 gpa_start, u64 size,
@@ -897,6 +913,9 @@ int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
 			 struct thhv_hpa_segment **out_segs,
 			 unsigned int *out_nr_segs);
 int thhv_find_parent_handle(u64 hpa, u64 size, u64 *out_handle);
+int thhv_cap_table_insert(u64 local_handle, u64 parent_handle,
+			  u64 sub_handle, u64 hpa_start, u64 size);
+int thhv_cap_table_remove(u64 local_handle);
 void thhv_pa_map_cleanup(void);
 
 /*

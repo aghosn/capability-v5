@@ -210,7 +210,8 @@ static void thhv_vp_unpin_pages(struct thhv_vp *vp)
 
 	/* Revoke COMM capability (unbinds in the capavisor). */
 	if (vp->comm_registered) {
-		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
+		themis_revoke_mem(vp->comm_parent_handle, vp->comm_cap_sub);
+		thhv_cap_table_remove(vp->comm_cap_handle);
 		vp->comm_registered = false;
 	}
 
@@ -360,10 +361,10 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 		goto err_free_vp;
 
 	/*
-	 * CARVE the COMM page from dom0's parent capability, then
+	 * CARVE the COMM page from the parent capability, then
 	 * REGISTER_COMM to bind it to this VP in the child domain.
-	 * The capavisor marks the capability with COMM|CLEAN attributes
-	 * and records the (child_domain, vp_id) binding internally.
+	 * The COMM cap stays owned by us (not SEND'd), so it remains
+	 * in the global cap table until VP teardown.
 	 */
 	{
 		u64 parent_handle;
@@ -376,14 +377,25 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 			goto err_unpin;
 		}
 
+		vp->comm_parent_handle = parent_handle;
 		ret = themis_carve(parent_handle, vp->comm_phys, PAGE_SIZE,
 				   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
 				   &vp->comm_cap_handle, &vp->comm_cap_sub);
-	}
-	if (ret) {
-		pr_err("thhv: CARVE COMM page HPA 0x%llx failed (%d)\n",
-		       vp->comm_phys, ret);
-		goto err_unpin;
+		if (ret) {
+			pr_err("thhv: CARVE COMM page HPA 0x%llx failed (%d)\n",
+			       vp->comm_phys, ret);
+			goto err_unpin;
+		}
+
+		/* Track the carved COMM cap in the global cap table. */
+		ret = thhv_cap_table_insert(vp->comm_cap_handle,
+					    parent_handle,
+					    vp->comm_cap_sub,
+					    vp->comm_phys, PAGE_SIZE);
+		if (ret) {
+			themis_revoke_mem(parent_handle, vp->comm_cap_sub);
+			goto err_unpin;
+		}
 	}
 
 	ret = themis_register_comm(vp->comm_cap_handle,
@@ -421,11 +433,10 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 err_put_fd:
 	put_unused_fd(fd);
 err_revoke_comm:
-	if (vp->comm_registered) {
-		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
+	if (vp->comm_registered || vp->comm_cap_handle) {
+		themis_revoke_mem(vp->comm_parent_handle, vp->comm_cap_sub);
+		thhv_cap_table_remove(vp->comm_cap_handle);
 		vp->comm_registered = false;
-	} else if (vp->comm_cap_handle) {
-		themis_revoke_mem(vp->comm_cap_handle, vp->comm_cap_sub);
 	}
 err_unpin:
 	thhv_vp_unpin_pages(vp);

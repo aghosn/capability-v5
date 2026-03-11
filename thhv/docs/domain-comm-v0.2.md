@@ -620,3 +620,100 @@ exercise the driver via ioctls:
 
 These tools run inside dom0 and are compiled against the same guest kernel
 headers (via `build-guest.sh` or a separate Makefile).
+
+## 17. Driver-Side Capability Table
+
+The driver is a client with a partial view of the capability tree maintained
+by the engine inside the capavisor.  It must track every capability it owns,
+every capability it sends away, and the parent-child relationships needed
+for revocation.
+
+### 17.1 Data Structures
+
+Three structures, each serving a distinct purpose:
+
+**1. Capability Table (global, module-wide)**
+
+All capabilities this domain currently **owns**.  Populated from attestation
+at module init; updated on every CARVE (insert) and SEND (remove).
+
+```c
+struct thhv_cap_entry {
+    struct rb_node node;         /* keyed by local_handle */
+    u64 local_handle;            /* domain-local handle (from engine) */
+    u64 parent_handle;           /* 0 for attestation roots */
+    u64 sub_handle;              /* for REVOKE(parent, sub) */
+    u64 hpa_start;
+    u64 size;
+};
+```
+
+- **Init**: attestation `mem_cap` entries inserted as roots (`parent_handle=0`).
+- **CARVE**: engine returns `(new_handle, sub)` → insert entry with
+  `parent_handle` set to the parent's `local_handle`.
+- **SEND**: entry **removed** from the table (engine frees the handle for
+  reuse).  The `(parent_handle, sub_handle)` pair is moved to the
+  partition's sent-caps list.
+- **REVOKE**: calling `themis_revoke(parent_handle, sub)` restores the
+  parent's range in the engine; no cap table update needed (the entry was
+  already removed on SEND).
+
+**2. Per-Partition Sent-Caps List**
+
+Each child domain (partition) tracks what capabilities were sent to it,
+so that partition teardown can revoke them all:
+
+```c
+struct thhv_sent_cap {
+    struct list_head list;
+    u64 parent_handle;   /* parent in OUR domain's table */
+    u64 sub_handle;      /* child sub-handle for REVOKE */
+};
+```
+
+- **SEND**: append `{parent_handle, sub_handle}` to the partition's list.
+- **Partition teardown**: walk the list, `themis_revoke(parent, sub)` each,
+  freeing the entries.
+
+**3. PA Map (unchanged)**
+
+Pure GPA→HPA address translation, independent of capability tracking.
+`rb-tree<GPA → {gpa, hpa, size}>`.  Populated from attestation `pa_map`
+entries.  Not modified by capability operations.
+
+### 17.2 CARVE + SEND Flow
+
+```
+User VA  ──pin──→  GPA  ──PA map──→  HPA
+                                       │
+HPA  ──cap table scan──→  find OWNED parent covering [hpa, hpa+size)
+                                       │
+themis_carve(parent.local_handle, hpa, size, rights)
+  → (new_handle, sub_handle)
+  → insert {new_handle, parent.local_handle, sub, hpa, size} into cap table
+                                       │
+themis_send_at(new_handle, child_domain, attrs, child_gpa)
+  → remove new_handle from cap table
+  → append {parent.local_handle, sub} to partition.sent_caps
+```
+
+### 17.3 Revocation (Partition Teardown)
+
+```
+for each {parent_handle, sub} in partition.sent_caps:
+    themis_revoke(parent_handle, sub)
+    → engine removes child from parent's tree, restores parent's range
+    → free the sent_cap entry
+```
+
+### 17.4 Design Rationale
+
+- The cap table is flat (not a tree) because the engine maintains the full
+  tree.  The driver only needs `(parent_handle, sub_handle)` to revoke.
+- After SEND, the `local_handle` is freed by the engine and may be reused
+  for the next CARVE.  The driver must remove the entry to avoid stale
+  lookups.
+- Attestation roots have `parent_handle=0` (they have no parent in the
+  driver's view; they are the domain's initial endowment).
+- The per-partition sent-caps list ensures cleanup is scoped: tearing down
+  one child domain doesn't affect capabilities sent to other children.

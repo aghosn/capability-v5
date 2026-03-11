@@ -45,26 +45,39 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->shared_meta_pages);
 	}
 
-	/* Free all memory regions. */
+	/* Free all memory regions (unpin pages only; caps revoked via sent_caps). */
 	{
 		struct rb_node *n;
 
 		while ((n = rb_first(&part->mem.regions)) != NULL) {
 			struct thhv_mem_region *r =
 				container_of(n, struct thhv_mem_region, node);
-			unsigned int j;
 
 			rb_erase(n, &part->mem.regions);
-			for (j = 0; j < r->nr_caps; j++)
-				themis_revoke_mem(r->caps[j].cap_handle,
-						 r->caps[j].cap_sub);
-			kfree(r->caps);
 			if (r->pages) {
 				unpin_user_pages(r->pages, r->nr_pages);
 				kfree(r->pages);
 			}
 			kfree(r);
 		}
+	}
+
+	/* Revoke all capabilities sent to this child domain. */
+	{
+		struct thhv_sent_cap *sc, *tmp;
+
+		spin_lock(&part->sent_caps.lock);
+		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
+			int rv;
+
+			rv = themis_revoke_mem(sc->parent_handle, sc->sub_handle);
+			if (rv)
+				pr_warn("thhv: REVOKE_MEM parent=%llu sub=%llu failed (%d)\n",
+					sc->parent_handle, sc->sub_handle, rv);
+			list_del(&sc->list);
+			kfree(sc);
+		}
+		spin_unlock(&part->sent_caps.lock);
 	}
 
 	/* TODO: free irqfds, ioeventfds */
@@ -141,6 +154,8 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 
 	/* ── Unmap path ─────────────────────────────────────────────────── */
 	if (gm.flags & THHV_MEM_F_UNMAP) {
+		struct thhv_sent_cap *sc, *tmp;
+
 		spin_lock(&part->mem.lock);
 		region = thhv_mem_find(part, gm.guest_pfn);
 		if (!region) {
@@ -150,20 +165,27 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 		rb_erase(&region->node, &part->mem.regions);
 		spin_unlock(&part->mem.lock);
 
-		/* Revoke every capability (one per HPA segment). */
-		for (i = 0; i < region->nr_caps; i++) {
-			ret = themis_revoke_mem(region->caps[i].cap_handle,
-					       region->caps[i].cap_sub);
-			if (ret)
-				pr_warn("thhv: REVOKE_MEM seg %u pfn 0x%llx failed (%d)\n",
-					i, region->guest_pfn, ret);
+		/* Revoke all capabilities associated with this region. */
+		spin_lock(&part->sent_caps.lock);
+		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
+			if (sc->region_key == gm.guest_pfn) {
+				ret = themis_revoke_mem(sc->parent_handle,
+						       sc->sub_handle);
+				if (ret)
+					pr_warn("thhv: REVOKE_MEM parent=%llu sub=%llu pfn 0x%llx failed (%d)\n",
+						sc->parent_handle,
+						sc->sub_handle,
+						gm.guest_pfn, ret);
+				list_del(&sc->list);
+				kfree(sc);
+			}
 		}
+		spin_unlock(&part->sent_caps.lock);
 
 		if (region->pages) {
 			unpin_user_pages(region->pages, region->nr_pages);
 			kfree(region->pages);
 		}
-		kfree(region->caps);
 		kfree(region);
 		return 0;
 	}
@@ -208,21 +230,20 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	if (ret)
 		goto err_unpin;
 
-	/* Allocate per-segment capability tracking. */
-	region->caps = kcalloc(nr_segs, sizeof(*region->caps), GFP_KERNEL);
-	if (!region->caps) {
-		ret = -ENOMEM;
-		goto err_free_segs;
-	}
-	region->nr_caps = nr_segs;
-
-	/* CARVE/ALIAS + SEND_AT each HPA segment with child GPA. */
+	/* CARVE/ALIAS + cap table insert + SEND_AT + cap table remove +
+	 * sent_caps append for each HPA segment.
+	 *
+	 * On error, we track how many segments completed the full cycle
+	 * (sent_caps) vs. how many only got as far as CARVE (cap table).
+	 */
 	{
 		u64 child_gpa_cursor = gm.guest_pfn << PAGE_SHIFT;
+		unsigned int nr_sent = 0;  /* segments fully sent */
 
 		for (i = 0; i < nr_segs; i++) {
 			u64 cap_handle, cap_sub;
 			u64 parent_handle;
+			struct thhv_sent_cap *sc;
 
 			ret = thhv_find_parent_handle(segs[i].hpa_start,
 						      segs[i].size,
@@ -243,26 +264,49 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 			if (ret)
 				goto err_revoke_partial;
 
-			region->caps[i].cap_handle = cap_handle;
-			region->caps[i].cap_sub = cap_sub;
-			region->caps[i].hpa_start = segs[i].hpa_start;
-			region->caps[i].size = segs[i].size;
+			/* Insert carved child into cap table. */
+			ret = thhv_cap_table_insert(cap_handle, parent_handle,
+						    cap_sub,
+						    segs[i].hpa_start,
+						    segs[i].size);
+			if (ret) {
+				themis_revoke_mem(parent_handle, cap_sub);
+				goto err_revoke_partial;
+			}
 
-			/*
-			 * send_at: place this HPA segment at the correct
-			 * child GPA offset.  The child GPA cursor advances
-			 * by each segment's size so multi-segment mappings
-			 * are contiguous in the child's address space.
-			 */
+			/* SEND_AT to child domain. */
 			ret = themis_send_at(cap_handle,
 					     part->domain_handle,
 					     gm.attrs,
 					     child_gpa_cursor);
 			if (ret) {
-				themis_revoke_mem(cap_handle, cap_sub);
+				/* Undo: revoke + remove from cap table. */
+				themis_revoke_mem(parent_handle, cap_sub);
+				thhv_cap_table_remove(cap_handle);
 				goto err_revoke_partial;
 			}
 
+			/* Handle sent: remove from cap table, add to sent_caps. */
+			thhv_cap_table_remove(cap_handle);
+
+			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+			if (!sc) {
+				/* Cap already sent — can't undo SEND easily.
+				 * Still record for cleanup even if alloc fails.
+				 */
+				pr_err("thhv: sent_cap alloc failed\n");
+				ret = -ENOMEM;
+				goto err_revoke_partial;
+			}
+			sc->parent_handle = parent_handle;
+			sc->sub_handle    = cap_sub;
+			sc->region_key    = gm.guest_pfn;
+
+			spin_lock(&part->sent_caps.lock);
+			list_add_tail(&sc->list, &part->sent_caps.list);
+			spin_unlock(&part->sent_caps.lock);
+
+			nr_sent++;
 			child_gpa_cursor += segs[i].size;
 		}
 	}
@@ -280,14 +324,39 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	return 0;
 
 err_revoke_all:
-	i = nr_segs;
-err_revoke_partial:
-	while (i-- > 0) {
-		if (region->caps[i].cap_handle)
-			themis_revoke_mem(region->caps[i].cap_handle,
-					 region->caps[i].cap_sub);
+	/* All segments were sent — revoke via sent_caps. */
+	{
+		struct thhv_sent_cap *sc, *tmp;
+
+		spin_lock(&part->sent_caps.lock);
+		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
+			if (sc->region_key == gm.guest_pfn) {
+				themis_revoke_mem(sc->parent_handle,
+						 sc->sub_handle);
+				list_del(&sc->list);
+				kfree(sc);
+			}
+		}
+		spin_unlock(&part->sent_caps.lock);
 	}
-	kfree(region->caps);
+	goto err_free_segs;
+
+err_revoke_partial:
+	/* Already-sent segments are in sent_caps — revoke them. */
+	{
+		struct thhv_sent_cap *sc, *tmp;
+
+		spin_lock(&part->sent_caps.lock);
+		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
+			if (sc->region_key == gm.guest_pfn) {
+				themis_revoke_mem(sc->parent_handle,
+						 sc->sub_handle);
+				list_del(&sc->list);
+				kfree(sc);
+			}
+		}
+		spin_unlock(&part->sent_caps.lock);
+	}
 err_free_segs:
 	kfree(segs);
 err_unpin:
@@ -434,6 +503,9 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 
 	spin_lock_init(&part->mem.lock);
 	part->mem.regions = RB_ROOT;
+
+	spin_lock_init(&part->sent_caps.lock);
+	INIT_LIST_HEAD(&part->sent_caps.list);
 
 	INIT_LIST_HEAD(&part->irqfds);
 	mutex_init(&part->irqfd_lock);

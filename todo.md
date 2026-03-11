@@ -704,9 +704,12 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   header validation, page-aware RX dequeue, parse attestation → PA map rb-tree +
   capability handles.  **Test**: `thhv-test-attest` userspace tool queries
   parsed info via ioctl.
-- [ ] **P15-dc-m3** — PA map validation: Trigger a real CARVE using parsed
-  handles/HPAs.  **Test**: `thhv-test-carve` allocates a page, driver translates
-  GPA→HPA via PA map, CARVE succeeds.
+- [ ] **P15-dc-m3** — Capability table + PA map validation: Implement the driver-side
+  capability table (§17 of domain-comm-v0.2.md): global cap table (rb-tree by
+  local_handle), per-partition sent-caps list, parent handle lookup by HPA.
+  Replace ad-hoc `attest_caps[]` and `thhv_mem_cap` tracking.  Fix REVOKE to
+  use `(parent_handle, sub)`.  **Test**: `insmod` loads attestation caps into
+  the cap table; CARVE inserts, SEND removes + appends to sent_caps.
 - [ ] **P15-dc-m4** — Ring growth: TX enqueue in driver, GROW_RX/TX messages,
   capavisor growth handler, platform CommBinding self-ref detection.
   **Test**: `thhv-test-grow` triggers growth, verifies expanded ring.

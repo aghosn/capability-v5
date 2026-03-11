@@ -37,16 +37,10 @@ struct thhv_pa_range {
 	u64 size;        /* bytes, page-aligned */
 };
 
-/* ── Attestation capability table (for parent handle lookup by HPA) ──────── */
+/* ── Global capability table (§17 of domain-comm-v0.2.md) ────────────────── */
 
-struct thhv_attest_cap {
-	u64 handle;
-	u64 hpa_start;
-	u64 size;
-};
-
-static struct thhv_attest_cap *attest_caps;
-static unsigned int            nr_attest_caps;
+static DEFINE_SPINLOCK(cap_table_lock);
+static struct rb_root cap_table = RB_ROOT;
 
 /* ── rb-tree helpers ───────────────────────────────────────────────────────── */
 
@@ -100,6 +94,113 @@ static void pa_map_clear(void)
 		rb_erase(n, &pa_map);
 		kfree(r);
 	}
+}
+
+/* ── Capability table rb-tree helpers ──────────────────────────────────────── */
+
+static struct thhv_cap_entry *cap_find_locked(u64 handle)
+{
+	struct rb_node *n = cap_table.rb_node;
+
+	while (n) {
+		struct thhv_cap_entry *e =
+			container_of(n, struct thhv_cap_entry, node);
+		if (handle < e->local_handle)
+			n = n->rb_left;
+		else if (handle > e->local_handle)
+			n = n->rb_right;
+		else
+			return e;
+	}
+	return NULL;
+}
+
+static int cap_insert_locked(struct thhv_cap_entry *entry)
+{
+	struct rb_node **link = &cap_table.rb_node;
+	struct rb_node *parent = NULL;
+
+	while (*link) {
+		struct thhv_cap_entry *e =
+			container_of(*link, struct thhv_cap_entry, node);
+		parent = *link;
+
+		if (entry->local_handle < e->local_handle)
+			link = &(*link)->rb_left;
+		else if (entry->local_handle > e->local_handle)
+			link = &(*link)->rb_right;
+		else
+			return -EEXIST;
+	}
+
+	rb_link_node(&entry->node, parent, link);
+	rb_insert_color(&entry->node, &cap_table);
+	return 0;
+}
+
+static void cap_table_clear(void)
+{
+	struct rb_node *n;
+
+	while ((n = rb_first(&cap_table)) != NULL) {
+		struct thhv_cap_entry *e =
+			container_of(n, struct thhv_cap_entry, node);
+		rb_erase(n, &cap_table);
+		kfree(e);
+	}
+}
+
+/*
+ * thhv_cap_table_insert — add a capability to the global cap table.
+ *
+ * Called after a successful CARVE (or at init for attestation roots).
+ */
+int thhv_cap_table_insert(u64 local_handle, u64 parent_handle,
+			  u64 sub_handle, u64 hpa_start, u64 size)
+{
+	struct thhv_cap_entry *e;
+	int ret;
+
+	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	if (!e)
+		return -ENOMEM;
+
+	e->local_handle  = local_handle;
+	e->parent_handle = parent_handle;
+	e->sub_handle    = sub_handle;
+	e->hpa_start     = hpa_start;
+	e->size          = size;
+
+	spin_lock(&cap_table_lock);
+	ret = cap_insert_locked(e);
+	spin_unlock(&cap_table_lock);
+
+	if (ret)
+		kfree(e);
+	return ret;
+}
+
+/*
+ * thhv_cap_table_remove — remove a capability from the global cap table.
+ *
+ * Called after SEND (handle freed by engine) or on revocation.
+ * Returns 0 on success, -ENOENT if handle not found.
+ */
+int thhv_cap_table_remove(u64 local_handle)
+{
+	struct thhv_cap_entry *e;
+
+	spin_lock(&cap_table_lock);
+	e = cap_find_locked(local_handle);
+	if (e)
+		rb_erase(&e->node, &cap_table);
+	spin_unlock(&cap_table_lock);
+
+	if (!e)
+		return -ENOENT;
+
+	kfree(e);
+	return 0;
 }
 
 /* ── THHV_SET_PA_MAP ioctl ─────────────────────────────────────────────────── */
@@ -339,30 +440,35 @@ int thhv_translate_pages(struct page **pages, unsigned long nr_pages,
 }
 
 /*
- * thhv_find_parent_handle — find the capability handle covering an HPA range.
+ * thhv_find_parent_handle — find an owned capability covering an HPA range.
  *
- * Searches the attestation mem_cap entries by HPA, not GPA.  This works
- * correctly at any nesting level (dom0, dom1, dom2, …) because CARVE
- * always operates on HPAs and the attestation provides HPA ranges for
- * each capability regardless of the domain's GPA mapping.
+ * Searches the global capability table for an entry whose [hpa_start,
+ * hpa_start+size) contains [hpa, hpa+size).  This works at any nesting
+ * level because each domain's cap table is populated from its own
+ * attestation report.
  *
  * Returns 0 on success and writes the handle to *out_handle.
- * Returns -ENXIO if no attestation capability covers [hpa, hpa+size).
+ * Returns -ENXIO if no capability covers [hpa, hpa+size).
  */
 int thhv_find_parent_handle(u64 hpa, u64 size, u64 *out_handle)
 {
-	unsigned int i;
+	struct rb_node *n;
 
-	for (i = 0; i < nr_attest_caps; i++) {
-		struct thhv_attest_cap *ac = &attest_caps[i];
+	spin_lock(&cap_table_lock);
 
-		if (ac->hpa_start <= hpa &&
-		    hpa + size <= ac->hpa_start + ac->size) {
-			*out_handle = ac->handle;
+	for (n = rb_first(&cap_table); n; n = rb_next(n)) {
+		struct thhv_cap_entry *e =
+			container_of(n, struct thhv_cap_entry, node);
+
+		if (e->hpa_start <= hpa &&
+		    hpa + size <= e->hpa_start + e->size) {
+			*out_handle = e->local_handle;
+			spin_unlock(&cap_table_lock);
 			return 0;
 		}
 	}
 
+	spin_unlock(&cap_table_lock);
 	pr_warn("thhv: no parent cap for HPA %#llx+%#llx\n", hpa, size);
 	return -ENXIO;
 }
@@ -445,31 +551,30 @@ int thhv_pa_map_init_from_attestation(void)
 		}
 	}
 
-	/* Store mem_cap entries for parent handle lookup (by HPA). */
+	/* Insert mem_cap entries into the global capability table. */
 	cursor = buf + sizeof(struct domcomm_attest_report);
 	mem_caps = (struct domcomm_mem_cap_entry *)cursor;
 
-	kfree(attest_caps);
-	attest_caps = kcalloc(report->nr_mem_caps,
-			      sizeof(struct thhv_attest_cap), GFP_KERNEL);
-	if (!attest_caps) {
-		ret = -ENOMEM;
-		goto out_free;
-	}
-	nr_attest_caps = report->nr_mem_caps;
-
 	for (i = 0; i < report->nr_mem_caps; i++) {
-		attest_caps[i].handle    = mem_caps[i].handle;
-		attest_caps[i].hpa_start = mem_caps[i].hpa_start;
-		attest_caps[i].size      = mem_caps[i].size;
-
 		pr_info("thhv:   mem_cap[%u]: handle=%llu gpa=%#llx hpa=%#llx "
 			"size=%#llx rights=%#x attr=%#x\n",
 			i, mem_caps[i].handle,
 			mem_caps[i].gpa_start, mem_caps[i].hpa_start,
 			mem_caps[i].size, mem_caps[i].rights,
 			mem_caps[i].attributes);
+
+		ret = thhv_cap_table_insert(mem_caps[i].handle, 0,
+					    0, mem_caps[i].hpa_start,
+					    mem_caps[i].size);
+		if (ret) {
+			pr_err("thhv: cap table insert handle=%llu failed (%d)\n",
+			       mem_caps[i].handle, ret);
+			goto out_free;
+		}
 	}
+
+	pr_info("thhv: capability table loaded (%u entries from attestation)\n",
+		report->nr_mem_caps);
 
 	/* Skip past dom_cap entries. */
 	cursor += (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry);
@@ -530,8 +635,10 @@ void thhv_pa_map_cleanup(void)
 	write_lock(&pa_map_lock);
 	pa_map_clear();
 	write_unlock(&pa_map_lock);
-	kfree(attest_caps);
-	attest_caps = NULL;
-	nr_attest_caps = 0;
+
+	spin_lock(&cap_table_lock);
+	cap_table_clear();
+	spin_unlock(&cap_table_lock);
+
 	domcomm_cleanup();
 }
