@@ -117,11 +117,15 @@ impl PhysicalInventory {
         let vapic_pages = num_vps;
         let fixed_pages = vmxon_pages + vmcs_pages + vapic_pages;
 
+        // Include COMM pages in the total reservation budget so META + COMM
+        // are carved together from the top of usable memory.
+        let comm_pages = DOMCOMM_NR_PAGES as u64;
+
         // Iteratively solve for EPT pages.
         let available = self.available_bytes();
         let mut meta_pages = fixed_pages;
         for _ in 0..3 {
-            let dom0_bytes = available.saturating_sub(meta_pages * PAGE_SIZE);
+            let dom0_bytes = available.saturating_sub((meta_pages + comm_pages) * PAGE_SIZE);
             let dom0_pages = dom0_bytes / PAGE_SIZE;
             let l1 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE);
             let l2 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE);
@@ -131,45 +135,43 @@ impl PhysicalInventory {
             meta_pages = fixed_pages + l1 + l2 + l3 + l4;
         }
         let ept_pages  = meta_pages - fixed_pages;
-        let meta_size  = meta_pages * PAGE_SIZE;
 
-        // Collect META from the TOP of usable physical memory.
-        // Work through self.regions in reverse (highest base last after Limine sort).
-        let mut meta_regions  = [PhysRegion { base: 0, length: 0 }; MAX_META_REGIONS];
-        let mut meta_count    = 0usize;
-        let mut meta_needed   = meta_size;
+        // Total reserved = META + COMM, carved together from the top.
+        let total_reserved = (meta_pages + comm_pages) * PAGE_SIZE;
 
         // dom0_owned starts as a copy of all regions; we'll trim/remove entries
-        // consumed by META.
+        // consumed by the combined META + COMM reservation.
         let mut dom0_owned       = self.regions;
         let mut dom0_owned_count = self.count;
 
-        // Walk from the highest-address region backwards.
-        let mut ri = self.count; // index into self.regions (will be decremented)
-        while meta_needed > 0 && ri > 0 {
+        // Collect reserved pages from the TOP of usable physical memory.
+        // These will be split into META and COMM afterwards.
+        let mut reserved_regions = [PhysRegion { base: 0, length: 0 }; MAX_META_REGIONS];
+        let mut reserved_count   = 0usize;
+        let mut reserved_needed  = total_reserved;
+
+        let mut ri = self.count;
+        while reserved_needed > 0 && ri > 0 {
             ri -= 1;
             let region = self.regions[ri];
             if region.length == 0 { continue; }
 
-            let take = region.length.min(meta_needed);
-            let meta_base = region.base + region.length - take;
+            let take = region.length.min(reserved_needed);
+            let take_base = region.base + region.length - take;
 
-            // Record this META fragment (prepend to keep ascending order).
-            // Shift existing entries up to insert at front.
-            if meta_count < MAX_META_REGIONS {
-                // Shift entries [0..meta_count) one position right.
-                let mut i = meta_count;
-                while i > 0 { meta_regions[i] = meta_regions[i-1]; i -= 1; }
-                meta_regions[0] = PhysRegion { base: meta_base, length: take };
-                meta_count += 1;
+            // Record fragment (prepend to keep ascending order).
+            if reserved_count < MAX_META_REGIONS {
+                let mut i = reserved_count;
+                while i > 0 { reserved_regions[i] = reserved_regions[i-1]; i -= 1; }
+                reserved_regions[0] = PhysRegion { base: take_base, length: take };
+                reserved_count += 1;
             }
-            meta_needed -= take;
+            reserved_needed -= take;
 
-            // Update dom0_owned: find this region's entry (by base) and shrink/remove it.
+            // Shrink/remove the corresponding dom0_owned entry.
             for d in 0..dom0_owned_count {
                 if dom0_owned[d].base == region.base {
                     if take == region.length {
-                        // Entire entry consumed — remove it by shifting down.
                         let mut j = d;
                         while j + 1 < dom0_owned_count {
                             dom0_owned[j] = dom0_owned[j+1];
@@ -177,7 +179,6 @@ impl PhysicalInventory {
                         }
                         dom0_owned_count -= 1;
                     } else {
-                        // Partial: shrink the entry (take from the top).
                         dom0_owned[d].length -= take;
                     }
                     break;
@@ -185,35 +186,40 @@ impl PhysicalInventory {
             }
         }
 
-        assert!(meta_needed == 0,
-            "not enough usable memory for META pool ({} KiB needed)",
-            meta_size / 1024);
+        assert!(reserved_needed == 0,
+            "not enough usable memory for META + COMM pool ({} KiB needed)",
+            total_reserved / 1024);
 
-        // ── Reserve DomainComm pages from the BOTTOM of the first usable region ── //
+        // ── Split reserved into COMM (bottom 4 pages) and META (rest) ─────── //
         //
-        // Unlike META (carved from the top), COMM is a single contiguous block
-        // taken from the lowest available address.  dom0 uses identity mapping
-        // (GPA == HPA), so the physical address IS the guest-visible address.
-        let comm_size = (DOMCOMM_NR_PAGES as u64) * PAGE_SIZE;
-        assert!(dom0_owned_count > 0 && dom0_owned[0].length >= comm_size,
-            "first usable region too small for DomainComm ({} KiB needed)",
-            comm_size / 1024);
+        // reserved_regions is sorted ascending by base.  Take the bottom
+        // DOMCOMM_NR_PAGES pages from the first (lowest) fragment as the
+        // contiguous COMM region; everything else is META.
+        let comm_size = comm_pages * PAGE_SIZE;
+        assert!(reserved_regions[0].length >= comm_size,
+            "first reserved fragment too small for COMM ({} KiB, need {} KiB)",
+            reserved_regions[0].length / 1024, comm_size / 1024);
 
         let comm_region = PhysRegion {
-            base: dom0_owned[0].base,
+            base: reserved_regions[0].base,
             length: comm_size,
         };
-        // Shrink the first dom0_owned entry from the bottom.
-        dom0_owned[0].base += comm_size;
-        dom0_owned[0].length -= comm_size;
-        if dom0_owned[0].length == 0 {
-            // Entire entry consumed (unlikely with 16 KiB) — remove it.
-            let mut j = 0;
-            while j + 1 < dom0_owned_count {
-                dom0_owned[j] = dom0_owned[j + 1];
-                j += 1;
+
+        // Build meta_regions: same as reserved but with COMM carved from the
+        // bottom of the first fragment.
+        let mut meta_regions = [PhysRegion { base: 0, length: 0 }; MAX_META_REGIONS];
+        let mut meta_count = 0usize;
+        for i in 0..reserved_count {
+            let mut r = reserved_regions[i];
+            if i == 0 {
+                // Skip the COMM pages at the bottom.
+                r.base += comm_size;
+                r.length -= comm_size;
             }
-            dom0_owned_count -= 1;
+            if r.length > 0 {
+                meta_regions[meta_count] = r;
+                meta_count += 1;
+            }
         }
 
         MemoryPartition {
