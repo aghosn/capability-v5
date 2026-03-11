@@ -690,6 +690,32 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
 - [ ] **P15i** — Device assignment: `THHV_ASSIGN_DEVICE` → `VMCALL_ASSIGN_DEVICE`
   (Phase 4 IOMMU required).
 
+#### P15-domcomm — DomainComm Implementation (see `thhv/docs/domain-comm-v0.2.md` §16)
+
+  Incremental implementation with validation at each milestone:
+
+- [ ] **P15-dc-m0** — Binary attestation format: Define `domcomm_*` structs in
+  `thhv.h` (C) and capavisor (Rust).  DomainComm header, message header,
+  attestation report with mem_cap/dom_cap/pa_map entries.
+- [ ] **P15-dc-m1** — Capavisor pre-allocation: Allocate 4 DomainComm pages for
+  dom0 at domain creation, e820 reserved, CPUID leaf 0x40000002, write header +
+  binary attestation to RX ring.  **Test**: `cargo themis` boots normally.
+- [ ] **P15-dc-m2** — Driver discovery + parsing: CPUID discovery, `memremap()`,
+  header validation, page-aware RX dequeue, parse attestation → PA map rb-tree +
+  capability handles.  **Test**: `thhv-test-attest` userspace tool queries
+  parsed info via ioctl.
+- [ ] **P15-dc-m3** — PA map validation: Trigger a real CARVE using parsed
+  handles/HPAs.  **Test**: `thhv-test-carve` allocates a page, driver translates
+  GPA→HPA via PA map, CARVE succeeds.
+- [ ] **P15-dc-m4** — Ring growth: TX enqueue in driver, GROW_RX/TX messages,
+  capavisor growth handler, platform CommBinding self-ref detection.
+  **Test**: `thhv-test-grow` triggers growth, verifies expanded ring.
+- [ ] **P15-dc-m5** — Async VP exit delivery: Capavisor writes VP_EXIT to
+  parent's RX ring, driver dispatches to VP waitqueue.  **Test**:
+  `thhv-test-vpexit` creates child VP, triggers exit, verifies DomainComm path.
+- [ ] **P15-dc-m6** — Capability enumeration: ENUM_CAP request/response via
+  TX/RX rings.
+
 ### Phase 16 — Cloud-Hypervisor Themis Backend
 
 Add a Themis/mshv-themis hypervisor backend to cloud-hypervisor, enabling it to

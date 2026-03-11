@@ -495,14 +495,125 @@ VP-level pages (target != owner) based on the CommBinding.
   to themselves in their own capability table.  If not, add one during domain
   creation.
 
-## 16. Implementation Plan
+## 16. Implementation & Validation Plan
 
-1. Define binary attestation format structures in `thhv.h` / `themis-abi`
-2. Add CPUID leaf 0x40000002 handling to capavisor (dom0 DomainComm discovery)
-3. Implement capavisor-side: pre-allocate dom0 DomainComm, write binary
-   attestation to RX ring at domain creation, e820 reservation
-4. Implement driver-side: CPUID discovery, memremap, parse attestation at init
-5. Implement ring growth protocol (GROW_RX/TX messages + capavisor handling)
-6. Wire async VP exit delivery through DomainComm RX ring
-7. Wire single capability enumeration (ENUM_CAP)
-8. Extend platform layer to distinguish DomainComm vs VP comm from CommBinding
+Implementation is incremental: each milestone is validated before moving to the
+next.  Validation is driven from dom0 userspace via test utilities that talk to
+the thhv driver through ioctls.
+
+### Milestone 0 — Binary Attestation Format (prerequisite)
+
+**What**: Define the binary attestation structures in both Rust (capavisor) and
+C (driver/thhv.h).  This is a prerequisite for everything else.
+
+- Define `domcomm_header`, `domcomm_msg_header`, `domcomm_attest_report`,
+  `domcomm_mem_cap_entry`, `domcomm_dom_cap_entry`, `domcomm_pa_map_entry`
+  in `thhv.h`
+- Define corresponding Rust structs in `themis-abi` or capavisor platform code
+- Define DomainComm message type constants
+
+**Validation**: Compilation only — no runtime test.
+
+### Milestone 1 — Capavisor DomainComm Pre-allocation
+
+**What**: Capavisor allocates DomainComm pages for dom0 during domain creation,
+marks them in e820, sets CPUID leaf, writes header + binary attestation to RX.
+
+- Allocate 4 pages at a known GPA for dom0's DomainComm
+- Mark in e820 as type 2 (reserved)
+- Handle CPUID leaf 0x40000002 in vmexit handler
+- Write DomainComm header to page 0
+- Serialize dom0's attestation report (binary format) into the RX ring
+- (Include PA map entries, capability handles, domain policies)
+
+**Validation**: `cargo themis` boots dom0 normally — no regression.  The
+reserved e820 region and CPUID leaf are present but ignored by the unmodified
+kernel.
+
+### Milestone 2 — Driver Discovery + Attestation Parsing
+
+**What**: thhv driver discovers DomainComm at init, reads and parses the
+binary attestation from the RX ring.
+
+- Read CPUID 0x40000002 at module init
+- `memremap()` the DomainComm region
+- Validate header (magic, version)
+- Initialize ring reader (page-aware dequeue logic)
+- Dequeue `DOMCOMM_MSG_ATTEST` from RX ring
+- Parse binary attestation → populate PA map rb-tree + store capability handles
+
+**Validation**:
+- Insert thhv.ko — `dmesg` shows discovered DomainComm GPA, page count,
+  parsed PA map entries, capability handles
+- **Userspace test tool** (`thhv-test-attest`): opens `/dev/thhv`, issues a new
+  ioctl (`THHV_QUERY_PA_MAP` or `THHV_QUERY_ATTEST`) to read back parsed info,
+  prints PA map entries and capability handles to stdout
+- Verify PA map entries match expected dom0 memory layout
+
+### Milestone 3 — Validate PA Map (CARVE with Real HPAs)
+
+**What**: Validate the parsed PA map by attempting a real CARVE operation using
+the handles and HPAs from attestation.
+
+- Userspace allocates a page, calls `THHV_SET_GUEST_MEMORY` (or a test-only
+  ioctl) to trigger the driver's pin → translate → CARVE path
+- Driver uses PA map to translate GPA→HPA, uses root cap handle from
+  attestation for CARVE
+
+**Validation**: CARVE succeeds (capavisor returns success).  This proves the
+PA map and capability handles are correct end-to-end.
+
+### Milestone 4 — Ring Growth
+
+**What**: Driver allocates new pages, CARVEs them, sends GROW_RX/TX message on
+the TX ring.  Capavisor handles the growth request.
+
+- Implement TX ring enqueue in driver (page-aware, variable-length)
+- Implement `DOMCOMM_MSG_GROW_RX` / `DOMCOMM_MSG_GROW_TX` message handling in
+  capavisor platform
+- Platform layer: distinguish DomainComm from VP-comm via CommBinding (self-ref
+  detection), needed for growth to route correctly
+- Capavisor maps new pages, updates ring metadata, sends `DOMCOMM_MSG_GROW_ACK`
+
+**Validation**:
+- **Userspace test tool** (`thhv-test-grow`): triggers ring growth via ioctl,
+  verifies ring capacity increased, sends/receives test messages to confirm the
+  grown ring works
+- Check `dmesg` for growth events
+
+### Milestone 5 — Async VP Exit Delivery
+
+**What**: Wire child VP exits through the DomainComm RX ring instead of (or in
+addition to) the synchronous COMM page path.
+
+- Capavisor writes `DOMCOMM_MSG_VP_EXIT` to parent's RX ring on child VMEXIT
+- Driver RX handler dequeues, dispatches to VP waitqueue
+- IPI notification via shared ThemIC vector
+
+**Validation**:
+- Create a child domain + VP, run it, trigger an exit (e.g., HLT or MMIO)
+- Verify exit notification arrives via DomainComm RX ring
+- Userspace receives the exit info through `THHV_RUN_VP` (async path)
+
+### Milestone 6 — Single Capability Enumeration
+
+**What**: `DOMCOMM_MSG_ENUM_CAP` request/response for querying individual
+capabilities at runtime.
+
+**Validation**: Userspace tool enumerates a known capability by handle, verifies
+the response matches expected attributes.
+
+### Test Utilities
+
+All test tools are small C programs in `thhv/tests/` that open `/dev/thhv` and
+exercise the driver via ioctls:
+
+| Tool | Purpose | Milestone |
+|------|---------|-----------|
+| `thhv-test-attest` | Query parsed attestation/PA map from driver | M2 |
+| `thhv-test-carve` | Trigger a CARVE to validate PA map correctness | M3 |
+| `thhv-test-grow` | Trigger ring growth, send/receive test messages | M4 |
+| `thhv-test-vpexit` | Create child VP, trigger exit, verify DomainComm delivery | M5 |
+
+These tools run inside dom0 and are compiled against the same guest kernel
+headers (via `build-guest.sh` or a separate Makefile).
