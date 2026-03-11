@@ -71,6 +71,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
@@ -455,8 +456,9 @@ impl PlatformDomain {
     /// Write a message to the RX ring of this domain's DomainComm.
     ///
     /// The capavisor is the sole producer of the RX ring.
+    /// Head/tail are monotonic (wrap only for page lookup).
     /// Returns the number of bytes written (including header), or 0 if ring full.
-    pub fn domcomm_rx_enqueue(&self, msg_type: u32, payload: &[u8]) -> usize {
+    pub fn domcomm_rx_enqueue(&mut self, msg_type: u32, payload: &[u8]) -> usize {
         use themis_abi::domcomm;
 
         let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
@@ -465,27 +467,37 @@ impl PlatformDomain {
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
         let total_size = ((msg_hdr_size + payload.len() + 7) / 8) * 8; // 8-byte align
 
+        let capacity = dc.rx.capacity();
+        let nr_pages = dc.rx.page_hpas.len();
+
         unsafe {
             let hdr = &mut *hdr_virt;
             let rx = &mut hdr.rx;
-            let capacity = dc.rx.capacity();
             let head = rx.head as usize;
-            let tail = rx.tail as usize;
 
-            // Check space.
-            let used = if head >= tail { head - tail } else { capacity - tail + head };
-            if capacity - used < total_size {
+            // Read tail (consumer = domain, monotonic) with acquire.
+            let tail = core::ptr::read_volatile(&rx.tail) as usize;
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
+            // Check space using monotonic subtraction.
+            let used = head.wrapping_sub(tail);
+            if used > capacity || capacity - used < total_size {
                 return 0; // Ring full
             }
 
-            // Page index within the ring's page array.
-            let ring_page_idx = (head % capacity) / 4096;
-            let page_off = head % 4096;
+            // Wrap head for page lookup.
+            let wrapped_head = head % capacity;
+            let ring_page_idx = wrapped_head / 4096;
+            let page_off = wrapped_head % 4096;
 
             // Check if message fits in current page.
             if page_off + total_size > 4096 {
                 // Write padding message to fill rest of page.
                 let pad_size = 4096 - page_off;
+                if ring_page_idx >= nr_pages {
+                    serial_println!("[domcomm] RX enqueue: page_idx {} OOB", ring_page_idx);
+                    return 0;
+                }
                 let pad_page_hpa = dc.rx.page_hpas[ring_page_idx];
                 let pad_virt = (pad_page_hpa + dc.hhdm_offset) as *mut u8;
                 let pad_hdr = pad_virt.add(page_off) as *mut domcomm::MsgHeader;
@@ -493,13 +505,17 @@ impl PlatformDomain {
                 (*pad_hdr).total_size = pad_size as u32;
                 (*pad_hdr).sequence = 0;
 
-                // Advance head past padding.
-                let new_head = ((head + pad_size) % capacity) as u32;
+                // Advance head monotonically (no wrapping).
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-                rx.head = new_head;
+                rx.head = (head + pad_size) as u32;
 
                 // Recurse with the new head position.
                 return self.domcomm_rx_enqueue(msg_type, payload);
+            }
+
+            if ring_page_idx >= nr_pages {
+                serial_println!("[domcomm] RX enqueue: page_idx {} OOB", ring_page_idx);
+                return 0;
             }
 
             // Write message within current page.
@@ -522,9 +538,9 @@ impl PlatformDomain {
             (*msg_hdr_ptr).total_size = total_size as u32;
             (*msg_hdr_ptr).sequence = 0; // TODO: monotonic counter per ring
 
-            // Memory barrier + advance head.
+            // Memory barrier + advance head monotonically.
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-            rx.head = ((head + total_size) % capacity) as u32;
+            rx.head = (head + total_size) as u32;
         }
 
         total_size
@@ -532,9 +548,12 @@ impl PlatformDomain {
 
     /// Read one message from the TX ring (domain→capavisor, we are consumer).
     ///
-    /// Returns `Some((msg_type, payload))` on success, `None` if ring is empty.
+    /// Returns `Some((msg_type, payload_size))` on success, `None` if ring is empty.
     /// Handles padding messages transparently.
-    pub fn domcomm_tx_dequeue(&self, buf: &mut [u8]) -> Option<(u32, usize)> {
+    ///
+    /// Security: bounds-checks all domain-supplied values. Copies the message
+    /// header before inspecting it to avoid TOCTOU on shared memory.
+    pub fn domcomm_tx_dequeue(&mut self, buf: &mut [u8]) -> Option<(u32, usize)> {
         use themis_abi::domcomm;
 
         let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
@@ -542,15 +561,18 @@ impl PlatformDomain {
 
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
 
+        let capacity = dc.tx.capacity();
+        if capacity == 0 {
+            return None;
+        }
+        let nr_pages = dc.tx.page_hpas.len();
+
         unsafe {
             let hdr = &mut *hdr_virt;
             let tx = &mut hdr.tx;
-            let capacity = dc.tx.capacity();
-            if capacity == 0 {
-                return None;
-            }
 
-            // Read head (producer = domain) with acquire.
+            // Read head (producer = domain) with acquire fence.
+            // Head/tail are monotonic (never wrapped by the domain).
             let head = core::ptr::read_volatile(&tx.head) as usize;
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
             let tail = tx.tail as usize;
@@ -559,37 +581,71 @@ impl PlatformDomain {
                 return None;
             }
 
-            // Read message header.
-            let ring_page_idx = (tail % capacity) / 4096;
-            let page_off = tail % 4096;
+            // Sanity: available data.
+            let avail = head.wrapping_sub(tail);
+            if avail > capacity {
+                serial_println!("[domcomm] TX dequeue: corrupt ring (head={}, tail={}, cap={})",
+                    head, tail, capacity);
+                return None;
+            }
+
+            // Wrap tail for page lookup.
+            let wrapped_tail = tail % capacity;
+            let ring_page_idx = wrapped_tail / 4096;
+            let page_off = wrapped_tail % 4096;
+
+            if ring_page_idx >= nr_pages {
+                serial_println!("[domcomm] TX dequeue: page_idx {} out of range (nr_pages={})",
+                    ring_page_idx, nr_pages);
+                return None;
+            }
+
             let page_hpa = dc.tx.page_hpas[ring_page_idx];
             let page_virt = (page_hpa + dc.hhdm_offset) as *const u8;
-            let msg_hdr_ptr = page_virt.add(page_off) as *const domcomm::MsgHeader;
-            let msg_hdr = core::ptr::read_volatile(msg_hdr_ptr);
 
-            // Skip padding.
+            // Copy the message header to a local variable (TOCTOU defense).
+            let mut msg_hdr: domcomm::MsgHeader = core::mem::zeroed();
+            core::ptr::copy_nonoverlapping(
+                page_virt.add(page_off) as *const u8,
+                &mut msg_hdr as *mut domcomm::MsgHeader as *mut u8,
+                msg_hdr_size,
+            );
+
+            // Skip padding — use monotonic tail (no wrapping).
             if msg_hdr.message_type == domcomm::msg_types::NONE {
                 let pad_size = msg_hdr.total_size as usize;
+                if pad_size == 0 || pad_size > 4096 {
+                    serial_println!("[domcomm] TX dequeue: invalid padding size {}", pad_size);
+                    return None;
+                }
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-                tx.tail = ((tail + pad_size) % capacity) as u32;
+                tx.tail = (tail + pad_size) as u32;
                 return self.domcomm_tx_dequeue(buf);
             }
 
-            let payload_size = msg_hdr.total_size as usize - msg_hdr_size;
+            // Bounds-check total_size.
+            let total_size = msg_hdr.total_size as usize;
+            if total_size < msg_hdr_size || total_size > avail || total_size > 4096 {
+                serial_println!("[domcomm] TX dequeue: invalid total_size {} (avail={}, hdr={})",
+                    total_size, avail, msg_hdr_size);
+                return None;
+            }
+
+            let payload_size = total_size - msg_hdr_size;
             if payload_size > buf.len() {
                 serial_println!("[domcomm] TX message too large ({} > {})", payload_size, buf.len());
                 return None;
             }
 
-            // Read payload.
+            // Copy payload (skip header).
             if payload_size > 0 {
                 let payload_src = page_virt.add(page_off + msg_hdr_size);
                 core::ptr::copy_nonoverlapping(payload_src, buf.as_mut_ptr(), payload_size);
             }
 
-            // Advance tail with release.
+            // Advance tail monotonically (match driver protocol).
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-            tx.tail = ((tail + msg_hdr.total_size as usize) % capacity) as u32;
+            tx.tail = (tail + total_size) as u32;
 
             Some((msg_hdr.message_type, payload_size))
         }
@@ -715,13 +771,18 @@ pub struct ThemisPlatform {
     domains:         DomainTable,
     // Tier 3: global routing
     routing:         RwLock<RoutingMaps>,
-    // LAPIC IDs: immutable after bootstrap
-    lapic_ids:       RwLock<Vec<u32>>,
+    // LAPIC IDs: written once at boot, immutable after — no lock needed.
+    lapic_ids:       UnsafeCell<Vec<u32>>,
     // Tree root anchor — keeps dom0's capability tree alive.
     dom0_cap:        Mutex<Option<CapabilityRef<Domain>>>,
     // Per-core VMXON physical addresses; written once by BSP, read by each AP.
     vmxon_phys:      Vec<u64>,
 }
+
+// SAFETY: `lapic_ids` uses `UnsafeCell` but is only written once during
+// single-threaded boot (bootstrap_set_lapic_ids) and read-only after.
+// All other fields are already Sync (atomics, spin locks, etc.).
+unsafe impl Sync for ThemisPlatform {}
 
 impl ThemisPlatform {
     /// Create a new platform with no domains registered.
@@ -752,7 +813,7 @@ impl ThemisPlatform {
             cores,
             domains:      DomainTable::new(),
             routing:      RwLock::new(RoutingMaps::new()),
-            lapic_ids:    RwLock::new(Vec::new()),
+            lapic_ids:    UnsafeCell::new(Vec::new()),
             dom0_cap:     Mutex::new(None),
             vmxon_phys:   Vec::new(),
         }
@@ -776,7 +837,7 @@ impl ThemisPlatform {
     }
 
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
-        *self.lapic_ids.write() = ids;
+        unsafe { *self.lapic_ids.get() = ids; }
     }
 
     pub fn bootstrap_give_meta(&self, domain_id: DomainId, region: PhysRegion) {
@@ -829,7 +890,7 @@ impl ThemisPlatform {
         let arc = self.domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_write_attestation: domain not registered"));
-        let d = arc.lock();
+        let mut d = arc.lock();
         let wrote = d.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, payload);
         assert!(wrote > 0, "bootstrap_write_attestation: RX ring full or too small");
     }
@@ -1024,14 +1085,25 @@ impl Platform for ThemisPlatform {
         // Send INIT assert: delivery mode 0x5, level assert (bit 14), edge.
         // INIT always causes VMEXIT(EXIT_REASON_INIT_SIGNAL = 3) from
         // non-root mode, regardless of pin-based controls.
-        let lapic_id = *self.lapic_ids
-            .read()
-            .get(core_id as usize)
-            .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id));
-        let icr: u64 = ((lapic_id as u64) << 32)
-            | (1u64 << 14)   // level = assert
-            | (0x5u64 << 8); // delivery mode = INIT
-        unsafe { x86::msr::wrmsr(x86::msr::IA32_X2APIC_ICR, icr) };
+        //
+        // Use xAPIC MMIO (0xFEE0_0000) because the capavisor never enables
+        // x2APIC mode and dom0 could regress it.  When we properly
+        // virtualise dom0's APIC access, we can switch to x2APIC MSRs.
+        let lapic_id = unsafe {
+            let ids = &*self.lapic_ids.get();
+            *ids.get(core_id as usize)
+                .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
+        };
+        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+        let apic_base = hhdm + 0xFEE0_0000u64;
+        unsafe {
+            // ICR high: destination APIC ID in bits 24-31
+            let icr_hi = (apic_base + 0x310) as *mut u32;
+            core::ptr::write_volatile(icr_hi, lapic_id << 24);
+            // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14)
+            let icr_lo = (apic_base + 0x300) as *mut u32;
+            core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
+        }
     }
 
     fn sync_barrier(&self, id: u8, participants: usize) {
@@ -1217,10 +1289,12 @@ impl Platform for ThemisPlatform {
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
-        let lapic_id = unsafe { x86::msr::rdmsr(x86::msr::IA32_X2APIC_APICID) as u32 };
-        self.lapic_ids
-            .read()
-            .iter()
+        // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
+        // Works regardless of xAPIC vs x2APIC mode.
+        let cpuid = core::arch::x86_64::__cpuid(1);
+        let lapic_id = (cpuid.ebx >> 24) as u32;
+        let ids = unsafe { &*self.lapic_ids.get() };
+        ids.iter()
             .position(|&id| id == lapic_id)
             .map(|i| i as CoreId)
     }

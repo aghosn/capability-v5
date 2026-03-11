@@ -284,6 +284,8 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		goto err_free;
 	}
 
+	pr_info("thhv: grow[1] alloc ok: gpa=%#llx hpa=%#llx\n", gpa, hpa);
+
 	/* Find parent capability covering this HPA range. */
 	ret = thhv_find_parent_handle(hpa, nr_pages * PAGE_SIZE,
 				      &parent_handle);
@@ -292,6 +294,8 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		       hpa, ret);
 		goto err_free;
 	}
+
+	pr_info("thhv: grow[2] parent_handle=%llu\n", parent_handle);
 
 	/* CARVE a new capability for the growth pages. */
 	ret = themis_carve(parent_handle, hpa,
@@ -303,6 +307,9 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		goto err_free;
 	}
 
+	pr_info("thhv: grow[3] CARVE ok: handle=%llu sub=%llu\n",
+		carved_handle, sub);
+
 	/* Insert into cap table (we own it until growth completes). */
 	ret = thhv_cap_table_insert(carved_handle, parent_handle,
 				    sub, hpa, nr_pages * PAGE_SIZE);
@@ -311,6 +318,8 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		goto err_revoke;
 	}
 
+	pr_info("thhv: grow[4] cap_table_insert ok\n");
+
 	/* REGISTER_COMM(carved_handle, self_domain_handle, 0) — self-ref. */
 	ret = themis_register_comm(carved_handle,
 				   dc->self_domain_handle, 0);
@@ -318,6 +327,8 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		pr_err("thhv: domcomm grow: REGISTER_COMM failed (%d)\n", ret);
 		goto err_cap_remove;
 	}
+
+	pr_info("thhv: grow[5] REGISTER_COMM ok\n");
 
 	/* Send GROW request on TX ring. */
 	req.cap_handle = carved_handle;
@@ -334,12 +345,16 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		goto err_cap_remove;
 	}
 
+	pr_info("thhv: grow[6] tx_enqueue ok, calling NOTIFY...\n");
+
 	/* Notify capavisor to process the TX ring. */
 	ret = themis_domcomm_notify();
 	if (ret) {
 		pr_err("thhv: domcomm grow: DOMCOMM_NOTIFY failed (%d)\n", ret);
 		goto err_cap_remove;
 	}
+
+	pr_info("thhv: grow[7] NOTIFY returned, checking RX for ACK...\n");
 
 	/* Read the GROW_ACK from RX ring. */
 	ret = domcomm_rx_dequeue(&dc->rx, &ack, sizeof(ack),

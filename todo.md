@@ -53,7 +53,7 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 - [x] **P3a**: ✅ DONE.  All 9 Platform trait methods implemented: acquire_shared/exclusive_lock
   (spin::RwLock), apply_update (6 variants), register_domain, on_domain_revoked,
-  send_ipi (x2APIC INIT assert), sync_barrier (two-phase AtomicUsize),
+  send_ipi (xAPIC MMIO INIT assert — see #U5 note), sync_barrier (two-phase AtomicUsize),
   try_acquire_update_lock / release_update_lock, poll_and_respond_cross_core.
   Helper methods: set_core_context, clear_core_domain, domain_core.
 - [x] **P3b**: Cross-core preemption via INIT signal.
@@ -714,8 +714,16 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   self-ref→GROW msg→ACK→extend local ring).  Capavisor: `DomainCommState` refactored
   with per-ring page tracking, `domcomm_tx_dequeue()`, CommRegion self-ref no-op,
   GROW handler (cap lookup→extend ring pages→update header→ACK).
-  **Test**: attestation verified (dom_cap, self-domain handle).  GROW flow needs
-  end-to-end test (trigger from init or ioctl).
+  **Bugs fixed during bring-up**:
+  - Head/tail wrapping mismatch (driver monotonic vs capavisor `% capacity`) — unified to monotonic.
+  - TOCTOU: capavisor now copies msg headers before inspection (pattern for all future msgs).
+  - `get_current_core()` deadlock: `lapic_ids` changed from `spin::RwLock` → `UnsafeCell`
+    (write-once at boot, read-only after).
+  - `rdmsr(IA32_X2APIC_APICID)` #GP: x2APIC never enabled; replaced with CPUID leaf 1.
+  **Test infrastructure**: `thhv/test/thhv_test.c` userspace tool + `THHV_TEST` ioctl
+  (build with `KCFLAGS=-DCONFIG_THHV_TEST`).
+  **Tested**: `grow_rx 1` (RX 2→3 pages, 12288 bytes) and `grow_tx 1` (TX 1→2 pages, 8192 bytes)
+  both pass end-to-end.
 - [ ] **P15-dc-m5** — Async VP exit delivery: Capavisor writes VP_EXIT to
   parent's RX ring, driver dispatches to VP waitqueue.  **Test**:
   `thhv-test-vpexit` creates child VP, triggers exit, verifies DomainComm path.
@@ -809,7 +817,14 @@ match with the running capavisor.  See `2026/docs/design/mshv_themis/mshv_themis
 - [ ] **#U1** `UpdateBatch::snapshots` — rollback not implemented. _Deferred — future work._
 - [ ] **#U2** `CapavisorAPI::ENUMERATE` / `enumerate_pending` — semantics TBD. _Deferred._
 - [ ] **#U3** Cache coloring — see `./2026/docs/design/address_translation.md`. _Phase 4–6 of address translation design._
-- [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note. _Post-clean-boot refactor._
+- [ ] **#U5** vAPIC for all domains (incl. dom0) — replace LAPIC/IOAPIC EPT passthrough with "Virtualize APIC accesses" (secondary bit 0), APIC-access page, virtual-APIC page, and TPR shadow.  Remove direct LAPIC EPT mapping from boot.rs.  See BUG-6 note.  _Post-clean-boot refactor._
+  **NOTE (x2APIC)**: the capavisor never enables x2APIC mode; the APIC runs
+  in xAPIC (MMIO) mode.  `get_current_core()` uses CPUID leaf 1 (always works).
+  `send_ipi()` uses xAPIC MMIO writes (0xFEE0_0300/0x310 via HHDM).  We cannot
+  enable x2APIC until dom0's APIC access is virtualised (otherwise dom0 Linux
+  may regress the mode by writing IA32_APIC_BASE directly).  Once #U5 is done
+  and IA32_APIC_BASE writes are intercepted, enable x2APIC for the capavisor
+  and switch send_ipi back to `wrmsr(IA32_X2APIC_ICR)`.
 - [x] **#U6** Enable XSAVES/XRSTORS — ✅ DONE.  Set secondary exec control bit 20 (ENABLE_XSAVES_XRSTORS), write XSS-exiting bitmap = 0 (all XSAVES/XRSTORS execute natively), removed CPUID 0xD:1 bit 3 mask.  IA32_XSS (0xDA0) passes through via zeroed MSR bitmap.  Tested: dom0 boots to login prompt.
 - [x] **#U7** Capability API plumbing (themis_abi ↔ capability engine) — ✅ DONE.
   CoreContext replaces PerCoreCell (domain_id, vp_id, domain_cap).  Boot init

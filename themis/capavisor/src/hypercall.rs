@@ -88,15 +88,18 @@ fn map_error(e: &CapaError) -> u64 {
 pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
     if platform_ptr.is_null() {
+        serial_println!("[VMCALL] platform_ptr null!");
         return HypercallResult::error(errors::ERR_INVALID);
     }
     let platform = unsafe { &*platform_ptr };
 
     let Some(core_id) = platform.get_current_core() else {
+        serial_println!("[VMCALL] get_current_core returned None");
         return HypercallResult::error(errors::ERR_INVALID);
     };
 
     let Some(caller) = platform.get_core_cap(core_id as usize) else {
+        serial_println!("[VMCALL] get_core_cap({}) returned None", core_id);
         return HypercallResult::error(errors::ERR_INVALID);
     };
 
@@ -153,13 +156,21 @@ fn do_carve(
     size: u64,
     rights_bits: u64,
 ) -> HypercallResult {
+    serial_println!("[CARVE] parent={} start={:#x} size={:#x} rights={:#x}",
+        parent_handle, start, size, rights_bits);
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::carve(&caller, parent_handle, access).map(|(h, s, batch)| ((h, s), batch))
     }) {
-        Ok(((handle, sub), _)) => HypercallResult::success_2(handle, sub),
-        Err(e) => HypercallResult::error(map_error(&e)),
+        Ok(((handle, sub), _)) => {
+            serial_println!("[CARVE] ok: handle={} sub={}", handle, sub);
+            HypercallResult::success_2(handle, sub)
+        }
+        Err(e) => {
+            serial_println!("[CARVE] error: {:?}", e);
+            HypercallResult::error(map_error(&e))
+        }
     }
 }
 
@@ -345,14 +356,12 @@ fn do_domcomm_notify(
 
     // Drain all pending TX messages.
     let mut buf = [0u8; 4096];
-    let mut processed = 0u32;
 
     loop {
         let result = pd_locked.domcomm_tx_dequeue(&mut buf);
         match result {
             None => break,
             Some((msg_type, payload_size)) => {
-                processed += 1;
                 match msg_type {
                     domcomm::msg_types::GROW_RX | domcomm::msg_types::GROW_TX => {
                         let is_rx = msg_type == domcomm::msg_types::GROW_RX;
@@ -370,10 +379,6 @@ fn do_domcomm_notify(
         }
     }
 
-    if processed > 0 {
-        serial_println!("[domcomm] processed {} TX messages from domain {}", processed, domain_id);
-    }
-
     HypercallResult::success()
 }
 
@@ -381,6 +386,10 @@ fn do_domcomm_notify(
 ///
 /// The domain has CARVEd pages and REGISTER_COMM'd them (self-ref).
 /// We look up the capability to find the HPAs, then extend the ring.
+///
+/// Security: the payload was already copied from shared memory by
+/// domcomm_tx_dequeue (TOCTOU-safe). All domain-supplied values
+/// (handle, nr_pages) are bounds-checked before use.
 fn handle_grow(
     _platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -390,21 +399,36 @@ fn handle_grow(
 ) {
     use themis_abi::domcomm;
 
-    if payload.len() < core::mem::size_of::<domcomm::GrowRequest>() {
+    let req_size = core::mem::size_of::<domcomm::GrowRequest>();
+    if payload.len() < req_size {
         serial_println!("[domcomm] GROW payload too small ({})", payload.len());
-        send_grow_ack(pd, 1); // status=1 (error)
+        send_grow_ack(pd, 1);
         return;
     }
 
-    let req = unsafe {
-        &*(payload.as_ptr() as *const domcomm::GrowRequest)
-    };
+    // Copy to a local struct (payload is already a copy from domcomm_tx_dequeue,
+    // but we do a typed copy for alignment safety).
+    let mut req: domcomm::GrowRequest = unsafe { core::mem::zeroed() };
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            payload.as_ptr(),
+            &mut req as *mut domcomm::GrowRequest as *mut u8,
+            req_size,
+        );
+    }
 
     serial_println!(
         "[domcomm] GROW_{}: cap_handle={} cap_sub={} nr_pages={}",
         if is_rx { "RX" } else { "TX" },
         req.cap_handle, req.cap_sub, req.nr_pages,
     );
+
+    // Bounds-check nr_pages (prevent OOM from malicious domain).
+    if req.nr_pages == 0 || req.nr_pages > 256 {
+        serial_println!("[domcomm] GROW: invalid nr_pages {}", req.nr_pages);
+        send_grow_ack(pd, 6);
+        return;
+    }
 
     // Look up the capability to find the HPAs.
     let hpa_start: u64;
