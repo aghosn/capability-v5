@@ -33,36 +33,64 @@ fi
 IMG="$(realpath "$IMG")"
 
 MNT="/tmp/mnt"
+NBD_MAX=15   # nbd0..nbd15
 
 modprobe nbd max_part=16
 
-# Clean up any stale nbd0 session from a previous run.
+# ── Clean up stale mount if $MNT is busy ──────────────────────────────────── #
 umount "$MNT" &>/dev/null || true
-qemu-nbd -d /dev/nbd0 &>/dev/null || true
-sleep 0.5
 
-qemu-nbd -c /dev/nbd0 "$IMG"
+# ── Find a usable nbd device ──────────────────────────────────────────────── #
+# If /dev/nbdN has a non-zero size it is already connected (possibly zombie'd
+# from a crashed previous run).  Try to disconnect it; if that fails, skip it
+# and try the next device.
+NBD=""
+for n in $(seq 0 $NBD_MAX); do
+    dev="/dev/nbd$n"
+    [[ -b "$dev" ]] || continue
+
+    sz=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    if (( sz != 0 )); then
+        # Device in use — try to reclaim it.
+        qemu-nbd -d "$dev" &>/dev/null || true
+        sleep 0.3
+        sz=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    fi
+    if (( sz == 0 )); then
+        NBD="$dev"
+        break
+    fi
+done
+
+if [[ -z "$NBD" ]]; then
+    echo "ERROR: no free nbd device found (nbd0..nbd$NBD_MAX all busy)" >&2
+    exit 1
+fi
+
+qemu-nbd -c "$NBD" "$IMG"
 
 # Wait for the kernel to discover partitions (up to 5 seconds).
 for i in $(seq 1 10); do
-    if ls /dev/nbd0p* &>/dev/null; then
+    if ls "${NBD}p"* &>/dev/null; then
         break
     fi
     sleep 0.5
 done
 
-if ! ls /dev/nbd0p* &>/dev/null; then
-    echo "ERROR: no partitions found on $IMG" >&2
-    qemu-nbd -d /dev/nbd0
+if ! ls "${NBD}p"* &>/dev/null; then
+    echo "ERROR: no partitions found on $IMG (device $NBD)" >&2
+    qemu-nbd -d "$NBD"
     exit 1
 fi
 
 mkdir -p "$MNT"
 
-# Find the root partition: try the largest ext4/xfs partition.
+# Find the root partition: try each partition looking for /etc.
+# Try -o noload first (ext4 with dirty journal from unclean shutdown),
+# then fall back to plain ro.
 ROOT_PART=""
-for part in /dev/nbd0p*; do
-    if mount -o ro "$part" "$MNT" &>/dev/null; then
+for part in "${NBD}p"*; do
+    if mount -o ro,noload "$part" "$MNT" &>/dev/null || mount -o ro "$part" "$MNT" &>/dev/null; then
         if [[ -d "$MNT/etc" ]]; then
             ROOT_PART="$part"
             umount "$MNT"
@@ -74,11 +102,11 @@ done
 
 if [[ -z "$ROOT_PART" ]]; then
     echo "ERROR: could not find root partition in $IMG" >&2
-    echo "Available partitions: $(ls /dev/nbd0p*)" >&2
-    qemu-nbd -d /dev/nbd0
+    echo "Available partitions: $(ls "${NBD}p"*)" >&2
+    qemu-nbd -d "$NBD"
     exit 1
 fi
 
 mount "$ROOT_PART" "$MNT"
-echo "Mounted $(basename "$IMG") at $MNT"
-echo "Unmount with:  sudo umount $MNT && sudo qemu-nbd -d /dev/nbd0"
+echo "Mounted $(basename "$IMG") at $MNT  (device $NBD)"
+echo "Unmount with:  sudo umount $MNT && sudo qemu-nbd -d $NBD"
