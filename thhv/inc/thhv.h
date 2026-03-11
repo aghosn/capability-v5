@@ -737,6 +737,27 @@ struct thhv_query {
 #define THHV_SET_VP_STATE \
 	_IOW(THHV_IOCTL_MAGIC, 0x22, struct thhv_vp_registers)
 
+/* ── Test ioctls (CONFIG_THHV_TEST only) ───────────────────────────────────── */
+
+/*
+ * Test commands for THHV_TEST_CMD ioctl.
+ * Each command exercises a specific driver path.
+ * Build with THHV_TEST=1 to enable.
+ */
+#define THHV_TEST_CMD_GROW_RX    1   /* Grow RX ring by arg pages */
+#define THHV_TEST_CMD_GROW_TX    2   /* Grow TX ring by arg pages */
+#define THHV_TEST_CMD_TX_PING    3   /* TX enqueue + notify (echo test) */
+
+struct thhv_test_cmd {
+	__u32 command;    /* THHV_TEST_CMD_* */
+	__u32 arg;        /* Command-specific argument */
+	__s32 result;     /* Filled on return: 0 = success, <0 = errno */
+	__u32 reserved;
+};
+
+#define THHV_TEST \
+	_IOWR(THHV_IOCTL_MAGIC, 0xF0, struct thhv_test_cmd)
+
 /* ── Internal driver structures (kernel-only) ──────────────────────────────── */
 
 #ifdef __KERNEL__

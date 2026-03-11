@@ -67,6 +67,43 @@ static long thhv_dev_query(void __user *uarg)
 	return 0;
 }
 
+/* ── Test infrastructure (CONFIG_THHV_TEST) ────────────────────────────────── */
+
+#ifdef CONFIG_THHV_TEST
+
+static long thhv_test_cmd(void __user *uarg)
+{
+	struct thhv_test_cmd cmd;
+	int ret;
+
+	if (copy_from_user(&cmd, uarg, sizeof(cmd)))
+		return -EFAULT;
+
+	switch (cmd.command) {
+	case THHV_TEST_CMD_GROW_RX:
+		pr_info("thhv: TEST grow RX by %u pages\n", cmd.arg);
+		ret = domcomm_request_grow(true, cmd.arg ? cmd.arg : 1);
+		break;
+
+	case THHV_TEST_CMD_GROW_TX:
+		pr_info("thhv: TEST grow TX by %u pages\n", cmd.arg);
+		ret = domcomm_request_grow(false, cmd.arg ? cmd.arg : 1);
+		break;
+
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	cmd.result = ret;
+	if (copy_to_user(uarg, &cmd, sizeof(cmd)))
+		return -EFAULT;
+
+	return ret;
+}
+
+#endif /* CONFIG_THHV_TEST */
+
 static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 			       unsigned long arg)
 {
@@ -89,6 +126,11 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 	 * from the capavisor's attestation data at init time.
 	 * See thhv_pa_map_init_from_attestation() in thhv_translate.c.
 	 */
+
+#ifdef CONFIG_THHV_TEST
+	case THHV_TEST:
+		return thhv_test_cmd(uarg);
+#endif
 
 	default:
 		return -ENOTTY;
