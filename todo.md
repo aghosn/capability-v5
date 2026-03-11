@@ -608,24 +608,32 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   with Themis error→errno translation), `Makefile` + `Kbuild` (out-of-tree build).
   All ioctls return `-ENOSYS`; data structures fully wired.
 - [x] **P15c** — ✅ DONE.  Partition ioctls wired to capavisor:
-  `MSHV_CREATE_PARTITION` → `themis_create_domain(~0, ~0, num_vps)` stores
-  domain handle; `MSHV_INITIALIZE_PARTITION` → `themis_seal(handle)` with
-  local `sealed` guard; partition destroy → `themis_revoke_domain(handle)`.
-  Error path in create properly revokes domain if fd allocation fails.
-- [ ] **P15d** — VP ioctls: `MSHV_CREATE_VP` → allocate VP slot in domain,
-  `MSHV_SET_VP_REGISTERS` / `MSHV_GET_VP_REGISTERS` → `VMCALL_SET_REG` / `VMCALL_GET_REG`
-  (or META page direct access if Phase 10 is available).
-- [ ] **P15e** — Memory mapping ioctls: `MSHV_MAP_GUEST_MEMORY` → `VMCALL_CARVE` +
+  `THHV_CREATE_PARTITION` → `themis_create_domain(cores_mask, api_flags, num_vps)`;
+  `THHV_INITIALIZE_PARTITION` → pins shared META pages (MSR bitmap + IO bitmaps,
+  3 pages from userspace) + `themis_seal(handle)`;
+  partition destroy → `themis_revoke_domain(handle)` + unpin pages.
+  Renamed entire driver from `hvthemis`/`MSHV` to `thhv`/`THHV` (`/dev/thhv`).
+  Added `THHV_QUERY` ioctl with `META_PAGES_PER_VP` and `META_PAGES_SHARED` types.
+- [x] **P15d** — ✅ DONE.  VP ioctls:
+  `THHV_CREATE_VP` accepts `meta_uaddr` (2 per-VP META pages for VMCS + VAPIC) +
+  `comm_uaddr` (1 COMM page for register state).  All pages pinned from userspace
+  via `pin_user_pages_fast`, unpinned on VP release.
+  `THHV_GET_VP_STATE` / `THHV_SET_VP_STATE` wired to per-register
+  `themis_get_reg`/`themis_set_reg` as slow-path fallback.
+  COMM page (`VpCommPage`) will be the fast path once REGISTER_COMM + SWITCH are wired.
+  Capavisor GET_REG/SET_REG handlers still return ERR_UNIMPL — needs P15e first.
+- [ ] **P15e** — Memory mapping: `THHV_SET_GUEST_MEMORY` → `VMCALL_CARVE` +
   `VMCALL_SEND` to transfer memory capabilities to child domain.
-  `MSHV_UNMAP_GUEST_MEMORY` → `VMCALL_REVOKE_MEM`.
-- [ ] **P15f** — `MSHV_RUN_VP` → `VMCALL_SWITCH`.  Returns exit reason from META page
-  (or from VMCALL return registers if Phase 10 not available).  Handle intercept
-  types: HLT, I/O port, MMIO, CPUID, MSR, shutdown.
-- [ ] **P15g** — Interrupt injection: `MSHV_ASSERT_INTERRUPT` → `VMCALL` or posted
-  interrupt path.  `MSHV_IRQFD` → eventfd + workqueue → PI descriptor write.
-- [ ] **P15h** — `mmap` for VP state: userspace maps META page (Phase 10) for
+  Also: CARVE + SEND the META pages (per-VP + shared) to child with META attribute,
+  and REGISTER_COMM for the COMM pages.  Unmap → `VMCALL_REVOKE_MEM`.
+- [ ] **P15f** — `THHV_RUN_VP` → `VMCALL_SWITCH`.  COMM page sync: capavisor
+  flushes dirty registers to child VMCS before entry, fills COMM from VMCS on exit.
+  Handle intercept types: HLT, I/O port, MMIO, CPUID, MSR, shutdown.
+- [ ] **P15g** — Interrupt injection: `THHV_ASSERT_INTERRUPT` → `VMCALL` or posted
+  interrupt path.  `THHV_IRQFD` → eventfd + workqueue → PI descriptor write.
+- [ ] **P15h** — `mmap` for VP state: userspace maps COMM page for
   zero-copy register access and exit reason inspection.
-- [ ] **P15i** — Device assignment: `MSHV_ASSIGN_DEVICE` → `VMCALL_ASSIGN_DEVICE`
+- [ ] **P15i** — Device assignment: `THHV_ASSIGN_DEVICE` → `VMCALL_ASSIGN_DEVICE`
   (Phase 4 IOMMU required).
 
 ### Phase 16 — Cloud-Hypervisor Themis Backend

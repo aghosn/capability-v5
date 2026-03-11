@@ -22,6 +22,15 @@ use themis_abi::{errors, opcodes};
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+// When built as a staticlib (for linking into a kernel module), we need
+// a panic handler.  In the kernel context, panics should never happen;
+// if they do, loop forever (the kernel's own BUG() is the real handler).
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
 // ── Raw VMCALL primitive ────────────────────────────────────────────────── //
 
 /// Issue a VMCALL with up to 5 arguments.

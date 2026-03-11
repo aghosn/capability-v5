@@ -5,6 +5,7 @@ thhv-objs := src/thhv_main.o src/thhv_hvcall.o src/thhv_part.o src/thhv_vp.o
 ccflags-y += -I$(src)/inc
 
 # Link the Rust static library (built by the outer Makefile).
-LIBTHEMIS_DIR := $(src)/../themis/crates/libthemis
-LIBTHEMIS_A   := $(LIBTHEMIS_DIR)/target/x86_64-unknown-none/release/liblibthemis.a
-KBUILD_EXTRA_LDFLAGS += $(LIBTHEMIS_A)
+# LDFLAGS_thhv.o applies during composite-object partial link (ld -r),
+# so modpost sees the resolved symbols.
+LIBTHEMIS_A := $(src)/../themis/target/x86_64-unknown-none/release/liblibthemis.a
+LDFLAGS_thhv.o += --whole-archive $(LIBTHEMIS_A) --no-whole-archive

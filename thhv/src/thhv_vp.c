@@ -12,6 +12,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/uaccess.h>
 #include <linux/mm.h>
+#include <linux/highmem.h>
 
 #include "thhv.h"
 
@@ -185,7 +186,7 @@ static int thhv_vp_pin_pages(struct thhv_vp *vp,
 	}
 
 	vp->comm_kaddr = kmap(vp->comm_page);
-	vp->comm_phys = page_to_phys(vp->comm_page);
+	vp->comm_phys = (u64)page_to_pfn(vp->comm_page) << PAGE_SHIFT;
 
 	return 0;
 
