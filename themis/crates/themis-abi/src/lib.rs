@@ -137,6 +137,8 @@ pub mod errors {
 
 pub mod regs;
 
+pub mod domcomm;
+
 pub use regs::{
     DescriptorTableReg, SegmentReg, VpCommPage, VpGpRegs, VpRegister, VpSregs,
 };

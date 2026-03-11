@@ -295,7 +295,7 @@ ATTEST_REQ.  Large reports are split across multiple messages with sequence
 numbers for reassembly.
 
 ```
-Attestation payload (binary, variable-length):
+Attestation payload (binary, 40-byte header + variable-length arrays):
 
 Offset   Size    Field
 0x00     8       domain_id
@@ -305,7 +305,10 @@ Offset   Size    Field
 0x14     4       nr_mem_caps     Number of memory capability entries
 0x18     4       nr_dom_caps     Number of domain capability entries
 0x1C     4       nr_pa_entries   Number of PA map (GPA→HPA) entries
-0x20     ...     mem_caps[]      Array of mem_cap_entry
+0x20     2       chunk_index     0-based (0 if single message)
+0x22     2       total_chunks    1 if entire report fits in one msg
+0x24     4       reserved
+0x28     ...     mem_caps[]      Array of mem_cap_entry
                  dom_caps[]      Array of dom_cap_entry
                  pa_map[]        Array of pa_map_entry
 
