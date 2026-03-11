@@ -942,6 +942,15 @@ int thhv_cap_table_insert(u64 local_handle, u64 parent_handle,
 int thhv_cap_table_remove(u64 local_handle);
 void thhv_pa_map_cleanup(void);
 
+/* CARVE + SEND META pages to a child domain (frame allocator backing). */
+int thhv_send_meta_pages(struct thhv_partition *part,
+			 struct page **pages, unsigned int nr_pages,
+			 u64 region_key);
+
+/* Synthetic region_key values for META caps (never valid as a guest_pfn). */
+#define THHV_META_KEY_SHARED	0xFFFFFFFFFFFF0001ULL
+#define THHV_META_KEY_VP(vp)	(0xFFFFFFFFFFFF1000ULL + (u64)(vp))
+
 /*
  * DomainComm ring accessor — page-aware byte-oriented ring.
  *

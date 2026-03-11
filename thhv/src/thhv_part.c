@@ -368,6 +368,114 @@ err_free:
 	return ret;
 }
 
+/* ── CARVE + SEND META pages to child domain ───────────────────────────────── */
+
+/*
+ * CARVE each pinned page from its parent capability and SEND to the child
+ * domain with META attribute.  META pages are used by the capavisor for
+ * internal allocations (VMCS, VAPIC, MSR bitmap, EPT pages).
+ *
+ * On success, each page's capability is tracked in part->sent_caps for
+ * revocation on teardown.  region_key is set to a synthetic value to
+ * distinguish META caps from normal memory mappings.
+ *
+ * Returns 0 on success, negative errno on failure (partial sends are
+ * rolled back).
+ */
+int thhv_send_meta_pages(struct thhv_partition *part,
+				struct page **pages, unsigned int nr_pages,
+				u64 region_key)
+{
+	unsigned int i, nr_sent = 0;
+	int ret;
+
+	for (i = 0; i < nr_pages; i++) {
+		u64 gpa, hpa, parent_handle, cap_handle, cap_sub;
+		struct thhv_sent_cap *sc;
+
+		gpa = (u64)page_to_pfn(pages[i]) << PAGE_SHIFT;
+		hpa = thhv_gpa_to_hpa(gpa);
+		if (hpa == (u64)-1) {
+			pr_err("thhv: META page[%u] GPA 0x%llx: no HPA\n",
+			       i, gpa);
+			ret = -EFAULT;
+			goto err_revoke;
+		}
+
+		ret = thhv_find_parent_handle(hpa, PAGE_SIZE, &parent_handle);
+		if (ret) {
+			pr_err("thhv: META page[%u] HPA 0x%llx: no parent cap\n",
+			       i, hpa);
+			goto err_revoke;
+		}
+
+		ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
+				   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
+				   &cap_handle, &cap_sub);
+		if (ret) {
+			pr_err("thhv: META page[%u] CARVE failed (%d)\n",
+			       i, ret);
+			goto err_revoke;
+		}
+
+		ret = thhv_cap_table_insert(cap_handle, parent_handle,
+					    cap_sub, hpa, PAGE_SIZE);
+		if (ret) {
+			themis_revoke_mem(parent_handle, cap_sub);
+			goto err_revoke;
+		}
+
+		ret = themis_send(cap_handle, part->domain_handle,
+				  THHV_MEM_A_META);
+		if (ret) {
+			themis_revoke_mem(parent_handle, cap_sub);
+			thhv_cap_table_remove(cap_handle);
+			pr_err("thhv: META page[%u] SEND failed (%d)\n",
+			       i, ret);
+			goto err_revoke;
+		}
+
+		thhv_cap_table_remove(cap_handle);
+
+		sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+		if (!sc) {
+			ret = -ENOMEM;
+			goto err_revoke;
+		}
+		sc->parent_handle = parent_handle;
+		sc->sub_handle    = cap_sub;
+		sc->region_key    = region_key;
+
+		spin_lock(&part->sent_caps.lock);
+		list_add_tail(&sc->list, &part->sent_caps.list);
+		spin_unlock(&part->sent_caps.lock);
+
+		nr_sent++;
+	}
+
+	pr_debug("thhv: sent %u META pages to domain 0x%llx (key=0x%llx)\n",
+		 nr_sent, part->domain_handle, region_key);
+	return 0;
+
+err_revoke:
+	/* Revoke already-sent META pages. */
+	{
+		struct thhv_sent_cap *sc, *tmp;
+
+		spin_lock(&part->sent_caps.lock);
+		list_for_each_entry_safe(sc, tmp, &part->sent_caps.list, list) {
+			if (sc->region_key == region_key) {
+				themis_revoke_mem(sc->parent_handle,
+						 sc->sub_handle);
+				list_del(&sc->list);
+				kfree(sc);
+			}
+		}
+		spin_unlock(&part->sent_caps.lock);
+	}
+	return ret;
+}
+
 /* ── Partition-level ioctl dispatch ────────────────────────────────────────── */
 
 static long thhv_part_ioctl(struct file *file, unsigned int cmd,
@@ -414,8 +522,21 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		part->shared_meta_nr_pages = THHV_META_PAGES_SHARED;
 
 		/*
-		 * TODO(P15e): CARVE + SEND shared META pages to child domain.
+		 * CARVE + SEND shared META pages (MSR bitmap + IO bitmaps)
+		 * to child domain.  The capavisor adds them to the domain's
+		 * frame allocator (GiveMetaMem update).
 		 */
+		ret = thhv_send_meta_pages(part, part->shared_meta_pages,
+					   THHV_META_PAGES_SHARED,
+					   THHV_META_KEY_SHARED);
+		if (ret) {
+			unpin_user_pages(part->shared_meta_pages,
+					 part->shared_meta_nr_pages);
+			kfree(part->shared_meta_pages);
+			part->shared_meta_pages = NULL;
+			part->shared_meta_nr_pages = 0;
+			return ret;
+		}
 
 		ret = themis_seal(part->domain_handle);
 		if (ret) {

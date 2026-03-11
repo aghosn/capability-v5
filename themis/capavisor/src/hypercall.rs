@@ -112,7 +112,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
     match opcode {
         opcodes::THEMIS_CARVE => do_carve(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_ALIAS => do_alias(platform, &caller, arg0, arg1, arg2, arg3),
-        opcodes::THEMIS_SEND => do_send(platform, &caller, arg0, arg1, arg2),
+        opcodes::THEMIS_SEND => do_send(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_ACCEPT => do_accept(platform, &caller, arg0),
         opcodes::THEMIS_REJECT => do_reject(platform, &caller, arg0),
         opcodes::THEMIS_CREATE_DOMAIN => do_create_domain(platform, &caller, arg0, arg1),
@@ -194,17 +194,21 @@ fn do_alias(
 }
 
 /// SEND (0x03): send memory capability to a receiver domain.
+/// arg3 (RCX) = child GPA hint; 0 means identity-map (GPA = HPA).
 fn do_send(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     cap_handle: u64,
     receiver_handle: u64,
     attrs_bits: u64,
+    child_gpa: u64,
 ) -> HypercallResult {
     let attrs = Attributes::from_bits(attrs_bits as u8);
+    let gpa_hint = if child_gpa != 0 { Some(child_gpa) } else { None };
     let caller = caller.clone();
     match execute(platform, false, || {
-        Capability::send(&caller, cap_handle, receiver_handle, attrs).map(|batch| ((), batch))
+        Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
+            .map(|batch| ((), batch))
     }) {
         Ok(_) => HypercallResult::success(),
         Err(e) => HypercallResult::error(map_error(&e)),

@@ -408,9 +408,16 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	vp->comm_registered = true;
 
 	/*
-	 * TODO: CARVE + SEND META pages to child domain (deferred until
-	 * EPT allocation from META pool is implemented in the capavisor).
+	 * CARVE + SEND per-VP META pages (VMCS + VAPIC) to child domain.
+	 * The capavisor uses these for VMCS/VAPIC allocation at seal time.
 	 */
+	ret = thhv_send_meta_pages(part, vp->meta_pages, vp->meta_nr_pages,
+				   THHV_META_KEY_VP(cv.vp_index));
+	if (ret) {
+		pr_err("thhv: SEND META for VP %u failed (%d)\n",
+		       cv.vp_index, ret);
+		goto err_revoke_comm;
+	}
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
