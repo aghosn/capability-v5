@@ -160,8 +160,11 @@ Offset   Size    Field                  Producer    Description
 0x100  3840      reserved
 ```
 
-Head and tail are **byte offsets** into the ring, wrapping modulo capacity.
-This supports variable-length messages natively.
+Head and tail are **logical byte offsets** into the ring.  The ring logic
+translates offsets to page-local addresses via:
+`page_index = offset / PAGE_SIZE`, `page_offset = offset % PAGE_SIZE`.
+Messages never cross page boundaries (see §6).  Capacity is derived:
+`rx_capacity = rx_page_count * PAGE_SIZE`, same for TX.
 
 ## 6. Layout — Pages 1+ (Message Rings)
 
@@ -174,6 +177,46 @@ Page (1+rx_page_count) .. Page M:     TX ring (domain → capavisor)
 ```
 
 Each ring is a **byte-oriented circular buffer** of variable-length messages.
+
+### Page-Level Fragmentation
+
+Ring backing pages may not be contiguous in HPA or GPA space (e.g., after
+ring growth via multiple GROW messages, or when the domain cannot allocate
+contiguous physical pages).
+
+**Invariant: messages never cross page boundaries.**
+
+When a message does not fit in the remaining space of the current page, the
+producer writes a **padding message** (`type=0`, `total_size=remaining_bytes`)
+to fill the rest of the page, and starts the real message at offset 0 of the
+next page.  This means:
+
+- **Max message payload** = `PAGE_SIZE - 16` bytes (one 16-byte header + payload
+  within a single 4096-byte page = 4080 bytes of payload)
+- Both sides can map and access each page **independently** — no need for a
+  contiguous virtual mapping across the entire ring
+- The capavisor accesses each page via `HHDM_BASE + page_hpa`, even when pages
+  are scattered in physical memory
+- The driver uses `memremap()` per page (or `vmap()` for an array of pages),
+  maintaining an internal page table for ring access
+- Head and tail are **logical byte offsets** into the ring.  The ring logic
+  translates `offset → (page_index, page_offset)` using:
+  `page_index = offset / PAGE_SIZE`, `page_offset = offset % PAGE_SIZE`
+
+### Intra-Page Fragmentation
+
+Because the ring is strict FIFO with in-order processing (SPSC), **intra-page
+fragmentation is inherently low**:
+
+- Messages are packed sequentially within each page with no gaps
+- Once the consumer advances tail past a message, that space is reclaimed when
+  head wraps around — no "holes" form because processing is strictly in-order
+- The only wasted space is **page-boundary padding**: at most
+  `(max_message_size - 1)` bytes per page transition
+- In practice, most messages are small (attestation entries ~40B, VP exit
+  notifications ~272B) relative to page size (4096B), so padding waste is
+  typically < 7% per page boundary crossing
+- No compaction or defragmentation is ever needed
 
 ### Message Layout (Variable-Length)
 
@@ -189,20 +232,22 @@ Offset   Size    Field
 
 - `total_size` is always 8-byte aligned.  The next message starts at
   `current_offset + total_size`.
-- When a message would wrap past the end of the ring, a **padding message**
-  (type=0, total_size=remaining bytes) is written and the real message starts
-  at offset 0 (wrap-around).
+- A message with `total_size > PAGE_SIZE - current_page_offset` triggers
+  page-boundary padding (see above).
 
 ### Enqueue (producer)
 
 ```
 1. Check space: (capacity - (head - tail)) >= msg_total_size
    If not enough: return -ENOSPC (domain can request growth)
-2. If msg would wrap past end: write padding msg, advance head to 0
-3. Write payload at ring[head % capacity]
+2. page_offset = head % PAGE_SIZE
+   If (page_offset + msg_total_size > PAGE_SIZE):
+     Write padding msg (type=0, total_size=PAGE_SIZE - page_offset)
+     Advance head to next page boundary
+3. Write payload at ring[head]  (within current page)
 4. Write header (message_type, total_size, sequence++)
 5. wmb()
-6. Update head
+6. Update head += total_size
 7. (Optional) Send IPI / doorbell to consumer
 ```
 
@@ -211,10 +256,11 @@ Offset   Size    Field
 ```
 1. if (tail == head) → empty, return
 2. rmb()
-3. Read header at ring[tail % capacity]
-4. If type == 0 (padding): skip (tail += total_size), goto 1
-5. Read payload
-6. tail += total_size
+3. page_offset = tail % PAGE_SIZE
+4. Read header at ring[tail]
+5. If type == 0 (padding): tail += total_size, goto 1  (skip to next page)
+6. Read payload (guaranteed within same page)
+7. tail += total_size
 ```
 
 Single-producer single-consumer (SPSC) — no locking needed, just memory
