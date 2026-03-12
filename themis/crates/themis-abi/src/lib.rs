@@ -100,9 +100,9 @@ pub mod opcodes {
     /// Enumerate pending capabilities / domain tree.
     pub const THEMIS_ENUMERATE:           u64 = 0x13;
 
-    /// Register a VP META state page.
-    /// IN:  RDI = domain_handle, RSI = vp_id, RDX = meta_cap_handle
-    pub const THEMIS_REGISTER_VP_META:    u64 = 0x14;
+    /// Add a virtual processor to a child domain.
+    /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
+    pub const THEMIS_ADD_VP:              u64 = 0x14;
 
     /// Register a doorbell page.
     pub const THEMIS_REGISTER_DOORBELL:   u64 = 0x15;

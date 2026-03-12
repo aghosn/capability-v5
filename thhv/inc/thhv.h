@@ -70,7 +70,7 @@
 #define THEMIS_HC_SET_DEF_INTR_POLICY 0x11
 #define THEMIS_HC_ASSIGN_DEVICE      0x12
 #define THEMIS_HC_ENUMERATE          0x13
-#define THEMIS_HC_REGISTER_VP_META   0x14
+#define THEMIS_HC_ADD_VP             0x14
 #define THEMIS_HC_REGISTER_DOORBELL  0x15
 #define THEMIS_HC_REGISTER_EVENT_FLAGS 0x16
 #define THEMIS_HC_REGISTER_INTR_CHAN 0x17
@@ -97,7 +97,7 @@
 #define THEMIS_OP_SET_DEF_INTR_POLICY 0x11
 #define THEMIS_OP_ASSIGN_DEVICE       0x12
 #define THEMIS_OP_ENUMERATE           0x13
-#define THEMIS_OP_REGISTER_VP_META    0x14
+#define THEMIS_OP_ADD_VP              0x14
 #define THEMIS_OP_REGISTER_DOORBELL   0x15
 #define THEMIS_OP_REGISTER_EVENT_FLAGS 0x16
 #define THEMIS_OP_REGISTER_INTR_CHAN  0x17
@@ -714,7 +714,7 @@ struct thhv_query {
 /* ── Partition-level ioctls ────────────────────────────────────────────────── */
 
 #define THHV_INITIALIZE_PARTITION \
-	_IOW(THHV_IOCTL_MAGIC, 0x10, struct thhv_initialize_partition)
+	_IO(THHV_IOCTL_MAGIC, 0x10)
 #define THHV_CREATE_VP \
 	_IOWR(THHV_IOCTL_MAGIC, 0x11, struct thhv_create_vp)
 #define THHV_SET_GUEST_MEMORY \
@@ -727,6 +727,8 @@ struct thhv_query {
 	_IOW(THHV_IOCTL_MAGIC, 0x15, struct thhv_msi_routing)
 #define THHV_GET_GPAP_ACCESS_BITMAP \
 	_IO(THHV_IOCTL_MAGIC, 0x16)
+#define THHV_SEND_SHARED_META \
+	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -916,6 +918,7 @@ int themis_set_intr_policy(u64 domain, u64 vector, u64 policy);
 int themis_set_def_intr_policy(u64 domain, u64 policy);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
+int themis_add_vp(u64 child_domain, u64 comm_cap);
 int themis_domcomm_notify(void);
 
 /* thhv_part.c */

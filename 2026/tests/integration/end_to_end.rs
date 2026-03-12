@@ -227,6 +227,11 @@ fn test_sandbox_inside_cvm() {
         .upgrade()
         .unwrap();
 
+    // Add VPs to CVM (must happen before seal)
+    for _ in 0..4u64 {
+        cvm.write().data.add_vprocessor().unwrap();
+    }
+
     // Give CVM 128MB
     let cvm_mem_access = Access::new(0x0, 0x8000000, Rights::RWX);
     let (cvm_mem_h, _, _) = Capability::carve(&root, mem_root_h, cvm_mem_access).unwrap();
@@ -241,6 +246,11 @@ fn test_sandbox_inside_cvm() {
     let sandbox = cvm.read().data.domain_capabilities[&sandbox_h]
         .upgrade()
         .unwrap();
+
+    // Add VPs to sandbox (must happen before seal)
+    for _ in 0..2u64 {
+        sandbox.write().data.add_vprocessor().unwrap();
+    }
 
     // Alias memory for sandbox: 32MB shared with CVM
     let sandbox_mem_access = Access::new(0x1000000, 0x2000000, Rights::RW); // Reduced rights

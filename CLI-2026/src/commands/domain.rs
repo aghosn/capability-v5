@@ -113,6 +113,16 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
 
     let child_id = child.read().data.id;
 
+    // Add VPs (no longer auto-created in Domain::new)
+    let num_vps = child.read().data.policy.num_vprocessors;
+    for _ in 0..num_vps {
+        child
+            .write()
+            .data
+            .add_vprocessor()
+            .map_err(|e| format!("Failed to add VP: {:?}", e))?;
+    }
+
     // Track domain name for reverse lookup
     state.register_domain_name(child_id, child_name.to_string());
     state.domains.insert(child_name.to_string(), child);

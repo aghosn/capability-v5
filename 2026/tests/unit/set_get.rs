@@ -31,6 +31,7 @@ fn make_child(
     parent: &CapabilityRef<Domain>,
     policy: DomainPolicy,
 ) -> (CapabilityRef<Domain>, LocalHandle) {
+    let num_vps = policy.num_vprocessors;
     let h = Capability::create(parent, policy).unwrap().0;
     let child = parent
         .read()
@@ -38,6 +39,10 @@ fn make_child(
         .domain_capabilities[&h]
         .upgrade()
         .unwrap();
+    // Explicitly add VPs (no longer auto-created in Domain::new)
+    for _ in 0..num_vps as u64 {
+        child.write().data.add_vprocessor().unwrap();
+    }
     (child, h)
 }
 

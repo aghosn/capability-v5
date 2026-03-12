@@ -486,11 +486,13 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 	int ret;
 
 	switch (cmd) {
-	case THHV_INITIALIZE_PARTITION: {
+	case THHV_SEND_SHARED_META: {
 		struct thhv_initialize_partition ip;
 
 		if (part->sealed)
 			return -EBUSY;
+		if (part->shared_meta_pages)
+			return -EBUSY;  /* already sent */
 		if (copy_from_user(&ip, uarg, sizeof(ip)))
 			return -EFAULT;
 		if (ip.meta_size != (u64)THHV_META_PAGES_SHARED * PAGE_SIZE)
@@ -525,6 +527,8 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		 * CARVE + SEND shared META pages (MSR bitmap + IO bitmaps)
 		 * to child domain.  The capavisor adds them to the domain's
 		 * frame allocator (GiveMetaMem update).
+		 * Must be done BEFORE CREATE_VP so ADD_VP can allocate the
+		 * MSR bitmap from the META pool.
 		 */
 		ret = thhv_send_meta_pages(part, part->shared_meta_pages,
 					   THHV_META_PAGES_SHARED,
@@ -537,19 +541,25 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 			part->shared_meta_nr_pages = 0;
 			return ret;
 		}
+		pr_debug("thhv: sent %u shared META pages for domain 0x%llx\n",
+			 part->shared_meta_nr_pages, part->domain_handle);
+		return 0;
+	}
+
+	case THHV_INITIALIZE_PARTITION: {
+		if (part->sealed)
+			return -EBUSY;
+		if (!part->shared_meta_pages) {
+			pr_err("thhv: shared META not sent before seal\n");
+			return -EINVAL;
+		}
 
 		ret = themis_seal(part->domain_handle);
-		if (ret) {
-			unpin_user_pages(part->shared_meta_pages,
-					 part->shared_meta_nr_pages);
-			kfree(part->shared_meta_pages);
-			part->shared_meta_pages = NULL;
-			part->shared_meta_nr_pages = 0;
+		if (ret)
 			return ret;
-		}
 		part->sealed = true;
-		pr_debug("thhv: sealed domain 0x%llx (%u shared META pages)\n",
-			 part->domain_handle, part->shared_meta_nr_pages);
+		pr_debug("thhv: sealed domain 0x%llx\n",
+			 part->domain_handle);
 		return 0;
 	}
 

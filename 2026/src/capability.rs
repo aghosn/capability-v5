@@ -2088,6 +2088,107 @@ impl Capability<Domain> {
         Ok(batch)
     }
 
+    /// Add a virtual processor to a child domain.
+    ///
+    /// Creates a [`VProcessorState`] in the child domain and binds the
+    /// supplied COMM capability to it.  The domain must be **Unsealed**
+    /// and the VP count must not exceed the policy limit.
+    ///
+    /// Returns `(vp_id, UpdateBatch)` — the `UpdateBatch` contains a
+    /// `CommRegion` update for the COMM binding.  The platform must
+    /// additionally allocate hardware VP state (VMCS, VAPIC, etc.)
+    /// outside the capability engine.
+    ///
+    /// # Arguments
+    /// * `caller`             — parent domain reference
+    /// * `child_domain_handle` — local handle to child domain capability
+    /// * `comm_mem_handle`    — local handle to CARVEd memory cap for COMM page
+    pub fn add_vp(
+        caller: &CapabilityRef<Domain>,
+        child_domain_handle: LocalHandle,
+        comm_mem_handle: LocalHandle,
+    ) -> Result<(u32, UpdateBatch)> {
+        let owner_id: DomainId;
+        let cap_ref: CapabilityRef<MemoryRegion>;
+        let child_ref: CapabilityRef<Domain>;
+
+        // Pre-flight: resolve handles.
+        {
+            let r = caller.read();
+            if r.data.is_memory_handle_frozen(comm_mem_handle) {
+                return Err(CapaError::PermissionDenied);
+            }
+            owner_id = r.data.id;
+
+            let cap_weak = r
+                .data
+                .get_memory_capability(comm_mem_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let child_weak = r
+                .data
+                .get_domain_capability(child_domain_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+
+            drop(r);
+            cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+        }
+
+        let child_domain_id: DomainId;
+
+        // Validate COMM cap: Carve, Exclusive, owned by caller, not already COMM.
+        {
+            let c = cap_ref.read();
+            if c.owned.owner != owner_id {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.data.kind != RegionKind::Carve {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.data.status != RegionStatus::Exclusive {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.owned.attributes.comm() {
+                return Err(CapaError::InvalidOperation(
+                    "capability already carries the COMM attribute".into(),
+                ));
+            }
+        }
+
+        // Add VP to child domain (validates unsealed + limit); returns assigned vp_id.
+        let vp_id: u32;
+        {
+            let mut child_w = child_ref.write();
+            child_domain_id = child_w.data.id;
+            vp_id = child_w.data.add_vprocessor()? as u32;
+        }
+
+        // Mutation: set COMM attribute + binding on the memory cap.
+        let (comm_phys, comm_size) = {
+            let mut c = cap_ref.write();
+            let phys = c.data.access.start;
+            let size = c.data.access.size;
+            c.owned.attributes = Attributes::from_bits(Attributes::COMM).canonicalize();
+            c.data.comm_binding = Some(CommBinding {
+                target_domain_id: child_domain_id,
+                vp_id,
+            });
+            (phys, size)
+        };
+
+        // Record weak ref for cleanup on revocation.
+        {
+            let mut child_w = child_ref.write();
+            child_w.data.comm_bindings.push(Arc::downgrade(&cap_ref));
+        }
+
+        let mut batch = UpdateBatch::new();
+        batch.add_comm_region(owner_id, child_domain_id, vp_id, comm_phys, comm_size);
+        Ok((vp_id, batch))
+    }
+
     /// Attest the caller domain itself.
     ///
     /// Requires the caller domain to be sealed and have `MonitorAPI::ATTEST` enabled.

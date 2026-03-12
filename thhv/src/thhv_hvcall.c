@@ -195,6 +195,17 @@ int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id)
 	return __themis_to_errno(status);
 }
 
+/* ── Add VP ──────────────────────────────────────────────────────────── */
+
+int themis_add_vp(u64 child_domain, u64 comm_cap)
+{
+	u64 rdi;
+	u64 status = __themis_vmcall(THEMIS_OP_ADD_VP,
+				     child_domain, comm_cap, 0, 0, 0,
+				     &rdi, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 /* ── DomainComm TX ring notification ─────────────────────────────────── */
 
 int themis_domcomm_notify(void)

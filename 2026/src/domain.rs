@@ -486,7 +486,7 @@ impl Domain {
     /// Create a new unsealed domain. VPs are allocated immediately.
     pub fn new(policy: DomainPolicy) -> Self {
         let id = generate_domain_id();
-        let mut d = Domain {
+        Domain {
             id,
             status: DomainStatus::Unsealed,
             policy,
@@ -500,9 +500,9 @@ impl Domain {
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
             next_pending_id: 0,
-        };
-        d.create_vprocessors();
-        d
+        }
+        // VPs are NOT auto-created.  They are added one at a time via
+        // Capability::add_vp().  `num_vprocessors` is the max limit.
     }
 
     /// Create the root domain (born Sealed with VPs already allocated)
@@ -549,7 +549,7 @@ impl Domain {
         }
     }
 
-    /// Seal the domain. VPs are already allocated at creation time.
+    /// Seal the domain.  No more VPs can be added after sealing.
     pub fn seal(&mut self) -> Result<()> {
         if self.status != DomainStatus::Unsealed {
             return Err(CapaError::DomainSealed);
@@ -558,7 +558,30 @@ impl Domain {
         Ok(())
     }
 
+    /// Add a virtual processor to this domain.
+    ///
+    /// The domain must be Unsealed and the VP count must not exceed
+    /// `num_vprocessors` (the max limit set at creation time).
+    /// The VP ID is auto-assigned sequentially (0, 1, 2, …).
+    /// Returns the assigned VP ID.
+    pub fn add_vprocessor(&mut self) -> Result<u64> {
+        if self.status != DomainStatus::Unsealed {
+            return Err(CapaError::DomainSealed);
+        }
+        if self.policy.vprocessor_states.len() >= self.policy.num_vprocessors {
+            return Err(CapaError::InvalidOperation(
+                "VP count exceeds num_vprocessors limit".into(),
+            ));
+        }
+        let vp_id = self.policy.vprocessor_states.len() as u64;
+        self.policy
+            .vprocessor_states
+            .push(Arc::new(VProcessorState::new(vp_id)));
+        Ok(vp_id)
+    }
+
     /// Allocate VP Arc objects according to `policy.num_vprocessors`.
+    /// Only used for the root domain which is born with all VPs.
     fn create_vprocessors(&mut self) {
         for id in 0..self.policy.num_vprocessors as u64 {
             self.policy

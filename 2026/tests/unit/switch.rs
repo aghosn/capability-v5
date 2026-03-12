@@ -24,11 +24,16 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 /// Child gets `MonitorAPI::ALL` (includes SWITCH) and all 4 cores.
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let num_vps = policy.num_vprocessors;
     let h = Capability::create(parent, policy).unwrap().0;
-    Capability::seal(parent, h).unwrap();
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
+    // Explicitly add VPs (no longer auto-created in Domain::new)
+    for _ in 0..num_vps {
+        child.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(parent, h).unwrap();
     (child, h)
 }
 
@@ -179,20 +184,26 @@ fn test_vp_nested_switch_and_return() {
     // child1 under root
     let child1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let child1_h = Capability::create(&root, child1_policy).unwrap().0;
-    Capability::seal(&root, child1_h).unwrap();
     let child1 = root.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
+    for _ in 0..4u64 {
+        child1.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(&root, child1_h).unwrap();
     let child1_id = child1.read().data.id;
     platform.register_domain(child1_id, Some(root_id));
 
     // child2 under child1
     let child2_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let child2_h = Capability::create(&child1, child2_policy).unwrap().0;
-    Capability::seal(&child1, child2_h).unwrap();
     let child2 = child1.read().data.domain_capabilities[&child2_h]
         .upgrade()
         .unwrap();
+    for _ in 0..4u64 {
+        child2.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(&child1, child2_h).unwrap();
     let child2_id = child2.read().data.id;
     platform.register_domain(child2_id, Some(child1_id));
 
@@ -328,10 +339,13 @@ fn test_vp_switch_no_switch_api() {
     let no_switch_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST);
     let caller_policy = DomainPolicy::new_restricted(0b1111, no_switch_api);
     let caller_h = Capability::create(&root, caller_policy).unwrap().0;
-    Capability::seal(&root, caller_h).unwrap();
     let caller = root.read().data.domain_capabilities[&caller_h]
         .upgrade()
         .unwrap();
+    for _ in 0..4u64 {
+        caller.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(&root, caller_h).unwrap();
     let caller_id = caller.read().data.id;
     platform.register_domain(caller_id, Some(root_id));
     init_vp_running(&caller, 0, 0);

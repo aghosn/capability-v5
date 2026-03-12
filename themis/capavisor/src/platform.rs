@@ -73,7 +73,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
 use capability_engine::{
@@ -339,6 +339,9 @@ pub struct PlatformDomain {
     /// Per-VP slots.  Index = domain-local VP ID (0, 1, 2, ...).
     /// Each slot holds an InactiveVcpu when the VP is not running.
     pub vps: Vec<VcpuSlot>,
+    /// Physical address of the MSR bitmap page for this domain's VPs.
+    /// Allocated from META pool at seal time; 0 until then.
+    pub msr_bitmap_phys: u64,
 
     /// DomainComm region: per-domain message ring with the capavisor.
     /// `None` until `init_domcomm()` allocates it.
@@ -383,6 +386,7 @@ impl PlatformDomain {
             parent,
             hhdm_offset,
             vps: Vec::new(),
+            msr_bitmap_phys: 0,
             domcomm: None,
         }
     }
@@ -919,6 +923,25 @@ impl ThemisPlatform {
 
     pub fn eptp(&self, domain_id: DomainId) -> Option<u64> {
         self.domains.get(domain_id)?.lock().ept.as_ref().map(|e| e.eptp())
+    }
+
+    /// Get a cloned Arc reference to a PlatformDomain (for use outside apply_update).
+    pub fn domain_arc(&self, domain_id: DomainId) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
+        self.domains.get(domain_id)
+    }
+
+    /// Get the HHDM offset (physical → virtual address translation).
+    pub fn hhdm_offset(&self) -> u64 {
+        self.hhdm_offset.load(Ordering::Relaxed)
+    }
+
+    /// Allocate the next globally unique VPID (1, 2, 3, ...).
+    /// VPID 0 is reserved (means "current VPID" in INVVPID).
+    pub fn next_vpid(&self) -> u16 {
+        static VPID_COUNTER: AtomicU16 = AtomicU16::new(1);
+        let id = VPID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        assert!(id != 0, "VPID counter wrapped to 0");
+        id
     }
 
     pub fn alloc_meta_frame(&self, domain_id: DomainId) -> u64 {

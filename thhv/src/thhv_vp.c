@@ -398,18 +398,9 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 		}
 	}
 
-	ret = themis_register_comm(vp->comm_cap_handle,
-				   part->domain_handle, vp->vp_index);
-	if (ret) {
-		pr_err("thhv: REGISTER_COMM vp %u failed (%d)\n",
-		       vp->vp_index, ret);
-		goto err_revoke_comm;
-	}
-	vp->comm_registered = true;
-
 	/*
 	 * CARVE + SEND per-VP META pages (VMCS + VAPIC) to child domain.
-	 * The capavisor uses these for VMCS/VAPIC allocation at seal time.
+	 * Must be done BEFORE ADD_VP so the capavisor can allocate VMCS/VAPIC.
 	 */
 	ret = thhv_send_meta_pages(part, vp->meta_pages, vp->meta_nr_pages,
 				   THHV_META_KEY_VP(cv.vp_index));
@@ -418,6 +409,18 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 		       cv.vp_index, ret);
 		goto err_revoke_comm;
 	}
+
+	/*
+	 * ADD_VP: creates VProcessorState in the capa engine, binds COMM page,
+	 * allocates VMCS + VAPIC from META pool, and sets up the VMCS.
+	 */
+	ret = themis_add_vp(part->domain_handle, vp->comm_cap_handle);
+	if (ret) {
+		pr_err("thhv: ADD_VP vp %u failed (%d)\n",
+		       vp->vp_index, ret);
+		goto err_revoke_comm;
+	}
+	vp->comm_registered = true;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {

@@ -254,11 +254,15 @@ pub fn assign_device(domain: u64, pci_bdf: u64) -> Result<(), u64> {
     check(rax)
 }
 
-/// Register a VP META state page.
-pub fn register_vp_meta(domain: u64, vp_id: u64, meta_cap: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_REGISTER_VP_META, domain, vp_id, meta_cap) };
-    check(rax)
+/// Add a virtual processor to a child domain.
+///
+/// IN:  RDI = child_domain_handle, RSI = comm_cap_handle
+/// OUT: RDI = vp_id on success
+pub fn add_vp(child_domain: u64, comm_cap: u64) -> Result<u64, u64> {
+    let (rax, rdi, _, _) =
+        unsafe { vmcall2(opcodes::THEMIS_ADD_VP, child_domain, comm_cap) };
+    check(rax)?;
+    Ok(rdi)
 }
 
 /// Register a doorbell page.

@@ -9,14 +9,14 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 
 use capability_engine::{
-    execute, Access, Attributes, Capability, CapabilityRef, CapaError, Domain, DomainPolicy,
-    MonitorAPI, Platform, Rights, UpdateBatch,
+    execute, Access, Attributes, Capability, CapabilityRef, CapaError, Domain, DomainId,
+    DomainPolicy, MonitorAPI, Platform, Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
-use crate::vcpu::{ActiveVcpu, Reg};
+use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
@@ -122,6 +122,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
         opcodes::THEMIS_ATTEST_SELF => do_attest_self(&caller),
         opcodes::THEMIS_REGISTER_COMM => do_register_comm(platform, &caller, arg0, arg1, arg2),
         opcodes::THEMIS_DOMCOMM_NOTIFY => do_domcomm_notify(platform, &caller),
+        opcodes::THEMIS_ADD_VP => do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys()),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_SWITCH
@@ -133,7 +134,6 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
         | opcodes::THEMIS_SET_DEF_INTR_POLICY
         | opcodes::THEMIS_ASSIGN_DEVICE
         | opcodes::THEMIS_ENUMERATE
-        | opcodes::THEMIS_REGISTER_VP_META
         | opcodes::THEMIS_REGISTER_DOORBELL
         | opcodes::THEMIS_REGISTER_EVENT_FLAGS
         | opcodes::THEMIS_REGISTER_INTR_CHAN => HypercallResult::unimpl(),
@@ -331,6 +331,151 @@ fn do_register_comm(
     }) {
         Ok(_) => HypercallResult::success(),
         Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// ADD_VP (0x14): add a virtual processor to a child domain.
+///
+/// The caller must have already CARVE'd a COMM page and SENT VP META pages
+/// to the child domain.  This operation:
+///   1. Allocates VMCS + VAPIC (+ MSR bitmap on first VP) from META pool.
+///   2. Calls `Capability::add_vp` in the capa engine (creates VProcessorState,
+///      binds COMM page).
+///   3. Sets up the VMCS and creates an InactiveVcpu.
+///   4. On capa engine failure, returns allocated META pages to the pool.
+///
+/// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
+/// OUT: RDI = vp_index on success
+fn do_add_vp(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_domain_handle: u64,
+    comm_cap_handle: u64,
+    caller_vmcs_phys: u64,
+) -> HypercallResult {
+    use x86::bits64::vmx as vmx_ops;
+    use x86::msr;
+
+    // ── Step 0: resolve child domain_id from handle (read-only) ──
+    let child_domain_id: DomainId = {
+        let r = caller.read();
+        let child_weak = match r.data.get_domain_capability(child_domain_handle) {
+            Some(w) => w.clone(),
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        drop(r);
+        let child_ref = match child_weak.upgrade() {
+            Some(c) => c,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let id = child_ref.read().data.id;
+        id
+    };
+
+    // ── Step 1: pre-allocate VMCS + VAPIC from child's META pool ──
+    let arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+
+    let (vmcs_phys, vapic_phys, msr_bitmap_phys, first_vp);
+    {
+        let mut pd = arc.lock();
+        // Check if this is the first VP (need extra page for MSR bitmap).
+        first_vp = pd.msr_bitmap_phys == 0;
+        let pages_needed = if first_vp { 3 } else { 2 };
+        if pd.meta.free_pages() < pages_needed as u64 {
+            serial_println!(
+                "[ADD_VP] not enough META pages: need {} have {}",
+                pages_needed, pd.meta.free_pages()
+            );
+            return HypercallResult::error(errors::ERR_NOMEM);
+        }
+        vmcs_phys = pd.meta.alloc_frame();
+        vapic_phys = pd.meta.alloc_frame();
+        if first_vp {
+            pd.msr_bitmap_phys = pd.meta.alloc_frame();
+        }
+        msr_bitmap_phys = pd.msr_bitmap_phys;
+    }
+
+    // ── Step 2: call into capa engine ──
+    let caller = caller.clone();
+    let result = execute(platform, false, || {
+        Capability::add_vp(&caller, child_domain_handle, comm_cap_handle)
+            .map(|(vp_id, batch)| (vp_id, batch))
+    });
+
+    match result {
+        Err(e) => {
+            // Rollback: return allocated pages to META pool.
+            let mut pd = arc.lock();
+            pd.meta.free_frame(vmcs_phys);
+            pd.meta.free_frame(vapic_phys);
+            if first_vp {
+                pd.meta.free_frame(msr_bitmap_phys);
+                pd.msr_bitmap_phys = 0;
+            }
+            serial_println!("[ADD_VP] capa engine error, META rolled back");
+            HypercallResult::error(map_error(&e))
+        }
+        Ok((vp_id, _batch)) => {
+            // ── Step 3: write VMCS revision ID, set up VMCS, create InactiveVcpu ──
+            let hhdm = platform.hhdm_offset();
+            let rev_id = (unsafe { msr::rdmsr(msr::IA32_VMX_BASIC) } & 0x7FFF_FFFF) as u32;
+
+            // Write revision ID into the VMCS page header.
+            let vmcs_virt = (vmcs_phys + hhdm) as *mut u32;
+            unsafe { vmcs_virt.write_volatile(rev_id) };
+
+            // Get child EPT pointer.
+            let eptp = match platform.eptp(child_domain_id) {
+                Some(e) => e,
+                None => {
+                    serial_println!("[ADD_VP] child domain has no EPT");
+                    // Rollback META.
+                    let mut pd = arc.lock();
+                    pd.meta.free_frame(vmcs_phys);
+                    pd.meta.free_frame(vapic_phys);
+                    if first_vp {
+                        pd.meta.free_frame(msr_bitmap_phys);
+                        pd.msr_bitmap_phys = 0;
+                    }
+                    return HypercallResult::error(errors::ERR_INVALID);
+                }
+            };
+
+            // Allocate a unique VPID.
+            let vpid = platform.next_vpid();
+
+            // Set up VMCS control/host/guest fields.
+            // This does VMCLEAR + VMPTRLD internally, so it clobbers the current
+            // (caller's) VMCS pointer — we restore it below.
+            unsafe {
+                crate::vmcs::setup_vmcs_for_vp(
+                    vmcs_phys,
+                    vapic_phys,
+                    msr_bitmap_phys,
+                    eptp,
+                    vp_id as usize,
+                );
+                // Deactivate child VMCS (save state to memory).
+                vmx_ops::vmclear(vmcs_phys).expect("ADD_VP: child vmclear failed");
+                // Restore caller's VMCS.
+                vmx_ops::vmptrld(caller_vmcs_phys).expect("ADD_VP: parent vmptrld restore failed");
+            }
+
+            // Create InactiveVcpu and store in the child's PlatformDomain.
+            let vcpu = InactiveVcpu::new(vmcs_phys, vapic_phys, msr_bitmap_phys, vpid);
+            platform.bootstrap_store_vcpu(child_domain_id, vp_id as usize, vcpu);
+
+            serial_println!(
+                "[ADD_VP] dom={} vp={} vmcs={:#x} vapic={:#x} msr_bm={:#x} vpid={}",
+                child_domain_id, vp_id, vmcs_phys, vapic_phys, msr_bitmap_phys, vpid,
+            );
+
+            HypercallResult::success_1(vp_id as u64)
+        }
     }
 }
 
