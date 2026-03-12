@@ -103,7 +103,6 @@
 #define THEMIS_OP_REGISTER_INTR_CHAN  0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
-#define THEMIS_OP_FLUSH_VP_STATE     0x1A
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -318,8 +317,8 @@ struct thhv_vp_registers {
  * VP COMM page — shared between driver and capavisor for bulk register transfer.
  *
  * Layout must match themis-abi VpCommPage exactly (4096 bytes, #[repr(C)]).
- * The driver writes register values + sets dirty_mask bits, then calls
- * FLUSH_VP_STATE to apply them to the child's VMCS.
+ * The driver writes register values + sets dirty_mask bits; the capavisor
+ * validates and applies them at SWITCH time.
  */
 #define VP_COMM_MASK_WORDS  3
 
@@ -987,7 +986,6 @@ int themis_set_def_intr_policy(u64 domain, u64 policy);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
-int themis_flush_vp_state(u64 child_domain, u64 vp_id);
 int themis_domcomm_notify(void);
 
 /* thhv_part.c */

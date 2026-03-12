@@ -265,16 +265,11 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 		goto out;
 	}
 
-	/* Write all register values into the COMM page + set dirty bits. */
+	/* Write all register values into the COMM page + set dirty bits.
+	 * The capavisor will validate and apply them at SWITCH time. */
 	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
 	for (i = 0; i < hdr.count; i++)
 		thhv_comm_set_reg(comm, (unsigned int)regs[i].name, regs[i].value);
-
-	/* Single VMCALL to flush dirty state into the child's VMCS. */
-	ret = themis_flush_vp_state(part->domain_handle, vp->vp_index);
-	if (ret)
-		pr_err("thhv: flush_vp_state vp %u failed (%d)\n",
-		       vp->vp_index, ret);
 
 out:
 	kfree(regs);

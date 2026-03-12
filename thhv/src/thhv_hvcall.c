@@ -206,16 +206,6 @@ int themis_add_vp(u64 child_domain, u64 comm_cap)
 	return __themis_to_errno(status);
 }
 
-/* ── Flush VP state ──────────────────────────────────────────────────── */
-
-int themis_flush_vp_state(u64 child_domain, u64 vp_id)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_FLUSH_VP_STATE,
-				     child_domain, vp_id, 0, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
 /* ── DomainComm TX ring notification ─────────────────────────────────── */
 
 int themis_domcomm_notify(void)

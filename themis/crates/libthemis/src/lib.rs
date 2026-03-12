@@ -265,15 +265,6 @@ pub fn add_vp(child_domain: u64, comm_cap: u64) -> Result<u64, u64> {
     Ok(rdi)
 }
 
-/// Flush dirty VP register state from a COMM page into the child's VMCS.
-///
-/// IN:  RDI = child_domain_handle, RSI = vp_id
-pub fn flush_vp_state(child_domain: u64, vp_id: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_FLUSH_VP_STATE, child_domain, vp_id) };
-    check(rax)
-}
-
 /// Register a doorbell page.
 pub fn register_doorbell(domain: u64, vp_id: u64, gpa: u64, slot: u64) -> Result<(), u64> {
     let (rax, _, _, _) =
