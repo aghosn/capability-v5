@@ -68,12 +68,10 @@ pub unsafe fn setup_vmcs_for_vp(
     eptp: u64,
     vp_index: usize,
 ) {
-    // VMCLEAR initialises the VMCS region and clears any previous launch state.
     vmx::vmclear(vmcs_phys).expect("vmclear failed");
-    // VMPTRLD makes this VMCS the current one for all subsequent vmread/vmwrite.
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vp_index);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vp_index, false);
     write_host_state();
     write_guest_state();
 
@@ -83,26 +81,61 @@ pub unsafe fn setup_vmcs_for_vp(
     );
 }
 
+/// Set up a child domain's VMCS with intercept-heavy controls.
+///
+/// Differs from dom0 VMCS setup:
+/// - EXTERNAL_INTERRUPT_EXITING: external interrupts cause VMEXIT to parent
+/// - HLT_EXITING: HLT causes VMEXIT to parent
+/// - Guest state is left at zeroes (parent populates via COMM page)
+///
+/// # Safety
+/// VMXON must already be active on this core. Clobbers current VMPTRLD.
+pub unsafe fn setup_child_vmcs(
+    vmcs_phys: u64,
+    vapic_phys: u64,
+    msr_bitmap_phys: u64,
+    eptp: u64,
+    vpid: u16,
+) {
+    vmx::vmclear(vmcs_phys).expect("child vmclear failed");
+    vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
+
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vpid as usize, true);
+    write_host_state();
+    write_guest_state();
+
+    serial_println!(
+        "  child VMCS: phys={:#x} VAPIC={:#x} EPTP={:#x} VPID={}",
+        vmcs_phys, vapic_phys, eptp, vpid,
+    );
+}
+
 // ── Control fields ────────────────────────────────────────────────────────── //
 
-unsafe fn write_control_fields(eptp: u64, vapic_phys: u64, msr_bitmap_phys: u64, vp_index: usize) {
+unsafe fn write_control_fields(
+    eptp: u64,
+    vapic_phys: u64,
+    msr_bitmap_phys: u64,
+    vp_index: usize,
+    child: bool,
+) {
     // ── Pin-based ──────────────────────────────────────────────────── //
-    // Enable VMX preemption timer (bit 6) for diagnostic heartbeat.
-    // dom0 has full trap permissions, so EXTERNAL_INTERRUPT_EXITING
-    // and NMI_EXITING are OFF — interrupts are delivered directly to
-    // the guest via its IDT.
-    let pin_desired: u64 = 1 << 6; // ACTIVATE_VMX_PREEMPTION_TIMER
+    let mut pin_desired: u64 = 1 << 6; // ACTIVATE_VMX_PREEMPTION_TIMER
+    if child {
+        pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
+    }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
     vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
         .expect("vmwrite pin-based");
 
     // ── Primary proc-based ────────────────────────────────────────────── //
-    // Match vmxvmm: SECONDARY_CONTROLS + USE_MSR_BITMAPS only.
-    // No HLT_EXITING — guest HLT is handled by the hardware directly.
-    let primary_desired: u64 =
+    let mut primary_desired: u64 =
         (1 << 28)  // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
+    if child {
+        primary_desired |= 1 << 7; // HLT_EXITING
+    }
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
     let primary_val = adjust(primary_desired, primary_msr);
     vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary_val)

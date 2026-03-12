@@ -85,22 +85,22 @@ fn map_error(e: &CapaError) -> u64 {
 ///
 /// Reads the opcode and arguments from guest registers, dispatches to the
 /// capability engine, and returns a `HypercallResult` to be written back.
-pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
+pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
     if platform_ptr.is_null() {
         serial_println!("[VMCALL] platform_ptr null!");
-        return HypercallResult::error(errors::ERR_INVALID);
+        return Some(HypercallResult::error(errors::ERR_INVALID));
     }
     let platform = unsafe { &*platform_ptr };
 
     let Some(core_id) = platform.get_current_core() else {
         serial_println!("[VMCALL] get_current_core returned None");
-        return HypercallResult::error(errors::ERR_INVALID);
+        return Some(HypercallResult::error(errors::ERR_INVALID));
     };
 
     let Some(caller) = platform.get_core_cap(core_id as usize) else {
         serial_println!("[VMCALL] get_core_cap({}) returned None", core_id);
-        return HypercallResult::error(errors::ERR_INVALID);
+        return Some(HypercallResult::error(errors::ERR_INVALID));
     };
 
     let opcode = vcpu.reg(Reg::Rax);
@@ -110,23 +110,23 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
     let arg3 = vcpu.reg(Reg::Rcx);
 
     match opcode {
-        opcodes::THEMIS_CARVE => do_carve(platform, &caller, arg0, arg1, arg2, arg3),
-        opcodes::THEMIS_ALIAS => do_alias(platform, &caller, arg0, arg1, arg2, arg3),
-        opcodes::THEMIS_SEND => do_send(platform, &caller, arg0, arg1, arg2, arg3),
-        opcodes::THEMIS_ACCEPT => do_accept(platform, &caller, arg0),
-        opcodes::THEMIS_REJECT => do_reject(platform, &caller, arg0),
-        opcodes::THEMIS_CREATE_DOMAIN => do_create_domain(platform, &caller, arg0, arg1),
-        opcodes::THEMIS_SEAL => do_seal(platform, &caller, arg0),
-        opcodes::THEMIS_REVOKE_MEM => do_revoke_mem(platform, &caller, arg0, arg1),
-        opcodes::THEMIS_REVOKE_DOMAIN => do_revoke_domain(platform, &caller, arg0),
-        opcodes::THEMIS_ATTEST_SELF => do_attest_self(&caller),
-        opcodes::THEMIS_REGISTER_COMM => do_register_comm(platform, &caller, arg0, arg1, arg2),
-        opcodes::THEMIS_DOMCOMM_NOTIFY => do_domcomm_notify(platform, &caller),
-        opcodes::THEMIS_ADD_VP => do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys()),
+        opcodes::THEMIS_CARVE => Some(do_carve(platform, &caller, arg0, arg1, arg2, arg3)),
+        opcodes::THEMIS_ALIAS => Some(do_alias(platform, &caller, arg0, arg1, arg2, arg3)),
+        opcodes::THEMIS_SEND => Some(do_send(platform, &caller, arg0, arg1, arg2, arg3)),
+        opcodes::THEMIS_ACCEPT => Some(do_accept(platform, &caller, arg0)),
+        opcodes::THEMIS_REJECT => Some(do_reject(platform, &caller, arg0)),
+        opcodes::THEMIS_CREATE_DOMAIN => Some(do_create_domain(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_SEAL => Some(do_seal(platform, &caller, arg0)),
+        opcodes::THEMIS_REVOKE_MEM => Some(do_revoke_mem(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_REVOKE_DOMAIN => Some(do_revoke_domain(platform, &caller, arg0)),
+        opcodes::THEMIS_ATTEST_SELF => Some(do_attest_self(&caller)),
+        opcodes::THEMIS_REGISTER_COMM => Some(do_register_comm(platform, &caller, arg0, arg1, arg2)),
+        opcodes::THEMIS_DOMCOMM_NOTIFY => Some(do_domcomm_notify(platform, &caller)),
+        opcodes::THEMIS_ADD_VP => Some(do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys())),
+        opcodes::THEMIS_SWITCH => do_switch(platform, &caller, arg0, arg1, vcpu),
 
         // Stubbed — return ERR_UNIMPL
-        opcodes::THEMIS_SWITCH
-        | opcodes::THEMIS_GET_CHAN
+        opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST
         | opcodes::THEMIS_GET_REG
         | opcodes::THEMIS_SET_REG
@@ -136,11 +136,11 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
         | opcodes::THEMIS_ENUMERATE
         | opcodes::THEMIS_REGISTER_DOORBELL
         | opcodes::THEMIS_REGISTER_EVENT_FLAGS
-        | opcodes::THEMIS_REGISTER_INTR_CHAN => HypercallResult::unimpl(),
+        | opcodes::THEMIS_REGISTER_INTR_CHAN => Some(HypercallResult::unimpl()),
 
         _ => {
             serial_println!("[VMCALL] unknown opcode {:#x}", opcode);
-            HypercallResult::error(errors::ERR_INVALID)
+            Some(HypercallResult::error(errors::ERR_INVALID))
         }
     }
 }
@@ -448,16 +448,15 @@ fn do_add_vp(
             // Allocate a unique VPID.
             let vpid = platform.next_vpid();
 
-            // Set up VMCS control/host/guest fields.
-            // This does VMCLEAR + VMPTRLD internally, so it clobbers the current
-            // (caller's) VMCS pointer — we restore it below.
+            // Set up child VMCS with intercept-heavy controls (HLT_EXITING,
+            // EXTERNAL_INTERRUPT_EXITING). Clobbers VMPTRLD — restored below.
             unsafe {
-                crate::vmcs::setup_vmcs_for_vp(
+                crate::vmcs::setup_child_vmcs(
                     vmcs_phys,
                     vapic_phys,
                     msr_bitmap_phys,
                     eptp,
-                    vp_id as usize,
+                    vpid,
                 );
                 // Deactivate child VMCS (save state to memory).
                 vmx_ops::vmclear(vmcs_phys).expect("ADD_VP: child vmclear failed");
@@ -479,112 +478,371 @@ fn do_add_vp(
     }
 }
 
-/// Map a `VpRegister` to the appropriate VMCS guest-state field or GPR slot
-/// and write the value.
+// ── SWITCH (sync mode) ───────────────────────────────────────────────────── //
+
+/// SWITCH (0x0A): swap the current ActiveVcpu for a child domain's VP.
 ///
-/// **Precondition**: the child VMCS is currently loaded (VMPTRLD done).
-/// GPRs (RAX–R15) go to InactiveVcpu's register file; everything else
-/// goes via VMWRITE to the corresponding VMCS guest-state encoding.
-fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut InactiveVcpu) {
+/// The monitor loop's `vcpu` is replaced: the parent is deactivated and
+/// stored in its VcpuSlot; the child is taken from its slot, activated,
+/// and becomes the new `vcpu`.  The next `vcpu.run()` in the monitor loop
+/// enters the child guest.
+///
+/// Returns `None` to tell the VMCALL handler to skip result-writeback
+/// and RIP-advance (the vcpu is now the child's, not the parent's).
+fn do_switch(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_domain_handle: u64,
+    vp_id: u64,
+    vcpu: &mut ActiveVcpu,
+) -> Option<HypercallResult> {
+    use themis_abi::regs::{VpCommPage, VpRegister, ALL_VP_REGISTERS};
+
+    let vp_idx = vp_id as usize;
+
+    // ── 1. Capability engine: forward switch (run-state transitions) ──
+    let switch_ctx = match Capability::switch(caller, child_domain_handle, vp_id, platform) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            serial_println!("[SWITCH] validation failed: {:?}", e);
+            return Some(HypercallResult::error(map_error(&e)));
+        }
+    };
+
+    let child_domain_id: DomainId = switch_ctx.to_domain;
+    let parent_domain_id: DomainId = switch_ctx.from_domain;
+    let parent_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
+
+    // ── 2. Look up child PlatformDomain + COMM HPA ──
+    let child_arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => {
+            let _ = Capability::switch(caller, 0, 0, platform);
+            return Some(HypercallResult::error(errors::ERR_NOTFOUND));
+        }
+    };
+
+    let comm_hpa = {
+        let d = child_arc.lock();
+        d.comm_hpas.get(vp_idx).copied().unwrap_or(0)
+    };
+
+    // ── 3. Snapshot dirty_mask, validate registers via capa engine ──
+    let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
+
+    if comm_hpa != 0 {
+        let hhdm = platform.hhdm_offset();
+        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+        let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
+
+        if !dirty.iter().all(|w| *w == 0) {
+            for i in 0..3 {
+                comm.dirty_mask[i] &= !dirty[i];
+            }
+            for reg in ALL_VP_REGISTERS {
+                let (w, b) = VpCommPage::mask_bit(*reg);
+                if dirty[w] & (1 << b) == 0 {
+                    continue;
+                }
+                let val = comm.read_reg(*reg);
+                if Capability::set_register(
+                    caller, child_domain_handle, vp_id, *reg as u64, val, platform,
+                ).is_ok() {
+                    pending.push((*reg, val));
+                }
+            }
+        }
+    }
+
+    // ── 4. Take child InactiveVcpu from its slot ──
+    let mut child_inactive = {
+        let d = child_arc.lock();
+        match d.vps.get(vp_idx).and_then(|s| s.take()) {
+            Some(v) => v,
+            None => {
+                serial_println!("[SWITCH] VP slot empty dom={} vp={}", child_domain_id, vp_idx);
+                let _ = Capability::switch(caller, 0, 0, platform);
+                return Some(HypercallResult::error(errors::ERR_BUSY));
+            }
+        }
+    };
+
+    // ── 5. Apply GPRs to child InactiveVcpu (before VMPTRLD) ──
+    let mut vmcs_pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
+    for (reg, val) in pending {
+        if is_gpr(reg) {
+            apply_reg_to_vcpu(reg, val, &mut child_inactive);
+        } else {
+            vmcs_pending.push((reg, val));
+        }
+    }
+
+    // ── 6. Deactivate parent → InactiveVcpu → store in parent slot ──
+    // SAFETY: we take ownership via ptr::read and will ptr::write the child
+    // ActiveVcpu back before returning.  Between read and write, `vcpu`
+    // is logically moved-from and must not be used.
+    let parent_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
+    let parent_inactive = parent_active.deactivate()
+        .expect("[SWITCH] parent deactivate (VMCLEAR) failed");
+
+    let parent_arc = platform.domain_arc(parent_domain_id)
+        .expect("[SWITCH] parent PlatformDomain not found");
+    parent_arc.lock().vps[parent_vp_id].put(parent_inactive);
+
+    // ── 7. Activate child (VMPTRLD) ──
+    // activate() consumes child_inactive.  VMPTRLD failure is fatal since
+    // the parent is already deactivated and stored.
+    let mut child_active = child_inactive.activate()
+        .expect("[SWITCH] child activate (VMPTRLD) failed — fatal");
+
+    // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
+    for (reg, val) in &vmcs_pending {
+        apply_vmcs_reg(&mut child_active, *reg, *val);
+    }
+
+    serial_println!(
+        "[SWITCH] swapped dom={}→{} vp={}→{} child_rip={:#x}",
+        parent_domain_id, child_domain_id,
+        parent_vp_id, vp_idx,
+        child_active.get(x86::vmx::vmcs::guest::RIP),
+    );
+
+    // ── 9. Replace the monitor loop's ActiveVcpu ──
+    unsafe { core::ptr::write(vcpu, child_active); }
+
+    // Return None: skip result-writeback + RIP-advance.
+    // The monitor loop will call vcpu.run() on the child next.
+    None
+}
+
+// ── Child exit forwarding ────────────────────────────────────────────────── //
+
+/// Called from `handle_vmexit` when the current domain is not dom0.
+///
+/// Reads the child's interrupt policy for this exit reason to determine
+/// which registers to copy back to the child's COMM page (so the parent
+/// can read them).  Then swaps back to the parent — to the parent this
+/// looks like a normal return from the SWITCH VMCALL with the exit reason
+/// in rdi.
+pub fn forward_child_exit(
+    vcpu: &mut ActiveVcpu,
+    exit_reason: u32,
+) {
+    use themis_abi::regs::{VpCommPage, ALL_VP_REGISTERS};
+    use x86::vmx::vmcs;
+
+    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null());
+    let platform = unsafe { &*platform_ptr };
+
+    let core_id = platform.get_current_core()
+        .expect("[CHILD_EXIT] get_current_core failed");
+
+    // Get child's cap BEFORE the return switch (core is still assigned to child).
+    let child_cap = platform.get_core_cap(core_id as usize)
+        .expect("[CHILD_EXIT] get_core_cap failed");
+
+    // Look up the interrupt policy for this exit reason.
+    let read_set = {
+        let c = child_cap.read();
+        let policy = c.data.policy.interrupts.get_policy(exit_reason as u8);
+        policy.read_set
+    };
+
+    serial_println!(
+        "[CHILD_EXIT] reason={} read_set={:x}",
+        exit_reason, read_set,
+    );
+
+    // ── Capa engine: return switch (child → parent) ──
+    let return_ctx = Capability::switch(&child_cap, 0, 0, platform)
+        .expect("[CHILD_EXIT] return switch failed");
+
+    let child_domain_id = return_ctx.from_domain;
+    let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
+    let parent_domain_id = return_ctx.to_domain;
+    let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
+
+    // ── Copy reported registers to child's COMM page ──
+    let child_arc = platform.domain_arc(child_domain_id)
+        .expect("[CHILD_EXIT] child PlatformDomain not found");
+    let comm_hpa = child_arc.lock().comm_hpas.get(child_vp_id).copied().unwrap_or(0);
+
+    if comm_hpa != 0 {
+        let hhdm = platform.hhdm_offset();
+        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+
+        for reg in ALL_VP_REGISTERS {
+            if !read_set.is_set(*reg as u64) {
+                continue;
+            }
+            // Read value from child's VMCS or GPR file.
+            let val = if let Some(gpr) = vp_reg_to_gpr(*reg) {
+                vcpu.reg(gpr)
+            } else if let Some(field) = vp_reg_to_vmcs_field(*reg) {
+                vcpu.try_get(field).unwrap_or(0)
+            } else {
+                continue;
+            };
+            comm.write_reg(*reg, val);
+        }
+    }
+
+    // ── Deactivate child → store in child's VcpuSlot ──
+    let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
+    let child_inactive = child_active.deactivate()
+        .expect("[CHILD_EXIT] child deactivate failed");
+    child_arc.lock().vps[child_vp_id].put(child_inactive);
+
+    // ── Take parent → activate → replace vcpu ──
+    let parent_arc = platform.domain_arc(parent_domain_id)
+        .expect("[CHILD_EXIT] parent PlatformDomain not found");
+    let parent_inactive = parent_arc.lock().vps[parent_vp_id].take()
+        .expect("[CHILD_EXIT] parent VcpuSlot empty");
+    let mut parent_active = parent_inactive.activate()
+        .expect("[CHILD_EXIT] parent activate failed");
+
+    // To the parent, this is a return from SWITCH VMCALL.
+    // RAX = SUCCESS, RDI = exit_reason.
+    parent_active.set_reg(Reg::Rax, errors::SUCCESS);
+    parent_active.set_reg(Reg::Rdi, exit_reason as u64);
+    parent_active.set_reg(Reg::Rsi, 0);
+    parent_active.set_reg(Reg::Rdx, 0);
+
+    // Advance parent RIP past the SWITCH VMCALL instruction.
+    let parent_rip = parent_active.get(vmcs::guest::RIP);
+    let parent_instr_len = parent_active.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
+        .unwrap_or(3); // VMCALL is 3 bytes
+    parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
+
+    serial_println!(
+        "[CHILD_EXIT] swapped back dom={}→{} vp={}→{}",
+        child_domain_id, parent_domain_id,
+        child_vp_id, parent_vp_id,
+    );
+
+    // Replace the monitor loop's ActiveVcpu with the parent's.
+    unsafe { core::ptr::write(vcpu, parent_active); }
+}
+
+// ── VpRegister ↔ VMCS / GPR mapping (reusable) ──────────────────────────── //
+
+/// Map a `VpRegister` to its VMCS guest-state field encoding.
+/// Returns `None` for GPRs (stored in the register file, not in VMCS)
+/// and for registers without a direct VMCS mapping.
+fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<u32> {
     use themis_abi::regs::VpRegister;
     use x86::vmx::vmcs::guest;
 
-    match reg {
-        // GPRs → register save area (not in VMCS)
-        VpRegister::Rax => vcpu.set_reg(Reg::Rax, val),
-        VpRegister::Rbx => vcpu.set_reg(Reg::Rbx, val),
-        VpRegister::Rcx => vcpu.set_reg(Reg::Rcx, val),
-        VpRegister::Rdx => vcpu.set_reg(Reg::Rdx, val),
-        VpRegister::Rsi => vcpu.set_reg(Reg::Rsi, val),
-        VpRegister::Rdi => vcpu.set_reg(Reg::Rdi, val),
-        VpRegister::Rbp => vcpu.set_reg(Reg::Rbp, val),
-        VpRegister::R8  => vcpu.set_reg(Reg::R8, val),
-        VpRegister::R9  => vcpu.set_reg(Reg::R9, val),
-        VpRegister::R10 => vcpu.set_reg(Reg::R10, val),
-        VpRegister::R11 => vcpu.set_reg(Reg::R11, val),
-        VpRegister::R12 => vcpu.set_reg(Reg::R12, val),
-        VpRegister::R13 => vcpu.set_reg(Reg::R13, val),
-        VpRegister::R14 => vcpu.set_reg(Reg::R14, val),
-        VpRegister::R15 => vcpu.set_reg(Reg::R15, val),
+    Some(match reg {
+        VpRegister::Rsp    => guest::RSP,
+        VpRegister::Rip    => guest::RIP,
+        VpRegister::Rflags => guest::RFLAGS,
+        VpRegister::Cr0    => guest::CR0,
+        VpRegister::Cr3    => guest::CR3,
+        VpRegister::Cr4    => guest::CR4,
+        VpRegister::Efer   => guest::IA32_EFER_FULL,
+        VpRegister::Dr7    => guest::DR7,
+        VpRegister::CsSelector   => guest::CS_SELECTOR,
+        VpRegister::DsSelector   => guest::DS_SELECTOR,
+        VpRegister::EsSelector   => guest::ES_SELECTOR,
+        VpRegister::FsSelector   => guest::FS_SELECTOR,
+        VpRegister::GsSelector   => guest::GS_SELECTOR,
+        VpRegister::SsSelector   => guest::SS_SELECTOR,
+        VpRegister::TrSelector   => guest::TR_SELECTOR,
+        VpRegister::LdtrSelector => guest::LDTR_SELECTOR,
+        VpRegister::CsBase   => guest::CS_BASE,
+        VpRegister::DsBase   => guest::DS_BASE,
+        VpRegister::EsBase   => guest::ES_BASE,
+        VpRegister::FsBase   => guest::FS_BASE,
+        VpRegister::GsBase   => guest::GS_BASE,
+        VpRegister::SsBase   => guest::SS_BASE,
+        VpRegister::TrBase   => guest::TR_BASE,
+        VpRegister::LdtrBase => guest::LDTR_BASE,
+        VpRegister::CsLimit   => guest::CS_LIMIT,
+        VpRegister::DsLimit   => guest::DS_LIMIT,
+        VpRegister::EsLimit   => guest::ES_LIMIT,
+        VpRegister::FsLimit   => guest::FS_LIMIT,
+        VpRegister::GsLimit   => guest::GS_LIMIT,
+        VpRegister::SsLimit   => guest::SS_LIMIT,
+        VpRegister::TrLimit   => guest::TR_LIMIT,
+        VpRegister::LdtrLimit => guest::LDTR_LIMIT,
+        VpRegister::CsAccessRights   => guest::CS_ACCESS_RIGHTS,
+        VpRegister::DsAccessRights   => guest::DS_ACCESS_RIGHTS,
+        VpRegister::EsAccessRights   => guest::ES_ACCESS_RIGHTS,
+        VpRegister::FsAccessRights   => guest::FS_ACCESS_RIGHTS,
+        VpRegister::GsAccessRights   => guest::GS_ACCESS_RIGHTS,
+        VpRegister::SsAccessRights   => guest::SS_ACCESS_RIGHTS,
+        VpRegister::TrAccessRights   => guest::TR_ACCESS_RIGHTS,
+        VpRegister::LdtrAccessRights => guest::LDTR_ACCESS_RIGHTS,
+        VpRegister::GdtrBase  => guest::GDTR_BASE,
+        VpRegister::GdtrLimit => guest::GDTR_LIMIT,
+        VpRegister::IdtrBase  => guest::IDTR_BASE,
+        VpRegister::IdtrLimit => guest::IDTR_LIMIT,
+        VpRegister::SysenterCs  => guest::IA32_SYSENTER_CS,
+        VpRegister::SysenterEsp => guest::IA32_SYSENTER_ESP,
+        VpRegister::SysenterEip => guest::IA32_SYSENTER_EIP,
+        VpRegister::FsBaseMsr   => guest::FS_BASE,
+        VpRegister::GsBaseMsr   => guest::GS_BASE,
+        VpRegister::ActivityState         => guest::ACTIVITY_STATE,
+        VpRegister::InterruptibilityState => guest::INTERRUPTIBILITY_STATE,
+        VpRegister::Pat                   => guest::IA32_PAT_FULL,
+        // No VMCS mapping.
+        _ => return None,
+    })
+}
 
-        // VMCS guest-state fields → VMWRITE
-        VpRegister::Rsp    => vmwrite(guest::RSP, val),
-        VpRegister::Rip    => vmwrite(guest::RIP, val),
-        VpRegister::Rflags => vmwrite(guest::RFLAGS, val),
+/// Map a `VpRegister` to a GPR index (`Reg`).
+/// Returns `None` for non-GPR registers.
+fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
+    use themis_abi::regs::VpRegister;
+    Some(match reg {
+        VpRegister::Rax => Reg::Rax,
+        VpRegister::Rbx => Reg::Rbx,
+        VpRegister::Rcx => Reg::Rcx,
+        VpRegister::Rdx => Reg::Rdx,
+        VpRegister::Rsi => Reg::Rsi,
+        VpRegister::Rdi => Reg::Rdi,
+        VpRegister::Rbp => Reg::Rbp,
+        VpRegister::R8  => Reg::R8,
+        VpRegister::R9  => Reg::R9,
+        VpRegister::R10 => Reg::R10,
+        VpRegister::R11 => Reg::R11,
+        VpRegister::R12 => Reg::R12,
+        VpRegister::R13 => Reg::R13,
+        VpRegister::R14 => Reg::R14,
+        VpRegister::R15 => Reg::R15,
+        _ => return None,
+    })
+}
 
-        VpRegister::Cr0  => vmwrite(guest::CR0, val),
-        VpRegister::Cr3  => vmwrite(guest::CR3, val),
-        VpRegister::Cr4  => vmwrite(guest::CR4, val),
-        VpRegister::Efer => vmwrite(guest::IA32_EFER_FULL, val),
-        VpRegister::Dr7  => vmwrite(guest::DR7, val),
-
-        VpRegister::CsSelector   => vmwrite(guest::CS_SELECTOR, val),
-        VpRegister::DsSelector   => vmwrite(guest::DS_SELECTOR, val),
-        VpRegister::EsSelector   => vmwrite(guest::ES_SELECTOR, val),
-        VpRegister::FsSelector   => vmwrite(guest::FS_SELECTOR, val),
-        VpRegister::GsSelector   => vmwrite(guest::GS_SELECTOR, val),
-        VpRegister::SsSelector   => vmwrite(guest::SS_SELECTOR, val),
-        VpRegister::TrSelector   => vmwrite(guest::TR_SELECTOR, val),
-        VpRegister::LdtrSelector => vmwrite(guest::LDTR_SELECTOR, val),
-
-        VpRegister::CsBase   => vmwrite(guest::CS_BASE, val),
-        VpRegister::DsBase   => vmwrite(guest::DS_BASE, val),
-        VpRegister::EsBase   => vmwrite(guest::ES_BASE, val),
-        VpRegister::FsBase   => vmwrite(guest::FS_BASE, val),
-        VpRegister::GsBase   => vmwrite(guest::GS_BASE, val),
-        VpRegister::SsBase   => vmwrite(guest::SS_BASE, val),
-        VpRegister::TrBase   => vmwrite(guest::TR_BASE, val),
-        VpRegister::LdtrBase => vmwrite(guest::LDTR_BASE, val),
-
-        VpRegister::CsLimit   => vmwrite(guest::CS_LIMIT, val),
-        VpRegister::DsLimit   => vmwrite(guest::DS_LIMIT, val),
-        VpRegister::EsLimit   => vmwrite(guest::ES_LIMIT, val),
-        VpRegister::FsLimit   => vmwrite(guest::FS_LIMIT, val),
-        VpRegister::GsLimit   => vmwrite(guest::GS_LIMIT, val),
-        VpRegister::SsLimit   => vmwrite(guest::SS_LIMIT, val),
-        VpRegister::TrLimit   => vmwrite(guest::TR_LIMIT, val),
-        VpRegister::LdtrLimit => vmwrite(guest::LDTR_LIMIT, val),
-
-        VpRegister::CsAccessRights   => vmwrite(guest::CS_ACCESS_RIGHTS, val),
-        VpRegister::DsAccessRights   => vmwrite(guest::DS_ACCESS_RIGHTS, val),
-        VpRegister::EsAccessRights   => vmwrite(guest::ES_ACCESS_RIGHTS, val),
-        VpRegister::FsAccessRights   => vmwrite(guest::FS_ACCESS_RIGHTS, val),
-        VpRegister::GsAccessRights   => vmwrite(guest::GS_ACCESS_RIGHTS, val),
-        VpRegister::SsAccessRights   => vmwrite(guest::SS_ACCESS_RIGHTS, val),
-        VpRegister::TrAccessRights   => vmwrite(guest::TR_ACCESS_RIGHTS, val),
-        VpRegister::LdtrAccessRights => vmwrite(guest::LDTR_ACCESS_RIGHTS, val),
-
-        VpRegister::GdtrBase  => vmwrite(guest::GDTR_BASE, val),
-        VpRegister::GdtrLimit => vmwrite(guest::GDTR_LIMIT, val),
-        VpRegister::IdtrBase  => vmwrite(guest::IDTR_BASE, val),
-        VpRegister::IdtrLimit => vmwrite(guest::IDTR_LIMIT, val),
-
-        VpRegister::SysenterCs  => vmwrite(guest::IA32_SYSENTER_CS, val),
-        VpRegister::SysenterEsp => vmwrite(guest::IA32_SYSENTER_ESP, val),
-        VpRegister::SysenterEip => vmwrite(guest::IA32_SYSENTER_EIP, val),
-
-        // FS/GS base MSRs map to the same VMCS fields as the segment bases.
-        VpRegister::FsBaseMsr    => vmwrite(guest::FS_BASE, val),
-        VpRegister::GsBaseMsr    => vmwrite(guest::GS_BASE, val),
-        // KERNEL_GS_BASE: not a VMCS field — saved/restored via MSR load/store
-        // lists.  For now, store it in the InactiveVcpu.
-        VpRegister::KernelGsBase => { /* TODO: MSR load/store area */ }
-
-        VpRegister::ApicBase => { /* IA32_APIC_BASE is a real MSR, skip for now */ }
-        VpRegister::Tpr      => { /* read-only for parent, ignore writes */ }
-        VpRegister::Ppr      => { /* read-only for parent, ignore writes */ }
-
-        VpRegister::ActivityState         => vmwrite(guest::ACTIVITY_STATE, val),
-        VpRegister::InterruptibilityState => vmwrite(guest::INTERRUPTIBILITY_STATE, val),
-        VpRegister::Pat                   => vmwrite(guest::IA32_PAT_FULL, val),
+/// Apply a VMCS-field register to an active VCPU via `ActiveVcpu::set()`.
+fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
+    if let Some(field) = vp_reg_to_vmcs_field(reg) {
+        vcpu.set(field, val);
     }
+}
+
+/// Apply a register value to an InactiveVcpu.
+/// GPRs go to the register file; VMCS fields require the VMCS to be loaded.
+fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut InactiveVcpu) {
+    if let Some(gpr) = vp_reg_to_gpr(reg) {
+        vcpu.set_reg(gpr, val);
+    } else if let Some(field) = vp_reg_to_vmcs_field(reg) {
+        vmwrite(field, val);
+    }
+}
+
+/// Returns true if the register is a GPR (stored in register file, not VMCS).
+fn is_gpr(reg: themis_abi::regs::VpRegister) -> bool {
+    vp_reg_to_gpr(reg).is_some()
 }
 
 /// Helper: VMWRITE with panic on failure.
 #[inline]
 fn vmwrite(field: u32, val: u64) {
     unsafe {
-        x86::bits64::vmx::vmwrite(field, val).expect("VMWRITE failed in apply_reg_to_vcpu");
+        x86::bits64::vmx::vmwrite(field, val).expect("VMWRITE failed");
     }
 }
 

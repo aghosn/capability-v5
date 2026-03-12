@@ -155,6 +155,37 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
     let _count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_REASON.store(basic_reason as u64, Ordering::Relaxed);
 
+    // ── Child domain exit forwarding ──
+    // If the current core is running a child domain (not dom0), forward the
+    // exit to the parent — except for capavisor-internal exits (external
+    // interrupts, preemption timer) which are handled transparently.
+    {
+        let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+        if !platform_ptr.is_null() {
+            let platform = unsafe { &*platform_ptr };
+            if let Some(core_id) = platform.get_current_core() {
+                let domain_id = platform.core_domain_id(core_id as usize);
+                if domain_id != 0 && domain_id != u64::MAX {
+                    match basic_reason {
+                        EXIT_REASON_EXTERNAL_INTERRUPT => {
+                            // Host interrupt while child was running — acknowledge and re-enter.
+                            return;
+                        }
+                        EXIT_REASON_VMX_PREEMPTION_TIMER => {
+                            vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                                     PREEMPTION_TIMER_TICKS);
+                            return;
+                        }
+                        _ => {
+                            // All other exits: forward to parent.
+                            crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     match basic_reason {
         EXIT_REASON_INIT_SIGNAL => {
@@ -377,12 +408,14 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_VMCALL => {
-            let result = crate::hypercall::handle_vmcall(vcpu);
-            vcpu.set_reg(Reg::Rax, result.rax);
-            vcpu.set_reg(Reg::Rdi, result.rdi);
-            vcpu.set_reg(Reg::Rsi, result.rsi);
-            vcpu.set_reg(Reg::Rdx, result.rdx);
-            next_instruction(vcpu);
+            if let Some(result) = crate::hypercall::handle_vmcall(vcpu) {
+                vcpu.set_reg(Reg::Rax, result.rax);
+                vcpu.set_reg(Reg::Rdi, result.rdi);
+                vcpu.set_reg(Reg::Rsi, result.rsi);
+                vcpu.set_reg(Reg::Rdx, result.rdx);
+                next_instruction(vcpu);
+            }
+            // None → SWITCH swapped the vcpu; skip writeback + RIP advance.
         }
 
         EXIT_REASON_XSETBV => {

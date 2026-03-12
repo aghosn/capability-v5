@@ -1043,6 +1043,11 @@ impl ThemisPlatform {
         self.cores[core_id].domain_cap.lock().clone()
     }
 
+    /// Lock-free read of the domain ID currently scheduled on `core_id`.
+    pub fn core_domain_id(&self, core_id: usize) -> u64 {
+        self.cores[core_id].domain_id.load(Ordering::Acquire)
+    }
+
     /// Get the `PlatformDomain` for a given domain ID.
     pub fn get_platform_domain(&self, id: DomainId)
         -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>>
