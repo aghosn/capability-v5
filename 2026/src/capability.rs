@@ -3,7 +3,7 @@
 use crate::attest::{self, AttestationReport};
 use crate::domain::{
     effective_vector, Domain, DomainPolicy, InterruptVisibility, MonitorAPI, PendingCapability,
-    PendingDomainCapability, PolicyIdentifier, VProcessorRef, VectorPolicy, VpCallContext,
+    PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef, VectorPolicy, VpCallContext,
     VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
@@ -2937,7 +2937,7 @@ impl Capability<Domain> {
                     });
                 entry.visibility = vis;
             }
-            PolicyIdentifier::VectorRegReadSet(vec) => {
+            PolicyIdentifier::VectorRegReadSet(vec, word) => {
                 let entry = child_w
                     .data
                     .policy
@@ -2945,9 +2945,9 @@ impl Capability<Domain> {
                     .overrides
                     .entry(vec)
                     .or_insert_with(VectorPolicy::default_report);
-                entry.read_set = value;
+                entry.read_set.set_word(word as usize, value);
             }
-            PolicyIdentifier::VectorRegWriteSet(vec) => {
+            PolicyIdentifier::VectorRegWriteSet(vec, word) => {
                 let entry = child_w
                     .data
                     .policy
@@ -2955,7 +2955,7 @@ impl Capability<Domain> {
                     .overrides
                     .entry(vec)
                     .or_insert_with(VectorPolicy::default_report);
-                entry.write_set = value;
+                entry.write_set.set_word(word as usize, value);
             }
         }
 
@@ -2995,11 +2995,11 @@ impl Capability<Domain> {
             PolicyIdentifier::VectorVisibility(vec) => {
                 visibility_to_u64(child_r.data.policy.interrupts.get_policy(vec).visibility)
             }
-            PolicyIdentifier::VectorRegReadSet(vec) => {
-                child_r.data.policy.interrupts.get_policy(vec).read_set
+            PolicyIdentifier::VectorRegReadSet(vec, word) => {
+                child_r.data.policy.interrupts.get_policy(vec).read_set.word(word as usize)
             }
-            PolicyIdentifier::VectorRegWriteSet(vec) => {
-                child_r.data.policy.interrupts.get_policy(vec).write_set
+            PolicyIdentifier::VectorRegWriteSet(vec, word) => {
+                child_r.data.policy.interrupts.get_policy(vec).write_set.word(word as usize)
             }
         };
 
@@ -3034,10 +3034,7 @@ impl Capability<Domain> {
         let (child_domain_id, write_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
 
-        // u64::MAX means "all registers allowed"; otherwise check the bit.
-        // TODO: allow the platform to configure the register bitmap size
-        // (currently u64 = 64 bits, but platforms may have >64 register IDs).
-        if write_set != u64::MAX && (reg_id >= 64 || (write_set >> reg_id) & 1 == 0) {
+        if !write_set.is_set(reg_id) {
             return Err(CapaError::RegisterAccessDenied);
         }
 
@@ -3071,10 +3068,7 @@ impl Capability<Domain> {
         let (child_domain_id, read_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, true)?;
 
-        // u64::MAX means "all registers allowed"; otherwise check the bit.
-        // TODO: allow the platform to configure the register bitmap size
-        // (currently u64 = 64 bits, but platforms may have >64 register IDs).
-        if read_set != u64::MAX && (reg_id >= 64 || (read_set >> reg_id) & 1 == 0) {
+        if !read_set.is_set(reg_id) {
             return Err(CapaError::RegisterAccessDenied);
         }
 
@@ -3156,7 +3150,7 @@ fn register_access_check(
     reg_id: u64,
     platform: &dyn Platform,
     want_read: bool,
-) -> Result<(DomainId, u64)> {
+) -> Result<(DomainId, RegBitmap)> {
     // Bounds check.
     if reg_id >= platform.register_count() {
         return Err(CapaError::RegisterOutOfRange);

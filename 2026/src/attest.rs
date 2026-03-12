@@ -319,10 +319,10 @@ fn attest_with_context(
         InterruptVisibility::NotReport => "NotReport",
     };
     out.push_str(&format!(
-        "  Default: visibility={}, read_set={:#018x}, write_set={:#018x}\n",
+        "  Default: visibility={}, read={:x}, write={:x}\n",
         vis_str(&irq.default.visibility),
         irq.default.read_set,
-        irq.default.write_set
+        irq.default.write_set,
     ));
     if irq.overrides.is_empty() {
         out.push_str("  Overrides: (none)\n");
@@ -330,11 +330,11 @@ fn attest_with_context(
         out.push_str("  Overrides:\n");
         for (vector, policy) in &irq.overrides {
             out.push_str(&format!(
-                "    Vector {:#04x}: visibility={}, read_set={:#018x}, write_set={:#018x}\n",
+                "    Vector {:#04x}: visibility={}, read={:x}, write={:x}\n",
                 vector,
                 vis_str(&policy.visibility),
                 policy.read_set,
-                policy.write_set
+                policy.write_set,
             ));
         }
     }

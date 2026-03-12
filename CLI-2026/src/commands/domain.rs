@@ -572,14 +572,29 @@ fn parse_policy_id(s: &str) -> std::result::Result<PolicyIdentifier, String> {
         return Ok(PolicyIdentifier::VectorVisibility(v));
     }
     if let Some(rest) = s.strip_prefix("vector-read:") {
-        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
-        return Ok(PolicyIdentifier::VectorRegReadSet(v));
+        let (vec_str, word) = parse_vector_word(rest)?;
+        let v = vec_str.parse::<u8>().map_err(|_| format!("Invalid vector: {}", vec_str))?;
+        return Ok(PolicyIdentifier::VectorRegReadSet(v, word));
     }
     if let Some(rest) = s.strip_prefix("vector-write:") {
-        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
-        return Ok(PolicyIdentifier::VectorRegWriteSet(v));
+        let (vec_str, word) = parse_vector_word(rest)?;
+        let v = vec_str.parse::<u8>().map_err(|_| format!("Invalid vector: {}", vec_str))?;
+        return Ok(PolicyIdentifier::VectorRegWriteSet(v, word));
     }
-    Err(format!("Unknown policy: '{}'. Use: cores, api-monitor, default-visibility, vector-visibility:<v>, vector-read:<v>, vector-write:<v>", s))
+    Err(format!("Unknown policy: '{}'. Use: cores, api-monitor, default-visibility, vector-visibility:<v>, vector-read:<v>[:<word>], vector-write:<v>[:<word>]", s))
+}
+
+/// Parse "vector[:word]" — word defaults to 0.
+fn parse_vector_word(s: &str) -> std::result::Result<(&str, u8), String> {
+    if let Some((vec_part, word_part)) = s.split_once(':') {
+        let w = word_part.parse::<u8>().map_err(|_| format!("Invalid word index: {}", word_part))?;
+        if w >= 3 {
+            return Err(format!("Word index must be 0..2, got {}", w));
+        }
+        Ok((vec_part, w))
+    } else {
+        Ok((s, 0))
+    }
 }
 
 /// Enumerate pending capabilities for a sealed domain

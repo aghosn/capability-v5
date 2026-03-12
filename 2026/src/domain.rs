@@ -144,30 +144,83 @@ pub enum InterruptVisibility {
     NotReport,
 }
 
+/// Register-access bitmap covering up to 192 register IDs (3 × 64 bits).
+///
+/// Each bit corresponds to a register ID: word `i` covers IDs `i*64 .. (i+1)*64`.
+/// The width matches the COMM page `dirty_mask` layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegBitmap(pub [u64; 3]);
+
+impl RegBitmap {
+    /// All bits cleared — no registers accessible.
+    pub const NONE: Self = RegBitmap([0; 3]);
+    /// All bits set — all registers accessible.
+    pub const ALL: Self = RegBitmap([u64::MAX; 3]);
+
+    /// Test whether bit `reg_id` is set.
+    #[inline]
+    pub fn is_set(&self, reg_id: u64) -> bool {
+        let word = (reg_id / 64) as usize;
+        let bit = reg_id % 64;
+        word < 3 && (self.0[word] >> bit) & 1 != 0
+    }
+
+    /// Return the raw word at `idx` (0..3).
+    #[inline]
+    pub fn word(&self, idx: usize) -> u64 {
+        if idx < 3 { self.0[idx] } else { 0 }
+    }
+
+    /// Set the raw word at `idx` (0..3).
+    #[inline]
+    pub fn set_word(&mut self, idx: usize, val: u64) {
+        if idx < 3 { self.0[idx] = val; }
+    }
+}
+
+impl core::fmt::LowerHex for RegBitmap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Print as a single big-endian hex string: word[2]:word[1]:word[0]
+        // Skip leading all-zero words for compactness.
+        if self.0 == [0; 3] {
+            return write!(f, "0x0");
+        }
+        if self.0 == [u64::MAX; 3] {
+            return write!(f, "0x{:x}{:016x}{:016x}", u64::MAX, u64::MAX, u64::MAX);
+        }
+        let first_nonzero = (0..3).rev().find(|&i| self.0[i] != 0).unwrap_or(0);
+        write!(f, "0x{:x}", self.0[first_nonzero])?;
+        for i in (0..first_nonzero).rev() {
+            write!(f, "{:016x}", self.0[i])?;
+        }
+        Ok(())
+    }
+}
+
 /// Policy for a specific interrupt vector
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorPolicy {
     pub visibility: InterruptVisibility,
     /// Bitmask of registers that can be read during interrupt handling
-    pub read_set: u64,
+    pub read_set: RegBitmap,
     /// Bitmask of registers that can be written during interrupt handling
-    pub write_set: u64,
+    pub write_set: RegBitmap,
 }
 
 impl VectorPolicy {
     pub fn default_deliver() -> Self {
         VectorPolicy {
             visibility: InterruptVisibility::Deliver,
-            read_set: 0,
-            write_set: 0,
+            read_set: RegBitmap::NONE,
+            write_set: RegBitmap::NONE,
         }
     }
 
     pub fn default_report() -> Self {
         VectorPolicy {
             visibility: InterruptVisibility::Report,
-            read_set: u64::MAX,
-            write_set: u64::MAX,
+            read_set: RegBitmap::ALL,
+            write_set: RegBitmap::ALL,
         }
     }
 }
@@ -288,12 +341,13 @@ pub enum PolicyIdentifier {
     /// Value: 0 = Deliver, 1 = Report, 2 = NotReport.
     /// Use vector = [`VECTOR_AVAILABLE`] (0xFF) for the "VP available" synthetic entry.
     VectorVisibility(u8),
-    /// Per-vector register read-access bitmap.
-    /// Bit `i` set means the parent may read register `i` when the VP is in this
-    /// interrupt state.
-    VectorRegReadSet(u8),
-    /// Per-vector register write-access bitmap.
-    VectorRegWriteSet(u8),
+    /// Per-vector register read-access bitmap (one word at a time).
+    /// First `u8` is the vector, second is the word index (0..3).
+    /// Bit `i` set means the parent may read register `word*64 + i`.
+    VectorRegReadSet(u8, u8),
+    /// Per-vector register write-access bitmap (one word at a time).
+    /// First `u8` is the vector, second is the word index (0..3).
+    VectorRegWriteSet(u8, u8),
 }
 
 /// Virtual processor state (platform-specific)

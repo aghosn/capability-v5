@@ -121,8 +121,8 @@ fn test_set_get_vector_reg_read_set() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let bitmap: u64 = 0b1010_1010;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5), bitmap).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5)).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), bitmap).unwrap();
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap();
     assert_eq!(v, bitmap);
 }
 
@@ -132,8 +132,8 @@ fn test_set_get_vector_reg_write_set() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let bitmap: u64 = 0xDEAD_BEEF;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7), bitmap).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7)).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0), bitmap).unwrap();
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0)).unwrap();
     assert_eq!(v, bitmap);
 }
 
@@ -241,7 +241,7 @@ fn test_register_bitmaps_not_monotone() {
     let (_, child_h) =
         make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // Parent sets a small read bitmap on child
-    Capability::set_policy(&parent, child_h, PolicyIdentifier::VectorRegReadSet(10), 0b0001)
+    Capability::set_policy(&parent, child_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0b0001)
         .unwrap();
     seal(&parent, child_h);
     let child = parent.read().data.domain_capabilities[&child_h].upgrade().unwrap();
@@ -249,10 +249,10 @@ fn test_register_bitmaps_not_monotone() {
     // Now set a LARGER bitmap on a grandchild through the child — must succeed (no monotonicity).
     let (_, gc_h) =
         make_child(&child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
-    Capability::set_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10), 0xFFFF_FFFF)
+    Capability::set_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0xFFFF_FFFF)
         .unwrap();
     let v =
-        Capability::get_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10)).unwrap();
+        Capability::get_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0)).unwrap();
     assert_eq!(v, 0xFFFF_FFFF);
 }
 
@@ -364,9 +364,9 @@ fn test_set_get_register_available_vp() {
 
     // Allow reg 0 for read and write under VECTOR_AVAILABLE (0xFF).
     let bitmap: u64 = 1; // bit 0 set
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE), bitmap)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), bitmap)
         .unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), bitmap)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), bitmap)
         .unwrap();
 
     // VP[0] is Available by default → effective vector = VECTOR_AVAILABLE.
@@ -382,7 +382,7 @@ fn test_set_register_denied_when_bit_not_in_write_bitmap() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // write bitmap for VECTOR_AVAILABLE has bit 0 but NOT bit 1
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 0b01)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0b01)
         .unwrap();
 
     let err = Capability::set_register(&parent, h, 0, 1, 42, &platform).unwrap_err();
@@ -396,7 +396,7 @@ fn test_get_register_denied_when_bit_not_in_read_bitmap() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // read bitmap for VECTOR_AVAILABLE has bit 0 but NOT bit 2
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE), 0b01)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 0b01)
         .unwrap();
 
     let err = Capability::get_register(&parent, h, 0, 2, &platform).unwrap_err();
@@ -416,8 +416,8 @@ fn test_set_get_register_interrupted_vp_uses_vector_override() {
 
     // Grant access to reg 3 under vector 42 only.
     let bitmap: u64 = 1 << 3;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42), bitmap).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(42), bitmap).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), bitmap).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(42, 0), bitmap).unwrap();
 
     // Put VP[0] in Interrupted { vector: 42 }
     set_vp_interrupted(&child, 0, 42);
@@ -435,12 +435,12 @@ fn test_register_access_blocked_for_different_vector() {
         make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Restrict the default VECTOR_AVAILABLE write bitmap (default_report sets u64::MAX).
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 0).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
 
     // Only allow reg 3 under vector 42.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42), 1 << 3).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 3).unwrap();
     // Explicitly deny vector 99.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(99), 0).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(99, 0), 0).unwrap();
 
     // VP is interrupted by vector 99 → override write_set = 0.
     set_vp_interrupted(&child, 0, 99);
@@ -457,10 +457,10 @@ fn test_vector_override_does_not_affect_available_vp() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Clear the default VECTOR_AVAILABLE write bitmap so only per-vector overrides grant access.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 0).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
 
     // Grant write access to reg 5 only under vector 42.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42), 1 << 5).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 5).unwrap();
 
     // VP[0] is Available by default.
     let err = Capability::set_register(&parent, h, 0, 5, 99, &platform).unwrap_err();
@@ -478,7 +478,7 @@ fn test_set_register_denied_when_vp_running() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full write access under VECTOR_AVAILABLE so bitmaps are not the obstacle.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), u64::MAX)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), u64::MAX)
         .unwrap();
 
     // Confirm write works while Available.
@@ -497,7 +497,7 @@ fn test_get_register_denied_when_vp_running() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full read access under VECTOR_AVAILABLE.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE), u64::MAX)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), u64::MAX)
         .unwrap();
 
     // Confirm read works while Available.
@@ -571,9 +571,9 @@ fn test_set_register_works_on_sealed_domain() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant write access to reg 0 under VECTOR_AVAILABLE before sealing.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 1)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1)
         .unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE), 1)
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 1)
         .unwrap();
 
     seal(&parent, h);
@@ -642,19 +642,19 @@ fn test_vector_visibility_independent_of_read_write_set() {
 
     // Set visibility and bitmaps independently for the same vector.
     Capability::set_policy(&parent, h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5), 0b111).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5), 0b011).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), 0b111).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0), 0b011).unwrap();
 
     assert_eq!(
         Capability::get_policy(&parent, h, PolicyIdentifier::VectorVisibility(5)).unwrap(),
         1
     );
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5)).unwrap(),
+        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap(),
         0b111
     );
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5)).unwrap(),
+        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0)).unwrap(),
         0b011
     );
 }
@@ -670,8 +670,8 @@ fn test_effective_vector_switches_on_interrupt() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Allow reg 0 write under VECTOR_AVAILABLE but NOT under vector 1.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 1).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(1), 0).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(1, 0), 0).unwrap();
 
     // While Available: write should succeed.
     Capability::set_register(&parent, h, 0, 0, 1, &platform).unwrap();

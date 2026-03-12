@@ -475,8 +475,8 @@ fn test_interrupt_no_handler() {
     let mut policy = DomainPolicy::new_root(4);
     policy.interrupts.default = VectorPolicy {
         visibility: InterruptVisibility::NotReport,
-        read_set: 0,
-        write_set: 0,
+        read_set: RegBitmap::NONE,
+        write_set: RegBitmap::NONE,
     };
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
