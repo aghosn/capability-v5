@@ -120,6 +120,10 @@ pub mod opcodes {
     /// Notify the capavisor to process the caller's DomainComm TX ring.
     /// IN:  (no arguments)
     pub const THEMIS_DOMCOMM_NOTIFY:      u64 = 0x19;
+
+    /// Flush dirty VP register state from a COMM page into the child's VMCS.
+    /// IN:  RDI = child_domain_handle, RSI = vp_id
+    pub const THEMIS_FLUSH_VP_STATE:      u64 = 0x1A;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //
@@ -131,6 +135,7 @@ pub mod errors {
     pub const ERR_NOMEM:      u64 = 3;
     pub const ERR_BADSTATE:   u64 = 4;
     pub const ERR_NOTFOUND:   u64 = 5;
+    pub const ERR_BUSY:       u64 = 6;
     pub const ERR_UNIMPL:     u64 = u64::MAX;
 }
 

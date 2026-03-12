@@ -320,6 +320,13 @@ pub enum VpRegister {
     Pat                  = 0xB2,
 }
 
+impl VpRegister {
+    /// Convert a raw discriminant value to a `VpRegister`, if valid.
+    pub fn from_discriminant(n: u64) -> Option<VpRegister> {
+        ALL_VP_REGISTERS.iter().find(|r| **r as u64 == n).copied()
+    }
+}
+
 // ── COMM page: bulk register transfer via shared memory ───────────────────── //
 
 /// Number of 64-bit words in the dirty / allowed bitmasks.
@@ -569,4 +576,209 @@ impl VpCommPage {
         let (w, b) = Self::mask_bit(reg);
         self.allowed_mask[w] & (1 << b) != 0
     }
+
+    /// Read a register value from the COMM page, zero-extended to u64.
+    ///
+    /// Selectors are stored as u16, limits and access rights as u32;
+    /// all are zero-extended to u64 for a uniform interface.
+    #[inline]
+    pub fn read_reg(&self, reg: VpRegister) -> u64 {
+        match reg {
+            // GPRs (u64)
+            VpRegister::Rax => self.rax,
+            VpRegister::Rbx => self.rbx,
+            VpRegister::Rcx => self.rcx,
+            VpRegister::Rdx => self.rdx,
+            VpRegister::Rsi => self.rsi,
+            VpRegister::Rdi => self.rdi,
+            VpRegister::Rbp => self.rbp,
+            VpRegister::R8  => self.r8,
+            VpRegister::R9  => self.r9,
+            VpRegister::R10 => self.r10,
+            VpRegister::R11 => self.r11,
+            VpRegister::R12 => self.r12,
+            VpRegister::R13 => self.r13,
+            VpRegister::R14 => self.r14,
+            VpRegister::R15 => self.r15,
+            // Stack / IP / flags (u64)
+            VpRegister::Rsp    => self.rsp,
+            VpRegister::Rip    => self.rip,
+            VpRegister::Rflags => self.rflags,
+            // Control regs (u64)
+            VpRegister::Cr0  => self.cr0,
+            VpRegister::Cr3  => self.cr3,
+            VpRegister::Cr4  => self.cr4,
+            VpRegister::Efer => self.efer,
+            VpRegister::Dr7  => self.dr7,
+            // Segment selectors (u16 → u64)
+            VpRegister::CsSelector   => self.cs_selector as u64,
+            VpRegister::DsSelector   => self.ds_selector as u64,
+            VpRegister::EsSelector   => self.es_selector as u64,
+            VpRegister::FsSelector   => self.fs_selector as u64,
+            VpRegister::GsSelector   => self.gs_selector as u64,
+            VpRegister::SsSelector   => self.ss_selector as u64,
+            VpRegister::TrSelector   => self.tr_selector as u64,
+            VpRegister::LdtrSelector => self.ldtr_selector as u64,
+            // Segment bases (u64)
+            VpRegister::CsBase   => self.cs_base,
+            VpRegister::DsBase   => self.ds_base,
+            VpRegister::EsBase   => self.es_base,
+            VpRegister::FsBase   => self.fs_base,
+            VpRegister::GsBase   => self.gs_base,
+            VpRegister::SsBase   => self.ss_base,
+            VpRegister::TrBase   => self.tr_base,
+            VpRegister::LdtrBase => self.ldtr_base,
+            // Segment limits (u32 → u64)
+            VpRegister::CsLimit   => self.cs_limit as u64,
+            VpRegister::DsLimit   => self.ds_limit as u64,
+            VpRegister::EsLimit   => self.es_limit as u64,
+            VpRegister::FsLimit   => self.fs_limit as u64,
+            VpRegister::GsLimit   => self.gs_limit as u64,
+            VpRegister::SsLimit   => self.ss_limit as u64,
+            VpRegister::TrLimit   => self.tr_limit as u64,
+            VpRegister::LdtrLimit => self.ldtr_limit as u64,
+            // Segment access rights (u32 → u64)
+            VpRegister::CsAccessRights   => self.cs_access_rights as u64,
+            VpRegister::DsAccessRights   => self.ds_access_rights as u64,
+            VpRegister::EsAccessRights   => self.es_access_rights as u64,
+            VpRegister::FsAccessRights   => self.fs_access_rights as u64,
+            VpRegister::GsAccessRights   => self.gs_access_rights as u64,
+            VpRegister::SsAccessRights   => self.ss_access_rights as u64,
+            VpRegister::TrAccessRights   => self.tr_access_rights as u64,
+            VpRegister::LdtrAccessRights => self.ldtr_access_rights as u64,
+            // Descriptor tables
+            VpRegister::GdtrBase  => self.gdtr_base,
+            VpRegister::GdtrLimit => self.gdtr_limit as u64,
+            VpRegister::IdtrBase  => self.idtr_base,
+            VpRegister::IdtrLimit => self.idtr_limit as u64,
+            // SYSENTER MSRs (u64)
+            VpRegister::SysenterCs  => self.sysenter_cs,
+            VpRegister::SysenterEsp => self.sysenter_esp,
+            VpRegister::SysenterEip => self.sysenter_eip,
+            // Segment MSRs (u64)
+            VpRegister::FsBaseMsr    => self.fs_base_msr,
+            VpRegister::GsBaseMsr    => self.gs_base_msr,
+            VpRegister::KernelGsBase => self.kernel_gs_base,
+            // APIC (u64)
+            VpRegister::ApicBase => self.apic_base,
+            VpRegister::Tpr      => self.tpr,
+            VpRegister::Ppr      => self.ppr,
+            // Activity / interruptibility / PAT
+            VpRegister::ActivityState         => self.activity_state as u64,
+            VpRegister::InterruptibilityState => self.interruptibility_state as u64,
+            VpRegister::Pat                   => self.pat,
+        }
+    }
+
+    /// Write a register value (u64, zero-extended) into the COMM page.
+    ///
+    /// Truncates to the natural width of the field (u16 for selectors,
+    /// u32 for limits/access-rights/activity).
+    #[inline]
+    pub fn write_reg(&mut self, reg: VpRegister, val: u64) {
+        match reg {
+            VpRegister::Rax => self.rax = val,
+            VpRegister::Rbx => self.rbx = val,
+            VpRegister::Rcx => self.rcx = val,
+            VpRegister::Rdx => self.rdx = val,
+            VpRegister::Rsi => self.rsi = val,
+            VpRegister::Rdi => self.rdi = val,
+            VpRegister::Rbp => self.rbp = val,
+            VpRegister::R8  => self.r8 = val,
+            VpRegister::R9  => self.r9 = val,
+            VpRegister::R10 => self.r10 = val,
+            VpRegister::R11 => self.r11 = val,
+            VpRegister::R12 => self.r12 = val,
+            VpRegister::R13 => self.r13 = val,
+            VpRegister::R14 => self.r14 = val,
+            VpRegister::R15 => self.r15 = val,
+            VpRegister::Rsp    => self.rsp = val,
+            VpRegister::Rip    => self.rip = val,
+            VpRegister::Rflags => self.rflags = val,
+            VpRegister::Cr0  => self.cr0 = val,
+            VpRegister::Cr3  => self.cr3 = val,
+            VpRegister::Cr4  => self.cr4 = val,
+            VpRegister::Efer => self.efer = val,
+            VpRegister::Dr7  => self.dr7 = val,
+            VpRegister::CsSelector   => self.cs_selector = val as u16,
+            VpRegister::DsSelector   => self.ds_selector = val as u16,
+            VpRegister::EsSelector   => self.es_selector = val as u16,
+            VpRegister::FsSelector   => self.fs_selector = val as u16,
+            VpRegister::GsSelector   => self.gs_selector = val as u16,
+            VpRegister::SsSelector   => self.ss_selector = val as u16,
+            VpRegister::TrSelector   => self.tr_selector = val as u16,
+            VpRegister::LdtrSelector => self.ldtr_selector = val as u16,
+            VpRegister::CsBase   => self.cs_base = val,
+            VpRegister::DsBase   => self.ds_base = val,
+            VpRegister::EsBase   => self.es_base = val,
+            VpRegister::FsBase   => self.fs_base = val,
+            VpRegister::GsBase   => self.gs_base = val,
+            VpRegister::SsBase   => self.ss_base = val,
+            VpRegister::TrBase   => self.tr_base = val,
+            VpRegister::LdtrBase => self.ldtr_base = val,
+            VpRegister::CsLimit   => self.cs_limit = val as u32,
+            VpRegister::DsLimit   => self.ds_limit = val as u32,
+            VpRegister::EsLimit   => self.es_limit = val as u32,
+            VpRegister::FsLimit   => self.fs_limit = val as u32,
+            VpRegister::GsLimit   => self.gs_limit = val as u32,
+            VpRegister::SsLimit   => self.ss_limit = val as u32,
+            VpRegister::TrLimit   => self.tr_limit = val as u32,
+            VpRegister::LdtrLimit => self.ldtr_limit = val as u32,
+            VpRegister::CsAccessRights   => self.cs_access_rights = val as u32,
+            VpRegister::DsAccessRights   => self.ds_access_rights = val as u32,
+            VpRegister::EsAccessRights   => self.es_access_rights = val as u32,
+            VpRegister::FsAccessRights   => self.fs_access_rights = val as u32,
+            VpRegister::GsAccessRights   => self.gs_access_rights = val as u32,
+            VpRegister::SsAccessRights   => self.ss_access_rights = val as u32,
+            VpRegister::TrAccessRights   => self.tr_access_rights = val as u32,
+            VpRegister::LdtrAccessRights => self.ldtr_access_rights = val as u32,
+            VpRegister::GdtrBase  => self.gdtr_base = val,
+            VpRegister::GdtrLimit => self.gdtr_limit = val as u16,
+            VpRegister::IdtrBase  => self.idtr_base = val,
+            VpRegister::IdtrLimit => self.idtr_limit = val as u16,
+            VpRegister::SysenterCs  => self.sysenter_cs = val,
+            VpRegister::SysenterEsp => self.sysenter_esp = val,
+            VpRegister::SysenterEip => self.sysenter_eip = val,
+            VpRegister::FsBaseMsr    => self.fs_base_msr = val,
+            VpRegister::GsBaseMsr    => self.gs_base_msr = val,
+            VpRegister::KernelGsBase => self.kernel_gs_base = val,
+            VpRegister::ApicBase => self.apic_base = val,
+            VpRegister::Tpr      => self.tpr = val,
+            VpRegister::Ppr      => self.ppr = val,
+            VpRegister::ActivityState         => self.activity_state = val as u32,
+            VpRegister::InterruptibilityState => self.interruptibility_state = val as u32,
+            VpRegister::Pat                   => self.pat = val,
+        }
+    }
 }
+
+/// All valid `VpRegister` discriminants, in order.
+///
+/// Used by the capavisor to iterate over dirty bits and resolve each to
+/// a `VpRegister` variant.
+pub const ALL_VP_REGISTERS: &[VpRegister] = &[
+    VpRegister::Rax, VpRegister::Rbx, VpRegister::Rcx, VpRegister::Rdx,
+    VpRegister::Rsi, VpRegister::Rdi, VpRegister::Rbp,
+    VpRegister::R8,  VpRegister::R9,  VpRegister::R10, VpRegister::R11,
+    VpRegister::R12, VpRegister::R13, VpRegister::R14, VpRegister::R15,
+    VpRegister::Rsp, VpRegister::Rip, VpRegister::Rflags,
+    VpRegister::Cr0, VpRegister::Cr3, VpRegister::Cr4, VpRegister::Efer, VpRegister::Dr7,
+    VpRegister::CsSelector, VpRegister::DsSelector, VpRegister::EsSelector,
+    VpRegister::FsSelector, VpRegister::GsSelector, VpRegister::SsSelector,
+    VpRegister::TrSelector, VpRegister::LdtrSelector,
+    VpRegister::CsBase, VpRegister::DsBase, VpRegister::EsBase,
+    VpRegister::FsBase, VpRegister::GsBase, VpRegister::SsBase,
+    VpRegister::TrBase, VpRegister::LdtrBase,
+    VpRegister::CsLimit, VpRegister::DsLimit, VpRegister::EsLimit,
+    VpRegister::FsLimit, VpRegister::GsLimit, VpRegister::SsLimit,
+    VpRegister::TrLimit, VpRegister::LdtrLimit,
+    VpRegister::CsAccessRights, VpRegister::DsAccessRights, VpRegister::EsAccessRights,
+    VpRegister::FsAccessRights, VpRegister::GsAccessRights, VpRegister::SsAccessRights,
+    VpRegister::TrAccessRights, VpRegister::LdtrAccessRights,
+    VpRegister::GdtrBase, VpRegister::GdtrLimit,
+    VpRegister::IdtrBase, VpRegister::IdtrLimit,
+    VpRegister::SysenterCs, VpRegister::SysenterEsp, VpRegister::SysenterEip,
+    VpRegister::FsBaseMsr, VpRegister::GsBaseMsr, VpRegister::KernelGsBase,
+    VpRegister::ApicBase, VpRegister::Tpr, VpRegister::Ppr,
+    VpRegister::ActivityState, VpRegister::InterruptibilityState, VpRegister::Pat,
+];

@@ -3034,7 +3034,10 @@ impl Capability<Domain> {
         let (child_domain_id, write_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
 
-        if (write_set >> reg_id) & 1 == 0 {
+        // u64::MAX means "all registers allowed"; otherwise check the bit.
+        // TODO: allow the platform to configure the register bitmap size
+        // (currently u64 = 64 bits, but platforms may have >64 register IDs).
+        if write_set != u64::MAX && (reg_id >= 64 || (write_set >> reg_id) & 1 == 0) {
             return Err(CapaError::RegisterAccessDenied);
         }
 
@@ -3068,7 +3071,10 @@ impl Capability<Domain> {
         let (child_domain_id, read_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, true)?;
 
-        if (read_set >> reg_id) & 1 == 0 {
+        // u64::MAX means "all registers allowed"; otherwise check the bit.
+        // TODO: allow the platform to configure the register bitmap size
+        // (currently u64 = 64 bits, but platforms may have >64 register IDs).
+        if read_set != u64::MAX && (reg_id >= 64 || (read_set >> reg_id) & 1 == 0) {
             return Err(CapaError::RegisterAccessDenied);
         }
 

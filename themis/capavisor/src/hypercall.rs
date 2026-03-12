@@ -123,6 +123,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> HypercallResult {
         opcodes::THEMIS_REGISTER_COMM => do_register_comm(platform, &caller, arg0, arg1, arg2),
         opcodes::THEMIS_DOMCOMM_NOTIFY => do_domcomm_notify(platform, &caller),
         opcodes::THEMIS_ADD_VP => do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys()),
+        opcodes::THEMIS_FLUSH_VP_STATE => do_flush_vp_state(platform, &caller, arg0, arg1, vcpu.vmcs_phys()),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_SWITCH
@@ -479,7 +480,265 @@ fn do_add_vp(
     }
 }
 
-// ── DomainComm TX ring processing ────────────────────────────────────────── //
+// ── FLUSH_VP_STATE ───────────────────────────────────────────────────────── //
+
+/// FLUSH_VP_STATE (0x1A): apply dirty COMM page registers to a child VP's VMCS.
+///
+/// For each dirty register, calls `Capability::set_register` for validation
+/// (the platform's `set_vp_register` is a no-op). After all validations,
+/// batch-applies approved registers to the child VMCS / GPR save area in a
+/// single VMPTRLD/VMCLEAR pair.
+///
+/// Returns: RAX = last error (0 if all succeeded),
+///          RDI/RSI/RDX = applied bitmap (3 × u64).
+fn do_flush_vp_state(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_domain_handle: u64,
+    vp_id: u64,
+    caller_vmcs_phys: u64,
+) -> HypercallResult {
+    use themis_abi::regs::{VpCommPage, ALL_VP_REGISTERS};
+    use x86::bits64::vmx as vmx_ops;
+
+    let vp_idx = vp_id as usize;
+
+    // ── Step 1: look up child domain ID ──
+    let child_domain_id = {
+        let r = caller.read();
+        let child_weak = match r.data.get_domain_capability(child_domain_handle) {
+            Some(w) => w.clone(),
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        drop(r);
+        let child_ref = match child_weak.upgrade() {
+            Some(c) => c,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let child_r = child_ref.read();
+        child_r.data.id
+    };
+
+    let arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+
+    let comm_hpa = {
+        let d = arc.lock();
+        d.comm_hpas.get(vp_idx).copied().unwrap_or(0)
+    };
+    if comm_hpa == 0 {
+        serial_println!("[FLUSH_VP] no COMM page for dom={} vp={}", child_domain_id, vp_idx);
+        return HypercallResult::error(errors::ERR_NOTFOUND);
+    }
+
+    // ── Step 2: snapshot dirty_mask from shared COMM page ──
+    let hhdm = platform.hhdm_offset();
+    let comm_ptr = (comm_hpa + hhdm) as *mut VpCommPage;
+    let comm = unsafe { &mut *comm_ptr };
+
+    let dirty: [u64; 3] = [
+        comm.dirty_mask[0],
+        comm.dirty_mask[1],
+        comm.dirty_mask[2],
+    ];
+
+    if dirty.iter().all(|w| *w == 0) {
+        return HypercallResult::success();
+    }
+
+    // Clear the snapshotted bits (new bits set concurrently are preserved).
+    for i in 0..3 {
+        comm.dirty_mask[i] &= !dirty[i];
+    }
+
+    // ── Step 3: validate each dirty register via Capability::set_register ──
+    // set_register calls platform.set_vp_register which is a no-op, so this
+    // only does validation (SET perm, VP exists, VP not running, write bitmap).
+    let mut approved: [u64; 3] = [0; 3];
+    let mut last_err: u64 = errors::SUCCESS;
+    let mut pending = alloc::vec::Vec::new();
+
+    for reg in ALL_VP_REGISTERS {
+        let (w, b) = VpCommPage::mask_bit(*reg);
+        if dirty[w] & (1 << b) == 0 {
+            continue;
+        }
+        let val = comm.read_reg(*reg);
+        let reg_id = *reg as u64;
+
+        match Capability::set_register(
+            caller,
+            child_domain_handle,
+            vp_id,
+            reg_id,
+            val,
+            platform,
+        ) {
+            Ok(()) => {
+                pending.push((*reg, val));
+                approved[w] |= 1 << b;
+            }
+            Err(e) => {
+                last_err = map_error(&e);
+            }
+        }
+    }
+
+    // ── Step 4: batch-apply approved registers to child VMCS / GPR save area ──
+    if !pending.is_empty() {
+        let mut vcpu_opt = {
+            let d = arc.lock();
+            d.vps.get(vp_idx).and_then(|s| s.take())
+        };
+
+        if let Some(ref mut vcpu) = vcpu_opt {
+            let child_vmcs = vcpu.vmcs_phys();
+            // TODO: optimize VMCS switching — consider caching the current
+            // VMPTRLD target per-core, or writing directly to the VMCS region
+            // at known offsets to avoid the VMCLEAR/VMPTRLD round-trip.
+            unsafe {
+                vmx_ops::vmclear(child_vmcs).expect("FLUSH_VP: child vmclear failed");
+                vmx_ops::vmptrld(child_vmcs).expect("FLUSH_VP: child vmptrld failed");
+            }
+
+            for (reg, val) in &pending {
+                apply_reg_to_vcpu(*reg, *val, vcpu);
+            }
+
+            unsafe {
+                vmx_ops::vmclear(child_vmcs).expect("FLUSH_VP: child vmclear post failed");
+                vmx_ops::vmptrld(caller_vmcs_phys).expect("FLUSH_VP: caller vmptrld failed");
+            }
+        } else {
+            serial_println!("[FLUSH_VP] VP busy dom={} vp={}", child_domain_id, vp_idx);
+            last_err = errors::ERR_BUSY;
+            approved = [0; 3];
+        }
+
+        if let Some(vcpu) = vcpu_opt {
+            arc.lock().vps[vp_idx].put(vcpu);
+        }
+    }
+
+    serial_println!("[FLUSH_VP] dom={} vp={} applied", child_domain_id, vp_idx);
+    HypercallResult {
+        rax: last_err,
+        rdi: approved[0],
+        rsi: approved[1],
+        rdx: approved[2],
+    }
+}
+
+/// Map a `VpRegister` to the appropriate VMCS guest-state field or GPR slot
+/// and write the value.
+///
+/// **Precondition**: the child VMCS is currently loaded (VMPTRLD done).
+/// GPRs (RAX–R15) go to InactiveVcpu's register file; everything else
+/// goes via VMWRITE to the corresponding VMCS guest-state encoding.
+fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut InactiveVcpu) {
+    use themis_abi::regs::VpRegister;
+    use x86::vmx::vmcs::guest;
+
+    match reg {
+        // GPRs → register save area (not in VMCS)
+        VpRegister::Rax => vcpu.set_reg(Reg::Rax, val),
+        VpRegister::Rbx => vcpu.set_reg(Reg::Rbx, val),
+        VpRegister::Rcx => vcpu.set_reg(Reg::Rcx, val),
+        VpRegister::Rdx => vcpu.set_reg(Reg::Rdx, val),
+        VpRegister::Rsi => vcpu.set_reg(Reg::Rsi, val),
+        VpRegister::Rdi => vcpu.set_reg(Reg::Rdi, val),
+        VpRegister::Rbp => vcpu.set_reg(Reg::Rbp, val),
+        VpRegister::R8  => vcpu.set_reg(Reg::R8, val),
+        VpRegister::R9  => vcpu.set_reg(Reg::R9, val),
+        VpRegister::R10 => vcpu.set_reg(Reg::R10, val),
+        VpRegister::R11 => vcpu.set_reg(Reg::R11, val),
+        VpRegister::R12 => vcpu.set_reg(Reg::R12, val),
+        VpRegister::R13 => vcpu.set_reg(Reg::R13, val),
+        VpRegister::R14 => vcpu.set_reg(Reg::R14, val),
+        VpRegister::R15 => vcpu.set_reg(Reg::R15, val),
+
+        // VMCS guest-state fields → VMWRITE
+        VpRegister::Rsp    => vmwrite(guest::RSP, val),
+        VpRegister::Rip    => vmwrite(guest::RIP, val),
+        VpRegister::Rflags => vmwrite(guest::RFLAGS, val),
+
+        VpRegister::Cr0  => vmwrite(guest::CR0, val),
+        VpRegister::Cr3  => vmwrite(guest::CR3, val),
+        VpRegister::Cr4  => vmwrite(guest::CR4, val),
+        VpRegister::Efer => vmwrite(guest::IA32_EFER_FULL, val),
+        VpRegister::Dr7  => vmwrite(guest::DR7, val),
+
+        VpRegister::CsSelector   => vmwrite(guest::CS_SELECTOR, val),
+        VpRegister::DsSelector   => vmwrite(guest::DS_SELECTOR, val),
+        VpRegister::EsSelector   => vmwrite(guest::ES_SELECTOR, val),
+        VpRegister::FsSelector   => vmwrite(guest::FS_SELECTOR, val),
+        VpRegister::GsSelector   => vmwrite(guest::GS_SELECTOR, val),
+        VpRegister::SsSelector   => vmwrite(guest::SS_SELECTOR, val),
+        VpRegister::TrSelector   => vmwrite(guest::TR_SELECTOR, val),
+        VpRegister::LdtrSelector => vmwrite(guest::LDTR_SELECTOR, val),
+
+        VpRegister::CsBase   => vmwrite(guest::CS_BASE, val),
+        VpRegister::DsBase   => vmwrite(guest::DS_BASE, val),
+        VpRegister::EsBase   => vmwrite(guest::ES_BASE, val),
+        VpRegister::FsBase   => vmwrite(guest::FS_BASE, val),
+        VpRegister::GsBase   => vmwrite(guest::GS_BASE, val),
+        VpRegister::SsBase   => vmwrite(guest::SS_BASE, val),
+        VpRegister::TrBase   => vmwrite(guest::TR_BASE, val),
+        VpRegister::LdtrBase => vmwrite(guest::LDTR_BASE, val),
+
+        VpRegister::CsLimit   => vmwrite(guest::CS_LIMIT, val),
+        VpRegister::DsLimit   => vmwrite(guest::DS_LIMIT, val),
+        VpRegister::EsLimit   => vmwrite(guest::ES_LIMIT, val),
+        VpRegister::FsLimit   => vmwrite(guest::FS_LIMIT, val),
+        VpRegister::GsLimit   => vmwrite(guest::GS_LIMIT, val),
+        VpRegister::SsLimit   => vmwrite(guest::SS_LIMIT, val),
+        VpRegister::TrLimit   => vmwrite(guest::TR_LIMIT, val),
+        VpRegister::LdtrLimit => vmwrite(guest::LDTR_LIMIT, val),
+
+        VpRegister::CsAccessRights   => vmwrite(guest::CS_ACCESS_RIGHTS, val),
+        VpRegister::DsAccessRights   => vmwrite(guest::DS_ACCESS_RIGHTS, val),
+        VpRegister::EsAccessRights   => vmwrite(guest::ES_ACCESS_RIGHTS, val),
+        VpRegister::FsAccessRights   => vmwrite(guest::FS_ACCESS_RIGHTS, val),
+        VpRegister::GsAccessRights   => vmwrite(guest::GS_ACCESS_RIGHTS, val),
+        VpRegister::SsAccessRights   => vmwrite(guest::SS_ACCESS_RIGHTS, val),
+        VpRegister::TrAccessRights   => vmwrite(guest::TR_ACCESS_RIGHTS, val),
+        VpRegister::LdtrAccessRights => vmwrite(guest::LDTR_ACCESS_RIGHTS, val),
+
+        VpRegister::GdtrBase  => vmwrite(guest::GDTR_BASE, val),
+        VpRegister::GdtrLimit => vmwrite(guest::GDTR_LIMIT, val),
+        VpRegister::IdtrBase  => vmwrite(guest::IDTR_BASE, val),
+        VpRegister::IdtrLimit => vmwrite(guest::IDTR_LIMIT, val),
+
+        VpRegister::SysenterCs  => vmwrite(guest::IA32_SYSENTER_CS, val),
+        VpRegister::SysenterEsp => vmwrite(guest::IA32_SYSENTER_ESP, val),
+        VpRegister::SysenterEip => vmwrite(guest::IA32_SYSENTER_EIP, val),
+
+        // FS/GS base MSRs map to the same VMCS fields as the segment bases.
+        VpRegister::FsBaseMsr    => vmwrite(guest::FS_BASE, val),
+        VpRegister::GsBaseMsr    => vmwrite(guest::GS_BASE, val),
+        // KERNEL_GS_BASE: not a VMCS field — saved/restored via MSR load/store
+        // lists.  For now, store it in the InactiveVcpu.
+        VpRegister::KernelGsBase => { /* TODO: MSR load/store area */ }
+
+        VpRegister::ApicBase => { /* IA32_APIC_BASE is a real MSR, skip for now */ }
+        VpRegister::Tpr      => { /* read-only for parent, ignore writes */ }
+        VpRegister::Ppr      => { /* read-only for parent, ignore writes */ }
+
+        VpRegister::ActivityState         => vmwrite(guest::ACTIVITY_STATE, val),
+        VpRegister::InterruptibilityState => vmwrite(guest::INTERRUPTIBILITY_STATE, val),
+        VpRegister::Pat                   => vmwrite(guest::IA32_PAT_FULL, val),
+    }
+}
+
+/// Helper: VMWRITE with panic on failure.
+#[inline]
+fn vmwrite(field: u32, val: u64) {
+    unsafe {
+        x86::bits64::vmx::vmwrite(field, val).expect("VMWRITE failed in flush_vp_state");
+    }
+}
 
 /// DOMCOMM_NOTIFY (0x19): process pending messages on the caller's TX ring.
 ///

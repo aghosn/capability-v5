@@ -434,10 +434,15 @@ fn test_register_access_blocked_for_different_vector() {
     let (child, h) =
         make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
+    // Restrict the default VECTOR_AVAILABLE write bitmap (default_report sets u64::MAX).
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 0).unwrap();
+
     // Only allow reg 3 under vector 42.
     Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42), 1 << 3).unwrap();
+    // Explicitly deny vector 99.
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(99), 0).unwrap();
 
-    // VP is interrupted by vector 99 (no override → default policy, write_set = 0).
+    // VP is interrupted by vector 99 → override write_set = 0.
     set_vp_interrupted(&child, 0, 99);
 
     let err = Capability::set_register(&parent, h, 0, 3, 0xBEEF, &platform).unwrap_err();
@@ -451,9 +456,11 @@ fn test_vector_override_does_not_affect_available_vp() {
     let platform = common::TestPlatform::new();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
+    // Clear the default VECTOR_AVAILABLE write bitmap so only per-vector overrides grant access.
+    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE), 0).unwrap();
+
     // Grant write access to reg 5 only under vector 42.
     Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42), 1 << 5).unwrap();
-    // VECTOR_AVAILABLE write bitmap is empty (default 0).
 
     // VP[0] is Available by default.
     let err = Capability::set_register(&parent, h, 0, 5, 99, &platform).unwrap_err();

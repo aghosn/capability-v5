@@ -93,7 +93,106 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 	return 0;
 }
 
-/* ── VP-level ioctl dispatch ───────────────────────────────────────────────── */
+/* ── COMM page register write helper ────────────────────────────────────────── */
+
+/*
+ * Write a register value into the COMM page and mark its dirty bit.
+ * Values are zero-extended to the natural field width by the capavisor.
+ */
+void thhv_comm_set_reg(struct thhv_vp_comm_page *comm, unsigned int reg, __u64 val)
+{
+	switch (reg) {
+	/* GPRs */
+	case THHV_VP_REG_RAX: comm->rax = val; break;
+	case THHV_VP_REG_RBX: comm->rbx = val; break;
+	case THHV_VP_REG_RCX: comm->rcx = val; break;
+	case THHV_VP_REG_RDX: comm->rdx = val; break;
+	case THHV_VP_REG_RSI: comm->rsi = val; break;
+	case THHV_VP_REG_RDI: comm->rdi = val; break;
+	case THHV_VP_REG_RBP: comm->rbp = val; break;
+	case THHV_VP_REG_R8:  comm->r8  = val; break;
+	case THHV_VP_REG_R9:  comm->r9  = val; break;
+	case THHV_VP_REG_R10: comm->r10 = val; break;
+	case THHV_VP_REG_R11: comm->r11 = val; break;
+	case THHV_VP_REG_R12: comm->r12 = val; break;
+	case THHV_VP_REG_R13: comm->r13 = val; break;
+	case THHV_VP_REG_R14: comm->r14 = val; break;
+	case THHV_VP_REG_R15: comm->r15 = val; break;
+	/* RSP / RIP / RFLAGS */
+	case THHV_VP_REG_RSP:    comm->rsp    = val; break;
+	case THHV_VP_REG_RIP:    comm->rip    = val; break;
+	case THHV_VP_REG_RFLAGS: comm->rflags = val; break;
+	/* Control regs */
+	case THHV_VP_REG_CR0:  comm->cr0  = val; break;
+	case THHV_VP_REG_CR3:  comm->cr3  = val; break;
+	case THHV_VP_REG_CR4:  comm->cr4  = val; break;
+	case THHV_VP_REG_EFER: comm->efer = val; break;
+	case THHV_VP_REG_DR7:  comm->dr7  = val; break;
+	/* Segment selectors */
+	case THHV_VP_REG_CS_SEL:   comm->cs_sel   = (__u16)val; break;
+	case THHV_VP_REG_DS_SEL:   comm->ds_sel   = (__u16)val; break;
+	case THHV_VP_REG_ES_SEL:   comm->es_sel   = (__u16)val; break;
+	case THHV_VP_REG_FS_SEL:   comm->fs_sel   = (__u16)val; break;
+	case THHV_VP_REG_GS_SEL:   comm->gs_sel   = (__u16)val; break;
+	case THHV_VP_REG_SS_SEL:   comm->ss_sel   = (__u16)val; break;
+	case THHV_VP_REG_TR_SEL:   comm->tr_sel   = (__u16)val; break;
+	case THHV_VP_REG_LDTR_SEL: comm->ldtr_sel = (__u16)val; break;
+	/* Segment bases */
+	case THHV_VP_REG_CS_BASE:   comm->cs_base   = val; break;
+	case THHV_VP_REG_DS_BASE:   comm->ds_base   = val; break;
+	case THHV_VP_REG_ES_BASE:   comm->es_base   = val; break;
+	case THHV_VP_REG_FS_BASE:   comm->fs_base   = val; break;
+	case THHV_VP_REG_GS_BASE:   comm->gs_base   = val; break;
+	case THHV_VP_REG_SS_BASE:   comm->ss_base   = val; break;
+	case THHV_VP_REG_TR_BASE:   comm->tr_base   = val; break;
+	case THHV_VP_REG_LDTR_BASE: comm->ldtr_base = val; break;
+	/* Segment limits */
+	case THHV_VP_REG_CS_LIM:   comm->cs_limit   = (__u32)val; break;
+	case THHV_VP_REG_DS_LIM:   comm->ds_limit   = (__u32)val; break;
+	case THHV_VP_REG_ES_LIM:   comm->es_limit   = (__u32)val; break;
+	case THHV_VP_REG_FS_LIM:   comm->fs_limit   = (__u32)val; break;
+	case THHV_VP_REG_GS_LIM:   comm->gs_limit   = (__u32)val; break;
+	case THHV_VP_REG_SS_LIM:   comm->ss_limit   = (__u32)val; break;
+	case THHV_VP_REG_TR_LIM:   comm->tr_limit   = (__u32)val; break;
+	case THHV_VP_REG_LDTR_LIM: comm->ldtr_limit = (__u32)val; break;
+	/* Segment access rights */
+	case THHV_VP_REG_CS_AR:   comm->cs_ar   = (__u32)val; break;
+	case THHV_VP_REG_DS_AR:   comm->ds_ar   = (__u32)val; break;
+	case THHV_VP_REG_ES_AR:   comm->es_ar   = (__u32)val; break;
+	case THHV_VP_REG_FS_AR:   comm->fs_ar   = (__u32)val; break;
+	case THHV_VP_REG_GS_AR:   comm->gs_ar   = (__u32)val; break;
+	case THHV_VP_REG_SS_AR:   comm->ss_ar   = (__u32)val; break;
+	case THHV_VP_REG_TR_AR:   comm->tr_ar   = (__u32)val; break;
+	case THHV_VP_REG_LDTR_AR: comm->ldtr_ar = (__u32)val; break;
+	/* Descriptor tables */
+	case THHV_VP_REG_GDTR_BASE: comm->gdtr_base  = val; break;
+	case THHV_VP_REG_GDTR_LIM:  comm->gdtr_limit = (__u16)val; break;
+	case THHV_VP_REG_IDTR_BASE: comm->idtr_base  = val; break;
+	case THHV_VP_REG_IDTR_LIM:  comm->idtr_limit = (__u16)val; break;
+	/* SYSENTER */
+	case THHV_VP_REG_SYSENTER_CS:  comm->sysenter_cs  = val; break;
+	case THHV_VP_REG_SYSENTER_ESP: comm->sysenter_esp = val; break;
+	case THHV_VP_REG_SYSENTER_EIP: comm->sysenter_eip = val; break;
+	/* Segment MSRs */
+	case THHV_VP_REG_FS_BASE_MSR:    comm->fs_base_msr    = val; break;
+	case THHV_VP_REG_GS_BASE_MSR:    comm->gs_base_msr    = val; break;
+	case THHV_VP_REG_KERNEL_GS_BASE: comm->kernel_gs_base = val; break;
+	/* APIC */
+	case THHV_VP_REG_APIC_BASE: comm->apic_base = val; break;
+	case THHV_VP_REG_TPR:       comm->tpr       = val; break;
+	case THHV_VP_REG_PPR:       comm->ppr       = val; break;
+	/* Activity / interruptibility / PAT */
+	case THHV_VP_REG_ACTIVITY_STATE:         comm->activity_state         = (__u32)val; break;
+	case THHV_VP_REG_INTERRUPTIBILITY_STATE: comm->interruptibility_state = (__u32)val; break;
+	case THHV_VP_REG_PAT:                    comm->pat                    = val; break;
+	default:
+		pr_warn("thhv: unknown VP register %u\n", reg);
+		return;
+	}
+	thhv_comm_mark_dirty(comm, reg);
+}
+
+/* ── VP state get/set ──────────────────────────────────────────────────────── */
 
 static long thhv_vp_get_state(struct thhv_vp *vp, void __user *uarg)
 {
@@ -142,8 +241,14 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	struct thhv_partition *part = vp->partition;
 	struct thhv_vp_registers hdr;
 	struct thhv_reg_name_value *regs;
+	struct thhv_vp_comm_page *comm;
 	u32 i;
 	int ret;
+
+	if (!vp->comm_kaddr) {
+		pr_err("thhv: set_state: COMM page not mapped\n");
+		return -EINVAL;
+	}
 
 	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 		return -EFAULT;
@@ -160,14 +265,17 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 		goto out;
 	}
 
-	for (i = 0; i < hdr.count; i++) {
-		ret = themis_set_reg(part->domain_handle, vp->vp_index,
-				     regs[i].name, regs[i].value);
-		if (ret)
-			goto out;
-	}
+	/* Write all register values into the COMM page + set dirty bits. */
+	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
+	for (i = 0; i < hdr.count; i++)
+		thhv_comm_set_reg(comm, (unsigned int)regs[i].name, regs[i].value);
 
-	ret = 0;
+	/* Single VMCALL to flush dirty state into the child's VMCS. */
+	ret = themis_flush_vp_state(part->domain_handle, vp->vp_index);
+	if (ret)
+		pr_err("thhv: flush_vp_state vp %u failed (%d)\n",
+		       vp->vp_index, ret);
+
 out:
 	kfree(regs);
 	return ret;

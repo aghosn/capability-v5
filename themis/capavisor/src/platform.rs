@@ -339,6 +339,9 @@ pub struct PlatformDomain {
     /// Per-VP slots.  Index = domain-local VP ID (0, 1, 2, ...).
     /// Each slot holds an InactiveVcpu when the VP is not running.
     pub vps: Vec<VcpuSlot>,
+    /// Per-VP COMM page physical addresses.  Index = VP ID.
+    /// Set when CommRegion update is applied (or during do_add_vp).
+    pub comm_hpas: Vec<u64>,
     /// Physical address of the MSR bitmap page for this domain's VPs.
     /// Allocated from META pool at seal time; 0 until then.
     pub msr_bitmap_phys: u64,
@@ -386,6 +389,7 @@ impl PlatformDomain {
             parent,
             hhdm_offset,
             vps: Vec::new(),
+            comm_hpas: Vec::new(),
             msr_bitmap_phys: 0,
             domcomm: None,
         }
@@ -1228,17 +1232,20 @@ impl Platform for ThemisPlatform {
             Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
                 if *domain_id == *target_domain_id {
                     // Self-ref COMM: DomainComm ring growth page.
-                    // No-op for now — capavisor has HHDM, so it can access
-                    // any HPA.  The GROW message handler reads HPAs from the
-                    // capability directly.  When we restrict the capavisor's
-                    // page tables later, this will become a real mapping op.
                     serial_println!(
                         "[apply] CommRegion self-ref: dom={} phys={:#x} size={:#x}",
                         domain_id, phys, size,
                     );
                 } else {
-                    // VP-level COMM: wire to child VP.
-                    // TODO(P7): map COMM page, associate with child VP.
+                    // VP-level COMM: store HPA for child VP.
+                    if let Some(arc) = self.domains.get(*target_domain_id) {
+                        let mut pd = arc.lock();
+                        let vp = *vp_id as usize;
+                        if vp >= pd.comm_hpas.len() {
+                            pd.comm_hpas.resize(vp + 1, 0);
+                        }
+                        pd.comm_hpas[vp] = *phys;
+                    }
                     serial_println!(
                         "[apply] CommRegion VP-comm: dom={} target={} vp={} phys={:#x} size={:#x}",
                         domain_id, target_domain_id, vp_id, phys, size,
@@ -1309,6 +1316,35 @@ impl Platform for ThemisPlatform {
 
     fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
         self.routing.read().domain_to_core.get(&domain_id).copied()
+    }
+
+    // ── Register access (validation-only; actual VMCS writes batched by handler) ──
+
+    fn register_count(&self) -> u64 {
+        // VpRegister discriminants range 0x00..=0xB2 (179 values).
+        // Round up to 192 (3 × 64) to match the dirty_mask word layout.
+        192
+    }
+
+    fn set_vp_register(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u64,
+        _reg_id: u64,
+        _value: u64,
+    ) -> capability_engine::error::Result<()> {
+        // No-op: the hypercall handler batches VMCS writes after validation.
+        Ok(())
+    }
+
+    fn get_vp_register(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u64,
+        _reg_id: u64,
+    ) -> capability_engine::error::Result<u64> {
+        // TODO: implement when GET_VP_STATE is needed.
+        Err(capability_engine::error::CapaError::NotSupported)
     }
 
     fn get_current_core(&self) -> Option<CoreId> {

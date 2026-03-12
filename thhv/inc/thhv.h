@@ -103,6 +103,7 @@
 #define THEMIS_OP_REGISTER_INTR_CHAN  0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
+#define THEMIS_OP_FLUSH_VP_STATE     0x1A
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -312,6 +313,73 @@ struct thhv_vp_registers {
 #define THHV_VP_REG_ACTIVITY_STATE         0xB0
 #define THHV_VP_REG_INTERRUPTIBILITY_STATE 0xB1
 #define THHV_VP_REG_PAT                   0xB2
+
+/*
+ * VP COMM page — shared between driver and capavisor for bulk register transfer.
+ *
+ * Layout must match themis-abi VpCommPage exactly (4096 bytes, #[repr(C)]).
+ * The driver writes register values + sets dirty_mask bits, then calls
+ * FLUSH_VP_STATE to apply them to the child's VMCS.
+ */
+#define VP_COMM_MASK_WORDS  3
+
+struct thhv_vp_comm_page {
+	__u64 dirty_mask[VP_COMM_MASK_WORDS];     /* offset   0 */
+	__u64 allowed_mask[VP_COMM_MASK_WORDS];   /* offset  24 */
+	__u8  _hdr_pad[16];                       /* offset  48 */
+	/* GPRs (offset 64) */
+	__u64 rax, rbx, rcx, rdx, rsi, rdi, rbp;
+	__u64 r8, r9, r10, r11, r12, r13, r14, r15;
+	/* RSP / RIP / RFLAGS (offset 184) */
+	__u64 rsp, rip, rflags;
+	/* Control regs (offset 208) */
+	__u64 cr0, cr3, cr4, efer, dr7;
+	/* Segment selectors (offset 248) */
+	__u16 cs_sel, ds_sel, es_sel, fs_sel, gs_sel, ss_sel, tr_sel, ldtr_sel;
+	/* Segment bases (offset 264) */
+	__u64 cs_base, ds_base, es_base, fs_base, gs_base, ss_base, tr_base, ldtr_base;
+	/* Segment limits (offset 328) */
+	__u32 cs_limit, ds_limit, es_limit, fs_limit, gs_limit, ss_limit, tr_limit, ldtr_limit;
+	/* Segment access rights (offset 360) */
+	__u32 cs_ar, ds_ar, es_ar, fs_ar, gs_ar, ss_ar, tr_ar, ldtr_ar;
+	/* GDTR (offset 392) */
+	__u64 gdtr_base;
+	__u16 gdtr_limit;
+	__u8  _gdtr_pad[6];
+	/* IDTR (offset 408) */
+	__u64 idtr_base;
+	__u16 idtr_limit;
+	__u8  _idtr_pad[6];
+	/* SYSENTER (offset 424) */
+	__u64 sysenter_cs, sysenter_esp, sysenter_eip;
+	/* FS/GS MSRs (offset 448) */
+	__u64 fs_base_msr, gs_base_msr, kernel_gs_base;
+	/* APIC (offset 472) */
+	__u64 apic_base, tpr, ppr;
+	/* Activity (offset 496) */
+	__u32 activity_state, interruptibility_state;
+	__u64 pat;
+	/* Padding to 4096 */
+	__u8  _pad[3584];
+} __packed;
+
+/*
+ * Set a dirty bit for register 'reg' (THHV_VP_REG_*) in the COMM page.
+ */
+static inline void thhv_comm_mark_dirty(struct thhv_vp_comm_page *comm, unsigned int reg)
+{
+	unsigned int word = reg / 64;
+	unsigned int bit  = reg % 64;
+
+	comm->dirty_mask[word] |= (1ULL << bit);
+}
+
+/*
+ * Write a u64 register value to the COMM page field for 'reg' and mark dirty.
+ * For selectors (u16) and limits/access-rights (u32), the caller writes
+ * the value zero-extended to u64; the capavisor truncates on read.
+ */
+void thhv_comm_set_reg(struct thhv_vp_comm_page *comm, unsigned int reg, __u64 val);
 
 /* ── ThemIC — Themis Message Interface for Cloud-Hypervisor ─────────────────── */
 /*
@@ -919,6 +987,7 @@ int themis_set_def_intr_policy(u64 domain, u64 policy);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
+int themis_flush_vp_state(u64 child_domain, u64 vp_id);
 int themis_domcomm_notify(void);
 
 /* thhv_part.c */

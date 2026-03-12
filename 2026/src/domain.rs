@@ -166,8 +166,8 @@ impl VectorPolicy {
     pub fn default_report() -> Self {
         VectorPolicy {
             visibility: InterruptVisibility::Report,
-            read_set: 0,
-            write_set: 0,
+            read_set: u64::MAX,
+            write_set: u64::MAX,
         }
     }
 }
