@@ -8,7 +8,7 @@
 # Environment knobs:
 #   PROFILE=release         build with --release (default: debug)
 #   QEMU_CPUS=4             number of vCPUs (default: 4)
-#   QEMU_MEM=1G             guest RAM (default: 1G)
+#   QEMU_MEM=4G             guest RAM (default: 4G)
 #   QEMU_ENABLE_KVM=1       use KVM acceleration (default: 1 if available)
 #   QEMU_BIOS=1             use legacy BIOS instead of UEFI (default: 0)
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
@@ -24,7 +24,7 @@ bash "$SCRIPT_DIR/build-iso.sh"
 ISO="$WORKSPACE_ROOT/target/themis.iso"
 
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_MEM="${QEMU_MEM:-1G}"
+QEMU_MEM="${QEMU_MEM:-4G}"
 
 # Detect KVM availability
 KVM_ARGS=""

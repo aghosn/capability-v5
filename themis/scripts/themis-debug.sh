@@ -23,7 +23,7 @@ PROFILE=debug bash "$SCRIPT_DIR/build-iso.sh"
 ISO="$WORKSPACE_ROOT/target/themis.iso"
 
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_MEM="${QEMU_MEM:-1G}"
+QEMU_MEM="${QEMU_MEM:-4G}"
 
 KVM_ARGS=""
 if [[ "${QEMU_ENABLE_KVM:-1}" == "1" ]] && [[ -e /dev/kvm ]]; then

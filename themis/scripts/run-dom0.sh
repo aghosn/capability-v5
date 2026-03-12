@@ -11,7 +11,7 @@
 # Environment knobs:
 #   SEED=1            attach cloud-init seed (first boot only)
 #   QEMU_CPUS=4       number of vCPUs (default: 2)
-#   QEMU_MEM=2G       guest RAM (default: 2G)
+#   QEMU_MEM=4G       guest RAM (default: 4G)
 #   QEMU_ENABLE_KVM=1 use KVM acceleration (default: 1 if available)
 #   QEMU_NET=1        enable user-mode networking (default: 1)
 #   QEMU_NET_FWD      extra port forwards (e.g. "hostfwd=tcp::2222-:22")
@@ -46,7 +46,7 @@ if [[ ! -f "$DOM0_DISK" ]]; then
 fi
 
 QEMU_CPUS="${QEMU_CPUS:-2}"
-QEMU_MEM="${QEMU_MEM:-2G}"
+QEMU_MEM="${QEMU_MEM:-4G}"
 
 # Detect KVM
 KVM_ARGS=""

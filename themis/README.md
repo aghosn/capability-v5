@@ -151,7 +151,7 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `QEMU_MEM` | `1G` | Guest RAM |
+| `QEMU_MEM` | `4G` | Guest RAM |
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
 | `QEMU_BIOS` | `0` | Set to `1` for legacy BIOS (default is UEFI/OVMF) |
@@ -221,7 +221,7 @@ runs only on the first seeded boot.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `SEED` | `0` | Set to `1` to attach cloud-init seed |
-| `QEMU_MEM` | `2G` | Guest RAM |
+| `QEMU_MEM` | `4G` | Guest RAM |
 | `QEMU_CPUS` | `2` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM acceleration |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
