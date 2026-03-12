@@ -271,6 +271,7 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	for (i = 0; i < hdr.count; i++)
 		thhv_comm_set_reg(comm, (unsigned int)regs[i].name, regs[i].value);
 
+	ret = 0;
 out:
 	kfree(regs);
 	return ret;

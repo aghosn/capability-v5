@@ -390,7 +390,6 @@ where
             // Barrier 0: wait until all affected cores have stopped executing
             platform.sync_barrier(0, affected_cores.len() + 1);
 
-            // Apply hardware updates while other cores are paused
             for update in batch.updates() {
                 platform.apply_update(update);
             }
@@ -398,7 +397,7 @@ where
             // Barrier 1: release cores to apply their local state (TLB flush…)
             platform.sync_barrier(1, affected_cores.len() + 1);
         } else {
-            // Local path: no remote core is running an affected domain
+            // Local path: no remote core is running an affected domain.
             for update in batch.updates() {
                 platform.apply_update(update);
             }

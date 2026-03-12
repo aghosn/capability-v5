@@ -10,6 +10,7 @@
 #   make guest                    # build against mounted dom0 disk (auto-detect)
 #   make guest DISK=path/to.img   # build against specific disk image
 #   make guest COPY_TO_GUEST=/root  # build + copy .ko to guest disk
+#   make tests                    # build userspace test binaries
 #   make clean
 
 KDIR     ?= /lib/modules/$(shell uname -r)/build
@@ -18,6 +19,11 @@ PWD      := $(shell pwd)
 # Path to libthemis crate and workspace target dir.
 LIBTHEMIS_DIR := $(PWD)/../themis/crates/libthemis
 LIBTHEMIS_A   := $(PWD)/../themis/target/x86_64-unknown-none/release/liblibthemis.a
+
+# Test binary output directory.
+TEST_BINDIR := $(PWD)/test/bin
+TEST_SRCS   := $(wildcard $(PWD)/test/test_*.c) $(wildcard $(PWD)/test/thhv_test.c)
+TEST_BINS   := $(patsubst $(PWD)/test/%.c,$(TEST_BINDIR)/%,$(TEST_SRCS))
 
 # Build libthemis.a as a no_std static lib with the "ffi" feature.
 $(LIBTHEMIS_A):
@@ -32,8 +38,16 @@ default: $(LIBTHEMIS_A)
 guest:
 	bash $(PWD)/build-guest.sh $(if $(DISK),$(DISK),)
 
+# Build all userspace test binaries into test/bin/.
+tests: $(TEST_BINS)
+
+$(TEST_BINDIR)/%: $(PWD)/test/%.c $(PWD)/inc/thhv.h
+	@mkdir -p $(TEST_BINDIR)
+	$(CC) -Wall -Wextra -O2 -I$(PWD)/inc -o $@ $<
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	cd $(LIBTHEMIS_DIR) && cargo clean
+	rm -rf $(TEST_BINDIR)
 
-.PHONY: default clean guest
+.PHONY: default clean guest tests

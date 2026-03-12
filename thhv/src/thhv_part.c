@@ -45,6 +45,15 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->shared_meta_pages);
 	}
 
+	/* Free kernel-allocated EPT META pages. */
+	if (part->ept_meta_pages) {
+		unsigned int j;
+
+		for (j = 0; j < part->ept_meta_nr_pages; j++)
+			__free_page(part->ept_meta_pages[j]);
+		kfree(part->ept_meta_pages);
+	}
+
 	/* Free all memory regions (unpin pages only; caps revoked via sent_caps). */
 	{
 		struct rb_node *n;
@@ -130,6 +139,29 @@ static int thhv_mem_insert(struct thhv_partition *part,
 }
 
 /* ── THHV_SET_GUEST_MEMORY handler ─────────────────────────────────────────── */
+
+/*
+ * Compute worst-case number of EPT intermediate pages needed to map a
+ * guest-physical region [gpa, gpa+size).  Accounts for all 4 EPT levels:
+ *   PML4 root (1 page, allocated by ensure_ept on first use),
+ *   PDPT entries (512 GB each), PD entries (1 GB each), PT entries (2 MB each).
+ */
+static unsigned int thhv_ept_meta_needed(u64 gpa, u64 size)
+{
+	u64 end = gpa + size - 1;
+	unsigned int n = 0;
+
+	/* EPT root (PML4): 1 page, first-time only but safe to over-allocate. */
+	n += 1;
+	/* PDPT pages (512 GB granularity). */
+	n += (unsigned int)((end >> 39) - (gpa >> 39)) + 1;
+	/* PD pages (1 GB granularity). */
+	n += (unsigned int)((end >> 30) - (gpa >> 30)) + 1;
+	/* PT pages (2 MB granularity). */
+	n += (unsigned int)((end >> 21) - (gpa >> 21)) + 1;
+
+	return n;
+}
 
 static long thhv_set_guest_memory(struct thhv_partition *part,
 				  void __user *uarg)
@@ -229,6 +261,77 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	ret = thhv_translate_pages(region->pages, nr_pages, &segs, &nr_segs);
 	if (ret)
 		goto err_unpin;
+
+	/*
+	 * Send EPT META pages to the child so the capavisor can allocate
+	 * intermediate EPT page-table pages when mapping this region.
+	 * Kernel-allocated pages are tracked in part->ept_meta_pages and
+	 * freed on partition teardown.
+	 */
+	{
+		u64 child_gpa = gm.guest_pfn << PAGE_SHIFT;
+		unsigned int nr_ept_meta = thhv_ept_meta_needed(child_gpa,
+								gm.size);
+		struct page **ept_pages;
+		unsigned int j;
+
+		ept_pages = kcalloc(nr_ept_meta, sizeof(struct page *),
+				    GFP_KERNEL);
+		if (!ept_pages) {
+			ret = -ENOMEM;
+			goto err_free_segs;
+		}
+
+		for (j = 0; j < nr_ept_meta; j++) {
+			ept_pages[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+			if (!ept_pages[j]) {
+				while (j--)
+					__free_page(ept_pages[j]);
+				kfree(ept_pages);
+				ret = -ENOMEM;
+				goto err_free_segs;
+			}
+		}
+
+		ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
+					   THHV_META_KEY_EPT);
+		if (ret) {
+			for (j = 0; j < nr_ept_meta; j++)
+				__free_page(ept_pages[j]);
+			kfree(ept_pages);
+			goto err_free_segs;
+		}
+
+		/*
+		 * Accumulate EPT META pages.  If we already have some from a
+		 * previous SET_GUEST_MEMORY call, grow the array.
+		 */
+		if (part->ept_meta_pages) {
+			struct page **merged;
+			unsigned int total = part->ept_meta_nr_pages + nr_ept_meta;
+
+			merged = krealloc(part->ept_meta_pages,
+					  total * sizeof(struct page *),
+					  GFP_KERNEL);
+			if (!merged) {
+				/* Pages already sent — just leak tracking. */
+				kfree(ept_pages);
+				ret = -ENOMEM;
+				goto err_free_segs;
+			}
+			memcpy(merged + part->ept_meta_nr_pages, ept_pages,
+			       nr_ept_meta * sizeof(struct page *));
+			kfree(ept_pages);
+			part->ept_meta_pages = merged;
+			part->ept_meta_nr_pages = total;
+		} else {
+			part->ept_meta_pages = ept_pages;
+			part->ept_meta_nr_pages = nr_ept_meta;
+		}
+
+		pr_debug("thhv: sent %u EPT META pages for domain 0x%llx\n",
+			 nr_ept_meta, part->domain_handle);
+	}
 
 	/* CARVE/ALIAS + cap table insert + SEND_AT + cap table remove +
 	 * sent_caps append for each HPA segment.

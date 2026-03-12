@@ -797,9 +797,11 @@ fn loom_e2e_send_to_domain_being_revoked() {
             Ok(()) => {
                 // B-first ordering: send generates Unmap(dom) + Map(ch1_id),
                 // then A revokes ch1 which now owns c1 →
-                //   Unmap(ch1_id) + Restore(dom_id) + RevokeDomain(ch1_id).
-                // Total: 5 updates.
-                assert_eq!(applied.len(), 5, "B-first: exactly 5 updates");
+                //   Restore(dom_id) + RevokeDomain(ch1_id).
+                // No Unmap(ch1_id): RevokeDomain is emitted first and frees the
+                // EPT; a subsequent unmap would touch an already-torn-down domain.
+                // Total: 4 updates.
+                assert_eq!(applied.len(), 4, "B-first: exactly 4 updates");
                 assert!(
                     applied.iter().any(|u| matches!(
                         u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. }
@@ -815,11 +817,6 @@ fn loom_e2e_send_to_domain_being_revoked() {
                     "B-first: Map(ch1_id) from send must be present"
                 );
                 // Memory restore: ch1's owned c1 is revoked back to dom.
-                let has_unmap_ch1 = applied.iter().any(|u| matches!(
-                    u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, shootdown_required: true, .. }
-                    if *domain == ch1_id && *rights == Rights::NONE
-                ));
-                assert!(has_unmap_ch1, "B-first: Unmap(ch1_id) from memory revoke must be present");
                 let has_restore_dom = applied.iter().any(|u| matches!(
                     u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, shootdown_required: false, .. }
                     if *domain == dom_id
@@ -1280,17 +1277,18 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
 //   4. Create unsealed receiver recv for Thread B.
 //
 // Thread A (exclusive): revoke_domain(dom, h_child).
-//   revoke_domain_subtree now revokes ch1's owned memory capabilities:
-//     ChangeRights(ch1_id, 0x0, 0x1000, NONE)      — unmap c1 from ch1
+//   revoke_domain_subtree revokes ch1 (marked revoked first) then its memory:
+//     RevokeDomain(ch1_id)                           — emitted at the top
 //     ChangeRights(dom_id, 0x0, 0x1000, restore)    — restore c1 to dom
-//     RevokeDomain(ch1_id)
+//   No Unmap(ch1_id): RevokeDomain is emitted first and frees the EPT;
+//   a subsequent unmap would touch an already-torn-down domain.
 //
 // Thread B (shared): send(dom, h_c2, dh_r, NONE).
 //   Immediate send (unsealed recv).
 //     ChangeRights(dom_id, 0x2000, 0x1000, NONE)    — unmap c2 from dom
 //     ChangeRights(recv_id, 0x2000, 0x1000, map)     — map c2 to recv
 //
-// Both orderings produce the same 5 updates (different order).
+// Both orderings produce the same 4 updates (different order).
 #[test]
 fn loom_e2e_domain_revoke_with_memory_vs_send() {
     loom::model(|| {
@@ -1368,9 +1366,9 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
 
         let applied = state.lock().unwrap().applied.clone();
 
-        // A: 3 updates (unmap ch1 + restore dom + RevokeDomain)
+        // A: 2 updates (restore dom + RevokeDomain; no unmap ch1 — EPT freed by RevokeDomain)
         // B: ≥2 updates (at least unmap dom + map recv from view diffs)
-        assert!(applied.len() >= 5, "at least 5 updates, got {}", applied.len());
+        assert!(applied.len() >= 4, "at least 4 updates, got {}", applied.len());
 
         // A: memory restored to dom
         let has_restore = applied.iter().any(|u| {
@@ -1380,15 +1378,6 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
             )
         });
         assert!(has_restore, "ChangeRights restoring c1 to dom must be present");
-
-        // A: unmap from ch1
-        let has_unmap_ch1 = applied.iter().any(|u| {
-            matches!(
-                u, Update::ChangeRights { domain, address: 0x0000, size: 0x1000, rights, .. }
-                if *domain == ch1_id && *rights == Rights::NONE
-            )
-        });
-        assert!(has_unmap_ch1, "ChangeRights(NONE) for ch1 must be present");
 
         // A: RevokeDomain
         let has_revoke = applied.iter().any(|u| {

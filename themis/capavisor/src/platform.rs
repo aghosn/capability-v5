@@ -1186,6 +1186,10 @@ impl Platform for ThemisPlatform {
             }
 
             Update::ChangeRights { domain, address, size, physical, rights, .. } => {
+                serial_println!(
+                    "[ChangeRights] domain={} addr={:#x} size={:#x} phys={:#x} rights={:#x}",
+                    domain, address, size, physical, rights.bits()
+                );
                 let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
                 let arc = self.domains
                     .get(*domain)

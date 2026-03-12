@@ -730,6 +730,59 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
 - [ ] **P15-dc-m6** — Capability enumeration: ENUM_CAP request/response via
   TX/RX rings.
 
+### C7 — End-to-End Child Domain HLT Test
+
+Validates the full child domain lifecycle: CREATE_DOMAIN → CARVE/SEND memory →
+ADD_VP → SET_VP_STATE → SEAL → SWITCH → verify HLT exit.
+Test binary: `thhv/test/test_child_hlt.c`.
+
+**Completed**:
+- [x] **C7a** — Test skeleton: CREATE_PARTITION, SET_GUEST_MEMORY, CREATE_VP,
+  SET_VP_STATE, INITIALIZE_PARTITION, RUN_VP, cleanup.
+- [x] **C7b** — Fix CREATE_DOMAIN MonotonicityViolation: `cores_mask` must be
+  a subset of parent's cores; now uses `sysconf(_SC_NPROCESSORS_ONLN)`.
+- [x] **C7c** — EPT META page allocation: child domain needs META pages for EPT
+  intermediate tables (PML4/PDPT/PD/PT).  Added `thhv_ept_meta_needed()` helper
+  and EPT META allocation block in `thhv_set_guest_memory` (before guest CARVE).
+  Key: `THHV_META_KEY_EPT = 0xFFFFFFFFFFFF2000`.
+- [x] **C7d** — Fix SET_VP_STATE EFAULT: uninitialized `ret` variable in
+  `thhv_vp_set_state()` fell through with stack garbage (-14 = EFAULT).
+  Fix: `ret = 0` after successful path.
+- [x] **C7e** — Fix RevokeDomain ordering panic and redundant updates:
+  Root cause: META pages canonicalize to `META|CLEAN|VITAL`, so each META
+  page's `revoke_subtree` emits a VITAL-triggered `RevokeDomain(child)` plus
+  `ChangeRights` unmaps for the child domain being destroyed.
+  Fix (in `2026/src/capability.rs`):
+  (a) Mark domain as revoked early in `revoke_domain_subtree` (call
+  `domain.data.revoke()` before dropping the lock), emit the single
+  authoritative `RevokeDomain` update at the top.
+  (b) In `revoke_subtree`, check `is_revoked()` on child_owner and
+  parent_owner domains — skip `ChangeRights` and VITAL `RevokeDomain` for
+  already-revoked domains.  This eliminates all redundant updates at the
+  source.  `execute()` (`2026/src/platform.rs`) reverted to a clean
+  single-pass apply — no mangling or dedup needed.
+
+**Current blocker**:
+- [ ] **C7f** — Fix SWITCH validation: `InvalidOperation("no VP running on this
+  core")`.  The `do_switch` handler validates that the calling core has a VP
+  bound to it, but `RUN_VP` is the *initial* launch — no VP is running yet.
+  Need to implement the initial VP launch path in the SWITCH handler (or a
+  separate `RUN` handler) that does VMPTRLD + VMRESUME for the child VMCS.
+
+**Known non-blocking issues**:
+- `REVOKE_MEM parent=N sub=M failed (-2)` warnings during cleanup: the driver's
+  `sent_caps` list tries to individually revoke caps that `revoke_domain` already
+  cleaned up.  Harmless but noisy.  Fix: skip `sent_caps` cleanup after a
+  successful `revoke_domain`, or clear the list before the loop.
+
+**Remaining after C7f**:
+- [ ] **C7g** — Verify HLT exit: child VP executes HLT at GPA 0x1000, capavisor
+  forwards exit via `InterceptMessage` on COMM page, driver reads exit and
+  returns to userspace.
+- [ ] **C7h** — Remove debug prints: ChangeRights logging (platform.rs),
+  EPT violation domain/core logging (vmexit.rs), CARVE logging (hypercall.rs),
+  do_create_domain debug (hypercall.rs).
+
 ### Phase 16 — Cloud-Hypervisor Themis Backend
 
 Add a Themis/mshv-themis hypervisor backend to cloud-hypervisor, enabling it to

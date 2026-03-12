@@ -782,3 +782,56 @@ pub const ALL_VP_REGISTERS: &[VpRegister] = &[
     VpRegister::ApicBase, VpRegister::Tpr, VpRegister::Ppr,
     VpRegister::ActivityState, VpRegister::InterruptibilityState, VpRegister::Pat,
 ];
+
+// ── Intercept message ────────────────────────────────────────────────────── //
+
+/// Byte offset within the `VpCommPage` where the intercept message is stored.
+pub const VP_COMM_INTERCEPT_OFFSET: usize = 512;
+
+/// Message types (matches THEMIC_MSG_* in thhv.h).
+pub const THEMIC_MSG_NONE: u32 = 0x0000;
+pub const THEMIC_MSG_VP_INTERCEPT: u32 = 0x0001;
+
+/// Message header preceding every message in the COMM page.
+/// Matches `struct themic_message_header` in thhv.h (16 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThemicMessageHeader {
+    pub message_type: u32,
+    pub payload_size: u32,
+    pub sequence: u64,
+}
+
+/// VP exit intercept message — written by the capavisor to COMM page
+/// offset 512 on a child VP exit.  The driver copies it to userspace.
+///
+/// Matches `struct themic_intercept_message` in thhv.h (120 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InterceptMessage {
+    pub header: ThemicMessageHeader,
+    pub exit_reason: u32,
+    pub instruction_length: u32,
+    pub exit_qualification: u64,
+    pub guest_physical_address: u64,
+    pub guest_rip: u64,
+    pub guest_rflags: u64,
+    // I/O port intercept fields.
+    pub port_number: u16,
+    pub access_size: u8,
+    pub is_write: u8,
+    pub _reserved: u32,
+    pub rax: u64,
+    // MMIO intercept fields.
+    pub instruction_bytes: [u8; 16],
+    // CPUID intercept fields.
+    pub cpuid_rax: u64,
+    pub cpuid_rcx: u64,
+    // MSR intercept fields.
+    pub msr_number: u32,
+    pub _rsvd2: u32,
+    pub msr_value: u64,
+}
+
+const _INTERCEPT_MSG_SIZE_CHECK: () =
+    assert!(core::mem::size_of::<InterceptMessage>() == 120);

@@ -250,12 +250,26 @@ fn do_create_domain(
     cores_bitmask: u64,
     api_flags: u64,
 ) -> HypercallResult {
+    serial_println!("[CREATE_DOMAIN] cores={:#x} api_flags={:#x}", cores_bitmask, api_flags);
+    {
+        let c = caller.read();
+        serial_println!("[CREATE_DOMAIN] caller domain_id={} sealed={} policy_api={:#x}",
+            c.data.id, c.data.is_sealed(), c.data.policy.api.bits());
+        serial_println!("[CREATE_DOMAIN] owner_domain is_some={}",
+            c.owned.owner_domain.is_some());
+    }
     let api = MonitorAPI::from_bits(api_flags as u16);
     let policy = DomainPolicy::new_restricted(cores_bitmask, api);
     let caller = caller.clone();
     match execute(platform, false, || Capability::create(&caller, policy.clone())) {
-        Ok((handle, _)) => HypercallResult::success_1(handle),
-        Err(e) => HypercallResult::error(map_error(&e)),
+        Ok((handle, _)) => {
+            serial_println!("[CREATE_DOMAIN] success handle={}", handle);
+            HypercallResult::success_1(handle)
+        }
+        Err(e) => {
+            serial_println!("[CREATE_DOMAIN] FAILED: {:?} => err_code={}", e, map_error(&e));
+            HypercallResult::error(map_error(&e))
+        }
     }
 }
 
@@ -628,7 +642,11 @@ pub fn forward_child_exit(
     vcpu: &mut ActiveVcpu,
     exit_reason: u32,
 ) {
-    use themis_abi::regs::{VpCommPage, ALL_VP_REGISTERS};
+    use themis_abi::regs::{
+        VpCommPage, ALL_VP_REGISTERS,
+        InterceptMessage, ThemicMessageHeader,
+        VP_COMM_INTERCEPT_OFFSET, THEMIC_MSG_VP_INTERCEPT,
+    };
     use x86::vmx::vmcs;
 
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
@@ -663,7 +681,7 @@ pub fn forward_child_exit(
     let parent_domain_id = return_ctx.to_domain;
     let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
 
-    // ── Copy reported registers to child's COMM page ──
+    // ── Copy reported registers + intercept message to child's COMM page ──
     let child_arc = platform.domain_arc(child_domain_id)
         .expect("[CHILD_EXIT] child PlatformDomain not found");
     let comm_hpa = child_arc.lock().comm_hpas.get(child_vp_id).copied().unwrap_or(0);
@@ -672,11 +690,11 @@ pub fn forward_child_exit(
         let hhdm = platform.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
 
+        // Copy register values into the COMM page register area.
         for reg in ALL_VP_REGISTERS {
             if !read_set.is_set(*reg as u64) {
                 continue;
             }
-            // Read value from child's VMCS or GPR file.
             let val = if let Some(gpr) = vp_reg_to_gpr(*reg) {
                 vcpu.reg(gpr)
             } else if let Some(field) = vp_reg_to_vmcs_field(*reg) {
@@ -686,6 +704,32 @@ pub fn forward_child_exit(
             };
             comm.write_reg(*reg, val);
         }
+
+        // Write the intercept message at offset 512 so the driver can read it.
+        let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+        let guest_rip = vcpu.get(vmcs::guest::RIP);
+        let guest_rflags = vcpu.get(vmcs::guest::RFLAGS);
+        let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
+        let guest_phys = vcpu.try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL).unwrap_or(0);
+
+        let msg = InterceptMessage {
+            header: ThemicMessageHeader {
+                message_type: THEMIC_MSG_VP_INTERCEPT,
+                payload_size: (core::mem::size_of::<InterceptMessage>() - core::mem::size_of::<ThemicMessageHeader>()) as u32,
+                sequence: 0,
+            },
+            exit_reason,
+            instruction_length: instr_len,
+            exit_qualification: exit_qual,
+            guest_physical_address: guest_phys,
+            guest_rip,
+            guest_rflags,
+            rax: vcpu.reg(Reg::Rax),
+            ..InterceptMessage::default()
+        };
+
+        let msg_ptr = (comm_hpa + hhdm + VP_COMM_INTERCEPT_OFFSET as u64) as *mut InterceptMessage;
+        unsafe { core::ptr::write_volatile(msg_ptr, msg); }
     }
 
     // ── Deactivate child → store in child's VcpuSlot ──

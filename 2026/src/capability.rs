@@ -390,6 +390,24 @@ impl Capability<MemoryRegion> {
         let comm = capa.owned.attributes.comm();
         let comm_binding = capa.data.comm_binding;
 
+        // Check if child owner's domain is already revoked.
+        // If so, skip ChangeRights and RevokeDomain — the domain's EPT
+        // will be freed by the RevokeDomain already in the batch.
+        // Use try_read to avoid deadlock: Capability::revoke holds the caller's
+        // domain write lock when it calls revoke_subtree.  revoke_domain_subtree
+        // always drops the write lock before calling revoke_subtree, so if
+        // try_read fails the domain is active (not being revoked) → false.
+        let child_revoked = capa
+            .owned
+            .owner_domain
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map_or(false, |dom_ref| {
+                dom_ref
+                    .try_read()
+                    .map_or(false, |r| r.data.is_revoked())
+            });
+
         #[cfg(feature = "address_translation")]
         let child_domain_weak = capa.owned.owner_domain.clone();
 
@@ -399,7 +417,22 @@ impl Capability<MemoryRegion> {
                 let parent = parent_ref.read();
                 let parent_owner = parent.owned.owner;
                 if parent_owner != child_owner {
-                    Some((parent_owner, parent.data.access.rights))
+                    // Also check if parent owner's domain is revoked — no point
+                    // remapping into a domain whose EPT is about to be freed.
+                    // Use try_read: if the parent's domain write lock is already
+                    // held (e.g. by Capability::revoke on the parent domain),
+                    // the domain is active (not being revoked) → false.
+                    let parent_revoked = parent
+                        .owned
+                        .owner_domain
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
+                        .map_or(false, |dom_ref| {
+                            dom_ref
+                                .try_read()
+                                .map_or(false, |r| r.data.is_revoked())
+                        });
+                    Some((parent_owner, parent.data.access.rights, parent_revoked))
                 } else {
                     None
                 }
@@ -408,7 +441,7 @@ impl Capability<MemoryRegion> {
             capa.get_parent().and_then(|parent_ref| {
                 let parent_owner = parent_ref.read().owned.owner;
                 if parent_owner != child_owner {
-                    Some((parent_owner, crate::memory::Rights::NONE))
+                    Some((parent_owner, crate::memory::Rights::NONE, false))
                 } else {
                     None
                 }
@@ -446,10 +479,11 @@ impl Capability<MemoryRegion> {
         }
 
         if kind == RegionKind::Carve {
-            if let Some((parent_owner, parent_rights)) = parent_info {
-                // META regions are never mapped into the owner's address space,
-                // so no unmap is needed for the child owner.
-                if !meta {
+            if let Some((parent_owner, parent_rights, parent_revoked)) = parent_info {
+                // Skip ChangeRights for revoked child domains — RevokeDomain
+                // (emitted first) frees the EPT; a subsequent unmap would
+                // touch an already-torn-down domain.
+                if !meta && !child_revoked {
                     updates.add_change_rights(
                         child_owner,
                         child_gpa,
@@ -459,14 +493,16 @@ impl Capability<MemoryRegion> {
                         true,
                     );
                 }
-                updates.add_change_rights(
-                    parent_owner,
-                    hpa_start,
-                    hpa_size,
-                    hpa_start,
-                    parent_rights,
-                    false,
-                );
+                if !parent_revoked {
+                    updates.add_change_rights(
+                        parent_owner,
+                        hpa_start,
+                        hpa_size,
+                        hpa_start,
+                        parent_rights,
+                        false,
+                    );
+                }
             }
         }
 
@@ -474,8 +510,8 @@ impl Capability<MemoryRegion> {
         // another domain. Unmap from the receiver; do NOT remap the parent because
         // alias never removes parent access.
         if kind == RegionKind::Alias {
-            if let Some((_, _)) = parent_info {
-                if !meta {
+            if let Some((_, _, _)) = parent_info {
+                if !meta && !child_revoked {
                     updates.add_change_rights(
                         child_owner,
                         child_gpa,
@@ -489,10 +525,9 @@ impl Capability<MemoryRegion> {
         }
 
         // === Address translation: clean up child domain's AddressMap ===
-        // Use try_write to avoid deadlock when child_owner is the caller.
-        // If try_write fails, revoke() handles cleanup for the caller's map.
+        // Skip if child is revoked — address_map was already cleared by revoke().
         #[cfg(feature = "address_translation")]
-        if parent_info.is_some() {
+        if parent_info.is_some() && !child_revoked {
             if let Some(ref w) = child_domain_weak {
                 if let Some(dom_ref) = w.upgrade() {
                     if let Some(mut dom) = dom_ref.try_write() {
@@ -514,7 +549,9 @@ impl Capability<MemoryRegion> {
             updates.add_uncomm_region(child_owner, target_id, vp, hpa_start, hpa_size);
         }
 
-        if vital {
+        // Only emit RevokeDomain if the domain wasn't already marked revoked
+        // (which means revoke_domain_subtree already emitted it).
+        if vital && !child_revoked {
             updates.add_revoke_domain_with_fallback(child_owner, None);
         }
 
@@ -674,6 +711,12 @@ impl Capability<Domain> {
             domain.data.memory_capabilities.values().cloned().collect();
         let domain_id = domain.data.id;
 
+        // Mark revoked early so that revoke_subtree (called below for memory
+        // caps) sees this domain as revoked and skips redundant ChangeRights
+        // and VITAL-triggered RevokeDomain updates.
+        domain.data.revoke();
+        updates.add_revoke_domain_with_fallback(domain_id, fallback);
+
         drop(domain);
 
         for child_ref in children {
@@ -784,9 +827,7 @@ impl Capability<Domain> {
             }
         }
 
-        let mut domain = domain_ref.write();
-        domain.data.revoke();
-        updates.add_revoke_domain_with_fallback(domain.data.id, fallback);
+        // domain.data.revoke() and RevokeDomain already emitted at the top.
 
         Ok(updates)
     }

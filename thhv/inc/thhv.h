@@ -876,6 +876,10 @@ struct thhv_partition {
 	struct page **shared_meta_pages;
 	unsigned int  shared_meta_nr_pages;
 
+	/* EPT META pages: kernel-allocated, sent to child for EPT page tables. */
+	struct page **ept_meta_pages;
+	unsigned int  ept_meta_nr_pages;
+
 	/* Memory region tracking: guest_pfn → pinned pages (for unpin on cleanup). */
 	struct {
 		spinlock_t lock;
@@ -1020,6 +1024,7 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 /* Synthetic region_key values for META caps (never valid as a guest_pfn). */
 #define THHV_META_KEY_SHARED	0xFFFFFFFFFFFF0001ULL
 #define THHV_META_KEY_VP(vp)	(0xFFFFFFFFFFFF1000ULL + (u64)(vp))
+#define THHV_META_KEY_EPT	0xFFFFFFFFFFFF2000ULL
 
 /*
  * DomainComm ring accessor — page-aware byte-oriented ring.
