@@ -10,7 +10,7 @@ use core::sync::atomic::Ordering;
 
 use capability_engine::{
     execute, Access, Attributes, Capability, CapabilityRef, CapaError, Domain, DomainId,
-    DomainPolicy, MonitorAPI, Platform, Rights, UpdateBatch,
+    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier, Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
@@ -124,14 +124,16 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_DOMCOMM_NOTIFY => Some(do_domcomm_notify(platform, &caller)),
         opcodes::THEMIS_ADD_VP => Some(do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys())),
         opcodes::THEMIS_SWITCH => do_switch(platform, &caller, arg0, arg1, vcpu),
+        opcodes::THEMIS_SET_INTR_POLICY =>
+            Some(do_set_intr_policy(platform, &caller, arg0, arg1 as u8, arg2)),
+        opcodes::THEMIS_SET_DEF_INTR_POLICY =>
+            Some(do_set_def_intr_policy(platform, &caller, arg0, arg1)),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST
         | opcodes::THEMIS_GET_REG
         | opcodes::THEMIS_SET_REG
-        | opcodes::THEMIS_SET_INTR_POLICY
-        | opcodes::THEMIS_SET_DEF_INTR_POLICY
         | opcodes::THEMIS_ASSIGN_DEVICE
         | opcodes::THEMIS_ENUMERATE
         | opcodes::THEMIS_REGISTER_DOORBELL
@@ -805,6 +807,66 @@ pub fn forward_child_exit(
     unsafe { core::ptr::write(vcpu, parent_active); }
 }
 
+// ── Interrupt policy VMCALLs ─────────────────────────────────────────────── //
+
+/// SET_INTR_POLICY (0x10): set per-vector interrupt visibility on a child domain.
+///
+/// arg0 = child_domain_handle, arg1 = vector (0–254), arg2 = visibility
+/// (0=Deliver, 1=Report, 2=NotReport).
+fn do_set_intr_policy(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_handle: u64,
+    vector: u8,
+    visibility: u64,
+) -> HypercallResult {
+    serial_println!(
+        "[SET_INTR_POLICY] child={} vec={} vis={}",
+        child_handle, vector, visibility
+    );
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::set_policy(
+            &caller,
+            child_handle,
+            PolicyIdentifier::VectorVisibility(vector),
+            visibility,
+        )
+        .map(|()| ((), UpdateBatch::new()))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// SET_DEF_INTR_POLICY (0x11): set the default interrupt visibility for a child domain.
+///
+/// arg0 = child_domain_handle, arg1 = visibility (0=Deliver, 1=Report, 2=NotReport).
+fn do_set_def_intr_policy(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_handle: u64,
+    visibility: u64,
+) -> HypercallResult {
+    serial_println!(
+        "[SET_DEF_INTR_POLICY] child={} vis={}",
+        child_handle, visibility
+    );
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::set_policy(
+            &caller,
+            child_handle,
+            PolicyIdentifier::DefaultInterruptVisibility,
+            visibility,
+        )
+        .map(|()| ((), UpdateBatch::new()))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
 // ── Interrupt forwarding ─────────────────────────────────────────────────── //
 
 /// Called from `handle_vmexit` when a physical external interrupt fires while a
@@ -822,8 +884,10 @@ pub fn forward_child_exit(
 ///    fires and `iret` returns, dom0 re-executes SWITCH → finds child VP Available
 ///    → VMLAUNCH resumes child from its saved VMCS state.
 ///
-/// Phase 1 routing: dom0 is always the handler for all vectors.  Future phases
-/// will use `InterruptPolicy` to route Report/NotReport chains correctly.
+/// Routing uses `InterruptPolicy`: if the running child domain has `Deliver`
+/// visibility for this vector, the interrupt is injected directly into the child
+/// (it owns the vector).  Otherwise (Report/NotReport) the interrupt is forwarded
+/// to dom0 via lazy-unwind.
 pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     use x86::vmx::vmcs;
 
@@ -838,7 +902,17 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     let child_cap = platform.get_core_cap(core_id as usize)
         .expect("[INTR_FWD] get_core_cap failed");
 
-    // Phase 1: always route to dom0 (the root Deliver domain).
+    // Consult the child's interrupt policy for this vector.
+    let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
+    if child_visibility == InterruptVisibility::Deliver {
+        // Child owns this vector — inject directly without forwarding.
+        serial_println!("[INTR_FWD] v={} Deliver: injecting into child directly", vector);
+        let intr_info = (1u64 << 31) | (vector as u64);
+        vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+        return;
+    }
+
+    // Report or NotReport: forward to dom0 (the root Deliver domain).
     let dom0_cap = platform.dom0_cap();
     let dom0_domain_id = dom0_cap.read().data.id;
 

@@ -782,6 +782,27 @@ struct thhv_query {
 #define THHV_SET_PA_MAP \
 	_IOW(THHV_IOCTL_MAGIC, 0x04, struct thhv_set_pa_map)
 
+/* ── Interrupt policy visibility values ────────────────────────────────────── */
+
+#define THHV_INTR_VISIBILITY_DELIVER     0  /* Domain receives the interrupt directly */
+#define THHV_INTR_VISIBILITY_REPORT      1  /* Interrupt forwarded up; domain notified on return */
+#define THHV_INTR_VISIBILITY_NOT_REPORT  2  /* Interrupt forwarded up; domain not notified */
+
+/* ── Interrupt policy ioctl struct ─────────────────────────────────────────── */
+
+/*
+ * Set interrupt visibility for a child domain before sealing.
+ * vector: 0–254 for a specific vector, 0xFF to set the domain default.
+ * visibility: THHV_INTR_VISIBILITY_*.
+ */
+#define THHV_INTR_POLICY_VEC_DEFAULT  0xFF
+
+struct thhv_set_intr_policy {
+	__u8 vector;      /* 0–254 for specific vector; 0xFF for domain default */
+	__u8 visibility;  /* THHV_INTR_VISIBILITY_* */
+	__u8 pad[6];
+};
+
 /* ── Partition-level ioctls ────────────────────────────────────────────────── */
 
 #define THHV_INITIALIZE_PARTITION \
@@ -800,6 +821,8 @@ struct thhv_query {
 	_IO(THHV_IOCTL_MAGIC, 0x16)
 #define THHV_SEND_SHARED_META \
 	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition)
+#define THHV_SET_INTR_POLICY \
+	_IOW(THHV_IOCTL_MAGIC, 0x18, struct thhv_set_intr_policy)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
