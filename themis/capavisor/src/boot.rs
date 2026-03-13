@@ -1303,6 +1303,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
             vmx.dom0.vmcs_phys(ap_vp),
             vmx.dom0.vapic_phys(ap_vp),
             msr_bitmap_phys,
+            0, // dom0 VPs have no Posted-Interrupt Descriptor
             (ap_vp + 1) as u16,
         );
         capa.platform.bootstrap_store_vcpu(0, ap_vp, vcpu);
@@ -1464,7 +1465,7 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
         x86::bits64::vmx::vmclear(bsp_vmcs_phys).expect("BSP vmclear for vcpu");
     }
 
-    let mut inactive = InactiveVcpu::new(bsp_vmcs_phys, bsp_vapic_phys, bsp_msr_bitmap_phys, bsp_vpid);
+    let mut inactive = InactiveVcpu::new(bsp_vmcs_phys, bsp_vapic_phys, bsp_msr_bitmap_phys, 0, bsp_vpid);
 
     // Set RSI = boot_params_phys (Linux boot protocol requirement).
     inactive.set_reg(Reg::Rsi, linux.boot_params_phys);

@@ -39,7 +39,7 @@
 #define THHV_IOCTL_MAGIC       0xB8
 #define THHV_SCHED_SYNC        0
 #define THHV_META_PAGES_SHARED 3
-#define THHV_META_PAGES_PER_VP 2
+#define THHV_META_PAGES_PER_VP 3
 #define THEMIC_MSG_SLOT_SIZE   256
 #define PAGE_SIZE_4K           4096
 

@@ -67,6 +67,7 @@ pub struct InactiveVcpu {
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    pid_phys: u64,
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
@@ -80,11 +81,12 @@ unsafe impl Send for InactiveVcpu {}
 impl InactiveVcpu {
     /// Create a new inactive VCPU from freshly-allocated VMCS/VAPIC pages.
     /// The VMCS must have been vmclear'd by the caller.
-    pub fn new(vmcs_phys: u64, vapic_phys: u64, msr_bitmap_phys: u64, vpid: u16) -> Self {
+    pub fn new(vmcs_phys: u64, vapic_phys: u64, msr_bitmap_phys: u64, pid_phys: u64, vpid: u16) -> Self {
         Self {
             vmcs_phys,
             vapic_phys,
             msr_bitmap_phys,
+            pid_phys,
             vpid,
             launched: false,
             regs: [0u64; REGFILE_SIZE],
@@ -102,6 +104,7 @@ impl InactiveVcpu {
             vmcs_phys: self.vmcs_phys,
             vapic_phys: self.vapic_phys,
             msr_bitmap_phys: self.msr_bitmap_phys,
+            pid_phys: self.pid_phys,
             vpid: self.vpid,
             launched: self.launched,
             regs: self.regs,
@@ -112,6 +115,7 @@ impl InactiveVcpu {
     pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
     pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
     pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
+    pub fn pid_phys(&self) -> u64 { self.pid_phys }
     pub fn vpid(&self) -> u16 { self.vpid }
 
     /// Read a guest GPR value.
@@ -136,6 +140,7 @@ pub struct ActiveVcpu {
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    pid_phys: u64,
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
@@ -192,6 +197,7 @@ impl ActiveVcpu {
     pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
     pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
     pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
+    pub fn pid_phys(&self) -> u64 { self.pid_phys }
     pub fn vpid(&self) -> u16 { self.vpid }
 
     // ── Lifecycle ────────────────────────────────────────────────────── //
@@ -208,6 +214,7 @@ impl ActiveVcpu {
             vmcs_phys: self.vmcs_phys,
             vapic_phys: self.vapic_phys,
             msr_bitmap_phys: self.msr_bitmap_phys,
+            pid_phys: self.pid_phys,
             vpid: self.vpid,
             launched: false, // VMCLEAR resets the launch state
             regs: self.regs,

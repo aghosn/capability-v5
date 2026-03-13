@@ -22,6 +22,27 @@ use x86::vmx::vmcs::{control, guest, host};
 use crate::serial_println;
 use crate::vmexit::host_rip_stub;
 
+// ── Posted Interrupt constants ───────────────────────────────────────────── //
+
+/// Notification vector used for Posted Interrupt IPIs.
+///
+/// When a VP running on another core has a posted interrupt delivered, the
+/// capavisor sends an IPI with this vector. Hardware then moves PIR → vIRR on
+/// the receiving core without a VM exit.
+///
+/// 0xF2 is chosen to avoid conflicts with Linux's per-CPU IPI vectors
+/// (0xF0=RESCHEDULE, 0xF1=CALL_FUNCTION_SINGLE, 0xFF=LOCAL_TIMER in common
+/// kernels). Validated at capavisor init against the running kernel's IDT.
+pub const POSTED_INTR_NOTIFY_VEC: u8 = 0xF2;
+
+/// VMCS encoding for the 16-bit Posted-Interrupt Notification Vector field.
+/// Intel SDM Vol 3C Table B-1, offset 0x0002.
+const VMCS_POSTED_INTR_NOTIFICATION_VECTOR: u32 = 0x0002;
+
+/// VMCS encoding for the 64-bit Posted-Interrupt Descriptor Address (full).
+/// Intel SDM Vol 3C Table B-1, offset 0x2016.
+const VMCS_POSTED_INTR_DESCRIPTOR_ADDR: u32 = 0x2016;
+
 // ── MSR-capability–adjusted control helper ───────────────────────────────── //
 
 /// Apply allowed-0 / allowed-1 mask from a VMX capability MSR to `desired`.
@@ -71,7 +92,7 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmclear(vmcs_phys).expect("vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vp_index, false);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, vp_index, false);
     write_host_state();
     write_guest_state();
 
@@ -94,19 +115,20 @@ pub unsafe fn setup_child_vmcs(
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    pid_phys: u64,
     eptp: u64,
     vpid: u16,
 ) {
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, vpid as usize, true);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, vpid as usize, true);
     write_host_state();
     write_guest_state();
 
     serial_println!(
-        "  child VMCS: phys={:#x} VAPIC={:#x} EPTP={:#x} VPID={}",
-        vmcs_phys, vapic_phys, eptp, vpid,
+        "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} EPTP={:#x} VPID={}",
+        vmcs_phys, vapic_phys, pid_phys, eptp, vpid,
     );
 }
 
@@ -116,6 +138,7 @@ unsafe fn write_control_fields(
     eptp: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    pid_phys: u64,
     vp_index: usize,
     child: bool,
 ) {
@@ -123,6 +146,7 @@ unsafe fn write_control_fields(
     let mut pin_desired: u64 = 1 << 6; // ACTIVATE_VMX_PREEMPTION_TIMER
     if child {
         pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
+        pin_desired |= 1 << 7; // PROCESS_POSTED_INTERRUPTS
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
@@ -297,6 +321,22 @@ unsafe fn write_control_fields(
     serial_println!("    exit_msr={:#018x}  exit={:#010x}", exit_msr, exit_val);
     serial_println!("    entry_msr={:#018x}  entry={:#010x}", entry_msr, entry_val);
     serial_println!("    EPTP={:#018x}  VPID={}", eptp, vp_index + 1);
+
+    // ── Posted Interrupt fields (child VPs only) ─────────────────────── //
+    // Only write these fields if PROCESS_POSTED_INTERRUPTS was actually set
+    // after the hardware capability mask was applied (bit 7 of pin_val).
+    // On hardware that doesn't support posted interrupts, these VMCS fields
+    // are unsupported and vmwrite would return VM_FAIL_INVALID.
+    if child && (pin_val & (1 << 7)) != 0 {
+        // Notification vector: sent as IPI to the VP's core for cross-core injection.
+        vmx::vmwrite(VMCS_POSTED_INTR_NOTIFICATION_VECTOR, POSTED_INTR_NOTIFY_VEC as u64)
+            .expect("vmwrite posted-intr notification vector");
+        // Physical address of the 64-byte aligned Posted-Interrupt Descriptor.
+        vmx::vmwrite(VMCS_POSTED_INTR_DESCRIPTOR_ADDR, pid_phys)
+            .expect("vmwrite posted-intr descriptor addr");
+    } else if child {
+        serial_println!("  [WARN] PROCESS_POSTED_INTERRUPTS not supported by hardware — PID disabled");
+    }
 }
 
 // ── Host state ────────────────────────────────────────────────────────────── //

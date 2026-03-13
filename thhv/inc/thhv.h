@@ -47,7 +47,7 @@
 #define THHV_SCHED_ASYNC  1
 
 /* META pages the capavisor needs per VP (VMCS + VAPIC). */
-#define THHV_META_PAGES_PER_VP  2
+#define THHV_META_PAGES_PER_VP  3
 
 /* ── Themis hypercall opcodes (RAX) ────────────────────────────────────────── */
 

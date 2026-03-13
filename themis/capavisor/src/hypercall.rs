@@ -388,18 +388,19 @@ fn do_add_vp(
         id
     };
 
-    // ── Step 1: pre-allocate VMCS + VAPIC from child's META pool ──
+    // ── Step 1: pre-allocate VMCS + VAPIC + PID from child's META pool ──
     let arc = match platform.domain_arc(child_domain_id) {
         Some(a) => a,
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };
 
-    let (vmcs_phys, vapic_phys, msr_bitmap_phys, first_vp);
+    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, first_vp);
     {
         let mut pd = arc.lock();
         // Check if this is the first VP (need extra page for MSR bitmap).
         first_vp = pd.msr_bitmap_phys == 0;
-        let pages_needed = if first_vp { 3 } else { 2 };
+        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap if first VP).
+        let pages_needed = if first_vp { 4 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -409,10 +410,17 @@ fn do_add_vp(
         }
         vmcs_phys = pd.meta.alloc_frame();
         vapic_phys = pd.meta.alloc_frame();
+        pid_phys = pd.meta.alloc_frame();
         if first_vp {
             pd.msr_bitmap_phys = pd.meta.alloc_frame();
         }
         msr_bitmap_phys = pd.msr_bitmap_phys;
+    }
+
+    // Zero the PID page (must be clean before VMENTRY).
+    let hhdm = platform.hhdm_offset();
+    unsafe {
+        core::ptr::write_bytes((pid_phys + hhdm) as *mut u8, 0, 64);
     }
 
     // ── Step 2: call into capa engine ──
@@ -428,6 +436,7 @@ fn do_add_vp(
             let mut pd = arc.lock();
             pd.meta.free_frame(vmcs_phys);
             pd.meta.free_frame(vapic_phys);
+            pd.meta.free_frame(pid_phys);
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
                 pd.msr_bitmap_phys = 0;
@@ -437,7 +446,6 @@ fn do_add_vp(
         }
         Ok((vp_id, _batch)) => {
             // ── Step 3: write VMCS revision ID, set up VMCS, create InactiveVcpu ──
-            let hhdm = platform.hhdm_offset();
             let rev_id = (unsafe { msr::rdmsr(msr::IA32_VMX_BASIC) } & 0x7FFF_FFFF) as u32;
 
             // Write revision ID into the VMCS page header.
@@ -453,6 +461,7 @@ fn do_add_vp(
                     let mut pd = arc.lock();
                     pd.meta.free_frame(vmcs_phys);
                     pd.meta.free_frame(vapic_phys);
+                    pd.meta.free_frame(pid_phys);
                     if first_vp {
                         pd.meta.free_frame(msr_bitmap_phys);
                         pd.msr_bitmap_phys = 0;
@@ -464,13 +473,14 @@ fn do_add_vp(
             // Allocate a unique VPID.
             let vpid = platform.next_vpid();
 
-            // Set up child VMCS with intercept-heavy controls (HLT_EXITING,
-            // EXTERNAL_INTERRUPT_EXITING). Clobbers VMPTRLD — restored below.
+            // Set up child VMCS with intercept-heavy controls + Posted Interrupts.
+            // Clobbers VMPTRLD — restored below.
             unsafe {
                 crate::vmcs::setup_child_vmcs(
                     vmcs_phys,
                     vapic_phys,
                     msr_bitmap_phys,
+                    pid_phys,
                     eptp,
                     vpid,
                 );
@@ -481,12 +491,12 @@ fn do_add_vp(
             }
 
             // Create InactiveVcpu and store in the child's PlatformDomain.
-            let vcpu = InactiveVcpu::new(vmcs_phys, vapic_phys, msr_bitmap_phys, vpid);
+            let vcpu = InactiveVcpu::new(vmcs_phys, vapic_phys, msr_bitmap_phys, pid_phys, vpid);
             platform.bootstrap_store_vcpu(child_domain_id, vp_id as usize, vcpu);
 
             serial_println!(
-                "[ADD_VP] dom={} vp={} vmcs={:#x} vapic={:#x} msr_bm={:#x} vpid={}",
-                child_domain_id, vp_id, vmcs_phys, vapic_phys, msr_bitmap_phys, vpid,
+                "[ADD_VP] dom={} vp={} vmcs={:#x} vapic={:#x} pid={:#x} msr_bm={:#x} vpid={}",
+                child_domain_id, vp_id, vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, vpid,
             );
 
             HypercallResult::success_1(vp_id as u64)
@@ -867,6 +877,38 @@ fn do_set_def_intr_policy(
     }
 }
 
+// ── Posted Interrupt Descriptor helpers ──────────────────────────────────── //
+
+/// Set bit `vector` in the Posted-Interrupt Requests (PIR) bitmap of the
+/// descriptor at physical address `pid_phys`.
+///
+/// The PIR is 256 bits = 4 × u64 starting at byte 0 of the PID page.
+/// Uses an atomic OR to avoid races with concurrent setters.
+///
+/// # Safety
+/// `pid_phys` must be a valid physical address of a zeroed 64-byte aligned
+/// PID page accessible via the HHDM.
+unsafe fn pid_set_pir(pid_phys: u64, hhdm: u64, vector: u8) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    let word = (vector / 64) as usize;
+    let bit = vector % 64;
+    let pir_virt = (pid_phys + hhdm) as *const AtomicU64;
+    unsafe { (*pir_virt.add(word)).fetch_or(1u64 << bit, Ordering::Release) };
+}
+
+/// Read and clear the Outstanding Notification (ON) bit (bit 256 = byte 32, bit 0)
+/// of the PID.  Returns the previous value.
+///
+/// Used to decide whether to send a notification IPI: if ON was 0 before our
+/// set, we must send the IPI; otherwise another sender already did.
+unsafe fn pid_test_and_set_on(pid_phys: u64, hhdm: u64) -> bool {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    // ON is bit 0 of the u32 at byte offset 32.
+    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+    let prev = unsafe { (*on_ptr).fetch_or(1, Ordering::AcqRel) };
+    prev & 1 != 0 // true if ON was already set (another sender beat us)
+}
+
 // ── Interrupt forwarding ─────────────────────────────────────────────────── //
 
 /// Called from `handle_vmexit` when a physical external interrupt fires while a
@@ -905,11 +947,25 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Consult the child's interrupt policy for this vector.
     let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
     if child_visibility == InterruptVisibility::Deliver {
-        // Child owns this vector — inject directly without forwarding.
-        serial_println!("[INTR_FWD] v={} Deliver: injecting into child directly", vector);
-        let intr_info = (1u64 << 31) | (vector as u64);
-        vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
-        return;
+        // Check whether PROCESS_POSTED_INTERRUPTS was actually enabled on the
+        // child's VMCS (hardware may have cleared it if unsupported).
+        use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
+        let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
+        if pin_val & (1 << 7) != 0 {
+            // Hardware supports posted interrupts — inject via PIR.
+            serial_println!("[INTR_FWD] v={} Deliver: posting via PIR", vector);
+            let pid_phys = vcpu.pid_phys();
+            let hhdm = platform.hhdm_offset();
+            unsafe { pid_set_pir(pid_phys, hhdm, vector) };
+            // VP is running on this core — no IPI needed; VMRESUME processes PIR.
+            return;
+        } else {
+            // PID not supported — fall back to VMENTRY_INTR_INFO injection.
+            serial_println!("[INTR_FWD] v={} Deliver: fallback VMENTRY injection (no PID)", vector);
+            let intr_info = (1u64 << 31) | (vector as u64);
+            vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            return;
+        }
     }
 
     // Report or NotReport: forward to dom0 (the root Deliver domain).
