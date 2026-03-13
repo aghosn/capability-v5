@@ -67,6 +67,11 @@ pub struct SwitchContext {
     pub from_vp_id: Option<u64>,
     /// VP ID of the target domain (None for non-VP switches)
     pub to_vp_id: Option<u64>,
+    /// If the target VP was Suspended due to an interrupt, this carries the
+    /// interrupt vector.  `do_switch` uses this to set `RDI = vector` on the
+    /// SWITCH return rather than `RDI = exit_reason` from a normal child exit.
+    /// `None` for all normal SWITCH forward operations.
+    pub interrupt_return: Option<u8>,
 }
 
 /// Interrupt context
@@ -206,6 +211,7 @@ impl SwitchManager {
             is_return,
             from_vp_id: None,
             to_vp_id: None,
+            interrupt_return: None,
         })
     }
 

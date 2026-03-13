@@ -130,8 +130,12 @@ unsafe fn write_control_fields(
         .expect("vmwrite pin-based");
 
     // ── Primary proc-based ────────────────────────────────────────────── //
+    // USE_TPR_SHADOW (bit 21): required prerequisite for APIC_REGISTER_VIRT
+    // and VID.  With TPR_THRESHOLD=0 it causes no threshold exits; CR8 writes
+    // in the guest land in VAPIC.vTPR (benign for dom0 since TPR_THRESHOLD=0).
     let mut primary_desired: u64 =
-        (1 << 28)  // USE_MSR_BITMAPS
+        (1 << 21)  // USE_TPR_SHADOW
+        | (1 << 28) // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
     if child {
         primary_desired |= 1 << 7; // HLT_EXITING
@@ -144,11 +148,22 @@ unsafe fn write_control_fields(
     // ── Secondary proc-based ──────────────────────────────────────────── //
     // ENABLE_RDTSCP (bit 3), ENABLE_EPT (bit 1), ENABLE_VPID (bit 5),
     // UNRESTRICTED_GUEST (bit 7), ENABLE_XSAVES (bit 20).
+    // APIC_REGISTER_VIRT (bit 8): virtualises APIC register reads to VAPIC page.
+    //   Requires USE_TPR_SHADOW=1.  Harmless without "Virtualize APIC accesses"
+    //   for xAPIC MMIO — it only affects x2APIC MSR reads.
+    // VID (bit 9): Virtual Interrupt Delivery.  On VM entry with VID=1, the
+    //   processor evaluates vIRR and delivers pending virtual interrupts without
+    //   a VM exit.  Requires USE_TPR_SHADOW=1.  Benign for dom0 when vIRR=0;
+    //   Phase 1 uses VMENTRY_INTR_INFO injection instead (no vIRR needed).
+    //   Phase 2 switches dom0 to vIRR injection once the APIC access page is
+    //   set up (see #U5), avoiding the vISR accumulation issue.
     let secondary_desired: u64 =
-        (1 << 1)  // ENABLE_EPT
+        (1 << 1)   // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
+        | (1 << 8) // APIC_REGISTER_VIRT
+        | (1 << 9) // VIRTUAL_INTERRUPT_DELIVERY (VID)
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
@@ -237,6 +252,18 @@ unsafe fn write_control_fields(
     // ── VAPIC page ────────────────────────────────────────────────────── //
     vmx::vmwrite(control::VIRT_APIC_ADDR_FULL as u32, vapic_phys)
         .expect("vmwrite VAPIC addr");
+
+    // ── TPR threshold ─────────────────────────────────────────────────── //
+    // Required when USE_TPR_SHADOW=1.  0 = no TPR-threshold VM exits.
+    vmx::vmwrite(control::TPR_THRESHOLD, 0).expect("vmwrite TPR threshold");
+
+    // ── EOI-exit bitmap (256 bits = four 64-bit VMCS fields) ─────────── //
+    // All 0: no EOI exits for any vector.  Report-domain notification uses
+    // the SWITCH return mechanism, not EOI exits (see interrupt-virtualization.md).
+    vmx::vmwrite(control::EOI_EXIT0_FULL, 0).expect("vmwrite EOI-exit bitmap 0");
+    vmx::vmwrite(control::EOI_EXIT1_FULL, 0).expect("vmwrite EOI-exit bitmap 1");
+    vmx::vmwrite(control::EOI_EXIT2_FULL, 0).expect("vmwrite EOI-exit bitmap 2");
+    vmx::vmwrite(control::EOI_EXIT3_FULL, 0).expect("vmwrite EOI-exit bitmap 3");
 
     // ── MSR / I/O bitmap addresses ────────────────────────────────────── //
     // Explicitly write address 0 (physical page 0, 4KB-aligned, within
@@ -454,6 +481,10 @@ unsafe fn write_guest_state() {
     vmx::vmwrite(guest::PENDING_DBG_EXCEPTIONS, 0).expect("vmwrite guest pending dbg");
     // VMCS link pointer: 0xFFFF…FFFF means no shadow VMCS.
     vmx::vmwrite(guest::LINK_PTR_FULL, u64::MAX).expect("vmwrite VMCS link ptr");
+    // GUEST_INTERRUPT_STATUS (RVI | SVI): required when VID=1.
+    // RVI=0: no pending virtual interrupt on entry.  SVI=0: no in-service virtual interrupt.
+    // Written to 0 here; updated automatically by hardware when VID delivers vIRR bits.
+    vmx::vmwrite(guest::INTERRUPT_STATUS, 0).expect("vmwrite GUEST_INTERRUPT_STATUS");
     // Preemption timer: initialise to a non-zero value so the first VMENTRY
     // does not fire an immediate timer exit (a timer value of 0 fires on the
     // first cycle).  The monitor loop resets it on every timer exit anyway.

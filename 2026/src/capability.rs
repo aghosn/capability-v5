@@ -2530,6 +2530,7 @@ impl Capability<Domain> {
             is_return: true,
             from_vp_id: Some(caller_vp_id),
             to_vp_id: Some(prev_vp_id),
+            interrupt_return: None,
         })
     }
 
@@ -2615,17 +2616,19 @@ impl Capability<Domain> {
         };
 
         // Claim target VP: Available → Running, or Suspended → Running.
-        // If Suspended, record callee info so the Interrupted callee can be freed.
-        let suspended_callee: Option<(CapabilityWeak<Domain>, u64)> = {
+        // If Suspended, record callee info so the Interrupted callee can be freed,
+        // and capture the interrupt vector for SwitchContext.interrupt_return.
+        let suspended_info: Option<(CapabilityWeak<Domain>, u64, u8)> = {
             let mut state = to_vp_arc.run_state.write();
 
             let callee_info = if let VpRunState::Suspended {
                 callee_domain,
                 callee_vp_id,
+                vector,
                 ..
             } = &*state
             {
-                Some((callee_domain.clone(), *callee_vp_id))
+                Some((callee_domain.clone(), *callee_vp_id, *vector))
             } else {
                 None
             };
@@ -2650,8 +2653,12 @@ impl Capability<Domain> {
             callee_info
         };
 
+        // interrupt_return: Some(vector) if the target VP was Suspended (interrupt return path).
+        // This is used by do_switch to set RDI=vector on the synthetic SWITCH return.
+        let interrupt_return: Option<u8> = suspended_info.as_ref().map(|(_, _, v)| *v);
+
         // If the target VP was Suspended, free its Interrupted callee.
-        if let Some((callee_weak, callee_vp_id)) = suspended_callee {
+        if let Some((callee_weak, callee_vp_id, _)) = suspended_info {
             if let Some(callee_cap) = callee_weak.upgrade() {
                 let vp_opt = callee_cap
                     .read()
@@ -2684,6 +2691,7 @@ impl Capability<Domain> {
             is_return: false,
             from_vp_id: Some(caller_vp_id),
             to_vp_id: Some(to_vp_id),
+            interrupt_return,
         })
     }
 

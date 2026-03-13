@@ -798,6 +798,81 @@ Test binary: `thhv/test/test_child_hlt.c`.
   EPT violation domain/core logging (vmexit.rs), CARVE logging (hypercall.rs),
   do_create_domain debug (hypercall.rs).
 
+---
+
+### Phase 15.5 — Interrupt Virtualization (VAPIC + VID + Posted Interrupts)
+
+Design document: `2026/docs/design/interrupt-virtualization.md`
+
+This phase implements correct interrupt routing between domains. It is the
+current active work item. The lost-timer-interrupt regression (RCU stall after
+C7 test) is a symptom of the missing Phase 1 implementation.
+
+#### Phase 1 — VAPIC + VID + Core Interrupt Forwarding
+
+- [ ] **intr-p1-vmcs** — Allocate VAPIC page per VP; enable APIC register
+  virtualization (secondary bit 8) and VID (secondary bit 9) in `write_control_fields`
+  for all VPs. Set `VIRTUAL_APIC_ADDR`, `EOI_EXIT_BITMAP`=0, `TPR_THRESHOLD`=0.
+  Dom0: `EXTERNAL_INTERRUPT_EXITING=0`. Children: already have `=1` + `ACK_ON_EXIT`.
+  Files: `vmcs.rs`, `platform.rs`.
+
+- [ ] **intr-p1-routing-table** — Add `interrupt_policy: [VectorPolicy; 256]` per VP
+  in `VpState` (`platform.rs`). Implement `THEMIS_HC_SET_INTR_POLICY` VMCALL handler
+  in `hypercall.rs`. Implement `route_interrupt(V, domain_cap) → handler_cap` that
+  walks the caller chain to find the first `Deliver` ancestor.
+  Files: `hypercall.rs`, `platform.rs`.
+
+- [ ] **intr-p1-forward** — Implement `forward_interrupt_to_handler` in `vmexit.rs`:
+  on `EXIT_REASON_EXTERNAL_INTERRUPT` during child execution, check policy for V.
+  Deliver path: set `vIRR[V]` in child VAPIC, VMRESUME.
+  Route-upward path: write InterceptMessage to child COMM page, call
+  `deliver_interrupt_vp` (lazy-unwind), VMCLEAR child, VMPTRLD handler, set
+  `vIRR[V]` in handler VAPIC, VMRESUME handler (do not advance handler RIP).
+  Files: `vmexit.rs`, `hypercall.rs`.
+
+- [ ] **intr-p1-switch-ctx** — Add `interrupt_return: Option<u8>` to `SwitchContext`
+  in `2026/src/switch.rs`. Update `switch_domain_forward` (`capability.rs` ~line 2544)
+  to populate it when target VP is `Suspended { vector }`. Update `do_switch`
+  (`hypercall.rs` ~line 506) to set `RDI=V`, `RAX=SUCCESS`, advance RIP when
+  `interrupt_return == Some(V)`.
+  Files: `2026/src/switch.rs`, `2026/src/capability.rs`, `hypercall.rs`.
+
+- [ ] **intr-p1-test** — Validate Phase 1: re-run C7 test (RCU stall should be gone).
+  Optionally write `test_intr_forward.c`: child loops while dom0 receives timer ticks.
+  Run `cargo test` in `2026/` for capability engine regression check.
+
+#### Phase 2 — Posted Interrupts
+
+- [ ] **intr-p2-pid** — Allocate 64-byte aligned `PostedInterruptDescriptor` per VP
+  at `add_vp` time. Write `POSTED_INTR_DESCRIPTOR_ADDR` and
+  `POSTED_INTR_NOTIFICATION_VECTOR` VMCS fields. Enable `PROCESS_POSTED_INTERRUPTS`
+  (pin-based bit 7) for child VPs.
+  Files: `vmcs.rs`, `platform.rs`.
+
+- [ ] **intr-p2-notify-vec** — Reserve Posted Interrupt notification vector at capavisor
+  init. Must not conflict with Linux's allocator (`0xF0–0xFF`). Probe candidate
+  `0xF2`. Store as capavisor global.
+  Files: `main.rs`, `vmcs.rs`.
+
+- [ ] **intr-p2-inject** — Implement `inject_via_pid(pid, V, target_core)`: atomically
+  set `PIR[V]`; if VP running and `ON` was 0, set `ON=1` and send notification IPI.
+  Replace direct vIRR writes in `forward_interrupt_to_handler` with PID injection
+  for cross-core running VPs (Case C in design doc).
+  Files: `hypercall.rs`, `platform.rs`.
+
+- [ ] **intr-p2-test** — Validate cross-core Deliver delivery. Multi-core child
+  domain test. Qualitative latency comparison vs Phase 1.
+
+#### Phase 3 — VT-d Interrupt Remapping  *(required for device passthrough)*
+
+Detailed breakdown deferred until Phase 2 is complete. High-level steps:
+enumerate DMAR, enable IR, build IRT, program IRTEs for Deliver/Report vectors,
+integrate with `MSHV_ASSIGN_DEVICE` (Phase 16e).
+
+- [ ] **intr-p3-plan** — Break down Phase 3 into detailed sub-tasks once Phase 2 done.
+
+---
+
 ### Phase 16 — Cloud-Hypervisor Themis Backend
 
 Add a Themis/mshv-themis hypervisor backend to cloud-hypervisor, enabling it to

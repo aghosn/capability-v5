@@ -637,6 +637,19 @@ fn do_switch(
         apply_vmcs_reg(&mut child_active, *reg, *val);
     }
 
+    // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop interrupt
+    // unwind), its RIP is sitting AT its own SWITCH VMCALL.  Deliver a synthetic
+    // SWITCH return result so the domain sees "my callee was preempted by interrupt V".
+    if let Some(vector) = switch_ctx.interrupt_return {
+        child_active.set_reg(Reg::Rax, errors::SUCCESS);
+        child_active.set_reg(Reg::Rdi, vector as u64);
+        child_active.set_reg(Reg::Rsi, 0);
+        child_active.set_reg(Reg::Rdx, 0);
+        // Advance RIP past the SWITCH VMCALL (3 bytes).
+        let rip = child_active.get(x86::vmx::vmcs::guest::RIP);
+        child_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
+    }
+
     serial_println!(
         "[SWITCH] swapped dom={}→{} vp={}→{} child_rip={:#x}",
         parent_domain_id, child_domain_id,
@@ -790,6 +803,98 @@ pub fn forward_child_exit(
 
     // Replace the monitor loop's ActiveVcpu with the parent's.
     unsafe { core::ptr::write(vcpu, parent_active); }
+}
+
+// ── Interrupt forwarding ─────────────────────────────────────────────────── //
+
+/// Called from `handle_vmexit` when a physical external interrupt fires while a
+/// child domain VP is running on this core.
+///
+/// Routes the interrupt to the handler (Deliver-policy ancestor, which in Phase 1
+/// is always dom0) using the lazy-unwind model:
+///
+/// 1. `deliver_interrupt_vp`: transitions child VP → Available, dom0 VP → Running.
+/// 2. VMCLEAR child → store InactiveVcpu in child's VcpuSlot.
+/// 3. Take dom0's InactiveVcpu from dom0's VcpuSlot → VMPTRLD dom0.
+/// 4. Set `VMENTRY_INTERRUPTION_INFO_FIELD` = external interrupt V (type=0, valid).
+/// 5. Dom0 RIP is left unchanged (stays AT the SWITCH VMCALL, since `do_switch`
+///    does not advance RIP before storing dom0 to its slot).  After the interrupt
+///    fires and `iret` returns, dom0 re-executes SWITCH → finds child VP Available
+///    → VMLAUNCH resumes child from its saved VMCS state.
+///
+/// Phase 1 routing: dom0 is always the handler for all vectors.  Future phases
+/// will use `InterruptPolicy` to route Report/NotReport chains correctly.
+pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
+    use x86::vmx::vmcs;
+
+    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null());
+    let platform = unsafe { &*platform_ptr };
+
+    let core_id = platform.get_current_core()
+        .expect("[INTR_FWD] get_current_core failed") as u64;
+
+    // Currently-running domain cap (the child that was interrupted).
+    let child_cap = platform.get_core_cap(core_id as usize)
+        .expect("[INTR_FWD] get_core_cap failed");
+
+    // Phase 1: always route to dom0 (the root Deliver domain).
+    let dom0_cap = platform.dom0_cap();
+    let dom0_domain_id = dom0_cap.read().data.id;
+
+    // Lazy-unwind: child VP → Available (n==2), dom0 VP → Running.
+    let intr_ctx = match Capability::deliver_interrupt_vp(
+        &child_cap,
+        dom0_domain_id,
+        core_id,
+        vector,
+        platform,
+    ) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            serial_println!("[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child", e);
+            // Fallback: re-inject into child via VMENTRY injection so the interrupt
+            // is not lost.  This can happen if the call chain is unexpected.
+            let intr_info = (1u64 << 31) | (vector as u64);
+            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            return;
+        }
+    };
+
+    serial_println!(
+        "[INTR_FWD] v={} child_dom={}:{} → handler_dom={}:{}",
+        vector,
+        intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id,
+        intr_ctx.handler_domain_id, intr_ctx.handler_vp_id,
+    );
+
+    // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
+    let child_arc = platform.domain_arc(intr_ctx.interrupted_domain_id)
+        .expect("[INTR_FWD] child domain not found");
+    let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
+    let child_inactive = child_active.deactivate()
+        .expect("[INTR_FWD] child deactivate failed");
+    child_arc.lock().vps[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
+
+    // Activate dom0 (VMPTRLD) from dom0's VcpuSlot.
+    let handler_arc = platform.domain_arc(intr_ctx.handler_domain_id)
+        .expect("[INTR_FWD] handler domain not found");
+    let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize].take()
+        .expect("[INTR_FWD] handler VcpuSlot empty");
+    let mut handler_active = handler_inactive.activate()
+        .expect("[INTR_FWD] handler activate (VMPTRLD) failed");
+
+    // Inject the interrupt via VM-entry event injection.
+    // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
+    // VMENTRY injection bypasses VID and does not update vISR — safe for dom0's
+    // xAPIC MMIO EOI path.  The processor clears bit 31 automatically after delivery.
+    let intr_info = (1u64 << 31) | (vector as u64);
+    handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+
+    // Replace the monitor loop's ActiveVcpu with the handler's.
+    // Handler RIP stays AT the SWITCH VMCALL (do_switch did not advance it before
+    // storing).  After iret from the interrupt IDT handler, dom0 re-executes SWITCH.
+    unsafe { core::ptr::write(vcpu, handler_active); }
 }
 
 // ── VpRegister ↔ VMCS / GPR mapping (reusable) ──────────────────────────── //

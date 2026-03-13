@@ -168,7 +168,13 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 if domain_id != 0 && domain_id != u64::MAX {
                     match basic_reason {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
-                            // Host interrupt while child was running — acknowledge and re-enter.
+                            // Physical interrupt fired while child was running.
+                            // ACKNOWLEDGE_INTERRUPT_ON_EXIT already sent EOI to the LAPIC.
+                            // Read the acknowledged vector and forward it to the handler domain
+                            // (dom0 in Phase 1) via lazy-unwind + VMENTRY injection.
+                            let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+                            let vector = (intr_info & 0xFF) as u8;
+                            crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
                             return;
                         }
                         EXIT_REASON_VMX_PREEMPTION_TIMER => {
