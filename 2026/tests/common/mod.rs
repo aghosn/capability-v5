@@ -224,8 +224,10 @@ impl Platform for TestPlatform {
         }
     }
 
-    fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
-        self.inner.lock().domain_to_core.get(&domain_id).copied()
+    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId> {
+        self.inner.lock().domain_to_core.get(&domain_id)
+            .map(|&c| vec![c])
+            .unwrap_or_default()
     }
 
     fn try_acquire_update_lock(&self) -> bool {

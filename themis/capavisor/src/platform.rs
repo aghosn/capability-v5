@@ -69,7 +69,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
@@ -301,7 +301,7 @@ impl VcpuSlot {
 /// - Cross-core reads happen under the `execute()` barrier protocol
 ///   (IPI + sync_barrier), so the `domain_cap` Mutex is never truly contended.
 /// - `domain_id` is a cached copy of the domain ID for fast lock-free
-///   observational reads (e.g., `domain_core()` routing lookups).
+///   observational reads (e.g., `domain_cores()` routing lookups).
 pub struct CoreContext {
     /// Cached domain ID — lock-free observational reads by other cores.
     pub domain_id: AtomicU64,
@@ -745,14 +745,14 @@ impl DomainTable {
 
 struct RoutingMaps {
     core_to_domain: BTreeMap<CoreId, DomainId>,
-    domain_to_core: BTreeMap<DomainId, CoreId>,
+    domain_to_cores: BTreeMap<DomainId, BTreeSet<CoreId>>,
 }
 
 impl RoutingMaps {
     fn new() -> Self {
         RoutingMaps {
             core_to_domain: BTreeMap::new(),
-            domain_to_core: BTreeMap::new(),
+            domain_to_cores: BTreeMap::new(),
         }
     }
 }
@@ -1034,6 +1034,19 @@ impl ThemisPlatform {
         self.cores[core_id].domain_id.store(dom_id, Ordering::Release);
         self.cores[core_id].vp_id.store(vp_id, Ordering::Release);
         *self.cores[core_id].domain_cap.lock() = Some(cap);
+        // Also keep the routing maps consistent so that execute() sends IPIs
+        // to ALL cores running this domain during EPT updates.
+        let mut routing = self.routing.write();
+        if let Some(old_domain) = routing.core_to_domain.remove(&(core_id as CoreId)) {
+            if let Some(set) = routing.domain_to_cores.get_mut(&old_domain) {
+                set.remove(&(core_id as CoreId));
+                if set.is_empty() {
+                    routing.domain_to_cores.remove(&old_domain);
+                }
+            }
+        }
+        routing.core_to_domain.insert(core_id as CoreId, dom_id);
+        routing.domain_to_cores.entry(dom_id).or_default().insert(core_id as CoreId);
     }
 
     /// Get the `CapabilityRef<Domain>` for the domain running on `core_id`.
@@ -1280,17 +1293,19 @@ impl Platform for ThemisPlatform {
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
         let mut routing = self.routing.write();
-        if let Some(core_id) = routing.domain_to_core.remove(&domain_id) {
-            routing.core_to_domain.remove(&core_id);
-            self.cores[core_id as usize].domain_id.store(
-                fallback.unwrap_or(IDLE_DOMAIN),
-                Ordering::Release,
-            );
-            // TODO(Phase 9): also update CoreContext.domain_cap to the fallback's
-            // CapabilityRef once on_domain_revoked carries it (switch-based unification).
-            if let Some(fb) = fallback {
-                routing.core_to_domain.insert(core_id, fb);
-                routing.domain_to_core.insert(fb, core_id);
+        if let Some(cores) = routing.domain_to_cores.remove(&domain_id) {
+            for core_id in cores {
+                routing.core_to_domain.remove(&core_id);
+                self.cores[core_id as usize].domain_id.store(
+                    fallback.unwrap_or(IDLE_DOMAIN),
+                    Ordering::Release,
+                );
+                // TODO(Phase 9): also update CoreContext.domain_cap to the fallback's
+                // CapabilityRef once on_domain_revoked carries it (switch-based unification).
+                if let Some(fb) = fallback {
+                    routing.core_to_domain.insert(core_id, fb);
+                    routing.domain_to_cores.entry(fb).or_default().insert(core_id);
+                }
             }
         }
     }
@@ -1307,10 +1322,15 @@ impl Platform for ThemisPlatform {
         *self.cores[core_id as usize].domain_cap.lock() = Some(domain_cap.clone());
         let mut routing = self.routing.write();
         if let Some(old_domain) = routing.core_to_domain.remove(&core_id) {
-            routing.domain_to_core.remove(&old_domain);
+            if let Some(set) = routing.domain_to_cores.get_mut(&old_domain) {
+                set.remove(&core_id);
+                if set.is_empty() {
+                    routing.domain_to_cores.remove(&old_domain);
+                }
+            }
         }
         routing.core_to_domain.insert(core_id, domain_id);
-        routing.domain_to_core.insert(domain_id, core_id);
+        routing.domain_to_cores.entry(domain_id).or_default().insert(core_id);
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
@@ -1319,12 +1339,20 @@ impl Platform for ThemisPlatform {
         *self.cores[core_id as usize].domain_cap.lock() = None;
         let mut routing = self.routing.write();
         if let Some(domain_id) = routing.core_to_domain.remove(&core_id) {
-            routing.domain_to_core.remove(&domain_id);
+            if let Some(set) = routing.domain_to_cores.get_mut(&domain_id) {
+                set.remove(&core_id);
+                if set.is_empty() {
+                    routing.domain_to_cores.remove(&domain_id);
+                }
+            }
         }
     }
 
-    fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
-        self.routing.read().domain_to_core.get(&domain_id).copied()
+    fn domain_cores(&self, domain_id: DomainId) -> alloc::vec::Vec<CoreId> {
+        self.routing.read().domain_to_cores
+            .get(&domain_id)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     // ── Register access (validation-only; actual VMCS writes batched by handler) ──

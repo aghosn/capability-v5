@@ -48,6 +48,7 @@ use crate::error::Result;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 /// A RAII guard that holds a platform operation lock (shared or exclusive).
 ///
@@ -223,8 +224,8 @@ pub trait Platform: Send + Sync {
     /// Record that `core_id` is no longer executing any domain (idle).
     fn clear_core_domain(&self, core_id: CoreId);
 
-    /// Return the core ID that `domain_id` is currently running on, if any.
-    fn domain_core(&self, domain_id: DomainId) -> Option<CoreId>;
+    /// Return all core IDs that `domain_id` is currently running on, if any.
+    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId>;
 
     // -----------------------------------------------------------------------
     // Virtual processor tracking
@@ -336,7 +337,7 @@ pub trait Platform: Send + Sync {
 /// 6. **Revocations**: for each `RevokeDomain` update, call
 ///    [`Platform::on_domain_revoked`] so the platform can redirect cores.
 ///    This is done inside the update-application lock so that
-///    `domain_core` queries from concurrent initiators see a consistent
+///    `domain_cores` queries from concurrent initiators see a consistent
 ///    core-to-domain mapping.
 /// 7. **Release update lock**, then drop the capability lock guard.
 ///
@@ -374,12 +375,16 @@ where
         }
 
         // Step 4/5 — determine affected cores and choose path.
-        // domain_core is queried inside the update lock so that concurrent
+        // domain_cores is queried inside the update lock so that concurrent
         // on_domain_revoked calls (also inside the lock) cannot race here.
+        // The current core (handling the hypercall) is excluded: it already
+        // stopped running guest code (VMEXIT) and will apply updates directly.
+        let current_core = platform.get_current_core();
         let affected_cores: BTreeSet<CoreId> = batch
             .affected_domains()
             .iter()
-            .filter_map(|&d| platform.domain_core(d))
+            .flat_map(|&d| platform.domain_cores(d))
+            .filter(|&c| Some(c) != current_core)
             .collect();
 
         if !affected_cores.is_empty() {
@@ -405,7 +410,7 @@ where
 
         // Step 6 — notify platform about domain revocations.
         // Inside the update lock: modifying core↔domain mappings here keeps
-        // them consistent with the domain_core queries above.
+        // them consistent with the domain_cores queries above.
         for update in batch.updates() {
             if let Update::RevokeDomain { domain, fallback } = update {
                 platform.on_domain_revoked(*domain, *fallback);

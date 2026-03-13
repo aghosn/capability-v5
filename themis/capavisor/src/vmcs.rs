@@ -169,8 +169,15 @@ unsafe fn write_control_fields(
     // ── VM-exit controls ──────────────────────────────────────────────── //
     // HOST_ADDRESS_SPACE_SIZE, SAVE/LOAD IA32_EFER and IA32_PAT,
     // SAVE_VMX_PREEMPTION_TIMER (bit 22) — preserve timer across exits.
+    // ACKNOWLEDGE_INTERRUPT_ON_EXIT (bit 15): for child VMCSes with
+    // EXTERNAL_INTERRUPT_EXITING=1, the hardware ACKs (sends EOI) the
+    // interrupt on exit so it is consumed.  Without this, the LAPIC keeps
+    // the interrupt pending and it fires again on every VMRESUME, causing an
+    // infinite external-interrupt exit loop that prevents the child from ever
+    // executing its first instruction.
     let exit_desired: u64 =
         (1 << 9)   // HOST_ADDRESS_SPACE_SIZE
+        | (if child { 1 << 15 } else { 0 }) // ACKNOWLEDGE_INTERRUPT_ON_EXIT
         | (1 << 18) // SAVE_IA32_PAT
         | (1 << 19) // LOAD_IA32_PAT
         | (1 << 20) // SAVE_IA32_EFER
@@ -447,6 +454,11 @@ unsafe fn write_guest_state() {
     vmx::vmwrite(guest::PENDING_DBG_EXCEPTIONS, 0).expect("vmwrite guest pending dbg");
     // VMCS link pointer: 0xFFFF…FFFF means no shadow VMCS.
     vmx::vmwrite(guest::LINK_PTR_FULL, u64::MAX).expect("vmwrite VMCS link ptr");
+    // Preemption timer: initialise to a non-zero value so the first VMENTRY
+    // does not fire an immediate timer exit (a timer value of 0 fires on the
+    // first cycle).  The monitor loop resets it on every timer exit anyway.
+    vmx::vmwrite(guest::VMX_PREEMPTION_TIMER_VALUE, crate::vmexit::PREEMPTION_TIMER_TICKS)
+        .expect("vmwrite guest preemption timer");
 
     // ── SYSENTER MSRs ─────────────────────────────────────────────────── //
     vmx::vmwrite(guest::IA32_SYSENTER_CS, 0).expect("vmwrite guest SYSENTER_CS");

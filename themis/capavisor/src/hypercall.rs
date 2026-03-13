@@ -514,7 +514,62 @@ fn do_switch(
 
     let vp_idx = vp_id as usize;
 
-    // ── 1. Capability engine: forward switch (run-state transitions) ──
+    // ── 1a. Resolve child domain ID + COMM HPA (before Capability::switch) ──
+    // MUST happen before Capability::switch transitions the child VP to Running,
+    // because set_register (used to validate the dirty COMM page registers)
+    // rejects writes to a VP that is already in Running state.
+    let (child_domain_id_pre, comm_hpa) = {
+        let c = caller.read();
+        let child_weak = match c.data.get_domain_capability(child_domain_handle) {
+            Some(w) => w.clone(),
+            None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
+        };
+        drop(c);
+        let child_ref = match child_weak.upgrade() {
+            Some(r) => r,
+            None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
+        };
+        let child_id = child_ref.read().data.id;
+        let hpa = platform.domain_arc(child_id)
+            .map(|arc| arc.lock().comm_hpas.get(vp_idx).copied().unwrap_or(0))
+            .unwrap_or(0);
+        (child_id, hpa)
+    };
+    serial_println!("[SWITCH] comm_hpa={:#x} for dom={} vp={}", comm_hpa, child_domain_id_pre, vp_idx);
+
+    // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
+    let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
+
+    if comm_hpa != 0 {
+        let hhdm = platform.hhdm_offset();
+        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+        let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
+        serial_println!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}]", dirty[0], dirty[1], dirty[2]);
+
+        if !dirty.iter().all(|w| *w == 0) {
+            // Clear dirty bits atomically before validation so we don't replay them.
+            for i in 0..3 {
+                comm.dirty_mask[i] &= !dirty[i];
+            }
+            for reg in ALL_VP_REGISTERS {
+                let (w, b) = VpCommPage::mask_bit(*reg);
+                if dirty[w] & (1 << b) == 0 {
+                    continue;
+                }
+                let val = comm.read_reg(*reg);
+                serial_println!("[SWITCH] dirty reg={:?} val={:#x}", reg, val);
+                // Validate via capability engine while child VP is still Available.
+                if Capability::set_register(
+                    caller, child_domain_handle, vp_id, *reg as u64, val, platform,
+                ).is_ok() {
+                    pending.push((*reg, val));
+                }
+            }
+        }
+    }
+
+    // ── 2. Capability engine: forward switch (run-state transitions) ──
+    // Child VP transitions Available → Running here; must be after COMM read above.
     let switch_ctx = match Capability::switch(caller, child_domain_handle, vp_id, platform) {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -527,7 +582,7 @@ fn do_switch(
     let parent_domain_id: DomainId = switch_ctx.from_domain;
     let parent_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
 
-    // ── 2. Look up child PlatformDomain + COMM HPA ──
+    // ── 3. Look up child PlatformDomain ──
     let child_arc = match platform.domain_arc(child_domain_id) {
         Some(a) => a,
         None => {
@@ -535,38 +590,6 @@ fn do_switch(
             return Some(HypercallResult::error(errors::ERR_NOTFOUND));
         }
     };
-
-    let comm_hpa = {
-        let d = child_arc.lock();
-        d.comm_hpas.get(vp_idx).copied().unwrap_or(0)
-    };
-
-    // ── 3. Snapshot dirty_mask, validate registers via capa engine ──
-    let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
-
-    if comm_hpa != 0 {
-        let hhdm = platform.hhdm_offset();
-        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
-        let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
-
-        if !dirty.iter().all(|w| *w == 0) {
-            for i in 0..3 {
-                comm.dirty_mask[i] &= !dirty[i];
-            }
-            for reg in ALL_VP_REGISTERS {
-                let (w, b) = VpCommPage::mask_bit(*reg);
-                if dirty[w] & (1 << b) == 0 {
-                    continue;
-                }
-                let val = comm.read_reg(*reg);
-                if Capability::set_register(
-                    caller, child_domain_handle, vp_id, *reg as u64, val, platform,
-                ).is_ok() {
-                    pending.push((*reg, val));
-                }
-            }
-        }
-    }
 
     // ── 4. Take child InactiveVcpu from its slot ──
     let mut child_inactive = {

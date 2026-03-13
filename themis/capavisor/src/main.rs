@@ -230,6 +230,22 @@ pub extern "C" fn _start() -> ! {
         capa.platform.set_core_context(core_id, capa.root_domain.clone(), core_id as u32);
     }
 
+    // Initialize dom0 VP run states to Running so that the capability engine's
+    // find_vp_on_core() succeeds when dom0 calls SWITCH or SET_REGISTER.
+    // Each dom0 VP maps 1:1 to a core (VP id == core id).
+    {
+        use capability_engine::VpRunState;
+        let dom = capa.root_domain.read();
+        for core_id in 0..num_cores {
+            if let Some(vp) = dom.data.policy.vprocessor_states.get(core_id) {
+                *vp.run_state.write() = VpRunState::Running {
+                    core: core_id as capability_engine::CoreId,
+                    caller: None,
+                };
+            }
+        }
+    }
+
     boot::launch(&linux, &vmx_state, &capa.platform);
 }
 

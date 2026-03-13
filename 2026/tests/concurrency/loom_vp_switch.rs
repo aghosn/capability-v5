@@ -113,12 +113,13 @@ impl Platform for LoomPlatform {
     fn clear_core_domain(&self, core_id: CoreId) {
         self.state.lock().unwrap().core_to_domain.remove(&core_id);
     }
-    fn domain_core(&self, domain_id: DomainId) -> Option<CoreId> {
+    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId> {
         let st = self.state.lock().unwrap();
         st.core_to_domain
             .iter()
-            .find(|(_, &did)| did == domain_id)
+            .filter(|(_, &did)| did == domain_id)
             .map(|(&cid, _)| cid)
+            .collect()
     }
     fn try_acquire_update_lock(&self) -> bool {
         true

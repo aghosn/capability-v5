@@ -763,11 +763,26 @@ Test binary: `thhv/test/test_child_hlt.c`.
   single-pass apply — no mangling or dedup needed.
 
 **Current blocker**:
-- [ ] **C7f** — Fix SWITCH validation: `InvalidOperation("no VP running on this
-  core")`.  The `do_switch` handler validates that the calling core has a VP
-  bound to it, but `RUN_VP` is the *initial* launch — no VP is running yet.
-  Need to implement the initial VP launch path in the SWITCH handler (or a
-  separate `RUN` handler) that does VMPTRLD + VMRESUME for the child VMCS.
+- [ ] **C7f** — EPT violations on dom0 cores during CARVE/SEND:
+  When a single page is carved from a 1GB EPT large page, `unmap_range` momentarily
+  zeroes the 1GB PDPT entry before re-inserting smaller (2MB/4KB) entries.  While
+  this modification is in-flight, any of the other 3 dom0 cores that walk the EPT
+  for a GPA in that 1GB range (e.g., their own page-table root pages) see "not
+  present" and take an EPT violation → `halt_forever()`.
+  Root cause: `domain_to_core` was a 1:1 map (only one dom0 core was stopped/INVEPT'd
+  per ChangeRights).  The other 3 cores continued running while EPT modifications were
+  in progress.
+  Fix (implemented, needs test):
+  - Changed `domain_to_core: BTreeMap<DomainId, CoreId>` → `domain_to_cores: BTreeMap<DomainId, BTreeSet<CoreId>>`
+    in `RoutingMaps` (`themis/capavisor/src/platform.rs`).
+  - `set_core_context` now *adds* the core to the domain's set instead of replacing.
+  - `clear_core_domain` removes just the departing core from the set.
+  - `on_domain_revoked` iterates the full core set and clears/remaps all cores.
+  - `domain_core()` in the `Platform` trait replaced by `domain_cores() -> Vec<CoreId>`.
+  - `execute()` (`2026/src/platform.rs`) filters out the current core (which is already
+    in the hypervisor handling the VMCALL) to avoid deadlock, then stops all remaining
+    cores before applying EPT changes.
+  All tests pass; capavisor builds clean.
 
 **Known non-blocking issues**:
 - `REVOKE_MEM parent=N sub=M failed (-2)` warnings during cleanup: the driver's
