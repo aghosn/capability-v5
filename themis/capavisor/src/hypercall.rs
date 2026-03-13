@@ -389,6 +389,22 @@ fn do_add_vp(
     };
 
     // ── Step 1: pre-allocate VMCS + VAPIC + PID from child's META pool ──
+    //
+    // Per-VP META page layout (current):
+    //   Page 0 (4 KB): VMCS — Intel requires a full 4 KB page.
+    //   Page 1 (4 KB): VAPIC — Virtual-APIC page; hardware maps the xAPIC
+    //     register space here.  xAPIC registers occupy offsets 0x000–0x3FF
+    //     (1 KB); offsets 0x400–0xFFF (3 KB) are architecturally reserved
+    //     and never accessed by hardware or the guest APIC emulation.
+    //   Page 2 (4 KB): PID — Posted-Interrupt Descriptor; only 64 bytes are
+    //     used (PIR bitmap + ON/SN/NV/NDST fields; Intel SDM Vol 3C §29.6).
+    //
+    // Optimization opportunity (TODO): sub-allocate the PID from the
+    // VAPIC page at offset 0x400 (naturally 64-byte aligned, in the unused
+    // upper 3 KB).  This would reduce per-VP META consumption from 3 pages
+    // to 2 pages, matching the original THHV_META_PAGES_PER_VP=2 budget.
+    // Requires computing pid_phys = vapic_phys + 0x400 instead of
+    // allocating a separate frame, and reverting THHV_META_PAGES_PER_VP to 2.
     let arc = match platform.domain_arc(child_domain_id) {
         Some(a) => a,
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
@@ -400,6 +416,7 @@ fn do_add_vp(
         // Check if this is the first VP (need extra page for MSR bitmap).
         first_vp = pd.msr_bitmap_phys == 0;
         // Per VP: VMCS + VAPIC + PID (+ MSR bitmap if first VP).
+        // See optimization note above for reducing this from 3 to 2 pages.
         let pages_needed = if first_vp { 4 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
@@ -417,7 +434,8 @@ fn do_add_vp(
         msr_bitmap_phys = pd.msr_bitmap_phys;
     }
 
-    // Zero the PID page (must be clean before VMENTRY).
+    // Zero the PID (64 bytes at offset 0 of the PID page; must be clean before VMENTRY).
+    // PIR[255:0] = 0, ON=0, SN=0 — no pending virtual interrupts, no IPI in flight.
     let hhdm = platform.hhdm_offset();
     unsafe {
         core::ptr::write_bytes((pid_phys + hhdm) as *mut u8, 0, 64);
@@ -878,6 +896,34 @@ fn do_set_def_intr_policy(
 }
 
 // ── Posted Interrupt Descriptor helpers ──────────────────────────────────── //
+//
+// The Posted-Interrupt Descriptor (PID) is a 64-byte, 64-byte-aligned
+// hardware structure defined in Intel SDM Vol 3C §29.6.  Its layout:
+//
+//   Bytes  0–31  (256 bits): PIR — Posted-Interrupt Requests.
+//                            One bit per interrupt vector (vectors 0–255).
+//                            The hypervisor sets bits here to post virtual
+//                            interrupts to the vCPU.  On the next VM entry
+//                            with PROCESS_POSTED_INTERRUPTS=1, hardware
+//                            atomically moves all set PIR bits into the
+//                            vIRR (VAPIC page bytes 0x200–0x21F) and
+//                            delivers the highest-priority pending interrupt
+//                            without a VM exit.
+//   Byte  32 bit 0:          ON — Outstanding Notification.
+//                            Set by the poster before sending a notification
+//                            IPI (if the vCPU is not currently running).
+//                            Cleared by hardware after processing PIR.
+//   Byte  32 bit 1:          SN — Suppress Notification.
+//                            When set, hardware suppresses the notification
+//                            IPI (used when vCPU is being scheduled off).
+//   Byte  33 (bits 15:8):    NV — Notification Vector.
+//                            Vector of the IPI sent to wake a sleeping vCPU
+//                            (configured in VMCS field 0x0002; we use 0xF2).
+//   Bytes 40–43:             NDST — Notification Destination.
+//                            APIC ID of the physical CPU currently running
+//                            this vCPU; used for cross-core IPI targeting.
+//
+// The PID is referenced by the child VMCS via VMCS field 0x2016.
 
 /// Set bit `vector` in the Posted-Interrupt Requests (PIR) bitmap of the
 /// descriptor at physical address `pid_phys`.
