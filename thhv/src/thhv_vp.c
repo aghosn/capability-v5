@@ -55,8 +55,22 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		 * child — we block in themis_switch() until the child
 		 * exits.  On return, the capavisor has written a
 		 * themic_intercept_message to the intercept slot.
+		 *
+		 * If the child was preempted by a physical interrupt while
+		 * running, themis_switch() returns -EAGAIN (ERR_RETRY).  We
+		 * check for pending signals and retry; this is the mechanism
+		 * that allows Ctrl-C / SIGINT to interrupt a running VP.
 		 */
-		ret = themis_switch(part->domain_handle, vp->vp_index);
+		do {
+			ret = themis_switch(part->domain_handle, vp->vp_index);
+			if (ret != -EAGAIN)
+				break;
+			if (signal_pending(current)) {
+				mutex_unlock(&vp->run_lock);
+				return -EINTR;
+			}
+		} while (true);
+
 		if (ret) {
 			mutex_unlock(&vp->run_lock);
 			return ret;

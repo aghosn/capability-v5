@@ -88,7 +88,7 @@ exec qemu-system-x86_64 \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
     -cdrom "$ISO" \
-    -serial stdio \
+    -serial mon:stdio \
     -display none \
     -no-reboot \
     -no-shutdown \

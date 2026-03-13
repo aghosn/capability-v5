@@ -112,6 +112,9 @@
 #define THEMIS_ERR_NOMEM     3
 #define THEMIS_ERR_BADSTATE  4
 #define THEMIS_ERR_NOTFOUND  5
+#define THEMIS_ERR_BUSY      6
+/* Child VP was preempted by a physical interrupt; caller should retry SWITCH. */
+#define THEMIS_ERR_RETRY     7
 #define THEMIS_ERR_UNIMPL    (~0ULL)
 
 /*
@@ -152,6 +155,7 @@ static inline int __themis_to_errno(u64 status)
 	case THEMIS_ERR_NOMEM:    return -ENOMEM;
 	case THEMIS_ERR_BADSTATE: return -EBUSY;
 	case THEMIS_ERR_NOTFOUND: return -ENOENT;
+	case THEMIS_ERR_RETRY:    return -EAGAIN;
 	case THEMIS_ERR_UNIMPL:   return -ENOSYS;
 	default:                  return -EIO;
 	}

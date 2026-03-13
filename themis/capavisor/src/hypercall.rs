@@ -891,9 +891,19 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     let intr_info = (1u64 << 31) | (vector as u64);
     handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
 
+    // Advance dom0's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY.
+    // This allows the Linux kernel driver to return from themis_switch(-EAGAIN),
+    // check signal_pending(), and either retry or propagate -EINTR to user space.
+    // Without this, the SWITCH vmcall would re-execute after every interrupt and
+    // the driver thread could never receive signals.
+    let rip = handler_active.get(x86::vmx::vmcs::guest::RIP);
+    handler_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
+    handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
+    handler_active.set_reg(Reg::Rdi, 0);
+    handler_active.set_reg(Reg::Rsi, 0);
+    handler_active.set_reg(Reg::Rdx, 0);
+
     // Replace the monitor loop's ActiveVcpu with the handler's.
-    // Handler RIP stays AT the SWITCH VMCALL (do_switch did not advance it before
-    // storing).  After iret from the interrupt IDT handler, dom0 re-executes SWITCH.
     unsafe { core::ptr::write(vcpu, handler_active); }
 }
 

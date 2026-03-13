@@ -132,6 +132,8 @@ pub mod errors {
     pub const ERR_BADSTATE:   u64 = 4;
     pub const ERR_NOTFOUND:   u64 = 5;
     pub const ERR_BUSY:       u64 = 6;
+    /// Child VP was preempted by a physical interrupt; caller should retry SWITCH.
+    pub const ERR_RETRY:      u64 = 7;
     pub const ERR_UNIMPL:     u64 = u64::MAX;
 }
 
