@@ -1199,10 +1199,6 @@ impl Platform for ThemisPlatform {
             }
 
             Update::ChangeRights { domain, address, size, physical, rights, .. } => {
-                serial_println!(
-                    "[ChangeRights] domain={} addr={:#x} size={:#x} phys={:#x} rights={:#x}",
-                    domain, address, size, physical, rights.bits()
-                );
                 let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
                 let arc = self.domains
                     .get(*domain)
@@ -1252,13 +1248,7 @@ impl Platform for ThemisPlatform {
             }
 
             Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
-                if *domain_id == *target_domain_id {
-                    // Self-ref COMM: DomainComm ring growth page.
-                    serial_println!(
-                        "[apply] CommRegion self-ref: dom={} phys={:#x} size={:#x}",
-                        domain_id, phys, size,
-                    );
-                } else {
+                if *domain_id != *target_domain_id {
                     // VP-level COMM: store HPA for child VP.
                     if let Some(arc) = self.domains.get(*target_domain_id) {
                         let mut pd = arc.lock();
@@ -1268,17 +1258,11 @@ impl Platform for ThemisPlatform {
                         }
                         pd.comm_hpas[vp] = *phys;
                     }
-                    serial_println!(
-                        "[apply] CommRegion VP-comm: dom={} target={} vp={} phys={:#x} size={:#x}",
-                        domain_id, target_domain_id, vp_id, phys, size,
-                    );
                 }
+                let _ = (domain_id, phys, size);
             }
             Update::UncommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
-                serial_println!(
-                    "[apply] UncommRegion: dom={} target={} vp={} phys={:#x} size={:#x}",
-                    domain_id, target_domain_id, vp_id, phys, size,
-                );
+                let _ = (domain_id, target_domain_id, vp_id, phys, size);
                 // TODO(P7): unmap COMM page.
             }
         }

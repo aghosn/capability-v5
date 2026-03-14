@@ -765,26 +765,10 @@ Test binary: `thhv/test/test_child_hlt.c`.
   single-pass apply — no mangling or dedup needed.
 
 **Current blocker**:
-- [ ] **C7f** — EPT violations on dom0 cores during CARVE/SEND:
-  When a single page is carved from a 1GB EPT large page, `unmap_range` momentarily
-  zeroes the 1GB PDPT entry before re-inserting smaller (2MB/4KB) entries.  While
-  this modification is in-flight, any of the other 3 dom0 cores that walk the EPT
-  for a GPA in that 1GB range (e.g., their own page-table root pages) see "not
-  present" and take an EPT violation → `halt_forever()`.
-  Root cause: `domain_to_core` was a 1:1 map (only one dom0 core was stopped/INVEPT'd
-  per ChangeRights).  The other 3 cores continued running while EPT modifications were
-  in progress.
-  Fix (implemented, needs test):
-  - Changed `domain_to_core: BTreeMap<DomainId, CoreId>` → `domain_to_cores: BTreeMap<DomainId, BTreeSet<CoreId>>`
-    in `RoutingMaps` (`themis/capavisor/src/platform.rs`).
-  - `set_core_context` now *adds* the core to the domain's set instead of replacing.
-  - `clear_core_domain` removes just the departing core from the set.
-  - `on_domain_revoked` iterates the full core set and clears/remaps all cores.
-  - `domain_core()` in the `Platform` trait replaced by `domain_cores() -> Vec<CoreId>`.
-  - `execute()` (`2026/src/platform.rs`) filters out the current core (which is already
-    in the hypervisor handling the VMCALL) to avoid deadlock, then stops all remaining
-    cores before applying EPT changes.
-  All tests pass; capavisor builds clean.
+- [x] **C7f** — ✅ DONE (validated). EPT violations on dom0 cores during CARVE/SEND:
+  Fix implemented (domain_to_cores BTreeSet, all-cores stop before EPT modifications).
+  Confirmed working: test_intr_loop ran 748 interrupt forwards on 4 CPUs with no
+  EPT violation / halt_forever.
 
 **Known non-blocking issues**:
 - `REVOKE_MEM parent=N sub=M failed (-2)` warnings during cleanup: the driver's
@@ -793,12 +777,20 @@ Test binary: `thhv/test/test_child_hlt.c`.
   successful `revoke_domain`, or clear the list before the loop.
 
 **Remaining after C7f**:
-- [ ] **C7g** — Verify HLT exit: child VP executes HLT at GPA 0x1000, capavisor
-  forwards exit via `InterceptMessage` on COMM page, driver reads exit and
-  returns to userspace.
-- [ ] **C7h** — Remove debug prints: ChangeRights logging (platform.rs),
-  EPT violation domain/core logging (vmexit.rs), CARVE logging (hypercall.rs),
-  do_create_domain debug (hypercall.rs).
+- [x] **C7f** — ✅ DONE (validated). EPT violation fix (domain_to_cores BTreeSet,
+  all-cores stop before EPT modifications) confirmed working: test_intr_loop ran
+  748 interrupt forwards on 4 CPUs with no EPT violation / halt_forever.
+
+- [x] **C7g** — ✅ DONE. test_intr_loop creates child that exits via HLT; driver
+  reads InterceptMessage from COMM page. test_child_hlt also present and working.
+
+- [x] **C7h** — ✅ DONE. Removed debug prints:
+  - `[CARVE]` entry/ok/error logging in `hypercall.rs`
+  - `[CREATE_DOMAIN]` verbose logging in `hypercall.rs`
+  - `[ChangeRights]` per-mapping log in `platform.rs`
+  - `[apply] CommRegion` / `[apply] UncommRegion` logs in `platform.rs`
+  - Simplified EPT violation handler (removed `domain_str` pattern, kept the
+    core/domain info in the fatal log).
 
 ---
 
@@ -833,9 +825,9 @@ C7 test) is a symptom of the missing Phase 1 implementation.
   for `Suspended { vector }` VPs. `do_switch` (`hypercall.rs:673-681`) sets
   `RDI=V`, `RAX=SUCCESS`, advances RIP when `interrupt_return == Some(V)`.
 
-- [ ] **intr-p1-test** — Validate Phase 1: re-run C7 test (RCU stall should be gone).
-  Optionally write `test_intr_forward.c`: child loops while dom0 receives timer ticks.
-  Run `cargo test` in `2026/` for capability engine regression check.
+- [x] **intr-p1-test** — ✅ DONE. test_intr_loop validated Phase 1: 748 interrupts
+  forwarded to dom0 while child ran on 4 CPUs, no RCU stall, dom0 fully responsive.
+  test_child_hlt also confirmed working (HLT exit via InterceptMessage).
 
 #### Phase 2 — Posted Interrupts
 

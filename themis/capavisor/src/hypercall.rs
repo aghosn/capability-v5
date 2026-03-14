@@ -158,21 +158,13 @@ fn do_carve(
     size: u64,
     rights_bits: u64,
 ) -> HypercallResult {
-    serial_println!("[CARVE] parent={} start={:#x} size={:#x} rights={:#x}",
-        parent_handle, start, size, rights_bits);
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::carve(&caller, parent_handle, access).map(|(h, s, batch)| ((h, s), batch))
     }) {
-        Ok(((handle, sub), _)) => {
-            serial_println!("[CARVE] ok: handle={} sub={}", handle, sub);
-            HypercallResult::success_2(handle, sub)
-        }
-        Err(e) => {
-            serial_println!("[CARVE] error: {:?}", e);
-            HypercallResult::error(map_error(&e))
-        }
+        Ok(((handle, sub), _)) => HypercallResult::success_2(handle, sub),
+        Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
 
@@ -252,26 +244,12 @@ fn do_create_domain(
     cores_bitmask: u64,
     api_flags: u64,
 ) -> HypercallResult {
-    serial_println!("[CREATE_DOMAIN] cores={:#x} api_flags={:#x}", cores_bitmask, api_flags);
-    {
-        let c = caller.read();
-        serial_println!("[CREATE_DOMAIN] caller domain_id={} sealed={} policy_api={:#x}",
-            c.data.id, c.data.is_sealed(), c.data.policy.api.bits());
-        serial_println!("[CREATE_DOMAIN] owner_domain is_some={}",
-            c.owned.owner_domain.is_some());
-    }
     let api = MonitorAPI::from_bits(api_flags as u16);
     let policy = DomainPolicy::new_restricted(cores_bitmask, api);
     let caller = caller.clone();
     match execute(platform, false, || Capability::create(&caller, policy.clone())) {
-        Ok((handle, _)) => {
-            serial_println!("[CREATE_DOMAIN] success handle={}", handle);
-            HypercallResult::success_1(handle)
-        }
-        Err(e) => {
-            serial_println!("[CREATE_DOMAIN] FAILED: {:?} => err_code={}", e, map_error(&e));
-            HypercallResult::error(map_error(&e))
-        }
+        Ok((handle, _)) => HypercallResult::success_1(handle),
+        Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
 

@@ -551,7 +551,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let rip = vcpu.get(vmcs::guest::RIP);
             let cr3 = vcpu.get(vmcs::guest::CR3);
-            let domain_str: &str = {
+            {
                 let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
                 if !platform_ptr.is_null() {
                     let platform = unsafe { &*platform_ptr };
@@ -561,19 +561,18 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             "[VMEXIT] EPT violation core={} domain={} vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
                             core_id, did, vcpu.vpid(), gpa, qual, rip, cr3
                         );
-                        "done"
                     } else {
-                        "skip"
+                        serial_println!(
+                            "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
+                            vcpu.vpid(), gpa, qual, rip, cr3
+                        );
                     }
                 } else {
-                    "skip"
+                    serial_println!(
+                        "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
+                        vcpu.vpid(), gpa, qual, rip, cr3
+                    );
                 }
-            };
-            if domain_str == "skip" {
-                serial_println!(
-                    "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
-                    vcpu.vpid(), gpa, qual, rip, cr3
-                );
             }
             crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
