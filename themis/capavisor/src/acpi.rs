@@ -5,7 +5,7 @@
 //!
 //! - **MADT**: processor topology (LAPIC IDs, I/O APIC addresses, ISO overrides)
 //! - **MCFG**: PCIe ECAM base addresses per segment/bus range
-//! - **DMAR**: raw VT-d remapping table (parsed later in Phase 4)
+//! - **DMAR**: VT-d remapping table — DRHD unit enumeration + IR capability check
 
 use alloc::vec::Vec;
 use core::ptr::NonNull;
@@ -178,6 +178,25 @@ pub struct Iso {
     pub flags: u16,
 }
 
+// ── VT-d / DMAR structures ─────────────────────────────────────────────── //
+
+/// VT-d Specification §8.3 — DMA Remapping Hardware Unit Definition.
+///
+/// One `DhrdUnit` corresponds to one DRHD structure in the DMAR table.
+/// Each unit has its own MMIO register block and its own Interrupt
+/// Remapping Table (IRT) allocated in intr-p3b.
+#[derive(Debug, Clone)]
+pub struct DhrdUnit {
+    /// Physical base address of the DRHD MMIO register block.
+    pub register_base: u64,
+    /// PCI segment number (usually 0).
+    pub segment: u16,
+    /// DRHD flags byte (bit 0 = INCLUDE_PCI_ALL).
+    pub flags: u8,
+    /// Whether this unit supports interrupt remapping (CAP register bit 16 / ECAP[3]).
+    pub ir_supported: bool,
+}
+
 /// Summary of all ACPI information needed by Themis.
 pub struct AcpiInfo {
     /// Physical address of the RSDP as given by Limine.
@@ -196,6 +215,9 @@ pub struct AcpiInfo {
     pub pci_config_regions: Option<PciConfigRegions>,
     /// Whether a DMAR table was found (VT-d available).
     pub has_dmar: bool,
+    /// DRHD units from the DMAR table (populated only when `has_dmar` is true).
+    /// Shared between interrupt remapping (intr-p3) and DMA remapping (Phase 4).
+    pub drhd_units: Vec<DhrdUnit>,
 }
 
 impl AcpiInfo {
@@ -261,10 +283,8 @@ impl AcpiInfo {
         // ── MCFG: PCIe ECAM config regions ───────────────────────────── //
         let pci_config_regions = PciConfigRegions::new(&tables).ok();
 
-        // ── DMAR: check presence (full parse in Phase 4) ─────────────── //
-        let has_dmar = tables
-            .table_headers()
-            .any(|(_, hdr)| hdr.signature == Signature::DMAR);
+        // ── DMAR: check presence and enumerate DRHD units ────────────── //
+        let (has_dmar, drhd_units) = parse_dmar(&tables, hhdm_offset);
 
         Self {
             rsdp_phys,
@@ -274,8 +294,112 @@ impl AcpiInfo {
             has_legacy_pics,
             pci_config_regions,
             has_dmar,
+            drhd_units,
         }
     }
+}
+
+// ── DMAR parsing ───────────────────────────────────────────────────────── //
+
+/// Walk the DMAR ACPI table and enumerate DRHD units.
+///
+/// Returns `(has_dmar, Vec<DhrdUnit>)`.  If no DMAR table is present the
+/// vector is empty.  For each DRHD unit found, the CAP register's IR bit
+/// (bit 16) and the ECAP register's EIM bit (bit 4) / IR bit (bit 3) are
+/// checked to set `DhrdUnit::ir_supported`.
+///
+/// DMAR table layout (VT-d spec §8.1):
+/// ```text
+/// Offset  Size  Field
+///    0     36   Standard ACPI SDT header ("DMAR" signature)
+///   36      1   Host Address Width
+///   37      1   Flags (bit 0 = INTR_REMAP capable at DMAR level)
+///   38     10   Reserved
+///   48+    var  Remapping Structure entries
+/// ```
+/// Each entry: `[type u16][length u16][...]`
+/// DRHD (type 0):  `[0 u16][len u16][flags u8][rsvd u8][segment u16][regbase u64]`
+fn parse_dmar<H: acpi::Handler + Clone>(
+    tables: &AcpiTables<H>,
+    hhdm_offset: u64,
+) -> (bool, Vec<DhrdUnit>) {
+    use crate::serial_println;
+
+    const DMAR_HEADER_SIZE: usize = 48; // 36 (SDT) + 2 (HAW) + 1 (flags) + 9 (rsvd)
+    const DRHD_TYPE: u16 = 0;
+
+    // CAP register (offset 0x08 from DRHD reg base): bit 16 = IR capable.
+    const CAP_OFFSET:  usize = 0x08;
+    const CAP_IR_BIT:  u64   = 1 << 16;
+    // ECAP register (offset 0x10): bit 3 = IR, bit 4 = EIM.
+    const ECAP_OFFSET: usize = 0x10;
+    const ECAP_IR_BIT: u64   = 1 << 3;
+
+    // Find the DMAR table physical address via the SDT header scan.
+    let dmar_phys = tables
+        .table_headers()
+        .find(|(_, hdr)| hdr.signature == acpi::sdt::Signature::DMAR)
+        .map(|(phys, _)| phys as u64);
+
+    let Some(dmar_phys) = dmar_phys else {
+        return (false, Vec::new());
+    };
+
+    // Read DMAR table length from the standard SDT header (offset 4, u32).
+    let dmar_virt = (dmar_phys + hhdm_offset) as *const u8;
+    let dmar_len = unsafe {
+        (dmar_virt.add(4) as *const u32).read_unaligned() as usize
+    };
+
+    if dmar_len < DMAR_HEADER_SIZE {
+        serial_println!("ACPI DMAR: table too short ({} bytes) — skipping", dmar_len);
+        return (true, Vec::new());
+    }
+
+    // Walk remapping structure entries starting at offset 48.
+    let mut offset = DMAR_HEADER_SIZE;
+    let mut units = Vec::new();
+
+    while offset + 4 <= dmar_len {
+        let entry_ptr = unsafe { dmar_virt.add(offset) };
+
+        let entry_type = unsafe { (entry_ptr as *const u16).read_unaligned() };
+        let entry_len  = unsafe { (entry_ptr.add(2) as *const u16).read_unaligned() } as usize;
+
+        if entry_len < 4 || offset + entry_len > dmar_len {
+            serial_println!("ACPI DMAR: malformed entry at offset {} (len {}) — stopping", offset, entry_len);
+            break;
+        }
+
+        if entry_type == DRHD_TYPE {
+            // DRHD: [type u16][len u16][flags u8][rsvd u8][segment u16][regbase u64]
+            if entry_len < 16 {
+                serial_println!("ACPI DMAR: DRHD entry too short ({}) at offset {}", entry_len, offset);
+            } else {
+                let drhd_flags   = unsafe { entry_ptr.add(4).read() };
+                let segment      = unsafe { (entry_ptr.add(6) as *const u16).read_unaligned() };
+                let register_base = unsafe { (entry_ptr.add(8) as *const u64).read_unaligned() };
+
+                // Read CAP and ECAP via HHDM.
+                let reg_virt = (register_base + hhdm_offset) as *const u64;
+                let cap  = unsafe { reg_virt.add(CAP_OFFSET  / 8).read_volatile() };
+                let ecap = unsafe { reg_virt.add(ECAP_OFFSET / 8).read_volatile() };
+                let ir_supported = (cap & CAP_IR_BIT != 0) || (ecap & ECAP_IR_BIT != 0);
+
+                serial_println!(
+                    "ACPI DMAR: DRHD seg={} base={:#x} flags={:#x} cap={:#x} ecap={:#x} ir={}",
+                    segment, register_base, drhd_flags, cap, ecap, ir_supported,
+                );
+
+                units.push(DhrdUnit { register_base, segment, flags: drhd_flags, ir_supported });
+            }
+        }
+
+        offset += entry_len;
+    }
+
+    serial_println!("ACPI DMAR: found {} DRHD unit(s)", units.len());
+    (true, units)
 }
 
 // ── DMAR stripping ─────────────────────────────────────────────────────── //

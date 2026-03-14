@@ -873,13 +873,12 @@ Add this flag to `run-qemu.sh` before intr-p3i.
 
 - [x] **intr-p3-plan** — ✅ DONE (this breakdown).
 
-- [ ] **intr-p3a** — DMAR parse for interrupt remapping.
-  Extend `acpi.rs` / add `dmar.rs`: walk the raw DMAR table bytes, collect
-  `DhrdUnit { register_base: u64, segment: u16, flags: u8 }` for each DRHD
-  structure.  Check VT-d capability register `CAP.IR` (bit 16 = interrupt
-  remapping supported) on each unit.  Store in `AcpiInfo` next to `has_dmar`.
-  **Shared with P4a** — P4a should reuse `DhrdUnit` list rather than re-parse.
-  Files: `acpi.rs` (or new `dmar.rs`), `boot.rs`.
+- [x] **intr-p3a** — DMAR parse for interrupt remapping. ✅ DONE
+  `acpi.rs`: added `DhrdUnit { register_base, segment, flags, ir_supported }`,
+  `parse_dmar()` helper walks DMAR table bytes, enumerates all DRHD structures,
+  reads `CAP` (offset 0x08, bit 16) and `ECAP` (offset 0x10, bit 3) on each unit.
+  `AcpiInfo` now carries `drhd_units: Vec<DhrdUnit>` (shared with P4a).
+  Print logged at boot: `ACPI DMAR: DRHD seg=N base=0x... ir=true/false`
 
 - [ ] **intr-p3b** — IRT allocation.
   For each DRHD unit: allocate one 4 KB-aligned page from `FrameAllocator` to
