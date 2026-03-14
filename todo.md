@@ -858,11 +858,85 @@ C7 test) is a symptom of the missing Phase 1 implementation.
 
 #### Phase 3 — VT-d Interrupt Remapping  *(required for device passthrough)*
 
-Detailed breakdown deferred until Phase 2 is complete. High-level steps:
-enumerate DMAR, enable IR, build IRT, program IRTEs for Deliver/Report vectors,
-integrate with `MSHV_ASSIGN_DEVICE` (Phase 16e).
+Zero-exit physical device interrupt delivery to child domains requires VT-d
+interrupt remapping.  Without it every physical interrupt causes an
+`EXIT_REASON_EXTERNAL_INTERRUPT` VMEXIT even for `Deliver` vectors; the
+capavisor re-injects them but the exit overhead is unavoidable.
 
-- [ ] **intr-p3-plan** — Break down Phase 3 into detailed sub-tasks once Phase 2 done.
+**Dependency**: intr-p3a shares infrastructure with Phase 4 P4a (DMAR DRHD
+enumeration).  Do intr-p3a first and have P4a reuse the same `DmarInfo`
+structures.  VT-d DMA translation (P4b–P4f) and interrupt remapping (intr-p3b+)
+are independent capabilities on the same DRHD units.
+
+**QEMU support**: `-device intel-iommu,intremap=on` enables emulated VT-d IR.
+Add this flag to `run-qemu.sh` before intr-p3i.
+
+- [x] **intr-p3-plan** — ✅ DONE (this breakdown).
+
+- [ ] **intr-p3a** — DMAR parse for interrupt remapping.
+  Extend `acpi.rs` / add `dmar.rs`: walk the raw DMAR table bytes, collect
+  `DhrdUnit { register_base: u64, segment: u16, flags: u8 }` for each DRHD
+  structure.  Check VT-d capability register `CAP.IR` (bit 16 = interrupt
+  remapping supported) on each unit.  Store in `AcpiInfo` next to `has_dmar`.
+  **Shared with P4a** — P4a should reuse `DhrdUnit` list rather than re-parse.
+  Files: `acpi.rs` (or new `dmar.rs`), `boot.rs`.
+
+- [ ] **intr-p3b** — IRT allocation.
+  For each DRHD unit: allocate one 4 KB-aligned page from `FrameAllocator` to
+  hold the Interrupt Remapping Table (IRT).  Each IRTE is 16 bytes (128-bit);
+  one 4 KB page holds 256 entries (vectors 0–255).  Zero all entries.
+  Write the `IRTA_REG` (IRT physical base | size encoding = 0 for 256 entries).
+  Store IRT HPA per unit.  Files: `boot.rs` (or new `iommu_ir.rs`).
+
+- [ ] **intr-p3c** — Enable VT-d interrupt remapping.
+  For each DRHD unit:
+  1. Issue `GCMD.SIRTP` (Set IRT Pointer) and wait for `GSTS.IRTPS`.
+  2. Issue `GCMD.IRE` (Interrupt Remapping Enable) and wait for `GSTS.IRES`.
+  3. Set `GCMD.CFI` = 0 (compatibility-format interrupts blocked after IR on).
+  All dom0 interrupts must be in remapped format before this step; see intr-p3d.
+  Files: `boot.rs` / `iommu_ir.rs`.
+
+- [ ] **intr-p3d** — I/O APIC RTE reprogramming for remapped format.
+  Before enabling IR: for each active I/O APIC redirection table entry, rewrite
+  it in "remapped interrupt format" (MSI address `0xFEEX_XXXX` + bit 4 = 1,
+  data[14:0] = IRTE handle index = vector).  IRTEs 0–255 map 1:1 to vectors
+  for dom0 initially.  Dom0 IRTE format: `IRTE.P=1, IRTE.FPD=0, IRTE.DST=dom0_lapic,
+  IRTE.V=vector, IRTE.DLM=0 (fixed), IRTE.TM=0 (edge), IRTE.RH=0, IRTE.DM=0`.
+  Files: `boot.rs` / `iommu_ir.rs`, `pci.rs`.
+
+- [ ] **intr-p3e** — MSI/MSI-X reprogramming for remapped format.
+  Walk PCI devices; rewrite MSI/MSI-X address/data fields to remapped format.
+  Same IRTE handle scheme as intr-p3d.  Can be deferred until device passthrough
+  (P16e) if no devices are currently assigned to children.
+  Files: `pci.rs`, `boot.rs`.
+
+- [ ] **intr-p3f** — IRTE management API.
+  Implement in `iommu_ir.rs`:
+  - `irte_program_remapped(irt_phys, hhdm, index, lapic_id, vector)`:
+    write a standard "remapped" IRTE (fixed delivery, target LAPIC, given vector).
+  - `irte_program_posted(irt_phys, hhdm, index, pid_phys, ndst)`:
+    write a "posted interrupt" IRTE: `IRTE.PM=1`, `IRTE.PDA=pid_phys>>6`,
+    `IRTE.NDST=ndst`.  Hardware posts the interrupt directly to the VP's PID
+    with no VMEXIT.
+  - `irte_invalidate(irt_phys, hhdm, index)`: clear Present bit + issue
+    IOTLB/IR invalidation (write `IIR` register).
+
+- [ ] **intr-p3g** — Hook into `VMCALL_SEAL` / `SET_INTR_POLICY`.
+  When a child domain VP is sealed with `Deliver` vectors:
+    - call `irte_program_posted(index=vector, pid_phys=vp.pid_phys, ndst=0)`
+      (NDST filled in at first `activate()`; IPI not needed if VP is not yet
+      running).
+  When `SET_INTR_POLICY` changes a vector back to `Report`/`NotReport`:
+    - call `irte_program_remapped(index=vector, ...)` to route back through
+      the capavisor notification path.
+  On `VMCALL_REVOKE_DOMAIN`: `irte_program_remapped` all child's vectors back
+  to dom0.  Files: `hypercall.rs`, `iommu_ir.rs`.
+
+- [ ] **intr-p3h** — QEMU validation.
+  Add `-device intel-iommu,intremap=on` to `scripts/run-qemu.sh`.
+  Run `test_intr_loop` and verify: (1) boot succeeds, (2) no EPT violations
+  during CARVE/SEND, (3) child domain still receives interrupts correctly,
+  (4) capavisor boot log shows "IR enabled" on each DRHD unit.
 
 ---
 
