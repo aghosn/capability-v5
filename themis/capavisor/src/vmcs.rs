@@ -177,17 +177,17 @@ unsafe fn write_control_fields(
     //   for xAPIC MMIO — it only affects x2APIC MSR reads.
     // VID (bit 9): Virtual Interrupt Delivery.  On VM entry with VID=1, the
     //   processor evaluates vIRR and delivers pending virtual interrupts without
-    //   a VM exit.  Requires USE_TPR_SHADOW=1.  Benign for dom0 when vIRR=0;
-    //   Phase 1 uses VMENTRY_INTR_INFO injection instead (no vIRR needed).
-    //   Phase 2 switches dom0 to vIRR injection once the APIC access page is
-    //   set up (see #U5), avoiding the vISR accumulation issue.
+    //   a VM exit.  Requires USE_TPR_SHADOW=1 AND EXTERNAL_INTERRUPT_EXITING=1
+    //   (Intel SDM Vol 3C §26.2.1.1).  Only set for child VMs, which already
+    //   have EXTERNAL_INTERRUPT_EXITING enabled.  For dom0, VID is omitted:
+    //   dom0 handles interrupts natively and vIRR is always 0.
     let secondary_desired: u64 =
         (1 << 1)   // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
         | (1 << 8) // APIC_REGISTER_VIRT
-        | (1 << 9) // VIRTUAL_INTERRUPT_DELIVERY (VID)
+        | (if child { 1 << 9 } else { 0 }) // VIRTUAL_INTERRUPT_DELIVERY (VID) — requires EXTERNAL_INTERRUPT_EXITING
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
