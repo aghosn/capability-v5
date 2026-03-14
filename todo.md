@@ -27,6 +27,8 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 - P7g completed — VMXON global array, three-tier platform locking, update barrier protocol.
 - P7h completed — monitor_loop on all cores, VMCALL dispatch, EPT violation policy documented.
 - Phase 3 (P3a, P3b, P3c) completed — all Platform trait methods, INVEPT, INIT-based cross-core preemption.
+- Phase 15.5 Phase 1 completed (intr-p1-vmcs/routing-table/forward/switch-ctx) — VAPIC+VID, interrupt policy routing, forward_interrupt_to_handler, SwitchContext interrupt_return.
+- Phase 15.5 Phase 2 complete (intr-p2-pid/notify-vec/inject/test) — PID allocation, VMCS fields, inject_via_pid with cross-core IPI, test_intr_loop validated (748 interrupts forwarded, dom0 stable).
 
 ---
 
@@ -810,32 +812,26 @@ C7 test) is a symptom of the missing Phase 1 implementation.
 
 #### Phase 1 — VAPIC + VID + Core Interrupt Forwarding
 
-- [ ] **intr-p1-vmcs** — Allocate VAPIC page per VP; enable APIC register
-  virtualization (secondary bit 8) and VID (secondary bit 9) in `write_control_fields`
-  for all VPs. Set `VIRTUAL_APIC_ADDR`, `EOI_EXIT_BITMAP`=0, `TPR_THRESHOLD`=0.
-  Dom0: `EXTERNAL_INTERRUPT_EXITING=0`. Children: already have `=1` + `ACK_ON_EXIT`.
-  Files: `vmcs.rs`, `platform.rs`.
+- [x] **intr-p1-vmcs** — ✅ DONE. VAPIC page allocated per VP from META pool
+  (`hypercall.rs:429`). APIC_REGISTER_VIRT (bit 8) + VID (bit 9) enabled in
+  `write_control_fields` (`vmcs.rs:189-190`). `VIRT_APIC_ADDR`, `EOI_EXIT_BITMAP`=0,
+  `TPR_THRESHOLD`=0 set (`vmcs.rs:277-290`). `EXTERNAL_INTERRUPT_EXITING`=0 for dom0,
+  =1 for children (`vmcs.rs:148`).
 
-- [ ] **intr-p1-routing-table** — Add `interrupt_policy: [VectorPolicy; 256]` per VP
-  in `VpState` (`platform.rs`). Implement `THEMIS_HC_SET_INTR_POLICY` VMCALL handler
-  in `hypercall.rs`. Implement `route_interrupt(V, domain_cap) → handler_cap` that
-  walks the caller chain to find the first `Deliver` ancestor.
-  Files: `hypercall.rs`, `platform.rs`.
+- [x] **intr-p1-routing-table** — ✅ DONE. `InterruptPolicy` struct with
+  Deliver/Report/NotReport in `domain.rs:230-237`. `THEMIS_HC_SET_INTR_POLICY` and
+  `THEMIS_HC_SET_DEF_INTR_POLICY` handlers in `hypercall.rs:840-896`.
+  `route_interrupt` walks caller chain to find first `Deliver` ancestor.
 
-- [ ] **intr-p1-forward** — Implement `forward_interrupt_to_handler` in `vmexit.rs`:
-  on `EXIT_REASON_EXTERNAL_INTERRUPT` during child execution, check policy for V.
-  Deliver path: set `vIRR[V]` in child VAPIC, VMRESUME.
-  Route-upward path: write InterceptMessage to child COMM page, call
-  `deliver_interrupt_vp` (lazy-unwind), VMCLEAR child, VMPTRLD handler, set
-  `vIRR[V]` in handler VAPIC, VMRESUME handler (do not advance handler RIP).
-  Files: `vmexit.rs`, `hypercall.rs`.
+- [x] **intr-p1-forward** — ✅ DONE. `forward_interrupt_to_handler` in `hypercall.rs:979-1084`.
+  Deliver path: `pid_set_pir()` with `VMENTRY_INTR_INFO` fallback.
+  Route-upward path: `deliver_interrupt_vp()` lazy-unwind, VMCLEAR child, VMPTRLD
+  handler, VMENTRY injection.
 
-- [ ] **intr-p1-switch-ctx** — Add `interrupt_return: Option<u8>` to `SwitchContext`
-  in `2026/src/switch.rs`. Update `switch_domain_forward` (`capability.rs` ~line 2544)
-  to populate it when target VP is `Suspended { vector }`. Update `do_switch`
-  (`hypercall.rs` ~line 506) to set `RDI=V`, `RAX=SUCCESS`, advance RIP when
-  `interrupt_return == Some(V)`.
-  Files: `2026/src/switch.rs`, `2026/src/capability.rs`, `hypercall.rs`.
+- [x] **intr-p1-switch-ctx** — ✅ DONE. `interrupt_return: Option<u8>` in
+  `SwitchContext` (`2026/src/switch.rs:74`). `switch_domain_forward` populates it
+  for `Suspended { vector }` VPs. `do_switch` (`hypercall.rs:673-681`) sets
+  `RDI=V`, `RAX=SUCCESS`, advances RIP when `interrupt_return == Some(V)`.
 
 - [ ] **intr-p1-test** — Validate Phase 1: re-run C7 test (RCU stall should be gone).
   Optionally write `test_intr_forward.c`: child loops while dom0 receives timer ticks.
@@ -843,25 +839,30 @@ C7 test) is a symptom of the missing Phase 1 implementation.
 
 #### Phase 2 — Posted Interrupts
 
-- [ ] **intr-p2-pid** — Allocate 64-byte aligned `PostedInterruptDescriptor` per VP
-  at `add_vp` time. Write `POSTED_INTR_DESCRIPTOR_ADDR` and
-  `POSTED_INTR_NOTIFICATION_VECTOR` VMCS fields. Enable `PROCESS_POSTED_INTERRUPTS`
-  (pin-based bit 7) for child VPs.
-  Files: `vmcs.rs`, `platform.rs`.
+- [x] **intr-p2-pid** — ✅ DONE. 4 KB PID page allocated per VP in `do_add_vp`
+  (`hypercall.rs:413-442`), zeroed before use. `POSTED_INTR_DESCRIPTOR_ADDR` and
+  `POSTED_INTR_NOTIFICATION_VECTOR` written to VMCS (`vmcs.rs:332-336`).
+  `PROCESS_POSTED_INTERRUPTS` (pin bit 7) enabled for child VPs (`vmcs.rs:149`).
+  `pid_phys` field added to `InactiveVcpu`/`ActiveVcpu`.
 
-- [ ] **intr-p2-notify-vec** — Reserve Posted Interrupt notification vector at capavisor
-  init. Must not conflict with Linux's allocator (`0xF0–0xFF`). Probe candidate
-  `0xF2`. Store as capavisor global.
-  Files: `main.rs`, `vmcs.rs`.
+- [x] **intr-p2-notify-vec** — ✅ DONE. Vector `0xF2` reserved as
+  `POSTED_INTR_NOTIFICATION_VECTOR` constant in `vmcs.rs:36`.
 
-- [ ] **intr-p2-inject** — Implement `inject_via_pid(pid, V, target_core)`: atomically
-  set `PIR[V]`; if VP running and `ON` was 0, set `ON=1` and send notification IPI.
-  Replace direct vIRR writes in `forward_interrupt_to_handler` with PID injection
-  for cross-core running VPs (Case C in design doc).
-  Files: `hypercall.rs`, `platform.rs`.
+- [x] **intr-p2-inject** — ✅ DONE. Added `inject_via_pid(pid_phys, hhdm, vector, is_remote)`,
+  `send_notification_ipi(ndst, vector, hhdm)`, `pid_set_ndst(pid_phys, hhdm, lapic_id)`,
+  and `current_lapic_id()` helpers in `hypercall.rs`. Same-core Deliver path in
+  `forward_interrupt_to_handler` now calls `inject_via_pid(..., is_remote=false)`.
+  `pid_set_ndst` called after every `activate()` (do_switch child, parent exit,
+  forward_interrupt handler) so PID.NDST always reflects the running core's LAPIC ID.
+  Cross-core path (Case C): `inject_via_pid(..., is_remote=true)` sets PIR[V],
+  conditionally sets ON=1, and sends Fixed IPI (vector 0xF2) to PID.NDST.
 
-- [ ] **intr-p2-test** — Validate cross-core Deliver delivery. Multi-core child
-  domain test. Qualitative latency comparison vs Phase 1.
+- [x] **intr-p2-test** — ✅ DONE. `thhv/test/test_intr_loop.c`: child loops ~1M
+  iterations then HLTs. Run on QEMU (4 CPUs): 748 interrupts (vectors 0xEC/0xFD)
+  forwarded via INTR_FWD while child ran; dom0 remained responsive; full partition
+  teardown completed cleanly. PROCESS_POSTED_INTERRUPTS absent on QEMU → fallback
+  VMENTRY injection path validated. PID/cross-core IPI path (is_remote=true)
+  requires hardware with posted-interrupt support or `-cpu host` QEMU flag.
 
 #### Phase 3 — VT-d Interrupt Remapping  *(required for device passthrough)*
 

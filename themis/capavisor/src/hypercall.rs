@@ -661,6 +661,8 @@ fn do_switch(
     // the parent is already deactivated and stored.
     let mut child_active = child_inactive.activate()
         .expect("[SWITCH] child activate (VMPTRLD) failed — fatal");
+    // Update PID.NDST so remote cores can send notification IPIs to this core.
+    unsafe { pid_set_ndst(child_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
 
     // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
     for (reg, val) in &vmcs_pending {
@@ -811,6 +813,8 @@ pub fn forward_child_exit(
         .expect("[CHILD_EXIT] parent VcpuSlot empty");
     let mut parent_active = parent_inactive.activate()
         .expect("[CHILD_EXIT] parent activate failed");
+    // Update PID.NDST so remote cores can send notification IPIs to this core.
+    unsafe { pid_set_ndst(parent_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
 
     // To the parent, this is a return from SWITCH VMCALL.
     // RAX = SUCCESS, RDI = exit_reason.
@@ -942,17 +946,81 @@ unsafe fn pid_set_pir(pid_phys: u64, hhdm: u64, vector: u8) {
     unsafe { (*pir_virt.add(word)).fetch_or(1u64 << bit, Ordering::Release) };
 }
 
-/// Read and clear the Outstanding Notification (ON) bit (bit 256 = byte 32, bit 0)
-/// of the PID.  Returns the previous value.
-///
-/// Used to decide whether to send a notification IPI: if ON was 0 before our
-/// set, we must send the IPI; otherwise another sender already did.
+/// Atomically set the Outstanding Notification (ON) bit (byte 32, bit 0) of
+/// the PID.  Returns `true` if ON was already set (another sender beat us),
+/// `false` if we were the first setter (we must send the notification IPI).
 unsafe fn pid_test_and_set_on(pid_phys: u64, hhdm: u64) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
-    // ON is bit 0 of the u32 at byte offset 32.
     let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
     let prev = unsafe { (*on_ptr).fetch_or(1, Ordering::AcqRel) };
-    prev & 1 != 0 // true if ON was already set (another sender beat us)
+    prev & 1 != 0
+}
+
+/// Write the NDST (Notification Destination, bytes 40–43) field of the PID
+/// to `lapic_id`.  Called whenever a VP is activated on a core so remote
+/// senders know which LAPIC to address the notification IPI to.
+///
+/// No-op when `pid_phys == 0` (dom0 has no PID page).
+///
+/// # Safety
+/// `pid_phys` must be a valid physical PID page address accessible via HHDM,
+/// or 0 to skip (dom0).
+unsafe fn pid_set_ndst(pid_phys: u64, hhdm: u64, lapic_id: u32) {
+    if pid_phys == 0 {
+        return;
+    }
+    let ndst_ptr = ((pid_phys + hhdm) + 40) as *mut u32;
+    unsafe { core::ptr::write_volatile(ndst_ptr, lapic_id) };
+}
+
+/// Send a Fixed-delivery IPI with `vector` to the physical LAPIC identified
+/// by `ndst_lapic_id`, using xAPIC MMIO at `hhdm + 0xFEE0_0000`.
+///
+/// Used to notify a remote core that a VP's PID has pending PIR bits (ON=1).
+///
+/// # Safety
+/// Must be called from VMX root mode; caller must have set `PID.ON = 1` before
+/// calling so the target core correctly processes the PID on VMENTRY.
+unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
+    let apic_base = hhdm + 0xFEE0_0000u64;
+    unsafe {
+        let icr_hi = (apic_base + 0x310) as *mut u32;
+        let icr_lo = (apic_base + 0x300) as *mut u32;
+        core::ptr::write_volatile(icr_hi, ndst_lapic_id << 24);
+        // Fixed delivery mode (0), level assert (bit 14), edge trigger.
+        core::ptr::write_volatile(icr_lo, (1u32 << 14) | (vector as u32));
+    }
+}
+
+/// Return the physical LAPIC ID of the calling CPU via CPUID leaf 1.
+fn current_lapic_id() -> u32 {
+    let cpuid = unsafe { core::arch::x86_64::__cpuid(1) };
+    (cpuid.ebx >> 24) as u32
+}
+
+/// Inject interrupt `vector` into the VP whose PID is at `pid_phys`.
+///
+/// - `is_remote = false` (Case A/B): VP is on this core or not running.
+///   Set PIR[V] only; the processor moves PIR → vIRR on VMENTRY automatically.
+/// - `is_remote = true` (Case C): VP is Running on a different core.
+///   Set PIR[V], then conditionally set ON=1 and send a notification IPI to
+///   that core so it processes the PID without a VM exit.
+///
+/// # Safety
+/// `pid_phys` must be a valid 64-byte aligned PID page accessible via HHDM.
+unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) {
+    unsafe { pid_set_pir(pid_phys, hhdm, vector) };
+    if is_remote {
+        let on_already_set = unsafe { pid_test_and_set_on(pid_phys, hhdm) };
+        if !on_already_set {
+            // We set ON=1 first — send the notification IPI to wake the remote core.
+            let ndst = unsafe {
+                core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
+            };
+            let notify_vec = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
+            unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
+        }
+    }
 }
 
 // ── Interrupt forwarding ─────────────────────────────────────────────────── //
@@ -998,12 +1066,12 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
         let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
         if pin_val & (1 << 7) != 0 {
-            // Hardware supports posted interrupts — inject via PIR.
-            serial_println!("[INTR_FWD] v={} Deliver: posting via PIR", vector);
+            // Hardware supports posted interrupts — inject via PID (Case A: same core).
+            serial_println!("[INTR_FWD] v={} Deliver: posting via PID (same-core)", vector);
             let pid_phys = vcpu.pid_phys();
             let hhdm = platform.hhdm_offset();
-            unsafe { pid_set_pir(pid_phys, hhdm, vector) };
-            // VP is running on this core — no IPI needed; VMRESUME processes PIR.
+            unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+            // VP is on this core; VMRESUME moves PIR → vIRR automatically.
             return;
         } else {
             // PID not supported — fall back to VMENTRY_INTR_INFO injection.
@@ -1059,6 +1127,8 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         .expect("[INTR_FWD] handler VcpuSlot empty");
     let mut handler_active = handler_inactive.activate()
         .expect("[INTR_FWD] handler activate (VMPTRLD) failed");
+    // Update PID.NDST so remote cores can address notification IPIs to this core.
+    unsafe { pid_set_ndst(handler_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
 
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
