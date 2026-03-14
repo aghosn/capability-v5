@@ -880,12 +880,15 @@ Add this flag to `run-qemu.sh` before intr-p3i.
   `AcpiInfo` now carries `drhd_units: Vec<DhrdUnit>` (shared with P4a).
   Print logged at boot: `ACPI DMAR: DRHD seg=N base=0x... ir=true/false`
 
-- [ ] **intr-p3b** — IRT allocation.
-  For each DRHD unit: allocate one 4 KB-aligned page from `FrameAllocator` to
-  hold the Interrupt Remapping Table (IRT).  Each IRTE is 16 bytes (128-bit);
-  one 4 KB page holds 256 entries (vectors 0–255).  Zero all entries.
-  Write the `IRTA_REG` (IRT physical base | size encoding = 0 for 256 entries).
-  Store IRT HPA per unit.  Files: `boot.rs` (or new `iommu_ir.rs`).
+- [x] **intr-p3b** — IRT allocation. ✅ DONE
+  `mem/inventory.rs`: added `MAX_DRHD_UNITS = 4` constant, `irt_pages` field to
+  `MetaBreakdown`, included in META pool sizing (4 pages reserved at partition time).
+  `acpi.rs`: added `irt_phys: u64` field to `DhrdUnit` (0 until allocated).
+  `platform.rs`: added `drhd_units: Vec<DhrdUnit>` to `ThemisPlatform`.
+  `boot.rs` (`init_themis`): for each IR-capable DRHD unit, allocates one page from
+  dom0's MetaAllocator (META pool, excluded from EPT), writes `IRTA_REG` (base | size=0
+  for 256 IRTEs), stores populated `DhrdUnit` list on `ThemisPlatform`.
+  Pages are machine-global / capavisor-private — no capability records needed.
 
 - [ ] **intr-p3c** — Enable VT-d interrupt remapping.
   For each DRHD unit:

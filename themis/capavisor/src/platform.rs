@@ -785,6 +785,9 @@ pub struct ThemisPlatform {
     dom0_cap:        Mutex<Option<CapabilityRef<Domain>>>,
     // Per-core VMXON physical addresses; written once by BSP, read by each AP.
     vmxon_phys:      Vec<u64>,
+    /// VT-d DRHD units with allocated IRT pages; written once at boot by
+    /// `init_themis`, immutable afterwards (entries updated via `program_irte`).
+    pub drhd_units:  Vec<crate::acpi::DhrdUnit>,
 }
 
 // SAFETY: `lapic_ids` uses `UnsafeCell` but is only written once during
@@ -824,6 +827,7 @@ impl ThemisPlatform {
             lapic_ids:    UnsafeCell::new(Vec::new()),
             dom0_cap:     Mutex::new(None),
             vmxon_phys:   Vec::new(),
+            drhd_units:   Vec::new(),
         }
     }
 

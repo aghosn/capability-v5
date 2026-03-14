@@ -490,11 +490,12 @@ pub fn platform(
         );
     }
     serial_println!(
-        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT  ({} pages = {} KiB)",
+        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT  ({} pages = {} KiB)",
         partition.meta_breakdown.vmxon_pages,
         partition.meta_breakdown.vmcs_pages,
         partition.meta_breakdown.vapic_pages,
         partition.meta_breakdown.ept_pages,
+        partition.meta_breakdown.irt_pages,
         partition.meta_breakdown.total_pages,
         partition.meta_breakdown.total_bytes() / 1024,
     );
@@ -701,7 +702,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
     const ROOT_ID: DomainId = 0;
 
-    let platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
+    let mut platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
     platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
 
@@ -731,12 +732,53 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         );
     }
     serial_println!(
-        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT pages",
+        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT pages",
         info.partition.meta_breakdown.vmxon_pages,
         info.partition.meta_breakdown.vmcs_pages,
         info.partition.meta_breakdown.vapic_pages,
         info.partition.meta_breakdown.ept_pages,
+        info.partition.meta_breakdown.irt_pages,
     );
+
+    // ── IRT allocation for VT-d interrupt remapping (intr-p3b) ───────────── //
+    //
+    // One 4 KiB page per IR-capable DRHD unit, allocated from the META pool.
+    // Pages are machine-global hardware tables written by the IOMMU; they are
+    // never visible to any domain (absent from EPT like all META pages).
+    // IRTA_REG is written here; GCMD.IRE is set later in intr-p3c.
+    if info.acpi.has_dmar {
+        // VT-d spec §10.4.28: IRTA_REG layout
+        //   bits[63:12]  IRT physical base (4 KiB-aligned)
+        //   bits[11]     Extended Interrupt Mode (X2APIC); set 0 for now
+        //   bits[3:0]    Size = log2(entries) - 1; 0 = 256 entries (minimum)
+        const IRTA_REG_OFFSET: usize = 0xB8;
+        const IRTA_SIZE_256:   u64   = 0; // size encoding: 2^(0+1)*128 = 256 entries
+
+        let mut units = info.acpi.drhd_units.clone();
+        for unit in units.iter_mut() {
+            if !unit.ir_supported {
+                serial_println!(
+                    "  DRHD seg={} base={:#x}: IR not supported — skipping IRT alloc",
+                    unit.segment, unit.register_base,
+                );
+                continue;
+            }
+
+            let irt_phys = platform.alloc_meta_frame(ROOT_ID);
+            unit.irt_phys = irt_phys;
+
+            // Write IRTA_REG: base | size_encoding (EIM=0, 256 entries).
+            let irta_virt = (unit.register_base + info.hhdm_offset + IRTA_REG_OFFSET as u64)
+                as *mut u64;
+            unsafe { core::ptr::write_volatile(irta_virt, irt_phys | IRTA_SIZE_256) };
+
+            serial_println!(
+                "  DRHD seg={} base={:#x}: IRT @ {:#x} (256 IRTEs, IRTA written)",
+                unit.segment, unit.register_base, irt_phys,
+            );
+        }
+        platform.drhd_units = units;
+    }
 
     // ── DomainComm header init for dom0 ──────────────────────────────────── //
     //

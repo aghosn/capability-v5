@@ -14,7 +14,7 @@ use acpi::{
     AcpiTables, Handler, Handle, PhysicalMapping,
     aml::AmlError,
     platform::PciConfigRegions,
-    sdt::{Signature, madt::{MadtEntry, Madt}},
+    sdt::madt::{MadtEntry, Madt},
 };
 
 // ── HHDM-based ACPI handler ────────────────────────────────────────────── //
@@ -195,6 +195,9 @@ pub struct DhrdUnit {
     pub flags: u8,
     /// Whether this unit supports interrupt remapping (CAP register bit 16 / ECAP[3]).
     pub ir_supported: bool,
+    /// Physical address of the 4 KiB IRT page allocated for this unit (intr-p3b).
+    /// Zero until `init_themis` allocates the page from the META pool.
+    pub irt_phys: u64,
 }
 
 /// Summary of all ACPI information needed by Themis.
@@ -391,7 +394,7 @@ fn parse_dmar<H: acpi::Handler + Clone>(
                     segment, register_base, drhd_flags, cap, ecap, ir_supported,
                 );
 
-                units.push(DhrdUnit { register_base, segment, flags: drhd_flags, ir_supported });
+                units.push(DhrdUnit { register_base, segment, flags: drhd_flags, ir_supported, irt_phys: 0 });
             }
         }
 

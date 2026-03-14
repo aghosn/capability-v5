@@ -8,6 +8,11 @@ const EPT_ENTRIES_PER_TABLE: u64 = 512;
 /// Maximum number of META physical regions (spanning multiple disjoint e820 entries).
 pub const MAX_META_REGIONS: usize = 16;
 
+/// Maximum number of VT-d DRHD units we budget for in the META pool.
+/// One 4 KiB IRT page is reserved per unit.  Typical hardware has 1–2 units;
+/// 4 is a safe upper bound that costs only 16 KiB.
+pub const MAX_DRHD_UNITS: usize = 4;
+
 /// Default number of DomainComm pages per domain (header + RX + TX).
 pub const DOMCOMM_NR_PAGES: u32 = 4;
 
@@ -54,6 +59,8 @@ pub struct MetaBreakdown {
     pub vmcs_pages: u64,
     pub vapic_pages: u64,
     pub ept_pages: u64,
+    /// IRT pages: one per DRHD unit (capped at MAX_DRHD_UNITS).
+    pub irt_pages: u64,
     pub total_pages: u64,
 }
 
@@ -115,7 +122,8 @@ impl PhysicalInventory {
         let vmxon_pages = num_cores;
         let vmcs_pages  = num_vps;
         let vapic_pages = num_vps;
-        let fixed_pages = vmxon_pages + vmcs_pages + vapic_pages;
+        let irt_pages   = MAX_DRHD_UNITS as u64;
+        let fixed_pages = vmxon_pages + vmcs_pages + vapic_pages + irt_pages;
 
         // Include COMM pages in the total reservation budget so META + COMM
         // are carved together from the top of usable memory.
@@ -232,6 +240,7 @@ impl PhysicalInventory {
                 vmcs_pages,
                 vapic_pages,
                 ept_pages,
+                irt_pages,
                 total_pages: meta_pages,
             },
             comm_region,
