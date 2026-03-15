@@ -14,7 +14,10 @@ use acpi::{
     AcpiTables, Handler, Handle, PhysicalMapping,
     aml::AmlError,
     platform::PciConfigRegions,
-    sdt::madt::{MadtEntry, Madt},
+    sdt::{
+        madt::{MadtEntry, Madt},
+        mcfg::Mcfg,
+    },
 };
 
 // ── HHDM-based ACPI handler ────────────────────────────────────────────── //
@@ -180,6 +183,24 @@ pub struct Iso {
 
 // ── VT-d / DMAR structures ─────────────────────────────────────────────── //
 
+/// One PCIe ECAM (Enhanced Configuration Access Mechanism) region from MCFG.
+///
+/// Covers a contiguous range of PCI buses on a single PCI segment.
+#[derive(Debug, Clone)]
+pub struct EcamRegion {
+    pub segment:   u16,
+    pub start_bus: u8,
+    pub end_bus:   u8,
+    pub base_phys: u64,
+}
+
+impl EcamRegion {
+    /// Number of PCI buses covered by this region.
+    pub fn bus_count(&self) -> u64 {
+        (self.end_bus as u64).saturating_sub(self.start_bus as u64) + 1
+    }
+}
+
 /// VT-d Specification §8.3 — DMA Remapping Hardware Unit Definition.
 ///
 /// One `DhrdUnit` corresponds to one DRHD structure in the DMAR table.
@@ -198,6 +219,12 @@ pub struct DhrdUnit {
     /// Physical address of the 4 KiB IRT page allocated for this unit (intr-p3b).
     /// Zero until `init_themis` allocates the page from the META pool.
     pub irt_phys: u64,
+    /// Physical address of the 4 KiB root table page for DMA remapping (P4b).
+    /// Zero until `init_themis` allocates it from the META pool.
+    pub root_phys: u64,
+    /// Context table pages keyed by bus number: `(bus, ctx_page_phys)`.
+    /// Populated in `init_themis` for every bus in this unit's PCI segment.
+    pub ctx_tables: Vec<(u8, u64)>,
 }
 
 /// Summary of all ACPI information needed by Themis.
@@ -216,6 +243,9 @@ pub struct AcpiInfo {
     pub has_legacy_pics: bool,
     /// PCIe ECAM regions from MCFG (segment → base address + bus range).
     pub pci_config_regions: Option<PciConfigRegions>,
+    /// Flat list of ECAM regions for IOMMU table sizing (same data as
+    /// `pci_config_regions` but in a simpler form for boot-time computation).
+    pub ecam_regions: Vec<EcamRegion>,
     /// Whether a DMAR table was found (VT-d available).
     pub has_dmar: bool,
     /// DRHD units from the DMAR table (populated only when `has_dmar` is true).
@@ -286,6 +316,23 @@ impl AcpiInfo {
         // ── MCFG: PCIe ECAM config regions ───────────────────────────── //
         let pci_config_regions = PciConfigRegions::new(&tables).ok();
 
+        // Build a flat EcamRegion list from the raw MCFG table for IOMMU sizing.
+        let ecam_regions: Vec<EcamRegion> = tables
+            .find_table::<Mcfg>()
+            .map(|m| {
+                m.get()
+                    .entries()
+                    .iter()
+                    .map(|e| EcamRegion {
+                        segment:   e.pci_segment_group,
+                        start_bus: e.bus_number_start,
+                        end_bus:   e.bus_number_end,
+                        base_phys: e.base_address,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // ── DMAR: check presence and enumerate DRHD units ────────────── //
         let (has_dmar, drhd_units) = parse_dmar(&tables, hhdm_offset);
 
@@ -296,9 +343,39 @@ impl AcpiInfo {
             isos,
             has_legacy_pics,
             pci_config_regions,
+            ecam_regions,
             has_dmar,
             drhd_units,
         }
+    }
+
+    /// Compute the exact number of META pages to reserve for IOMMU DMA tables.
+    ///
+    /// Returns `(root_pages, ctx_pages)`:
+    /// - `root_pages`: one 4 KiB page per DRHD unit (for the root table).
+    /// - `ctx_pages`: one 4 KiB page per PCI bus covered by each
+    ///   INCLUDE_PCI_ALL DRHD, matching ECAM bus ranges by PCI segment.
+    ///   Scoped DRHDs contribute 0 context table pages (deferred).
+    ///
+    /// This is called before `partition()` so the META pool is sized exactly.
+    pub fn iommu_page_counts(&self) -> (u64, u64) {
+        if !self.has_dmar {
+            return (0, 0);
+        }
+        let root_pages = self.drhd_units.len() as u64;
+        let mut ctx_pages: u64 = 0;
+        for unit in &self.drhd_units {
+            // Allocate context tables for all buses in the matching ECAM segment,
+            // regardless of INCLUDE_PCI_ALL.  A DRHD with flags=0x0 routes DMA
+            // for specific devices but we still need passthrough entries for every
+            // possible source-id; an absent (P=0) root entry is a DMA fault.
+            ctx_pages += self.ecam_regions
+                .iter()
+                .filter(|r| r.segment == unit.segment)
+                .map(|r| r.bus_count())
+                .sum::<u64>();
+        }
+        (root_pages, ctx_pages)
     }
 }
 
@@ -390,6 +467,8 @@ fn parse_dmar<H: acpi::Handler + Clone>(
                     flags: drhd_flags,
                     ir_supported: false,
                     irt_phys: 0,
+                    root_phys: 0,
+                    ctx_tables: Vec::new(),
                 });
             }
         }

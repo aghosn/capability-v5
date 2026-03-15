@@ -277,7 +277,7 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
 - [x] **P4a**: ✅ DONE (Phase 3).  DRHD units parsed from DMAR in `acpi.rs`; stored in
   `AcpiInfo.drhd_units` and `ThemisPlatform.drhd_units`.
 
-- [ ] **P4b**: Early ACPI pre-pass: extend to also parse MCFG → collect
+- [x] **P4b**: ✅ DONE. Early ACPI pre-pass: extend to also parse MCFG → collect
   `EcamRegion { segment, start_bus, end_bus, base_phys }` into `AcpiInfo`.
   Compute exact META reservation: `iommu_root_pages = n_drhd`,
   `iommu_ctx_pages = Σ bus_count_per_drhd_segment`.  Add both fields to
@@ -291,8 +291,10 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
       poll `GSTS.RTPS`
   Store `root_phys` and `Vec<(bus, ctx_phys)>` back into `DhrdUnit` (or a new
   `IommuUnit` struct in `platform.rs`).
+  Bugs fixed: CTX_LOW 0x5→0x9 (TT bits[3:2] not bits[2:1]), CCMD CIRG bit[61] not
+  bit[60], AW read from CAP.SAGAW at runtime (QEMU only supports AW=1/39-bit).
 
-- [ ] **P4c**: Enable VT-d DMA translation per DRHD.
+- [x] **P4c**: ✅ DONE. Enable VT-d DMA translation per DRHD.
   Sequence: `GCMD.TE = 1` → poll `GSTS.TES`.  WARN on timeout (same pattern as
   intr-p3c).  Log "DMA translation enabled on DRHD 0x…".
   After this point every PCIe DMA goes through the IOMMU; dom0 sees passthrough.

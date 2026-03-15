@@ -246,39 +246,9 @@ pub fn platform(
     serial_println!();
     serial_println!("CPUs: {} cores (BSP + {} APs)", num_cores, num_cores - 1);
 
-    let partition = inventory.partition(num_cores as u64);
-    // META regions are NOT added to non_ram_e820 here — load_linux() receives
-    // them via its `meta_regions` parameter and writes the TYPE_RESERVED entries
-    // directly into boot_params.e820_table.  Adding them here too would produce
-    // duplicate entries in the e820 table seen by Linux.
-
-    // ── Phase 1c: SMP bootstrap ───────────────────────────────────────────── //
-
-    serial_println!();
-    let num_aps = num_cores as u64 - 1;
-    serial_println!(
-        "SMP: BSP LAPIC {} — waking {} APs ...",
-        bsp_lapic_id,
-        num_aps
-    );
-
-    for cpu in cpus.iter() {
-        if cpu.lapic_id != bsp_lapic_id {
-            cpu.goto_address.write(crate::ap_entry);
-        }
-    }
-
-    if num_aps > 0 {
-        while AP_READY_COUNT.load(Ordering::Acquire) < num_aps {
-            core::hint::spin_loop();
-        }
-    }
-    serial_println!("SMP: all {} APs parked ✓", num_aps);
-
-    // ── Phase 1d: ACPI parsing ────────────────────────────────────────────── //
-
-    serial_println!();
-    // Map ACPI/reserved regions that Limine base revision 3 leaves unmapped.
+    // ACPI must be parsed before partition() so we can compute the exact
+    // number of IOMMU table pages (root + context tables) to reserve.
+    // Map ACPI/reserved regions first (Limine base revision 3 leaves them unmapped).
     let mut acpi_mapped: Vec<(u64, u64)> = Vec::new();
     for entry in entries.iter() {
         match entry.entry_type {
@@ -307,6 +277,39 @@ pub fn platform(
     } else {
         serial_println!("ACPI: no MCFG (no PCIe ECAM)");
     }
+
+    let iommu_counts = acpi.iommu_page_counts();
+    let partition = inventory.partition(num_cores as u64, iommu_counts);
+    // META regions are NOT added to non_ram_e820 here — load_linux() receives
+    // them via its `meta_regions` parameter and writes the TYPE_RESERVED entries
+    // directly into boot_params.e820_table.  Adding them here too would produce
+    // duplicate entries in the e820 table seen by Linux.
+
+    // ── Phase 1c: SMP bootstrap ───────────────────────────────────────────── //
+
+    serial_println!();
+    let num_aps = num_cores as u64 - 1;
+    serial_println!(
+        "SMP: BSP LAPIC {} — waking {} APs ...",
+        bsp_lapic_id,
+        num_aps
+    );
+
+    for cpu in cpus.iter() {
+        if cpu.lapic_id != bsp_lapic_id {
+            cpu.goto_address.write(crate::ap_entry);
+        }
+    }
+
+    if num_aps > 0 {
+        while AP_READY_COUNT.load(Ordering::Acquire) < num_aps {
+            core::hint::spin_loop();
+        }
+    }
+    serial_println!("SMP: all {} APs parked ✓", num_aps);
+
+    // ── Phase 1d: ACPI already parsed above (moved before partition) ──────── //
+    serial_println!();
 
     // ── Phase 1e: PCI enumeration ─────────────────────────────────────────── //
 
@@ -490,12 +493,14 @@ pub fn platform(
         );
     }
     serial_println!(
-        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT  ({} pages = {} KiB)",
+        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT + {} IOMMU-root + {} IOMMU-ctx  ({} pages = {} KiB)",
         partition.meta_breakdown.vmxon_pages,
         partition.meta_breakdown.vmcs_pages,
         partition.meta_breakdown.vapic_pages,
         partition.meta_breakdown.ept_pages,
         partition.meta_breakdown.irt_pages,
+        partition.meta_breakdown.iommu_root_pages,
+        partition.meta_breakdown.iommu_ctx_pages,
         partition.meta_breakdown.total_pages,
         partition.meta_breakdown.total_bytes() / 1024,
     );
@@ -732,12 +737,14 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         );
     }
     serial_println!(
-        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT pages",
+        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT + {} IOMMU-root + {} IOMMU-ctx pages",
         info.partition.meta_breakdown.vmxon_pages,
         info.partition.meta_breakdown.vmcs_pages,
         info.partition.meta_breakdown.vapic_pages,
         info.partition.meta_breakdown.ept_pages,
         info.partition.meta_breakdown.irt_pages,
+        info.partition.meta_breakdown.iommu_root_pages,
+        info.partition.meta_breakdown.iommu_ctx_pages,
     );
 
     // ── IRT allocation for VT-d interrupt remapping (intr-p3b) ───────────── //
@@ -864,6 +871,202 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             serial_println!("WARN: VT-d DRHD {:#x}: IRES timeout — IR may not be active", unit.register_base);
         } else {
             serial_println!("  DRHD {:#x}: IR enabled (CFI=1, all IRTEs P=0)", unit.register_base);
+        }
+    }
+
+    // ── P4b: VT-d root table + context table allocation ──────────────────── //
+    //
+    // For each DRHD unit:
+    //   1. Allocate one META page → root table (256 × 16-byte entries).
+    //   2. For each bus in the matching ECAM segment: allocate one META page
+    //      → context table (256 × 16-byte entries).
+    //   3. Fill every context entry as passthrough (TT=10b) for dom0.
+    //   4. Fill root entries to point at their context table pages.
+    //   5. Write RTADDR_REG and issue GCMD.SRTP.
+    //
+    // P4c (TE=1) follows immediately after all DRHD units are initialised.
+    //
+    // Context entry layout (VT-d spec §9.3, legacy mode 128-bit):
+    //   Low  u64: bit[0]=P, bits[3:2]=TT, bits[63:12]=SLPTPTR (ignored for passthrough)
+    //   High u64: bits[2:0]=AW (1=39-bit/3-level, 2=48-bit/4-level), bits[23:8]=DID
+    //   Passthrough: low=0x9 (P=1 | TT=2<<2=8), high=(DID=1)<<8 | AW (read from CAP.SAGAW)
+    // Root entry layout (VT-d spec §9.2):
+    //   Low  u64: bit[0]=P, bits[63:12]=CTP (context table phys >> 12)
+    //   High u64: 0 (reserved)
+    {
+        const RTADDR_REG_OFFSET: u64 = 0x20;
+        const CAP_OFFSET:        u64 = 0x08;
+        const ECAP_OFFSET:       u64 = 0x10;
+        const CCMD_OFFSET:       u64 = 0x28;
+        const GCMD_OFFSET:       u64 = 0x18;
+        const GSTS_OFFSET:       u64 = 0x1C;
+        const GCMD_SRTP: u32 = 1 << 30;
+        const GSTS_RTPS: u32 = 1 << 30;
+        const POLL_LIMIT: usize = 100_000;
+
+        // CTX_LOW is fixed: P=1 (bit[0]), TT=pass-through=2<<2=8 (bits[3:2]).
+        // CTX_HIGH is computed per-DRHD from CAP.SAGAW (bits[12:8]).
+        const CTX_LOW: u64 = 0x9;
+
+        let hhdm  = info.hhdm_offset;
+
+        for i in 0..platform.drhd_units.len() {
+            let (segment, _flags, reg_base) = {
+                let u = &platform.drhd_units[i];
+                (u.segment, u.flags, u.register_base)
+            };
+
+            let base = reg_base + hhdm;
+
+            // Read CAP.SAGAW (bits[12:8]) to pick the highest supported AW.
+            // AW=1 → 39-bit/3-level; AW=2 → 48-bit/4-level.
+            let cap   = unsafe { ((base + CAP_OFFSET) as *const u64).read_volatile() };
+            let sagaw = (cap >> 8) & 0x1f;
+            let aw    = (u64::BITS - 1 - sagaw.leading_zeros()) as u64;
+            let ctx_high: u64 = (1u64 << 8) | aw; // DID=1, AW
+
+            // Allocate root table page and zero it (256 entries × 16 bytes = 4 KiB).
+            let root_phys = platform.alloc_meta_frame(ROOT_ID);
+            let root_virt = (root_phys + hhdm) as *mut u64;
+            unsafe { core::ptr::write_bytes(root_virt as *mut u8, 0, 4096) };
+
+            // Find ECAM regions for this unit's segment (all buses, regardless
+            // of INCLUDE_PCI_ALL — an absent root entry causes a DMA fault).
+            let ecam_regions: Vec<crate::acpi::EcamRegion> = info.acpi.ecam_regions
+                .iter()
+                .filter(|r| r.segment == segment)
+                .cloned()
+                .collect();
+
+            let mut ctx_tables: Vec<(u8, u64)> = Vec::new();
+            for region in &ecam_regions {
+                for bus in region.start_bus..=region.end_bus {
+                    // Allocate context table page for this bus.
+                    let ctx_phys = platform.alloc_meta_frame(ROOT_ID);
+                    let ctx_virt = (ctx_phys + hhdm) as *mut u64;
+
+                    // Fill all 256 context entries as passthrough.
+                    // VT-d spec: write high word first, then low word with P=1,
+                    // to prevent the IOMMU reading a half-written present entry.
+                    unsafe {
+                        for j in 0usize..256 {
+                            let entry = ctx_virt.add(j * 2); // each entry = 2 × u64
+                            entry.add(1).write_volatile(ctx_high); // high first
+                            entry.write_volatile(CTX_LOW);          // low + P=1 last
+                        }
+                    }
+
+                    // Point root table entry for this bus at the context table.
+                    unsafe {
+                        let root_entry = root_virt.add(bus as usize * 2);
+                        root_entry.add(1).write_volatile(0);       // high = reserved
+                        root_entry.write_volatile(ctx_phys | 0x1); // P=1, CTP
+                    }
+
+                    ctx_tables.push((bus, ctx_phys));
+                }
+            }
+
+            let rtaddr = (base + RTADDR_REG_OFFSET) as *mut u64;
+            let gcmd   = (base + GCMD_OFFSET)       as *mut u32;
+            let gsts   = (base + GSTS_OFFSET)       as *const u32;
+            let ccmd   = (base + CCMD_OFFSET)       as *mut u64;
+
+            // RTADDR_REG: bits[63:12] = root_phys, bits[11:10] = 00 (legacy mode)
+            unsafe { rtaddr.write_volatile(root_phys) };
+            unsafe { gcmd.write_volatile(GCMD_SRTP) };
+            let ok = (0..POLL_LIMIT).any(|_| {
+                core::hint::spin_loop();
+                (unsafe { gsts.read_volatile() } & GSTS_RTPS) != 0
+            });
+            if !ok {
+                serial_println!(
+                    "WARN: VT-d DRHD {:#x}: RTPS timeout",
+                    platform.drhd_units[i].register_base
+                );
+            }
+
+            // VT-d spec §10.2.1: global context-cache invalidation required
+            // after SRTP before enabling translation.
+            // CCMD_REG[63]=ICC, bits[62:61]=CIRG: 01=global (bit[61]).
+            unsafe { ccmd.write_volatile((1u64 << 63) | (1u64 << 61)) };
+            let ok = (0..POLL_LIMIT).any(|_| {
+                core::hint::spin_loop();
+                (unsafe { ccmd.read_volatile() } & (1u64 << 63)) == 0
+            });
+            if !ok {
+                serial_println!(
+                    "WARN: VT-d DRHD {:#x}: context-cache invalidation timeout",
+                    platform.drhd_units[i].register_base
+                );
+            }
+
+            // VT-d spec §10.2.2: global IOTLB invalidation.
+            // IOTLB_REG is at ECAP.IRO*16 + 8; ECAP bits[9:8] = IRO.
+            let ecap = unsafe { ((base + ECAP_OFFSET) as *const u64).read_volatile() };
+            let iro  = ((ecap >> 8) & 0x3f) as u64; // bits[13:8] per spec
+            let iotlb_reg = (base + iro * 16 + 8) as *mut u64;
+            // IVA_REG: bit[63]=IVT, bits[61:60]=IIRG: 01=global, bit[4]=DR, bit[3]=DW.
+            unsafe { iotlb_reg.write_volatile((1u64 << 63) | (1u64 << 60) | (1u64 << 4) | (1u64 << 3)) };
+            let ok = (0..POLL_LIMIT).any(|_| {
+                core::hint::spin_loop();
+                (unsafe { iotlb_reg.read_volatile() } & (1u64 << 63)) == 0
+            });
+            if !ok {
+                serial_println!(
+                    "WARN: VT-d DRHD {:#x}: IOTLB invalidation timeout",
+                    platform.drhd_units[i].register_base
+                );
+            }
+
+            serial_println!(
+                "  DRHD seg={} base={:#x}: root @ {:#x}, {} ctx tables, AW={}, cache flushed",
+                segment,
+                platform.drhd_units[i].register_base,
+                root_phys,
+                ctx_tables.len(),
+                aw
+            );
+            platform.drhd_units[i].root_phys = root_phys;
+            platform.drhd_units[i].ctx_tables = ctx_tables;
+        }
+    }
+
+    // ── P4c: Enable VT-d DMA translation ─────────────────────────────────── //
+    //
+    // After RTADDR is latched (SRTP done), set GCMD.TE=1 per DRHD to activate
+    // DMA translation.  All PCIe DMA goes through the IOMMU from this point;
+    // dom0 devices use passthrough context entries (no address remapping).
+    {
+        const GCMD_OFFSET: u64 = 0x18;
+        const GSTS_OFFSET: u64 = 0x1C;
+        const GCMD_TE:  u32 = 1 << 31;
+        const GSTS_TES: u32 = 1 << 31;
+        const POLL_LIMIT: usize = 100_000;
+        let hhdm = info.hhdm_offset;
+
+        for unit in platform.drhd_units.iter() {
+            if unit.root_phys == 0 { continue; }
+            let base = unit.register_base + hhdm;
+            let gcmd = (base + GCMD_OFFSET) as *mut u32;
+            let gsts = (base + GSTS_OFFSET) as *const u32;
+
+            unsafe { gcmd.write_volatile(GCMD_TE) };
+            let ok = (0..POLL_LIMIT).any(|_| {
+                core::hint::spin_loop();
+                (unsafe { gsts.read_volatile() } & GSTS_TES) != 0
+            });
+            if !ok {
+                serial_println!(
+                    "WARN: VT-d DRHD {:#x}: TES timeout — DMA translation may not be active",
+                    unit.register_base
+                );
+            } else {
+                serial_println!(
+                    "  DRHD {:#x}: DMA translation enabled (passthrough for dom0)",
+                    unit.register_base
+                );
+            }
         }
     }
 
