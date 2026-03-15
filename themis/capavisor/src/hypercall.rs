@@ -260,10 +260,22 @@ fn do_seal(
     domain_handle: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    let result = execute(platform, false, || {
         Capability::seal(&caller, domain_handle).map(|()| ((), Default::default()))
-    }) {
-        Ok(_) => HypercallResult::success(),
+    });
+    match result {
+        Ok(_) => {
+            // intr-p3g: program IRTEs for the newly-sealed child domain.
+            let child_cap = caller
+                .read()
+                .data
+                .get_domain_capability(domain_handle)
+                .and_then(|weak| weak.upgrade());
+            if let Some(child) = child_cap {
+                program_domain_irtes(platform, &child);
+            }
+            HypercallResult::success()
+        }
         Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
@@ -290,11 +302,25 @@ fn do_revoke_domain(
     caller: &CapabilityRef<Domain>,
     child_handle: u64,
 ) -> HypercallResult {
+    // intr-p3g: capture child domain_id BEFORE revocation (cap may be dropped after).
+    let child_domain_id: Option<capability_engine::DomainId> = caller
+        .read()
+        .data
+        .get_domain_capability(child_handle)
+        .and_then(|weak| weak.upgrade())
+        .map(|cap| cap.read().data.id);
+
     let caller = caller.clone();
     match execute(platform, true, || {
         Capability::revoke_domain(&caller, child_handle).map(|batch| ((), batch))
     }) {
-        Ok(_) => HypercallResult::success(),
+        Ok(_) => {
+            // intr-p3g: clear all IRTEs that were programmed for this domain.
+            if let Some(id) = child_domain_id {
+                invalidate_domain_irtes(platform, id);
+            }
+            HypercallResult::success()
+        }
         Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
@@ -1453,4 +1479,86 @@ fn send_grow_ack(pd: &mut crate::platform::PlatformDomain, status: u32) {
         )
     };
     pd.domcomm_rx_enqueue(domcomm::msg_types::GROW_ACK, ack_bytes);
+}
+
+// ── intr-p3g: IRTE lifecycle helpers ────────────────────────────────────── //
+
+/// Program IRTEs for every vector in a newly-sealed child domain.
+///
+/// For each IR-capable DRHD unit:
+/// - Deliver vectors with a valid PID → posted-interrupt IRTE pointing to VP[0]
+/// - Report / NotReport vectors → remapped IRTE delivered to BSP LAPIC
+///
+/// Called from `do_seal` after the capability engine completes sealing.
+fn program_domain_irtes(
+    platform: &ThemisPlatform,
+    child_cap: &CapabilityRef<Domain>,
+) {
+    if platform.drhd_units.is_empty() {
+        return;
+    }
+
+    let hhdm = platform.hhdm_offset();
+    let bsp_lapic = platform.bsp_lapic_id();
+
+    let (child_id, intr_policy) = {
+        let r = child_cap.read();
+        (r.data.id, r.data.policy.interrupts.clone())
+    };
+
+    // Peek at VP[0]'s pid_phys without taking the VP.
+    let primary_pid_phys: u64 = platform
+        .domain_arc(child_id)
+        .map(|arc| arc.lock().vps.first().map_or(0, |s| s.peek_pid_phys()))
+        .unwrap_or(0);
+
+    for unit in platform.drhd_units.iter() {
+        if unit.irt_phys == 0 {
+            continue;
+        }
+        for vector in 0u8..=254 {
+            let vis = intr_policy.get_policy(vector).visibility;
+            match vis {
+                InterruptVisibility::Deliver if primary_pid_phys != 0 => unsafe {
+                    crate::iommu_ir::irte_program_posted(
+                        unit.irt_phys,
+                        hhdm,
+                        vector,
+                        primary_pid_phys,
+                        0,
+                    );
+                },
+                _ => unsafe {
+                    crate::iommu_ir::irte_program_remapped(
+                        unit.irt_phys,
+                        hhdm,
+                        vector,
+                        bsp_lapic,
+                        vector,
+                    );
+                },
+            }
+        }
+    }
+}
+
+/// Invalidate all IRTE slots for a domain that is being revoked.
+///
+/// Called from `do_revoke_domain` after the capability engine removes the
+/// domain.  Clears all 256 entries for every IR-capable DRHD unit.
+fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
+    if platform.drhd_units.is_empty() {
+        return;
+    }
+    let hhdm = platform.hhdm_offset();
+    for unit in platform.drhd_units.iter() {
+        if unit.irt_phys == 0 {
+            continue;
+        }
+        for vector in 0u8..=255 {
+            unsafe {
+                crate::iommu_ir::irte_invalidate(unit.irt_phys, hhdm, vector);
+            }
+        }
+    }
 }

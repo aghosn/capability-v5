@@ -245,6 +245,11 @@ use crate::vcpu::InactiveVcpu;
 /// An empty slot (null pointer) means the VP is currently active on some core.
 pub struct VcpuSlot {
     ptr: AtomicPtr<InactiveVcpu>,
+    /// Physical address of this VP's Posted Interrupt Descriptor.
+    /// Set by `put()` from the InactiveVcpu and never changes afterwards.
+    /// Readable without taking the VP — safe because pid_phys is immutable
+    /// after the first `put()`.  0 for dom0 VPs (no PID).
+    pid_phys: AtomicU64,
 }
 
 impl VcpuSlot {
@@ -252,14 +257,17 @@ impl VcpuSlot {
     pub const fn empty() -> Self {
         VcpuSlot {
             ptr: AtomicPtr::new(core::ptr::null_mut()),
+            pid_phys: AtomicU64::new(0),
         }
     }
 
     /// Create a slot holding an InactiveVcpu.
     #[allow(dead_code)]
     pub fn with_vcpu(vcpu: InactiveVcpu) -> Self {
+        let pid = vcpu.pid_phys();
         VcpuSlot {
             ptr: AtomicPtr::new(Box::into_raw(Box::new(vcpu))),
+            pid_phys: AtomicU64::new(pid),
         }
     }
 
@@ -280,8 +288,20 @@ impl VcpuSlot {
     /// # Panics
     /// Panics if the slot is not empty (double-return bug).
     pub fn put(&self, vcpu: InactiveVcpu) {
+        let pid = vcpu.pid_phys();
         let old = self.ptr.swap(Box::into_raw(Box::new(vcpu)), Ordering::Release);
         assert!(old.is_null(), "VcpuSlot::put: slot was not empty (double-return bug)");
+        // Cache pid_phys so callers can read it without taking the VP.
+        self.pid_phys.store(pid, Ordering::Relaxed);
+    }
+
+    /// Read the cached pid_phys without taking the VP.
+    ///
+    /// Returns 0 if the VP has no PID (dom0) or the slot was never populated.
+    /// Safe to call concurrently with `take()` / `put()` because pid_phys
+    /// is immutable after the first `put()`.
+    pub fn peek_pid_phys(&self) -> u64 {
+        self.pid_phys.load(Ordering::Relaxed)
     }
 
     /// Check if the VP is currently available (not taken by any core).
@@ -850,6 +870,15 @@ impl ThemisPlatform {
 
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
         unsafe { *self.lapic_ids.get() = ids; }
+    }
+
+    /// Physical LAPIC ID of the BSP (core 0).
+    /// Used as the remapped-IRTE destination for Report/NotReport vectors.
+    pub fn bsp_lapic_id(&self) -> u32 {
+        unsafe { &*self.lapic_ids.get() }
+            .first()
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn bootstrap_give_meta(&self, domain_id: DomainId, region: PhysRegion) {
