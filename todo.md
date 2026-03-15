@@ -246,16 +246,68 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 ### Phase 4 — VT-d IOMMU Initialization
 
-- [ ] **P4a**: Parse raw DMAR bytes: locate DRHD units (hardware units) + RMRR regions.
-- [ ] **P4b**: For each DRHD unit: allocate root table + context tables from `FrameAllocator`;
-  program root table address register; set passthrough mode (all DMA allowed) initially.
-- [ ] **P4c**: Enable VT-d translation: `iommu.enable_translation()` on all units.
-- [ ] **P4d**: RMRR handling: pre-map RMRR physical ranges as identity in the dom0 IOMMU domain
-  PT (these regions must remain accessible to legacy devices regardless of domain assignment).
-- [ ] **P4e**: `IommuManager::update_domain_pt(domain, hpa, size, rights)`:
-  walk DMA PT (same format as EPT), set/clear entries, call IOTLB invalidation.
-- [ ] **P4f**: `IommuManager::assign_device(pci_addr, domain)`:
-  reprogram context entry for device BDF → domain's DMA page table.
+**Page allocation strategy** (mirrors IRT approach from Phase 3):
+IOMMU table pages (root tables + context tables) come from the META pool — the same
+capavisor-private pool that holds VMXON/VMCS/VAPIC/IRT pages.  META pages are excluded
+from all EPT mappings so no guest can ever touch them.
+
+To get the *exact* count before `partition()` runs, we extend the early ACPI pre-pass
+(already done for DMAR in `platform()`) to also read the MCFG table (ACPI RAM, safe
+early).  MCFG gives us the ECAM bus ranges per PCI segment.  Combined with the DRHD
+count from DMAR we compute:
+
+  root_pages        = n_drhd_units                            (1 page per DRHD)
+  context_pages     = Σ (end_bus − start_bus + 1) per DRHD   (1 page per bus in segment)
+
+For QEMU q35 (1 DRHD, segment 0, buses 0–255): 1 + 256 = 257 pages ≈ 1 MiB.
+On real hardware with fewer buses the count is proportionally smaller.
+
+Scope rule: for the initial implementation we handle only `INCLUDE_PCI_ALL` DRHDs
+(covers all buses in the segment's ECAM range).  Scoped DRHDs are a future hardening item.
+
+Dom0 uses **passthrough translation type** (context entry bits[1:0] = `10b`) so no
+DMA page table is needed for dom0.  The IOMMU passes dom0 device DMA addresses straight
+through to physical.  DMA PTs are introduced in P4e/P4f for child-domain isolation.
+
+**RMRR note**: RMRR regions are reported by ACPI for legacy devices (USB, graphics)
+that DMA to fixed physical ranges.  With passthrough mode for dom0 these regions are
+implicitly covered — no extra mapping needed until we move to a real dom0 DMA PT in P4d.
+P4d is therefore deferred until we have child-domain DMA isolation (P4e).
+
+- [x] **P4a**: ✅ DONE (Phase 3).  DRHD units parsed from DMAR in `acpi.rs`; stored in
+  `AcpiInfo.drhd_units` and `ThemisPlatform.drhd_units`.
+
+- [ ] **P4b**: Early ACPI pre-pass: extend to also parse MCFG → collect
+  `EcamRegion { segment, start_bus, end_bus, base_phys }` into `AcpiInfo`.
+  Compute exact META reservation: `iommu_root_pages = n_drhd`,
+  `iommu_ctx_pages = Σ bus_count_per_drhd_segment`.  Add both fields to
+  `MetaBreakdown` in `inventory.rs` so `partition()` reserves them correctly.
+  In `init_themis()` for each DRHD:
+    - alloc 1 META page → root table (zero it)
+    - for each bus in segment: alloc 1 META page → context table (zero it)
+    - fill root table entry N → present, context table phys
+    - fill all 256 context entries per table → passthrough (`tt=10b`, `did=1` for dom0)
+    - write `RTADDR_REG = root_phys | 0` (legacy translation mode), issue `GCMD.SRTP`,
+      poll `GSTS.RTPS`
+  Store `root_phys` and `Vec<(bus, ctx_phys)>` back into `DhrdUnit` (or a new
+  `IommuUnit` struct in `platform.rs`).
+
+- [ ] **P4c**: Enable VT-d DMA translation per DRHD.
+  Sequence: `GCMD.TE = 1` → poll `GSTS.TES`.  WARN on timeout (same pattern as
+  intr-p3c).  Log "DMA translation enabled on DRHD 0x…".
+  After this point every PCIe DMA goes through the IOMMU; dom0 sees passthrough.
+
+- [ ] **P4d** ⏸ DEFERRED: RMRR identity mapping in dom0 DMA PT.  Not needed while
+  dom0 uses passthrough translation type.  Revisit when dom0 gets a real DMA PT.
+
+- [ ] **P4e**: `IommuManager::update_domain_pt(domain_id, gpa, size, rights)`:
+  walk/build a 4-level DMA PT (same structure as EPT, pages from META or a dedicated
+  IOMMU frame pool), set/clear leaf entries, issue IOTLB invalidation
+  (`IVA_REG` per-page or `GCMD` global invalidate).
+
+- [ ] **P4f**: `IommuManager::assign_device(bdf, domain_id)`:
+  look up context entry for (bus, dev, fn), point it at `domain_id`'s DMA PT,
+  update `did` field, flush context-cache and IOTLB.
 
 ### Phase 5 — APICv and Virtual APIC
 
