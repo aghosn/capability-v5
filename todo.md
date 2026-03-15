@@ -320,32 +320,36 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
 
 ### Phase 5 — APICv and Virtual APIC
 
-- [ ] **P5-ept-verify**: Replace `crates/ept/` vmxvmm port with the formally-verified
+- [ ] **P5-ept-verify**: DEFERRED — Replace `crates/ept/` vmxvmm port with the formally-verified
   EPT from `asterinas/hyperenclave` (ASPLOS'24, Rust MIR → Coq proofs, Apache-2.0).
   Steps: clone hyperenclave, locate `src/memory/ept.rs` (or equivalent), strip
   TEE/enclave policy, adapt to our `FrameAllocator` trait and local address types,
   run unit tests under `x86_64-unknown-linux-gnu`.  This restores the original P0c plan.
 
-- [ ] **P5a**: Per-VP allocation: VAPIC page (4 KB from `FrameAllocator`) and
+- [x] **P5a**: Per-VP allocation: VAPIC page (4 KB from `FrameAllocator`) and
   posted-interrupt descriptor (64 B, 64 B-aligned from `FrameAllocator`).
-  Note: once Phase 10 (META VP-state regions) is implemented, the PI descriptor is
-  colocated inside the `VpStateMeta` page, eliminating the separate allocation;
-  `VpHw.pi_desc_phys` becomes an offset into the META page.
-- [ ] **P5b**: APIC access page: one 4 KB page per domain at APIC MMIO address (0xFEE00000);
+  ✅ DONE: VAPIC in domain.rs, PID in VcpuSlot.pid_phys; both written to VMCS.
+- [x] **P5b**: APIC access page: one 4 KB page per domain at APIC MMIO address (0xFEE00000);
   used by `APIC_ACCESS_ADDR` VMCS field for xAPIC mode.
-- [ ] **P5c**: VMCS secondary execution controls (when `CpuFeatures::apicv`):
+  ✅ DONE (cdb85c0): per-domain apic_access_phys from META; VIRTUALIZE_APIC_ACCESSES
+  (bit 0) enabled for child VPs; EXIT_REASON_APIC_ACCESS (44) handler in vmexit.rs.
+- [x] **P5c**: VMCS secondary execution controls (when `CpuFeatures::apicv`):
   `VIRTUALIZE_X2APIC | APIC_REG_VIRT | VIRT_INTR_DELIVERY`.
   Pin-based controls: `PROCESS_POSTED_INTERRUPTS`.
   VMCS fields: `VIRTUAL_APIC_PAGE_ADDR`, `POSTED_INTR_DESC_ADDR`, `POSTED_INTR_NV`,
   `APIC_ACCESS_ADDR`, EOI-exit bitmap (zeroed initially).
-- [ ] **P5d**: `vapic::inject_virtual_interrupt(vapic_page, vector)`:
+  ✅ DONE: all bits set in vmcs.rs; VIRTUALIZE_X2APIC (bit 4) added in e6ebc30.
+- [x] **P5d**: `vapic::inject_virtual_interrupt(vapic_page, vector)`:
   set bit in VIRR (offset 0x200 + vector/8 in VAPIC page); update RVI (requesting
   virtual interrupt = highest VIRR bit that exceeds PPR).
-- [ ] **P5e**: `vapic::post_interrupt(pi_desc, vector)`:
+  ✅ DONE (26eecc2): `inject_virtual_interrupt` in vmexit.rs.
+- [x] **P5e**: `vapic::post_interrupt(pi_desc, vector)`:
   set `PIR[vector]` bit atomically; set `ON` (outstanding notification) bit;
   send posted-interrupt notification IPI (NV) to target LAPIC if domain VP is running.
-- [ ] **P5f**: Fallback path: if `!CpuFeatures::apicv`, disable all APICv VMCS bits;
+  ✅ DONE: `inject_via_pid` + `forward_interrupt_to_handler` in hypercall.rs.
+- [x] **P5f**: Fallback path: if `!CpuFeatures::apicv`, disable all APICv VMCS bits;
   emulate APIC register access via VMEXIT.
+  ✅ DONE: VMENTRY_INTERRUPTION_INFO_FIELD fallback in forward_interrupt_to_handler.
 
 ### Phase 6 — IRQ Router and Interrupt Policy
 
