@@ -302,14 +302,21 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
 - [ ] **P4d** ⏸ DEFERRED: RMRR identity mapping in dom0 DMA PT.  Not needed while
   dom0 uses passthrough translation type.  Revisit when dom0 gets a real DMA PT.
 
-- [ ] **P4e**: `IommuManager::update_domain_pt(domain_id, gpa, size, rights)`:
-  walk/build a 4-level DMA PT (same structure as EPT, pages from META or a dedicated
-  IOMMU frame pool), set/clear leaf entries, issue IOTLB invalidation
-  (`IVA_REG` per-page or `GCMD` global invalidate).
+- [x] **P4e**: ✅ DONE. IOMMU second-level page table (SLPT) per child domain.
+  Reuses `EptMapper` (VT-d SLPT format is bit-compatible with EPT: same R/W/X
+  bits, same phys addr layout).  Added `alloc_root_at_level(level)` + `root_phys()`
+  to EptMapper.  Added `aw: u64` to `DhrdUnit` (stored from CAP.SAGAW in P4b).
+  Added `iommu_pt: Option<EptMapper>` to `PlatformDomain` + `ensure_iommu_pt(level)`.
+  `ThemisPlatform::iommu_pt_level()` derives `Level::L3`/`L4` from min SAGAW AW.
+  `apply_update` mirrors EPT changes into SLPT: `ChangeRights(rights≠0)` maps,
+  `ChangeRights(rights=0)` unmaps, `RevokeDomain` frees the SLPT tree.
 
-- [ ] **P4f**: `IommuManager::assign_device(bdf, domain_id)`:
-  look up context entry for (bus, dev, fn), point it at `domain_id`'s DMA PT,
-  update `did` field, flush context-cache and IOTLB.
+- [x] **P4f**: ✅ DONE. Device assignment hypercalls.
+  `ThemisPlatform::assign_device(bdf, domain_id)`: looks up context table for bus,
+  writes TT=00/SLPTPTR context entry + flushes context-cache (device-selective) and
+  IOTLB (global).  `release_device(bdf)`: restores dom0 passthrough entry.
+  Added `THEMIS_ASSIGN_DEVICE` (0x12) + `THEMIS_RELEASE_DEVICE` (0x1a) hypercalls
+  in hypercall.rs.  dom0 passes domain_handle + BDF to assign; BDF alone to release.
 
 ### Phase 5 — APICv and Virtual APIC
 

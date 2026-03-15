@@ -97,6 +97,10 @@ pub mod opcodes {
     /// IN:  RDI = domain_handle, RSI = pci_bdf
     pub const THEMIS_ASSIGN_DEVICE:       u64 = 0x12;
 
+    /// Release a PCI device from its assigned domain, returning it to dom0 passthrough.
+    /// IN:  RDI = pci_bdf
+    pub const THEMIS_RELEASE_DEVICE:      u64 = 0x1a;
+
     /// Enumerate pending capabilities / domain tree.
     pub const THEMIS_ENUMERATE:           u64 = 0x13;
 

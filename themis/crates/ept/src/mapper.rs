@@ -122,6 +122,27 @@ impl EptMapper {
         Self::new(hhdm_offset, root)
     }
 
+    /// Allocate a fresh root at a specific `level` (L3 for 3-level / 39-bit,
+    /// L4 for 4-level / 48-bit).  Used by the VT-d SLPT which reuses this
+    /// mapper at the level dictated by the DRHD unit's CAP.SAGAW AW field.
+    pub fn alloc_root_at_level(
+        allocator: &mut impl FrameAllocator,
+        hhdm_offset: u64,
+        level: Level,
+    ) -> Self {
+        let root = allocator
+            .allocate_frame()
+            .expect("EptMapper::alloc_root_at_level: out of frames");
+        Self { hhdm_offset, root, level }
+    }
+
+    /// Return the raw root physical address.
+    ///
+    /// Used as the SLPTPTR in a VT-d context entry (bits[63:12] of ctx-entry low).
+    pub fn root_phys(&self) -> u64 {
+        self.root
+    }
+
     /// Return the EPT pointer (EPTP) value to write into `VMCS.EPT_POINTER`.
     ///
     /// Encodes: 4-level walk, WB memory type, accessed/dirty bits disabled.

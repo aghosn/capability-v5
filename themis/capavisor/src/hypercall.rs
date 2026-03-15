@@ -129,12 +129,16 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SET_DEF_INTR_POLICY =>
             Some(do_set_def_intr_policy(platform, &caller, arg0, arg1)),
 
+        opcodes::THEMIS_ASSIGN_DEVICE =>
+            Some(do_assign_device(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_RELEASE_DEVICE =>
+            Some(do_release_device(platform, arg0)),
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST
         | opcodes::THEMIS_GET_REG
         | opcodes::THEMIS_SET_REG
-        | opcodes::THEMIS_ASSIGN_DEVICE
         | opcodes::THEMIS_ENUMERATE
         | opcodes::THEMIS_REGISTER_DOORBELL
         | opcodes::THEMIS_REGISTER_EVENT_FLAGS
@@ -1562,3 +1566,45 @@ fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
         }
     }
 }
+
+// ── P4f: Device assignment hypercall handlers ────────────────────────────── //
+
+/// ASSIGN_DEVICE (0x12): assign a PCI device to a child domain's IOMMU context.
+///
+/// After this call the device's DMA is isolated to `domain_handle`'s SLPT;
+/// addresses the child maps via CARVE/ALIAS appear in the IOMMU page table.
+///
+/// IN:  RDI = domain_handle (u64)
+///      RSI = pci_bdf (u16 — bus[15:8] | device[7:3] | function[2:0])
+fn do_assign_device(
+    platform: &ThemisPlatform,
+    caller:   &CapabilityRef<Domain>,
+    domain_handle: u64,
+    bdf_arg:       u64,
+) -> HypercallResult {
+    let bdf = bdf_arg as u16;
+    // Resolve domain_handle → domain_id via the caller's capability tree.
+    let child_domain_id = {
+        let cap = caller.read();
+        let child_weak = cap.data.get_domain_capability(domain_handle);
+        match child_weak.and_then(|w| w.upgrade()) {
+            Some(child) => child.read().data.id,
+            None => return HypercallResult::error(errors::ERR_INVALID),
+        }
+    };
+    platform.assign_device(bdf, child_domain_id);
+    HypercallResult::success()
+}
+
+/// RELEASE_DEVICE (0x1a): return a PCI device to dom0 passthrough.
+///
+/// IN:  RDI = pci_bdf (u16)
+fn do_release_device(
+    platform: &ThemisPlatform,
+    bdf_arg:  u64,
+) -> HypercallResult {
+    let bdf = bdf_arg as u16;
+    platform.release_device(bdf);
+    HypercallResult::success()
+}
+

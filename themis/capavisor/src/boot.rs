@@ -1028,6 +1028,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
                 aw
             );
             platform.drhd_units[i].root_phys = root_phys;
+            platform.drhd_units[i].aw        = aw;
             platform.drhd_units[i].ctx_tables = ctx_tables;
         }
     }

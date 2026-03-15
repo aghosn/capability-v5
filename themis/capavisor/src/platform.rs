@@ -81,7 +81,7 @@ use capability_engine::{
 };
 
 use crate::serial_println;
-use ept::{EptEntryFlags, EptMapper, EptMemoryType};
+use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 
 use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
 
@@ -349,6 +349,10 @@ impl CoreContext {
 pub struct PlatformDomain {
     /// EPT root mapper, allocated lazily on first `ChangeRights` or `GiveMetaMem`.
     pub ept: Option<EptMapper>,
+    /// IOMMU second-level page table (SLPT), mirrors EPT for DMA isolation.
+    /// Allocated lazily on the first `ChangeRights` mapping for this domain.
+    /// Uses the same EptMapper type (VT-d SLPT format is bit-compatible with EPT).
+    pub iommu_pt: Option<EptMapper>,
     /// META page allocator — populated via `GiveMetaMem` updates.
     pub meta: MetaAllocator,
     /// Parent domain ID, stored for vital-memory revocation fallback.
@@ -405,6 +409,7 @@ impl PlatformDomain {
     fn new(hhdm_offset: u64, parent: Option<DomainId>) -> Self {
         PlatformDomain {
             ept: None,
+            iommu_pt: None,
             meta: MetaAllocator::new(hhdm_offset),
             parent,
             hhdm_offset,
@@ -689,6 +694,20 @@ impl PlatformDomain {
             self.ept = Some(EptMapper::alloc_root(&mut self.meta, self.hhdm_offset));
         }
     }
+
+    /// Ensure an IOMMU second-level page table (SLPT) root exists for this domain.
+    ///
+    /// `alloc` should be backed by the **root domain's** META pool so that child
+    /// domain META budgets are not consumed by hypervisor page-table pages.
+    fn ensure_iommu_pt(&mut self, level: Level, alloc: &mut impl ept::FrameAllocator) {
+        if self.iommu_pt.is_none() {
+            self.iommu_pt = Some(EptMapper::alloc_root_at_level(
+                alloc,
+                self.hhdm_offset,
+                level,
+            ));
+        }
+    }
 }
 
 // ── UC-aware EPT range mapping helper ─────────────────────────────────────── //
@@ -778,6 +797,33 @@ impl RoutingMaps {
 }
 
 // ── ThemisPlatform ────────────────────────────────────────────────────────── //
+
+/// Domain ID reserved for the root (dom0) domain.
+/// IOMMU page-table frames (SLPT root + intermediate pages) are allocated
+/// from this domain's META pool — not from child domains — so that child
+/// META budgets are not consumed by hypervisor-internal structures.
+pub const ROOT_DOMAIN_ID: DomainId = 0;
+
+/// A frame allocator that routes alloc/free to the **root domain**'s META pool.
+///
+/// Used by IOMMU SLPT operations in `apply_update` so that child domains'
+/// META budgets are not consumed by hypervisor page-table pages.
+struct RootMetaProxy<'a>(&'a ThemisPlatform);
+
+impl ept::FrameAllocator for RootMetaProxy<'_> {
+    fn allocate_frame(&mut self) -> Option<u64> {
+        let arc = self.0.domains.get(ROOT_DOMAIN_ID)?;
+        let mut d = arc.lock();
+        let phys = d.meta.alloc_frame();
+        Some(phys)
+    }
+
+    fn free_frame(&mut self, phys: u64) {
+        if let Some(arc) = self.0.domains.get(ROOT_DOMAIN_ID) {
+            arc.lock().meta.free_frame(phys);
+        }
+    }
+}
 
 /// The Themis `Platform` implementation.
 pub struct ThemisPlatform {
@@ -879,6 +925,123 @@ impl ThemisPlatform {
             .first()
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Return the `Level` to use for IOMMU second-level page tables.
+    ///
+    /// Derived from the minimum AW (adjusted guest-address width) across all
+    /// DRHD units: AW=1 → `Level::L3` (39-bit), AW=2 → `Level::L4` (48-bit).
+    /// Falls back to `Level::L3` if no DRHD units are present.
+    pub fn iommu_pt_level(&self) -> Level {
+        let min_aw = self.drhd_units.iter()
+            .filter(|u| u.aw > 0)
+            .map(|u| u.aw)
+            .min()
+            .unwrap_or(1);
+        if min_aw >= 2 { Level::L4 } else { Level::L3 }
+    }
+
+    /// Reprogram a PCI device's IOMMU context entry to use `domain_id`'s
+    /// second-level page table (SLPT), replacing the dom0 passthrough entry.
+    ///
+    /// `bdf` is the 16-bit source ID: `bus[15:8] | device[7:3] | function[2:0]`.
+    ///
+    /// # Panics
+    /// Panics if `domain_id` has no IOMMU PT yet (no memory has been mapped for
+    /// it), or if no DRHD unit covers the bus encoded in `bdf`.
+    pub fn assign_device(&self, bdf: u16, domain_id: DomainId) {
+        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+        let bus   = (bdf >> 8) as u8;
+        let devfn = (bdf & 0xFF) as usize;
+
+        let slptptr = self.domains
+            .get(domain_id)
+            .unwrap_or_else(|| panic!("assign_device: unknown domain {}", domain_id))
+            .lock()
+            .iommu_pt
+            .as_ref()
+            .unwrap_or_else(|| panic!("assign_device: domain {} has no IOMMU PT", domain_id))
+            .root_phys();
+
+        for unit in &self.drhd_units {
+            if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
+                let ctx_virt = (ctx_phys + hhdm) as *mut u64;
+                let entry    = unsafe { ctx_virt.add(devfn * 2) };
+                // Write high word first (DID, AW), then low word with P=1 last.
+                // TT=00 (multi-level second-level translation).
+                let ctx_hi = (domain_id << 8) | unit.aw;
+                let ctx_lo = slptptr | 0x1; // P=1, TT=00, SLPTPTR
+                unsafe {
+                    entry.add(1).write_volatile(ctx_hi);
+                    entry.write_volatile(ctx_lo);
+                }
+                self.flush_ctx_and_iotlb(unit, bdf, hhdm);
+                serial_println!(
+                    "  IOMMU: BDF {:#06x} assigned to domain {} (slptptr={:#x})",
+                    bdf, domain_id, slptptr
+                );
+                return;
+            }
+        }
+        panic!("assign_device: no DRHD covers bus {} for BDF {:#06x}", bus, bdf);
+    }
+
+    /// Restore the passthrough context entry for a PCI device, returning it to
+    /// dom0 (DID=1, TT=10b pass-through).  Called on child-domain revocation.
+    ///
+    /// No-ops silently if no DRHD covers the bus.
+    pub fn release_device(&self, bdf: u16) {
+        let hhdm  = self.hhdm_offset.load(Ordering::Relaxed);
+        let bus   = (bdf >> 8) as u8;
+        let devfn = (bdf & 0xFF) as usize;
+
+        for unit in &self.drhd_units {
+            if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
+                let ctx_virt = (ctx_phys + hhdm) as *mut u64;
+                let entry    = unsafe { ctx_virt.add(devfn * 2) };
+                // Restore dom0 passthrough: high=(DID=1<<8)|AW, low=0x9 (P=1, TT=10b).
+                let ctx_hi = (1u64 << 8) | unit.aw;
+                let ctx_lo = 0x9u64;
+                unsafe {
+                    entry.add(1).write_volatile(ctx_hi);
+                    entry.write_volatile(ctx_lo);
+                }
+                self.flush_ctx_and_iotlb(unit, bdf, hhdm);
+                serial_println!("  IOMMU: BDF {:#06x} released to dom0 passthrough", bdf);
+                return;
+            }
+        }
+    }
+
+    /// Flush context-cache (device-selective) and IOTLB (global) for a DRHD unit.
+    fn flush_ctx_and_iotlb(&self, unit: &crate::acpi::DhrdUnit, bdf: u16, hhdm: u64) {
+        const CCMD_OFFSET:  u64 = 0x28;
+        const ECAP_OFFSET:  u64 = 0x10;
+        const POLL_LIMIT: usize = 100_000;
+
+        let base = unit.register_base + hhdm;
+        let ccmd = (base + CCMD_OFFSET) as *mut u64;
+
+        // Context-cache invalidation: device-selective (CIRG=11b=bits[62:61]),
+        // SID=bdf in bits[47:32], ICC=bit[63].
+        let ccmd_val = (1u64 << 63)          // ICC
+            | (3u64 << 61)                   // CIRG = device-selective
+            | ((bdf as u64) << 32);          // SID
+        unsafe { ccmd.write_volatile(ccmd_val) };
+        for _ in 0..POLL_LIMIT {
+            core::hint::spin_loop();
+            if unsafe { ccmd.read_volatile() } & (1u64 << 63) == 0 { break; }
+        }
+
+        // IOTLB global invalidation.
+        let ecap = unsafe { ((base + ECAP_OFFSET) as *const u64).read_volatile() };
+        let iro  = ((ecap >> 8) & 0x3f) as u64;
+        let iotlb_reg = (base + iro * 16 + 8) as *mut u64;
+        unsafe { iotlb_reg.write_volatile((1u64 << 63) | (1u64 << 60)) };
+        for _ in 0..POLL_LIMIT {
+            core::hint::spin_loop();
+            if unsafe { iotlb_reg.read_volatile() } & (1u64 << 63) == 0 { break; }
+        }
     }
 
     pub fn bootstrap_give_meta(&self, domain_id: DomainId, region: PhysRegion) {
@@ -1228,16 +1391,21 @@ impl Platform for ThemisPlatform {
                     .lock()
                     .meta
                     .add_range(PhysRegion { base: *start, length: *size });
-                // TODO(P4): update IOMMU domain page table for this META region.
+                // META pages are hypervisor-internal (EPT tables, VMCS) and are
+                // not DMA targets — no IOMMU PT mapping needed here.
             }
 
             Update::ChangeRights { domain, address, size, physical, rights, .. } => {
                 let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
+                let iommu_level = self.iommu_pt_level();
+                // Only child domains (domain != ROOT_DOMAIN_ID) get a SLPT.
+                // dom0 uses passthrough context entries and needs no IOMMU PT.
+                let is_child = *domain != ROOT_DOMAIN_ID;
                 let arc = self.domains
                     .get(*domain)
                     .expect("ChangeRights: unknown domain");
                 let mut d = arc.lock();
-                // Split the MutexGuard borrow into disjoint field pointers so the
+                // Split the MutexGuard borrow into a disjoint field pointer so the
                 // borrow checker accepts simultaneous &mut ept and &mut meta.
                 let meta_ptr: *mut MetaAllocator = &mut d.meta;
 
@@ -1246,18 +1414,33 @@ impl Platform for ThemisPlatform {
                         // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
                         ept.unmap_range(unsafe { &mut *meta_ptr }, *address, *size as usize);
                     }
-                    // TODO(P4): remove mapping from IOMMU domain page table.
+                    if is_child {
+                        if let Some(slpt) = d.iommu_pt.as_mut() {
+                            // SLPT pages are owned by root's META; use RootMetaProxy.
+                            slpt.unmap_range(&mut RootMetaProxy(self), *address, *size as usize);
+                        }
+                    }
                 } else {
                     d.ensure_ept();
+                    if is_child {
+                        // SAFETY: child domain lock held; root domain lock acquired
+                        // inside RootMetaProxy. update_lock serialises all apply_update
+                        // calls so no other thread can hold the root domain lock here.
+                        d.ensure_iommu_pt(iommu_level, &mut RootMetaProxy(self));
+                    }
                     let flags = rights_to_ept_flags(rights);
-                    let ept   = d.ept.as_mut().unwrap();
-                    map_range_typed(
-                        // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
-                        ept, unsafe { &mut *meta_ptr },
-                        *address, *physical, *size as usize,
-                        flags, &uc_ranges,
-                    );
-                    // TODO(P4): update IOMMU domain page table with same mapping.
+                    // SAFETY: ept and meta are disjoint fields of PlatformDomain.
+                    let ept = d.ept.as_mut().unwrap();
+                    map_range_typed(ept, unsafe { &mut *meta_ptr },
+                        *address, *physical, *size as usize, flags, &uc_ranges);
+                    if is_child {
+                        if let Some(slpt) = d.iommu_pt.as_mut() {
+                            // VT-d SLPT: same GPA→HPA mapping; no memory-type bits needed.
+                            slpt.map_range(&mut RootMetaProxy(self),
+                                *address, *physical, *size as usize,
+                                flags, ept::EptMemoryType::WB);
+                        }
+                    }
                 }
             }
 
@@ -1266,7 +1449,10 @@ impl Platform for ThemisPlatform {
                     if let Some(ept) = d.ept.take() {
                         ept.free_all(&mut d.meta);
                     }
-                    // TODO(P4): free IOMMU domain page table.
+                    if let Some(slpt) = d.iommu_pt.take() {
+                        // SLPT pages were allocated from root's META; return them there.
+                        slpt.free_all(&mut RootMetaProxy(self));
+                    }
                 }
             }
 

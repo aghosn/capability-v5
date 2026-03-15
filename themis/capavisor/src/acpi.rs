@@ -222,6 +222,9 @@ pub struct DhrdUnit {
     /// Physical address of the 4 KiB root table page for DMA remapping (P4b).
     /// Zero until `init_themis` allocates it from the META pool.
     pub root_phys: u64,
+    /// Adjusted guest-address width for second-level page tables (from CAP.SAGAW).
+    /// 1 = 39-bit / 3-level; 2 = 48-bit / 4-level.  Set by P4b init.
+    pub aw: u64,
     /// Context table pages keyed by bus number: `(bus, ctx_page_phys)`.
     /// Populated in `init_themis` for every bus in this unit's PCI segment.
     pub ctx_tables: Vec<(u8, u64)>,
@@ -468,6 +471,7 @@ fn parse_dmar<H: acpi::Handler + Clone>(
                     ir_supported: false,
                     irt_phys: 0,
                     root_phys: 0,
+                    aw: 0,
                     ctx_tables: Vec::new(),
                 });
             }
