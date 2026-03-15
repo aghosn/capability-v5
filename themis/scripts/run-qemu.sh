@@ -82,8 +82,8 @@ fi
 
 exec qemu-system-x86_64 \
     $KVM_ARGS \
-    -machine q35 \
-    -device intel-iommu \
+    -machine q35,kernel-irqchip=split \
+    -device intel-iommu,intremap=on \
     ${FIRMWARE_ARGS} \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
