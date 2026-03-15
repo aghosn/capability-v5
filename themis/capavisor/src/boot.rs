@@ -745,21 +745,39 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     // One 4 KiB page per IR-capable DRHD unit, allocated from the META pool.
     // Pages are machine-global hardware tables written by the IOMMU; they are
     // never visible to any domain (absent from EPT like all META pages).
-    // IRTA_REG is written here; GCMD.IRE is set later in intr-p3c.
+    //
+    // We must map each DRHD's MMIO region before accessing its registers:
+    // Limine only HHDM-maps usable RAM; IOMMU MMIO holes need explicit mapping.
+    // IRTA_REG is written here; GCMD.SIRTP/IRE are issued in intr-p3c.
     if info.acpi.has_dmar {
         // VT-d spec §10.4.28: IRTA_REG layout
         //   bits[63:12]  IRT physical base (4 KiB-aligned)
-        //   bits[11]     Extended Interrupt Mode (X2APIC); set 0 for now
+        //   bits[11]     Extended Interrupt Mode (X2APIC); 0 for now
         //   bits[3:0]    Size = log2(entries) - 1; 0 = 256 entries (minimum)
         const IRTA_REG_OFFSET: usize = 0xB8;
-        const IRTA_SIZE_256:   u64   = 0; // size encoding: 2^(0+1)*128 = 256 entries
+        const IRTA_SIZE_256:   u64   = 0;
+        // CAP register (offset 0x08): bit 16 = IR capable.
+        const CAP_OFFSET:  usize = 0x08;
+        const CAP_IR_BIT:  u64   = 1 << 16;
+        // ECAP register (offset 0x10): bit 3 = IR.
+        const ECAP_OFFSET: usize = 0x10;
+        const ECAP_IR_BIT: u64   = 1 << 3;
 
         let mut units = info.acpi.drhd_units.clone();
         for unit in units.iter_mut() {
+            // Map the DRHD MMIO register page before any register access.
+            crate::mem::map_phys_range(unit.register_base, 0x1000, info.hhdm_offset);
+
+            // Read CAP/ECAP now that the page is mapped.
+            let reg_virt = (unit.register_base + info.hhdm_offset) as *const u64;
+            let cap  = unsafe { reg_virt.add(CAP_OFFSET  / 8).read_volatile() };
+            let ecap = unsafe { reg_virt.add(ECAP_OFFSET / 8).read_volatile() };
+            unit.ir_supported = (cap & CAP_IR_BIT != 0) || (ecap & ECAP_IR_BIT != 0);
+
             if !unit.ir_supported {
                 serial_println!(
-                    "  DRHD seg={} base={:#x}: IR not supported — skipping IRT alloc",
-                    unit.segment, unit.register_base,
+                    "  DRHD seg={} base={:#x}: IR not supported (cap={:#x} ecap={:#x}) — skipping",
+                    unit.segment, unit.register_base, cap, ecap,
                 );
                 continue;
             }
@@ -773,8 +791,8 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             unsafe { core::ptr::write_volatile(irta_virt, irt_phys | IRTA_SIZE_256) };
 
             serial_println!(
-                "  DRHD seg={} base={:#x}: IRT @ {:#x} (256 IRTEs, IRTA written)",
-                unit.segment, unit.register_base, irt_phys,
+                "  DRHD seg={} base={:#x}: cap={:#x} ecap={:#x} IRT @ {:#x} IRTA_REG written",
+                unit.segment, unit.register_base, cap, ecap, irt_phys,
             );
         }
         platform.drhd_units = units;

@@ -331,13 +331,6 @@ fn parse_dmar<H: acpi::Handler + Clone>(
     const DMAR_HEADER_SIZE: usize = 48; // 36 (SDT) + 2 (HAW) + 1 (flags) + 9 (rsvd)
     const DRHD_TYPE: u16 = 0;
 
-    // CAP register (offset 0x08 from DRHD reg base): bit 16 = IR capable.
-    const CAP_OFFSET:  usize = 0x08;
-    const CAP_IR_BIT:  u64   = 1 << 16;
-    // ECAP register (offset 0x10): bit 3 = IR, bit 4 = EIM.
-    const ECAP_OFFSET: usize = 0x10;
-    const ECAP_IR_BIT: u64   = 1 << 3;
-
     // Find the DMAR table physical address via the SDT header scan.
     let dmar_phys = tables
         .table_headers()
@@ -379,22 +372,25 @@ fn parse_dmar<H: acpi::Handler + Clone>(
             if entry_len < 16 {
                 serial_println!("ACPI DMAR: DRHD entry too short ({}) at offset {}", entry_len, offset);
             } else {
-                let drhd_flags   = unsafe { entry_ptr.add(4).read() };
-                let segment      = unsafe { (entry_ptr.add(6) as *const u16).read_unaligned() };
+                let drhd_flags    = unsafe { entry_ptr.add(4).read() };
+                let segment       = unsafe { (entry_ptr.add(6) as *const u16).read_unaligned() };
                 let register_base = unsafe { (entry_ptr.add(8) as *const u64).read_unaligned() };
 
-                // Read CAP and ECAP via HHDM.
-                let reg_virt = (register_base + hhdm_offset) as *const u64;
-                let cap  = unsafe { reg_virt.add(CAP_OFFSET  / 8).read_volatile() };
-                let ecap = unsafe { reg_virt.add(ECAP_OFFSET / 8).read_volatile() };
-                let ir_supported = (cap & CAP_IR_BIT != 0) || (ecap & ECAP_IR_BIT != 0);
-
+                // CAP/ECAP reads deferred to init_themis() after the MMIO region
+                // is explicitly mapped.  Mark ir_supported=false here; init_themis
+                // will update it once it can safely access the registers.
                 serial_println!(
-                    "ACPI DMAR: DRHD seg={} base={:#x} flags={:#x} cap={:#x} ecap={:#x} ir={}",
-                    segment, register_base, drhd_flags, cap, ecap, ir_supported,
+                    "ACPI DMAR: DRHD seg={} base={:#x} flags={:#x} (IR check deferred)",
+                    segment, register_base, drhd_flags,
                 );
 
-                units.push(DhrdUnit { register_base, segment, flags: drhd_flags, ir_supported, irt_phys: 0 });
+                units.push(DhrdUnit {
+                    register_base,
+                    segment,
+                    flags: drhd_flags,
+                    ir_supported: false,
+                    irt_phys: 0,
+                });
             }
         }
 
