@@ -188,6 +188,7 @@ unsafe fn write_control_fields(
         | (1 << 7) // UNRESTRICTED_GUEST
         | (1 << 8) // APIC_REGISTER_VIRT
         | (if child { 1 << 9 } else { 0 }) // VIRTUAL_INTERRUPT_DELIVERY (VID) — requires EXTERNAL_INTERRUPT_EXITING
+        | (if child { 1 << 4 } else { 0 }) // VIRTUALIZE_X2APIC — x2APIC MSR reads (0x800-0x8FF) → VAPIC page; requires APIC_REGISTER_VIRT=1
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
