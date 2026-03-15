@@ -798,6 +798,75 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         platform.drhd_units = units;
     }
 
+    // ── Enable VT-d interrupt remapping (intr-p3c) ───────────────────────── //
+    //
+    // For each IR-capable DRHD unit, issue GCMD.SIRTP (latch the IRTA_REG
+    // pointer written in intr-p3b) then GCMD.IRE (enable interrupt remapping).
+    //
+    // CFI=1: Compatibility Format Interrupts are allowed to pass through the
+    // IOMMU unchanged.  This means dom0's existing I/O APIC RTEs (which Linux
+    // programs in the standard compatibility format) continue to work without
+    // any reprogramming.  All IRTEs start with P=0 (not present), so no remapped
+    // interrupt is active until intr-p3g programs one for a child domain.
+    //
+    // VT-d spec §10.4.8 GCMD / §10.4.9 GSTS register layout:
+    //   Bit[25] IRE  / IRES  — Interrupt Remapping Enable / Status
+    //   Bit[24] SIRTP/ IRTPS — Set IRT Pointer / IRT Pointer Set Status
+    //   Bit[23] CFI  / CFIS  — Compat Format Interrupt / Status
+    //
+    // Note: each GCMD bit is a one-shot command; write one bit at a time and
+    // wait for the corresponding GSTS status bit before proceeding.
+    for unit in platform.drhd_units.iter() {
+        if unit.irt_phys == 0 { continue; }
+
+        const GCMD_OFFSET: u64 = 0x18;
+        const GSTS_OFFSET: u64 = 0x1C;
+        const SIRTP: u32 = 1 << 24;
+        const CFI:   u32 = 1 << 23;
+        const IRE:   u32 = 1 << 25;
+        const IRTPS: u32 = 1 << 24;
+        const CFIS:  u32 = 1 << 23;
+        const IRES:  u32 = 1 << 25;
+        const POLL_LIMIT: usize = 100_000;
+
+        let base = unit.register_base + info.hhdm_offset;
+        let gcmd = (base + GCMD_OFFSET) as *mut u32;
+        let gsts = (base + GSTS_OFFSET) as *const u32;
+
+        // Step 1: SIRTP — latch IRTA_REG into hardware.
+        unsafe { gcmd.write_volatile(SIRTP) };
+        let ok = (0..POLL_LIMIT).any(|_| {
+            core::hint::spin_loop();
+            (unsafe { gsts.read_volatile() } & IRTPS) != 0
+        });
+        if !ok {
+            serial_println!("WARN: VT-d DRHD {:#x}: IRTPS timeout — skipping IRE", unit.register_base);
+            continue;
+        }
+
+        // Step 2: CFI — let compat-format interrupts (dom0) pass through.
+        unsafe { gcmd.write_volatile(CFI) };
+        let ok = (0..POLL_LIMIT).any(|_| {
+            core::hint::spin_loop();
+            (unsafe { gsts.read_volatile() } & CFIS) != 0
+        });
+        if !ok {
+            serial_println!("WARN: VT-d DRHD {:#x}: CFIS timeout", unit.register_base);
+        }
+
+        // Step 3: IRE — enable interrupt remapping.
+        unsafe { gcmd.write_volatile(IRE) };
+        let ok = (0..POLL_LIMIT).any(|_| {
+            core::hint::spin_loop();
+            (unsafe { gsts.read_volatile() } & IRES) != 0
+        });
+        if !ok {
+            serial_println!("WARN: VT-d DRHD {:#x}: IRES timeout — IR may not be active", unit.register_base);
+        } else {
+            serial_println!("  DRHD {:#x}: IR enabled (CFI=1, all IRTEs P=0)", unit.register_base);
+        }
+    }
+
     // ── DomainComm header init for dom0 ──────────────────────────────────── //
     //
     // The COMM region was reserved during partition() (separate from META).

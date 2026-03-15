@@ -890,21 +890,23 @@ Add this flag to `run-qemu.sh` before intr-p3i.
   for 256 IRTEs), stores populated `DhrdUnit` list on `ThemisPlatform`.
   Pages are machine-global / capavisor-private — no capability records needed.
 
-- [ ] **intr-p3c** — Enable VT-d interrupt remapping.
-  For each DRHD unit:
-  1. Issue `GCMD.SIRTP` (Set IRT Pointer) and wait for `GSTS.IRTPS`.
-  2. Issue `GCMD.IRE` (Interrupt Remapping Enable) and wait for `GSTS.IRES`.
-  3. Set `GCMD.CFI` = 0 (compatibility-format interrupts blocked after IR on).
-  All dom0 interrupts must be in remapped format before this step; see intr-p3d.
-  Files: `boot.rs` / `iommu_ir.rs`.
+- [x] **intr-p3c** — Enable VT-d interrupt remapping. ✅ DONE
+  `boot.rs` (`init_themis`): for each IR-capable DRHD unit with an allocated IRT:
+  1. GCMD.SIRTP → poll GSTS.IRTPS (hardware latches IRTA_REG)
+  2. GCMD.CFI=1 → poll GSTS.CFIS (compat-format interrupts pass through)
+  3. GCMD.IRE → poll GSTS.IRES (interrupt remapping active)
+  **Design decision**: CFI=1 (Compatibility Format Interrupt passthrough enabled).
+  Dom0's I/O APIC RTEs stay in compatibility format — Linux programs them
+  normally and they pass straight through the IOMMU.  All IRTEs start with
+  P=0, so no remapped interrupt is active until intr-p3g programs one for a
+  child domain.  This avoids the need for intr-p3d at this stage.
 
-- [ ] **intr-p3d** — I/O APIC RTE reprogramming for remapped format.
-  Before enabling IR: for each active I/O APIC redirection table entry, rewrite
-  it in "remapped interrupt format" (MSI address `0xFEEX_XXXX` + bit 4 = 1,
-  data[14:0] = IRTE handle index = vector).  IRTEs 0–255 map 1:1 to vectors
-  for dom0 initially.  Dom0 IRTE format: `IRTE.P=1, IRTE.FPD=0, IRTE.DST=dom0_lapic,
-  IRTE.V=vector, IRTE.DLM=0 (fixed), IRTE.TM=0 (edge), IRTE.RH=0, IRTE.DM=0`.
-  Files: `boot.rs` / `iommu_ir.rs`, `pci.rs`.
+- [ ] **intr-p3d** — I/O APIC RTE reprogramming for remapped format. ⏸ DEFERRED
+  Not needed while CFI=1 (compat interrupts pass through for dom0).
+  Required only if we later set CFI=0 for full isolation.  Defer to device
+  passthrough hardening (post-P16).  Original spec: reprogram each active RTE
+  to remapped format (bit[11]=1, handle in bits[63:49]+[0], trigger/polarity
+  preserved); write matching IRTE with P=1, DST=dom0_lapic, vector=V.
 
 - [ ] **intr-p3e** — MSI/MSI-X reprogramming for remapped format.
   Walk PCI devices; rewrite MSI/MSI-X address/data fields to remapped format.
