@@ -926,7 +926,7 @@ Add this flag to `run-qemu.sh` before intr-p3i.
     Note: real hardware needs IEC invalidation queue — deferred.
   All writes follow the VT-d 3-step update protocol (P=0 → high → low+P).
 
-- [ ] **intr-p3g** — Hook into `VMCALL_SEAL` / `SET_INTR_POLICY`.
+- [x] **intr-p3g** — Hook into `VMCALL_SEAL` / `SET_INTR_POLICY`.
   When a child domain VP is sealed with `Deliver` vectors:
     - call `irte_program_posted(index=vector, pid_phys=vp.pid_phys, ndst=0)`
       (NDST filled in at first `activate()`; IPI not needed if VP is not yet
