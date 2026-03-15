@@ -937,7 +937,7 @@ Add this flag to `run-qemu.sh` before intr-p3i.
   On `VMCALL_REVOKE_DOMAIN`: `irte_program_remapped` all child's vectors back
   to dom0.  Files: `hypercall.rs`, `iommu_ir.rs`.
 
-- [ ] **intr-p3h** — QEMU validation.
+- [x] **intr-p3h** — QEMU validation.
   Add `-device intel-iommu,intremap=on` to `scripts/run-qemu.sh`.
   Run `test_intr_loop` and verify: (1) boot succeeds, (2) no EPT violations
   during CARVE/SEND, (3) child domain still receives interrupts correctly,
