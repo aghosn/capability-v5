@@ -33,6 +33,7 @@ mod domain;
 mod gdt;
 mod guest;
 mod hypercall;
+mod iommu_ir;
 mod mem;
 mod msr_virt;
 mod pci;

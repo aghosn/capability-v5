@@ -914,16 +914,17 @@ Add this flag to `run-qemu.sh` before intr-p3i.
   (P16e) if no devices are currently assigned to children.
   Files: `pci.rs`, `boot.rs`.
 
-- [ ] **intr-p3f** — IRTE management API.
-  Implement in `iommu_ir.rs`:
+- [x] **intr-p3f** — IRTE management API. ✅ DONE
+  New file `iommu_ir.rs`:
   - `irte_program_remapped(irt_phys, hhdm, index, lapic_id, vector)`:
-    write a standard "remapped" IRTE (fixed delivery, target LAPIC, given vector).
+    remapped IRTE — fixed delivery, edge trigger, physical dest mode.
   - `irte_program_posted(irt_phys, hhdm, index, pid_phys, ndst)`:
-    write a "posted interrupt" IRTE: `IRTE.PM=1`, `IRTE.PDA=pid_phys>>6`,
-    `IRTE.NDST=ndst`.  Hardware posts the interrupt directly to the VP's PID
-    with no VMEXIT.
-  - `irte_invalidate(irt_phys, hhdm, index)`: clear Present bit + issue
-    IOTLB/IR invalidation (write `IIR` register).
+    posted IRTE — IM=1, NV=0xF2, NDST=lapic_id, PDA=pid_phys>>6.
+  - `irte_update_ndst(irt_phys, hhdm, index, ndst)`: patch NDST in-place
+    when VP migrates to a different core.
+  - `irte_invalidate(irt_phys, hhdm, index)`: zero both words (P=0).
+    Note: real hardware needs IEC invalidation queue — deferred.
+  All writes follow the VT-d 3-step update protocol (P=0 → high → low+P).
 
 - [ ] **intr-p3g** — Hook into `VMCALL_SEAL` / `SET_INTR_POLICY`.
   When a child domain VP is sealed with `Deliver` vectors:
