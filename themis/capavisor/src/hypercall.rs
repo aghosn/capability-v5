@@ -418,14 +418,15 @@ fn do_add_vp(
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };
 
-    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, first_vp);
+    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys, first_vp);
     {
         let mut pd = arc.lock();
-        // Check if this is the first VP (need extra page for MSR bitmap).
+        // Check if this is the first VP (need extra pages for MSR bitmap + APIC access page).
         first_vp = pd.msr_bitmap_phys == 0;
-        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap if first VP).
-        // See optimization note above for reducing this from 3 to 2 pages.
-        let pages_needed = if first_vp { 4 } else { 3 };
+        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + APIC access page if first VP).
+        // Note: THHV_META_PAGES_SHARED (3) + THHV_META_PAGES_PER_VP (3) = 6 total,
+        // which comfortably covers the 5 pages needed on the first VP.
+        let pages_needed = if first_vp { 5 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -438,8 +439,10 @@ fn do_add_vp(
         pid_phys = pd.meta.alloc_frame();
         if first_vp {
             pd.msr_bitmap_phys = pd.meta.alloc_frame();
+            pd.apic_access_phys = pd.meta.alloc_frame();
         }
         msr_bitmap_phys = pd.msr_bitmap_phys;
+        apic_access_phys = pd.apic_access_phys;
     }
 
     // Zero the PID (64 bytes at offset 0 of the PID page; must be clean before VMENTRY).
@@ -466,6 +469,8 @@ fn do_add_vp(
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
                 pd.msr_bitmap_phys = 0;
+                pd.meta.free_frame(apic_access_phys);
+                pd.apic_access_phys = 0;
             }
             serial_println!("[ADD_VP] capa engine error, META rolled back");
             HypercallResult::error(map_error(&e))
@@ -491,6 +496,8 @@ fn do_add_vp(
                     if first_vp {
                         pd.meta.free_frame(msr_bitmap_phys);
                         pd.msr_bitmap_phys = 0;
+                        pd.meta.free_frame(apic_access_phys);
+                        pd.apic_access_phys = 0;
                     }
                     return HypercallResult::error(errors::ERR_INVALID);
                 }
@@ -507,6 +514,7 @@ fn do_add_vp(
                     vapic_phys,
                     msr_bitmap_phys,
                     pid_phys,
+                    apic_access_phys,
                     eptp,
                     vpid,
                 );

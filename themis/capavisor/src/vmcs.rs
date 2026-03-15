@@ -92,7 +92,8 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmclear(vmcs_phys).expect("vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, vp_index, false);
+    // dom0 keeps its xAPIC MMIO EPT passthrough — no APIC access page.
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, vp_index, false);
     write_host_state();
     write_guest_state();
 
@@ -116,19 +117,20 @@ pub unsafe fn setup_child_vmcs(
     vapic_phys: u64,
     msr_bitmap_phys: u64,
     pid_phys: u64,
+    apic_access_phys: u64,
     eptp: u64,
     vpid: u16,
 ) {
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, vpid as usize, true);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, vpid as usize, true);
     write_host_state();
     write_guest_state();
 
     serial_println!(
-        "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} EPTP={:#x} VPID={}",
-        vmcs_phys, vapic_phys, pid_phys, eptp, vpid,
+        "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} APIC_ACC={:#x} EPTP={:#x} VPID={}",
+        vmcs_phys, vapic_phys, pid_phys, apic_access_phys, eptp, vpid,
     );
 }
 
@@ -139,6 +141,7 @@ unsafe fn write_control_fields(
     vapic_phys: u64,
     msr_bitmap_phys: u64,
     pid_phys: u64,
+    apic_access_phys: u64,
     vp_index: usize,
     child: bool,
 ) {
@@ -189,6 +192,7 @@ unsafe fn write_control_fields(
         | (1 << 8) // APIC_REGISTER_VIRT
         | (if child { 1 << 9 } else { 0 }) // VIRTUAL_INTERRUPT_DELIVERY (VID) — requires EXTERNAL_INTERRUPT_EXITING
         | (if child { 1 << 4 } else { 0 }) // VIRTUALIZE_X2APIC — x2APIC MSR reads (0x800-0x8FF) → VAPIC page; requires APIC_REGISTER_VIRT=1
+        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO → EXIT_REASON_APIC_ACCESS (44)
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
@@ -277,6 +281,16 @@ unsafe fn write_control_fields(
     // ── VAPIC page ────────────────────────────────────────────────────── //
     vmx::vmwrite(control::VIRT_APIC_ADDR_FULL as u32, vapic_phys)
         .expect("vmwrite VAPIC addr");
+
+    // ── APIC access page (child VPs only) ─────────────────────────────── //
+    // When VIRTUALIZE_APIC_ACCESSES (bit 0) is set in secondary controls,
+    // xAPIC MMIO accesses by the guest to this physical page cause
+    // EXIT_REASON_APIC_ACCESS (44) instead of an EPT violation.
+    // dom0 uses EPT passthrough of 0xFEE00000 and has apic_access_phys=0.
+    if apic_access_phys != 0 {
+        vmx::vmwrite(control::APIC_ACCESS_ADDR_FULL as u32, apic_access_phys)
+            .expect("vmwrite APIC access addr");
+    }
 
     // ── TPR threshold ─────────────────────────────────────────────────── //
     // Required when USE_TPR_SHADOW=1.  0 = no TPR-threshold VM exits.

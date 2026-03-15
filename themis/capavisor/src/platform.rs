@@ -370,6 +370,13 @@ pub struct PlatformDomain {
     /// Allocated from META pool at seal time; 0 until then.
     pub msr_bitmap_phys: u64,
 
+    /// Physical address of the APIC access page (one per domain, 4 KB).
+    /// Used with VIRTUALIZE_APIC_ACCESSES (secondary proc-based bit 0) for
+    /// child VPs — xAPIC MMIO accesses to 0xFEE00000 fault to this page
+    /// instead of an EPT violation.  Allocated from META on first ADD_VP.
+    /// 0 until then.
+    pub apic_access_phys: u64,
+
     /// DomainComm region: per-domain message ring with the capavisor.
     /// `None` until `init_domcomm()` allocates it.
     pub domcomm: Option<DomainCommState>,
@@ -416,6 +423,7 @@ impl PlatformDomain {
             vps: Vec::new(),
             comm_hpas: Vec::new(),
             msr_bitmap_phys: 0,
+            apic_access_phys: 0,
             domcomm: None,
         }
     }

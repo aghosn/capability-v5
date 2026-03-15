@@ -102,6 +102,9 @@ pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
 pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
 pub const EXIT_REASON_VMX_PREEMPTION_TIMER: u32 = 52;
 pub const EXIT_REASON_XSETBV: u32 = 55;
+/// APIC-access VM exit (SDM Vol 3C §29.4): guest accessed the APIC-access
+/// page while VIRTUALIZE_APIC_ACCESSES (secondary bit 0) was set.
+pub const EXIT_REASON_APIC_ACCESS: u32 = 44;
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
@@ -638,8 +641,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS);
         }
 
-        other => {
-            serial_println!("[VMEXIT] unhandled exit reason {} — halting", other);
+        EXIT_REASON_APIC_ACCESS => {
+            handle_apic_access_exit(vcpu);
+        }
+
+        _other => {
             halt_forever();
         }
     }
@@ -648,6 +654,58 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
+
+/// Handle an APIC-access VM exit (exit reason 44).
+///
+/// Triggered when the guest accesses the APIC-access page (GPA 0xFEE00000)
+/// while VIRTUALIZE_APIC_ACCESSES is set.  With APIC_REGISTER_VIRT=1 and
+/// VID=1, most register reads and EOI/TPR writes are handled by hardware
+/// without an exit.  This handler sees the remaining accesses (e.g. ICR
+/// writes for IPI delivery, non-standard register accesses).
+///
+/// Current policy: emulate read accesses from the VAPIC page; log and
+/// advance RIP for write accesses.  ICR-based IPI emulation can be added
+/// here when multi-VP child domains are needed.
+///
+/// Exit qualification bit layout (SDM Vol 3C §27.2.1 Table 27-6):
+///   bits[11:0] — access offset within the 4 KB APIC-access page
+///   bits[15:12] — access type: 0=data-read, 1=data-write, 2=instr-fetch,
+///                              3=read-during-event-delivery, 10=GPA-read
+fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
+    let qual    = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+    let offset  = (qual & 0xFFF) as usize;   // byte offset within APIC page
+    let acc_type = (qual >> 12) & 0xF;
+
+    let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
+    if platform_ptr.is_null() { next_instruction(vcpu); return; }
+    let hhdm = unsafe { (*platform_ptr).hhdm_offset() };
+
+    let vapic_phys = vcpu.vapic_phys();
+    let vapic_virt = (vapic_phys + hhdm) as *mut u32;
+
+    match acc_type {
+        0 | 3 => {
+            // Data read or read during event delivery: return VAPIC page value.
+            // APIC registers are 32-bit aligned; offset / 4 gives the word index.
+            let word_idx = offset / 4;
+            let val = unsafe { vapic_virt.add(word_idx).read_volatile() };
+            vcpu.set_reg(Reg::Rax, val as u64);
+        }
+        1 => {
+            // Data write: mirror into VAPIC page.
+            let word_idx = offset / 4;
+            let val = vcpu.reg(Reg::Rax) as u32;
+            unsafe { vapic_virt.add(word_idx).write_volatile(val) };
+        }
+        _ => {
+            serial_println!(
+                "[APIC_ACCESS] unhandled access type {} offset={:#x} — advancing RIP",
+                acc_type, offset
+            );
+        }
+    }
+    next_instruction(vcpu);
+}
 
 /// Inject a virtual interrupt directly via the VAPIC page (VID path).
 ///
