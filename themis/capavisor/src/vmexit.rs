@@ -649,6 +649,35 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
 
+/// Inject a virtual interrupt directly via the VAPIC page (VID path).
+///
+/// Sets VIRR[`vector`] in the VAPIC page (offset 0x200, same layout as xAPIC
+/// IRR) and updates RVI in the guest interrupt-status VMCS field so the
+/// processor delivers the interrupt on the next VMENTRY without an IPI.
+///
+/// # Safety
+/// `vapic_virt` must be the host-virtual address of the 4 KB VAPIC page whose
+/// physical address was written to VMCS `VIRTUAL_APIC_PAGE_ADDR`.  The VMCS
+/// for `vcpu` must be current (VMPTRLD'd) when this function is called.
+/// Caller must hold the VP lock.
+pub unsafe fn inject_virtual_interrupt(vapic_virt: *mut u32, vector: u8, vcpu: &mut ActiveVcpu) {
+    // VAPIC VIRR layout mirrors xAPIC IRR: 8 × 32-bit words starting at 0x200.
+    // Byte offset for this vector:  0x200 + (vector / 32) * 4
+    // Bit position within the word: vector % 32
+    let word_idx = (vector / 32) as usize;         // 0..7
+    let bit = vector % 32;
+    let virr_ptr = unsafe { vapic_virt.add(0x200 / 4 + word_idx) };
+    unsafe { virr_ptr.write_volatile(virr_ptr.read_volatile() | (1u32 << bit)) };
+
+    // Update RVI (bits[7:0] of guest interrupt-status) if this vector is higher.
+    let status = vcpu.get(vmcs::guest::INTERRUPT_STATUS);
+    let rvi = (status & 0xFF) as u8;
+    if vector > rvi {
+        let new_status = (status & !0xFF) | (vector as u64);
+        vcpu.set(vmcs::guest::INTERRUPT_STATUS, new_status);
+    }
+}
+
 /// Inject #GP(0) into the guest.
 fn inject_gp(vcpu: &mut ActiveVcpu) {
     let info: u64 = (1 << 31) | (3 << 8) | 13 | (1 << 11);
