@@ -1598,8 +1598,7 @@ impl Platform for ThemisPlatform {
         let hhdm = self.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
         comm.write_reg(reg, value);
-        let (w, b) = VpCommPage::mask_bit(reg);
-        comm.dirty_mask[w] |= b;
+        comm.mark_dirty(reg);
         Ok(())
     }
 
