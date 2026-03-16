@@ -1576,23 +1576,89 @@ impl Platform for ThemisPlatform {
 
     fn set_vp_register(
         &self,
-        _domain_id: DomainId,
-        _vp_id: u64,
-        _reg_id: u64,
-        _value: u64,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
+        value: u64,
     ) -> capability_engine::error::Result<()> {
-        // No-op: the hypercall handler batches VMCS writes after validation.
+        use capability_engine::error::CapaError;
+        use themis_abi::regs::VpRegister;
+
+        let reg = VpRegister::from_discriminant(reg_id)
+            .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
+
+        let mut vcpu = self.take_vcpu(domain_id, vp_id as usize)
+            .ok_or_else(|| CapaError::InvalidOperation("VP not available".into()))?;
+
+        if let Some(gpr) = crate::hypercall::vp_reg_to_gpr(reg) {
+            vcpu.set_reg(gpr, value);
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+        } else if let Some(field) = crate::hypercall::vp_reg_to_vmcs_field(reg) {
+            let vmcs_phys = vcpu.vmcs_phys();
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+            unsafe {
+                use x86::bits64::vmx as vmx_ops;
+                let caller_vmcs = vmx_ops::vmptrst()
+                    .map_err(|_| CapaError::InvalidOperation("vmptrst failed".into()))?;
+                vmx_ops::vmptrld(vmcs_phys)
+                    .map_err(|_| CapaError::InvalidOperation("vmptrld failed".into()))?;
+                let write_result = x86::bits64::vmx::vmwrite(field, value)
+                    .map_err(|_| CapaError::InvalidOperation("vmwrite failed".into()));
+                // Always restore caller VMCS even on write failure.
+                vmx_ops::vmclear(vmcs_phys)
+                    .map_err(|_| CapaError::InvalidOperation("vmclear failed".into()))?;
+                vmx_ops::vmptrld(caller_vmcs)
+                    .map_err(|_| CapaError::InvalidOperation("vmptrld restore failed".into()))?;
+                write_result?;
+            }
+        } else {
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+            return Err(CapaError::InvalidOperation("reg has no VMCS mapping".into()));
+        }
         Ok(())
     }
 
     fn get_vp_register(
         &self,
-        _domain_id: DomainId,
-        _vp_id: u64,
-        _reg_id: u64,
+        domain_id: DomainId,
+        vp_id: u64,
+        reg_id: u64,
     ) -> capability_engine::error::Result<u64> {
-        // TODO: implement when GET_VP_STATE is needed.
-        Err(capability_engine::error::CapaError::NotSupported)
+        use capability_engine::error::CapaError;
+        use themis_abi::regs::VpRegister;
+
+        let reg = VpRegister::from_discriminant(reg_id)
+            .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
+
+        let vcpu = self.take_vcpu(domain_id, vp_id as usize)
+            .ok_or_else(|| CapaError::InvalidOperation("VP not available".into()))?;
+
+        if let Some(gpr) = crate::hypercall::vp_reg_to_gpr(reg) {
+            let val = vcpu.reg(gpr);
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+            Ok(val)
+        } else if let Some(field) = crate::hypercall::vp_reg_to_vmcs_field(reg) {
+            let vmcs_phys = vcpu.vmcs_phys();
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+            let val = unsafe {
+                use x86::bits64::vmx as vmx_ops;
+                let caller_vmcs = vmx_ops::vmptrst()
+                    .map_err(|_| CapaError::InvalidOperation("vmptrst failed".into()))?;
+                vmx_ops::vmptrld(vmcs_phys)
+                    .map_err(|_| CapaError::InvalidOperation("vmptrld failed".into()))?;
+                let read_result = x86::bits64::vmx::vmread(field)
+                    .map_err(|_| CapaError::InvalidOperation("vmread failed".into()));
+                vmx_ops::vmclear(vmcs_phys)
+                    .map_err(|_| CapaError::InvalidOperation("vmclear failed".into()))?;
+                vmx_ops::vmptrld(caller_vmcs)
+                    .map_err(|_| CapaError::InvalidOperation("vmptrld restore failed".into()))?;
+                read_result?
+            };
+            Ok(val)
+        } else {
+            self.return_vcpu(domain_id, vp_id as usize, vcpu);
+            Err(CapaError::InvalidOperation("reg has no VMCS mapping".into()))
+        }
     }
 
     fn get_current_core(&self) -> Option<CoreId> {

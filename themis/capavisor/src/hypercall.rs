@@ -134,11 +134,14 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_RELEASE_DEVICE =>
             Some(do_release_device(platform, arg0)),
 
+        opcodes::THEMIS_GET_REG =>
+            Some(do_get_reg(platform, &caller, arg0, arg1, arg2)),
+        opcodes::THEMIS_SET_REG =>
+            Some(do_set_reg(platform, &caller, arg0, arg1, arg2, arg3)),
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST
-        | opcodes::THEMIS_GET_REG
-        | opcodes::THEMIS_SET_REG
         | opcodes::THEMIS_ENUMERATE
         | opcodes::THEMIS_REGISTER_DOORBELL
         | opcodes::THEMIS_REGISTER_EVENT_FLAGS
@@ -1039,9 +1042,59 @@ unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) 
     }
 }
 
-// ── Interrupt forwarding ─────────────────────────────────────────────────── //
+// ── GET_REG / SET_REG ────────────────────────────────────────────────────── //
 
-/// Called from `handle_vmexit` when a physical external interrupt fires while a
+/// GET_REG (0x0E): read a single VP register from a child domain VP.
+///
+/// All permission and state checks are performed by the capability engine:
+/// - Caller must hold `MonitorAPI::GET`.
+/// - `reg_id` must be within `platform.register_count()`.
+/// - The register bit must be set in the effective read-bitmap for the VP.
+/// - The VP must not be in Running state.
+///
+/// The actual hardware read is delegated to `ThemisPlatform::get_vp_register`.
+fn do_get_reg(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    domain_handle: u64,
+    vp_id: u64,
+    reg_id: u64,
+) -> HypercallResult {
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::get_register(&caller, domain_handle, vp_id, reg_id, platform)
+            .map(|value| (value, Default::default()))
+    }) {
+        Ok((value, _)) => HypercallResult::success_1(value),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// SET_REG (0x0F): write a single VP register on a child domain VP.
+///
+/// All permission and state checks are performed by the capability engine
+/// (symmetric to GET_REG, requires `MonitorAPI::SET` and write-bitmap access).
+///
+/// The actual hardware write is delegated to `ThemisPlatform::set_vp_register`.
+fn do_set_reg(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    domain_handle: u64,
+    vp_id: u64,
+    reg_id: u64,
+    value: u64,
+) -> HypercallResult {
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::set_register(&caller, domain_handle, vp_id, reg_id, value, platform)
+            .map(|()| ((), Default::default()))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+// ── Interrupt forwarding ─────────────────────────────────────────────────── //
 /// child domain VP is running on this core.
 ///
 /// Routes the interrupt to the handler (Deliver-policy ancestor, which in Phase 1
@@ -1174,7 +1227,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 /// Map a `VpRegister` to its VMCS guest-state field encoding.
 /// Returns `None` for GPRs (stored in the register file, not in VMCS)
 /// and for registers without a direct VMCS mapping.
-fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<u32> {
+pub(crate) fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<u32> {
     use themis_abi::regs::VpRegister;
     use x86::vmx::vmcs::guest;
 
@@ -1238,7 +1291,7 @@ fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<u32> {
 
 /// Map a `VpRegister` to a GPR index (`Reg`).
 /// Returns `None` for non-GPR registers.
-fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
+pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
     use themis_abi::regs::VpRegister;
     Some(match reg {
         VpRegister::Rax => Reg::Rax,
