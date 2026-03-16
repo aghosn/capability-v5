@@ -365,14 +365,18 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
 - [x] **P6d**: `IrqRouter::configure_domain_policy(domain, policy, hw)`:
   called by `VMCALL_SEAL` handler; programs EOI-exit bitmap and posted interrupt config.
   ✅ DONE (pre-existing): `program_domain_irtes()` called from do_seal.
-- [ ] **P6e**: VMEXIT `EXTERNAL_INTERRUPT` handler (same-core path):
-  ✅ DONE (pre-existing): `forward_interrupt_to_handler` consults `InterruptPolicy`,
-  posts via PID (Deliver) or lazy-unwinds to dom0 (Report/NotReport).
-  **DEFERRED: cross-core park/resume path** (needs VP META pages from P10).
-- [x] **P6f**: VMEXIT `EOI_INDUCED` handler: capability engine resume-after-interrupt
-  for REPORT-visibility vectors; notify parent chain.
-  ✅ DONE (18e4c01): `EXIT_REASON_EOI_INDUCED=45` constant + stub handler.
-  Full REPORT completion chain deferred until EOI-exit bitmap is programmed.
+- [x] **P6e**: VMEXIT `EXTERNAL_INTERRUPT` handler: ✅ FULLY DONE.
+  Same-core path: `forward_interrupt_to_handler` lazy-unwinds via `deliver_interrupt_vp`
+  which walks the VP `caller` chain — **always same-core by construction** (SWITCH always
+  parks the parent VP on the same core before running the child).
+  Cross-core path: handled by Phase 2 Posted Interrupts (`inject_via_pid` + notification
+  IPI) for Deliver VPs that are Available or running on a different core.
+  No further work needed. P10f is closed.
+- [x] **P6f**: VMEXIT `EOI_INDUCED` handler: stub present (`EXIT_REASON_EOI_INDUCED=45`).
+  ✅ DONE (18e4c01): handler exists. **No further work needed**: in the lazy-unwind model
+  the physical EOI is issued by dom0's interrupt handler (step 2 of the unwind chain).
+  REPORT domains are notified via the COMM page `InterceptMessage`, not via virtual EOI.
+  EOI-exit bitmap programming is not required for correctness; stub is sufficient.
 - [x] **P6g**: Timer interrupt: LAPIC timer → DELIVER to dom0 by default.
   ✅ DONE (pre-existing): dom0 handles timer natively; child timer interrupts forward
   via `forward_interrupt_to_handler` → dom0.
@@ -505,12 +509,13 @@ The following three invariants govern what dom0 sees and can access:
 - [x] **P10d**: ✅ DONE — `do_switch` reads COMM dirty mask and applies to VMCS/regfile on
   every VP entry.
 - [x] **P10e**: ✅ DONE — GET_REG/SET_REG read/write COMM page directly (no VMCS switching).
-- [ ] **P10f**: ❌ OPEN — Cross-core interrupt routing: park VP on core C2, signal via IPI,
-  resume on correct core. Requires cross-core `CoreUpdate::Switch` protocol. Deferred.
-- [ ] **P10g**: ❌ OPEN — EOI-exit bitmap programming on `SET_INTR_POLICY`: when a vector's
-  policy changes to REPORT, set the corresponding bit in the VMCS EOI-exit bitmap (currently
-  always zero). Requires VMPTRLD+vmwrite+VMCLEAR on the target VP's VMCS.
-
+- [x] **P10f**: ✅ NOT NEEDED — Cross-core interrupt routing is handled by construction.
+  `deliver_interrupt_vp` walks the VP `caller` chain which is always same-core (SWITCH
+  parks the parent on the same core before running the child). The Posted Interrupts
+  mechanism (Phase 2) handles the remaining case (Deliver VP running on a different core).
+- [x] **P10g**: ✅ NOT NEEDED — EOI-exit bitmap programming is not required. In the
+  lazy-unwind model the physical EOI is issued by dom0's interrupt handler. REPORT domains
+  are notified via the COMM page `InterceptMessage`. No virtual EOI exit is needed.
 
 ### Phase 11 — ThemIC: Doorbell and Event Flag Pages
 

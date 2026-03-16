@@ -680,8 +680,19 @@ fn do_switch(
     // the parent is already deactivated and stored.
     let mut child_active = child_inactive.activate()
         .expect("[SWITCH] child activate (VMPTRLD) failed — fatal");
-    // Update PID.NDST so remote cores can send notification IPIs to this core.
-    unsafe { pid_set_ndst(child_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
+    // Update PID.NDST so the software injection path (inject_via_pid) targets
+    // this core.  Also update IRTE.NDST so hardware-posted device interrupts
+    // for Deliver vectors are routed here by the IOMMU.
+    let current_lapic = current_lapic_id();
+    unsafe { pid_set_ndst(child_active.pid_phys(), platform.hhdm_offset(), current_lapic) };
+    {
+        let child_ref = caller.read().data
+            .get_domain_capability(child_domain_handle)
+            .and_then(|w| w.upgrade());
+        if let Some(child_cap) = child_ref {
+            sync_irte_ndst(platform, &child_cap, current_lapic);
+        }
+    }
 
     // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
     for (reg, val) in &vmcs_pending {
@@ -833,6 +844,8 @@ pub fn forward_child_exit(
     let mut parent_active = parent_inactive.activate()
         .expect("[CHILD_EXIT] parent activate failed");
     // Update PID.NDST so remote cores can send notification IPIs to this core.
+    // IRTE.NDST sync is not needed here: the parent (dom0) uses remapped IRTEs
+    // (not posted), so its interrupts are not routed via posted-interrupt NDST.
     unsafe { pid_set_ndst(parent_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
 
     // To the parent, this is a return from SWITCH VMCALL.
@@ -1555,6 +1568,14 @@ fn send_grow_ack(pd: &mut crate::platform::PlatformDomain, status: u32) {
 /// - Report / NotReport vectors → remapped IRTE delivered to BSP LAPIC
 ///
 /// Called from `do_seal` after the capability engine completes sealing.
+///
+/// **NOTE**: The posted IRTE's `NDST` field is initialised to 0 here because
+/// the VP has not started yet and we don't know which core it will run on.
+/// `sync_irte_ndst` must be called each time the VP is activated (VMPTRLD) to
+/// update `IRTE.NDST` to the current physical LAPIC ID.  Without this, hardware-
+/// posted device interrupts would be sent to the wrong core (always core 0).
+/// This path has not been exercised yet; it will need end-to-end testing once
+/// real device assignment is in use.
 fn program_domain_irtes(
     platform: &ThemisPlatform,
     child_cap: &CapabilityRef<Domain>,
@@ -1602,6 +1623,46 @@ fn program_domain_irtes(
                         vector,
                     );
                 },
+            }
+        }
+    }
+}
+
+/// Update `IRTE.NDST` for all Deliver-policy vectors of a domain to `new_ndst`.
+///
+/// Must be called each time a domain VP is activated (VMPTRLD) so that
+/// hardware-posted device interrupts are delivered to the correct physical core.
+///
+/// Background: `program_domain_irtes` initialises `IRTE.NDST = 0` at SEAL
+/// time because the VP hasn't started yet.  The IOMMU reads `IRTE.NDST` to
+/// determine which core to send the notification IPI to when it posts an
+/// interrupt to the VP's PID.  If `NDST` is stale (points to a different
+/// core), the IPI goes to the wrong place and the virtual interrupt is delayed
+/// until the VP is next resumed (at which point PIR→vIRR merge happens at
+/// VMENTRY).  Keeping `NDST` current avoids this latency.
+///
+/// **Testing note**: this path requires real device assignment (`ASSIGN_DEVICE`)
+/// to exercise end-to-end.  It should be validated once device passthrough is
+/// in use.
+fn sync_irte_ndst(
+    platform: &ThemisPlatform,
+    child_cap: &CapabilityRef<Domain>,
+    new_ndst: u32,
+) {
+    if platform.drhd_units.is_empty() {
+        return;
+    }
+    let intr_policy = child_cap.read().data.policy.interrupts.clone();
+    let hhdm = platform.hhdm_offset();
+    for unit in platform.drhd_units.iter() {
+        if unit.irt_phys == 0 {
+            continue;
+        }
+        for vector in 0u8..=254 {
+            if intr_policy.get_policy(vector).visibility == InterruptVisibility::Deliver {
+                unsafe {
+                    crate::iommu_ir::irte_update_ndst(unit.irt_phys, hhdm, vector, new_ndst);
+                }
             }
         }
     }

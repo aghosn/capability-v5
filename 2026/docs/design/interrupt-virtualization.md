@@ -481,13 +481,13 @@ The driver must communicate three things to the capavisor that are not knowable 
 | APICv: `inject_virtual_interrupt` | ✅ Done | `c1a0c1a`; sets VIRR + RVI in VAPIC page |
 | APICv: APIC access page + exit handler | ✅ Done | `3e58f7a`; `EXIT_REASON_APIC_ACCESS=44` emulated via VAPIC |
 | NMI_EXITING for child VPs | ✅ Done | `8d282ad`; NMI forwarded to dom0 via `forward_interrupt_to_handler` |
-| EOI_INDUCED exit handler | ⚠️ Stub | `8d282ad`; handler exists but EOI-exit bitmap always 0 → never fires |
+| EOI_INDUCED exit handler | ✅ Not needed | Lazy-unwind model: physical EOI issued by dom0; REPORT domains notified via COMM page. EOI-exit bitmap stays 0. |
 | `SET_INTR_POLICY` hypercall | ✅ Done | `do_set_intr_policy` wired; EOI-exit bitmap update still deferred (see Open Q4) |
 | COMM page register snapshot on exit | ✅ Done | `forward_child_exit` writes all `read_set` registers to `VpCommPage` |
 | PID allocation per VP | ✅ Done | `pid_phys` in `VcpuSlot`, allocated from META at `ADD_VP` time |
 | Notification vector | ✅ Done | `NOTIFY_VEC = 0xF2` reserved in `hypercall.rs` |
 | GET_REG / SET_REG via COMM page | ✅ Done | `get_vp_register`/`set_vp_register` read/write `VpCommPage` directly |
-| Cross-core delivery (Case C) | ❌ Deferred | Park/resume protocol needs `CoreUpdate::Switch` cross-core path |
+| `IRTE.NDST` sync on VP activation | ✅ Done | `sync_irte_ndst` called in `do_switch` after VMPTRLD; updates NDST for all Deliver-vector IRTEs. **Needs end-to-end test once real device assignment is in use.** |
 | EOI-exit bitmap update on policy change | ❌ Open | See Open Question 4; requires VMPTRLD+vmwrite on target VP's VMCS |
 | `THHV_IRQFD` fd-triggered injection | ❌ Not implemented | Needs PID write + notification IPI from kernel thread |
 | `THHV_IOEVENTFD` MMIO exit → userspace | ❌ Not implemented | Needs EPT violation routing to userspace fd |
@@ -508,11 +508,11 @@ The LAPIC timer (TSC deadline timer, vector configured by Linux) is a *local* in
 3. **vTPR / TPR threshold interaction**: ✅ Resolved — `TPR_THRESHOLD=0` set for all child
    VPs in `vmcs.rs`; all interrupts deliverable regardless of guest CR8.
 
-4. **EOI-exit bitmap updates on policy change**: ❌ Open — When `SET_INTR_POLICY` sets a
-   vector to REPORT visibility, the corresponding bit in the VMCS EOI-exit bitmap must be set.
-   Currently always 0. Fix: at `SET_INTR_POLICY` time, if VP is inactive, do
-   VMPTRLD + vmwrite(EOI_EXIT_BITMAPn) + VMCLEAR. If VP is active, store pending and apply
-   at next VMENTRY.
+4. **EOI-exit bitmap updates on policy change**: ✅ Resolved — **not needed**. In the
+   lazy-unwind model the physical EOI is issued by dom0's interrupt handler before the
+   unwind chain returns to REPORT domains. REPORT domains learn about the interrupt via
+   the COMM page `InterceptMessage`, not through virtual EOI. The EOI-exit bitmap can
+   remain all-zero.
 
 ---
 
