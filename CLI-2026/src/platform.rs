@@ -185,9 +185,9 @@ impl Platform for CliPlatform {
         }
     }
 
-    fn domain_core(&self, _domain_id: DomainId) -> Option<CoreId> {
-        // Always return None so execute() uses the local path (no IPI/barriers needed in CLI)
-        None
+    fn domain_cores(&self, _domain_id: DomainId) -> Vec<CoreId> {
+        // Return empty vec so execute() uses the local path (no IPI/barriers needed in CLI)
+        Vec::new()
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
