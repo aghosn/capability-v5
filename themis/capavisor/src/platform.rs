@@ -1582,39 +1582,24 @@ impl Platform for ThemisPlatform {
         value: u64,
     ) -> capability_engine::error::Result<()> {
         use capability_engine::error::CapaError;
-        use themis_abi::regs::VpRegister;
+        use themis_abi::regs::{VpCommPage, VpRegister};
 
         let reg = VpRegister::from_discriminant(reg_id)
             .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
 
-        let mut vcpu = self.take_vcpu(domain_id, vp_id as usize)
-            .ok_or_else(|| CapaError::InvalidOperation("VP not available".into()))?;
+        let arc = self.domain_arc(domain_id)
+            .ok_or_else(|| CapaError::InvalidOperation("domain not found".into()))?;
+        let comm_hpa = arc.lock().comm_hpas.get(vp_id as usize).copied().unwrap_or(0);
 
-        if let Some(gpr) = crate::hypercall::vp_reg_to_gpr(reg) {
-            vcpu.set_reg(gpr, value);
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-        } else if let Some(field) = crate::hypercall::vp_reg_to_vmcs_field(reg) {
-            let vmcs_phys = vcpu.vmcs_phys();
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-            unsafe {
-                use x86::bits64::vmx as vmx_ops;
-                let caller_vmcs = vmx_ops::vmptrst()
-                    .map_err(|_| CapaError::InvalidOperation("vmptrst failed".into()))?;
-                vmx_ops::vmptrld(vmcs_phys)
-                    .map_err(|_| CapaError::InvalidOperation("vmptrld failed".into()))?;
-                let write_result = x86::bits64::vmx::vmwrite(field, value)
-                    .map_err(|_| CapaError::InvalidOperation("vmwrite failed".into()));
-                // Always restore caller VMCS even on write failure.
-                vmx_ops::vmclear(vmcs_phys)
-                    .map_err(|_| CapaError::InvalidOperation("vmclear failed".into()))?;
-                vmx_ops::vmptrld(caller_vmcs)
-                    .map_err(|_| CapaError::InvalidOperation("vmptrld restore failed".into()))?;
-                write_result?;
-            }
-        } else {
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-            return Err(CapaError::InvalidOperation("reg has no VMCS mapping".into()));
+        if comm_hpa == 0 {
+            return Err(CapaError::InvalidOperation("VP has no COMM page".into()));
         }
+
+        let hhdm = self.hhdm_offset();
+        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+        comm.write_reg(reg, value);
+        let (w, b) = VpCommPage::mask_bit(reg);
+        comm.dirty_mask[w] |= b;
         Ok(())
     }
 
@@ -1625,40 +1610,22 @@ impl Platform for ThemisPlatform {
         reg_id: u64,
     ) -> capability_engine::error::Result<u64> {
         use capability_engine::error::CapaError;
-        use themis_abi::regs::VpRegister;
+        use themis_abi::regs::{VpCommPage, VpRegister};
 
         let reg = VpRegister::from_discriminant(reg_id)
             .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
 
-        let vcpu = self.take_vcpu(domain_id, vp_id as usize)
-            .ok_or_else(|| CapaError::InvalidOperation("VP not available".into()))?;
+        let arc = self.domain_arc(domain_id)
+            .ok_or_else(|| CapaError::InvalidOperation("domain not found".into()))?;
+        let comm_hpa = arc.lock().comm_hpas.get(vp_id as usize).copied().unwrap_or(0);
 
-        if let Some(gpr) = crate::hypercall::vp_reg_to_gpr(reg) {
-            let val = vcpu.reg(gpr);
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-            Ok(val)
-        } else if let Some(field) = crate::hypercall::vp_reg_to_vmcs_field(reg) {
-            let vmcs_phys = vcpu.vmcs_phys();
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-            let val = unsafe {
-                use x86::bits64::vmx as vmx_ops;
-                let caller_vmcs = vmx_ops::vmptrst()
-                    .map_err(|_| CapaError::InvalidOperation("vmptrst failed".into()))?;
-                vmx_ops::vmptrld(vmcs_phys)
-                    .map_err(|_| CapaError::InvalidOperation("vmptrld failed".into()))?;
-                let read_result = x86::bits64::vmx::vmread(field)
-                    .map_err(|_| CapaError::InvalidOperation("vmread failed".into()));
-                vmx_ops::vmclear(vmcs_phys)
-                    .map_err(|_| CapaError::InvalidOperation("vmclear failed".into()))?;
-                vmx_ops::vmptrld(caller_vmcs)
-                    .map_err(|_| CapaError::InvalidOperation("vmptrld restore failed".into()))?;
-                read_result?
-            };
-            Ok(val)
-        } else {
-            self.return_vcpu(domain_id, vp_id as usize, vcpu);
-            Err(CapaError::InvalidOperation("reg has no VMCS mapping".into()))
+        if comm_hpa == 0 {
+            return Err(CapaError::InvalidOperation("VP has no COMM page".into()));
         }
+
+        let hhdm = self.hhdm_offset();
+        let comm = unsafe { &*((comm_hpa + hhdm) as *const VpCommPage) };
+        Ok(comm.read_reg(reg))
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
