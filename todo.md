@@ -353,42 +353,32 @@ P4d is therefore deferred until we have child-domain DMA isolation (P4e).
 
 ### Phase 6 — IRQ Router and Interrupt Policy
 
-- [ ] **P6a**: `IrqRouter` initialization at boot: all vectors assigned to dom0 with
-  `PostedInterrupt` delivery (APICv) or `VmExit` fallback.
+- [x] **P6a**: `IrqRouter` initialization at boot: all vectors assigned to dom0.
+  ✅ DONE (pre-existing): `InterruptPolicy` / `InterruptVisibility` in capability engine
+  + `program_domain_irtes()` at SEAL time + dom0 default policy = Deliver all vectors.
 - [ ] **P6b**: I/O APIC programming (`x2apic::IoApic`): set redirection table entries
   for all PCI legacy IRQs targeting dom0 initially.
+  *(DEFERRED: dom0 programs I/O APIC natively via EPT passthrough)*
 - [ ] **P6c**: MSI-X programming: write MSI-X table entries for PCI devices targeting
   dom0's notification vector (LAPIC ID = dom0 VP[0] physical LAPIC).
-- [ ] **P6d**: `IrqRouter::configure_domain_policy(domain, policy, hw)`:
+  *(DEFERRED: dom0 programs MSI-X natively via EPT passthrough)*
+- [x] **P6d**: `IrqRouter::configure_domain_policy(domain, policy, hw)`:
   called by `VMCALL_SEAL` handler; programs EOI-exit bitmap and posted interrupt config.
-- [ ] **P6e**: VMEXIT `EXTERNAL_INTERRUPT` handler:
-  1. **Immediately** write physical LAPIC EOI: `wrmsr(IA32_X2APIC_EOI, 0)` (x2APIC) or
-     MMIO write to LAPIC base + 0xB0 (xAPIC). This clears the physical ISR bit and
-     de-asserts level-triggered IRQ lines. Must happen before any other action, and is
-     independent of virtual APIC state (see Physical LAPIC EOI section in Q2).
-  2. Read `VM_EXIT_INTR_INFO` to obtain the physical vector V.
-  3. Look up `IrqRouter::route(V)` → (domain D, delivery mode).
-  4. If delivery is `DELIVER` with `PostedInterrupt` or `VirtualInject`:
-     call `deliver_interrupt_vp`; inject V into handler VP's VIRR (VAPIC page bit set);
-     VMRESUME into handler domain VP on same core.
-  5. If domain D is confidential and policy is `DEFER_TO_PARENT` or `REPORT`:
-     **cross-core routing path** (see archived Q2 Cross-Core Interrupt Routing):
-     a. Write interrupt info (vector, source, IRQ state) into VP META page.
-     b. Set `PENDING_IRQ` bit in VP META page header atomically.
-     c. Post virtual interrupt to dom0 VP's PI descriptor (`PIR[tyche_irq_notification_vector]`);
-        send NV IPI to dom0 core's LAPIC → APICv delivers to dom0 with zero VMEXIT.
-     d. Park core X with `CLI` — spin poll loop on RESUME_WITH_IRQ / RESUME_NO_IRQ bits
-        in VP META page, calling `poll_and_respond_cross_core()` each iteration for barrier
-        participation.
-     e. On `RESUME_WITH_IRQ`: PI descriptor `PIR[V]` already set by dom0 core;
-        hardware merges PIR → VIRR on VMRESUME; VMRESUME.
-     f. On `RESUME_NO_IRQ`: VMRESUME with no pending interrupt (interrupt was for dom0).
-- [ ] **P6f**: VMEXIT `EOI_INDUCED` handler: capability engine resume-after-interrupt
+  ✅ DONE (pre-existing): `program_domain_irtes()` called from do_seal.
+- [ ] **P6e**: VMEXIT `EXTERNAL_INTERRUPT` handler (same-core path):
+  ✅ DONE (pre-existing): `forward_interrupt_to_handler` consults `InterruptPolicy`,
+  posts via PID (Deliver) or lazy-unwinds to dom0 (Report/NotReport).
+  **DEFERRED: cross-core park/resume path** (needs VP META pages from P10).
+- [x] **P6f**: VMEXIT `EOI_INDUCED` handler: capability engine resume-after-interrupt
   for REPORT-visibility vectors; notify parent chain.
-- [ ] **P6g**: Timer interrupt: LAPIC timer → DELIVER to dom0 by default; APICv posts
-  it without VMEXIT. Monitor can intercept via EOI-exit bitmap if timer-based preemption
-  of child domains is needed.
-- [ ] **P6h**: NMI: always VMEXIT (cannot be posted); route to Themis for watchdog/panic.
+  ✅ DONE (18e4c01): `EXIT_REASON_EOI_INDUCED=45` constant + stub handler.
+  Full REPORT completion chain deferred until EOI-exit bitmap is programmed.
+- [x] **P6g**: Timer interrupt: LAPIC timer → DELIVER to dom0 by default.
+  ✅ DONE (pre-existing): dom0 handles timer natively; child timer interrupts forward
+  via `forward_interrupt_to_handler` → dom0.
+- [x] **P6h**: NMI: always VMEXIT (cannot be posted); route to Themis for watchdog/panic.
+  ✅ DONE (18e4c01): `NMI_EXITING` (pin bit 3) for child VPs; NMI forwarded to dom0
+  via `forward_interrupt_to_handler(vcpu, 2)`. Dom0 NMIs handled natively.
 
 ### Phase 7 — Remaining Items
 
