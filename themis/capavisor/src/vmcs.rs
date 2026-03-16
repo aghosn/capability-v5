@@ -149,6 +149,7 @@ unsafe fn write_control_fields(
     let mut pin_desired: u64 = 1 << 6; // ACTIVATE_VMX_PREEMPTION_TIMER
     if child {
         pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
+        pin_desired |= 1 << 3; // NMI_EXITING — NMIs from child VM always exit to capavisor
         pin_desired |= 1 << 7; // PROCESS_POSTED_INTERRUPTS
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);

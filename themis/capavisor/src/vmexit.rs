@@ -105,6 +105,10 @@ pub const EXIT_REASON_XSETBV: u32 = 55;
 /// APIC-access VM exit (SDM Vol 3C §29.4): guest accessed the APIC-access
 /// page while VIRTUALIZE_APIC_ACCESSES (secondary bit 0) was set.
 pub const EXIT_REASON_APIC_ACCESS: u32 = 44;
+/// EOI-induced VM exit (SDM Vol 3C §29.1.4): VID=1, guest wrote EOI, and the
+/// delivered vector's bit was set in the EOI-exit bitmap.  Used to notify the
+/// capability engine when a REPORT-visibility vector completes.
+pub const EXIT_REASON_EOI_INDUCED: u32 = 45;
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
@@ -178,6 +182,21 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
                             crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
+                            return;
+                        }
+                        EXIT_REASON_EXCEPTION_NMI => {
+                            // NMI fired while child was running (NMI_EXITING=1 for child VPs).
+                            // NMIs cannot be posted via PIR — forward to dom0 as vector 2.
+                            // Child's default Report policy routes it via lazy-unwind to dom0.
+                            let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+                            let exc_type = ((intr_info >> 8) & 0x7) as u8;
+                            if exc_type == 2 {
+                                // Type 2 = NMI; forward to dom0.
+                                crate::hypercall::forward_interrupt_to_handler(vcpu, 2);
+                            } else {
+                                // Exception from child VM (not NMI) — forward via general path.
+                                crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            }
                             return;
                         }
                         EXIT_REASON_VMX_PREEMPTION_TIMER => {
@@ -643,6 +662,17 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
         EXIT_REASON_APIC_ACCESS => {
             handle_apic_access_exit(vcpu);
+        }
+
+        EXIT_REASON_EOI_INDUCED => {
+            // Exit qualification bits[7:0] = vector whose EOI caused the exit.
+            // Fires only when VID=1 and the vector's bit is set in the EOI-exit
+            // bitmap (currently all zero → this exit never fires in practice).
+            // When REPORT-visibility interrupt delivery to child domains is added,
+            // set the relevant bitmap bits and implement parent-chain notification here.
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let vector = (qual & 0xFF) as u8;
+            serial_println!("[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)", vector);
         }
 
         _other => {
