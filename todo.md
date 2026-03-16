@@ -756,6 +756,11 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   handler needs updating to pass this 4th argument to `Capability::send_at()`.
   Currently the capavisor ignores RCX in SEND — TODO.
 
+- [x] **P15-ioeventfd** — ✅ DONE. `THHV_IOEVENTFD` ioctl fully implemented:
+  `thhv_ioeventfd.c` (assign/deassign/drain), capavisor REGISTER_DOORBELL (0x15) wired,
+  EPT violation → doorbell fast-path → `DOORBELL_NOTIFY` on DomainComm RX ring,
+  `thhv_drain_domcomm_rx()` called after each `themis_switch()` return.
+
 - [ ] **P15g** — Interrupt injection: `THHV_ASSERT_INTERRUPT` → `VMCALL` or posted
   interrupt path.  `THHV_IRQFD` → eventfd + workqueue → PI descriptor write.
 - [ ] **P15h** — `mmap` for VP state: userspace maps COMM page for

@@ -541,6 +541,7 @@ struct thhv_run_vp {
 #define DOMCOMM_MSG_DOMAIN_EVENT  0x0004  /* Child domain state change */
 #define DOMCOMM_MSG_ERROR         0x0005  /* Error / backpressure signal */
 #define DOMCOMM_MSG_GROW_ACK      0x0006  /* Ring growth acknowledged */
+#define DOMCOMM_MSG_DOORBELL_NOTIFY 0x0007 /* Doorbell write (fast-path, child not stopped) */
 
 /* Domain → Capavisor (TX ring) */
 #define DOMCOMM_MSG_ATTEST_REQ    0x0100  /* Request (self-)attestation */
@@ -708,12 +709,27 @@ struct domcomm_enum_cap_req {
 	__u64 handle;                 /* Handle to enumerate */
 };
 
+/* DOMCOMM_MSG_DOORBELL_NOTIFY payload (RX ring, capavisor → domain).
+ * Sent when an EPT violation matches a registered doorbell.  The child VP
+ * is NOT stopped; it has already resumed.
+ */
+struct domcomm_doorbell_notify {
+	__u32 doorbell_id;   /* matches thhv_ioeventfd_entry.doorbell_id */
+	__u32 reserved;
+	__u64 gpa;           /* guest physical address that was written */
+	__u64 value;         /* data written by the guest */
+	__u32 size;          /* write size in bytes */
+	__u32 reserved2;
+};
+
 struct thhv_irqfd {
 	__s32 fd;
 	__u32 gsi;
 	__u32 flags;
 	__u32 rsvd;
 };
+
+#define THHV_IRQFD_FLAG_DEASSIGN  (1u << 0)
 
 struct thhv_ioeventfd {
 	__s32 fd;
@@ -722,6 +738,10 @@ struct thhv_ioeventfd {
 	__u32 len;
 	__u32 datamatch;
 };
+
+#define THHV_IOEVENTFD_FLAG_DATAMATCH  (1u << 0)  /* filter on datamatch value */
+#define THHV_IOEVENTFD_FLAG_PIO        (1u << 1)  /* port I/O (not MMIO) */
+#define THHV_IOEVENTFD_FLAG_DEASSIGN   (1u << 2)  /* remove existing registration */
 
 struct thhv_msi_routing {
 	__u32 nr;
@@ -890,6 +910,39 @@ struct thhv_sent_cap {
 };
 
 /* Per-partition state. */
+
+/*
+ * Per-ioeventfd entry: tracks one registered doorbell and the eventfd to
+ * signal when the capavisor reports a matching guest write.
+ */
+struct thhv_ioeventfd_entry {
+	struct list_head  node;
+	u64               doorbell_id;   /* returned by REGISTER_DOORBELL */
+	u64               addr;          /* guest GPA registered as doorbell */
+	u32               len;           /* access size (0 = any) */
+	u64               datamatch;     /* match value (0 if DATAMATCH flag not set) */
+	u32               flags;         /* ioctl flags */
+	struct eventfd_ctx *eventfd;
+	struct thhv_partition *partition;
+};
+
+/*
+ * Per-irqfd entry: when the eventfd fires, inject `vector` into VP 0 of
+ * the partition via INJECT_INTERRUPT.  GSI→vector mapping via MSI routing
+ * is a TODO; currently the ioctl `gsi` field is passed through as the vector.
+ */
+struct thhv_irqfd_entry {
+	struct list_head   node;
+	u32                gsi;
+	u32                vector;       /* MSI routing lookup result (TODO) */
+	struct eventfd_ctx *eventfd;
+	wait_queue_entry_t wait;
+	struct work_struct work;
+	struct thhv_partition *partition;
+	bool               deassign;
+};
+
+/* Per-partition state. */
 struct thhv_partition {
 	u64 domain_handle;
 	u64 domain_id;
@@ -1018,10 +1071,24 @@ int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
 int themis_domcomm_notify(void);
+int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
+			     u64 datamatch, u64 flags, u64 *out_doorbell_id);
+int themis_unregister_doorbell(u64 child_domain, u64 doorbell_id);
+int themis_set_themic_vector(u64 vector);
 
 /* thhv_part.c */
 long thhv_partition_create(struct file *dev_file, void __user *uarg);
 extern const struct file_operations thhv_partition_fops;
+
+/* thhv_ioeventfd.c */
+int  thhv_ioeventfd_assign(struct thhv_partition *part, struct thhv_ioeventfd __user *uarg);
+int  thhv_ioeventfd_deassign(struct thhv_partition *part, struct thhv_ioeventfd __user *uarg);
+void thhv_drain_domcomm_rx(struct thhv_partition *part);
+
+/* thhv_irqfd.c */
+int  thhv_irqfd_assign(struct thhv_partition *part, struct thhv_irqfd __user *uarg);
+int  thhv_irqfd_deassign(struct thhv_partition *part, struct thhv_irqfd __user *uarg);
+void thhv_irqfd_release_all(struct thhv_partition *part);
 
 /* thhv_vp.c */
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg);

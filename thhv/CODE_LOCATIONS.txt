@@ -1,0 +1,312 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    THHV DRIVER — EXACT CODE LOCATIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+1️⃣  IRQFD STUB (P15g)
+────────────────────────────────────────────────────────────────────────────────
+File:        thhv/src/thhv_part.c
+Lines:       691-693
+Context:     partition ioctl dispatch (THHV_IRQFD case)
+Current code:
+    case THHV_IRQFD:
+        /* TODO(P15g): eventfd → VMCALL_ASSERT_INTERRUPT */
+        return -ENOSYS;
+
+Structure:   struct thhv_irqfd (inc/thhv.h:712-715)
+    __s32 fd;      // eventfd file descriptor
+    __u32 gsi;     // Global System Interrupt (0-255)
+    __u32 flags;   // Control flags
+    __u32 rsvd;
+
+IOCTL macro: inc/thhv.h:814-815
+    #define THHV_IRQFD _IOW(THHV_IOCTL_MAGIC, 0x13, struct thhv_irqfd)
+
+Partition tracking: inc/thhv.h:927 (struct thhv_partition)
+    struct list_head irqfds;
+    struct mutex irqfd_lock;
+
+Initialization: thhv_part.c:760-761
+    INIT_LIST_HEAD(&part->irqfds);
+    mutex_init(&part->irqfd_lock);
+
+Cleanup TODO: thhv_part.c:92
+    /* TODO: free irqfds, ioeventfds */
+
+───────────────────────────────────────────────────────────────────────────────
+
+2️⃣  IOEVENTFD STUB (P15h)
+────────────────────────────────────────────────────────────────────────────────
+File:        thhv/src/thhv_part.c
+Lines:       695-697
+Context:     partition ioctl dispatch (THHV_IOEVENTFD case)
+Current code:
+    case THHV_IOEVENTFD:
+        /* TODO(P15h): VMCALL_REGISTER_DOORBELL */
+        return -ENOSYS;
+
+Structure:   struct thhv_ioeventfd (inc/thhv.h:716-721)
+    __s32 fd;      // eventfd file descriptor
+    __u32 flags;   // Control flags (datamatch_type, etc.)
+    __u64 addr;    // Guest physical address (doorbell location)
+    __u32 len;     // 1, 2, or 4 bytes
+    __u32 datamatch;  // Optional data pattern to match
+
+IOCTL macro: inc/thhv.h:817-818
+    #define THHV_IOEVENTFD _IOW(THHV_IOCTL_MAGIC, 0x14, struct thhv_ioeventfd)
+
+Partition tracking: inc/thhv.h:929-931 (struct thhv_partition)
+    struct {
+        struct list_head list;
+        struct mutex lock;
+    } ioeventfds;
+
+Initialization: thhv_part.c:763-764
+    INIT_LIST_HEAD(&part->ioeventfds.list);
+    mutex_init(&part->ioeventfds.lock);
+
+Cleanup TODO: thhv_part.c:92
+    /* TODO: free irqfds, ioeventfds */
+
+───────────────────────────────────────────────────────────────────────────────
+
+3️⃣  VMCALL INFRASTRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+Raw VMCALL Primitive: inc/thhv.h:165-180
+    static inline u64 __themis_vmcall(u64 opcode,
+                  u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                  u64 *r0, u64 *r1, u64 *r2)
+    {
+        u64 status, o0, o1, o2;
+        register u64 _a4 asm("r8") = a4;
+        asm volatile("vmcall"
+            : "=a"(status), "=D"(o0), "=S"(o1), "=d"(o2)
+            : "a"(opcode), "D"(a0), "S"(a1), "d"(a2),
+              "c"(a3), "r"(_a4)
+            : "r9", "r10", "r11", "memory", "cc"
+        );
+        if (r0) *r0 = o0;
+        if (r1) *r1 = o1;
+        if (r2) *r2 = o2;
+        return status;
+    }
+
+Error mapping: inc/thhv.h:182-192
+    static inline int __themis_to_errno(u64 status)
+    Maps: SUCCESS→0, INVALID→-EINVAL, NOPERM→-EPERM, NOMEM→-ENOMEM,
+          BADSTATE→-EBUSY, NOTFOUND→-ENOENT, RETRY→-EAGAIN, UNIMPL→-ENOSYS
+
+Opcode definitions: inc/thhv.h:54-103
+    #define THEMIS_OP_SET_THEMIC_VECTOR   0x17
+    #define THEMIS_OP_REGISTER_DOORBELL   0x15
+    #define THEMIS_OP_DOMCOMM_NOTIFY      0x19
+
+Wrapper definitions: thhv_hvcall.c (lines shown)
+    themis_carve (25-31)
+    themis_send (43-48)
+    themis_switch (110-115)
+    themis_set_intr_policy (164-169)
+    themis_register_comm (190-195)
+    themis_add_vp (200-206)
+    themis_domcomm_notify (211-216)
+    [MISSING: themis_set_themic_vector, themis_register_doorbell, assert_interrupt]
+
+───────────────────────────────────────────────────────────────────────────────
+
+4️⃣  DOMAINCOMM RING INFRASTRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+Global state: inc/thhv.h:1021
+    struct domcomm_state thhv_domcomm;  // Global instance
+
+State struct: inc/thhv.h:1013-1022
+    struct domcomm_state {
+        void __iomem         *base;           // memremap'd header page
+        struct domcomm_header *hdr;
+        struct domcomm_ring   rx;             // RX ring (we consume)
+        struct domcomm_ring   tx;             // TX ring (we produce)
+        u64                   gpa;            // GPA from CPUID 0x40000002
+        unsigned int          total_pages;
+        bool                  initialized;
+        u64                   self_domain_handle;
+    };
+
+Ring struct: inc/thhv.h:1010-1018
+    struct domcomm_ring {
+        void __iomem **page_vas;              // Virtual addresses of pages
+        unsigned int   nr_pages;
+        __u32         *head;                  // Producer head pointer
+        __u32         *tail;                  // Consumer tail pointer
+        u32            capacity;              // Total capacity in bytes
+        u64            next_seq;              // Next sequence number
+    };
+
+Initialization: thhv_domcomm.c:495-569
+    domcomm_init()
+        - CPUID discovery (line 504)
+        - Header validation (lines 531-544)
+        - Ring setup (lines 551-558)
+
+RX Dequeue: thhv_domcomm.c:103-156
+    domcomm_rx_dequeue(ring, buf, buf_size, &out_type, &out_payload_size)
+
+TX Enqueue: thhv_domcomm.c:171-233
+    domcomm_tx_enqueue(ring, msg_type, payload, payload_size)
+
+Message types: inc/thhv.h:550-565
+    #define DOMCOMM_MSG_NONE          0x0000
+    #define DOMCOMM_MSG_ATTEST        0x0001
+    #define DOMCOMM_MSG_VP_EXIT       0x0002
+    #define DOMCOMM_MSG_IRQ_NOTIFY    0x0003  // ← For IRQFD
+    #define DOMCOMM_MSG_DOMAIN_EVENT  0x0004
+    #define DOMCOMM_MSG_ERROR         0x0005
+    #define DOMCOMM_MSG_GROW_ACK      0x0006
+
+Message header: inc/thhv.h:575-579
+    struct domcomm_msg_header {
+        __u32 message_type;
+        __u32 total_size;
+        __u64 sequence;
+    }
+
+───────────────────────────────────────────────────────────────────────────────
+
+5️⃣  VP EXIT HANDLING
+────────────────────────────────────────────────────────────────────────────────
+
+Sync mode (WORKS): thhv_vp.c:52-79
+    themis_switch(part->domain_handle, vp->vp_index)
+    thhv_read_intercept_msg(vp, msg_buf)
+    copy_to_user(uarg, msg_buf, THEMIC_MSG_SLOT_SIZE)
+
+Async mode (INCOMPLETE TODO): thhv_vp.c:81-99
+    wait_event_interruptible(vp->exit_wq, atomic_read(&vp->exit_pending));
+    [MISSING: no code sets exit_pending or wakes exit_wq]
+
+Message reading: thhv_vp.c:30-34
+    thhv_read_intercept_msg()
+        memcpy(out_buf, (u8 *)vp->comm_kaddr + 512, THEMIC_MSG_SLOT_SIZE);
+
+VP struct fields (async): inc/thhv.h:941-943
+    wait_queue_head_t exit_wq;
+    atomic_t exit_pending;
+    u8 exit_msg[256];
+
+Initialization: thhv_vp.c:473-474
+    init_waitqueue_head(&vp->exit_wq);
+    atomic_set(&vp->exit_pending, 0);
+
+───────────────────────────────────────────────────────────────────────────────
+
+6️⃣  INTERRUPT INFRASTRUCTURE STATUS
+────────────────────────────────────────────────────────────────────────────────
+
+Interrupt policy ioctl: thhv_part.c:652-666
+    case THHV_SET_INTR_POLICY:
+        themis_set_intr_policy(part->domain_handle, ip.vector, ip.visibility)
+
+Visibility modes: inc/thhv.h:772-776
+    #define THHV_INTR_VISIBILITY_DELIVER     0
+    #define THHV_INTR_VISIBILITY_REPORT      1
+    #define THHV_INTR_VISIBILITY_NOT_REPORT  2
+
+MISSING IMPLEMENTATIONS:
+    - SET_THEMIC_VECTOR vmcall (opcode 0x17)
+    - Interrupt handler registration
+    - IPI notify mechanism
+    - DomainComm RX polling thread
+    - notify_vector configuration
+
+ThemIC message structures: inc/thhv.h:400-487
+    #define THEMIC_NUM_CHANNELS    16
+    #define THEMIC_CHAN_INTERCEPT  0  // VP exit messages
+    #define THEMIC_CHAN_DOORBELL   1  // Doorbell events
+    #define THEMIC_CHAN_IRQ_ACK    2  // Interrupt acks
+    
+    struct themic_intercept_message (lines 433-451)
+    struct themic_doorbell_message (lines 457-465)
+    struct themic_message_page (lines 469-474)
+    struct themic_event_flag_page (lines 480-482)
+
+Module init: thhv_main.c:170-192
+    domcomm_init() called (line 177)
+    No interrupt setup done
+
+───────────────────────────────────────────────────────────────────────────────
+
+7️⃣  PARTITION & VP STRUCTURES (FULL)
+────────────────────────────────────────────────────────────────────────────────
+
+struct thhv_partition (inc/thhv.h, starts ~910):
+    u64 domain_handle;
+    u64 domain_id;
+    u32 sched_policy;
+    u32 num_vps;
+    bool sealed;
+    struct thhv_vp **vps;
+    struct page **shared_meta_pages;
+    unsigned int shared_meta_nr_pages;
+    struct page **ept_meta_pages;
+    unsigned int ept_meta_nr_pages;
+    struct { spinlock_t lock; struct rb_root regions; } mem;
+    struct { spinlock_t lock; struct list_head list; } sent_caps;
+    struct list_head irqfds;              ← for IRQFD entries
+    struct mutex irqfd_lock;
+    struct { struct list_head list; struct mutex lock; } ioeventfds;  ← for IOEVENTFD
+    struct file *file;
+    struct kref refcount;
+
+struct thhv_vp (inc/thhv.h, starts ~935):
+    u32 vp_index;
+    struct thhv_partition *partition;
+    struct mutex run_lock;
+    wait_queue_head_t exit_wq;            ← for async VP exits
+    atomic_t exit_pending;                ← incomplete, needs wiring
+    u8 exit_msg[256];
+    struct page **meta_pages;
+    unsigned int meta_nr_pages;
+    struct page *comm_page;
+    void *comm_kaddr;
+    u64 comm_phys;
+    u64 comm_parent_handle;
+    u64 comm_cap_handle;
+    u64 comm_cap_sub;
+    bool comm_registered;
+    struct file *file;
+
+───────────────────────────────────────────────────────────────────────────────
+
+8️⃣  KEY FUNCTION CALL PATHS
+────────────────────────────────────────────────────────────────────────────────
+
+IRQFD registration should:
+    User → ioctl(partition_fd, THHV_IRQFD, &irqfd_struct)
+        → thhv_part_ioctl() [thhv_part.c:609]
+        → case THHV_IRQFD [thhv_part.c:691]
+        → [IMPLEMENT: copy_from_user, eventfd_ctx_get, validate GSI]
+        → [LINK: partition->irqfds list]
+        → [CALL: themis_assert_interrupt() ← NEEDS WRAPPER]
+
+IOEVENTFD registration should:
+    User → ioctl(partition_fd, THHV_IOEVENTFD, &ioeventfd_struct)
+        → thhv_part_ioctl() [thhv_part.c:609]
+        → case THHV_IOEVENTFD [thhv_part.c:695]
+        → [IMPLEMENT: copy_from_user, eventfd_ctx_get, validate addr]
+        → [LINK: partition->ioeventfds.list]
+        → [CALL: themis_register_doorbell() ← NEEDS WRAPPER]
+
+Interrupt delivery flow (async, needs implementation):
+    DomainComm RX message → DOMCOMM_MSG_IRQ_NOTIFY
+        → [IMPLEMENT: RX polling thread or handler]
+        → [FIND: matching IRQFD entry by GSI]
+        → [CALL: eventfd_signal(eventfd_ctx, 1)]
+
+Async VP exit flow (incomplete):
+    Capavisor sends DOMCOMM_MSG_VP_EXIT
+        → [IMPLEMENT: RX polling detects message]
+        → [SET: vp->exit_pending = 1]
+        → [WAKE: wake_up(&vp->exit_wq)]
+        → [RETURN: from wait_event_interruptible in thhv_run_vp]
+        → [COPY: exit_msg to userspace]
+
+═══════════════════════════════════════════════════════════════════════════════

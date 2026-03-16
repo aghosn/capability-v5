@@ -12,6 +12,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/uaccess.h>
 #include <linux/mm.h>
+#include <linux/eventfd.h>
 
 #include "thhv.h"
 
@@ -89,7 +90,15 @@ static void thhv_partition_destroy(struct kref *ref)
 		spin_unlock(&part->sent_caps.lock);
 	}
 
-	/* TODO: free irqfds, ioeventfds */
+	/* Free ioeventfd entries (no unregister — domain already being torn down). */
+	{
+		struct thhv_ioeventfd_entry *e, *etmp;
+		list_for_each_entry_safe(e, etmp, &part->ioeventfds.list, node) {
+			list_del(&e->node);
+			eventfd_ctx_put(e->eventfd);
+			kfree(e);
+		}
+	}
 
 	kfree(part);
 }
@@ -692,9 +701,17 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		/* TODO(P15g): eventfd → VMCALL_ASSERT_INTERRUPT */
 		return -ENOSYS;
 
-	case THHV_IOEVENTFD:
-		/* TODO(P15h): VMCALL_REGISTER_DOORBELL */
-		return -ENOSYS;
+	case THHV_IOEVENTFD: {
+		struct thhv_ioeventfd __user *ioe = uarg;
+		struct thhv_ioeventfd args;
+
+		if (copy_from_user(&args, ioe, sizeof(args)))
+			return -EFAULT;
+
+		if (args.flags & THHV_IOEVENTFD_FLAG_DEASSIGN)
+			return thhv_ioeventfd_deassign(part, ioe);
+		return thhv_ioeventfd_assign(part, ioe);
+	}
 
 	case THHV_SET_MSI_ROUTING:
 		/* TODO(P15g): build GSI → MSI table */

@@ -78,6 +78,10 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 
 		thhv_read_intercept_msg(vp, msg_buf);
 
+		/* Drain the DomainComm RX ring: signal any ioeventfds whose
+		 * doorbell was hit while the child was running. */
+		thhv_drain_domcomm_rx(part);
+
 	} else {
 		/*
 		 * Async mode: the child VP runs on its own core.

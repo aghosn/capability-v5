@@ -1,0 +1,156 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║       THHV DRIVER AUDIT — QUICK REFERENCE FOR IRQFD/IOEVENTFD IMPL          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+📁 KEY FILE LOCATIONS:
+
+  1. IRQFD STUB:        thhv_part.c:691-693
+  2. IOEVENTFD STUB:    thhv_part.c:695-697
+  3. IRQFD STRUCT:      thhv.h:712-715 (struct thhv_irqfd)
+  4. IOEVENTFD STRUCT:  thhv.h:716-721 (struct thhv_ioeventfd)
+  5. PARTITION STRUCT:  thhv.h:910 (irqfds list + ioeventfds struct)
+  6. VP STRUCT:         thhv.h:935 (exit_wq + exit_pending for async)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 DATA STRUCTURES SUMMARY:
+
+  struct thhv_partition {
+    [track]:  struct list_head irqfds;           // IRQFD tracking (empty list)
+              struct mutex irqfd_lock;            // Protects irqfds list
+              struct { list_head, mutex } ioeventfds;  // IOEventFD tracking
+  }
+
+  struct thhv_vp {
+    [async]:  wait_queue_head_t exit_wq;         // VP exit parking (incomplete!)
+              atomic_t exit_pending;              // Exit event flag (never set)
+              u8 exit_msg[256];                   // ThemIC intercept message
+  }
+
+  struct thhv_irqfd {
+    __s32 fd;           // User-provided eventfd
+    __u32 gsi;          // Global System Interrupt (0-255)
+    __u32 flags;        // Control flags
+    __u32 rsvd;
+  }
+
+  struct thhv_ioeventfd {
+    __s32 fd;           // User-provided eventfd
+    __u32 flags;        // Control flags (datamatch_type, etc.)
+    __u64 addr;         // Guest physical address (doorbell location)
+    __u32 len;          // 1, 2, or 4 bytes
+    __u32 datamatch;    // Optional pattern to match
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔌 VMCALL INFRASTRUCTURE:
+
+  ✅ Available Wrappers (thhv_hvcall.c):
+     - themis_switch()              // Sync VP run
+     - themis_add_vp()              // Register VP + COMM
+     - themis_register_comm()       // Bind COMM page
+     - themis_set_intr_policy()     // Configure interrupt visibility
+     - themis_set_reg()             // Set VP register
+     - themis_carve()               // Allocate capability
+
+  ❌ Missing Wrappers:
+     - themis_set_themic_vector()   // THEMIS_OP_SET_THEMIC_VECTOR (0x17)
+     - themis_register_doorbell()   // THEMIS_OP_REGISTER_DOORBELL (0x15)
+     - themis_assert_interrupt()    // Custom opcode (NOT DEFINED)
+
+  🔧 Raw VMCALL Primitive (inc/thhv.h:165-180):
+     __themis_vmcall(opcode, a0, a1, a2, a3, a4, r0, r1, r2)
+     Register convention: RAX=opcode, RDI/RSI/RDX/RCX/R8 = args
+     Out: RAX=status, RDI/RSI/RDX = returns
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🌐 DOMAINCOMM RING INFRASTRUCTURE:
+
+  Global State: thhv_domcomm (struct domcomm_state)
+    .rx:        DomainComm RX ring (capavisor → dom0)
+    .tx:        DomainComm TX ring (dom0 → capavisor)
+
+  RX Message Types Relevant to IRQFD/IOEVENTFD:
+    DOMCOMM_MSG_IRQ_NOTIFY (0x0003)    ← Interrupt delivery event
+    DOMCOMM_MSG_DOORBELL? (0x000?)     ← Doorbell notification (TBD)
+    DOMCOMM_MSG_VP_EXIT (0x0002)       ← Async VP exit (incomplete)
+
+  Functions:
+    domcomm_rx_dequeue()     // Consume one message from RX ring
+    domcomm_tx_enqueue()     // Produce one message on TX ring
+    domcomm_request_grow()   // Grow RX or TX ring
+
+  Discovery: CPUID 0x40000002 (EAX:EBX=GPA, ECX=pages)
+  Init:      domcomm_init() called from thhv_main.c module init
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚡ INTERRUPT INFRASTRUCTURE STATUS: ❌ CRITICAL GAPS
+
+  ✅ Already Done:
+     - THHV_SET_INTR_POLICY ioctl (thhv_part.c:652)
+     - Interrupt visibility modes defined (DELIVER/REPORT/NOT_REPORT)
+
+  ❌ NOT DONE:
+     - No SET_THEMIC_VECTOR call (notify_vector never configured)
+     - No IDT interrupt handler registered
+     - No IPI handler for async VP exits
+     - Async mode completely unimplemented (thhv_vp.c:88 TODO)
+     - No notify_vector → exit_pending → exit_wq wakeup path
+     - No DomainComm RX polling thread
+
+  ThemIC Notify Vector:
+     - Defined in Themis ABI (SET_THEMIC_VECTOR opcode = 0x17)
+     - NOT wrapped in driver
+     - Needs IDT entry registration after configuration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 IMPLEMENTATION ROADMAP:
+
+  IRQFD (P15g):
+    1. Create struct thhv_irqfd_entry to wrap eventfd_ctx + GSI
+    2. Implement thhv_irqfd_add() to validate fd, get eventfd_ctx, alloc entry
+    3. Link into partition->irqfds list (protected by partition->irqfd_lock)
+    4. Create mapping function: GSI → entry (binary search or hash table)
+    5. Wrap themis_assert_interrupt() (custom opcode TBD)
+    6. Wire DomainComm RX: on DOMCOMM_MSG_IRQ_NOTIFY, call eventfd_signal()
+    7. Implement thhv_irqfd_del() for deassign, cleanup entry
+    8. Complete async VP exit path: IPI handler → exit_pending → exit_wq wake
+
+  IOEVENTFD (P15h):
+    1. Create struct thhv_ioeventfd_entry to wrap eventfd_ctx + addr + len
+    2. Implement thhv_ioeventfd_add() to validate, allocate, link entry
+    3. Link into partition->ioeventfds.list (protected by ioeventfds.lock)
+    4. Create addr-based lookup (hash table or interval tree)
+    5. Wrap themis_register_doorbell() (needs wrapper creation)
+    6. Wire guest write detection: VM exit → doorbell check → eventfd_signal()
+    7. Implement thhv_ioeventfd_del() for deassign
+    8. Support optional datamatch filtering on write payload
+
+  Common Infrastructure:
+    1. Set up DomainComm RX polling (thread or work queue)
+    2. Implement notify_vector interrupt handler
+    3. Wire SET_THEMIC_VECTOR on domain creation
+    4. Complete async VP exit path (exit_pending flag, wakeup logic)
+    5. Add eventfd cleanup in thhv_partition_destroy() (line 92 TODO)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 STRUCT SIZES & MEMORY:
+
+  struct thhv_irqfd:        16 bytes (4 u32s)
+  struct thhv_ioeventfd:    24 bytes (u32 + flags + u64 + u32 + u32)
+  struct thhv_partition:    ~128 bytes (+ pointers + spinlocks)
+  struct thhv_vp:           ~384 bytes (+ pointers + waitqueue + atomic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📄 DOCUMENTATION:
+
+  Full audit:          thhv/AUDIT.md (731 lines)
+  DomainComm spec:     thhv/docs/domain-comm-v0.2.md
+  Module structure:    thhv/README.md
+

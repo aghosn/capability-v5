@@ -215,3 +215,30 @@ int themis_domcomm_notify(void)
 				     NULL, NULL, NULL);
 	return __themis_to_errno(status);
 }
+
+/* ── ThemIC doorbell registration ────────────────────────────────────── */
+
+int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
+     u64 datamatch, u64 flags, u64 *out_doorbell_id)
+{
+u64 status = __themis_vmcall(THEMIS_OP_REGISTER_DOORBELL,
+     child_domain, gpa, size, datamatch, flags,
+     out_doorbell_id, NULL, NULL);
+return __themis_to_errno(status);
+}
+
+int themis_unregister_doorbell(u64 child_domain, u64 doorbell_id)
+{
+u64 status = __themis_vmcall(THEMIS_OP_UNREGISTER_DOORBELL,
+     child_domain, doorbell_id, 0, 0, 0,
+     NULL, NULL, NULL);
+return __themis_to_errno(status);
+}
+
+int themis_set_themic_vector(u64 vector)
+{
+u64 status = __themis_vmcall(THEMIS_OP_SET_THEMIC_VECTOR,
+     vector, 0, 0, 0, 0,
+     NULL, NULL, NULL);
+return __themis_to_errno(status);
+}
