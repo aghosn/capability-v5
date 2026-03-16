@@ -400,7 +400,8 @@ The following three invariants govern what dom0 sees and can access:
 
 #### Open items
 
-- [ ] **P7d**: Set dom0 interrupt policy: all vectors DELIVER (dom0 is the default handler).
+- [x] **P7d**: ✅ DONE (pre-existing). Dom0's `DomainPolicy::new_root()` in the capability
+  engine sets `default_deliver` for all vectors — dom0 is the default interrupt handler.
 
 - [ ] **P7f-alt**: *(Future / optional)* **64-bit direct entry** for dom0 instead of the
   32-bit decompressor path.  Trade-offs:
@@ -455,50 +456,61 @@ The following three invariants govern what dom0 sees and can access:
 
 ### Phase 8 — Hypercall Dispatch + Hypercall ABI
 
-- [ ] **P8a**: `crates/themis-abi/`: opcode constants, `VpRegister` enum, error codes.
-  Shared between capavisor and `libthemis` guest library.
-- [ ] **P8b**: `hypercall.rs`: decode RAX, call `execute(||...)`, encode result.
-- [ ] **P8c**: Implement all CapavisorAPI hypercall handlers listed in the Hypercall ABI table,
-  including: `VMCALL_CARVE`, `VMCALL_ALIAS`, `VMCALL_SEND`, `VMCALL_ACCEPT`, `VMCALL_REJECT`,
-  `VMCALL_CREATE_DOMAIN`, `VMCALL_SEAL`, `VMCALL_REVOKE_MEM`, `VMCALL_REVOKE_DOMAIN`,
-  `VMCALL_SWITCH`, `VMCALL_GET_CHAN`, `VMCALL_ATTEST_SELF`, `VMCALL_ATTEST`,
-  `VMCALL_GET_REG`, `VMCALL_SET_REG`, `VMCALL_SET_INTR_POLICY`, `VMCALL_SET_DEF_INTR_POLICY`.
-  Stubs for `VMCALL_REGISTER_VP_META` and `VMCALL_REGISTER_DOORBELL` (implemented in
-  Phases 10–11).
-- [ ] **P8d**: `VMCALL_ASSIGN_DEVICE`: validate caller, reprogram IOMMU + I/O APIC.
+- [x] **P8a**: ✅ DONE. Opcodes, `VpRegister` enum, and error codes all present in
+  `themis-abi/src/lib.rs` (opcodes/errors) and `themis-abi/src/regs.rs` (VpRegister).
+- [x] **P8b**: ✅ DONE. Full dispatch in `hypercall.rs`: decodes RAX/RDI/RSI/RDX/RCX,
+  routes via match, wraps each handler in `execute(||...)`, encodes `HypercallResult`.
+- [x] **P8c**: ✅ DONE (core handlers). All major handlers implemented: CARVE, ALIAS, SEND,
+  ACCEPT, REJECT, CREATE_DOMAIN, SEAL, REVOKE_MEM, REVOKE_DOMAIN, SWITCH, ATTEST_SELF,
+  GET_REG, SET_REG, SET_INTR_POLICY, SET_DEF_INTR_POLICY, ADD_VP, REGISTER_COMM,
+  DOMCOMM_NOTIFY. Still stubbed (ERR_UNIMPL): GET_CHAN, ATTEST, ENUMERATE,
+  REGISTER_DOORBELL, REGISTER_EVENT_FLAGS, REGISTER_INTR_CHAN.
+- [x] **P8d**: ✅ DONE. `do_assign_device` / `do_release_device` validate caller via
+  capability handle and reprogram VT-d context entries to child SLPT.
 - [x] **P8e**: `libthemis` guest library (`crates/libthemis/`): `no_std` VMCALL wrappers.
   Covers all 23 opcodes from `themis-abi`. Usable from Linux kernel module via FFI
   or from a bare-metal child domain.
 
 ### Phase 9 — Multi-Domain Support
 
-- [ ] **P9a**: dom0 `VMCALL_CREATE_DOMAIN` → Themis allocates EPT root + IOMMU PT.
-- [ ] **P9b**: dom0 carves memory + sends to child → `apply_update` updates child EPT + IOMMU.
-- [ ] **P9c**: dom0 seals child → Themis allocates child VMCS + VAPIC + PI descriptors;
-  calls `IrqRouter::configure_domain_policy` for child.
-- [ ] **P9d**: `VMCALL_SWITCH` → `switch_domain`, VMPTRLD child VMCS, VMRESUME.
-- [ ] **P9e**: `VMCALL_REVOKE_DOMAIN` → capability engine subtree revoke; `on_domain_revoked`
-  frees EPT + IOMMU + VMCS + VAPIC structures; reassigns devices to parent.
-- [ ] **P9f**: Cross-domain interrupt delivery (REPORT): EOI-exit VMEXIT → capability engine
-  `deliver_interrupt_vp` → VMCS switch to handler domain → VMRESUME.
+- [x] **P9a**: ✅ DONE. `do_create_domain` → `Capability::create()` → `apply_update`
+  allocates EPT root (`ensure_ept`) and IOMMU SLPT (`ensure_iommu_pt`) on first memory mapping.
+- [x] **P9b**: ✅ DONE. CARVE/SEND handlers trigger `UpdateBatch`; `apply_update::ChangeRights`
+  maps GPA→HPA in both child EPT and IOMMU SLPT.
+- [x] **P9c**: ✅ DONE. `do_seal` programs child IRTEs. `do_add_vp` allocates VMCS + VAPIC +
+  PID + MSR bitmap + APIC access page from META, then calls `vmcs::setup_child_vmcs`.
+- [x] **P9d**: ✅ DONE. `do_switch` performs full domain context switch: validates COMM dirty
+  registers, VMCLEAR parent, VMPTRLD child (`activate()`), VMRESUME via monitor loop.
+- [x] **P9e**: ✅ DONE. `do_revoke_domain` calls `Capability::revoke_domain()`; `apply_update::
+  RevokeDomain` tears down EPT + IOMMU SLPT; `invalidate_domain_irtes` clears all IRTEs.
+- [ ] **P9f**: ⚠️ PARTIAL. EOI-exit handler stub exists (logs vector) but EOI-exit bitmap is
+  all zeros so it never fires. REPORT-visibility interrupt completion notification deferred.
 
-### Phase 10 — META VP-State Regions
+### Phase 10 — META VP-State Regions *(SUPERSEDED by VpCommPage)*
 
-Implements the EVMCS-inspired `VpStateMeta` pages for zero-hypercall VP register access,
-PI descriptor colocation, and the cross-core interrupt routing channel. Depends on Phase 9.
+> **STALE — design replaced.** The `VpStateMeta` concept (EVMCS-inspired shared page per VP)
+> was implemented as `VpCommPage` (`themis-abi/src/regs.rs`), which covers all originally
+> planned functionality: per-VP register storage with dirty bitmask, written on every VMEXIT
+> (`forward_child_exit`), applied on every VMENTRY (`do_switch`), and used directly by
+> GET_REG/SET_REG hypercalls via `platform.get_vp_register`/`set_vp_register`.
+>
+> Items P10a–P10e are already covered. Only P10f (cross-core routing) remains genuinely open.
 
-- [ ] **P10a**: Define `VpStateMeta` struct in `crates/themis-abi/` (shared layout between
-  capavisor and driver/userspace). Fields: GPRs, RIP/RSP/RFLAGS, CR0/CR3/CR4/EFER,
-  exit_reason, exit_qualification, `dirty` atomic bitmask, interrupt routing fields,
-  `pi_desc: PostedInterruptDescriptor` (64 B, 64 B-aligned).
-- [ ] **P10b**: `VMCALL_REGISTER_VP_META(domain_handle, vp_id, meta_cap_handle)`:
-  validate, map META page into Themis root-mode, store in `VpHw.meta_virt/meta_phys`,
-  update VMCS `POSTED_INTR_DESC_ADDR`.
-- [ ] **P10c**: On every VMEXIT from a VP with META page, write VP mirror (GPRs, CRs, exit info).
-- [ ] **P10d**: On every VMENTRY, check `dirty` field and reload VMCS guest-state from META page.
-- [ ] **P10e**: Update `THEMIS_GET_VP_REGS` ioctl path: if META mapped, read directly — no hypercall.
-- [ ] **P10f**: Update cross-core interrupt routing (P6e step 5) to use META page fields.
-- [ ] **P10g**: Resolve write-back timing: generation counter + benchmark overhead.
+- [x] **P10a**: ✅ DONE — `VpCommPage` in `themis-abi/src/regs.rs`. Full register storage,
+  dirty/allowed bitmasks, `read_reg`/`write_reg`/`mark_dirty` helpers.
+- [x] **P10b**: ✅ DONE — `THEMIS_REGISTER_COMM` (`do_register_comm`) maps the COMM page
+  and stores `comm_hpa` in `PlatformDomain.comm_hpas[vp_id]`.
+- [x] **P10c**: ✅ DONE — `forward_child_exit` writes all registers in `read_set` to the
+  COMM page on every VP exit.
+- [x] **P10d**: ✅ DONE — `do_switch` reads COMM dirty mask and applies to VMCS/regfile on
+  every VP entry.
+- [x] **P10e**: ✅ DONE — GET_REG/SET_REG read/write COMM page directly (no VMCS switching).
+- [ ] **P10f**: ❌ OPEN — Cross-core interrupt routing: park VP on core C2, signal via IPI,
+  resume on correct core. Requires cross-core `CoreUpdate::Switch` protocol. Deferred.
+- [ ] **P10g**: ❌ OPEN — EOI-exit bitmap programming on `SET_INTR_POLICY`: when a vector's
+  policy changes to REPORT, set the corresponding bit in the VMCS EOI-exit bitmap (currently
+  always zero). Requires VMPTRLD+vmwrite+VMCLEAR on the target VP's VMCS.
+
 
 ### Phase 11 — ThemIC: Doorbell and Event Flag Pages
 

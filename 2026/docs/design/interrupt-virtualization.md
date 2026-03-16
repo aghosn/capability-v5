@@ -470,15 +470,27 @@ The driver must communicate three things to the capavisor that are not knowable 
 
 ### Implementation Status
 
+*(Updated 2026-03-16)*
+
 | Component | Status | Notes |
 |---|---|---|
-| `SET_INTR_POLICY` hypercall → `Capability::set_policy` | Stubbed | Needs EOI-exit bitmap update side effect |
-| `THHV_IRQFD` fd-triggered injection | Defined | Needs PID write + notification IPI implementation |
-| `THHV_IOEVENTFD` MMIO exit → userspace fd | Defined | Needs EPT violation routing |
-| `THHV_MSI_ROUTING` physical vector → partition map | Defined | Phase 1: routing table; Phase 3: IRTE |
-| Write `InterceptMessage { exit_reason=V }` to leaf COMM page on interrupt | **New** — in interrupt exit handler | Contains register snapshot per read_set; parent reads on SWITCH return |
-| PID allocation per VP | **New** | 64-byte aligned allocation per VP at ADD_VP time |
-| Notification vector reservation | **New** | Must happen at module load |
+| Phase 1: VAPIC + VID + forwarding | ✅ Done | `intr-p1-*` commits; `forward_interrupt_to_handler`, `SET_INTR_POLICY` wired |
+| Phase 2: Posted Interrupts + PID | ✅ Done | `intr-p2-*` commits; `inject_via_pid`, notification vector `0xF2`, cross-core IPI |
+| Phase 3: VT-d Interrupt Remapping | ✅ Done | `intr-p3-*` commits; IRTE alloc, IR enable, `program_domain_irtes` at seal/revoke |
+| APICv: VIRTUALIZE_X2APIC (bit 4) | ✅ Done | `e6ebc30`; x2APIC MSR reads via VAPIC page, no exit |
+| APICv: `inject_virtual_interrupt` | ✅ Done | `c1a0c1a`; sets VIRR + RVI in VAPIC page |
+| APICv: APIC access page + exit handler | ✅ Done | `3e58f7a`; `EXIT_REASON_APIC_ACCESS=44` emulated via VAPIC |
+| NMI_EXITING for child VPs | ✅ Done | `8d282ad`; NMI forwarded to dom0 via `forward_interrupt_to_handler` |
+| EOI_INDUCED exit handler | ⚠️ Stub | `8d282ad`; handler exists but EOI-exit bitmap always 0 → never fires |
+| `SET_INTR_POLICY` hypercall | ✅ Done | `do_set_intr_policy` wired; EOI-exit bitmap update still deferred (see Open Q4) |
+| COMM page register snapshot on exit | ✅ Done | `forward_child_exit` writes all `read_set` registers to `VpCommPage` |
+| PID allocation per VP | ✅ Done | `pid_phys` in `VcpuSlot`, allocated from META at `ADD_VP` time |
+| Notification vector | ✅ Done | `NOTIFY_VEC = 0xF2` reserved in `hypercall.rs` |
+| GET_REG / SET_REG via COMM page | ✅ Done | `get_vp_register`/`set_vp_register` read/write `VpCommPage` directly |
+| Cross-core delivery (Case C) | ❌ Deferred | Park/resume protocol needs `CoreUpdate::Switch` cross-core path |
+| EOI-exit bitmap update on policy change | ❌ Open | See Open Question 4; requires VMPTRLD+vmwrite on target VP's VMCS |
+| `THHV_IRQFD` fd-triggered injection | ❌ Not implemented | Needs PID write + notification IPI from kernel thread |
+| `THHV_IOEVENTFD` MMIO exit → userspace | ❌ Not implemented | Needs EPT violation routing to userspace fd |
 
 ### Key Design Constraint: LAPIC Timer Interrupts
 
@@ -488,13 +500,19 @@ The LAPIC timer (TSC deadline timer, vector configured by Linux) is a *local* in
 
 ## Open Questions
 
-1. **Notification vector**: What physical vector to reserve for Posted Interrupt notification? Must not conflict with Linux's vector allocator (typically `0xF0–0xFF` are used by the kernel). Candidate: `0xF2` or a value outside Linux's range.
+1. **Notification vector**: ✅ Resolved — `NOTIFY_VEC = 0xF2` reserved in `hypercall.rs`.
 
-2. **APIC-access page**: Do we need the APIC-access page (MMIO at 0xFEE00000) in the EPT, or is x2APIC MSR-based access sufficient? x2APIC avoids the need to map the page and is the preferred path for new systems.
+2. **APIC-access page**: ✅ Resolved — APIC access page implemented (P5b); x2APIC path also
+   enabled (VIRTUALIZE_X2APIC). Both are in place.
 
-3. **vTPR / TPR threshold interaction**: How should child domains interact with the TPR threshold? Setting `TPR_THRESHOLD=0` means all interrupts are deliverable regardless of guest CR8; appropriate for children that don't set a high task priority.
+3. **vTPR / TPR threshold interaction**: ✅ Resolved — `TPR_THRESHOLD=0` set for all child
+   VPs in `vmcs.rs`; all interrupts deliverable regardless of guest CR8.
 
-4. **EOI-exit bitmap updates on policy change**: When `SET_INTR_POLICY` is called, the EOI-exit bitmap in the VMCS must be updated (currently always 0 — only becomes relevant if future design adds an EOI-exit use case). Requires either re-writing the VMCS field (VMPTRLD + vmwrite + VMCLEAR) or storing a "pending policy update" applied on next VMENTRY.
+4. **EOI-exit bitmap updates on policy change**: ❌ Open — When `SET_INTR_POLICY` sets a
+   vector to REPORT visibility, the corresponding bit in the VMCS EOI-exit bitmap must be set.
+   Currently always 0. Fix: at `SET_INTR_POLICY` time, if VP is inactive, do
+   VMPTRLD + vmwrite(EOI_EXIT_BITMAPn) + VMCLEAR. If VP is active, store pending and apply
+   at next VMENTRY.
 
 ---
 
