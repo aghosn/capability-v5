@@ -108,6 +108,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
     let arg1 = vcpu.reg(Reg::Rsi);
     let arg2 = vcpu.reg(Reg::Rdx);
     let arg3 = vcpu.reg(Reg::Rcx);
+    let arg4 = vcpu.reg(Reg::R8);
 
     match opcode {
         opcodes::THEMIS_CARVE => Some(do_carve(platform, &caller, arg0, arg1, arg2, arg3)),
@@ -139,13 +140,17 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SET_REG =>
             Some(do_set_reg(platform, &caller, arg0, arg1, arg2, arg3)),
 
+        opcodes::THEMIS_REGISTER_DOORBELL =>
+            Some(do_register_doorbell(platform, &caller, arg0, arg1, arg2 as u32, arg3, arg4 as u32)),
+        opcodes::THEMIS_UNREGISTER_DOORBELL =>
+            Some(do_unregister_doorbell(platform, &caller, arg0, arg1 as u32)),
+        opcodes::THEMIS_SET_THEMIC_VECTOR =>
+            Some(do_set_themic_vector(platform, &caller, arg0)),
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST
-        | opcodes::THEMIS_ENUMERATE
-        | opcodes::THEMIS_REGISTER_DOORBELL
-        | opcodes::THEMIS_REGISTER_EVENT_FLAGS
-        | opcodes::THEMIS_REGISTER_INTR_CHAN => Some(HypercallResult::unimpl()),
+        | opcodes::THEMIS_ENUMERATE => Some(HypercallResult::unimpl()),
 
         _ => {
             serial_println!("[VMCALL] unknown opcode {:#x}", opcode);
@@ -1559,6 +1564,132 @@ fn send_grow_ack(pd: &mut crate::platform::PlatformDomain, status: u32) {
     pd.domcomm_rx_enqueue(domcomm::msg_types::GROW_ACK, ack_bytes);
 }
 
+// ── ThemIC VMCALLs ───────────────────────────────────────────────────────── //
+
+/// REGISTER_DOORBELL (0x15): register a doorbell entry for a child domain.
+///
+/// arg0 = child_domain_handle, arg1 = gpa, arg2 = size (1/2/4/8),
+/// arg3 = datamatch, arg4 = flags (THEMIC_DOORBELL_FLAG_*)
+/// Returns doorbell_id in arg0 on success.
+fn do_register_doorbell(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_handle: u64,
+    gpa: u64,
+    size: u32,
+    datamatch: u64,
+    flags: u32,
+) -> HypercallResult {
+    use crate::platform::{DoorbellEntry, THEMIC_MAX_DOORBELLS};
+
+    let any_size = flags & crate::platform::THEMIC_DOORBELL_FLAG_ANY_SIZE != 0;
+    if !any_size && size != 1 && size != 2 && size != 4 && size != 8 {
+        return HypercallResult::error(errors::ERR_INVALID);
+    }
+
+    let child_domain_id: DomainId = {
+        let r = caller.read();
+        let child_weak = match r.data.get_domain_capability(child_handle) {
+            Some(w) => w.clone(),
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        drop(r);
+        let child_ref = match child_weak.upgrade() {
+            Some(c) => c,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let id = child_ref.read().data.id;
+        id
+    };
+
+    let child_arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+    let mut pd = child_arc.lock();
+
+    if pd.doorbells.len() >= THEMIC_MAX_DOORBELLS {
+        return HypercallResult::error(errors::ERR_NOMEM);
+    }
+
+    let doorbell_id = pd.next_doorbell_id;
+    pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
+    pd.doorbells.push(DoorbellEntry { doorbell_id, gpa, datamatch, size, flags });
+
+    serial_println!(
+        "[REGISTER_DOORBELL] child_dom={} id={} gpa={:#x} size={} flags={:#x}",
+        child_domain_id, doorbell_id, gpa, size, flags
+    );
+
+    HypercallResult::success_1(doorbell_id as u64)
+}
+
+/// UNREGISTER_DOORBELL (0x16): remove a previously registered doorbell entry.
+///
+/// arg0 = child_domain_handle, arg1 = doorbell_id
+fn do_unregister_doorbell(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_handle: u64,
+    doorbell_id: u32,
+) -> HypercallResult {
+    let child_domain_id: DomainId = {
+        let r = caller.read();
+        let child_weak = match r.data.get_domain_capability(child_handle) {
+            Some(w) => w.clone(),
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        drop(r);
+        let child_ref = match child_weak.upgrade() {
+            Some(c) => c,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let id = child_ref.read().data.id;
+        id
+    };
+
+    let child_arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+    let mut pd = child_arc.lock();
+
+    let before = pd.doorbells.len();
+    pd.doorbells.retain(|e| e.doorbell_id != doorbell_id);
+    if pd.doorbells.len() == before {
+        return HypercallResult::error(errors::ERR_NOTFOUND);
+    }
+
+    serial_println!(
+        "[UNREGISTER_DOORBELL] child_dom={} id={}", child_domain_id, doorbell_id
+    );
+    HypercallResult::success()
+}
+
+/// SET_THEMIC_VECTOR (0x17): configure the notify_vector in the caller's
+/// DomainComm header.  dom0's driver registers the IDT handler for this vector;
+/// the capavisor sends an IPI at this vector to notify dom0 of pending
+/// DomainComm RX ring messages (doorbells, VP exits in async mode).
+///
+/// arg0 = vector (u8, 1–255)
+fn do_set_themic_vector(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    vector: u64,
+) -> HypercallResult {
+    if vector == 0 || vector > 255 {
+        return HypercallResult::error(errors::ERR_INVALID);
+    }
+    let caller_id = caller.read().data.id;
+    let arc = match platform.domain_arc(caller_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+    arc.lock().set_notify_vector(vector as u32);
+    serial_println!("[SET_THEMIC_VECTOR] dom={} vector={:#x}", caller_id, vector);
+    HypercallResult::success()
+}
+
 // ── intr-p3g: IRTE lifecycle helpers ────────────────────────────────────── //
 
 /// Program IRTEs for every vector in a newly-sealed child domain.
@@ -1570,7 +1701,6 @@ fn send_grow_ack(pd: &mut crate::platform::PlatformDomain, status: u32) {
 /// Called from `do_seal` after the capability engine completes sealing.
 ///
 /// **NOTE**: The posted IRTE's `NDST` field is initialised to 0 here because
-/// the VP has not started yet and we don't know which core it will run on.
 /// `sync_irte_ndst` must be called each time the VP is activated (VMPTRLD) to
 /// update `IRTE.NDST` to the current physical LAPIC ID.  Without this, hardware-
 /// posted device interrupts would be sent to the wrong core (always core 0).

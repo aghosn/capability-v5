@@ -108,14 +108,17 @@ pub mod opcodes {
     /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
     pub const THEMIS_ADD_VP:              u64 = 0x14;
 
-    /// Register a doorbell page.
-    pub const THEMIS_REGISTER_DOORBELL:   u64 = 0x15;
+    /// IN:  RDI = child_domain_handle, RSI = gpa, RDX = size (bytes), RCX = datamatch, R8 = flags
+    /// OUT: RDI = doorbell_id
+    pub const THEMIS_REGISTER_DOORBELL:     u64 = 0x15;
 
-    /// Register an event flags page.
-    pub const THEMIS_REGISTER_EVENT_FLAGS:u64 = 0x16;
+    /// Unregister a previously registered doorbell entry.
+    /// IN:  RDI = child_domain_handle, RSI = doorbell_id
+    pub const THEMIS_UNREGISTER_DOORBELL:   u64 = 0x16;
 
-    /// Register an interrupt channel.
-    pub const THEMIS_REGISTER_INTR_CHAN:  u64 = 0x17;
+    /// Configure the capavisor's notify_vector for DomainComm doorbell IPIs.
+    /// IN:  RDI = vector (1–255)
+    pub const THEMIS_SET_THEMIC_VECTOR:     u64 = 0x17;
 
     /// Register a COMM page owned by the caller, bound to a child VP.
     /// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id

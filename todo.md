@@ -552,18 +552,18 @@ per-VP shared pages are needed.  COMM redesign prerequisites are already done.
 
 **ThemIC protocol** (capavisor + driver, after COMM redesign):
 
-- [ ] **P11a**: Add `msg_types::DOORBELL_NOTIFY = 0x0007` and `DoorbellNotify` struct
-  to `themis-abi/src/domcomm.rs` (matches the Rust layout used by capavisor and driver).
-- [ ] **P11b**: `VMCALL_REGISTER_DOORBELL(child_domain_handle, gpa, size, datamatch, flags)`
-  → doorbell_id.  Capavisor stores a `Vec<DoorbellEntry>` per child domain in
-  `PlatformDomain` (no shared page needed).
-- [ ] **P11c**: `VMCALL_UNREGISTER_DOORBELL(child_domain_handle, doorbell_id)`.
-- [ ] **P11d**: EPT_VIOLATION handler: check faulting GPA against registered doorbells.
-  Match → write `DoorbellNotify` to parent's DomainComm RX ring, send `notify_vector`
-  IPI to parent core, advance child RIP, VMRESUME child (fast-path, child not stopped).
-  No match → full intercept path (`forward_child_exit`).
-- [ ] **P11e**: `VMCALL_SET_THEMIC_VECTOR(vector)`: write the given vector into the
-  caller's DomainComm header `notify_vector` field.  Default 0xF0.
+- [x] **P11a**: ✅ DONE. `msg_types::DOORBELL_NOTIFY = 0x0007` and `DoorbellNotify` struct
+  added to `themis-abi/src/domcomm.rs`.
+- [x] **P11b**: ✅ DONE. `VMCALL_REGISTER_DOORBELL(child_domain_handle, gpa, size, datamatch, flags)`
+  → doorbell_id.  Capavisor stores `Vec<DoorbellEntry>` + `next_doorbell_id` per child domain in
+  `PlatformDomain`.  Validates child domain cap ownership; enforces 128-entry limit.
+- [x] **P11c**: ✅ DONE. `VMCALL_UNREGISTER_DOORBELL(child_domain_handle, doorbell_id)`.
+- [x] **P11d**: ✅ DONE. EPT_VIOLATION handler replaced (`handle_ept_doorbell` in `vmexit.rs`).
+  Match → write `DoorbellNotify` to parent's DomainComm RX ring, advance child RIP, VMRESUME
+  child (fast-path, child not stopped).  No match → `forward_child_exit`.
+  Note: IPI deferred (async mode future work; commented stub in handler).
+- [x] **P11e**: ✅ DONE. `VMCALL_SET_THEMIC_VECTOR(vector)`: writes into caller's DomainComm
+  header `notify_vector` field via `set_notify_vector()`.  Opcode 0x17 = `THEMIS_SET_THEMIC_VECTOR`.
 
 ### Phase 12 — `themis-vmm.ko` Linux Kernel Driver *(superseded by Phase 15)*
 

@@ -27,6 +27,7 @@ pub mod msg_types {
     pub const DOMAIN_EVENT: u32 = 0x0004;
     pub const ERROR: u32 = 0x0005;
     pub const GROW_ACK: u32 = 0x0006;
+    pub const DOORBELL_NOTIFY: u32 = 0x0007;
 
     /// Domain → Capavisor (TX ring)
     pub const ATTEST_REQ: u32 = 0x0100;
@@ -191,6 +192,23 @@ pub const THEMIC_INTERCEPT_MSG_SIZE: usize = 120;
 
 // ── Error message ────────────────────────────────────────────────────────── //
 
+/// DOORBELL_NOTIFY payload (capavisor → domain, on the RX ring).
+///
+/// Written when an EPT violation matches a registered doorbell entry.
+/// The child VP is NOT stopped; it resumes immediately after the fast-path.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DoorbellNotify {
+    pub doorbell_id: u32,  // matches the id returned by REGISTER_DOORBELL
+    pub reserved: u32,
+    pub gpa: u64,          // guest physical address that was written
+    pub value: u64,        // data value written by the guest
+    pub size: u32,         // write size in bytes (1/2/4/8)
+    pub reserved2: u32,
+}
+
+// ── Error message ────────────────────────────────────────────────────────── //
+
 /// ERROR payload (capavisor → domain).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -222,6 +240,7 @@ const _: () = {
     assert!(core::mem::size_of::<GrowRequest>() == 24);
     assert!(core::mem::size_of::<GrowAck>() == 16);
     assert!(core::mem::size_of::<VpExit>() == 128);
+    assert!(core::mem::size_of::<DoorbellNotify>() == 32);
     assert!(core::mem::size_of::<ErrorMsg>() == 16);
     assert!(core::mem::size_of::<EnumCapReq>() == 8);
 };

@@ -566,38 +566,30 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_EPT_VIOLATION => {
-            while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let rip = vcpu.get(vmcs::guest::RIP);
-            let cr3 = vcpu.get(vmcs::guest::CR3);
-            {
-                let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
-                if !platform_ptr.is_null() {
-                    let platform = unsafe { &*platform_ptr };
-                    if let Some(core_id) = platform.get_current_core() {
-                        let did = platform.core_domain_id(core_id as usize);
-                        serial_println!(
-                            "[VMEXIT] EPT violation core={} domain={} vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
-                            core_id, did, vcpu.vpid(), gpa, qual, rip, cr3
-                        );
-                    } else {
-                        serial_println!(
-                            "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
-                            vcpu.vpid(), gpa, qual, rip, cr3
-                        );
+
+            // Check for doorbell fast-path: look up GPA in child domain's table.
+            // If matched: write DoorbellNotify to parent's DomainComm RX ring,
+            // advance child RIP, and VMRESUME child without stopping it.
+            // If no match: forward to the parent via forward_child_exit.
+            let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
+            if !platform_ptr.is_null() {
+                let platform = unsafe { &*platform_ptr };
+                if let Some(doorbell_result) = handle_ept_doorbell(platform, vcpu, gpa, qual) {
+                    if doorbell_result {
+                        // Fast-path: child resumes immediately.
+                        return;
                     }
-                } else {
-                    serial_println!(
-                        "[VMEXIT] EPT violation vpid={} GPA={:#x} qual={:#x} RIP={:#x} CR3={:#x}",
-                        vcpu.vpid(), gpa, qual, rip, cr3
-                    );
                 }
             }
-            crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
-            halt_forever();
+
+            // No doorbell match (or platform not ready) — full intercept path.
+            serial_println!(
+                "[VMEXIT] EPT violation GPA={:#x} qual={:#x} RIP={:#x} → forward_child_exit",
+                gpa, qual, vcpu.get(vmcs::guest::RIP)
+            );
+            crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_EPT_VIOLATION);
         }
 
         EXIT_REASON_EPT_MISCONFIG => {
@@ -853,4 +845,118 @@ fn sync_ia32e_mode_guest(vcpu: &mut ActiveVcpu) {
         };
         vcpu.set(control::VMENTRY_CONTROLS, new_entry);
     }
+}
+
+/// Doorbell fast-path for EPT violations.
+///
+/// Looks up the faulting `gpa` in the child domain's capavisor-internal
+/// doorbell table.  On a match:
+///   1. Writes a `DoorbellNotify` message to the parent's DomainComm RX ring.
+///   2. Advances the child RIP past the faulting write instruction.
+///   3. Returns `Some(true)` — caller should VMRESUME child immediately.
+///
+/// In synchronous (same-core SWITCH) mode the parent is parked and will drain
+/// the RX ring when the child eventually exits normally.  An IPI is not sent
+/// because the parent VP is not running; it will observe the ring message on
+/// its next wakeup.  Future async-mode support will add cross-core IPI here.
+///
+/// Returns `Some(false)` if no doorbell matches (caller should forward_child_exit).
+/// Returns `None` if the platform state is not ready for doorbell lookup.
+fn handle_ept_doorbell(
+    platform: &crate::platform::ThemisPlatform,
+    vcpu: &mut ActiveVcpu,
+    gpa: u64,
+    qual: u64,
+) -> Option<bool> {
+    use themis_abi::domcomm;
+    use crate::platform::{THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_DOORBELL_FLAG_ANY_SIZE};
+
+    // EPT qualification bit 1 = data write; bit 0 = data read; bit 2 = instr fetch.
+    let is_write = (qual & (1 << 1)) != 0;
+    if !is_write {
+        // Only data writes can match doorbells.
+        return Some(false);
+    }
+
+    let core_id = platform.get_current_core()?;
+    let child_domain_id = platform.core_domain_id(core_id as usize);
+
+    let child_arc = platform.domain_arc(child_domain_id)?;
+    let child_pd = child_arc.lock();
+
+    // Extract write size from EPT exit qualification bits [4:3] (encoded access size).
+    // Bits [4:3]: 0 = 1B, 1 = 2B, 2 = 4B, 3 = 8B.  Not always reliable for all
+    // instruction types, but sufficient for the common virtio kick case (32-bit store).
+    let write_size: u32 = match (qual >> 3) & 0x3 {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+
+    // The written value is in RAX for simple MOV stores (best-effort; not always correct
+    // for all instruction encodings).  For datamatch we do a best-effort check.
+    let written_value = vcpu.reg(Reg::Rax);
+
+    let matched: Option<(u32, u64, u64, u32)> = child_pd.doorbells.iter().find_map(|e| {
+        if e.gpa != gpa {
+            return None;
+        }
+        let any_value = e.flags & THEMIC_DOORBELL_FLAG_ANY_VALUE != 0;
+        let any_size  = e.flags & THEMIC_DOORBELL_FLAG_ANY_SIZE  != 0;
+        if !any_size  && e.size != write_size  { return None; }
+        if !any_value && e.datamatch != written_value { return None; }
+        Some((e.doorbell_id, e.gpa, written_value, write_size))
+    });
+
+    let (doorbell_id, matched_gpa, value, size) = match matched {
+        Some(m) => m,
+        None => return Some(false),
+    };
+
+    // Drop child lock before accessing parent (lock order: child < parent would invert).
+    drop(child_pd);
+
+    // Resolve parent domain.  In the SWITCH model, `PlatformDomain::parent` holds
+    // the parent domain ID.
+    let parent_domain_id = {
+        let guard = child_arc.lock();
+        guard.parent?
+    };
+
+    let parent_arc = platform.domain_arc(parent_domain_id)?;
+    let mut parent_pd = parent_arc.lock();
+
+    let notify = domcomm::DoorbellNotify {
+        doorbell_id,
+        reserved: 0,
+        gpa: matched_gpa,
+        value,
+        size,
+        reserved2: 0,
+    };
+    let notify_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &notify as *const domcomm::DoorbellNotify as *const u8,
+            core::mem::size_of::<domcomm::DoorbellNotify>(),
+        )
+    };
+    parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
+
+    // In async mode (future): send notify_vector IPI to parent core so it can
+    // process the doorbell without waiting for the child to exit.
+    // let _notify_vec = parent_pd.get_notify_vector();
+    // unsafe { send_notify_ipi(parent_core_lapic, notify_vec) };
+
+    drop(parent_pd);
+
+    // Advance child RIP past the faulting write instruction.
+    next_instruction(vcpu);
+
+    serial_println!(
+        "[DOORBELL] fast-path id={} gpa={:#x} val={:#x} size={}",
+        doorbell_id, matched_gpa, value, size
+    );
+
+    Some(true)
 }

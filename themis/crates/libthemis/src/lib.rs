@@ -265,29 +265,26 @@ pub fn add_vp(child_domain: u64, comm_cap: u64) -> Result<u64, u64> {
     Ok(rdi)
 }
 
-/// Register a doorbell page.
-pub fn register_doorbell(domain: u64, vp_id: u64, gpa: u64, slot: u64) -> Result<(), u64> {
+/// Register a doorbell entry for a child domain.
+/// Returns the assigned doorbell_id on success.
+pub fn register_doorbell(child_domain: u64, gpa: u64, size: u64, datamatch: u64, flags: u64) -> Result<u64, u64> {
+    let (rax, rdi, _, _) =
+        unsafe { vmcall5(opcodes::THEMIS_REGISTER_DOORBELL, child_domain, gpa, size, datamatch, flags) };
+    check(rax)?;
+    Ok(rdi)
+}
+
+/// Unregister a previously registered doorbell entry.
+pub fn unregister_doorbell(child_domain: u64, doorbell_id: u64) -> Result<(), u64> {
     let (rax, _, _, _) =
-        unsafe { vmcall4(opcodes::THEMIS_REGISTER_DOORBELL, domain, vp_id, gpa, slot) };
+        unsafe { vmcall2(opcodes::THEMIS_UNREGISTER_DOORBELL, child_domain, doorbell_id) };
     check(rax)
 }
 
-/// Register an event flags page.
-pub fn register_event_flags(domain: u64, vp_id: u64, meta_cap: u64) -> Result<(), u64> {
+/// Configure the notify_vector for DomainComm doorbell IPIs from the capavisor.
+pub fn set_themic_vector(vector: u64) -> Result<(), u64> {
     let (rax, _, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_REGISTER_EVENT_FLAGS, domain, vp_id, meta_cap) };
-    check(rax)
-}
-
-/// Register an interrupt channel.
-pub fn register_intr_chan(
-    child: u64,
-    vp_id: u64,
-    slot: u64,
-    vector: u64,
-) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall4(opcodes::THEMIS_REGISTER_INTR_CHAN, child, vp_id, slot, vector) };
+        unsafe { vmcall1(opcodes::THEMIS_SET_THEMIC_VECTOR, vector) };
     check(rax)
 }
 

@@ -380,6 +380,29 @@ pub struct PlatformDomain {
     /// DomainComm region: per-domain message ring with the capavisor.
     /// `None` until `init_domcomm()` allocates it.
     pub domcomm: Option<DomainCommState>,
+
+    /// Registered doorbell entries for this domain's child VPs (fast-path EPT violations).
+    /// Keyed by doorbell_id; max THEMIC_MAX_DOORBELLS entries.
+    pub doorbells: Vec<DoorbellEntry>,
+    /// Counter for assigning unique doorbell IDs. Monotonically increasing.
+    pub next_doorbell_id: u32,
+}
+
+/// Maximum number of doorbell entries per child domain.
+pub const THEMIC_MAX_DOORBELLS: usize = 128;
+
+/// Flags for doorbell matching behaviour.
+pub const THEMIC_DOORBELL_FLAG_ANY_VALUE: u32 = 1 << 0;  // ignore datamatch
+pub const THEMIC_DOORBELL_FLAG_ANY_SIZE:  u32 = 1 << 1;  // ignore access size
+
+/// A single registered doorbell entry (capavisor-internal, not a shared page).
+#[derive(Clone)]
+pub struct DoorbellEntry {
+    pub doorbell_id: u32,
+    pub gpa: u64,
+    pub datamatch: u64,
+    pub size: u32,
+    pub flags: u32,
 }
 
 /// Per-ring page tracking for DomainComm growth.
@@ -425,6 +448,8 @@ impl PlatformDomain {
             msr_bitmap_phys: 0,
             apic_access_phys: 0,
             domcomm: None,
+            doorbells: Vec::new(),
+            next_doorbell_id: 1,
         }
     }
 
@@ -690,6 +715,30 @@ impl PlatformDomain {
 
             Some((msg_hdr.message_type, payload_size))
         }
+    }
+
+    /// Write `vector` into the DomainComm header's notify_vector field.
+    /// Called by SET_THEMIC_VECTOR so the capavisor uses the right IDT vector
+    /// when sending doorbell IPIs to this domain.
+    pub fn set_notify_vector(&mut self, vector: u32) {
+        use themis_abi::domcomm;
+        let dc = match self.domcomm.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
+        unsafe { core::ptr::write_volatile(&mut (*hdr_virt).notify_vector, vector); }
+    }
+
+    /// Return the notify_vector from the DomainComm header (0 if not initialised).
+    pub fn get_notify_vector(&self) -> u32 {
+        use themis_abi::domcomm;
+        let dc = match self.domcomm.as_ref() {
+            Some(d) => d,
+            None => return 0,
+        };
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *const domcomm::Header;
+        unsafe { core::ptr::read_volatile(&(*hdr_virt).notify_vector) }
     }
 
     /// Ensure an EPT root page exists, allocating from `self.meta` if needed.
