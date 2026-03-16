@@ -136,181 +136,123 @@ stack:
 
 ### 4.2 ThemIC Architecture
 
-ThemIC provides equivalent services through three shared-memory structures, all
-allocated from META memory (capability-tracked, capavisor-mapped):
+ThemIC provides equivalent services through two complementary layers, both of
+which already exist in the codebase:
 
 ```
-Per-VP ThemIC state (allocated per child VP, mapped into parent domain + capavisor):
+Per-DOMAIN notification state (one per parent domain):
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ThemIC Message Page (4 KB)                                          │
+│  DomainComm region (already implemented, per parent domain)          │
 │  ┌──────────────────────────────────────────────────────────────┐    │
-│  │ Slot 0: VP Intercept Message (256 B)                         │    │
-│  │   exit_reason, exit_qualification, guest_phys_addr,          │    │
-│  │   instruction_length, rax, rcx, rdx, port, access_info ...  │    │
+│  │ Header page: magic, version, notify_vector, TX/RX ring meta  │    │
 │  ├──────────────────────────────────────────────────────────────┤    │
-│  │ Slot 1: Doorbell Event Message (256 B)                       │    │
-│  │   doorbell_id, gpa, value, size                              │    │
+│  │ TX ring (domain → capavisor): hypercall requests             │    │
 │  ├──────────────────────────────────────────────────────────────┤    │
-│  │ Slot 2: Interrupt Injection Ack (256 B)                      │    │
-│  │   injected_vector, delivery_status                           │    │
-│  ├──────────────────────────────────────────────────────────────┤    │
-│  │ Slots 3–15: Reserved / user-defined channels                 │    │
+│  │ RX ring (capavisor → domain): VP_EXIT, DOORBELL_NOTIFY, ...  │    │
 │  └──────────────────────────────────────────────────────────────┘    │
-├──────────────────────────────────────────────────────────────────────┤
-│  ThemIC Event Flag Page (4 KB)                                       │
+│                                                                       │
+│  Doorbell table: capavisor-internal Vec<DoorbellEntry>               │
+│  (stored in PlatformDomain; not a shared page)                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+Per-VP register sync state (one VpCommPage per child VP):
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  VpCommPage (4 KB, per child VP, mapped via REGISTER_COMM)           │
 │  ┌──────────────────────────────────────────────────────────────┐    │
-│  │ flags[0]: bit 0 = intercept pending                          │    │
-│  │           bit 1 = doorbell pending                           │    │
-│  │           bit 2 = interrupt ack pending                      │    │
-│  │           bits 3–255 = reserved                              │    │
-│  │ flags[1..15]: reserved for future channels                   │    │
-│  └──────────────────────────────────────────────────────────────┘    │
-├──────────────────────────────────────────────────────────────────────┤
-│  ThemIC Doorbell Table (4 KB)                                        │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │ Entry 0: { gpa, size, datamatch, flags, doorbell_id }        │    │
-│  │ Entry 1: { gpa, size, datamatch, flags, doorbell_id }        │    │
-│  │ ...                                                          │    │
-│  │ Entry N: (max ~128 entries per 4 KB page)                    │    │
+│  │ dirty_mask / allowed_mask (bytes 0–63)                        │    │
+│  ├──────────────────────────────────────────────────────────────┤    │
+│  │ Register storage area (bytes 64–511)                         │    │
+│  ├──────────────────────────────────────────────────────────────┤    │
+│  │ Intercept message @ offset 512 (written on sync VP exit)     │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+The earlier design proposed three new per-VP pages (message page, event flag
+page, doorbell table) but this was superseded.  DomainComm already provides
+the per-domain ring channel needed for doorbell notifications; no additional
+shared pages are required.  VpCommPage handles the per-VP register sync and
+synchronous intercept message delivery.
+
 ### 4.3 ThemIC Data Structures
 
+```rust
+// === DomainComm additions (themis-abi/src/domcomm.rs) ===
+// Shared between capavisor, driver, and userspace.
+
+// New message type on the DomainComm RX ring:
+pub const MSG_DOORBELL_NOTIFY: u32 = 0x0007;
+
+/// DOORBELL_NOTIFY payload (capavisor → domain, on the DomainComm RX ring).
+/// Sent instead of stopping the child VP.
+#[repr(C)]
+pub struct DoorbellNotify {
+    pub doorbell_id: u32,   // matches registered doorbell entry
+    pub reserved: u32,
+    pub gpa: u64,           // address that was written
+    pub value: u64,         // data that was written
+    pub size: u32,          // write size in bytes
+    pub reserved2: u32,
+}
+```
+
 ```c
-/* In crates/themis-abi/ — shared between capavisor, driver, and userspace */
+/* === Capavisor-internal (PlatformDomain, NOT a shared page) === */
 
-#define THEMIC_NUM_CHANNELS       16
-#define THEMIC_MSG_SLOT_SIZE      256   /* bytes per message slot */
-#define THEMIC_MAX_DOORBELLS      128
-
-/* === Message Page === */
-
-/* Channel indices (like MSHV's SINT indices) */
-#define THEMIC_CHAN_INTERCEPT      0     /* VP exit / intercept messages */
-#define THEMIC_CHAN_DOORBELL       1     /* Doorbell event notifications */
-#define THEMIC_CHAN_IRQ_ACK        2     /* Interrupt injection acknowledgments */
-/* 3–15 reserved */
-
-struct themic_message_header {
-    __u32 message_type;           /* THEMIC_MSG_* */
-    __u32 payload_size;           /* bytes of payload following header */
-    __u64 sequence;               /* monotonic counter for ordering */
-};
-
-/* Message types */
-#define THEMIC_MSG_NONE           0x0000
-#define THEMIC_MSG_VP_INTERCEPT   0x0001  /* VP exit: I/O, MMIO, CPUID, MSR, HLT, etc. */
-#define THEMIC_MSG_DOORBELL       0x0002  /* Doorbell write detected */
-#define THEMIC_MSG_IRQ_ACK        0x0003  /* Interrupt delivery acknowledged */
-#define THEMIC_MSG_SHUTDOWN       0x0004  /* Domain shutdown / triple fault */
-
-struct themic_intercept_message {
-    struct themic_message_header header;
-    __u32 exit_reason;            /* VMX exit reason */
-    __u32 instruction_length;
-    __u64 exit_qualification;
-    __u64 guest_physical_address;
-    __u64 guest_rip;
-    __u64 guest_rflags;
-    /* I/O port intercept fields */
-    __u16 port_number;
-    __u8  access_size;            /* 1, 2, 4 */
-    __u8  is_write;
-    __u32 reserved;
-    __u64 rax;                    /* for I/O port: data written/read */
-    /* MMIO intercept fields */
-    __u8  instruction_bytes[16];  /* faulting instruction for emulation */
-    /* CPUID intercept fields */
-    __u64 cpuid_rax, cpuid_rcx;
-    /* MSR intercept fields */
-    __u32 msr_number;
-    __u64 msr_value;
-};
-
-struct themic_doorbell_message {
-    struct themic_message_header header;
-    __u32 doorbell_id;            /* matches registered doorbell entry */
-    __u64 gpa;                    /* address that was written */
-    __u64 value;                  /* data that was written */
-    __u32 size;                   /* write size in bytes */
-};
-
-struct themic_message_page {
-    union {
-        struct {
-            __u8 slot_data[THEMIC_MSG_SLOT_SIZE];
-        } slots[THEMIC_NUM_CHANNELS];
-    };
-    /* Total: 16 × 256 = 4096 bytes = 1 page */
-};
-
-/* === Event Flag Page === */
-
-struct themic_event_flag_page {
-    __u64 flags[THEMIC_NUM_CHANNELS];  /* 64 bits per channel */
-    /* bit 0 of flags[THEMIC_CHAN_INTERCEPT] → intercept pending */
-    /* bit 0 of flags[THEMIC_CHAN_DOORBELL]  → doorbell pending */
-    /* Higher bits reserved for future sub-channel multiplexing */
-    __u8  reserved[4096 - THEMIC_NUM_CHANNELS * 8];
-};
-
-/* === Doorbell Table === */
-
+#define THEMIC_MAX_DOORBELLS                    128
 #define THEMIC_DOORBELL_FLAG_TRIGGER_ANY_VALUE  (1 << 0)
 #define THEMIC_DOORBELL_FLAG_TRIGGER_SIZE_ANY   (1 << 1)
 #define THEMIC_DOORBELL_FLAG_PIO                (1 << 2)  /* PIO (else MMIO) */
 
 struct themic_doorbell_entry {
-    __u64 gpa;                    /* guest physical address to monitor */
-    __u64 datamatch;              /* value to match (if not ANY_VALUE) */
-    __u32 size;                   /* access size (1/2/4/8) */
-    __u32 flags;                  /* THEMIC_DOORBELL_FLAG_* */
-    __u32 doorbell_id;            /* driver-assigned ID */
+    __u64 gpa;         /* guest physical address to monitor */
+    __u64 datamatch;   /* value to match (if not ANY_VALUE) */
+    __u32 size;        /* access size (1/2/4/8) */
+    __u32 flags;       /* THEMIC_DOORBELL_FLAG_* */
+    __u32 doorbell_id; /* assigned at registration */
     __u32 reserved;
 };
-
-struct themic_doorbell_table {
-    __u32 count;                  /* number of active entries */
-    __u32 capacity;               /* max entries (128) */
-    struct themic_doorbell_entry entries[THEMIC_MAX_DOORBELLS];
-};
 ```
+
+The VpCommPage intercept message (offset 512, written on synchronous VP exit
+by `forward_child_exit`) is defined in `themis-abi/src/regs.rs` as
+`InterceptMessage` / `ThemicMessageHeader`.  It is only used on the
+synchronous `VMCALL_SWITCH` path and is not sent through DomainComm.
 
 ### 4.4 ThemIC Notification Protocol
 
-Unlike SynIC which uses MSR-based configuration and a hypervisor-managed interrupt
-delivery path, ThemIC uses a simple **write-flag-IPI** protocol:
+ThemIC uses the existing **DomainComm RX ring + IPI** protocol rather than a
+dedicated per-VP event flag page:
 
 ```
 Producer (capavisor on any core):
-  1. Write structured message to message_page.slots[channel]
-  2. atomic_or(&event_flag_page.flags[channel], 1)   // set pending bit
-  3. Send doorbell IPI to target core                 // fixed vector, NOT INIT
+  1. Write DoorbellNotify message to parent domain's DomainComm RX ring
+  2. Send IPI at notify_vector (stored in DomainComm header) to parent core
+     // fixed vector, NOT INIT; default 0xF0
 
 Consumer (dom0 on target core):
-  1. Receive doorbell IPI → IDT handler fires
-  2. Read event_flag_page.flags[] to find pending channels
-  3. For each pending channel:
-     a. Read message from message_page.slots[channel]
-     b. atomic_and(&event_flag_page.flags[channel], ~1)  // clear pending
-     c. Dispatch message (wake VP thread, signal eventfd, etc.)
+  1. Receive IPI → IDT handler fires (vector = notify_vector)
+  2. Drain DomainComm RX ring: dequeue pending messages
+  3. For each DOORBELL_NOTIFY message:
+     a. Extract doorbell_id, gpa, value, size
+     b. Dispatch: signal eventfd, wake VMM thread, etc.
 ```
 
-**The doorbell IPI** is a dedicated fixed-vector interrupt (e.g., `THEMIC_VECTOR =
-0xF0`) that is **not intercepted** by the capavisor for dom0.  Because dom0's VMCS
-has `EXTERNAL_INTERRUPT_EXITING = 0`, the IPI is delivered directly to dom0's IDT
-without a VMEXIT.  The mshv-themis.ko driver registers the handler for this vector.
+**The notify_vector IPI** is a dedicated fixed-vector interrupt that is **not
+intercepted** by the capavisor for dom0.  Because dom0's VMCS has
+`EXTERNAL_INTERRUPT_EXITING = 0`, the IPI is delivered directly to dom0's IDT
+without a VMEXIT.  The mshv-themis.ko driver registers the handler for this
+vector via `VMCALL_SET_THEMIC_VECTOR`.
 
 This is architecturally identical to how MSHV uses `HYPERVISOR_CALLBACK_VECTOR`
-with `auto_eoi` — the SynIC SINT raises a specific IDT vector, and the kernel
-ISR (`synic_isr`) processes it.
+— a fixed IDT vector is raised and the kernel ISR (`synic_isr`) drains the ring.
+ThemIC replaces the SynIC SINT mechanism with the DomainComm RX ring.
 
 **Key difference from the INIT IPI protocol**: The INIT IPI is reserved for the
 capability engine's cross-core barrier protocol (EPT updates, revocation).  The
-ThemIC doorbell IPI is a regular fixed-vector interrupt that does not trigger
+ThemIC notify IPI is a regular fixed-vector interrupt that does not trigger
 barriers — it is a lightweight "you have mail" signal.
 
 ### 4.5 ThemIC Doorbell Fast-Path
@@ -326,14 +268,13 @@ MSHV doorbell chain (for comparison):
 
 ThemIC doorbell chain:
   Guest writes doorbell GPA → EPT violation VMEXIT → Capavisor:
-    1. Look up GPA in child's doorbell table
+    1. Look up GPA in child domain's capavisor-internal doorbell table
     2. If match:
-       a. Write themic_doorbell_message to message_page.slots[CHAN_DOORBELL]
-       b. Set event flag bit for CHAN_DOORBELL
-       c. Send doorbell IPI to parent's core
-       d. Advance child's RIP past the write instruction
-       e. VMRESUME child immediately (no parent involvement needed)
-    3. If no match: full intercept path (write to CHAN_INTERCEPT, etc.)
+       a. Write DoorbellNotify message to parent's DomainComm RX ring
+       b. Send notify_vector IPI to parent's core
+       c. Advance child's RIP past the write instruction
+       d. VMRESUME child immediately (no parent involvement needed)
+    3. If no match: full intercept path → forward_child_exit
 ```
 
 **Critical property**: In the doorbell fast-path, the child VP is **not stopped**.
@@ -341,164 +282,89 @@ The capavisor handles the entire doorbell notification in the VMEXIT handler and
 resumes the child.  This is what makes it fast — the child doesn't wait for the
 parent to process the event.
 
-### 4.6 ThemIC Page Allocation: COMM Capability Redesign
+### 4.6 COMM Capability Redesign — DONE
 
-ThemIC pages are parent-owned memory shared with the capavisor.  This is
-exactly the COMM use-case — monitor↔domain shared memory — but the current COMM
-design doesn't fit: it is one-shot per domain, implies VITAL (revoking it kills
-the domain), and has no notion of binding to a child domain.
+> **Status: COMPLETE (P11-comm-a through P11-comm-f all done).**
+> This section is retained for historical context.
 
-**COMM redesign** (minimal, 4 changes to the capability engine):
+The COMM capability redesign was implemented to support **VpCommPage** — the
+per-VP register snapshot page used by the synchronous `VMCALL_SWITCH` path.
+The four changes made:
 
-1. **COMM no longer implies VITAL** — change `canonicalize()`: COMM → CLEAN only.
-   Revoking a COMM page zeros it but does not kill anyone.
+1. **COMM no longer implies VITAL** — `canonicalize()` sets `COMM | CLEAN`.
+   Revoking a COMM page zeros memory but does not kill the owning domain.
 
-2. **Allow multiple COMM per domain** — remove the single-slot `comm_cap: Option<...>`
-   from `Domain`.  COMM is tracked purely by the attribute flag on individual
-   capabilities and by the child-side binding list (see below).
+2. **Multiple COMM per domain** — `Domain` carries `comm_bindings: Vec<CapabilityWeak<MemoryRegion>>`
+   (child-side weak refs to parent COMM caps bound to this domain).
 
-3. **Add binding target to `register_comm`**:
-   ```rust
-   pub fn register_comm(
-       caller: &CapabilityRef<Domain>,
-       handle: LocalHandle,              // memory cap in caller's table
-       child_domain_handle: LocalHandle, // child domain in caller's domain table
-       vp_id: u32,                       // which VP this page is for
-   ) -> Result<UpdateBatch>
-   ```
-   Caller (parent) still must own the memory capability.  The engine resolves
-   `child_domain_handle` to the child domain, validates the caller owns both
-   capabilities, marks the memory capability as COMM, and records the binding.
+3. **Binding target on `register_comm`** — signature is now
+   `register_comm(caller, handle, child_domain_handle, vp_id)`.
+   `MemoryRegion` carries `comm_binding: Option<CommBinding>` where
+   `CommBinding = { target_domain_id, vp_id }`.  Emits `CommRegion` update with
+   target domain and VP ID so the platform can record `comm_hpas[vp_id]`.
 
-4. **Auto-release on child revocation** — when a child domain is revoked but the
-   parent survives, iterate the child's `comm_bindings` (weak refs to parent memory
-   capabilities), upgrade each, clear the COMM attribute and binding, emit
-   `UncommRegion` updates.  The parent gets its memory back.
+4. **Auto-release on child revocation** — revocation iterates
+   `child.comm_bindings`, clears COMM attribute + binding, emits `UncommRegion`.
 
-**Data model changes:**
-
-```rust
-// In MemoryRegion — add binding target:
-pub struct MemoryRegion {
-    pub kind: RegionKind,
-    pub status: RegionStatus,
-    pub access: Access,
-    pub comm_binding: Option<CommBinding>,  // NEW: set when COMM attribute is applied
-}
-
-pub struct CommBinding {
-    pub target_domain_id: DomainId,
-    pub vp_id: u32,
-}
-
-// In Domain — replace single comm_cap with binding list on the child side:
-pub struct Domain {
-    // ... existing fields ...
-    // REMOVE: pub comm_cap: Option<CapabilityWeak<MemoryRegion>>,
-    // ADD: weak refs from child to parent's COMM caps bound to this domain
-    pub comm_bindings: Vec<CapabilityWeak<MemoryRegion>>,
-}
-```
-
-**Cleanup on child revocation:**
-```rust
-// In revoke_recursive, when revoking a child domain:
-fn cleanup_comm_bindings(child: &mut Domain) {
-    for weak in child.comm_bindings.drain(..) {
-        if let Some(cap_ref) = weak.upgrade() {
-            let mut cap = cap_ref.write();
-            let phys = cap.data.access.start;
-            let size = cap.data.access.size;
-            // Clear COMM attribute → parent can carve/alias/send again
-            cap.owned.attributes = Attributes::NONE;
-            cap.data.comm_binding = None;
-            // Emit UncommRegion so platform unmaps from HHDM
-            batch.add_uncomm_region(child.id, phys, size);
-        }
-        // If upgrade fails → parent already revoked, nothing to do
-    }
-}
-```
-
-**CommRegion update extended:**
-```rust
-CommRegion {
-    domain_id: DomainId,    // parent (owner of the COMM cap)
-    target_domain_id: DomainId, // child this page is bound to
-    vp_id: u32,
-    phys: u64,
-    size: u64,
-}
-```
-
-**register_comm flow:**
-```
-Parent calls: register_comm(dom0, themic_msg_handle, child_handle, vp_id=0)
-  1. Resolve child_handle → child domain capability (must be owned by caller)
-  2. Resolve themic_msg_handle → memory capability (must be owned by caller,
-     Carve, Exclusive, not already COMM)
-  3. Set COMM attribute (implies CLEAN via canonicalize)
-  4. Set comm_binding = Some(CommBinding { target_domain_id: child.id, vp_id: 0 })
-  5. Push weak ref to child.comm_bindings
-  6. Emit CommRegion { domain_id: dom0.id, target_domain_id: child.id, vp_id: 0,
-                       phys, size }
-  7. Platform maps via HHDM, records as ThemIC page for child VP 0
-```
+**ThemIC notifications do NOT use per-VP COMM pages.**  Doorbell events flow
+through the existing per-domain DomainComm RX ring, which is initialized at
+domain creation and is entirely separate from COMM capabilities.  No per-VP
+ThemIC message page or event flag page is allocated.
 
 ### 4.7 ThemIC Registration VMCALLs
 
-With the COMM redesign, ThemIC registration uses `register_comm` for the pages
-and adds only doorbell-specific VMCALLs:
+ThemIC requires only doorbell-specific VMCALLs.  No new COMM pages are needed
+since notifications flow through DomainComm.
 
 ```
-VMCALL_REGISTER_COMM(mem_cap_handle, child_domain_handle, vp_id)
-  Existing API (extended).  Parent registers a memory capability as COMM
-  bound to a child VP.  Used for ThemIC message pages, event flag pages.
-  The capavisor receives CommRegion update and maps via HHDM.
-
-VMCALL_REGISTER_DOORBELL(child_domain_handle, vp_id, gpa, size, datamatch, flags)
+VMCALL_REGISTER_DOORBELL(child_domain_handle, gpa, size, datamatch, flags)
   → doorbell_id
-  Register a doorbell entry for a child VP.  The capavisor adds this to the
-  child's doorbell table and will fast-path matching guest writes.
+  Register a doorbell entry for a child domain.  The capavisor adds this
+  to the child's capavisor-internal doorbell table (no shared page) and
+  will fast-path matching EPT violations from that domain.
 
-VMCALL_UNREGISTER_DOORBELL(child_domain_handle, vp_id, doorbell_id)
-  Remove a doorbell entry.
+VMCALL_UNREGISTER_DOORBELL(child_domain_handle, doorbell_id)
+  Remove a previously registered doorbell entry.
 
 VMCALL_SET_THEMIC_VECTOR(vector)
-  Tell the capavisor which IDT vector to use for doorbell IPIs to dom0.
-  Called once during driver init.  Default: 0xF0.
+  Write the capavisor-to-dom0 IPI vector into the caller's DomainComm
+  header notify_vector field.  Called once during driver init.  Default: 0xF0.
 ```
 
-No new monitor API — `register_comm` already exists; we extend its signature
-with `child_domain_handle` and `vp_id`.  The doorbell calls are platform-level
-(capavisor only), not capability engine API.
+The doorbell VMCALLs are platform-level (capavisor only), not capability engine
+API.  The caller must hold a capability to the child domain (validated by the
+capavisor before adding entries).
 
 ### 4.8 ThemIC vs SynIC Mapping
 
 | SynIC concept | ThemIC equivalent | Notes |
 |--------------|-------------------|-------|
-| SIMP (message page, per-VP) | `themic_message_page` | Parent-owned COMM capability bound to child VP |
-| SIEFP (event flag page) | `themic_event_flag_page` | Parent-owned COMM capability bound to child VP |
-| SINT[0] (interception) | `THEMIC_CHAN_INTERCEPT` | VP exit messages |
-| SINT[5] (doorbell) | `THEMIC_CHAN_DOORBELL` | Doorbell event messages |
-| Event ring | Inline in message slot | Single message per channel; sufficient for 1:1 VP:thread model |
-| HYPERVISOR_CALLBACK_VECTOR | `THEMIC_VECTOR` (0xF0) | Fixed IDT vector, not intercepted for dom0 |
-| MSR-based SINT config | `register_comm` + VMCALL | Capability-gated, not MSR-based |
+| SIMP (message page, per-VP) | VpCommPage | Per-VP COMM cap; register sync + intercept message (sync path only) |
+| SIEFP (event flag page) | DomainComm RX ring | Per-domain ring; no separate event flag page |
+| SINT[0] (interception) | VpCommPage intercept msg @ offset 512 | Sync: written by `forward_child_exit`; parent reads after SWITCH returns |
+| SINT[5] (doorbell) | DomainComm `DOORBELL_NOTIFY` message | Written to RX ring on doorbell EPT violation |
+| Event ring | DomainComm RX ring | Per-domain, not per-VP |
+| HYPERVISOR_CALLBACK_VECTOR | `notify_vector` in DomainComm header | Configured via `VMCALL_SET_THEMIC_VECTOR`; default 0xF0 |
+| MSR-based SINT config | `VMCALL_REGISTER_DOORBELL` | Capability-gated, not MSR-based |
 | Auto-EOI | x2APIC EOI in ISR | Standard EOI; no synthetic auto-EOI needed |
-| SynIC enable (SCONTROL MSR) | `register_comm(handle, child, vp)` | Per-VP COMM binding |
+| SynIC enable (SCONTROL MSR) | DomainComm initialized at domain creation | Per-domain; always available |
 | Doorbell port/connection | `VMCALL_REGISTER_DOORBELL` | Same concept: {GPA, data, size} → fast-path |
 
 ### 4.9 ThemIC in Synchronous vs Asynchronous Mode
 
-**Synchronous mode**: ThemIC is **not used for VP intercepts**.  The `VMCALL_SWITCH`
-call blocks the dom0 VP and returns directly with the exit reason in registers.
-However, ThemIC **is still used for doorbells** — the doorbell fast-path allows the
-child to resume immediately after a virtio kick, and the parent is notified
-asynchronously via the doorbell IPI.
+**Synchronous mode** (current): ThemIC is **not used for VP intercepts**.
+`VMCALL_SWITCH` blocks the dom0 VP and returns directly with exit reason in
+registers; dom0 reads VpCommPage (offset 512) for the full intercept detail.
+ThemIC **is** used for doorbells — the EPT violation fast-path writes a
+`DOORBELL_NOTIFY` to the DomainComm RX ring and sends a `notify_vector` IPI,
+allowing dom0 to process doorbell events asynchronously while the child
+continues running.
 
-**Asynchronous mode**: ThemIC is the **primary notification mechanism**.  All child VP
-exits are communicated through the ThemIC message page + doorbell IPI, as described
-in the async protocol (§6.2).
+**Asynchronous mode** (future): VP exits would also be routed through DomainComm
+as `VP_EXIT` messages + `notify_vector` IPI, eliminating the synchronous SWITCH
+block.  VpCommPage still holds the register snapshot.  The VP_EXIT message type
+is already defined in `domcomm.rs` but `forward_child_exit` does not yet write to
+the ring (it uses the synchronous SWITCH return path).
 
 ---
 

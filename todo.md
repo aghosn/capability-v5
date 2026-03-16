@@ -523,8 +523,9 @@ The following three invariants govern what dom0 sees and can access:
 > (see COMM redesign below) instead of META pages.  See
 > `2026/docs/design/mshv_themis/mshv_themis.md` §4 for the full ThemIC design.
 
-Implements the SynIC-inspired cross-domain notification protocol.  ThemIC pages
-are parent-owned COMM capabilities bound to child VPs.  Depends on COMM redesign.
+Implements the SynIC-inspired cross-domain notification protocol.  Doorbell
+notifications flow through the existing per-domain DomainComm RX ring; no new
+per-VP shared pages are needed.  COMM redesign prerequisites are already done.
 
 **COMM Redesign** (capability engine change, prerequisite for ThemIC):
 
@@ -551,20 +552,18 @@ are parent-owned COMM capabilities bound to child VPs.  Depends on COMM redesign
 
 **ThemIC protocol** (capavisor + driver, after COMM redesign):
 
-- [ ] **P11a**: Define ThemIC message/event-flag/doorbell structs in `crates/themis-abi/`:
-  `themic_message_page` (16 channels × 256 B), `themic_event_flag_page`,
-  `themic_doorbell_entry`, `themic_intercept_message`, `themic_doorbell_message`.
-- [ ] **P11b**: `VMCALL_REGISTER_DOORBELL(child_domain_handle, vp_id, gpa, size, datamatch, flags)`
-  → doorbell_id.  Capavisor stores doorbell table per child domain.
-- [ ] **P11c**: `VMCALL_UNREGISTER_DOORBELL(child_domain_handle, vp_id, doorbell_id)`.
+- [ ] **P11a**: Add `msg_types::DOORBELL_NOTIFY = 0x0007` and `DoorbellNotify` struct
+  to `themis-abi/src/domcomm.rs` (matches the Rust layout used by capavisor and driver).
+- [ ] **P11b**: `VMCALL_REGISTER_DOORBELL(child_domain_handle, gpa, size, datamatch, flags)`
+  → doorbell_id.  Capavisor stores a `Vec<DoorbellEntry>` per child domain in
+  `PlatformDomain` (no shared page needed).
+- [ ] **P11c**: `VMCALL_UNREGISTER_DOORBELL(child_domain_handle, doorbell_id)`.
 - [ ] **P11d**: EPT_VIOLATION handler: check faulting GPA against registered doorbells.
-  Match → write `themic_doorbell_message` to COMM page, set event flag, send doorbell
+  Match → write `DoorbellNotify` to parent's DomainComm RX ring, send `notify_vector`
   IPI to parent core, advance child RIP, VMRESUME child (fast-path, child not stopped).
-- [ ] **P11e**: `VMCALL_SET_THEMIC_VECTOR(vector)`: configure which IDT vector the
-  capavisor uses for doorbell IPIs to dom0.  Default 0xF0.
-- [ ] **P11f**: Intercept notification path (async mode): on child VP exit, write
-  `themic_intercept_message` to COMM page channel 0, set event flag, send doorbell
-  IPI to parent core.  Park child core waiting for resume/recover decision.
+  No match → full intercept path (`forward_child_exit`).
+- [ ] **P11e**: `VMCALL_SET_THEMIC_VECTOR(vector)`: write the given vector into the
+  caller's DomainComm header `notify_vector` field.  Default 0xF0.
 
 ### Phase 12 — `themis-vmm.ko` Linux Kernel Driver *(superseded by Phase 15)*
 
