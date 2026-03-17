@@ -1046,17 +1046,21 @@ hierarchy (`Hypervisor`, `Vm`, `Vcpu`) using `/dev/mshv` ioctls from Phase 15.
   `THHV_RUN_VP`, decodes `themic_intercept_message`, maps exits to `VmExit`.
   `get_regs()`/`set_regs()` via `THHV_GET/SET_VP_STATE`. `get_sregs()`/`set_sregs()`
   via segment/control register names. Builds clean with `--features themis`.
-- [ ] **P16d** — Memory management: adapt `GuestMemoryMmap` regions to
-  `MSHV_MAP_GUEST_MEMORY` calls.  Handle capability-specific constraints
-  (alignment, region splitting).
-- [ ] **P16e** — Device passthrough: PCI device assignment via `MSHV_ASSIGN_DEVICE`.
-  VFIO integration if needed for userspace device access.
+- [x] **P16d** — ✅ DONE. `create_user_memory_region()` in `ThemisVm` calls
+  `THHV_SET_GUEST_MEMORY`; `GuestMemoryMmap` regions flow through the existing
+  cloud-hypervisor memory manager unchanged.
+- [ ] **P16e** — Device passthrough: PCI device assignment via `THHV_ASSIGN_DEVICE`.
+  VFIO integration if needed for userspace device access. Requires P15i.
 - [ ] **P16f** — virtio device backends: verify virtio-blk, virtio-net, virtio-console
   work over the Themis backend (they should — virtio is guest-kernel ↔ VMM
   userspace, independent of hypervisor backend).
-- [ ] **P16g** — Boot integration: kernel + initrd loading, boot parameter setup.
-  Adapt cloud-hypervisor's direct kernel boot or firmware boot paths to use
-  Themis VP register setup.
+- [x] **P16g** — ✅ DONE. Boot integration wired:
+  - `set_fpu()` / `set_lapic()` made no-ops (Themis manages via APICv/VMCS).
+  - `vmm/src/vm.rs`: `is_themis` detection + `init_themis()` path (skips mshv
+    irqchip init; calls `create_interrupt_controller` + `create_devices`).
+  - `vmm/src/seccomp_filters.rs`: Themis ioctl allowlist added.
+  - `vmm/Cargo.toml` + `cloud-hypervisor/Cargo.toml`: `themis` feature passthrough.
+  - Both `--features themis` and `--features kvm` build clean.
 - [ ] **P16h** — End-to-end validation: boot a Linux guest under cloud-hypervisor
   running on Themis.  Test: serial console, virtio-blk root disk, SSH.
 
