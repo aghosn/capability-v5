@@ -762,10 +762,13 @@ ABI.  Can be started at any time — missing capavisor features (e.g., SWITCH,
   EPT violation → doorbell fast-path → `DOORBELL_NOTIFY` on DomainComm RX ring,
   `thhv_drain_domcomm_rx()` called after each `themis_switch()` return.
 
-- [ ] **P15g** — Interrupt injection: `THHV_ASSERT_INTERRUPT` → `VMCALL` or posted
-  interrupt path.  `THHV_IRQFD` → eventfd + workqueue → PI descriptor write.
-- [ ] **P15h** — `mmap` for VP state: userspace maps COMM page for
-  zero-copy register access and exit reason inspection.
+- [x] **P15g** — ✅ DONE. Interrupt injection implemented as `THEMIS_INJECT_INTERRUPT` (0x1b)
+  VMCALL + `THHV_IRQFD` ioctl: eventfd + poll waitqueue + workqueue → `themis_inject_interrupt`
+  → `do_inject_interrupt` → `inject_via_pid` → PI descriptor write.
+- [x] **P15h** — ✅ NOT NEEDED / ALREADY DONE. COMM page is userspace-allocated: caller
+  allocates a normal page, passes VA via `THHV_INIT_VP` ioctl, driver pins it with
+  `pin_user_pages_fast`. Userspace already owns and can read/write the page directly.
+  No `remap_pfn_range` needed.
 - [ ] **P15i** — Device assignment: `THHV_ASSIGN_DEVICE` → `VMCALL_ASSIGN_DEVICE`
   (Phase 4 IOMMU required).
 
@@ -1033,16 +1036,16 @@ the capavisor roadmap.
 `hypervisor` crate abstraction.  The Themis backend plugs into the same trait
 hierarchy (`Hypervisor`, `Vm`, `Vcpu`) using `/dev/mshv` ioctls from Phase 15.
 
-- [ ] **P16a** — Fork/branch cloud-hypervisor; add `hypervisor/src/themis/` module
-  implementing the `Hypervisor` trait.  `Themis::new()` opens `/dev/mshv` and
-  verifies the Themis CPUID vendor string.
-- [ ] **P16b** — `ThemisVm` implementing the `Vm` trait: wraps a partition fd.
-  `create_vm()` → `MSHV_CREATE_PARTITION`.  `set_memory_region()` →
-  `MSHV_MAP_GUEST_MEMORY`.  `create_irq_chip()` / `set_irq_routing()` → Themis
-  interrupt policy VMCALLs.
-- [ ] **P16c** — `ThemisVcpu` implementing the `Vcpu` trait: wraps a VP fd.
-  `run()` → `MSHV_RUN_VP`, decode exit reason, return `VcpuExit` enum.
-  `set_regs()` / `get_regs()` → `MSHV_SET_VP_REGISTERS` / `MSHV_GET_VP_REGISTERS`.
+- [x] **P16a** — ✅ DONE. `hypervisor/src/themis/mod.rs` added with `ThemisHypervisor`
+  implementing the `Hypervisor` trait. Opens `/dev/thhv`, detection via path check.
+  Wired into `lib.rs` `new()` dispatch + `HypervisorType::Themis` variant.
+- [x] **P16b** — ✅ DONE. `ThemisVm` implementing the `Vm` trait. `create_vm()` →
+  `THHV_CREATE_PARTITION` + `THHV_INITIALIZE_PARTITION`. `create_user_memory_region()` →
+  `THHV_SET_GUEST_MEMORY`. `register_irqfd/ioeventfd` → `THHV_IRQFD/IOEVENTFD`.
+- [x] **P16c** — ✅ DONE. `ThemisVcpu` implementing the `Vcpu` trait. `run()` →
+  `THHV_RUN_VP`, decodes `themic_intercept_message`, maps exits to `VmExit`.
+  `get_regs()`/`set_regs()` via `THHV_GET/SET_VP_STATE`. `get_sregs()`/`set_sregs()`
+  via segment/control register names. Builds clean with `--features themis`.
 - [ ] **P16d** — Memory management: adapt `GuestMemoryMmap` regions to
   `MSHV_MAP_GUEST_MEMORY` calls.  Handle capability-specific constraints
   (alignment, region splitting).

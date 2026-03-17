@@ -1,0 +1,3 @@
+[submodule "cloud-hypervisor"]
+	path = cloud-hypervisor
+	url = git@github.com:aghosn/cloud-hypervisor.git
