@@ -127,6 +127,11 @@ pub mod opcodes {
     /// Notify the capavisor to process the caller's DomainComm TX ring.
     /// IN:  (no arguments)
     pub const THEMIS_DOMCOMM_NOTIFY:      u64 = 0x19;
+
+    /// Inject a virtual interrupt into a VP of a child domain.
+    /// IN:  RDI = child_domain_handle, RSI = vp_id, RDX = vector (0–255)
+    /// The VP must be stopped (not currently running via SWITCH).
+    pub const THEMIS_INJECT_INTERRUPT:    u64 = 0x1b;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

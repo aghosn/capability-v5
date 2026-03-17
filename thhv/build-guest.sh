@@ -128,6 +128,22 @@ if [[ -n "$COPY_TO_GUEST" ]]; then
     mkdir -p "$DEST"
     cp "$SCRIPT_DIR/thhv.ko" "$DEST/thhv.ko"
     echo "→ Copied thhv.ko to guest:$COPY_TO_GUEST/thhv.ko"
+
+    # Also rebuild and copy test binaries if the test source exists.
+    TEST_BIN_DIR="$SCRIPT_DIR/test/bin"
+    if [[ -d "$SCRIPT_DIR/test" ]]; then
+        echo "→ Building test binaries..."
+        make -C "$SCRIPT_DIR" tests
+        TEST_DEST="$MNT/home/cloud/executables"
+        mkdir -p "$TEST_DEST"
+        for bin in "$TEST_BIN_DIR"/*; do
+            [[ -f "$bin" && -x "$bin" ]] || continue
+            cp "$bin" "$TEST_DEST/"
+            echo "→ Copied $(basename "$bin") to guest:~/executables/"
+        done
+        # Fix ownership so the cloud user can run them.
+        chown -R 1000:1000 "$TEST_DEST" 2>/dev/null || true
+    fi
 fi
 
 echo "✓ Done."

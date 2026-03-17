@@ -75,6 +75,7 @@
 #define THEMIS_HC_UNREGISTER_DOORBELL 0x16
 #define THEMIS_HC_SET_THEMIC_VECTOR  0x17
 #define THEMIS_HC_REGISTER_COMM      0x18
+#define THEMIS_HC_INJECT_INTERRUPT   0x1b
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
 
@@ -103,6 +104,7 @@
 #define THEMIS_OP_SET_THEMIC_VECTOR   0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
+#define THEMIS_OP_INJECT_INTERRUPT   0x1b
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -936,7 +938,9 @@ struct thhv_irqfd_entry {
 	u32                gsi;
 	u32                vector;       /* MSI routing lookup result (TODO) */
 	struct eventfd_ctx *eventfd;
+	wait_queue_head_t  *wqh;         /* saved during poll, used on deassign */
 	wait_queue_entry_t wait;
+	poll_table         pt;           /* used during assign to subscribe to wqh */
 	struct work_struct work;
 	struct thhv_partition *partition;
 	bool               deassign;
@@ -973,8 +977,10 @@ struct thhv_partition {
 	} sent_caps;
 
 	/* IRQfd tracking. */
-	struct list_head irqfds;
-	struct mutex irqfd_lock;
+	struct {
+		struct list_head list;
+		struct mutex lock;
+	} irqfds;
 
 	/* IOEventFd / doorbell tracking. */
 	struct {
@@ -1075,6 +1081,7 @@ int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
 			     u64 datamatch, u64 flags, u64 *out_doorbell_id);
 int themis_unregister_doorbell(u64 child_domain, u64 doorbell_id);
 int themis_set_themic_vector(u64 vector);
+int themis_inject_interrupt(u64 child_domain, u32 vp_id, u8 vector);
 
 /* thhv_part.c */
 long thhv_partition_create(struct file *dev_file, void __user *uarg);

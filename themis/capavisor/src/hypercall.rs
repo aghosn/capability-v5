@@ -146,6 +146,8 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
             Some(do_unregister_doorbell(platform, &caller, arg0, arg1 as u32)),
         opcodes::THEMIS_SET_THEMIC_VECTOR =>
             Some(do_set_themic_vector(platform, &caller, arg0)),
+        opcodes::THEMIS_INJECT_INTERRUPT =>
+            Some(do_inject_interrupt(platform, &caller, arg0, arg1 as u32, arg2 as u8)),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
@@ -1687,6 +1689,77 @@ fn do_set_themic_vector(
     };
     arc.lock().set_notify_vector(vector as u32);
     serial_println!("[SET_THEMIC_VECTOR] dom={} vector={:#x}", caller_id, vector);
+    HypercallResult::success()
+}
+
+/// INJECT_INTERRUPT (0x1B): inject a virtual interrupt into a stopped child VP.
+///
+/// The caller (parent domain) specifies the child domain, VP index, and
+/// interrupt vector.  The capavisor writes to the VP's Posted Interrupt
+/// Descriptor (PIR) so the interrupt is delivered on the next VMRESUME.
+///
+/// The VP must not currently be running (i.e. the caller is not inside
+/// a SWITCH for this VP).  Injecting into a running VP is a no-op today
+/// (future work: posted-interrupt VMCALL while VP is live on a remote core).
+///
+/// IN:  arg0 = child_domain_handle, arg1 = vp_id, arg2 = vector (0–255)
+fn do_inject_interrupt(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_domain_handle: u64,
+    vp_id: u32,
+    vector: u8,
+) -> HypercallResult {
+    if vector == 0 {
+        return HypercallResult::error(errors::ERR_INVALID);
+    }
+
+    // Validate that the caller owns the child domain capability.
+    let child_domain_id: DomainId = {
+        let r = caller.read();
+        let child_weak = match r.data.get_domain_capability(child_domain_handle) {
+            Some(w) => w.clone(),
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        drop(r);
+        let child_ref = match child_weak.upgrade() {
+            Some(c) => c,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let id = child_ref.read().data.id;
+        id
+    };
+
+    let child_arc = match platform.domain_arc(child_domain_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+
+    let pid_phys = {
+        let pd = child_arc.lock();
+        if vp_id as usize >= pd.vps.len() {
+            return HypercallResult::error(errors::ERR_INVALID);
+        }
+        pd.vps[vp_id as usize].peek_pid_phys()
+    };
+
+    if pid_phys == 0 {
+        // VP has no PID yet (never run, or async mode not initialised).
+        return HypercallResult::error(errors::ERR_NOTFOUND);
+    }
+
+    let hhdm = platform.hhdm_offset();
+
+    // VP is not currently running on this core — is_remote = false means
+    // we set the PIR bit and let the next VMRESUME pick it up.
+    // TODO: check if VP is live on a remote core (async mode) and send
+    // a posted-interrupt IPI (vector 0xF2) instead.
+    unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+
+    serial_println!(
+        "[INJECT_INTERRUPT] child_dom={} vp={} vector={:#x}",
+        child_domain_id, vp_id, vector
+    );
     HypercallResult::success()
 }
 

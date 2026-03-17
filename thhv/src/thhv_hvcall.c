@@ -242,3 +242,11 @@ u64 status = __themis_vmcall(THEMIS_OP_SET_THEMIC_VECTOR,
      NULL, NULL, NULL);
 return __themis_to_errno(status);
 }
+
+int themis_inject_interrupt(u64 child_domain, u32 vp_id, u8 vector)
+{
+u64 status = __themis_vmcall(THEMIS_OP_INJECT_INTERRUPT,
+     child_domain, (u64)vp_id, (u64)vector, 0, 0,
+     NULL, NULL, NULL);
+return __themis_to_errno(status);
+}

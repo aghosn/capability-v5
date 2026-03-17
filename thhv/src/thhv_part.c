@@ -90,6 +90,9 @@ static void thhv_partition_destroy(struct kref *ref)
 		spin_unlock(&part->sent_caps.lock);
 	}
 
+	/* Release all irqfd entries (removes waitqueue entries, flushes work). */
+	thhv_irqfd_release_all(part);
+
 	/* Free ioeventfd entries (no unregister — domain already being torn down). */
 	{
 		struct thhv_ioeventfd_entry *e, *etmp;
@@ -697,9 +700,17 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 	case THHV_SET_GUEST_MEMORY:
 		return thhv_set_guest_memory(part, uarg);
 
-	case THHV_IRQFD:
-		/* TODO(P15g): eventfd → VMCALL_ASSERT_INTERRUPT */
-		return -ENOSYS;
+	case THHV_IRQFD: {
+		struct thhv_irqfd __user *irq = uarg;
+		struct thhv_irqfd args;
+
+		if (copy_from_user(&args, irq, sizeof(args)))
+			return -EFAULT;
+
+		if (args.flags & THHV_IRQFD_FLAG_DEASSIGN)
+			return thhv_irqfd_deassign(part, irq);
+		return thhv_irqfd_assign(part, irq);
+	}
 
 	case THHV_IOEVENTFD: {
 		struct thhv_ioeventfd __user *ioe = uarg;
@@ -774,8 +785,8 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 	spin_lock_init(&part->sent_caps.lock);
 	INIT_LIST_HEAD(&part->sent_caps.list);
 
-	INIT_LIST_HEAD(&part->irqfds);
-	mutex_init(&part->irqfd_lock);
+	INIT_LIST_HEAD(&part->irqfds.list);
+	mutex_init(&part->irqfds.lock);
 
 	INIT_LIST_HEAD(&part->ioeventfds.list);
 	mutex_init(&part->ioeventfds.lock);
