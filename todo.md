@@ -487,8 +487,9 @@ The following three invariants govern what dom0 sees and can access:
   registers, VMCLEAR parent, VMPTRLD child (`activate()`), VMRESUME via monitor loop.
 - [x] **P9e**: ✅ DONE. `do_revoke_domain` calls `Capability::revoke_domain()`; `apply_update::
   RevokeDomain` tears down EPT + IOMMU SLPT; `invalidate_domain_irtes` clears all IRTEs.
-- [ ] **P9f**: ⚠️ PARTIAL. EOI-exit handler stub exists (logs vector) but EOI-exit bitmap is
-  all zeros so it never fires. REPORT-visibility interrupt completion notification deferred.
+- [x] **P9f**: ✅ NOT NEEDED. EOI-exit bitmap stays all-zeros by design. Report policy is
+  implemented via the SWITCH return mechanism (RDI=vector on early return), not via EOI exits.
+  Physical EOI is handled transparently by dom0's interrupt handler. Resolved.
 
 ### Phase 10 — META VP-State Regions *(SUPERSEDED by VpCommPage)*
 
