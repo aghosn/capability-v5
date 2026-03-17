@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# update-bins.sh — Copy build artifacts into guest/bins.img without root.
+#
+# Usage:
+#   bash themis/scripts/update-bins.sh
+#   PROFILE=release bash themis/scripts/update-bins.sh
+#   BINS_TARGETS=thhv,chv bash themis/scripts/update-bins.sh
+#   NESTED_KERNEL=path/to/bzImage bash themis/scripts/update-bins.sh
+#
+# Mounts guest/bins.img via fuse2fs, copies any build artifacts that are
+# present, refreshes version.txt, then unmounts and cleans up. Missing
+# artifacts are skipped with warnings so partial builds can still be packaged.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
+BINS_IMG="$WORKSPACE_ROOT/guest/bins.img"
+PROFILE="${PROFILE:-debug}"
+BINS_TARGETS="${BINS_TARGETS:-all}"
+NESTED_KERNEL="${NESTED_KERNEL:-}"
+NESTED_ROOTFS="${NESTED_ROOTFS:-}"
+MNT=""
+MOUNTED=false
+
+need() {
+    if ! command -v "$1" &>/dev/null; then
+        echo "ERROR: '$1' not found. Install: $2" >&2
+        exit 1
+    fi
+}
+
+warn_missing() {
+    echo "WARNING: $1 not found; skipping." >&2
+}
+
+cleanup() {
+    if [[ "$MOUNTED" == true && -n "$MNT" ]] && mountpoint -q "$MNT" 2>/dev/null; then
+        fusermount -u "$MNT" 2>/dev/null || true
+    fi
+    if [[ -n "$MNT" && -d "$MNT" ]]; then
+        rm -rf "$MNT"
+    fi
+}
+trap cleanup EXIT
+
+should_package() {
+    local want="$1"
+    local raw=""
+    local normalized=""
+    local -a package_targets=()
+
+    if [[ "$BINS_TARGETS" == "all" ]]; then
+        return 0
+    fi
+
+    IFS=',' read -r -a package_targets <<< "$BINS_TARGETS"
+    for raw in "${package_targets[@]}"; do
+        normalized="${raw//[[:space:]]/}"
+        normalized="${normalized,,}"
+        case "$want:$normalized" in
+            chv:chv|chv:cloud-hypervisor|cloud-hypervisor:chv|cloud-hypervisor:cloud-hypervisor)
+                return 0
+                ;;
+            *)
+                if [[ "$want" == "$normalized" ]]; then
+                    return 0
+                fi
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+copy_2026_tests() {
+    local cargo_toml="$REPO_ROOT/2026/Cargo.toml"
+    local deps_dir="$REPO_ROOT/2026/target/$PROFILE/deps"
+    local test_name=""
+    local candidate=""
+    local copied=0
+
+    [[ -f "$cargo_toml" && -d "$deps_dir" ]] || return 0
+
+    while IFS= read -r test_name; do
+        shopt -s nullglob
+        for candidate in "$deps_dir/${test_name}-"*; do
+            if [[ -f "$candidate" && -x "$candidate" ]]; then
+                cp "$candidate" "$MNT/2026/tests/"
+                copied=1
+            fi
+        done
+        shopt -u nullglob
+    done < <(
+        awk '
+            /^\[\[test\]\]/ { in_test = 1; next }
+            /^\[\[/ { in_test = 0 }
+            in_test && $1 == "name" {
+                gsub(/"/, "", $3)
+                print $3
+            }
+        ' "$cargo_toml"
+    )
+
+    return 0
+}
+
+need fuse2fs    "sudo apt install fuse2fs e2fsprogs"
+need fusermount "sudo apt install fuse3"
+need git        "sudo apt install git"
+
+if [[ ! -f "$BINS_IMG" ]]; then
+    echo "ERROR: bins image not found: $BINS_IMG" >&2
+    echo "       Remediation: run bash themis/scripts/create-bins.sh first." >&2
+    exit 1
+fi
+
+MNT="$(mktemp -d)"
+fuse2fs -o fakeroot "$BINS_IMG" "$MNT" >/dev/null 2>&1
+MOUNTED=true
+
+for _ in {1..50}; do
+    if mountpoint -q "$MNT" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+if ! mountpoint -q "$MNT" 2>/dev/null; then
+    echo "ERROR: failed to mount $BINS_IMG with fuse2fs" >&2
+    echo "       Remediation: ensure FUSE is available, then retry." >&2
+    exit 1
+fi
+
+mkdir -p \
+    "$MNT/thhv/tests" \
+    "$MNT/cloud-hypervisor" \
+    "$MNT/2026/tests" \
+    "$MNT/nested"
+
+THHV_KO="$REPO_ROOT/thhv/thhv.ko"
+THHV_TEST_DIR="$REPO_ROOT/thhv/test/bin"
+CHV_BIN="$REPO_ROOT/cloud-hypervisor/target/$PROFILE/cloud-hypervisor"
+CAPENG_BIN="$REPO_ROOT/2026/target/$PROFILE/capability-engine-v2"
+
+if should_package thhv; then
+    if [[ -f "$THHV_KO" ]]; then
+        cp "$THHV_KO" "$MNT/thhv/thhv.ko"
+    else
+        warn_missing "$THHV_KO"
+    fi
+
+    shopt -s nullglob
+    TEST_BINS=("$THHV_TEST_DIR"/*)
+    if (( ${#TEST_BINS[@]} > 0 )); then
+        cp "${TEST_BINS[@]}" "$MNT/thhv/tests/"
+    else
+        warn_missing "$THHV_TEST_DIR/*"
+    fi
+    shopt -u nullglob
+fi
+
+if should_package chv; then
+    if [[ -f "$CHV_BIN" ]]; then
+        cp "$CHV_BIN" "$MNT/cloud-hypervisor/cloud-hypervisor"
+    else
+        warn_missing "$CHV_BIN"
+    fi
+fi
+
+if should_package 2026; then
+    if [[ -f "$CAPENG_BIN" ]]; then
+        cp "$CAPENG_BIN" "$MNT/2026/capability-engine-v2"
+    else
+        warn_missing "$CAPENG_BIN"
+    fi
+    copy_2026_tests
+fi
+
+if [[ -n "$NESTED_KERNEL" ]]; then
+    if [[ -f "$NESTED_KERNEL" ]]; then
+        cp "$NESTED_KERNEL" "$MNT/nested/bzImage"
+    else
+        warn_missing "$NESTED_KERNEL"
+    fi
+fi
+
+if [[ -n "$NESTED_ROOTFS" ]]; then
+    if [[ -f "$NESTED_ROOTFS" ]]; then
+        cp "$NESTED_ROOTFS" "$MNT/nested/rootfs.img"
+    else
+        warn_missing "$NESTED_ROOTFS"
+    fi
+fi
+
+GIT_REV="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$MNT/version.txt" <<META
+rev: ${GIT_REV}
+timestamp: ${TIMESTAMP}
+profile: ${PROFILE}
+nested_kernel: ${NESTED_KERNEL:-none}
+nested_rootfs: ${NESTED_ROOTFS:-none}
+META
+
+fusermount -u "$MNT"
+MOUNTED=false
+rm -rf "$MNT"
+MNT=""
+
+echo "✔ Updated guest/bins.img"

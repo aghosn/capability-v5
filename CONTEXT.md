@@ -98,6 +98,21 @@ interface** (`Capability::*`, `apply_update`, hypercall handlers in `hypercall.r
   state transitions are auditable through a single validation point (A1), and
   because capability revocation relies on the engine owning all references.
 
+### A10 — Always update todo.md when work is completed
+
+After completing any task — whether it was pre-planned or discovered during
+implementation — update `todo.md` at the repo root:
+
+- If the item already exists: mark it `[x]` and add a brief ✅ DONE note with
+  what was implemented and which files were changed.
+- If the item does not exist: insert it under the appropriate phase with
+  `[x]` and a DONE note. Never leave completed work undocumented.
+- If a task was determined to be not needed or superseded: mark it with
+  `[x] ✅ NOT NEEDED` or `[x] ✅ SUPERSEDED` with a one-line explanation.
+
+This keeps `todo.md` as a living record of both planned and emergent work,
+and ensures any future agent can reconstruct what was done and why.
+
 ---
 
 ## 2. Design Decisions (Settled — Do Not Relitigate)

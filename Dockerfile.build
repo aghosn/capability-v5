@@ -1,0 +1,53 @@
+# Dockerfile.build — build-only toolchain image for the Themis project.
+# It compiles the Rust workspace, builds the thhv kernel module, and packs
+# guest/bins.img from a bind-mounted checkout. QEMU is intentionally excluded:
+# all VM execution is expected to run natively on the host.
+FROM ubuntu:24.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/root/.rustup \
+    CARGO_HOME=/root/.cargo \
+    PATH=/root/.cargo/bin:${PATH}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    apt-utils \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    dpkg-dev \
+    e2fsprogs \
+    fuse2fs \
+    git \
+    grub-pc-bin \
+    libclang-dev \
+    libssl-dev \
+    llvm \
+    mtools \
+    pkg-config \
+    qemu-utils \
+    wget \
+    xorriso \
+ && rm -rf /var/lib/apt/lists/*
+
+# themis/rust-toolchain.toml currently pins channel=nightly,
+# target=x86_64-unknown-none, and the listed components below.
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain none \
+ && rustup toolchain install nightly \
+    --component rust-src \
+    --component rust-analyzer \
+    --component rustfmt \
+    --component clippy \
+    --component llvm-tools \
+    --target x86_64-unknown-none \
+ && rustup default nightly
+
+WORKDIR /workspace
+VOLUME ["/workspace"]
+
+CMD ["/bin/bash"]

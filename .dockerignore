@@ -1,0 +1,7 @@
+target/
+cloud-hypervisor/target/
+themis/target/
+themis/guest/*.img
+.git/
+**/.git
+**/.git/

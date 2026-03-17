@@ -1196,6 +1196,66 @@ kernel config and QEMU/bare-metal setup needed for a working NIC.
 - [ ] **P17e** — **Validation**: SSH into dom0, `curl` an external URL,
   `apt`/`apk` package install over the network.
 
+### Phase 20 — Attested Boot
+
+Bind the capavisor binary to the physical platform via a TPM root of trust, and
+have the capavisor sign domain attestation reports with an Ed25519 key measured
+into the TPM at boot.  Design: `2026/docs/design/attestation/attestation.md`.
+
+**Dependency order**: P20a → P20b → P20c → P20d → P20e (signed reports).
+P20f (swtpm QEMU) is independent of P20b–e.  P20g requires P20e + P20f.
+
+- [ ] **P20a** — **Struct definitions in `themis-abi`**:
+  - Add `BootAttestation` (128 bytes): magic, pub_key[32], priv_key[32],
+    measurement[32], pcr_index:u32, reserved[20].  This is the boot handoff struct.
+  - Add `SignedAttestReport` (168 bytes): wraps `AttestReport` + signature[64]
+    + pub_key[32] + nonce[32].  This is what `do_attest_self` will deliver.
+  - Add `ed25519-dalek` (no_std) + `sha2` + `zeroize` to `themis-abi/Cargo.toml`.
+
+- [ ] **P20b** — **Pre-boot keygen + PCR extend** (Limine module or pre-capavisor binary):
+  - Implement `BootAttestModule`: runs before capavisor entry.
+  - Generate Ed25519 key pair seeded from RDRAND/RDSEED.
+  - Compute `SHA-256(capavisor_binary ‖ boot_info_bytes ‖ pub_key)`.
+  - Issue `TPM2_PCR_Extend(PCR=11, SHA-256, digest)` over TIS MMIO (0xFED40000).
+  - Write `BootAttestation` struct to a Limine-tagged memory region for capavisor.
+  - Minimal no_std TIS driver (send/recv TPM2 command/response bytes).
+
+- [ ] **P20c** — **Capavisor boot handoff** (`capavisor/src/boot.rs`):
+  - Scan Limine module list for `BOOT_ATTEST_MAGIC` tag.
+  - Copy `BootAttestation` from the module region.
+  - Zero the source region immediately after copying (key hygiene).
+  - Store `pub_key` and `priv_key` in a static `AttestedKey` inside META
+    (never mapped into any domain's EPT).
+  - Verify `measurement` field matches expected PCR value (optional sanity check).
+
+- [ ] **P20d** — **Attestation key management** (`capavisor/src/attest.rs` or new module):
+  - `static ATTEST_KEY: Once<AttestKey>` — holds Ed25519 signing key.
+  - `fn init_attest_key(priv_key: &[u8; 32])` — called from boot, zeroes input after init.
+  - `fn sign_report(report: &AttestReport, nonce: &[u8; 32]) -> [u8; 64]` — Ed25519 sign.
+  - `fn get_pub_key() -> [u8; 32]` — returns public key for inclusion in reports.
+
+- [ ] **P20e** — **Signed report delivery** (`capavisor/src/hypercall.rs`):
+  - Update `do_attest_self`: accept nonce from hypercall args (RDI–RDX = 4×u64 = 32 bytes).
+  - Call `attest_domain` to build `AttestReport`.
+  - Call `sign_report(report, nonce)` → signature.
+  - Build `SignedAttestReport { report, signature, pub_key, nonce }`.
+  - Write into DomainComm RX ring (same path as existing boot attestation write).
+  - Return `HypercallResult::success_1(report.domain_id)` (unchanged ABI).
+
+- [ ] **P20f** — **QEMU swtpm integration** (`themis/scripts/run-qemu.sh` + `run-dom0.sh`):
+  - Add `start_swtpm()` helper: creates `/tmp/swtpm-state`, starts swtpm socket daemon.
+  - Pass `-chardev socket,id=chrtpm,...  -tpmdev emulator,...  -device tpm-tis,...` to QEMU.
+  - Stop swtpm on exit (`trap`).
+  - Ensure `swtpm` and `tpm2-tools` are listed as host prerequisites in scripts/README.md.
+
+- [ ] **P20g** — **Dom0 attestation verifier tool** (`2026/` workspace or `themis/tools/`):
+  - Reads `SignedAttestReport` from DomainComm (via ioctl or /dev/thhv read).
+  - Reads TPM PCR 11 via `tpm2_pcrread sha256:11` or direct TPM2 command.
+  - Reconstructs `expected_measurement = SHA-256(expected_binary ‖ expected_boot_info ‖ pub_key)`.
+  - Checks `PCR[11] == expected_measurement`.
+  - Verifies Ed25519 signature on the `AttestReport` bytes using `pub_key` from report.
+  - Prints pass/fail with details.
+
 ### Phase 18 — Monitor-Provided Hypercall Library (Exploratory)
 
 Explore having the capavisor provide a pre-compiled hypercall stub library

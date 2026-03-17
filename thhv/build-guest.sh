@@ -1,91 +1,155 @@
 #!/usr/bin/env bash
-# Build thhv.ko against kernel headers from a dom0 guest disk image.
+# Build thhv.ko against kernel headers from a prefetched headers tree or a
+# dom0 guest disk image.
 #
 # Usage:
-#   sudo bash build-guest.sh                               # auto-detect disk
-#   sudo bash build-guest.sh guest/jammy-server-*.img      # explicit disk path
-#   sudo DOM0_VERSION=noble bash build-guest.sh            # by version name
+#   KHEADERS_DIR=/path/to/linux-headers bash thhv/build-guest.sh
+#   bash themis/scripts/fetch-kheaders.sh && bash thhv/build-guest.sh
+#   sudo bash build-guest.sh guest/jammy-server-*.img
+#   sudo DOM0_VERSION=noble bash build-guest.sh
 #
-# The script mounts the disk, finds the kernel headers, builds the module,
-# optionally copies thhv.ko onto the disk, then unmounts.
+# The script prefers KHEADERS_DIR or extracted headers in themis/target/
+# kheaders/. If neither is available it falls back to mounting the dom0 disk,
+# finding the kernel headers there, building the module, optionally copying
+# thhv.ko onto the disk, then unmounting.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-THEMIS_SCRIPTS="$SCRIPT_DIR/../themis/scripts"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+THEMIS_SCRIPTS="$WORKSPACE_ROOT/themis/scripts"
 MNT="/tmp/mnt"
 COPY_TO_GUEST="${COPY_TO_GUEST:-}"   # set to a path (e.g. /root/) to copy .ko
+DISK=""
+HEADERS_DIR=""
+HEADERS_SOURCE=""
+MOUNTED_BY_US=false
 
-# ── Resolve disk image path ───────────────────────────────────────────────── #
+validate_headers_dir() {
+    local dir="$1"
+    [[ -d "$dir" && -f "$dir/Makefile" ]]
+}
 
-if [[ -n "${1:-}" ]]; then
-    DISK="$1"
-else
-    source "$THEMIS_SCRIPTS/dom0-lib.sh"
-    GUEST_DIR="$(cd "$SCRIPT_DIR/../themis/guest" 2>/dev/null && pwd)" || true
-    if [[ -z "$GUEST_DIR" || ! -d "$GUEST_DIR" ]]; then
-        echo "ERROR: no dom0 disk found in themis/guest/. Run: cargo fetch-dom0" >&2
-        exit 1
-    fi
-    if [[ -n "${DOM0_VERSION:-}" ]]; then
-        dom0_select "$DOM0_VERSION"
-    elif _detected=$(dom0_detect_from_guest_dir "$GUEST_DIR"); then
-        dom0_select "$_detected"
+candidate_headers_dir_from_kver() {
+    local kver_file="$THEMIS_SCRIPTS/dom0-kernel-version.txt"
+    local kver
+
+    [[ -f "$kver_file" ]] || return 1
+    kver="$(tr -d '[:space:]' < "$kver_file")"
+    [[ -n "$kver" ]] || return 1
+
+    if [[ "$kver" == *-generic ]]; then
+        printf '%s\n' "$WORKSPACE_ROOT/themis/target/kheaders/usr/src/linux-headers-${kver}"
     else
-        echo "ERROR: no dom0 disk found in themis/guest/. Run: cargo fetch-dom0" >&2
+        printf '%s\n' "$WORKSPACE_ROOT/themis/target/kheaders/usr/src/linux-headers-${kver}-generic"
+    fi
+}
+
+resolve_disk() {
+    if [[ -n "$DISK" ]]; then
+        return
+    fi
+
+    if [[ -n "${1:-}" ]]; then
+        DISK="$1"
+    else
+        source "$THEMIS_SCRIPTS/dom0-lib.sh"
+        GUEST_DIR="$(cd "$WORKSPACE_ROOT/themis/guest" 2>/dev/null && pwd)" || true
+        if [[ -z "$GUEST_DIR" || ! -d "$GUEST_DIR" ]]; then
+            echo "ERROR: no dom0 disk found in themis/guest/. Run: cargo fetch-dom0" >&2
+            exit 1
+        fi
+        if [[ -n "${DOM0_VERSION:-}" ]]; then
+            dom0_select "$DOM0_VERSION"
+        elif _detected=$(dom0_detect_from_guest_dir "$GUEST_DIR"); then
+            dom0_select "$_detected"
+        else
+            echo "ERROR: no dom0 disk found in themis/guest/. Run: cargo fetch-dom0" >&2
+            exit 1
+        fi
+        DISK="$GUEST_DIR/$DOM0_IMAGE_NAME"
+    fi
+
+    if [[ ! -f "$DISK" ]]; then
+        echo "ERROR: disk image not found: $DISK" >&2
         exit 1
     fi
-    DISK="$GUEST_DIR/$DOM0_IMAGE_NAME"
-fi
+}
 
-if [[ ! -f "$DISK" ]]; then
-    echo "ERROR: disk image not found: $DISK" >&2
-    exit 1
-fi
+ensure_guest_mounted() {
+    if mountpoint -q "$MNT" 2>/dev/null; then
+        echo "  (guest already mounted at $MNT)"
+        return
+    fi
 
-echo "→ Disk: $(basename "$DISK")"
-
-# ── Mount ──────────────────────────────────────────────────────────────────── #
-
-already_mounted=false
-if mountpoint -q "$MNT" 2>/dev/null; then
-    echo "  (already mounted at $MNT)"
-    already_mounted=true
-else
     if [[ "$(id -u)" -ne 0 ]]; then
-        echo "ERROR: disk not mounted and not running as root." >&2
-        echo "       Either mount first:  sudo bash themis/scripts/mount-guest.sh" >&2
-        echo "       Or run with sudo:    sudo bash thhv/build-guest.sh" >&2
+        echo "ERROR: guest mount required but not running as root." >&2
+        echo "       Preferred no-sudo path: bash themis/scripts/fetch-kheaders.sh" >&2
+        echo "       Then rerun:             bash thhv/build-guest.sh" >&2
+        echo "       Or mount first:         sudo bash themis/scripts/mount-guest.sh" >&2
+        echo "       Or run with sudo:       sudo bash thhv/build-guest.sh" >&2
         exit 1
     fi
-    bash "$THEMIS_SCRIPTS/mount-guest.sh" "$DISK"
-fi
 
-# Ensure we unmount on exit (unless it was already mounted before we started).
+    resolve_disk "${1:-}"
+    echo "→ Disk: $(basename "$DISK")"
+    bash "$THEMIS_SCRIPTS/mount-guest.sh" "$DISK"
+    MOUNTED_BY_US=true
+}
+
 cleanup() {
-    if [[ "$already_mounted" == false ]]; then
+    if [[ "$MOUNTED_BY_US" == true ]]; then
         echo "→ Unmounting..."
         bash "$THEMIS_SCRIPTS/umount-guest.sh" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
-# ── Find kernel headers ───────────────────────────────────────────────────── #
+# ── Resolve kernel headers ─────────────────────────────────────────────────── #
 
-HEADERS_DIR=""
-for d in "$MNT"/usr/src/linux-headers-*-generic; do
-    if [[ -d "$d" && -f "$d/Makefile" ]]; then
-        HEADERS_DIR="$d"
-        break
+if [[ -n "${KHEADERS_DIR:-}" ]]; then
+    if ! validate_headers_dir "$KHEADERS_DIR"; then
+        echo "ERROR: KHEADERS_DIR does not point to a valid kernel headers tree: $KHEADERS_DIR" >&2
+        echo "       Expected to find a Makefile there." >&2
+        exit 1
     fi
-done
+    HEADERS_DIR="$KHEADERS_DIR"
+    HEADERS_SOURCE="KHEADERS_DIR override"
+else
+    if _candidate=$(candidate_headers_dir_from_kver) && validate_headers_dir "$_candidate"; then
+        HEADERS_DIR="$_candidate"
+        HEADERS_SOURCE="prefetched headers (pinned dom0 kernel)"
+    else
+        for d in "$WORKSPACE_ROOT"/themis/target/kheaders/usr/src/linux-headers-*-generic; do
+            if validate_headers_dir "$d"; then
+                HEADERS_DIR="$d"
+                HEADERS_SOURCE="prefetched headers"
+                break
+            fi
+        done
+    fi
+fi
 
 if [[ -z "$HEADERS_DIR" ]]; then
-    echo "ERROR: no kernel headers found in $MNT/usr/src/" >&2
-    echo "       Install them in the guest: apt install linux-headers-generic" >&2
-    exit 1
+    ensure_guest_mounted "${1:-}"
+
+    for d in "$MNT"/usr/src/linux-headers-*-generic; do
+        if validate_headers_dir "$d"; then
+            HEADERS_DIR="$d"
+            HEADERS_SOURCE="mounted dom0 guest"
+            break
+        fi
+    done
+
+    if [[ -z "$HEADERS_DIR" ]]; then
+        echo "ERROR: no kernel headers found in $MNT/usr/src/" >&2
+        echo "       Install them in the guest: apt install linux-headers-generic" >&2
+        echo "       Or fetch them on the host: bash themis/scripts/fetch-kheaders.sh" >&2
+        exit 1
+    fi
 fi
 
 KVER=$(basename "$HEADERS_DIR" | sed 's/^linux-headers-//')
+echo "→ Using kernel headers from $HEADERS_SOURCE"
 echo "→ Kernel headers: $KVER"
 echo "→ Headers path:   $HEADERS_DIR"
 
@@ -124,6 +188,8 @@ echo "→ Built: thhv.ko ($(du -h "$SCRIPT_DIR/thhv.ko" | cut -f1))"
 # ── Optionally copy to guest disk ──────────────────────────────────────────── #
 
 if [[ -n "$COPY_TO_GUEST" ]]; then
+    ensure_guest_mounted "${1:-}"
+
     DEST="$MNT/$COPY_TO_GUEST"
     mkdir -p "$DEST"
     cp "$SCRIPT_DIR/thhv.ko" "$DEST/thhv.ko"

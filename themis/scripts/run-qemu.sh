@@ -80,6 +80,12 @@ elif _detected=$(dom0_detect_from_guest_dir "$WORKSPACE_ROOT/guest"); then
     echo "  + virtio disk: guest/$DOM0_IMAGE_NAME  (${DOM0_VERSION_NICK})"
 fi
 
+BINS_ARGS=""
+if [[ -f "$WORKSPACE_ROOT/guest/bins.img" ]]; then
+    BINS_ARGS+="-drive id=bins,file=$WORKSPACE_ROOT/guest/bins.img,format=raw,if=none,readonly=on "
+    BINS_ARGS+="-device virtio-blk-pci,drive=bins "
+fi
+
 exec qemu-system-x86_64 \
     $KVM_ARGS \
     -machine q35,kernel-irqchip=split \
@@ -93,4 +99,5 @@ exec qemu-system-x86_64 \
     -no-reboot \
     -no-shutdown \
     ${DISK_ARGS} \
+    ${BINS_ARGS} \
     ${QEMU_EXTRA_ARGS:-}

@@ -36,6 +36,7 @@ else
 fi
 
 DOM0_DISK="$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME"
+BINS_IMG="$WORKSPACE_ROOT/guest/bins.img"
 SEED_IMG="$WORKSPACE_ROOT/guest/seed.img"
 SEEDED_MARKER="$WORKSPACE_ROOT/guest/.dom0-seeded"
 
@@ -75,6 +76,12 @@ elif [[ ! -f "$SEEDED_MARKER" ]]; then
     echo ""
 fi
 
+BINS_ARGS=""
+if [[ -f "$BINS_IMG" ]]; then
+    BINS_ARGS+="-drive id=bins,file=$BINS_IMG,format=raw,if=none,readonly=on "
+    BINS_ARGS+="-device virtio-blk-pci,drive=bins"
+fi
+
 # ── Networking ───────────────────────────────────────────────────────────────
 # User-mode (SLIRP) networking with virtio-net.  Guest gets DHCP 10.0.2.x,
 # host-to-guest SSH on localhost:2222.
@@ -95,6 +102,7 @@ qemu-system-x86_64 \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
     -drive if=virtio,format=qcow2,file="$DOM0_DISK" \
+    $BINS_ARGS \
     $SEED_ARG \
     $NET_ARGS \
     -nographic \
