@@ -97,7 +97,6 @@ exec qemu-system-x86_64 \
     -serial mon:stdio \
     -display none \
     -no-reboot \
-    -no-shutdown \
     ${DISK_ARGS} \
     ${BINS_ARGS} \
     ${QEMU_EXTRA_ARGS:-}
