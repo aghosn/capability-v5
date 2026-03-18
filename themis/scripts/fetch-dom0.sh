@@ -93,10 +93,27 @@ users:
     lock_passwd: False
     shell: /bin/bash
 ssh_pwauth: True
+write_files:
+  - path: /etc/systemd/system/opt-bins.mount
+    content: |
+      [Unit]
+      Description=Themis bins artifact disk
+      After=dev-vdb.device
+      Requires=dev-vdb.device
+
+      [Mount]
+      What=/dev/vdb
+      Where=/opt/bins
+      Type=ext2
+      Options=ro
+
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
   - mkdir -p /opt/bins
-  - echo 'LABEL=bins  /opt/bins  ext2  ro,nofail,x-systemd.device-timeout=30  0 0' >> /etc/fstab
-  - mount /opt/bins || true
+  - systemctl daemon-reload
+  - systemctl enable opt-bins.mount
+  - systemctl start opt-bins.mount || true
   - ln -sf /opt/bins /home/cloud/bins
   - echo "themis dom0 cloud-init complete" > /dev/ttyS0
 EOF
