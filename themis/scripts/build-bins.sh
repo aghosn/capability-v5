@@ -157,6 +157,15 @@ else
     _DOM0_FRESH=false
 fi
 
+# ── Auto-fetch dom1 guest image if not present ───────────────────────────────
+DOM1_DISK="$WORKSPACE_ROOT/guest/dom1.img"
+if [[ ! -f "$DOM1_DISK" ]]; then
+    echo "→ [dom1] guest image not found — fetching automatically"
+    bash "$SCRIPT_DIR/fetch-dom1.sh"
+else
+    echo "→ [dom1] guest image present (dom1.img)"
+fi
+
 if should_build capavisor; then
     echo "→ [capavisor] cargo ${CARGO_BUILD_ARGS[*]} -p capavisor"
     (
@@ -168,10 +177,10 @@ else
 fi
 
 if should_build chv; then
-    echo "→ [cloud-hypervisor] cargo ${CARGO_BUILD_ARGS[*]} --features themis"
+    echo "→ [cloud-hypervisor] cargo ${CARGO_BUILD_ARGS[*]} --features themis,kvm"
     (
         cd "$REPO_ROOT/cloud-hypervisor"
-        cargo "${CARGO_BUILD_ARGS[@]}" --features themis
+        cargo "${CARGO_BUILD_ARGS[@]}" --features themis,kvm
     )
 else
     echo "→ [cloud-hypervisor] skipped"

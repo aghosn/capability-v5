@@ -1083,25 +1083,25 @@ archive (no VM mount needed).
 - Kernel version: pinned in `themis/scripts/dom0-kernel-version.txt`
 - Nested guest image: deferred to P16h (reuse dom0 kernel)
 
-- [ ] **P16.5a** — `bins.img` lifecycle: `themis/scripts/create-bins.sh` and
+- [x] **P16.5a** — `bins.img` lifecycle: `themis/scripts/create-bins.sh` and
   `themis/scripts/update-bins.sh`.  `create-bins.sh` creates a sparse 2G ext2
   image with directory structure `thhv/`, `cloud-hypervisor/`, `nested/`, writes
   `version.txt`.  `update-bins.sh` mounts via `fuse2fs`, copies artifacts
   (thhv.ko, test bins, cloud-hypervisor binary), writes git rev + timestamp to
   `version.txt`, unmounts.  Both run with zero privileges.
 
-- [ ] **P16.5b** — QEMU integration: modify `themis/scripts/run-qemu.sh` and
+- [x] **P16.5b** — QEMU integration: modify `themis/scripts/run-qemu.sh` and
   `themis/scripts/run-dom0.sh` to detect `guest/bins.img` and attach it as a
   second `virtio-blk-pci` drive (read-only).  If `bins.img` is absent, boot
   proceeds normally (no error).
 
-- [ ] **P16.5c** — Guest cloud-init auto-mount: modify `themis/scripts/fetch-dom0.sh`
+- [x] **P16.5c** — Guest cloud-init auto-mount: modify `themis/scripts/fetch-dom0.sh`
   to add `mkdir -p /opt/bins` and an fstab entry
   `LABEL=bins /opt/bins ext2 ro,nofail,x-systemd.automount 0 0` to the
   cloud-init `user-data` `runcmd` section.  Also add a symlink
   `/home/cloud/bins -> /opt/bins` for convenience.
 
-- [ ] **P16.5d** — No-sudo kernel headers: `themis/scripts/fetch-kheaders.sh` reads
+- [x] **P16.5d** — No-sudo kernel headers: `themis/scripts/fetch-kheaders.sh` reads
   `themis/scripts/dom0-kernel-version.txt` (pinned kernel version string, e.g.
   `6.8.0-51-generic`), downloads matching `.deb` packages from Ubuntu archive
   using `apt-get download` (no sudo), extracts into `themis/target/kheaders/`
@@ -1109,14 +1109,14 @@ archive (no VM mount needed).
   `KHEADERS_DIR=themis/target/kheaders/...` when available; keep NBD-mount as
   fallback.  Add `dom0-kernel-version.txt` to repo with current pinned version.
 
-- [ ] **P16.5e** — Build orchestration: `themis/scripts/build-bins.sh` runs all
+- [x] **P16.5e** — Build orchestration: `themis/scripts/build-bins.sh` runs all
   component builds in order: (1) capavisor `cargo build`, (2) cloud-hypervisor
   `cargo build --release --features themis`, (3) 2026 workspace `cargo build
   --release`, (4) `make -C thhv` with headers from P16.5d, (5) `make -C thhv
   tests`, (6) `update-bins.sh`.  Flags: `BINS_TARGETS=thhv,chv,2026`,
   `PROFILE=release`.
 
-- [ ] **P16.5f** — xtask / cargo aliases: add `build-bins` and `dom0` as
+- [x] **P16.5f** — xtask / cargo aliases: add `build-bins` and `dom0` as
   `cargo xtask` subcommands (or `.cargo/config.toml` aliases) so the full
   workflow is `cargo build-bins && cargo dom0`.
 
@@ -1141,7 +1141,7 @@ Key property: `build-bins.sh` is the same script in both paths.  The
 container just wraps it with the right environment.  `fetch-kheaders.sh`
 works inside Docker via `apt-get download` (no host kernel involved).
 
-- [ ] **P16.5g** — `Dockerfile.build`: builder image based on
+- [x] **P16.5g** — `Dockerfile.build`: builder image based on
   `ubuntu:24.04`.  Installs pinned Rust toolchain (via `rustup` with the
   same toolchain file as the workspace), LLVM/clang matching what capavisor
   needs, `build-essential`, `dpkg-dev`, `fuse2fs`, `e2fsprogs`, `curl`,
@@ -1150,7 +1150,7 @@ works inside Docker via `apt-get download` (no host kernel involved).
   Build with `docker build -f Dockerfile.build -t themis-build .` from
   the repo root.
 
-- [ ] **P16.5h** — `themis/scripts/build-bins-docker.sh`: thin wrapper
+- [x] **P16.5h** — `themis/scripts/build-bins-docker.sh`: thin wrapper
   that runs `build-bins.sh` inside the container:
   ```bash
   docker run --rm \
@@ -1164,13 +1164,34 @@ works inside Docker via `apt-get download` (no host kernel involved).
   The `--user` flag ensures output files are owned by the host user.
   Expose as `cargo build-bins-docker` alias alongside `cargo build-bins`.
 
-- [ ] **P16.5i** — Document the two-path workflow in
+- [x] **P16.5i** — Document the two-path workflow in
   `themis/scripts/README.md`: native path (requires recent host kernel +
   toolchain), Docker path (requires only Docker; kernel compatibility
   handled inside container).  Include a troubleshooting section for the
   "older kernel host" case (the motivation for the Docker path).
 
-### Phase 17 — Dom0 Networking
+- [ ] **P16.5j** — **Dom1 guest image**: `themis/scripts/fetch-dom1.sh`
+  downloads a fresh Ubuntu Noble cloud image for dom1 (separate copy from
+  dom0), creates a cloud-init seed (`guest/dom1-seed.img`) that provisions
+  user `cloud`/`cloud123` with sudo.  No bins mount needed for dom1.
+  `build-bins.sh` auto-fetches dom1 if `guest/dom1.img` is absent (same
+  pattern as dom0 auto-fetch).
+
+- [ ] **P16.5k** — **Dom1 disk attachment**: update `run-qemu.sh` and
+  `run-dom0.sh` to attach `guest/dom1.img` as `vdc` (read-write) when
+  present.  `SEED_DOM1=1` attaches `guest/dom1-seed.img` as a cdrom for
+  first-boot cloud-init provisioning.
+
+- [ ] **P16.5l** — **`run-dom1.sh` in bins**: package
+  `themis/scripts/run-dom1.sh` into `bins.img` at
+  `/opt/bins/run-dom1.sh`.  The script:
+  1. Tries `sudo insmod /opt/bins/thhv/thhv.ko` if `/dev/thhv` absent.
+  2. Calls `cloud-hypervisor` with UEFI firmware, `--disk path=/dev/vdc`,
+     `--cpus boot=2`, `--memory size=1G`, `--console tty`, `--serial tty`.
+  3. Auto-detects backend: if `/dev/thhv` present → Themis, else → KVM.
+  Works identically under `cargo dom0` (KVM) and `cargo themis` (Themis).
+
+
 
 Enable network connectivity for the dom0 Linux guest.  Can be started at any
 time — the dom0 kernel already boots to a login prompt; this phase adds the

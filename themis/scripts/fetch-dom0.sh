@@ -114,6 +114,7 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable opt-bins.mount
   - systemctl start opt-bins.mount || true
+  - systemctl mask systemd-networkd-wait-online.service
   - ln -sf /opt/bins /home/cloud/bins
   - echo "themis dom0 cloud-init complete" > /dev/ttyS0
 EOF

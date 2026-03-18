@@ -167,6 +167,9 @@ if should_package chv; then
     else
         warn_missing "$CHV_BIN"
     fi
+    # Always package run-dom1.sh alongside the binary.
+    cp "$SCRIPT_DIR/run-dom1.sh" "$MNT/cloud-hypervisor/run-dom1.sh"
+    chmod +x "$MNT/cloud-hypervisor/run-dom1.sh"
 fi
 
 if should_package 2026; then
