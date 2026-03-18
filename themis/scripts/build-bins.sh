@@ -14,6 +14,12 @@
 
 set -euo pipefail
 
+# When invoked via `cargo build-bins` from the repo root, the parent cargo
+# process (stable) injects RUSTUP_TOOLCHAIN=stable into the environment,
+# which overrides rust-toolchain.toml files in sub-workspaces.  Unset it so
+# each workspace (themis/, cloud-hypervisor/, 2026/) resolves its own toolchain.
+unset RUSTUP_TOOLCHAIN
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
@@ -135,6 +141,19 @@ resolve_kheaders_dir() {
 }
 
 echo "→ build-bins: PROFILE=$PROFILE BINS_TARGETS=$BINS_TARGETS"
+
+# ── Auto-fetch dom0 guest image if not present ───────────────────────────────
+# Source dom0-lib to detect the expected image filename, then fetch if missing.
+source "$SCRIPT_DIR/dom0-lib.sh"
+dom0_select "${DOM0_VERSION:-}"
+DOM0_DISK="$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME"
+
+if [[ ! -f "$DOM0_DISK" ]]; then
+    echo "→ [dom0] guest image not found — fetching automatically"
+    bash "$SCRIPT_DIR/fetch-dom0.sh"
+else
+    echo "→ [dom0] guest image present ($DOM0_IMAGE_NAME)"
+fi
 
 if should_build capavisor; then
     echo "→ [capavisor] cargo ${CARGO_BUILD_ARGS[*]} -p capavisor"

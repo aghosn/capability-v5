@@ -95,8 +95,8 @@ users:
 ssh_pwauth: True
 runcmd:
   - mkdir -p /opt/bins
-  - |
-    echo 'LABEL=bins  /opt/bins  ext2  ro,nofail,x-systemd.automount  0 0' >> /etc/fstab
+  - echo 'LABEL=bins  /opt/bins  ext2  ro,nofail  0 0' >> /etc/fstab
+  - mount /opt/bins || true
   - ln -sf /opt/bins /home/cloud/bins
   - echo "themis dom0 cloud-init complete" > /dev/ttyS0
 EOF

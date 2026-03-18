@@ -44,9 +44,8 @@ impl CpuFeatures {
 pub fn detect_features(has_dmar: bool) -> CpuFeatures {
     // CPUID.01H: ECX
     let cpuid1 = core::arch::x86_64::__cpuid(1);
-    let vmx = (cpuid1.ecx >> 5) & 1 != 0;    // ECX[5] = VMX
-    let x2apic = (cpuid1.ecx >> 21) & 1 != 0; // ECX[21] = x2APIC
-
+    let vmx = (cpuid1.ecx >> 5) & 1 != 0;     // ECX[5] = VMX
+    let x2apic = (cpuid1.ecx >> 21) & 1 != 0;  // ECX[21] = x2APIC
     // Physical address width from CPUID.80000008H
     let cpuid_pa = core::arch::x86_64::__cpuid(0x80000008);
     let phys_addr_bits = (cpuid_pa.eax & 0xFF) as u8;

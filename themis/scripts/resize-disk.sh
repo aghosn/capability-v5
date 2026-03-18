@@ -6,8 +6,8 @@
 #   bash scripts/resize-disk.sh guest/<image-name>.img 10
 #
 # After resizing, boot the guest and run inside it:
-#   sudo growpart /dev/vda 1
-#   sudo resize2fs /dev/vda1
+#   sudo growpart /dev/vdb 1
+#   sudo resize2fs /dev/vdb1
 
 set -euo pipefail
 
@@ -48,5 +48,5 @@ qemu-img info "$IMAGE" | grep 'virtual size'
 echo ""
 echo "✔ Image grown by ${SIZE_GB}G."
 echo "  Boot the guest and run:"
-echo "    sudo growpart /dev/vda 1"
-echo "    sudo resize2fs /dev/vda1"
+echo "    sudo growpart /dev/vdb 1"
+echo "    sudo resize2fs /dev/vdb1"

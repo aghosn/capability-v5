@@ -58,6 +58,26 @@ else
     KVM_ARGS="-cpu qemu64"
 fi
 
+# ── UEFI firmware (OVMF) ─────────────────────────────────────────────────────
+# Ubuntu cloud images require UEFI — they have no MBR/BIOS boot path.
+# We use a per-guest writable VARS copy so UEFI state persists across reboots.
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS_GUEST="$WORKSPACE_ROOT/guest/ovmf_vars.fd"
+
+if [[ ! -f "$OVMF_CODE" ]]; then
+    echo "ERROR: OVMF firmware not found at $OVMF_CODE"
+    echo "       Install it with: sudo apt install ovmf"
+    exit 1
+fi
+
+if [[ ! -f "$OVMF_VARS_GUEST" ]]; then
+    cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_GUEST"
+fi
+
+UEFI_ARGS="-drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+UEFI_ARGS+=" -drive if=pflash,format=raw,file=$OVMF_VARS_GUEST"
+
 # Cloud-init seed: only attach when SEED=1
 SEED_ARG=""
 if [[ "${SEED:-0}" == "1" ]]; then
@@ -101,6 +121,7 @@ qemu-system-x86_64 \
     $KVM_ARGS \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
+    $UEFI_ARGS \
     -drive if=virtio,format=qcow2,file="$DOM0_DISK" \
     $BINS_ARGS \
     $SEED_ARG \
