@@ -113,6 +113,18 @@ implementation — update `todo.md` at the repo root:
 This keeps `todo.md` as a living record of both planned and emergent work,
 and ensures any future agent can reconstruct what was done and why.
 
+### A11 — KISS: always seek the simplest solution first
+
+Before implementing a fix, understand the root cause fully. Prefer the simplest
+explanation and the smallest change. If a one-line fix exists, take it — do not
+reach for architectural changes, new abstractions, or workarounds before
+exhausting simple options. Two examples of violations: adding `isa-debug-exit`
+and port-detection logic when removing `-no-shutdown` was the fix; fighting fstab
+timing with systemd unit files when `/dev/vdb` directly was sufficient.
+
+When debugging: **read the diff between the working and broken configuration
+first**, before reasoning about internals.
+
 ---
 
 ## 2. Design Decisions (Settled — Do Not Relitigate)
