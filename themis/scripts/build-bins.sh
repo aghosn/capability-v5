@@ -151,8 +151,10 @@ DOM0_DISK="$WORKSPACE_ROOT/guest/$DOM0_IMAGE_NAME"
 if [[ ! -f "$DOM0_DISK" ]]; then
     echo "→ [dom0] guest image not found — fetching automatically"
     bash "$SCRIPT_DIR/fetch-dom0.sh"
+    _DOM0_FRESH=true
 else
     echo "→ [dom0] guest image present ($DOM0_IMAGE_NAME)"
+    _DOM0_FRESH=false
 fi
 
 if should_build capavisor; then
@@ -209,3 +211,23 @@ echo "→ Refreshing guest/bins.img"
 PROFILE="$PROFILE" BINS_TARGETS="$BINS_TARGETS" bash "$SCRIPT_DIR/update-bins.sh"
 
 echo "✔ build-bins complete"
+
+if [[ "$_DOM0_FRESH" == true ]]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║  Fresh dom0 image downloaded — two manual steps before booting:  ║"
+    echo "╠══════════════════════════════════════════════════════════════════╣"
+    echo "║                                                                  ║"
+    echo "║  1. Resize the disk (default is ~2.5G, recommended: +20G):       ║"
+    echo "║       cd themis                                                  ║"
+    echo "║       cargo resize-disk guest/$DOM0_IMAGE_NAME 20                ║"
+    echo "║                                                                  ║"
+    echo "║  2. First boot — cloud-init provisions the 'cloud' user:         ║"
+    echo "║       cd themis && SEED=1 cargo dom0                             ║"
+    echo "║     Then inside dom0:                                            ║"
+    echo "║       sudo growpart /dev/vdb 1 && sudo resize2fs /dev/vdb1       ║"
+    echo "║     Shut down: sudo poweroff                                     ║"
+    echo "║                                                                  ║"
+    echo "║  After that, normal boots: cargo dom0  or  cargo themis          ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+fi
