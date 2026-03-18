@@ -103,8 +103,6 @@ if [[ -f "$BINS_IMG" ]]; then
 fi
 
 # ── Networking ───────────────────────────────────────────────────────────────
-# User-mode (SLIRP) networking with virtio-net.  Guest gets DHCP 10.0.2.x,
-# host-to-guest SSH on localhost:2222.
 NET_ARGS=""
 if [[ "${QEMU_NET:-1}" == "1" ]]; then
     NET_FWD="hostfwd=tcp::2222-:22"
@@ -122,7 +120,8 @@ qemu-system-x86_64 \
     -smp "$QEMU_CPUS" \
     -m "$QEMU_MEM" \
     $UEFI_ARGS \
-    -drive if=virtio,format=qcow2,file="$DOM0_DISK" \
+    -drive id=dom0,file="$DOM0_DISK",format=qcow2,if=none \
+    -device virtio-blk-pci,drive=dom0 \
     $BINS_ARGS \
     $SEED_ARG \
     $NET_ARGS \

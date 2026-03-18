@@ -1720,6 +1720,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
         // is incomplete; can be removed once P7f-dmar is fully verified.
         // systemd.mask=boot-efi.mount: the EFI partition (vda15) fails because
         // the custom kernel lacks NLS iso8859-1; masking it avoids emergency mode.
+        // Disk ordering: vda=ubuntu root disk, vdb=bins.img (RO artifact disk).
         "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 keep_bootcon intel_iommu=off nokaslr nopv root=/dev/vda1 rw loglevel=8 ignore_loglevel systemd.mask=boot-efi.mount systemd.mask=multipathd.service",
     );
 

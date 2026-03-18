@@ -225,7 +225,7 @@ if [[ "$_DOM0_FRESH" == true ]]; then
     echo "║  2. First boot — cloud-init provisions the 'cloud' user:         ║"
     echo "║       cd themis && SEED=1 cargo dom0                             ║"
     echo "║     Then inside dom0:                                            ║"
-    echo "║       sudo growpart /dev/vdb 1 && sudo resize2fs /dev/vdb1       ║"
+    echo "║       sudo growpart /dev/vda 1 && sudo resize2fs /dev/vda1       ║"
     echo "║     Shut down: sudo poweroff                                     ║"
     echo "║                                                                  ║"
     echo "║  After that, normal boots: cargo dom0  or  cargo themis          ║"
