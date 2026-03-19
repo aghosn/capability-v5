@@ -199,6 +199,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         let entry_ctrl  = vcpu.get(control::VMENTRY_CONTROLS);
                         let pin_ctrl    = vcpu.get(control::PINBASED_EXEC_CONTROLS);
                         let proc2_ctrl  = vcpu.get(control::SECONDARY_PROCBASED_EXEC_CONTROLS);
+                        let intr_info   = vcpu.get(control::VMENTRY_INTERRUPTION_INFO_FIELD);
                         let cr0_mask    = vcpu.get(control::CR0_GUEST_HOST_MASK);
                         let cr0_shadow  = vcpu.get(control::CR0_READ_SHADOW);
                         let cr4_mask    = vcpu.get(control::CR4_GUEST_HOST_MASK);
@@ -212,6 +213,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                              SS sel={:#x} ar={:#x} TR_AR={:#x} LDTR_AR={:#x}\n\
                              activity={} interrupt={:#x} link_ptr={:#x} vpid={}\n\
                              ENTRY_CTRL={:#x} PIN={:#x} PROC2={:#x}\n\
+                             INTR_INFO={:#x}\n\
                              CR0_MASK={:#x} CR0_SHADOW={:#x} CR4_MASK={:#x} CR4_SHADOW={:#x}",
                             domain_id, core_id, exit_qual, exit_qual & 0xf,
                             cr0, cr4, cr3, efer,
@@ -220,6 +222,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             ss_sel, ss_ar, tr_ar, ldtr_ar,
                             activity, interrupt, link_ptr, vpid,
                             entry_ctrl, pin_ctrl, proc2_ctrl,
+                            intr_info,
                             cr0_mask, cr0_shadow, cr4_mask, cr4_shadow,
                         );
                         panic!("exit 33: dom={} core={} qual={:#x}", domain_id, core_id, exit_qual);

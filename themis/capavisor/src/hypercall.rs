@@ -1377,12 +1377,19 @@ pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
 /// Apply a VMCS-field register to an active VCPU via `ActiveVcpu::set()`.
 fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
     use themis_abi::regs::VpRegister;
-    // Enforce VMCS FIXED0 constraints for control registers so that
-    // VMLAUNCH/VMRESUME guest-state checks pass regardless of what the VMM
-    // (cloud-hypervisor) requested.
     let adjusted = match reg {
         VpRegister::Cr0 => unsafe { crate::vmcs::vmcs_adjust_cr0(val) },
         VpRegister::Cr4 => crate::vmcs::vmcs_adjust_cr4(val),
+        // VMCS LDTR AR: if usable (bit 16=0), type must be 2 (LDT).
+        // KVM/CHV represents a null LDTR as AR=0 (usable + type=0), which
+        // violates SDM 26.3.1.2. Force to unusable.
+        VpRegister::LdtrAccessRights => {
+            if val & 0x10000 == 0 && (val & 0xf) != 2 {
+                0x10000
+            } else {
+                val
+            }
+        }
         _ => val,
     };
     if let Some(field) = vp_reg_to_vmcs_field(reg) {
