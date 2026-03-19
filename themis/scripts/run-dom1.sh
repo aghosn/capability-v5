@@ -5,11 +5,12 @@
 #   - If /dev/thhv is present (or thhv.ko loads successfully): Themis backend
 #   - Otherwise: KVM backend
 #
-# Dom1's disk is passed to dom0 as /dev/vdc by run-qemu.sh / run-dom0.sh.
+# Uses dom0's own kernel + initrd (same Ubuntu Noble image) for direct kernel
+# boot, bypassing GRUB and the LABEL=cloudimg-rootfs issue entirely.
 #
 # Usage (from inside dom0):
-#   sudo /opt/bins/run-dom1.sh              # normal boot
-#   SEED_DOM1=1 sudo /opt/bins/run-dom1.sh  # first boot with cloud-init seed
+#   sudo /opt/bins/cloud-hypervisor/run-dom1.sh              # normal boot
+#   SEED_DOM1=1 sudo /opt/bins/cloud-hypervisor/run-dom1.sh  # first boot with cloud-init seed
 #
 # Login: cloud / cloud123
 
@@ -18,20 +19,20 @@ set -euo pipefail
 BINS="/opt/bins"
 CHV="$BINS/cloud-hypervisor/cloud-hypervisor"
 THHV_KO="$BINS/thhv/thhv.ko"
-DOM1_DISK="/dev/vdc"
-DOM1_SEED="/dev/vdd"  # only present when SEED_DOM1=1 was set at QEMU launch
+DOM1_DISK="$BINS/dom1/dom1.raw"
+HVF="$BINS/dom1/hypervisor-fw"
 
-OVMF="${OVMF:-/usr/share/OVMF/OVMF.fd}"
 CHV_CPUS="${CHV_CPUS:-2}"
 CHV_MEM="${CHV_MEM:-1G}"
 
-if [[ ! -b "$DOM1_DISK" ]]; then
-    echo "ERROR: dom1 disk $DOM1_DISK not found."
-    echo "       Make sure QEMU was started with dom1.img attached (it is automatic"
-    echo "       when guest/dom1.img exists on the host)."
+if [[ ! -f "$DOM1_DISK" ]]; then
+    echo "ERROR: dom1 disk not found at $DOM1_DISK"
     exit 1
 fi
-
+if [[ ! -f "$HVF" ]]; then
+    echo "ERROR: hypervisor-fw not found at $HVF"
+    exit 1
+fi
 if [[ ! -f "$CHV" ]]; then
     echo "ERROR: cloud-hypervisor binary not found at $CHV"
     exit 1
@@ -41,7 +42,7 @@ fi
 if [[ ! -c /dev/thhv ]]; then
     if [[ -f "$THHV_KO" ]]; then
         echo "→ Loading thhv.ko..."
-        sudo insmod "$THHV_KO" || true
+        insmod "$THHV_KO" || true
     fi
 fi
 
@@ -51,23 +52,33 @@ else
     echo "→ Backend: KVM (/dev/kvm)"
 fi
 
-DISK_ARGS="path=$DOM1_DISK"
-EXTRA_DISKS=""
-if [[ "${SEED_DOM1:-0}" == "1" && -b "$DOM1_SEED" ]]; then
-    EXTRA_DISKS="--disk path=$DOM1_SEED,readonly=on"
-    echo "  + cloud-init seed: $DOM1_SEED"
+# ── Networking: TAP + NAT ─────────────────────────────────────────────────
+TAP="tap-dom1"
+DOM1_IP="192.168.100.2"
+GW_IP="192.168.100.1"
+
+if ! ip link show "$TAP" &>/dev/null 2>&1; then
+    ip tuntap add "$TAP" mode tap
 fi
+ip addr flush dev "$TAP" 2>/dev/null || true
+ip addr add "${GW_IP}/24" dev "$TAP"
+ip link set "$TAP" up
+sysctl -qw net.ipv4.ip_forward=1
+iptables -t nat -C POSTROUTING -s 192.168.100.0/24 -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -j MASQUERADE
+echo "  + networking: tap=$TAP gw=$GW_IP dom1=$DOM1_IP"
 
 echo "→ Booting dom1 — ${CHV_CPUS} CPUs, ${CHV_MEM} RAM"
 echo "  Login: cloud / cloud123"
 echo ""
 
 exec "$CHV" \
-    --firmware "$OVMF" \
+    --kernel "$HVF" \
     --disk path="$DOM1_DISK" \
-    $EXTRA_DISKS \
+    --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS" \
     --memory size="$CHV_MEM" \
-    --console tty \
     --serial tty \
+    --console off \
+    --seccomp log \
     ${CHV_EXTRA_ARGS:-}

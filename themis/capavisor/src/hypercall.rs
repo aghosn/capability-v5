@@ -258,8 +258,12 @@ fn do_create_domain(
     cores_bitmask: u64,
     api_flags: u64,
 ) -> HypercallResult {
-    let api = MonitorAPI::from_bits(api_flags as u16);
-    let policy = DomainPolicy::new_restricted(cores_bitmask, api);
+    // Intersect the requested cores/api with what the caller actually has,
+    // so that !0 ("give me everything") works correctly.
+    let parent_cores = caller.read().data.policy.cores;
+    let parent_api = caller.read().data.policy.api;
+    let api = MonitorAPI::from_bits(api_flags as u16 & parent_api.bits());
+    let policy = DomainPolicy::new_restricted(cores_bitmask & parent_cores, api);
     let caller = caller.clone();
     match execute(platform, false, || Capability::create(&caller, policy.clone())) {
         Ok((handle, _)) => HypercallResult::success_1(handle),
@@ -390,8 +394,8 @@ fn do_add_vp(
     use x86::bits64::vmx as vmx_ops;
     use x86::msr;
 
-    // ── Step 0: resolve child domain_id from handle (read-only) ──
-    let child_domain_id: DomainId = {
+    // ── Step 0: resolve child domain_id and CapabilityRef from handle ──
+    let (child_domain_id, child_domain_ref): (DomainId, CapabilityRef<Domain>) = {
         let r = caller.read();
         let child_weak = match r.data.get_domain_capability(child_domain_handle) {
             Some(w) => w.clone(),
@@ -403,8 +407,32 @@ fn do_add_vp(
             None => return HypercallResult::error(errors::ERR_NOTFOUND),
         };
         let id = child_ref.read().data.id;
-        id
+        (id, child_ref)
     };
+
+    // ── Step 0b: drain pending META caps from child domain ──
+    //
+    // Per-VP META pages are sent via THEMIS_SEND after the domain is sealed
+    // (INITIALIZE_PARTITION seals it).  Sealed-send enqueues them as pending
+    // capabilities rather than immediately emitting a GiveMetaMem update.
+    // Accept all pending caps now so their GiveMetaMem updates fire and
+    // populate pd.meta before the size check below.
+    {
+        let pending_ids: alloc::vec::Vec<u64> =
+            child_domain_ref.read().data.get_pending_ids();
+        for pid in pending_ids {
+            match execute(platform, false, || {
+                Capability::accept(&child_domain_ref, pid)
+                    .map(|(handle, batch)| (handle, batch))
+            }) {
+                Ok(_) => {}
+                Err(e) => {
+                    serial_println!("[ADD_VP] failed to accept pending cap {}: {:?}", pid, e);
+                    return HypercallResult::error(map_error(&e));
+                }
+            }
+        }
+    }
 
     // ── Step 1: pre-allocate VMCS + VAPIC + PID from child's META pool ──
     //

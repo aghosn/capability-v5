@@ -105,16 +105,23 @@ write_files:
       What=/dev/vdb
       Where=/opt/bins
       Type=ext2
-      Options=ro
+      Options=defaults
 
       [Install]
       WantedBy=multi-user.target
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service
+    content: |
+      [Unit]
+      Description=Dummy — masked by Themis cloud-init
+      [Service]
+      ExecStart=/bin/true
 runcmd:
   - mkdir -p /opt/bins
   - systemctl daemon-reload
   - systemctl enable opt-bins.mount
   - systemctl start opt-bins.mount || true
   - systemctl mask systemd-networkd-wait-online.service
+  - apt-get install -y --no-install-recommends qemu-kvm ovmf
   - ln -sf /opt/bins /home/cloud/bins
   - echo "themis dom0 cloud-init complete" > /dev/ttyS0
 EOF

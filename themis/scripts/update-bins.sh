@@ -139,6 +139,41 @@ mkdir -p \
     "$MNT/2026/tests" \
     "$MNT/nested"
 
+# ── README ───────────────────────────────────────────────────────────────────
+cat > "$MNT/README.md" <<'EOF'
+# Themis bins
+
+This partition contains pre-built binaries and guest images for the Themis project.
+
+## Boot dom1 (nested VM)
+
+From inside dom0:
+
+```bash
+# First boot (cloud-init provisioning):
+SEED_DOM1=1 sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+
+# Subsequent boots:
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+```
+
+Login: `cloud` / `cloud123`
+
+## Contents
+
+| Path | Description |
+|------|-------------|
+| `cloud-hypervisor/cloud-hypervisor` | Cloud Hypervisor VMM binary |
+| `cloud-hypervisor/run-dom1.sh` | Script to boot dom1 |
+| `dom1/dom1.raw` | Dom1 root disk (Ubuntu Noble, raw) |
+| `dom1/hypervisor-fw` | Rust Hypervisor Firmware |
+| `dom1/dom1-seed.img` | Dom1 cloud-init seed (first boot) |
+| `thhv/thhv.ko` | Themis kernel module |
+| `thhv/tests/` | Themis unit tests |
+| `2026/` | Capability engine binaries and tests |
+| `nested/` | Nested kernel / rootfs (if built) |
+EOF
+
 THHV_KO="$REPO_ROOT/thhv/thhv.ko"
 THHV_TEST_DIR="$REPO_ROOT/thhv/test/bin"
 CHV_BIN="$REPO_ROOT/cloud-hypervisor/target/$PROFILE/cloud-hypervisor"
@@ -170,6 +205,16 @@ if should_package chv; then
     # Always package run-dom1.sh alongside the binary.
     cp "$SCRIPT_DIR/run-dom1.sh" "$MNT/cloud-hypervisor/run-dom1.sh"
     chmod +x "$MNT/cloud-hypervisor/run-dom1.sh"
+fi
+
+# ── Dom1 guest image ──────────────────────────────────────────────────────────
+DOM1_IMG="$WORKSPACE_ROOT/guest/dom1.raw"
+DOM1_HVF="$WORKSPACE_ROOT/guest/hypervisor-fw"
+if [[ -f "$DOM1_IMG" ]]; then
+    mkdir -p "$MNT/dom1"
+    cp "$DOM1_IMG" "$MNT/dom1/dom1.raw"
+    [[ -f "$DOM1_HVF" ]] && cp "$DOM1_HVF" "$MNT/dom1/hypervisor-fw"
+    echo "  ✔ dom1/dom1.raw + hypervisor-fw packed into bins"
 fi
 
 if should_package 2026; then

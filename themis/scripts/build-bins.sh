@@ -158,12 +158,12 @@ else
 fi
 
 # ── Auto-fetch dom1 guest image if not present ───────────────────────────────
-DOM1_DISK="$WORKSPACE_ROOT/guest/dom1.img"
+DOM1_DISK="$WORKSPACE_ROOT/guest/dom1.raw"
 if [[ ! -f "$DOM1_DISK" ]]; then
     echo "→ [dom1] guest image not found — fetching automatically"
     bash "$SCRIPT_DIR/fetch-dom1.sh"
 else
-    echo "→ [dom1] guest image present (dom1.img)"
+    echo "→ [dom1] guest image present (dom1.raw)"
 fi
 
 if should_build capavisor; then

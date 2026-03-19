@@ -82,20 +82,8 @@ fi
 
 BINS_ARGS=""
 if [[ -f "$WORKSPACE_ROOT/guest/bins.img" ]]; then
-    BINS_ARGS+="-drive id=bins,file=$WORKSPACE_ROOT/guest/bins.img,format=raw,if=none,readonly=on "
+    BINS_ARGS+="-drive id=bins,file=$WORKSPACE_ROOT/guest/bins.img,format=raw,if=none "
     BINS_ARGS+="-device virtio-blk-pci,drive=bins "
-fi
-
-DOM1_ARGS=""
-if [[ -f "$WORKSPACE_ROOT/guest/dom1.img" ]]; then
-    DOM1_ARGS+="-drive id=dom1,file=$WORKSPACE_ROOT/guest/dom1.img,format=qcow2,if=none "
-    DOM1_ARGS+="-device virtio-blk-pci,drive=dom1 "
-    echo "  + dom1 disk: guest/dom1.img  (vdc)"
-    if [[ "${SEED_DOM1:-0}" == "1" && -f "$WORKSPACE_ROOT/guest/dom1-seed.img" ]]; then
-        DOM1_ARGS+="-drive id=dom1seed,file=$WORKSPACE_ROOT/guest/dom1-seed.img,format=raw,if=none,readonly=on "
-        DOM1_ARGS+="-device virtio-blk-pci,drive=dom1seed "
-        echo "  + dom1 seed: guest/dom1-seed.img  (vdd)"
-    fi
 fi
 
 exec qemu-system-x86_64 \
@@ -111,5 +99,4 @@ exec qemu-system-x86_64 \
     -no-reboot \
     ${DISK_ARGS} \
     ${BINS_ARGS} \
-    ${DOM1_ARGS} \
     ${QEMU_EXTRA_ARGS:-}

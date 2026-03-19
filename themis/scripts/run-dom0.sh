@@ -98,21 +98,11 @@ fi
 
 BINS_ARGS=""
 if [[ -f "$BINS_IMG" ]]; then
-    BINS_ARGS+="-drive id=bins,file=$BINS_IMG,format=raw,if=none,readonly=on "
+    BINS_ARGS+="-drive id=bins,file=$BINS_IMG,format=raw,if=none "
     BINS_ARGS+="-device virtio-blk-pci,drive=bins"
 fi
 
-DOM1_ARGS=""
-DOM1_IMG="$WORKSPACE_ROOT/guest/dom1.img"
-DOM1_SEED_IMG="$WORKSPACE_ROOT/guest/dom1-seed.img"
-if [[ -f "$DOM1_IMG" ]]; then
-    DOM1_ARGS+="-drive id=dom1,file=$DOM1_IMG,format=qcow2,if=none "
-    DOM1_ARGS+="-device virtio-blk-pci,drive=dom1 "
-    if [[ "${SEED_DOM1:-0}" == "1" && -f "$DOM1_SEED_IMG" ]]; then
-        DOM1_ARGS+="-drive id=dom1seed,file=$DOM1_SEED_IMG,format=raw,if=none,readonly=on "
-        DOM1_ARGS+="-device virtio-blk-pci,drive=dom1seed "
-    fi
-fi
+
 
 # ── Networking ───────────────────────────────────────────────────────────────
 NET_ARGS=""
@@ -135,7 +125,6 @@ qemu-system-x86_64 \
     -drive id=dom0,file="$DOM0_DISK",format=qcow2,if=none \
     -device virtio-blk-pci,drive=dom0 \
     $BINS_ARGS \
-    $DOM1_ARGS \
     $SEED_ARG \
     $NET_ARGS \
     -nographic \

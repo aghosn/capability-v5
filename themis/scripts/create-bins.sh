@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GUEST_DIR="$WORKSPACE_ROOT/guest"
 BINS_IMG="$GUEST_DIR/bins.img"
-BINS_SIZE="${BINS_SIZE:-2G}"
+BINS_SIZE="${BINS_SIZE:-4G}"
 MNT=""
 MOUNTED=false
 
