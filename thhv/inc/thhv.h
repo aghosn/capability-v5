@@ -790,8 +790,8 @@ struct thhv_query {
 #define THHV_QUERY_META_PAGES_PER_VP     1  /* META pages needed per VP (VMCS+VAPIC) */
 #define THHV_QUERY_META_PAGES_SHARED     2  /* Shared META pages per partition (MSR+IO bitmaps) */
 
-/* Shared META page count: MSR bitmap (1) + IO bitmap A (1) + IO bitmap B (1). */
-#define THHV_META_PAGES_SHARED  3
+/* Shared META page count: MSR bitmap (1) + IO bitmap A (1) + IO bitmap B (1) + EPT root (1). */
+#define THHV_META_PAGES_SHARED  4
 
 /* ── Device-level ioctls ───────────────────────────────────────────────────── */
 

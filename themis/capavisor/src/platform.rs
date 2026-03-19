@@ -746,7 +746,7 @@ impl PlatformDomain {
     /// # Panics
     ///
     /// Panics if the META pool is empty (no `GiveMetaMem` update received yet).
-    fn ensure_ept(&mut self) {
+    pub fn ensure_ept(&mut self) {
         if self.ept.is_none() {
             self.ept = Some(EptMapper::alloc_root(&mut self.meta, self.hhdm_offset));
         }

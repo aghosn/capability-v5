@@ -15,7 +15,7 @@ use capability_engine::{
 use themis_abi::{errors, opcodes};
 
 use crate::platform::ThemisPlatform;
-use crate::serial_println;
+use crate::{serial_println, serial_debug};
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
@@ -394,8 +394,8 @@ fn do_add_vp(
     use x86::bits64::vmx as vmx_ops;
     use x86::msr;
 
-    // ── Step 0: resolve child domain_id and CapabilityRef from handle ──
-    let (child_domain_id, child_domain_ref): (DomainId, CapabilityRef<Domain>) = {
+    // ── Step 0: resolve child domain_id from handle (read-only) ──
+    let child_domain_id: DomainId = {
         let r = caller.read();
         let child_weak = match r.data.get_domain_capability(child_domain_handle) {
             Some(w) => w.clone(),
@@ -407,32 +407,8 @@ fn do_add_vp(
             None => return HypercallResult::error(errors::ERR_NOTFOUND),
         };
         let id = child_ref.read().data.id;
-        (id, child_ref)
+        id
     };
-
-    // ── Step 0b: drain pending META caps from child domain ──
-    //
-    // Per-VP META pages are sent via THEMIS_SEND after the domain is sealed
-    // (INITIALIZE_PARTITION seals it).  Sealed-send enqueues them as pending
-    // capabilities rather than immediately emitting a GiveMetaMem update.
-    // Accept all pending caps now so their GiveMetaMem updates fire and
-    // populate pd.meta before the size check below.
-    {
-        let pending_ids: alloc::vec::Vec<u64> =
-            child_domain_ref.read().data.get_pending_ids();
-        for pid in pending_ids {
-            match execute(platform, false, || {
-                Capability::accept(&child_domain_ref, pid)
-                    .map(|(handle, batch)| (handle, batch))
-            }) {
-                Ok(_) => {}
-                Err(e) => {
-                    serial_println!("[ADD_VP] failed to accept pending cap {}: {:?}", pid, e);
-                    return HypercallResult::error(map_error(&e));
-                }
-            }
-        }
-    }
 
     // ── Step 1: pre-allocate VMCS + VAPIC + PID from child's META pool ──
     //
@@ -462,8 +438,8 @@ fn do_add_vp(
         // Check if this is the first VP (need extra pages for MSR bitmap + APIC access page).
         first_vp = pd.msr_bitmap_phys == 0;
         // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + APIC access page if first VP).
-        // Note: THHV_META_PAGES_SHARED (3) + THHV_META_PAGES_PER_VP (3) = 6 total,
-        // which comfortably covers the 5 pages needed on the first VP.
+        // THHV_META_PAGES_SHARED (4: MSR bitmap + IO bitmaps + EPT root) +
+        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP, comfortably covers 5+1=6.
         let pages_needed = if first_vp { 5 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
@@ -521,24 +497,13 @@ fn do_add_vp(
             let vmcs_virt = (vmcs_phys + hhdm) as *mut u32;
             unsafe { vmcs_virt.write_volatile(rev_id) };
 
-            // Get child EPT pointer.
-            let eptp = match platform.eptp(child_domain_id) {
-                Some(e) => e,
-                None => {
-                    serial_println!("[ADD_VP] child domain has no EPT");
-                    // Rollback META.
-                    let mut pd = arc.lock();
-                    pd.meta.free_frame(vmcs_phys);
-                    pd.meta.free_frame(vapic_phys);
-                    pd.meta.free_frame(pid_phys);
-                    if first_vp {
-                        pd.meta.free_frame(msr_bitmap_phys);
-                        pd.msr_bitmap_phys = 0;
-                        pd.meta.free_frame(apic_access_phys);
-                        pd.apic_access_phys = 0;
-                    }
-                    return HypercallResult::error(errors::ERR_INVALID);
-                }
+            // Get child EPT pointer — allocate an empty root if none exists yet.
+            // SET_GUEST_MEMORY is deferred until just before run(); the VMCS needs
+            // a valid EPTP now, and ChangeRights will populate the EPT later.
+            let eptp = {
+                let mut pd = arc.lock();
+                pd.ensure_ept();
+                pd.ept.as_ref().unwrap().eptp()
             };
 
             // Allocate a unique VPID.
@@ -566,7 +531,7 @@ fn do_add_vp(
             let vcpu = InactiveVcpu::new(vmcs_phys, vapic_phys, msr_bitmap_phys, pid_phys, vpid);
             platform.bootstrap_store_vcpu(child_domain_id, vp_id as usize, vcpu);
 
-            serial_println!(
+            serial_debug!(
                 "[ADD_VP] dom={} vp={} vmcs={:#x} vapic={:#x} pid={:#x} msr_bm={:#x} vpid={}",
                 child_domain_id, vp_id, vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, vpid,
             );
@@ -619,7 +584,7 @@ fn do_switch(
             .unwrap_or(0);
         (child_id, hpa)
     };
-    serial_println!("[SWITCH] comm_hpa={:#x} for dom={} vp={}", comm_hpa, child_domain_id_pre, vp_idx);
+    serial_debug!("[SWITCH] comm_hpa={:#x} for dom={} vp={}", comm_hpa, child_domain_id_pre, vp_idx);
 
     // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
     let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
@@ -628,7 +593,7 @@ fn do_switch(
         let hhdm = platform.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
         let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
-        serial_println!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}]", dirty[0], dirty[1], dirty[2]);
+        serial_debug!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}]", dirty[0], dirty[1], dirty[2]);
 
         if !dirty.iter().all(|w| *w == 0) {
             // Clear dirty bits atomically before validation so we don't replay them.
@@ -641,7 +606,7 @@ fn do_switch(
                     continue;
                 }
                 let val = comm.read_reg(*reg);
-                serial_println!("[SWITCH] dirty reg={:?} val={:#x}", reg, val);
+                serial_debug!("[SWITCH] dirty reg={:?} val={:#x}", reg, val);
                 // Validate via capability engine while child VP is still Available.
                 if Capability::set_register(
                     caller, child_domain_handle, vp_id, *reg as u64, val, platform,
@@ -657,7 +622,7 @@ fn do_switch(
     let switch_ctx = match Capability::switch(caller, child_domain_handle, vp_id, platform) {
         Ok(ctx) => ctx,
         Err(e) => {
-            serial_println!("[SWITCH] validation failed: {:?}", e);
+            serial_debug!("[SWITCH] validation failed: {:?}", e);
             return Some(HypercallResult::error(map_error(&e)));
         }
     };
@@ -681,7 +646,7 @@ fn do_switch(
         match d.vps.get(vp_idx).and_then(|s| s.take()) {
             Some(v) => v,
             None => {
-                serial_println!("[SWITCH] VP slot empty dom={} vp={}", child_domain_id, vp_idx);
+                serial_debug!("[SWITCH] VP slot empty dom={} vp={}", child_domain_id, vp_idx);
                 let _ = Capability::switch(caller, 0, 0, platform);
                 return Some(HypercallResult::error(errors::ERR_BUSY));
             }
@@ -729,6 +694,54 @@ fn do_switch(
         }
     }
 
+    // ── 7b. PIR → VMENTRY_INTR_INFO drain (no-hardware-PID fallback) ──
+    // When PROCESS_POSTED_INTERRUPTS is not supported by hardware, the processor
+    // ignores the PID page on VMENTRY.  inject_via_pid() still writes PIR bits
+    // as a software queue.  Drain one pending vector here and inject it via
+    // VMENTRY_INTR_INFO so the child receives it on this VMENTRY.
+    {
+        use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
+        use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+        let pin_val = child_active.get(PINBASED_EXEC_CONTROLS);
+        if pin_val & (1 << 7) == 0 {
+            let pid_phys = child_active.pid_phys();
+            if pid_phys != 0 {
+                let hhdm = platform.hhdm_offset();
+                let pir_base = (pid_phys + hhdm) as *const AtomicU64;
+                // Scan PIR words 0–3 (256 bits) for the highest pending vector.
+                let mut found: Option<u8> = None;
+                for i in (0..4usize).rev() {
+                    let word = unsafe { (*pir_base.add(i)).load(Ordering::Acquire) };
+                    if word != 0 {
+                        let bit = 63 - word.leading_zeros();
+                        let vector = (i * 64 + bit as usize) as u8;
+                        // Atomically clear this PIR bit before injection.
+                        unsafe {
+                            (*pir_base.add(i)).fetch_and(!(1u64 << bit), Ordering::AcqRel)
+                        };
+                        found = Some(vector);
+                        break;
+                    }
+                }
+                // Clear the ON (Outstanding Notification) bit regardless.
+                let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+                unsafe { (*on_ptr).store(0, Ordering::Release) };
+                if let Some(vector) = found {
+                    // Inject as External Interrupt (type=0), valid (bit 31).
+                    let intr_info = (1u64 << 31) | (vector as u64);
+                    child_active.set(
+                        x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                        intr_info,
+                    );
+                    serial_println!(
+                        "[SWITCH] PIR→VMENTRY_INTR_INFO v={:#x} (no hw PID)",
+                        vector
+                    );
+                }
+            }
+        }
+    }
+
     // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
     for (reg, val) in &vmcs_pending {
         apply_vmcs_reg(&mut child_active, *reg, *val);
@@ -747,7 +760,7 @@ fn do_switch(
         child_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
     }
 
-    serial_println!(
+    serial_debug!(
         "[SWITCH] swapped dom={}→{} vp={}→{} child_rip={:#x}",
         parent_domain_id, child_domain_id,
         parent_vp_id, vp_idx,
@@ -800,7 +813,7 @@ pub fn forward_child_exit(
         policy.read_set
     };
 
-    serial_println!(
+    serial_debug!(
         "[CHILD_EXIT] reason={} read_set={:x}",
         exit_reason, read_set,
     );
@@ -896,7 +909,7 @@ pub fn forward_child_exit(
         .unwrap_or(3); // VMCALL is 3 bytes
     parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
 
-    serial_println!(
+    serial_debug!(
         "[CHILD_EXIT] swapped back dom={}→{} vp={}→{}",
         child_domain_id, parent_domain_id,
         child_vp_id, parent_vp_id,
@@ -1184,7 +1197,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
         if pin_val & (1 << 7) != 0 {
             // Hardware supports posted interrupts — inject via PID (Case A: same core).
-            serial_println!("[INTR_FWD] v={} Deliver: posting via PID (same-core)", vector);
+            serial_debug!("[INTR_FWD] v={} Deliver: posting via PID (same-core)", vector);
             let pid_phys = vcpu.pid_phys();
             let hhdm = platform.hhdm_offset();
             unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
@@ -1192,7 +1205,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
             return;
         } else {
             // PID not supported — fall back to VMENTRY_INTR_INFO injection.
-            serial_println!("[INTR_FWD] v={} Deliver: fallback VMENTRY injection (no PID)", vector);
+            serial_debug!("[INTR_FWD] v={} Deliver: fallback VMENTRY injection (no PID)", vector);
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1213,7 +1226,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     ) {
         Ok(ctx) => ctx,
         Err(e) => {
-            serial_println!("[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child", e);
+            serial_debug!("[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child", e);
             // Fallback: re-inject into child via VMENTRY injection so the interrupt
             // is not lost.  This can happen if the call chain is unexpected.
             let intr_info = (1u64 << 31) | (vector as u64);
@@ -1222,7 +1235,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     };
 
-    serial_println!(
+    serial_debug!(
         "[INTR_FWD] v={} child_dom={}:{} → handler_dom={}:{}",
         vector,
         intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id,
@@ -1363,8 +1376,17 @@ pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
 
 /// Apply a VMCS-field register to an active VCPU via `ActiveVcpu::set()`.
 fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
+    use themis_abi::regs::VpRegister;
+    // Enforce VMCS FIXED0 constraints for control registers so that
+    // VMLAUNCH/VMRESUME guest-state checks pass regardless of what the VMM
+    // (cloud-hypervisor) requested.
+    let adjusted = match reg {
+        VpRegister::Cr0 => unsafe { crate::vmcs::vmcs_adjust_cr0(val) },
+        VpRegister::Cr4 => crate::vmcs::vmcs_adjust_cr4(val),
+        _ => val,
+    };
     if let Some(field) = vp_reg_to_vmcs_field(reg) {
-        vcpu.set(field, val);
+        vcpu.set(field, adjusted);
     }
 }
 

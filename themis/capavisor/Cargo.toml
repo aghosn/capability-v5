@@ -8,6 +8,10 @@ name              = "capavisor"
 path              = "src/main.rs"
 # build.rs emits the absolute path to linker.ld so cargo always finds it.
 
+[features]
+# Enable verbose per-VMEXIT / SWITCH / CHILD_EXIT serial tracing.
+verbose = []
+
 [dependencies]
 capability-engine-v2  = { workspace = true }
 x86                   = { workspace = true }

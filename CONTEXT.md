@@ -7,6 +7,121 @@ knowledge.  Read the axioms before making any change.
 
 ---
 
+## 0. Architecture Overview
+
+### What is Themis?
+
+Themis is a **capability-based bare-metal hypervisor** designed to enforce strong
+isolation through capabilities rather than traditional ring-based privilege separation.
+Unlike conventional hypervisors (Xen, KVM) where dom0 is privileged, Themis treats
+all domains uniformly — access control is mediated entirely through **unforgeable
+capability tokens**.
+
+**Core idea**: A domain can only perform operations (create child domains, access
+memory, assign devices) if it holds the corresponding capability.  Capabilities can
+be delegated to children and later revoked, providing fine-grained, time-varying
+isolation without requiring a trusted control plane.
+
+### Three-Tier Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Nested Guest (L2)                                       │  ← Unmodified Linux VM
+│  (cloud-hypervisor manages this)                         │
+└──────────────────────────────────────────────────────────┘
+                         ↕ virtio, VMCALL
+┌──────────────────────────────────────────────────────────┐
+│  Dom0 (L1)                                               │  ← Ubuntu Linux + thhv.ko
+│  - VMM (cloud-hypervisor --features themis)              │
+│  - thhv.ko kernel module (hypercall interface)           │
+└──────────────────────────────────────────────────────────┘
+                         ↕ VMCALL hypercalls
+┌──────────────────────────────────────────────────────────┐
+│  Capavisor (L0)                                          │  ← Themis bare-metal hypervisor
+│  - Capability engine (validates all operations)          │     (Rust no_std)
+│  - VMCS/EPT/IOMMU management                             │
+│  - Posted Interrupt injection                            │
+└──────────────────────────────────────────────────────────┘
+                         ↕
+                    Hardware (x86-64 VT-x + VT-d)
+```
+
+**Execution flow**:
+1. Physical machine boots → Capavisor starts (L0)
+2. Capavisor creates dom0 domain (L1) → Ubuntu Linux boots with thhv.ko module
+3. Dom0 userspace runs cloud-hypervisor VMM → creates nested guest domain (L2)
+4. Nested guest (e.g., another Linux VM) runs applications
+
+### Key Terminology
+
+| Term | Definition |
+|------|------------|
+| **Capavisor** | The bare-metal hypervisor (Themis itself), runs at L0 |
+| **Domain** | Isolated execution context (like a VM). Has EPT, VMCS, capabilities. |
+| **Dom0** | The **first** domain created at boot. NOT privileged — uses same hypercall ABI as children. |
+| **VP** | Virtual Processor — a vCPU belonging to a domain. Has its own VMCS, register state. |
+| **Capability** | Unforgeable token granting rights to a resource (child domain, memory region, device). Held as a handle in capability table. |
+| **EPT** | Extended Page Tables — x86 hardware second-level address translation (GPA → HPA). Each domain has its own EPT. |
+| **SLPT** | Second-Level Page Table — IOMMU's equivalent of EPT for DMA (IOVA → HPA). Themis mirrors EPT into SLPT (A4). |
+| **VMCS** | Virtual Machine Control Structure — x86 hardware state for a VP (guest registers, CR3, etc.). |
+| **VMCALL** | x86 instruction for guest → hypervisor hypercalls. |
+| **VMEXIT** | Hardware trap from guest to hypervisor (e.g., EPT violation, I/O, interrupts). |
+| **META pool** | Hypervisor-internal memory: EPT tables, VMCS, VAPIC, PID, COMM pages. Never mapped into guest EPT (A5). |
+| **COMM page** | Shared memory page for bulk VP register transfer (set_regs/get_regs). Allocated by VMM userspace, pinned by thhv.ko (A6). |
+| **VAPIC** | Virtual APIC page — x86 APICv hardware optimization for guest local APIC access. |
+| **PID** | Posted Interrupt Descriptor — x86 hardware structure for asynchronous interrupt injection to a VP. |
+| **GPA / HPA / IOVA** | Guest Physical Address / Host Physical Address / I/O Virtual Address (device DMA address, equal to GPA in Themis per A4). |
+| **thhv.ko** | Linux kernel module for dom0 — provides `/dev/thhv` ioctl interface, wraps all hypercalls (A7). |
+| **HHDM** | Higher Half Direct Map — kernel virtual address space mapping of all physical RAM (Linux standard). |
+
+### Capability Model
+
+Capabilities are **the only mechanism for access control** in Themis.  Key properties:
+
+- **Unforgeable**: Capabilities are opaque handles (e.g., 64-bit integers).  You cannot
+  synthesize one — you must receive it from the hypervisor (e.g., `CREATE_DOMAIN` returns
+  a child domain capability).
+- **Delegatable**: A domain can pass capabilities to its children, granting them access
+  to resources.
+- **Revocable**: The holder of a capability can revoke it, immediately cutting off the
+  child's access.  When a domain is revoked, all its children are recursively revoked.
+- **Tree-structured**: Capabilities form a hierarchy.  Dom0 is the root.  Each domain
+  holds capabilities to its children (and memory/device resources delegated to them).
+
+**Example**:
+```
+dom0 holds:
+  - cap_A (child domain A)
+  - cap_mem1 (memory region 0x1000–0x2000)
+
+dom0 calls: CARVE_MEM(cap_A, 0x1000, 4096)  ← delegates memory to A
+
+→ capavisor validates: does dom0 hold cap_A? does it hold cap_mem1?
+→ if yes: update EPT for domain A, mark memory as no longer usable by dom0
+
+later, dom0 calls: REVOKE_DOMAIN(cap_A)
+→ domain A and all its children are destroyed, EPT/SLPT torn down
+```
+
+### Synchronous Switch Model (SWITCH hypercall)
+
+Themis uses a **synchronous parent-child scheduling model**, not traditional timesliced
+scheduling:
+
+- Parent domain calls `SWITCH(child_cap, vp_id)` hypercall → capavisor VMRESUMES the
+  child VP.  Parent is blocked (VP is in VMCALL).
+- Child runs until a VMEXIT occurs (I/O, EPT fault, HLT, interrupt).
+- Capavisor handles the VMEXIT → returns control to parent.  Parent's SWITCH hypercall
+  returns with exit reason and child state.
+- Parent (the VMM, e.g., cloud-hypervisor) inspects exit reason, emulates I/O or
+  updates child state, then calls SWITCH again.
+
+**Physical interrupts**: When a physical interrupt arrives while the child is running,
+the SWITCH call returns early with `RDI = vector`.  The parent's interrupt handler
+(dom0 Linux) processes it, then the VMM re-invokes SWITCH (A3 lazy-unwind model).
+
+---
+
 ## 1. Axioms — Hard Invariants
 
 These are non-negotiable constraints.  Violating any of them introduces security
@@ -150,207 +265,6 @@ a new explicit discussion with the user.
 
 ```
 capability-v5/
-├── themis/                     # Capavisor (bare-metal hypervisor, Rust no_std)
-│   ├── capavisor/src/
-│   │   ├── capability.rs       # Capability engine — validates all operations (A1)
-│   │   ├── platform.rs         # PlatformDomain, apply_update, hardware writes (A1)
-│   │   ├── hypercall.rs        # Hypercall dispatch (do_* handlers)
-│   │   ├── vmexit.rs           # VMEXIT handlers (interrupts, EPT, APIC, I/O)
-│   │   ├── vmcs.rs             # VMCS field constants + per-VP setup
-│   │   ├── domain.rs           # Domain lifecycle, VAPIC/PID/COMM allocation
-│   │   └── boot.rs             # Early boot, IOMMU init, dom0 creation
-│   ├── crates/
-│   │   ├── ept/                # EPT mapper — also reused for IOMMU SLPT
-│   │   └── themis-abi/src/lib.rs  # Shared ABI: hypercall numbers, structs
-│   └── scripts/                # Build and boot scripts (see §6)
-│
-├── thhv/                       # mshv-compatible Linux kernel module (dom0 side)
-│   ├── inc/thhv.h              # UAPI: all ioctl defs, structs, VP reg names
-│   ├── src/thhv_part.c         # Partition lifecycle + ioctl dispatch
-│   ├── src/thhv_vp.c           # VP lifecycle, RUN_VP loop, COMM page drain
-│   ├── src/thhv_hvcall.c       # All VMCALL wrappers — THE only VMCALL site (A7)
-│   ├── src/thhv_ioeventfd.c    # IOEVENTFD: doorbell GPA → eventfd signal
-│   ├── src/thhv_irqfd.c        # IRQFD: eventfd → INJECT_INTERRUPT VMCALL
-│   └── build-guest.sh          # Build thhv.ko + tests; copy to dom0 disk
-│
-├── cloud-hypervisor/           # Fork of cloud-hypervisor (git submodule)
-│   └── hypervisor/src/themis/mod.rs  # Themis backend ~1250 lines, --features themis
-│
-├── 2026/                       # CLI / integration test workspace (Rust)
-├── todo.md                     # Authoritative task tracker — read before any work
-└── CONTEXT.md                  # This file
-```
-
----
-
-## 4. Hypercall ABI
-
-All hypercall numbers are defined in `themis/crates/themis-abi/src/lib.rs` AND
-mirrored in `thhv/inc/thhv.h` as `THEMIS_HC_*` / `THEMIS_OP_*`.  When adding a
-new hypercall, update **both** files.
-
-| Constant | Number | Description |
-|----------|--------|-------------|
-| `THEMIS_CREATE_DOMAIN`     | 0x01 | Create child domain |
-| `THEMIS_CARVE_MEM`         | 0x02 | Carve memory into child (exclusive) |
-| `THEMIS_SEND_MEM`          | 0x03 | Alias memory into child (shared) |
-| `THEMIS_SEAL_DOMAIN`       | 0x04 | Seal domain (programs VMCS, IRTEs, IOMMU) |
-| `THEMIS_SWITCH`            | 0x05 | Synchronous domain switch (run child VP) |
-| `THEMIS_REVOKE_DOMAIN`     | 0x06 | Revoke child domain |
-| `THEMIS_ADD_VP`            | 0x08 | Add VP to domain |
-| `THEMIS_GET_REG`           | 0x09 | Get VP register via COMM page |
-| `THEMIS_SET_REG`           | 0x0A | Set VP register via COMM page |
-| `THEMIS_REGISTER_DOORBELL` | 0x10 | Register EPT-violation doorbell fast-path |
-| `THEMIS_REVOKE_MEM`        | 0x11 | Revoke memory capability |
-| `THEMIS_ASSIGN_DEVICE`     | 0x12 | Assign PCI device to child domain (IOMMU) |
-| `THEMIS_RELEASE_DEVICE`    | 0x1A | Release PCI device back to dom0 |
-| `THEMIS_INJECT_INTERRUPT`  | 0x1B | Inject interrupt via Posted Interrupt Descriptor |
-
----
-
-## 5. Key Data Flows
-
-### IOEVENTFD — guest write → VMM wakeup
-```
-guest write to doorbell GPA
-  → EPT violation in capavisor
-  → handle_ept_doorbell: writes DoorbellNotify to parent DomainComm RX ring,
-    advances child RIP, resumes child immediately (no VP stop)
-  → thhv_vp.c: thhv_drain_domcomm_rx(part) called after themis_switch returns
-  → DOMCOMM_MSG_DOORBELL_NOTIFY matched → eventfd_signal → VMM worker wakes
-```
-
-### IRQFD — VMM write → guest interrupt
-```
-VMM writes to eventfd
-  → poll waitqueue wakeup in thhv_irqfd.c
-  → schedule_work → thhv_irqfd_inject workqueue
-  → themis_inject_interrupt(domain, vp=0, vector) VMCALL
-  → do_inject_interrupt: validates child cap, gets pid_phys
-  → inject_via_pid(pid_phys, hhdm, vector, false)
-  → PIR bit set in Posted Interrupt Descriptor → delivered on VMRESUME
-```
-
-### VP register set (bulk path via COMM page)
-```
-VMM writes register values + sets dirty_mask bits in VpCommPage (userspace memory)
-  → THHV_SET_VP_STATE ioctl → driver writes to pinned COMM page kernel mapping
-  → capavisor reads dirty_mask at SWITCH time → applies to VMCS before VMENTRY
-```
-
----
-
-## 6. Scripts & Commands Reference
-
-### Build commands (from repo root)
-
-| Command | What it does |
-|---------|-------------|
-| `cargo themis` | Build capavisor ISO + boot Themis + dom0 under QEMU |
-| `cargo dom0` | Boot dom0 standalone under QEMU (no Themis) |
-| `SEED=1 cargo dom0` | First boot: attach cloud-init seed to provision `cloud` user |
-| `cargo fetch-dom0` | Download Ubuntu Noble cloud image + create seed.img |
-
-### Script environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROFILE` | `debug` | `release` for optimised builds |
-| `QEMU_CPUS` | `4`/`2` | vCPU count (run-qemu / run-dom0) |
-| `QEMU_MEM` | `4G` | Guest RAM |
-| `QEMU_ENABLE_KVM` | `1` | Use KVM acceleration |
-| `QEMU_BIOS` | `0` | `1` = legacy BIOS |
-| `SEED` | `` | `1` = attach cloud-init seed |
-| `DOM0_VERSION` | `noble` | `noble` or `jammy` |
-| `COPY_TO_GUEST` | `` | Guest home dir for binary copy (e.g. `/root`) |
-| `BINS_SIZE` | `2G` | Size of bins.img (Phase 16.5) |
-| `BINS_TARGETS` | `all` | `thhv,chv,2026` subset builds |
-
-### Dom0 access
-- User: `cloud` / Password: `cloud123` (provisioned by cloud-init on first boot)
-- SSH: `ssh -p 2222 cloud@localhost`
-- Test binaries land in `~/executables/` (populated by `build-guest.sh`)
-
-### thhv.ko build
-```bash
-# With NBD mount (legacy, needs sudo):
-sudo COPY_TO_GUEST=/root bash thhv/build-guest.sh
-
-# Planned (Phase 16.5, no sudo):
-bash themis/scripts/fetch-kheaders.sh   # download headers from Ubuntu apt
-bash themis/scripts/build-bins.sh       # build everything + pack into bins.img
-```
-
-### cloud-hypervisor build
-```bash
-cd cloud-hypervisor
-cargo build --features themis           # Themis backend
-cargo build --features kvm              # KVM backend (must stay clean)
-```
-
----
-
-## 7. Coding Conventions
-
-### Rust (capavisor)
-- `no_std` environment — no heap allocation outside the META allocator.
-- RwLockReadGuard lifetime: always use an explicit `let` binding before using
-  the value, e.g. `let id = guard.read().data.id; id` — the guard drops before
-  the binding is returned.  Inline use of `.read().field` as a return value
-  keeps the guard alive too long and causes borrow checker errors.
-- New hypercall handlers follow the pattern in `do_register_doorbell` /
-  `do_add_vp`: validate child capability → extract fields → hardware write.
-- Error return: `Err(ThemisError::ERR_PERM)` for capability failures,
-  `Err(ThemisError::ERR_INVAL)` for bad arguments.
-
-### C (thhv kernel module)
-- All new source files must be added to `thhv/Kbuild`.
-- Kernel-internal structs (`thhv_irqfd_entry`, `thhv_ioeventfd_entry`) go inside
-  `#ifdef __KERNEL__` guards in `thhv/inc/thhv.h`.
-- Use `cancel_work_sync` not `flush_work` in teardown paths.
-- Use `fget` + `eventfd_ctx_fileget` not `eventfd_fget` / `eventfd_wq`
-  (portability — not exported in all kernel versions).
-- Nested struct pattern for list+lock: `struct { struct list_head list; struct mutex lock; }`.
-
-### Rust (cloud-hypervisor Themis backend)
-- All new code is gated `#[cfg(all(feature = "themis", target_arch = "x86_64"))]`.
-- Never change KVM or mshv paths.
-- Stubs that are genuinely not applicable return `Ok(())` (e.g. `set_fpu`,
-  `set_lapic`).  Stubs that will be implemented later return a typed error.
-- The `--features kvm` build must stay clean after every change.
-
----
-
-## 8. Known Issues & Gotchas
-
-| Issue | Detail |
-|-------|--------|
-| Double kernel log lines | Guest has `console=ttyS0` and `console=tty0`; both write to serial under `-serial mon:stdio`. Expected, not a bug. |
-| Stale test binaries in guest | `~/executables/` was populated manually from old stubs. Refresh: `sudo COPY_TO_GUEST=/root bash thhv/build-guest.sh` |
-| thhv.ko ABI mismatch | Building against wrong kernel headers produces an incompatible module that insmod silently rejects. Always match headers to `uname -r` of the guest. |
-| `eventfd_wq()` not exported | Some kernel versions don't export this symbol. thhv_irqfd.c uses the poll_table callback approach instead — do not change this. |
-| SWITCH returns EAGAIN | Normal under interrupt preemption — the driver retry loop in `thhv_vp.c` handles this. Not an error. |
-| GSI = vector | `THHV_IRQFD.gsi` is treated as the interrupt vector directly. Full MSI routing is future work (P15i). |
-
----
-
-## 9. Open Work (summary — see todo.md for details)
-
-| Phase | Description | Blocked on |
-|-------|-------------|-----------|
-| 16.5 | Automated build & deploy (bins.img, no-sudo, Docker) | Nothing — **next** |
-| 16f  | Verify virtio backends work end-to-end | 16h |
-| 16h  | Boot Linux guest under cloud-hypervisor on Themis | 16.5 |
-| 16e  | Device passthrough (`THHV_ASSIGN_DEVICE`) | 16h |
-| 15-dc-m5 | Async VP exit delivery via DomainComm | Deferred |
-| 17   | Dom0 networking | Independent |
-
----
-
-## 2. Component Map
-
-```
-capability-v5/
 ├── themis/                     # Capavisor (bare-metal hypervisor, Rust)
 │   ├── capavisor/src/
 │   │   ├── capability.rs       # Capability engine — THE source of truth
@@ -391,7 +305,7 @@ capability-v5/
 
 ---
 
-## 3. Key Implemented Hypercalls
+## 4. Key Implemented Hypercalls
 
 | Constant | Number | Description |
 |----------|--------|-------------|
@@ -412,7 +326,7 @@ capability-v5/
 
 ---
 
-## 4. IOEVENTFD / IRQFD Flow
+## 5. IOEVENTFD / IRQFD Flow
 
 ### IOEVENTFD (guest → VMM notification)
 1. Guest writes to doorbell GPA → EPT violation in capavisor
@@ -431,7 +345,7 @@ capability-v5/
 
 ---
 
-## 5. Cloud-Hypervisor Themis Backend
+## 6. Cloud-Hypervisor Themis Backend
 
 The Themis backend (`cloud-hypervisor/hypervisor/src/themis/mod.rs`, ~1250 lines)
 is enabled with `--features themis`.
@@ -454,7 +368,7 @@ is enabled with `--features themis`.
 
 ---
 
-## 6. Build & Deploy
+## 7. Build & Deploy
 
 ### Current workflow (requires sudo for NBD mount)
 
@@ -506,7 +420,7 @@ cargo build --features themis
 
 ---
 
-## 7. Planned: Automated Build & Deploy (Phase 16.5)
+## 8. Planned: Automated Build & Deploy (Phase 16.5)
 
 The planned automation eliminates all sudo from the build/deploy workflow using
 a separate `bins.img` artifact disk (ext2, FUSE-mounted) and downloaded kernel headers.
@@ -543,7 +457,7 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
 
 ---
 
-## 8. Known Issues / Gotchas
+## 9. Known Issues / Gotchas
 
 - **Double kernel log lines in QEMU serial**: Linux guest has both `console=ttyS0`
   and `console=tty0`; both write to the serial port under `-serial mon:stdio`.
@@ -574,7 +488,7 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
 
 ---
 
-## 9. Todo Tracker
+## 10. Todo Tracker
 
 The authoritative task list is `todo.md` at the repo root.  Key open phases:
 

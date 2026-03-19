@@ -35,8 +35,12 @@ int ret;
 if (READ_ONCE(entry->deassign))
 return;
 
+pr_info("thhv: [DBG] irqfd_inject gsi=%u vec=%u domain=%llu\n",
+	entry->gsi, entry->vector,
+	(unsigned long long)entry->partition->domain_handle);
 ret = themis_inject_interrupt(entry->partition->domain_handle,
       0, (u8)entry->vector);
+pr_info("thhv: [DBG] irqfd_inject ret=%d\n", ret);
 if (ret && ret != -ENOSYS)
 pr_warn_ratelimited("thhv: irqfd inject gsi=%u vec=%u: %d\n",
     entry->gsi, entry->vector, ret);

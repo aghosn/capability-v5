@@ -89,6 +89,16 @@ macro_rules! serial_println {
     ($($arg:tt)*) => { $crate::serial_print!("{}\n", format_args!($($arg)*)) };
 }
 
+/// Like `serial_println!` but only emits output when the `verbose` feature is enabled.
+/// Use this for high-frequency per-VMEXIT / SWITCH / CHILD_EXIT tracing.
+#[macro_export]
+macro_rules! serial_debug {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "verbose")]
+        $crate::serial_println!($($arg)*)
+    };
+}
+
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
 #[used] static BASE_REVISION:       BaseRevision            = BaseRevision::new();

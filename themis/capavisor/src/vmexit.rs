@@ -9,7 +9,7 @@ use x86::msr;
 use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 
-use crate::serial_println;
+use crate::{serial_println, serial_debug};
 use crate::vcpu::{ActiveVcpu, Reg, VmxError};
 
 use capability_engine::Platform;
@@ -173,6 +173,58 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             if let Some(core_id) = platform.get_current_core() {
                 let domain_id = platform.core_domain_id(core_id as usize);
                 if domain_id != 0 && domain_id != u64::MAX {
+                    // VM-entry failure due to invalid guest state — VMCS fields
+                    // violated Intel SDM 26.3 checks.  Dump state and panic; this
+                    // should never happen once VMCS initialisation is correct.
+                    if basic_reason == EXIT_REASON_VMENTRY_INVALID_GUEST {
+                        let exit_qual  = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+                        let cr0     = vcpu.get(vmcs::guest::CR0);
+                        let cr4     = vcpu.get(vmcs::guest::CR4);
+                        let cr3     = vcpu.get(vmcs::guest::CR3);
+                        let rip     = vcpu.get(vmcs::guest::RIP);
+                        let rflags  = vcpu.get(vmcs::guest::RFLAGS);
+                        let efer    = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+                        let cs_sel  = vcpu.get(vmcs::guest::CS_SELECTOR);
+                        let cs_base = vcpu.get(vmcs::guest::CS_BASE);
+                        let cs_lim  = vcpu.get(vmcs::guest::CS_LIMIT);
+                        let cs_ar   = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+                        let ss_sel  = vcpu.get(vmcs::guest::SS_SELECTOR);
+                        let ss_ar   = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
+                        let tr_ar   = vcpu.get(vmcs::guest::TR_ACCESS_RIGHTS);
+                        let ldtr_ar = vcpu.get(vmcs::guest::LDTR_ACCESS_RIGHTS);
+                        let activity    = vcpu.get(vmcs::guest::ACTIVITY_STATE);
+                        let interrupt   = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+                        let link_ptr    = vcpu.get(vmcs::guest::LINK_PTR_FULL);
+                        let vpid        = vcpu.get(control::VPID);
+                        let entry_ctrl  = vcpu.get(control::VMENTRY_CONTROLS);
+                        let pin_ctrl    = vcpu.get(control::PINBASED_EXEC_CONTROLS);
+                        let proc2_ctrl  = vcpu.get(control::SECONDARY_PROCBASED_EXEC_CONTROLS);
+                        let cr0_mask    = vcpu.get(control::CR0_GUEST_HOST_MASK);
+                        let cr0_shadow  = vcpu.get(control::CR0_READ_SHADOW);
+                        let cr4_mask    = vcpu.get(control::CR4_GUEST_HOST_MASK);
+                        let cr4_shadow  = vcpu.get(control::CR4_READ_SHADOW);
+                        // exit_qual bits 3:0 encode the failing check (SDM Table 27-7)
+                        serial_println!(
+                            "[FATAL] exit 33 dom={} core={} EXIT_QUAL={:#x} (check={})\n\
+                             CR0={:#x} CR4={:#x} CR3={:#x} EFER={:#x}\n\
+                             RIP={:#x} RFLAGS={:#x}\n\
+                             CS sel={:#x} base={:#x} lim={:#x} ar={:#x}\n\
+                             SS sel={:#x} ar={:#x} TR_AR={:#x} LDTR_AR={:#x}\n\
+                             activity={} interrupt={:#x} link_ptr={:#x} vpid={}\n\
+                             ENTRY_CTRL={:#x} PIN={:#x} PROC2={:#x}\n\
+                             CR0_MASK={:#x} CR0_SHADOW={:#x} CR4_MASK={:#x} CR4_SHADOW={:#x}",
+                            domain_id, core_id, exit_qual, exit_qual & 0xf,
+                            cr0, cr4, cr3, efer,
+                            rip, rflags,
+                            cs_sel, cs_base, cs_lim, cs_ar,
+                            ss_sel, ss_ar, tr_ar, ldtr_ar,
+                            activity, interrupt, link_ptr, vpid,
+                            entry_ctrl, pin_ctrl, proc2_ctrl,
+                            cr0_mask, cr0_shadow, cr4_mask, cr4_shadow,
+                        );
+                        panic!("exit 33: dom={} core={} qual={:#x}", domain_id, core_id, exit_qual);
+                    }
+
                     match basic_reason {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
                             // Physical interrupt fired while child was running.
@@ -330,7 +382,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 }
                 (0xDEAD0000..=0xDEADFFFF, _) => {
                     let code = leaf & 0xFFFF;
-                    serial_println!("[TRACE] code={:#x}", code);
+                    serial_debug!("[TRACE] code={:#x}", code);
                     eax = 0; ebx = 0; ecx = 0; edx = 0;
                 }
                 _ => {}
@@ -462,7 +514,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 );
                 host_xcr0 = ((hi as u64) << 32) | (lo as u64);
                 let safe_val = (val & host_xcr0) | 1;
-                serial_println!("[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}", val, host_xcr0, safe_val);
+                serial_debug!("[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}", val, host_xcr0, safe_val);
                 core::arch::asm!(
                     "xsetbv",
                     in("ecx") 0u32,
@@ -504,7 +556,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         vcpu.set(vmcs::guest::CR4, val);
                     }
                     8 => { /* CR8 / TPR — ignore for now */ }
-                    _ => { serial_println!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", cr_num, val); }
+                    _ => { serial_debug!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", cr_num, val); }
                 }
             } else if acc == 1 {
                 // MOV from CR
@@ -585,7 +637,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             }
 
             // No doorbell match (or platform not ready) — full intercept path.
-            serial_println!(
+            serial_debug!(
                 "[VMEXIT] EPT violation GPA={:#x} qual={:#x} RIP={:#x} → forward_child_exit",
                 gpa, qual, vcpu.get(vmcs::guest::RIP)
             );
@@ -664,7 +716,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // set the relevant bitmap bits and implement parent-chain notification here.
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let vector = (qual & 0xFF) as u8;
-            serial_println!("[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)", vector);
+            serial_debug!("[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)", vector);
         }
 
         _other => {
@@ -953,7 +1005,7 @@ fn handle_ept_doorbell(
     // Advance child RIP past the faulting write instruction.
     next_instruction(vcpu);
 
-    serial_println!(
+    serial_debug!(
         "[DOORBELL] fast-path id={} gpa={:#x} val={:#x} size={}",
         doorbell_id, matched_gpa, value, size
     );

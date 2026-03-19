@@ -19,6 +19,36 @@ use x86::bits64::vmx;
 use x86::msr;
 use x86::vmx::vmcs::{control, guest, host};
 
+// ── VMCS constraint helpers (public — used by hypercall.rs apply_vmcs_reg) ── //
+
+/// Return the CR0 bits that must always be 1 in the guest VMCS field.
+///
+/// IA32_VMX_CR0_FIXED0 lists bits that VMX non-root operation requires.
+/// UNRESTRICTED_GUEST exempts PE (bit 0) and PG (bit 31), so we exclude them.
+/// The remaining mandatory bits (typically ET=4, NE=5) must be set in
+/// guest::CR0 before VMLAUNCH or the VMCS consistency check fails (exit 33).
+pub unsafe fn cr0_required_bits() -> u64 {
+    let fixed0 = msr::rdmsr(msr::IA32_VMX_CR0_FIXED0);
+    fixed0 & !((1u64 << 0) | (1u64 << 31)) // exclude PE and PG
+}
+
+/// Adjust a guest CR0 value so it satisfies IA32_VMX_CR0_FIXED0.
+///
+/// OR in the required bits (typically ET=bit4, NE=bit5); other bits are
+/// left as requested.  PE/PG are exempted and not forced.
+pub unsafe fn vmcs_adjust_cr0(val: u64) -> u64 {
+    val | cr0_required_bits()
+}
+
+/// Adjust a guest CR4 value so it satisfies IA32_VMX_CR4_FIXED0.
+///
+/// CR4.VMXE (bit 13) is required on all Intel VMX-capable CPUs.
+/// The CR4 guest/host mask owns this bit, so the guest never clears it,
+/// but the VMCS field must have it set for the consistency check.
+pub fn vmcs_adjust_cr4(val: u64) -> u64 {
+    val | (1u64 << 13) // VMXE
+}
+
 use crate::serial_println;
 use crate::vmexit::host_rip_stub;
 
@@ -510,14 +540,13 @@ unsafe fn write_guest_state() {
     }
 
     // ── Control registers ─────────────────────────────────────────────── //
-    // CR0: PE (bit 0) + ET (bit 4) + NE (bit 5) = 0x31
-    // PG is NOT set — UNRESTRICTED_GUEST allows no-paging protected mode.
-    // P7f will set PG + load CR3 before VMLAUNCH.
-    vmx::vmwrite(guest::CR0, 0x31).expect("vmwrite guest CR0");
+    // CR0: PE (bit 0) + ET (bit 4) + NE (bit 5) = 0x31, plus any other
+    // FIXED0-required bits from this CPU.  PG is NOT set — UNRESTRICTED_GUEST
+    // allows no-paging protected mode.
+    vmx::vmwrite(guest::CR0, vmcs_adjust_cr0(0x31)).expect("vmwrite guest CR0");
     vmx::vmwrite(guest::CR3, 0).expect("vmwrite guest CR3");
-    // CR4: VMXE (bit 13) satisfies IA32_VMX_CR4_FIXED0 on this hardware.
-    // Mask = 0 (set above) means startup_32 can freely write CR4 = PAE etc.
-    vmx::vmwrite(guest::CR4, 1u64 << 13).expect("vmwrite guest CR4");
+    // CR4: VMXE (bit 13) is required by IA32_VMX_CR4_FIXED0.
+    vmx::vmwrite(guest::CR4, vmcs_adjust_cr4(0)).expect("vmwrite guest CR4");
 
     // ── EFER: 0 (no long mode in the stub; P7f sets LME+LMA for Linux) ── //
     vmx::vmwrite(guest::IA32_EFER_FULL, 0).expect("vmwrite guest EFER");

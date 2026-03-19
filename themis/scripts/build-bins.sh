@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
 BINS_IMG="$WORKSPACE_ROOT/guest/bins.img"
-PROFILE="${PROFILE:-debug}"
+PROFILE="${PROFILE:-release}"
 BINS_TARGETS="${BINS_TARGETS:-all}"
 KHEADERS_DIR="${KHEADERS_DIR:-}"
 

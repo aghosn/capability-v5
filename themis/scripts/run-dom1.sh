@@ -5,14 +5,11 @@
 #   - If /dev/thhv is present (or thhv.ko loads successfully): Themis backend
 #   - Otherwise: KVM backend
 #
-# Uses dom0's own kernel + initrd (same Ubuntu Noble image) for direct kernel
-# boot, bypassing GRUB and the LABEL=cloudimg-rootfs issue entirely.
+# Uses dom0's own kernel + initrd for direct kernel boot, bypassing GRUB.
+# Slow/network-dependent services are masked via the kernel cmdline.
 #
 # Usage (from inside dom0):
-#   sudo /opt/bins/cloud-hypervisor/run-dom1.sh              # normal boot
-#   SEED_DOM1=1 sudo /opt/bins/cloud-hypervisor/run-dom1.sh  # first boot with cloud-init seed
-#
-# Login: cloud / cloud123
+#   sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 
 set -euo pipefail
 
@@ -20,17 +17,12 @@ BINS="/opt/bins"
 CHV="$BINS/cloud-hypervisor/cloud-hypervisor"
 THHV_KO="$BINS/thhv/thhv.ko"
 DOM1_DISK="$BINS/dom1/dom1.raw"
-HVF="$BINS/dom1/hypervisor-fw"
 
 CHV_CPUS="${CHV_CPUS:-2}"
 CHV_MEM="${CHV_MEM:-1G}"
 
 if [[ ! -f "$DOM1_DISK" ]]; then
     echo "ERROR: dom1 disk not found at $DOM1_DISK"
-    exit 1
-fi
-if [[ ! -f "$HVF" ]]; then
-    echo "ERROR: hypervisor-fw not found at $HVF"
     exit 1
 fi
 if [[ ! -f "$CHV" ]]; then
@@ -72,13 +64,36 @@ echo "→ Booting dom1 — ${CHV_CPUS} CPUs, ${CHV_MEM} RAM"
 echo "  Login: cloud / cloud123"
 echo ""
 
+# Auto-detect kernel and initramfs — prefer versioned files, fall back to unversioned.
+KERNEL_IMG=""
+INITRAMFS_IMG=""
+
+for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
+[[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
+
+for f in $(ls /boot/initrd.img-* 2>/dev/null | sort -V); do INITRAMFS_IMG="$f"; done
+[[ -z "$INITRAMFS_IMG" && -f /boot/initrd.img ]] && INITRAMFS_IMG=/boot/initrd.img
+
+if [[ -z "$KERNEL_IMG" ]]; then echo "ERROR: no kernel found in /boot"; exit 1; fi
+echo "  kernel:    $KERNEL_IMG"
+if [[ -n "$INITRAMFS_IMG" ]]; then
+    echo "  initramfs: $INITRAMFS_IMG"
+    INITRAMFS_ARGS="--initramfs $INITRAMFS_IMG"
+else
+    echo "  initramfs: none"
+    INITRAMFS_ARGS=""
+fi
+echo ""
+
 exec "$CHV" \
-    --kernel "$HVF" \
+    --kernel "$KERNEL_IMG" \
+    ${INITRAMFS_ARGS} \
+    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS" \
     --memory size="$CHV_MEM" \
     --serial tty \
     --console off \
-    --seccomp log \
+    --seccomp false \
     ${CHV_EXTRA_ARGS:-}
