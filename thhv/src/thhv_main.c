@@ -10,6 +10,7 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/poll.h>
 #include <asm/cpuid.h>
 
 #include "thhv.h"

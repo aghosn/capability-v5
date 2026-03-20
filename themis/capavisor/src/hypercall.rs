@@ -202,7 +202,9 @@ fn do_alias(
 }
 
 /// SEND (0x03): send memory capability to a receiver domain.
-/// arg3 (RCX) = child GPA hint; 0 means identity-map (GPA = HPA).
+/// arg3 (RCX) = child GPA; u64::MAX means identity-map (GPA = HPA).
+/// 0 is a valid explicit GPA (maps memory at the bottom of the child's
+/// address space), so the sentinel must not be 0.
 fn do_send(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -212,14 +214,18 @@ fn do_send(
     child_gpa: u64,
 ) -> HypercallResult {
     let attrs = Attributes::from_bits(attrs_bits as u8);
-    let gpa_hint = if child_gpa != 0 { Some(child_gpa) } else { None };
+    let gpa_hint = if child_gpa != u64::MAX { Some(child_gpa) } else { None };
+    serial_println!("[SEND] cap={:#x} receiver={:#x} gpa={:#x}", cap_handle, receiver_handle, child_gpa);
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
             .map(|batch| ((), batch))
     }) {
         Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
+        Err(e) => {
+            serial_println!("[SEND] FAILED: {:?}", e);
+            HypercallResult::error(map_error(&e))
+        }
     }
 }
 

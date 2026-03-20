@@ -16,6 +16,7 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#include <linux/poll.h>
 
 /* ── THHV ioctl magic ──────────────────────────────────────────────────────── */
 

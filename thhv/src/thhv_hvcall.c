@@ -42,8 +42,9 @@ int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
 
 int themis_send(u64 cap, u64 receiver, u64 attrs)
 {
+	/* Use (u64)-1 as the "no GPA hint" sentinel (identity-map / META pages). */
 	u64 status = __themis_vmcall(THEMIS_OP_SEND,
-				     cap, receiver, attrs, 0, 0,
+				     cap, receiver, attrs, (u64)-1, 0,
 				     NULL, NULL, NULL);
 	return __themis_to_errno(status);
 }
