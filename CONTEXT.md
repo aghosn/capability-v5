@@ -258,6 +258,8 @@ a new explicit discussion with the user.
 | Dom0 IRQ model | Deliver all vectors (passthrough policy) | Dom0 is trusted with all hardware initially |
 | bins.img format | ext2 raw image + fuse2fs | Self-contained, no extra daemon, sudo-free |
 | Docker build layer | Build-only (no QEMU) | QEMU needs KVM hardware access; only the build needs a stable toolchain env |
+| CPUID policy owner | CHV (dom0 userspace) handles CPUID exits | CHV knows dom1's vCPU count/features; same model as KVM `KVM_SET_CPUID2`. CHV calls `set_cpuid2()` before first run; `ThemisVcpu` stores the policy and uses it in `handle_cpuid_exit`. Long-term: move into `DomainPolicy` in capavisor (P16.6c). |
+| `do_send` GPA sentinel | `u64::MAX` = identity-map; `0` = explicit GPA 0 | GPA 0 is valid (dom1 memory starts there). Changed from `0`=identity-map which broke all dom1 memory mapping. |
 
 ---
 
@@ -480,7 +482,14 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
 
 - **thhv.ko build requires matching kernel headers**: Use `fetch-kheaders.sh` (Phase
   16.5d) or the NBD-mount fallback.  Building against wrong headers silently produces
-  an incompatible module.
+  an incompatible module. **The pinned version in `dom0-kernel-version.txt` must match
+  the kernel actually running in dom0** — check `uname -r` in dom0 if thhv.ko fails
+  to load with "disagrees about version of symbol" errors.
+
+- **`themis_send` vs `themis_send_at` GPA sentinel**: `themis_send` (no GPA) now passes
+  `(u64)-1` as the sentinel for "identity-map / META pages". `themis_send_at` passes the
+  explicit child GPA. `0` is a valid GPA (dom1 memory starts at GPA 0) — using `0` as
+  the identity-map sentinel broke all dom1 memory mapping.
 
 - **Device assignment requires IOMMU + VT-d**: P15i/P16e depend on capavisor having
   IOMMU SLPT per child domain (done, P4e/P8d) AND the thhv driver wiring

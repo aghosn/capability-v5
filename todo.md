@@ -16,6 +16,7 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 ## Current Status
 
 **✅ MILESTONE: dom0 boots to login prompt on 4 CPUs.**
+**🚧 IN PROGRESS: dom1 (nested Ubuntu Noble) boot under CHV on Themis.**
 
 - Phases 0, 0.5, 1, 2 (partial) completed — workspace, Limine integration, memory/ACPI/PCI, VT-x foundation.
 - Phase 7 (partial) completed — capability engine init, dom0 EPT, e820, ACPI passthrough, DMAR stripping, VMLAUNCH, SMP.
@@ -29,6 +30,15 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 - Phase 3 (P3a, P3b, P3c) completed — all Platform trait methods, INVEPT, INIT-based cross-core preemption.
 - Phase 15.5 Phase 1 completed (intr-p1-vmcs/routing-table/forward/switch-ctx) — VAPIC+VID, interrupt policy routing, forward_interrupt_to_handler, SwitchContext interrupt_return.
 - Phase 15.5 Phase 2 complete (intr-p2-pid/notify-vec/inject/test) — PID allocation, VMCS fields, inject_via_pid with cross-core IPI, test_intr_loop validated (748 interrupts forwarded, dom0 stable).
+- **dom1 boot unblocked (2026-03-20)**:
+  - Fixed `do_send` GPA-0 sentinel bug (`0` → `u64::MAX` for identity-map; `0` is now a valid explicit GPA).
+  - Fixed `thhv_hvcall.c::themis_send` META pages used wrong sentinel → `RegionOverlap`.
+  - Fixed VMCS guest-state validity: CR0 FIXED0, CR4 VMXE, LDTR_AR unusable enforcement.
+  - Fixed `dom0-kernel-version.txt` pointing to wrong kernel (106 vs 101); thhv.ko now matches dom0.
+  - Fixed `thhv.h` missing `#include <linux/poll.h>` (pre-existing build error).
+  - Implemented CPUID exit emulation in CHV Themis backend (`handle_cpuid_exit`).
+  - Implemented `set_cpuid2` to store CHV's filtered CPUID policy per-VP.
+  - Dom1 now executes past GPA 0x100000 into the `hypervisor-fw` firmware region.
 
 ---
 
@@ -1061,13 +1071,64 @@ hierarchy (`Hypervisor`, `Vm`, `Vcpu`) using `/dev/mshv` ioctls from Phase 15.
   - `vmm/src/seccomp_filters.rs`: Themis ioctl allowlist added.
   - `vmm/Cargo.toml` + `cloud-hypervisor/Cargo.toml`: `themis` feature passthrough.
   - Both `--features themis` and `--features kvm` build clean.
-- [ ] **P16h** — End-to-end validation: boot a Linux guest under cloud-hypervisor
-  running on Themis.  Test: serial console, virtio-blk root disk, SSH.
-  *(Requires Phase 16.5 automation to be practical.)*
+- [x] **P16h** — 🚧 IN PROGRESS. End-to-end validation: boot a Linux guest under
+  cloud-hypervisor running on Themis. Dom1 executes past GPA 0x100000 into
+  hypervisor-fw. Firmware CPUID and HLT exits handled. Next: firmware completes
+  init, Linux kernel boots, serial console, login prompt.
+  Blockers resolved: EPT GPA-0 mapping, LDTR_AR, CPUID emulation.
+  Current blocker: firmware HLT exit handling / timer interrupt.
 
 ---
 
-### Phase 16.5 — Automated Build & Deploy
+### Phase 16.6 — Dom1 Boot Completion & CPUID Policy
+
+Follow-on work needed to complete dom1 boot and properly integrate CPUID
+virtualization into the capability/domain-policy model.
+
+- [ ] **P16.6a** — **HLT exit + timer interrupt for dom1**: hypervisor-fw halts
+  waiting for a timer interrupt to continue initialization. CHV returns
+  `VmExit::Ignore` for HLT but no timer interrupt is ever injected. Investigate
+  whether `THHV_IRQFD` or a periodic injection mechanism is needed.
+
+- [ ] **P16.6b** — **MSR exit emulation**: RDMSR/WRMSR are currently silently
+  ignored (`VmExit::Ignore`). Firmware and Linux kernel use several MSRs
+  (IA32_MISC_ENABLE, IA32_EFER, IA32_PAT, IA32_TSC_DEADLINE, x2APIC MSRs).
+  Implement basic MSR emulation: passthrough safe read-only MSRs, handle
+  EFER/PAT writes, inject #GP for unsupported MSRs.
+
+- [ ] **P16.6c** — **CPUID policy in DomainPolicy (capavisor)**:
+  Currently CHV handles CPUID exits in dom0 userspace (correct short-term
+  design). Long-term: integrate CPUID policy into `DomainPolicy` in
+  `themis/capavisor/src/capability.rs`. Add a `CpuIdPolicy` struct
+  (allowed leaves, masked bits, topology overrides). CHV sends the policy via
+  a new `THHV_SET_CPUID_POLICY` ioctl / `THEMIS_OP_SET_CPUID` hypercall before
+  `INITIALIZE_PARTITION`. Capavisor handles CPUID exits entirely in VMX root
+  mode without a round-trip to dom0. Benefits:
+  - No VMX exit cost to dom0 userspace on every CPUID
+  - Policy enforced at L0 (can't be bypassed by dom0 compromise)
+  - Consistent with capability model: domain creation specifies full policy
+
+- [ ] **P16.6d** — **EXCEPTION/NMI exit handling**: exit reason 0 is currently
+  silently ignored. Dom1 exceptions (#GP, #PF, #UD) need to be either injected
+  back into the guest or reported as errors.
+
+- [ ] **P16.6e** — **Dom1 serial console output**: verify dom1 kernel output
+  appears on dom0's console (CHV serial → dom0 stdout → QEMU serial).
+
+- [ ] **P16.6f** — **Dom1 virtio-blk root mount**: verify dom1 can mount its
+  root disk (virtio-blk backed by `dom1.raw`).
+
+- [ ] **P16.6g** — **Dom1 login prompt**: end-to-end: dom1 boots Ubuntu Noble
+  to a login prompt with `cloud`/`cloud123`.
+
+- [ ] **P16.6h** — **META page batching optimization** (`thhv/src/thhv_part.c::thhv_send_meta_pages`):
+  Currently sends each 4KB EPT page-table node as a separate CARVE+SEND (518 sends for 1GB).
+  Optimization: scan for runs of physically contiguous pages sharing the same parent capability
+  handle → one CARVE (for `run_len × PAGE_SIZE`) + one SEND per contiguous run.
+  Condition per run: `hpa[i+1] == hpa[i] + PAGE_SIZE` AND same `parent_handle`.
+  The `thhv_sent_cap` tracking must be updated to store one entry per run instead of per page.
+  Expected result: reduces ~518 capability metadata entries to O(10) for typical allocations.
+
 
 Replace the current manual sudo-heavy workflow with a fully automated, sudo-free build
 and deployment pipeline.  Core idea: a separate **`bins.img`** ext2 disk image holds all

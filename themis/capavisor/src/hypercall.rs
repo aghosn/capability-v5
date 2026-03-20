@@ -599,6 +599,14 @@ fn do_switch(
         let hhdm = platform.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
         let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
+        {
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static DIRTY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+            if DIRTY_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 5 {
+                serial_println!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}] dom={} vp={}",
+                    dirty[0], dirty[1], dirty[2], child_domain_id_pre, vp_id);
+            }
+        }
         serial_debug!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}]", dirty[0], dirty[1], dirty[2]);
 
         if !dirty.iter().all(|w| *w == 0) {
@@ -613,10 +621,22 @@ fn do_switch(
                 }
                 let val = comm.read_reg(*reg);
                 serial_debug!("[SWITCH] dirty reg={:?} val={:#x}", reg, val);
+                // Log RIP specifically for first few switches
+                if *reg == VpRegister::Rip {
+                    use core::sync::atomic::{AtomicU32, Ordering};
+                    static RIP_LOG: AtomicU32 = AtomicU32::new(0);
+                    if RIP_LOG.fetch_add(1, Ordering::Relaxed) < 10 {
+                        serial_println!("[SWITCH] RIP dirty val={:#x} dom={} vp={}", val, child_domain_id_pre, vp_id);
+                    }
+                }
                 // Validate via capability engine while child VP is still Available.
-                if Capability::set_register(
+                let set_ok = Capability::set_register(
                     caller, child_domain_handle, vp_id, *reg as u64, val, platform,
-                ).is_ok() {
+                ).is_ok();
+                if *reg == VpRegister::Rip && !set_ok {
+                    serial_println!("[SWITCH] RIP set_register REJECTED val={:#x}", val);
+                }
+                if set_ok {
                     pending.push((*reg, val));
                 }
             }
@@ -753,6 +773,23 @@ fn do_switch(
         apply_vmcs_reg(&mut child_active, *reg, *val);
     }
 
+    // Print child GUEST_RIP for first few switches to diagnose RIP issues.
+    {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static VMENTRY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+        if VMENTRY_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 5 {
+            serial_println!(
+                "[SWITCH] VMENTRY dom={} vp={} GUEST_RIP={:#x} CR0={:#x} CR3={:#x} CR4={:#x} EFER={:#x}",
+                child_domain_id, vp_idx,
+                child_active.get(x86::vmx::vmcs::guest::RIP),
+                child_active.get(x86::vmx::vmcs::guest::CR0),
+                child_active.get(x86::vmx::vmcs::guest::CR3),
+                child_active.get(x86::vmx::vmcs::guest::CR4),
+                child_active.get(x86::vmx::vmcs::guest::IA32_EFER_FULL),
+            );
+        }
+    }
+
     // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop interrupt
     // unwind), its RIP is sitting AT its own SWITCH VMCALL.  Deliver a synthetic
     // SWITCH return result so the domain sees "my callee was preempted by interrupt V".
@@ -864,6 +901,28 @@ pub fn forward_child_exit(
         let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
         let guest_phys = vcpu.try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL).unwrap_or(0);
 
+        // For I/O instruction exits (exit reason 30), extract port/size/direction
+        // from the exit qualification (SDM Vol 3C §27.2.1 Table 27-5):
+        //   bits  2:0  = size encoding (0=1B, 1=2B, 3=4B)
+        //   bit   3    = direction (0=OUT/write, 1=IN/read)
+        //   bit   6    = operand encoding (0=port in DX, 1=port in qual[31:16])
+        //   bits 31:16 = port number if bit 6 = 1
+        const IO_EXIT_REASON: u32 = 30;
+        let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
+            let size   = ((exit_qual & 0b111) as u8) + 1;
+            let is_in  = (exit_qual >> 3) & 1; // 1=IN(read), 0=OUT(write)
+            let imm    = (exit_qual >> 6) & 1;
+            let port   = if imm != 0 {
+                (exit_qual >> 16) as u16
+            } else {
+                (vcpu.reg(Reg::Rdx) & 0xFFFF) as u16
+            };
+            let write  = if is_in == 0 { 1u8 } else { 0u8 };
+            (port, size, write)
+        } else {
+            (0u16, 0u8, 0u8)
+        };
+
         let msg = InterceptMessage {
             header: ThemicMessageHeader {
                 message_type: THEMIC_MSG_VP_INTERCEPT,
@@ -877,6 +936,13 @@ pub fn forward_child_exit(
             guest_rip,
             guest_rflags,
             rax: vcpu.reg(Reg::Rax),
+            // I/O exit fields (only meaningful when exit_reason == 28).
+            port_number: io_port,
+            access_size: io_size,
+            is_write: io_is_write,
+            // Fill CPUID leaf/subleaf so CHV emulates the correct leaf.
+            cpuid_rax: vcpu.reg(Reg::Rax),
+            cpuid_rcx: vcpu.reg(Reg::Rcx),
             ..InterceptMessage::default()
         };
 

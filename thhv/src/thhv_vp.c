@@ -49,6 +49,14 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 	if (!mutex_trylock(&vp->run_lock))
 		return -EBUSY;
 
+	/* Log COMM page RIP at run time for diagnostic purposes */
+	if (vp->comm_kaddr) {
+		struct thhv_vp_comm_page *comm =
+			(struct thhv_vp_comm_page *)vp->comm_kaddr;
+		pr_info("thhv: RUN_VP vp=%u COMM->rip=0x%llx dirty_mask[0]=0x%llx\n",
+			vp->vp_index, comm->rip, comm->dirty_mask[0]);
+	}
+
 	if (part->sched_policy == THHV_SCHED_SYNC) {
 		/*
 		 * Sync mode: the calling thread's VP is "donated" to the
@@ -286,8 +294,12 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	/* Write all register values into the COMM page + set dirty bits.
 	 * The capavisor will validate and apply them at SWITCH time. */
 	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
-	for (i = 0; i < hdr.count; i++)
+	for (i = 0; i < hdr.count; i++) {
+		if (regs[i].name == THHV_VP_REG_RIP)
+			pr_info("thhv: SET_VP_STATE vp=%u RIP=0x%llx\n",
+				vp->vp_index, regs[i].value);
 		thhv_comm_set_reg(comm, (unsigned int)regs[i].name, regs[i].value);
+	}
 
 	ret = 0;
 out:
