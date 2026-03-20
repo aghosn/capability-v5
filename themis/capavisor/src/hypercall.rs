@@ -629,14 +629,16 @@ fn do_switch(
                         serial_println!("[SWITCH] RIP dirty val={:#x} dom={} vp={}", val, child_domain_id_pre, vp_id);
                     }
                 }
-                // Validate via capability engine while child VP is still Available.
-                let set_ok = Capability::set_register(
-                    caller, child_domain_handle, vp_id, *reg as u64, val, platform,
+                // Validate via capability engine (write access check only —
+                // do NOT call set_register which would call set_vp_register and
+                // re-mark the dirty bit, causing infinite replay on every run).
+                let check_ok = Capability::check_register_write(
+                    caller, child_domain_handle, vp_id, *reg as u64, platform,
                 ).is_ok();
-                if *reg == VpRegister::Rip && !set_ok {
-                    serial_println!("[SWITCH] RIP set_register REJECTED val={:#x}", val);
+                if *reg == VpRegister::Rip && !check_ok {
+                    serial_println!("[SWITCH] RIP write DENIED val={:#x}", val);
                 }
-                if set_ok {
+                if check_ok {
                     pending.push((*reg, val));
                 }
             }
@@ -1466,6 +1468,23 @@ fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val:
     };
     if let Some(field) = vp_reg_to_vmcs_field(reg) {
         vcpu.set(field, adjusted);
+    }
+    // VMENTRY_CONTROLS.IA32E_MODE_GUEST (bit 9) must track EFER.LMA (bit 10).
+    // Without this, writing EFER.LMA=1 via the dirty-COMM path leaves the VM
+    // in 32-bit compatibility mode on re-entry → 64-bit code decoded as 32-bit
+    // → triple fault.
+    if reg == VpRegister::Efer {
+        let lma = (val >> 10) & 1;
+        let entry = vcpu.get(x86::vmx::vmcs::control::VMENTRY_CONTROLS);
+        const IA32E_MODE_GUEST: u64 = 1 << 9;
+        let new_entry = if lma == 1 {
+            entry | IA32E_MODE_GUEST
+        } else {
+            entry & !IA32E_MODE_GUEST
+        };
+        if new_entry != entry {
+            vcpu.set(x86::vmx::vmcs::control::VMENTRY_CONTROLS, new_entry);
+        }
     }
 }
 

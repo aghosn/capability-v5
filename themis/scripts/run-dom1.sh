@@ -88,7 +88,7 @@ echo ""
 exec "$CHV" \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
+    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet nokaslr systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS" \

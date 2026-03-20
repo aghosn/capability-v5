@@ -3090,6 +3090,32 @@ impl Capability<Domain> {
         platform.set_vp_register(child_domain_id, vp_id, reg_id, value)
     }
 
+    /// Validate that `caller` may write `reg_id` on the child VP, without
+    /// performing the actual write or touching the COMM page.
+    ///
+    /// Used by `do_switch` when draining dirty COMM-page bits: the capability
+    /// engine validates access, but the write is applied directly to the VMCS
+    /// via `apply_vmcs_reg` — not via `set_vp_register` (which would re-mark
+    /// the dirty bit and cause an infinite replay loop).
+    pub fn check_register_write(
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        vp_id: u64,
+        reg_id: u64,
+        platform: &dyn Platform,
+    ) -> Result<()> {
+        caller.read().owned.validate_operation(MonitorAPI::SET)?;
+
+        let (_child_domain_id, write_set) =
+            register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
+
+        if !write_set.is_set(reg_id) {
+            return Err(CapaError::RegisterAccessDenied);
+        }
+
+        Ok(())
+    }
+
     /// Read a VP register from a child domain.
     ///
     /// The engine validates:
