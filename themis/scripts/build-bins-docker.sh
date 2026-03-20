@@ -51,8 +51,16 @@ fi
 echo "→ Running build-bins inside $IMAGE"
 exec docker run --rm \
     -v "$REPO_ROOT":/workspace \
+    -v /etc/passwd:/etc/passwd:ro \
+    -v /etc/group:/etc/group:ro \
     -w /workspace \
     --user "$(id -u):$(id -g)" \
+    --device /dev/fuse \
+    --cap-add SYS_ADMIN \
+    --security-opt apparmor:unconfined \
+    --env PATH="/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    --env CARGO_HOME="/usr/local/cargo" \
+    --env RUSTUP_HOME="/usr/local/rustup" \
     --env PROFILE="$PROFILE" \
     --env BINS_TARGETS="$BINS_TARGETS" \
     --env KHEADERS_DIR="$KHEADERS_DIR" \

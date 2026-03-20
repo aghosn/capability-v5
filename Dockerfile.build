@@ -7,9 +7,9 @@ FROM ubuntu:24.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    RUSTUP_HOME=/root/.rustup \
-    CARGO_HOME=/root/.cargo \
-    PATH=/root/.cargo/bin:${PATH}
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -17,11 +17,13 @@ RUN apt-get update \
     build-essential \
     ca-certificates \
     clang \
+    cloud-image-utils \
     cmake \
     curl \
     dpkg-dev \
     e2fsprogs \
     fuse2fs \
+    fuse3 \
     git \
     grub-pc-bin \
     libclang-dev \
@@ -45,7 +47,9 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
     --component clippy \
     --component llvm-tools \
     --target x86_64-unknown-none \
- && rustup default nightly
+ && rustup default nightly \
+ && chmod -R a+rwX /usr/local/cargo /usr/local/rustup \
+ && ln -s /usr/bin/fusermount3 /usr/local/bin/fusermount
 
 WORKDIR /workspace
 VOLUME ["/workspace"]
