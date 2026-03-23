@@ -204,5 +204,18 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 | `0x226` | `arch/x86/kernel/setup.c` | `setup_arch` | after `e820__finish_early_params()` |
 | `0x227` | `arch/x86/kernel/setup.c` | `setup_arch` | after `efi_init()` (no-op if non-EFI) |
 | `0x228` | `arch/x86/kernel/setup.c` | `setup_arch` | after `dmi_setup()` |
+| `0x280` | `arch/x86/kernel/setup.c` | `setup_arch` | after `early_platform_quirks()` |
+| `0x281` | `arch/x86/kernel/setup.c` | `setup_arch` | after `early_acpi_boot_init()` |
+| `0x282` | `arch/x86/kernel/setup.c` | `setup_arch` | after `initmem_init()` |
+| `0x283` | `arch/x86/kernel/setup.c` | `setup_arch` | after `memblock_find_dma_reserve()` |
+| `0x284` | `arch/x86/kernel/setup.c` | `setup_arch` | after `pagetable_init()` |
+| `0x285` | `arch/x86/kernel/setup.c` | `setup_arch` | after `kasan_init()` |
+| `0x286` | `arch/x86/kernel/setup.c` | `setup_arch` | after `early_quirks()` |
+| `0x290` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | entry |
+| `0x291` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `acpi_table_init_complete()` |
+| `0x292` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `acpi_table_parse(BOOT)` |
+| `0x293` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after blacklist check |
+| `0x294` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `early_acpi_process_madt()` |
+| `0x295` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `acpi_reduced_hw_init()` |
 
 **Next free range: `0x229`**

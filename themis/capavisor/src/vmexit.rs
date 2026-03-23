@@ -322,6 +322,39 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // None → SWITCH swapped the vcpu; no writeback needed.
                             return;
                         }
+                        EXIT_REASON_CPUID => {
+                            // Intercept hypervisor-identification leaves so child
+                            // domains see "ThemisCapa" (same as dom0) regardless of
+                            // what CHV would return.  All other leaves are forwarded
+                            // to CHV via the normal child-exit path.
+                            let leaf = vcpu.reg(Reg::Rax) as u32;
+                            match leaf {
+                                0x40000000..=0x4FFFFFFF => {
+                                    let (eax, ebx, ecx, edx) = match leaf {
+                                        0x40000000 => (
+                                            0x40000003u32,
+                                            u32::from_le_bytes(*b"Them"),
+                                            u32::from_le_bytes(*b"isCa"),
+                                            u32::from_le_bytes(*b"pa  "),
+                                        ),
+                                        0x40000001 => (0b00001, 0, 0, 0),
+                                        0x40000003 => (256, 1024, 4096, 0),
+                                        _ => (0, 0, 0, 0),
+                                    };
+                                    vcpu.set_reg(Reg::Rax, eax as u64);
+                                    vcpu.set_reg(Reg::Rbx, ebx as u64);
+                                    vcpu.set_reg(Reg::Rcx, ecx as u64);
+                                    vcpu.set_reg(Reg::Rdx, edx as u64);
+                                    next_instruction(vcpu);
+                                    return;
+                                }
+                                _ => {
+                                    // Non-hypervisor leaf: forward to CHV.
+                                    crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                                    return;
+                                }
+                            }
+                        }
                         _ => {
                             // All other exits: forward to parent.
                             crate::hypercall::forward_child_exit(vcpu, basic_reason);
