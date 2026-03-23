@@ -65,11 +65,17 @@ echo "  Login: cloud / cloud123"
 echo ""
 
 # Auto-detect kernel and initramfs — prefer versioned files, fall back to unversioned.
+# If a debug/instrumented kernel was packed into bins.img, prefer it.
 KERNEL_IMG=""
 INITRAMFS_IMG=""
 
-for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
-[[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
+if [[ -f "$BINS/nested/bzImage" ]]; then
+    echo "  → Using instrumented nested kernel: $BINS/nested/bzImage"
+    KERNEL_IMG="$BINS/nested/bzImage"
+else
+    for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
+    [[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
+fi
 
 for f in $(ls /boot/initrd.img-* 2>/dev/null | sort -V); do INITRAMFS_IMG="$f"; done
 [[ -z "$INITRAMFS_IMG" && -f /boot/initrd.img ]] && INITRAMFS_IMG=/boot/initrd.img
@@ -88,7 +94,7 @@ echo ""
 exec "$CHV" \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet nokaslr systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
+    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet nokaslr nopv systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS" \

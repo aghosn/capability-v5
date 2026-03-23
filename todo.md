@@ -1096,6 +1096,17 @@ virtualization into the capability/domain-policy model.
   Implement basic MSR emulation: passthrough safe read-only MSRs, handle
   EFER/PAT writes, inject #GP for unsupported MSRs.
 
+- [ ] **P16.6b2** — **Paravirtualization (nopv workaround)**: Dom1 currently
+  boots with `nopv` in its kernel cmdline (same as dom0), disabling kvmclock
+  and all KVM paravirt features. The hang without `nopv` is in
+  `pvclock_read_flags()` spinning on an odd version in `hv_clock_boot[0].pvti`
+  — CHV forwards the `MSR_KVM_SYSTEM_TIME_NEW` write (via capavisor passthrough)
+  but never initialises the pvclock struct in guest memory. Long-term, either:
+  (a) implement pvclock struct initialisation in capavisor / thhv when the MSR
+  is written; or (b) have CHV handle it as it does under native KVM.
+  Low priority while getting dom1 to a login prompt; revisit when clock accuracy
+  and steal-time accounting matter.
+
 - [ ] **P16.6c** — **CPUID policy in DomainPolicy (capavisor)**:
   Currently CHV handles CPUID exits in dom0 userspace (correct short-term
   design). Long-term: integrate CPUID policy into `DomainPolicy` in

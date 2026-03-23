@@ -132,6 +132,10 @@ pub mod opcodes {
     /// IN:  RDI = child_domain_handle, RSI = vp_id, RDX = vector (0–255)
     /// The VP must be stopped (not currently running via SWITCH).
     pub const THEMIS_INJECT_INTERRUPT:    u64 = 0x1b;
+
+    /// Debug print: emit a serial trace message from any domain.
+    /// IN:  RDI = 64-bit value to print.  No capability check needed.
+    pub const THEMIS_DBG_PRINT:           u64 = 0x1c;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

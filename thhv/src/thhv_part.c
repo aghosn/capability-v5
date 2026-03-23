@@ -379,7 +379,7 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 			if (ret)
 				goto err_revoke_partial;
 
-			/* Insert carved child into cap table. */
+			/* Insert child region into cap table. */
 			ret = thhv_cap_table_insert(cap_handle, parent_handle,
 						    cap_sub,
 						    segs[i].hpa_start,

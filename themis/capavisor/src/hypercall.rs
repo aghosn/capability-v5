@@ -149,6 +149,12 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_INJECT_INTERRUPT =>
             Some(do_inject_interrupt(platform, &caller, arg0, arg1 as u32, arg2 as u8)),
 
+        opcodes::THEMIS_DBG_PRINT => {
+            let dom_id = caller.read().data.id;
+            serial_println!("[DBG] dom={} val={:#x}", dom_id, arg0);
+            Some(HypercallResult::success())
+        }
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
         | opcodes::THEMIS_ATTEST

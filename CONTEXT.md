@@ -495,6 +495,17 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
   IOMMU SLPT per child domain (done, P4e/P8d) AND the thhv driver wiring
   `THHV_ASSIGN_DEVICE` (not yet done).
 
+
+---
+
+## 11. Debugging Skills
+
+See `skills/` at the repo root for full skill writeups.
+
+- **`skills/debugging-dom-boot.md`** — How to instrument a Linux kernel with
+  `themis_trace()` (direct VMCALL to capavisor) to debug early-boot failures in
+  guest domains, including the trace code registry.
+
 ---
 
 ## 10. Todo Tracker

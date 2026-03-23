@@ -9,14 +9,14 @@ use x86::msr;
 use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 
-use crate::{serial_println, serial_debug};
 use crate::vcpu::{ActiveVcpu, Reg, VmxError};
+use crate::{serial_debug, serial_println};
 
 use capability_engine::Platform;
 
 // ── DomainComm discovery statics (written once at boot, read by CPUID handler) ─ //
-use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicU32;
+use core::sync::atomic::AtomicU64;
 
 /// Dom0 DomainComm region GPA (set by init_themis, read by CPUID leaf 0x40000002).
 pub static DOMCOMM_GPA: AtomicU64 = AtomicU64::new(0);
@@ -30,53 +30,53 @@ pub static DOMCOMM_PAGES: AtomicU32 = AtomicU32::new(0);
 #[allow(dead_code)]
 const X2APIC_MSR_BASE: u32 = 0x800;
 #[allow(dead_code)]
-const X2APIC_MSR_END: u32  = 0x840; // exclusive
+const X2APIC_MSR_END: u32 = 0x840; // exclusive
 
 // Notable x2APIC register offsets (MSR = BASE + offset/16).
 #[allow(dead_code)]
-const X2APIC_ID:      u32 = 0x802;
+const X2APIC_ID: u32 = 0x802;
 #[allow(dead_code)]
-const X2APIC_VER:     u32 = 0x803;
+const X2APIC_VER: u32 = 0x803;
 #[allow(dead_code)]
-const X2APIC_TPR:     u32 = 0x808;
+const X2APIC_TPR: u32 = 0x808;
 #[allow(dead_code)]
-const X2APIC_PPR:     u32 = 0x80A;
+const X2APIC_PPR: u32 = 0x80A;
 #[allow(dead_code)]
-const X2APIC_EOI:     u32 = 0x80B;
+const X2APIC_EOI: u32 = 0x80B;
 #[allow(dead_code)]
-const X2APIC_LDR:     u32 = 0x80D;
+const X2APIC_LDR: u32 = 0x80D;
 #[allow(dead_code)]
-const X2APIC_SVR:     u32 = 0x80F;
+const X2APIC_SVR: u32 = 0x80F;
 #[allow(dead_code)]
-const X2APIC_ISR0:    u32 = 0x810;
+const X2APIC_ISR0: u32 = 0x810;
 #[allow(dead_code)]
-const X2APIC_TMR0:    u32 = 0x818;
+const X2APIC_TMR0: u32 = 0x818;
 #[allow(dead_code)]
-const X2APIC_IRR0:    u32 = 0x820;
+const X2APIC_IRR0: u32 = 0x820;
 #[allow(dead_code)]
-const X2APIC_ESR:     u32 = 0x828;
+const X2APIC_ESR: u32 = 0x828;
 #[allow(dead_code)]
-const X2APIC_ICR:     u32 = 0x830;
+const X2APIC_ICR: u32 = 0x830;
 #[allow(dead_code)]
-const X2APIC_LVT_TIMER:   u32 = 0x832;
+const X2APIC_LVT_TIMER: u32 = 0x832;
 #[allow(dead_code)]
 const X2APIC_LVT_THERMAL: u32 = 0x833;
 #[allow(dead_code)]
-const X2APIC_LVT_PERF:    u32 = 0x834;
+const X2APIC_LVT_PERF: u32 = 0x834;
 #[allow(dead_code)]
-const X2APIC_LVT_LINT0:   u32 = 0x835;
+const X2APIC_LVT_LINT0: u32 = 0x835;
 #[allow(dead_code)]
-const X2APIC_LVT_LINT1:   u32 = 0x836;
+const X2APIC_LVT_LINT1: u32 = 0x836;
 #[allow(dead_code)]
-const X2APIC_LVT_ERROR:   u32 = 0x837;
+const X2APIC_LVT_ERROR: u32 = 0x837;
 #[allow(dead_code)]
-const X2APIC_TIMER_ICR:   u32 = 0x838;
+const X2APIC_TIMER_ICR: u32 = 0x838;
 #[allow(dead_code)]
-const X2APIC_TIMER_CCR:   u32 = 0x839;
+const X2APIC_TIMER_CCR: u32 = 0x839;
 #[allow(dead_code)]
-const X2APIC_TIMER_DCR:   u32 = 0x83E;
+const X2APIC_TIMER_DCR: u32 = 0x83E;
 #[allow(dead_code)]
-const X2APIC_SELF_IPI:    u32 = 0x83F;
+const X2APIC_SELF_IPI: u32 = 0x83F;
 
 // ── Exit reason constants (Intel SDM Vol 3C §27.9.1) ─────────────────────── //
 
@@ -141,7 +141,9 @@ pub fn monitor_loop(vcpu: &mut ActiveVcpu) -> ! {
             }
         };
         // SAFETY: VMCS is loaded via ActiveVcpu and we just exited from the guest.
-        unsafe { handle_vmexit(vcpu, exit_reason); }
+        unsafe {
+            handle_vmexit(vcpu, exit_reason);
+        }
     }
 }
 
@@ -162,6 +164,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
     let _count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_REASON.store(basic_reason as u64, Ordering::Relaxed);
 
+    //TODO(aghosn): Not sure about this. We have two matches depending on whether we're dom0 or
+    //dom1. This should not really be the case, and dom1 will be able to create dom2 later on too.
+    //We should have a more homogeneous way of handling the exits, that takes into account the
+    //capability state.
+
     // ── Child domain exit forwarding ──
     // If the current core is running a child domain (not dom0), forward the
     // exit to the parent — except for capavisor-internal exits (external
@@ -177,33 +184,33 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     // violated Intel SDM 26.3 checks.  Dump state and panic; this
                     // should never happen once VMCS initialisation is correct.
                     if basic_reason == EXIT_REASON_VMENTRY_INVALID_GUEST {
-                        let exit_qual  = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-                        let cr0     = vcpu.get(vmcs::guest::CR0);
-                        let cr4     = vcpu.get(vmcs::guest::CR4);
-                        let cr3     = vcpu.get(vmcs::guest::CR3);
-                        let rip     = vcpu.get(vmcs::guest::RIP);
-                        let rflags  = vcpu.get(vmcs::guest::RFLAGS);
-                        let efer    = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-                        let cs_sel  = vcpu.get(vmcs::guest::CS_SELECTOR);
+                        let exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+                        let cr0 = vcpu.get(vmcs::guest::CR0);
+                        let cr4 = vcpu.get(vmcs::guest::CR4);
+                        let cr3 = vcpu.get(vmcs::guest::CR3);
+                        let rip = vcpu.get(vmcs::guest::RIP);
+                        let rflags = vcpu.get(vmcs::guest::RFLAGS);
+                        let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+                        let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
                         let cs_base = vcpu.get(vmcs::guest::CS_BASE);
-                        let cs_lim  = vcpu.get(vmcs::guest::CS_LIMIT);
-                        let cs_ar   = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
-                        let ss_sel  = vcpu.get(vmcs::guest::SS_SELECTOR);
-                        let ss_ar   = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
-                        let tr_ar   = vcpu.get(vmcs::guest::TR_ACCESS_RIGHTS);
+                        let cs_lim = vcpu.get(vmcs::guest::CS_LIMIT);
+                        let cs_ar = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+                        let ss_sel = vcpu.get(vmcs::guest::SS_SELECTOR);
+                        let ss_ar = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
+                        let tr_ar = vcpu.get(vmcs::guest::TR_ACCESS_RIGHTS);
                         let ldtr_ar = vcpu.get(vmcs::guest::LDTR_ACCESS_RIGHTS);
-                        let activity    = vcpu.get(vmcs::guest::ACTIVITY_STATE);
-                        let interrupt   = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
-                        let link_ptr    = vcpu.get(vmcs::guest::LINK_PTR_FULL);
-                        let vpid        = vcpu.get(control::VPID);
-                        let entry_ctrl  = vcpu.get(control::VMENTRY_CONTROLS);
-                        let pin_ctrl    = vcpu.get(control::PINBASED_EXEC_CONTROLS);
-                        let proc2_ctrl  = vcpu.get(control::SECONDARY_PROCBASED_EXEC_CONTROLS);
-                        let intr_info   = vcpu.get(control::VMENTRY_INTERRUPTION_INFO_FIELD);
-                        let cr0_mask    = vcpu.get(control::CR0_GUEST_HOST_MASK);
-                        let cr0_shadow  = vcpu.get(control::CR0_READ_SHADOW);
-                        let cr4_mask    = vcpu.get(control::CR4_GUEST_HOST_MASK);
-                        let cr4_shadow  = vcpu.get(control::CR4_READ_SHADOW);
+                        let activity = vcpu.get(vmcs::guest::ACTIVITY_STATE);
+                        let interrupt = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+                        let link_ptr = vcpu.get(vmcs::guest::LINK_PTR_FULL);
+                        let vpid = vcpu.get(control::VPID);
+                        let entry_ctrl = vcpu.get(control::VMENTRY_CONTROLS);
+                        let pin_ctrl = vcpu.get(control::PINBASED_EXEC_CONTROLS);
+                        let proc2_ctrl = vcpu.get(control::SECONDARY_PROCBASED_EXEC_CONTROLS);
+                        let intr_info = vcpu.get(control::VMENTRY_INTERRUPTION_INFO_FIELD);
+                        let cr0_mask = vcpu.get(control::CR0_GUEST_HOST_MASK);
+                        let cr0_shadow = vcpu.get(control::CR0_READ_SHADOW);
+                        let cr4_mask = vcpu.get(control::CR4_GUEST_HOST_MASK);
+                        let cr4_shadow = vcpu.get(control::CR4_READ_SHADOW);
                         // exit_qual bits 3:0 encode the failing check (SDM Table 27-7)
                         serial_println!(
                             "[FATAL] exit 33 dom={} core={} EXIT_QUAL={:#x} (check={})\n\
@@ -215,17 +222,41 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                              ENTRY_CTRL={:#x} PIN={:#x} PROC2={:#x}\n\
                              INTR_INFO={:#x}\n\
                              CR0_MASK={:#x} CR0_SHADOW={:#x} CR4_MASK={:#x} CR4_SHADOW={:#x}",
-                            domain_id, core_id, exit_qual, exit_qual & 0xf,
-                            cr0, cr4, cr3, efer,
-                            rip, rflags,
-                            cs_sel, cs_base, cs_lim, cs_ar,
-                            ss_sel, ss_ar, tr_ar, ldtr_ar,
-                            activity, interrupt, link_ptr, vpid,
-                            entry_ctrl, pin_ctrl, proc2_ctrl,
+                            domain_id,
+                            core_id,
+                            exit_qual,
+                            exit_qual & 0xf,
+                            cr0,
+                            cr4,
+                            cr3,
+                            efer,
+                            rip,
+                            rflags,
+                            cs_sel,
+                            cs_base,
+                            cs_lim,
+                            cs_ar,
+                            ss_sel,
+                            ss_ar,
+                            tr_ar,
+                            ldtr_ar,
+                            activity,
+                            interrupt,
+                            link_ptr,
+                            vpid,
+                            entry_ctrl,
+                            pin_ctrl,
+                            proc2_ctrl,
                             intr_info,
-                            cr0_mask, cr0_shadow, cr4_mask, cr4_shadow,
+                            cr0_mask,
+                            cr0_shadow,
+                            cr4_mask,
+                            cr4_shadow,
                         );
-                        panic!("exit 33: dom={} core={} qual={:#x}", domain_id, core_id, exit_qual);
+                        panic!(
+                            "exit 33: dom={} core={} qual={:#x}",
+                            domain_id, core_id, exit_qual
+                        );
                     }
 
                     match basic_reason {
@@ -255,8 +286,40 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         EXIT_REASON_VMX_PREEMPTION_TIMER => {
-                            vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
-                                     PREEMPTION_TIMER_TICKS);
+                            vcpu.set(
+                                vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                                PREEMPTION_TIMER_TICKS,
+                            );
+                            return;
+                        }
+                        EXIT_REASON_INIT_SIGNAL => {
+                            // An INIT IPI fired while a child VP was running.
+                            // This is the capavisor's own cross-core notification
+                            // mechanism (INVEPT, drain per-core update queue, etc.)
+                            // — identical to the dom0 path.  Process pending work
+                            // and re-enter the child.
+                            // Dom1's SMP AP wakeup uses CHV's virtual LAPIC
+                            // emulation (MMIO exits), not hardware INIT signals.
+                            use crate::PLATFORM_PTR;
+                            use core::sync::atomic::Ordering;
+                            let ptr = PLATFORM_PTR.load(Ordering::Acquire);
+                            if !ptr.is_null() {
+                                let platform = unsafe { &*ptr };
+                                platform.poll_and_respond_cross_core();
+                            }
+                            return;
+                        }
+                        EXIT_REASON_VMCALL => {
+                            // Route child VMCALLs directly to the capability engine,
+                            // same as dom0. This enables dom1 to create dom2, etc.
+                            if let Some(result) = crate::hypercall::handle_vmcall(vcpu) {
+                                vcpu.set_reg(Reg::Rax, result.rax);
+                                vcpu.set_reg(Reg::Rdi, result.rdi);
+                                vcpu.set_reg(Reg::Rsi, result.rsi);
+                                vcpu.set_reg(Reg::Rdx, result.rdx);
+                                next_instruction(vcpu);
+                            }
+                            // None → SWITCH swapped the vcpu; no writeback needed.
                             return;
                         }
                         _ => {
@@ -287,23 +350,27 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_SIPI => {
-            let qual   = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let vector = qual & 0xFF;
-            let cs_base     = vector << 12;
+            let cs_base = vector << 12;
             let cs_selector = vector << 8;
 
-            vcpu.set(vmcs::guest::CS_SELECTOR,      cs_selector);
-            vcpu.set(vmcs::guest::CS_BASE,           cs_base);
-            vcpu.set(vmcs::guest::CS_LIMIT,          0xFFFF);
-            vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS,  0x009B);
-            vcpu.set(vmcs::guest::RIP,               0);
-            vcpu.set(vmcs::guest::CR0,               0x30);
-            vcpu.set(vmcs::guest::ACTIVITY_STATE,    0);
-            vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS);
+            vcpu.set(vmcs::guest::CS_SELECTOR, cs_selector);
+            vcpu.set(vmcs::guest::CS_BASE, cs_base);
+            vcpu.set(vmcs::guest::CS_LIMIT, 0xFFFF);
+            vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, 0x009B);
+            vcpu.set(vmcs::guest::RIP, 0);
+            vcpu.set(vmcs::guest::CR0, 0x30);
+            vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
+            vcpu.set(
+                vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                PREEMPTION_TIMER_TICKS,
+            );
 
             serial_println!(
                 "[VMEXIT] SIPI vector={:#x} startup={:#x} — AP activated",
-                vector, cs_base,
+                vector,
+                cs_base,
             );
         }
 
@@ -362,31 +429,39 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 }
                 (0x40000001, _) => {
                     eax = 0b00001; // bit 0: sync scheduling supported
-                    ebx = 0; ecx = 0; edx = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
                 }
                 (0x40000002, _) => {
                     // DomainComm discovery: GPA and page count.
                     // Set by init_themis → bootstrap_init_domcomm.
                     let gpa = DOMCOMM_GPA.load(Ordering::Relaxed);
                     let pages = DOMCOMM_PAGES.load(Ordering::Relaxed);
-                    eax = gpa as u32;          // GPA low 32 bits
-                    ebx = (gpa >> 32) as u32;  // GPA high 32 bits
-                    ecx = pages;               // region size in pages
+                    eax = gpa as u32; // GPA low 32 bits
+                    ebx = (gpa >> 32) as u32; // GPA high 32 bits
+                    ecx = pages; // region size in pages
                     edx = 0;
                 }
                 (0x40000003, _) => {
-                    eax = 256;  // max VPs per partition
+                    eax = 256; // max VPs per partition
                     ebx = 1024; // max partitions
                     ecx = 4096; // max memory regions
                     edx = 0;
                 }
                 (0x40000000..=0x4FFFFFFF, _) => {
-                    eax = 0; ebx = 0; ecx = 0; edx = 0;
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
                 }
                 (0xDEAD0000..=0xDEADFFFF, _) => {
                     let code = leaf & 0xFFFF;
                     serial_debug!("[TRACE] code={:#x}", code);
-                    eax = 0; ebx = 0; ecx = 0; edx = 0;
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
                 }
                 _ => {}
             }
@@ -435,8 +510,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
         EXIT_REASON_WRMSR => {
             let ecx = vcpu.reg(Reg::Rcx) as u32;
-            let value = ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32)
-                      | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
+            let value =
+                ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32) | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
             if ecx == msr::IA32_EFER {
                 vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
                 next_instruction(vcpu);
@@ -468,23 +543,38 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
                 core::hint::spin_loop();
             }
-            let qual   = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let rip    = vcpu.get(vmcs::guest::RIP);
-            let rsp    = vcpu.get(vmcs::guest::RSP);
-            let cr0    = vcpu.get(vmcs::guest::CR0);
-            let cr3    = vcpu.get(vmcs::guest::CR3);
-            let cr4    = vcpu.get(vmcs::guest::CR4);
-            let efer   = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let rip = vcpu.get(vmcs::guest::RIP);
+            let rsp = vcpu.get(vmcs::guest::RSP);
+            let cr0 = vcpu.get(vmcs::guest::CR0);
+            let cr3 = vcpu.get(vmcs::guest::CR3);
+            let cr4 = vcpu.get(vmcs::guest::CR4);
+            let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
             let rflags = vcpu.get(vmcs::guest::RFLAGS);
-            let cs_ar  = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+            let cs_ar = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
             let entry_ctl = vcpu.get(control::VMENTRY_CONTROLS);
             serial_println!("===== VM-ENTRY FAILURE (vpid={}) =====", vcpu.vpid());
             serial_println!("  qual={:#018x}", qual);
-            serial_println!("  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}", rip, rsp, rflags);
-            serial_println!("  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}", cr0, cr3, cr4, efer);
+            serial_println!(
+                "  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}",
+                rip,
+                rsp,
+                rflags
+            );
+            serial_println!(
+                "  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}",
+                cr0,
+                cr3,
+                cr4,
+                efer
+            );
             serial_println!("  CS_AR={:#06x}  entry_ctl={:#010x}", cs_ar, entry_ctl);
-            serial_println!("  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
-                vcpu.reg(Reg::Rax), vcpu.reg(Reg::Rbx), vcpu.reg(Reg::Rcx));
+            serial_println!(
+                "  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
+                vcpu.reg(Reg::Rax),
+                vcpu.reg(Reg::Rbx),
+                vcpu.reg(Reg::Rcx)
+            );
             serial_println!("==========================================");
             crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
@@ -517,7 +607,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 );
                 host_xcr0 = ((hi as u64) << 32) | (lo as u64);
                 let safe_val = (val & host_xcr0) | 1;
-                serial_debug!("[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}", val, host_xcr0, safe_val);
+                serial_debug!(
+                    "[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}",
+                    val,
+                    host_xcr0,
+                    safe_val
+                );
                 core::arch::asm!(
                     "xsetbv",
                     in("ecx") 0u32,
@@ -530,9 +625,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_CR_ACCESS => {
-            let qual    = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let cr_num  = (qual & 0xF) as u32;
-            let acc     = (qual >> 4) & 0x3;
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let cr_num = (qual & 0xF) as u32;
+            let acc = (qual >> 4) & 0x3;
             let reg_idx = (qual >> 8) & 0xF;
 
             if acc == 0 {
@@ -559,7 +654,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         vcpu.set(vmcs::guest::CR4, val);
                     }
                     8 => { /* CR8 / TPR — ignore for now */ }
-                    _ => { serial_debug!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", cr_num, val); }
+                    _ => {
+                        serial_debug!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", cr_num, val);
+                    }
                 }
             } else if acc == 1 {
                 // MOV from CR
@@ -580,46 +677,84 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 core::hint::spin_loop();
             }
 
-            let rip    = vcpu.get(vmcs::guest::RIP);
-            let rsp    = vcpu.get(vmcs::guest::RSP);
-            let cr0    = vcpu.get(vmcs::guest::CR0);
-            let cr3    = vcpu.get(vmcs::guest::CR3);
-            let cr4    = vcpu.get(vmcs::guest::CR4);
-            let efer   = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+            let rip = vcpu.get(vmcs::guest::RIP);
+            let rsp = vcpu.get(vmcs::guest::RSP);
+            let cr0 = vcpu.get(vmcs::guest::CR0);
+            let cr3 = vcpu.get(vmcs::guest::CR3);
+            let cr4 = vcpu.get(vmcs::guest::CR4);
+            let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
             let rflags = vcpu.get(vmcs::guest::RFLAGS);
             let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
             let cs_base = vcpu.get(vmcs::guest::CS_BASE);
-            let cs_ar  = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
+            let cs_ar = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
             let ss_sel = vcpu.get(vmcs::guest::SS_SELECTOR);
-            let ss_ar  = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
+            let ss_ar = vcpu.get(vmcs::guest::SS_ACCESS_RIGHTS);
             let entry_ctl = vcpu.get(control::VMENTRY_CONTROLS);
-            let act    = vcpu.get(vmcs::guest::ACTIVITY_STATE);
+            let act = vcpu.get(vmcs::guest::ACTIVITY_STATE);
             let interruptibility = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
             let idtr_base = vcpu.get(vmcs::guest::IDTR_BASE);
             let idtr_limit = vcpu.get(vmcs::guest::IDTR_LIMIT);
 
             serial_println!("===== TRIPLE FAULT (vpid={}) =====", vcpu.vpid());
-            serial_println!("  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}", rip, rsp, rflags);
-            serial_println!("  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}", cr0, cr3, cr4, efer);
-            serial_println!("  CS: sel={:#06x} base={:#010x} ar={:#06x}  SS: sel={:#06x} ar={:#06x}",
-                cs_sel, cs_base, cs_ar, ss_sel, ss_ar);
+            serial_println!(
+                "  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}",
+                rip,
+                rsp,
+                rflags
+            );
+            serial_println!(
+                "  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}",
+                cr0,
+                cr3,
+                cr4,
+                efer
+            );
+            serial_println!(
+                "  CS: sel={:#06x} base={:#010x} ar={:#06x}  SS: sel={:#06x} ar={:#06x}",
+                cs_sel,
+                cs_base,
+                cs_ar,
+                ss_sel,
+                ss_ar
+            );
             serial_println!("  IDTR: base={:#018x} limit={:#06x}", idtr_base, idtr_limit);
-            serial_println!("  entry_ctl={:#010x}  activity={} interruptibility={:#x}",
-                entry_ctl, act, interruptibility);
-            serial_println!("  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
-                vcpu.reg(Reg::Rax), vcpu.reg(Reg::Rbx), vcpu.reg(Reg::Rcx));
-            serial_println!("  RDX={:#018x}  RSI={:#018x}  RDI={:#018x}",
-                vcpu.reg(Reg::Rdx), vcpu.reg(Reg::Rsi), vcpu.reg(Reg::Rdi));
-            serial_println!("  R8 ={:#018x}  R9 ={:#018x}  R10={:#018x}",
-                vcpu.reg(Reg::R8), vcpu.reg(Reg::R9), vcpu.reg(Reg::R10));
-            serial_println!("  RBP={:#018x}  R12={:#018x}  R13={:#018x}",
-                vcpu.reg(Reg::Rbp), vcpu.reg(Reg::R12), vcpu.reg(Reg::R13));
+            serial_println!(
+                "  entry_ctl={:#010x}  activity={} interruptibility={:#x}",
+                entry_ctl,
+                act,
+                interruptibility
+            );
+            serial_println!(
+                "  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
+                vcpu.reg(Reg::Rax),
+                vcpu.reg(Reg::Rbx),
+                vcpu.reg(Reg::Rcx)
+            );
+            serial_println!(
+                "  RDX={:#018x}  RSI={:#018x}  RDI={:#018x}",
+                vcpu.reg(Reg::Rdx),
+                vcpu.reg(Reg::Rsi),
+                vcpu.reg(Reg::Rdi)
+            );
+            serial_println!(
+                "  R8 ={:#018x}  R9 ={:#018x}  R10={:#018x}",
+                vcpu.reg(Reg::R8),
+                vcpu.reg(Reg::R9),
+                vcpu.reg(Reg::R10)
+            );
+            serial_println!(
+                "  RBP={:#018x}  R12={:#018x}  R13={:#018x}",
+                vcpu.reg(Reg::Rbp),
+                vcpu.reg(Reg::R12),
+                vcpu.reg(Reg::R13)
+            );
             serial_println!("=================================");
 
             crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
 
+        //TODO(aghosn): not sure about this.
         EXIT_REASON_EPT_VIOLATION => {
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
@@ -642,7 +777,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // No doorbell match (or platform not ready) — full intercept path.
             serial_debug!(
                 "[VMEXIT] EPT violation GPA={:#x} qual={:#x} RIP={:#x} → forward_child_exit",
-                gpa, qual, vcpu.get(vmcs::guest::RIP)
+                gpa,
+                qual,
+                vcpu.get(vmcs::guest::RIP)
             );
             crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_EPT_VIOLATION);
         }
@@ -653,8 +790,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             }
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let rip = vcpu.get(vmcs::guest::RIP);
-            serial_println!("[VMEXIT] EPT misconfig vpid={} GPA={:#x} RIP={:#x}",
-                vcpu.vpid(), gpa, rip);
+            serial_println!(
+                "[VMEXIT] EPT misconfig vpid={} GPA={:#x} RIP={:#x}",
+                vcpu.vpid(),
+                gpa,
+                rip
+            );
             crate::SERIAL_LOCK.store(false, core::sync::atomic::Ordering::Release);
             halt_forever();
         }
@@ -667,8 +808,14 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let rip = vcpu.get(vmcs::guest::RIP);
 
             let name = match vector {
-                0 => "#DE", 1 => "#DB", 2 => "NMI", 3 => "#BP",
-                6 => "#UD", 8 => "#DF", 13 => "#GP", 14 => "#PF",
+                0 => "#DE",
+                1 => "#DB",
+                2 => "NMI",
+                3 => "#BP",
+                6 => "#UD",
+                8 => "#DF",
+                13 => "#GP",
+                14 => "#PF",
                 _ => "??",
             };
 
@@ -678,15 +825,17 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 let cr3 = vcpu.get(vmcs::guest::CR3);
                 let cr4 = vcpu.get(vmcs::guest::CR4);
                 serial_println!("  RSP={:#018x}  CR3={:#010x}  CR4={:#010x}", rsp, cr3, cr4);
-                serial_println!("  RAX={:#018x}  RCX={:#018x}  RDX={:#018x}",
-                    vcpu.reg(Reg::Rax), vcpu.reg(Reg::Rcx), vcpu.reg(Reg::Rdx));
+                serial_println!(
+                    "  RAX={:#018x}  RCX={:#018x}  RDX={:#018x}",
+                    vcpu.reg(Reg::Rax),
+                    vcpu.reg(Reg::Rcx),
+                    vcpu.reg(Reg::Rdx)
+                );
             }
 
             // Re-inject the exception into the guest.
-            let inject = (1u64 << 31)
-                       | ((exc_type as u64) << 8)
-                       | (vector as u64)
-                       | (has_error_code << 11);
+            let inject =
+                (1u64 << 31) | ((exc_type as u64) << 8) | (vector as u64) | (has_error_code << 11);
             vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
             if has_error_code == 1 {
                 let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
@@ -704,7 +853,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let _ifl = if _rflags & (1 << 9) != 0 { 1 } else { 0 };
             // serial_println!("[HEARTBEAT] CS={:#06x} RIP={:#018x} RSP={:#018x} IF={} CR3={:#x}",
             //                _cs, _rip, _rsp, _ifl, _cr3);
-            vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS);
+            vcpu.set(
+                vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                PREEMPTION_TIMER_TICKS,
+            );
         }
 
         EXIT_REASON_APIC_ACCESS => {
@@ -719,7 +871,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // set the relevant bitmap bits and implement parent-chain notification here.
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let vector = (qual & 0xFF) as u8;
-            serial_debug!("[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)", vector);
+            serial_debug!(
+                "[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)",
+                vector
+            );
         }
 
         _other => {
@@ -749,12 +904,15 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 ///   bits[15:12] — access type: 0=data-read, 1=data-write, 2=instr-fetch,
 ///                              3=read-during-event-delivery, 10=GPA-read
 fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
-    let qual    = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-    let offset  = (qual & 0xFFF) as usize;   // byte offset within APIC page
+    let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+    let offset = (qual & 0xFFF) as usize; // byte offset within APIC page
     let acc_type = (qual >> 12) & 0xF;
 
     let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
-    if platform_ptr.is_null() { next_instruction(vcpu); return; }
+    if platform_ptr.is_null() {
+        next_instruction(vcpu);
+        return;
+    }
     let hhdm = unsafe { (*platform_ptr).hhdm_offset() };
 
     let vapic_phys = vcpu.vapic_phys();
@@ -777,7 +935,8 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
         _ => {
             serial_println!(
                 "[APIC_ACCESS] unhandled access type {} offset={:#x} — advancing RIP",
-                acc_type, offset
+                acc_type,
+                offset
             );
         }
     }
@@ -799,7 +958,7 @@ pub unsafe fn inject_virtual_interrupt(vapic_virt: *mut u32, vector: u8, vcpu: &
     // VAPIC VIRR layout mirrors xAPIC IRR: 8 × 32-bit words starting at 0x200.
     // Byte offset for this vector:  0x200 + (vector / 32) * 4
     // Bit position within the word: vector % 32
-    let word_idx = (vector / 32) as usize;         // 0..7
+    let word_idx = (vector / 32) as usize; // 0..7
     let bit = vector % 32;
     let virr_ptr = unsafe { vapic_virt.add(0x200 / 4 + word_idx) };
     unsafe { virr_ptr.write_volatile(virr_ptr.read_volatile() | (1u32 << bit)) };
@@ -848,15 +1007,15 @@ fn gpr_by_index(vcpu: &ActiveVcpu, idx: u64) -> u64 {
         5 => vcpu.reg(Reg::Rbp),
         6 => vcpu.reg(Reg::Rsi),
         7 => vcpu.reg(Reg::Rdi),
-        8  => vcpu.reg(Reg::R8),
-        9  => vcpu.reg(Reg::R9),
+        8 => vcpu.reg(Reg::R8),
+        9 => vcpu.reg(Reg::R9),
         10 => vcpu.reg(Reg::R10),
         11 => vcpu.reg(Reg::R11),
         12 => vcpu.reg(Reg::R12),
         13 => vcpu.reg(Reg::R13),
         14 => vcpu.reg(Reg::R14),
         15 => vcpu.reg(Reg::R15),
-        _  => 0,
+        _ => 0,
     }
 }
 
@@ -871,15 +1030,15 @@ fn set_gpr_by_index(vcpu: &mut ActiveVcpu, idx: u64, val: u64) {
         5 => vcpu.set_reg(Reg::Rbp, val),
         6 => vcpu.set_reg(Reg::Rsi, val),
         7 => vcpu.set_reg(Reg::Rdi, val),
-        8  => vcpu.set_reg(Reg::R8,  val),
-        9  => vcpu.set_reg(Reg::R9,  val),
+        8 => vcpu.set_reg(Reg::R8, val),
+        9 => vcpu.set_reg(Reg::R9, val),
         10 => vcpu.set_reg(Reg::R10, val),
         11 => vcpu.set_reg(Reg::R11, val),
         12 => vcpu.set_reg(Reg::R12, val),
         13 => vcpu.set_reg(Reg::R13, val),
         14 => vcpu.set_reg(Reg::R14, val),
         15 => vcpu.set_reg(Reg::R15, val),
-        _  => {}
+        _ => {}
     }
 }
 
@@ -923,8 +1082,8 @@ fn handle_ept_doorbell(
     gpa: u64,
     qual: u64,
 ) -> Option<bool> {
+    use crate::platform::{THEMIC_DOORBELL_FLAG_ANY_SIZE, THEMIC_DOORBELL_FLAG_ANY_VALUE};
     use themis_abi::domcomm;
-    use crate::platform::{THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_DOORBELL_FLAG_ANY_SIZE};
 
     // EPT qualification bit 1 = data write; bit 0 = data read; bit 2 = instr fetch.
     let is_write = (qual & (1 << 1)) != 0;
@@ -958,9 +1117,13 @@ fn handle_ept_doorbell(
             return None;
         }
         let any_value = e.flags & THEMIC_DOORBELL_FLAG_ANY_VALUE != 0;
-        let any_size  = e.flags & THEMIC_DOORBELL_FLAG_ANY_SIZE  != 0;
-        if !any_size  && e.size != write_size  { return None; }
-        if !any_value && e.datamatch != written_value { return None; }
+        let any_size = e.flags & THEMIC_DOORBELL_FLAG_ANY_SIZE != 0;
+        if !any_size && e.size != write_size {
+            return None;
+        }
+        if !any_value && e.datamatch != written_value {
+            return None;
+        }
         Some((e.doorbell_id, e.gpa, written_value, write_size))
     });
 
@@ -1010,7 +1173,10 @@ fn handle_ept_doorbell(
 
     serial_debug!(
         "[DOORBELL] fast-path id={} gpa={:#x} val={:#x} size={}",
-        doorbell_id, matched_gpa, value, size
+        doorbell_id,
+        matched_gpa,
+        value,
+        size
     );
 
     Some(true)
