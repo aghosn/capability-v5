@@ -115,13 +115,18 @@ write_files:
       Description=Dummy — masked by Themis cloud-init
       [Service]
       ExecStart=/bin/true
+  - path: /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+    content: |
+      PasswordAuthentication yes
 runcmd:
   - mkdir -p /opt/bins
   - systemctl daemon-reload
   - systemctl enable opt-bins.mount
   - systemctl start opt-bins.mount || true
   - systemctl mask systemd-networkd-wait-online.service
-  - apt-get install -y --no-install-recommends qemu-kvm ovmf
+  - apt-get install -y --no-install-recommends qemu-kvm ovmf openssh-server
+  - systemctl enable ssh
+  - systemctl start ssh || true
   - ln -sf /opt/bins /home/cloud/bins
   - echo "themis dom0 cloud-init complete" > /dev/ttyS0
 EOF

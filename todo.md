@@ -40,6 +40,74 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
   - Implemented `set_cpuid2` to store CHV's filtered CPUID policy per-VP.
   - Dom1 now executes past GPA 0x100000 into the `hypervisor-fw` firmware region.
 
+- **dom1 Linux kernel boot debugging (2026-03-23)** — using `themis_trace()` VMCALL
+  instrumentation (see `skills/debugging-dom-boot.md` for full trace code registry and
+  procedure). Current state of `../linux` (relative to repo root): instrumented bzImage
+  is built and packed into `themis/guest/bins.img` as `nested/bzImage` (kernel #18).
+  Run `cargo themis` then `sudo /opt/bins/cloud-hypervisor/run-dom1.sh` inside dom0
+  and check `grep '\[DBG\]' /tmp/out.txt` for traces.
+
+  Bugs fixed during this session:
+  - **nopv**: added `nopv` to dom1 kernel cmdline in `themis/scripts/run-dom1.sh`.
+    Without it, dom1 hangs in `pvclock_read_flags()` spinning on an odd version because
+    CHV never initialises the pvclock struct after `MSR_KVM_SYSTEM_TIME_NEW` write.
+    See P16.6b2 for long-term fix.
+  - **CPUID 0x40000000 for child domains**: added `EXIT_REASON_CPUID` to child domain
+    dispatch in `capavisor/src/vmexit.rs` — returns "ThemisCapa" for hypervisor leaves
+    (0x40000000–0x4FFFFFFF), forwards all other leaves to CHV. Without this, dom1 saw
+    "KVMKVMKVM" and `ms_hyperv_platform()` hung (ms_hyperv has `ignore_nopv=true`).
+  - **APIC_ACCESS for child domains (IN PROGRESS as of 2026-03-23)**: root cause and
+    design fully understood. Summary:
+
+    Root cause: dom1's EPT has NO mapping for GPA `0xFEE00000`. Guest LAPIC MMIO
+    accesses cause `EXIT_REASON_EPT_VIOLATION` (forwarded to CHV). CHV's
+    `handle_mmio_exit` calls `advance_rip(rip, instruction_length=0)` — EPT violations
+    do NOT populate `VMEXIT_INSTRUCTION_LEN` in hardware, so RIP never advances →
+    infinite loop / hang.
+
+    Fix: `VIRTUALIZE_APIC_ACCESSES` is already set in child VMCS (bit 0, secondary
+    controls) when `apic_access_phys != 0`. `APIC_ACCESS_ADDR = apic_access_phys` is
+    already written. What is missing is the EPT mapping `GPA 0xFEE00000 →
+    apic_access_phys` in the child domain's EPT. Once this mapping exists, hardware
+    fires `EXIT_REASON_APIC_ACCESS` (44) instead of EPT violations, instruction_length
+    is populated, and `handle_apic_access_exit` handles it correctly.
+
+    Design decisions confirmed (cross-checked against KVM `vmx.c`):
+    - `VIRTUAL_APIC_PAGE` (vapic_phys) is **per-vCPU**: holds APIC register state.
+    - `APIC_ACCESS_ADDR` (apic_access_phys) is **per-partition** (shared across vCPUs):
+      just a sentinel HPA. EPT is per-partition (one mapping for all vCPUs), so
+      APIC_ACCESS_ADDR must be the same for all vCPUs of a partition — it CANNOT be the
+      same page as vapic_phys. KVM uses the same split (per-VM apic_access page vs
+      per-vCPU virtual APIC page). Contents of apic_access_phys are never read/written
+      by anyone — it is purely a unique HPA sentinel.
+    - For any APIC operation requiring parent (dom0) involvement, the COMM channel
+      handles the notification path. No APIC exits need to reach dom0 directly.
+
+    **Next step**: ~~In `do_add_vp` (first VP of a child partition), after allocating
+    `apic_access_phys`, call `platform.apply_update(&Update::ChangeRights { ... })` to
+    add EPT mapping `GPA 0xFEE00000 → apic_access_phys` for the child domain.~~ **DONE
+    via capability system (2026-03-23)**:
+    - `struct thhv_initialize_partition` extended with `apic_access_uaddr` + `apic_access_size`
+    - `THHV_SEND_SHARED_META` handler pins CHV-provided page, CARVEs from dom0, SEND_AT
+      to child at GPA `0xFEE00000` → `ChangeRights` → EPT mapping (fully capability-mediated)
+    - `thhv_set_guest_memory` guards against any overlap with `[0xFEE00000, 0xFEEFFFFF]`
+    - capavisor `apply_update → ChangeRights` detects `address == 0xFEE00000` on child
+      domain and stores `physical` as `apic_access_phys` (architectural constant, not magic)
+    - `do_add_vp` no longer allocates `apic_access_phys` from META (removed); reads it
+      from `pd.apic_access_phys` set by ChangeRights; first-VP META pages reduced 5→4
+    - CHV allocates `apic_access` mmap (1 page), passes to `ThhvInitializePartition`,
+      keeps it alive in `ThemisVmState::_apic_access`
+    - **Next**: build + deploy and check trace advances past `0x2A4`
+
+  Last known trace sequence (kernel #18):
+  ```
+  0x293 (early_acpi_boot_init: after blacklist check)
+  0x2A0 (apic_set_fixmap entry)
+  0x2A1 (set_fixmap_nocache done)
+  0x2A3 (apic_read_boot_cpu_id entry)
+  → HANG at 0x2A4 (read_apic_id() MMIO read at 0xFEE00020) — EPT violation, RIP stuck
+  ```
+
 ---
 
 ## Open Implementation Phases
@@ -1122,6 +1190,35 @@ virtualization into the capability/domain-policy model.
 - [ ] **P16.6d** — **EXCEPTION/NMI exit handling**: exit reason 0 is currently
   silently ignored. Dom1 exceptions (#GP, #PF, #UD) need to be either injected
   back into the guest or reported as errors.
+
+- [ ] **P16.6d2** — **APIC virtualization for child domains (capavisor-owned)**:
+  Currently `EXIT_REASON_APIC_ACCESS` from child domains is forwarded to the
+  parent (CHV/dom0) via `forward_child_exit`. This is architecturally wrong and
+  unscalable: at recursion depth N the round-trip cost is O(N) wake-ups.
+
+  **Design principle**: the LAPIC is per-vCPU state. It does not cross domain
+  boundaries at runtime. Capavisor (L0) should handle LAPIC virtualization for
+  ALL domains, never involving the parent, except at vCPU creation time.
+
+  | Operation | Handler | Rationale |
+  |-----------|---------|-----------|
+  | Routine LAPIC reads/writes | Capavisor, via vapic page | Per-vCPU state, O(1) at any depth |
+  | APIC timer | Capavisor, via VMX preemption timer | Already done for dom0 |
+  | Intra-domain IPI (same domain) | Capavisor directly | Domain-internal, no boundary |
+  | Cross-domain IPI | Capavisor + capability check | IS a security boundary |
+  | Initial APIC ID / topology | Parent sets at vCPU creation | Policy decision, not runtime |
+
+  **Implementation**:
+  1. Add `EXIT_REASON_APIC_ACCESS` to the child domain dispatch in `vmexit.rs`,
+     routing it to `handle_apic_access_exit` (already implemented for dom0).
+  2. The vapic page per child vCPU is already managed in VMCS setup — just needs
+     to be populated at creation time with the APIC ID supplied by the parent.
+  3. Add `EXIT_REASON_APIC_WRITE` handling for write-trapping (ICR writes for IPI
+     delivery need the cross-domain capability check).
+  4. Cross-domain IPI: capavisor checks whether the source domain has a capability
+     allowing interrupt delivery to the target vCPU/domain; if yes, inject directly.
+
+  This applies to dom1, dom2, dom3 etc. uniformly — no special-casing per depth.
 
 - [ ] **P16.6e** — **Dom1 serial console output**: verify dom1 kernel output
   appears on dom0's console (CHV serial → dom0 stdout → QEMU serial).

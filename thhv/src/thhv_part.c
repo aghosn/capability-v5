@@ -46,6 +46,13 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->shared_meta_pages);
 	}
 
+	/* Unpin APIC-access sentinel page. */
+	if (part->apic_access_pages) {
+		unpin_user_pages(part->apic_access_pages,
+				 part->apic_access_nr_pages);
+		kfree(part->apic_access_pages);
+	}
+
 	/* Free kernel-allocated EPT META pages. */
 	if (part->ept_meta_pages) {
 		unsigned int j;
@@ -193,6 +200,20 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 		return -EINVAL;
 	if (gm.userspace_addr & ~PAGE_MASK)
 		return -EINVAL;
+
+	/* Guard: GPA 0xFEE00000 is owned by capavisor for LAPIC virtualization.
+	 * CHV must not map guest memory overlapping this range. */
+	{
+		u64 req_start = gm.guest_pfn << PAGE_SHIFT;
+		u64 req_end   = req_start + gm.size;
+		u64 lap_end   = THHV_LAPIC_GPA + PAGE_SIZE;
+
+		if (req_start < lap_end && req_end > THHV_LAPIC_GPA) {
+			pr_err("thhv: SET_GUEST_MEMORY GPA [0x%llx, 0x%llx) overlaps LAPIC range [0x%llx, 0x%llx)\n",
+			       req_start, req_end, THHV_LAPIC_GPA, lap_end);
+			return -EINVAL;
+		}
+	}
 
 	nr_pages = gm.size >> PAGE_SHIFT;
 
@@ -658,6 +679,152 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		}
 		pr_debug("thhv: sent %u shared META pages for domain 0x%llx\n",
 			 part->shared_meta_nr_pages, part->domain_handle);
+
+		/*
+		 * APIC-access sentinel page: pinned from CHV userspace, CARVEd
+		 * from dom0's memory, and SEND_AT to the child domain at GPA
+		 * THHV_LAPIC_GPA (0xFEE00000).  The capavisor's ChangeRights
+		 * handler detects this GPA and stores the HPA as apic_access_phys
+		 * for the VMCS APIC_ACCESS_ADDR field.  EPT META pages are also
+		 * allocated here to back the EPT page-table entries for this GPA.
+		 */
+		if (!ip.apic_access_uaddr || (ip.apic_access_uaddr & ~PAGE_MASK))
+			return -EINVAL;
+		if (ip.apic_access_size != PAGE_SIZE)
+			return -EINVAL;
+
+		{
+			u64 hpa, parent_handle, cap_handle, cap_sub;
+			struct page **ept_pages;
+			unsigned int nr_ept_meta, j;
+			struct thhv_sent_cap *sc;
+
+			/* Pin the APIC-access page. */
+			part->apic_access_pages = kcalloc(1, sizeof(struct page *),
+							  GFP_KERNEL);
+			if (!part->apic_access_pages)
+				return -ENOMEM;
+
+			ret = pin_user_pages_fast(ip.apic_access_uaddr, 1,
+						  FOLL_WRITE | FOLL_LONGTERM,
+						  part->apic_access_pages);
+			if (ret != 1) {
+				kfree(part->apic_access_pages);
+				part->apic_access_pages = NULL;
+				return ret < 0 ? ret : -EFAULT;
+			}
+			part->apic_access_nr_pages = 1;
+
+			/* Translate to HPA. */
+			hpa = thhv_gpa_to_hpa(
+				(u64)page_to_pfn(part->apic_access_pages[0]) << PAGE_SHIFT);
+			if (hpa == (u64)-1) {
+				pr_err("thhv: APIC-access page HPA translation failed\n");
+				return -EFAULT;
+			}
+
+			/* Send EPT META pages for GPA THHV_LAPIC_GPA. */
+			nr_ept_meta = thhv_ept_meta_needed(THHV_LAPIC_GPA, PAGE_SIZE);
+			ept_pages = kcalloc(nr_ept_meta, sizeof(struct page *),
+					    GFP_KERNEL);
+			if (!ept_pages)
+				return -ENOMEM;
+
+			for (j = 0; j < nr_ept_meta; j++) {
+				ept_pages[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+				if (!ept_pages[j]) {
+					while (j--)
+						__free_page(ept_pages[j]);
+					kfree(ept_pages);
+					return -ENOMEM;
+				}
+			}
+
+			ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
+						   THHV_META_KEY_EPT);
+			if (ret) {
+				for (j = 0; j < nr_ept_meta; j++)
+					__free_page(ept_pages[j]);
+				kfree(ept_pages);
+				pr_err("thhv: APIC-access EPT META send failed (%d)\n", ret);
+				return ret;
+			}
+
+			/* Accumulate EPT META pages for cleanup. */
+			if (part->ept_meta_pages) {
+				struct page **merged;
+				unsigned int total = part->ept_meta_nr_pages + nr_ept_meta;
+
+				merged = krealloc(part->ept_meta_pages,
+						  total * sizeof(struct page *),
+						  GFP_KERNEL);
+				if (!merged) {
+					kfree(ept_pages);
+					return -ENOMEM;
+				}
+				memcpy(merged + part->ept_meta_nr_pages, ept_pages,
+				       nr_ept_meta * sizeof(struct page *));
+				kfree(ept_pages);
+				part->ept_meta_pages = merged;
+				part->ept_meta_nr_pages = total;
+			} else {
+				part->ept_meta_pages = ept_pages;
+				part->ept_meta_nr_pages = nr_ept_meta;
+			}
+
+			/* CARVE the APIC-access page from dom0's memory. */
+			ret = thhv_find_parent_handle(hpa, PAGE_SIZE, &parent_handle);
+			if (ret) {
+				pr_err("thhv: APIC-access page HPA 0x%llx: no parent cap\n", hpa);
+				return ret;
+			}
+
+			ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
+					   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
+					   &cap_handle, &cap_sub);
+			if (ret) {
+				pr_err("thhv: APIC-access CARVE failed (%d)\n", ret);
+				return ret;
+			}
+
+			ret = thhv_cap_table_insert(cap_handle, parent_handle,
+						    cap_sub, hpa, PAGE_SIZE);
+			if (ret) {
+				themis_revoke_mem(parent_handle, cap_sub);
+				return ret;
+			}
+
+			/* SEND_AT to child domain at GPA THHV_LAPIC_GPA.
+			 * The capavisor ChangeRights handler records HPA as
+			 * apic_access_phys when it sees address == THHV_LAPIC_GPA. */
+			ret = themis_send_at(cap_handle, part->domain_handle,
+					     0 /* no special attrs */,
+					     THHV_LAPIC_GPA);
+			if (ret) {
+				themis_revoke_mem(parent_handle, cap_sub);
+				thhv_cap_table_remove(cap_handle);
+				pr_err("thhv: APIC-access SEND_AT failed (%d)\n", ret);
+				return ret;
+			}
+
+			/* Track capability for revocation on teardown. */
+			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+			if (!sc) {
+				themis_revoke_mem(parent_handle, cap_sub);
+				thhv_cap_table_remove(cap_handle);
+				return -ENOMEM;
+			}
+			sc->cap_handle    = cap_handle;
+			sc->parent_handle = parent_handle;
+			sc->sub_handle    = cap_sub;
+			sc->region_key    = THHV_LAPIC_GPA >> PAGE_SHIFT;
+			spin_lock(&part->sent_caps.lock);
+			list_add_tail(&sc->list, &part->sent_caps.list);
+			spin_unlock(&part->sent_caps.lock);
+
+			pr_debug("thhv: APIC-access page HPA 0x%llx mapped at GPA 0x%llx for domain 0x%llx\n",
+				 hpa, THHV_LAPIC_GPA, part->domain_handle);
+		}
 		return 0;
 	}
 

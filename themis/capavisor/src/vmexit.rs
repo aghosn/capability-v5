@@ -355,6 +355,15 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 }
                             }
                         }
+                        EXIT_REASON_APIC_ACCESS => {
+                            // Handle LAPIC MMIO accesses for child domains natively
+                            // using the same virtual APIC page mechanism as dom0.
+                            // Forwarding to the parent is architecturally wrong:
+                            // the LAPIC is per-vCPU state that doesn't cross domain
+                            // boundaries, and the round-trip cost is O(depth).
+                            handle_apic_access_exit(vcpu);
+                            return;
+                        }
                         _ => {
                             // All other exits: forward to parent.
                             crate::hypercall::forward_child_exit(vcpu, basic_reason);

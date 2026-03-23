@@ -11,6 +11,8 @@
 #   QEMU_MEM=4G             guest RAM (default: 4G)
 #   QEMU_ENABLE_KVM=1       use KVM acceleration (default: 1 if available)
 #   QEMU_BIOS=1             use legacy BIOS instead of UEFI (default: 0)
+#   QEMU_NET=1              enable user-mode networking (default: 1)
+#   QEMU_NET_FWD            extra port forwards (e.g. "hostfwd=tcp::8080-:8080")
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
 
 set -euo pipefail
@@ -86,6 +88,17 @@ if [[ -f "$WORKSPACE_ROOT/guest/bins.img" ]]; then
     BINS_ARGS+="-device virtio-blk-pci,drive=bins "
 fi
 
+# ── Networking ───────────────────────────────────────────────────────────────
+NET_ARGS=""
+if [[ "${QEMU_NET:-1}" == "1" ]]; then
+    NET_FWD="hostfwd=tcp::2222-:22"
+    [[ -n "${QEMU_NET_FWD:-}" ]] && NET_FWD+=",${QEMU_NET_FWD}"
+    NET_ARGS="-netdev user,id=n0,${NET_FWD} -device virtio-net-pci,netdev=n0"
+fi
+
+echo "→ Booting $ISO (${QEMU_CPUS} CPUs, ${QEMU_MEM} RAM)"
+[[ -n "$NET_ARGS" ]] && echo "  + networking: virtio-net (SLIRP), SSH → localhost:2222"
+
 exec qemu-system-x86_64 \
     $KVM_ARGS \
     -machine q35,kernel-irqchip=split \
@@ -99,4 +112,5 @@ exec qemu-system-x86_64 \
     -no-reboot \
     ${DISK_ARGS} \
     ${BINS_ARGS} \
+    ${NET_ARGS} \
     ${QEMU_EXTRA_ARGS:-}

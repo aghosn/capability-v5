@@ -498,13 +498,29 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
 
 ---
 
-## 11. Debugging Skills
+## 11. Skills
 
-See `skills/` at the repo root for full skill writeups.
+### Mandatory — read this first, every session
 
-- **`skills/debugging-dom-boot.md`** — How to instrument a Linux kernel with
-  `themis_trace()` (direct VMCALL to capavisor) to debug early-boot failures in
-  guest domains, including the trace code registry.
+**`skills/agent-workflow.md`** — Session hygiene: startup ritual, how to maintain
+`todo.md` during a session (mark tasks in-progress/done, write debugging stack notes,
+list file changes), build hygiene, and end-of-session checklist.  This skill applies
+to every session regardless of task.
+
+### How to select additional skills
+
+After reading `agent-workflow.md`, run `ls skills/` to see the current list (new skills
+may have been added since this document was last updated), then read whichever apply to
+your task:
+
+| Skill file | When to read it |
+|------------|----------------|
+| `skills/debugging-dom-boot.md` | Debugging an early-boot hang in a guest domain (dom1, nested Linux). Covers `themis_trace()` VMCALL instrumentation and the trace code registry. |
+| `skills/running-inside-dom0.md` | Booting Themis + dom0 under QEMU, capturing the full trace to `/tmp/out.txt`, SSH-ing into dom0 in parallel, and diagnosing hangs or crashes. |
+| `skills/working-on-capability-engine.md` | Modifying `2026/` — domain-mediated API, locking model (shared vs. exclusive, `execute()`), running `cargo test` / `cargo loom` / `cargo loom-all`, test policy, verifying CLI-2026. |
+| `skills/working-on-capavisor.md` | Modifying `themis/capavisor/` — core invariants (capability-first, adversarial domains, no dom0 privilege, META pool isolation), adding vmexit handlers, adding hypercalls, `ThemisPlatform::apply_update`, active-codebase caveats. |
+
+Read the full skill file, not just this table — the table is a routing guide only.
 
 ---
 

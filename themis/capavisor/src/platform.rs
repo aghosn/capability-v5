@@ -1466,6 +1466,13 @@ impl Platform for ThemisPlatform {
                 // borrow checker accepts simultaneous &mut ept and &mut meta.
                 let meta_ptr: *mut MetaAllocator = &mut d.meta;
 
+                // Child domain mapping GPA 0xFEE00000 (LAPIC base): record the HPA
+                // so ADD_VP can set APIC_ACCESS_ADDR in the child VMCS, enabling
+                // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
+                if is_child && *address == 0xFEE0_0000 && *size == 0x1000 {
+                    d.apic_access_phys = *physical;
+                }
+
                 if rights.bits() == 0 {
                     if let Some(ept) = d.ept.as_mut() {
                         // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.

@@ -181,9 +181,17 @@ struct thhv_create_vp {
 	__u64 comm_uaddr;     /* Userspace VA of COMM page (PAGE_SIZE) */
 };
 
+/* Guest physical address of the LAPIC MMIO window.  The capavisor maps the
+ * apic_access page here so VIRTUALIZE_APIC_ACCESSES fires APIC_ACCESS exits
+ * instead of EPT violations for child-domain LAPIC accesses.
+ */
+#define THHV_LAPIC_GPA	0xFEE00000ULL
+
 struct thhv_initialize_partition {
-	__u64 meta_uaddr;     /* Userspace VA of shared META pages */
-	__u64 meta_size;      /* Size in bytes (must be PAGE_SIZE * META_PAGES_SHARED) */
+	__u64 meta_uaddr;          /* Userspace VA of shared META pages */
+	__u64 meta_size;           /* Size in bytes (must be PAGE_SIZE * META_PAGES_SHARED) */
+	__u64 apic_access_uaddr;   /* Userspace VA of APIC-access sentinel page (PAGE_SIZE) */
+	__u64 apic_access_size;    /* Must be PAGE_SIZE */
 };
 
 struct thhv_set_guest_memory {
@@ -960,6 +968,11 @@ struct thhv_partition {
 	/* Shared META pages: MSR bitmap + IO bitmaps A & B.  Pinned at INITIALIZE. */
 	struct page **shared_meta_pages;
 	unsigned int  shared_meta_nr_pages;
+
+	/* APIC-access sentinel page: mapped at GPA THHV_LAPIC_GPA so that
+	 * VIRTUALIZE_APIC_ACCESSES fires APIC_ACCESS exits for LAPIC accesses. */
+	struct page **apic_access_pages;
+	unsigned int  apic_access_nr_pages;
 
 	/* EPT META pages: kernel-allocated, sent to child for EPT page tables. */
 	struct page **ept_meta_pages;

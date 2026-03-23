@@ -447,12 +447,14 @@ fn do_add_vp(
     let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys, first_vp);
     {
         let mut pd = arc.lock();
-        // Check if this is the first VP (need extra pages for MSR bitmap + APIC access page).
+        // Check if this is the first VP (need extra page for MSR bitmap).
         first_vp = pd.msr_bitmap_phys == 0;
-        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + APIC access page if first VP).
+        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap if first VP).
+        // apic_access_phys comes from the ChangeRights mapping of GPA 0xFEE00000,
+        // established during THHV_SEND_SHARED_META — not allocated from META.
         // THHV_META_PAGES_SHARED (4: MSR bitmap + IO bitmaps + EPT root) +
-        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP, comfortably covers 5+1=6.
-        let pages_needed = if first_vp { 5 } else { 3 };
+        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP, comfortably covers 4+1=5.
+        let pages_needed = if first_vp { 4 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -465,9 +467,10 @@ fn do_add_vp(
         pid_phys = pd.meta.alloc_frame();
         if first_vp {
             pd.msr_bitmap_phys = pd.meta.alloc_frame();
-            pd.apic_access_phys = pd.meta.alloc_frame();
         }
         msr_bitmap_phys = pd.msr_bitmap_phys;
+        // apic_access_phys was recorded by apply_update when thhv mapped the
+        // APIC-access sentinel page at GPA 0xFEE00000 via THHV_SEND_SHARED_META.
         apic_access_phys = pd.apic_access_phys;
     }
 
@@ -495,8 +498,7 @@ fn do_add_vp(
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
                 pd.msr_bitmap_phys = 0;
-                pd.meta.free_frame(apic_access_phys);
-                pd.apic_access_phys = 0;
+                // apic_access_phys is not from META — do not free it.
             }
             serial_println!("[ADD_VP] capa engine error, META rolled back");
             HypercallResult::error(map_error(&e))
