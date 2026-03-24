@@ -26,37 +26,35 @@ The workflow has two parallel tracks:
 
 ---
 
+## Step 0 — Rebuild Bins (after code changes)
+
+After modifying thhv, cloud-hypervisor, or capavisor, repack the bins image
+from the **repo root**:
+
+```bash
+cargo build-bins
+```
+
+This rebuilds and packs all binaries into `guest/bins.img` (mounted as
+`/opt/bins/` in dom0).
+
+---
+
 ## Step 1 — Build and Boot (with trace capture)
 
-Boot the full Themis stack and redirect all serial output to a file:
+Boot the full Themis stack from **inside the `themis/` directory**:
 
 ```bash
-cargo themis > /tmp/out.txt 2>&1 &
-THEMIS_PID=$!
-echo "Themis PID: $THEMIS_PID"
+cd themis/
+cargo themis 2>&1 | tee /tmp/out.txt
 ```
 
-Or equivalently from the scripts directory:
+`cargo themis` builds the ISO first, then launches QEMU. All capavisor
+`serial_println!` and dom0 kernel messages go to stdout and are captured in
+`/tmp/out.txt`.
 
-```bash
-bash themis/scripts/run-qemu.sh > /tmp/out.txt 2>&1 &
-```
-
-`cargo themis` builds the ISO first (`build-iso.sh`), then launches QEMU.
-The serial console (`-serial mon:stdio`) is the only output — all capavisor
-`serial_println!` and dom0 kernel messages go to `/tmp/out.txt`.
-
-**Wait for dom0 to be ready** by polling the trace:
-
-```bash
-# Wait until dom0's SSH server is accepting connections (up to ~90s).
-for i in $(seq 1 90); do
-    ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
-        -o ConnectTimeout=2 -p 2222 cloud@localhost true 2>/dev/null && break
-    sleep 1
-done
-echo "dom0 ready"
-```
+**Wait for dom0 to finish booting** (watch `/tmp/out.txt` for the login prompt
+or cloud-init completion), then SSH in from a separate terminal (Step 2).
 
 ---
 
@@ -101,18 +99,17 @@ scp -o StrictHostKeyChecking=no -P 2222 ./myfile cloud@localhost:/home/cloud/
 
 ### Running cloud-hypervisor (dom1) inside dom0
 
+From a terminal SSH'd into dom0:
+
 ```bash
-ssh -o StrictHostKeyChecking=no -o BatchMode=yes -p 2222 cloud@localhost '
-    sudo insmod /opt/bins/thhv/thhv.ko
-    /opt/bins/cloud-hypervisor/cloud-hypervisor \
-        --kernel /opt/bins/nested/bzImage \
-        --memory size=512M \
-        --cpus boot=1 \
-        --serial tty \
-        --console off \
-        2>&1
-'
+# Run dom1 with 1 vCPU (use for debugging; increase CPUs once stable)
+sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
+
+# Default CPU count (multi-core)
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 ```
+
+`thhv.ko` is loaded automatically by `run-dom1.sh` if not already loaded.
 
 ---
 
@@ -186,44 +183,24 @@ grep "VMCALL\|\[HC\]" /tmp/out.txt | tail -10
 
 ---
 
-## Step 5 — Full Example Workflow (agent-ready)
+## Step 5 — Full Workflow Summary
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+```
+# 1. After code changes — repack bins (repo root)
+cargo build-bins
 
-REPO="$(git rev-parse --show-toplevel)"
-OUT=/tmp/out.txt
+# 2. Boot the stack (inside themis/)
+cd themis/
+cargo themis 2>&1 | tee /tmp/out.txt
 
-# 1. Boot
-cd "$REPO"
-cargo themis > "$OUT" 2>&1 &
-QEMU_PID=$!
-echo "QEMU PID=$QEMU_PID, trace: $OUT"
+# 3. In a separate terminal — SSH into dom0
+ssh cloud@localhost -p 2222
 
-# 2. Wait for dom0 SSH
-echo "Waiting for dom0..."
-SSH="ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=2 -p 2222 cloud@localhost"
-for i in $(seq 1 90); do
-    $SSH true 2>/dev/null && break
-    if ! kill -0 $QEMU_PID 2>/dev/null; then
-        echo "QEMU exited early — trace:"
-        tail -30 "$OUT"
-        exit 1
-    fi
-    sleep 1
-done
+# 4. Inside dom0 — run dom1 (1 vCPU for debugging)
+sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
 
-# 3. Run test
-echo "dom0 ready — running test"
-$SSH 'sudo insmod /opt/bins/thhv/thhv.ko && echo "thhv loaded"'
-
-# 4. Inspect result
-$SSH 'dmesg | grep -i thhv | tail -10'
-
-# 5. Shutdown cleanly (optional)
-$SSH 'sudo poweroff' || true
-wait $QEMU_PID || true
+# 5. Watch traces (from host)
+grep '\[DBG\]' /tmp/out.txt | tail -30
 ```
 
 ---

@@ -99,6 +99,19 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
       keeps it alive in `ThemisVmState::_apic_access`
     - **Next**: build + deploy and check trace advances past `0x2A4`
 
+    **Build/deploy bugs found and fixed (2026-03-23)**:
+    - `thhv.ko` was stale (Mar 20) despite `cargo build-bins` — Makefile only checks
+      `liblibthemis.a` freshness. Fix: `touch src/thhv_part.c` before `make` to force
+      rebuild when headers change.
+    - Compile error: `sc->cap_handle` doesn't exist in `struct thhv_sent_cap`; correct
+      field is `sub_handle`. Fixed in `thhv_part.c`.
+    - `EEXIST` from `THHV_CREATE_VP`: after `themis_send_at` for APIC access page
+      succeeds, `cap_handle` was left in the cap table. Capa engine reuses the same slot
+      number for the next `CARVE` (COMM page in `THHV_CREATE_VP`). `thhv_cap_table_insert`
+      returns `EEXIST`. Fix: call `thhv_cap_table_remove(cap_handle)` after successful
+      `themis_send_at`, matching the pattern in `thhv_send_meta_pages`.
+    - **Next**: re-run dom1 boot and check trace advances past `0x2A4`
+
   Last known trace sequence (kernel #18):
   ```
   0x293 (early_acpi_boot_init: after blacklist check)

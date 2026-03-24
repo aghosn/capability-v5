@@ -806,6 +806,9 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 				pr_err("thhv: APIC-access SEND_AT failed (%d)\n", ret);
 				return ret;
 			}
+			/* After SEND_AT the sender's cap slot is consumed; remove
+			 * from cap_table so the capa engine can reuse the handle. */
+			thhv_cap_table_remove(cap_handle);
 
 			/* Track capability for revocation on teardown. */
 			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
@@ -814,7 +817,6 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 				thhv_cap_table_remove(cap_handle);
 				return -ENOMEM;
 			}
-			sc->cap_handle    = cap_handle;
 			sc->parent_handle = parent_handle;
 			sc->sub_handle    = cap_sub;
 			sc->region_key    = THHV_LAPIC_GPA >> PAGE_SHIFT;
