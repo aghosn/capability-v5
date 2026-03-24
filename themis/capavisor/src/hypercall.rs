@@ -764,16 +764,26 @@ fn do_switch(
                 let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
                 unsafe { (*on_ptr).store(0, Ordering::Release) };
                 if let Some(vector) = found {
-                    // Inject as External Interrupt (type=0), valid (bit 31).
-                    let intr_info = (1u64 << 31) | (vector as u64);
-                    child_active.set(
-                        x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                        intr_info,
-                    );
-                    serial_println!(
-                        "[SWITCH] PIR→VMENTRY_INTR_INFO v={:#x} (no hw PID)",
-                        vector
-                    );
+                    // Check guest can accept external interrupts before injection.
+                    let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
+                    let interruptibility =
+                        child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
+                    let if_set = rflags & (1 << 9) != 0;
+                    let sti_mov_ss_block = interruptibility & 0x3 != 0;
+                    if if_set && !sti_mov_ss_block {
+                        // Inject as External Interrupt (type=0), valid (bit 31).
+                        let intr_info = (1u64 << 31) | (vector as u64);
+                        child_active.set(
+                            x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                            intr_info,
+                        );
+                    } else {
+                        // Guest not ready — put the PIR bit back for next try.
+                        unsafe {
+                            (*pir_base.add(vector as usize / 64))
+                                .fetch_or(1u64 << (vector as usize % 64), Ordering::AcqRel)
+                        };
+                    }
                 }
             }
         }
@@ -1990,10 +2000,6 @@ fn do_inject_interrupt(
     // a posted-interrupt IPI (vector 0xF2) instead.
     unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
 
-    serial_println!(
-        "[INJECT_INTERRUPT] child_dom={} vp={} vector={:#x}",
-        child_domain_id, vp_id, vector
-    );
     HypercallResult::success()
 }
 

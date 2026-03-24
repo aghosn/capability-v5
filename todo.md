@@ -112,7 +112,7 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
       `themis_send_at`, matching the pattern in `thhv_send_meta_pages`.
     - **Next**: re-run dom1 boot and check trace advances past `0x2A4`
 
-  Last known trace sequence (kernel #18):
+  Last known trace sequence (kernel #18, as of 2026-03-23):
   ```
   0x293 (early_acpi_boot_init: after blacklist check)
   0x2A0 (apic_set_fixmap entry)
@@ -120,6 +120,53 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
   0x2A3 (apic_read_boot_cpu_id entry)
   → HANG at 0x2A4 (read_apic_id() MMIO read at 0xFEE00020) — EPT violation, RIP stuck
   ```
+
+- **dom1 MMIO emulation fixes (2026-03-24)** — three critical bugs fixed:
+
+  1. **MSR save/restore on VMCS switch** (`crates/vmx/src/vcpu.rs`):
+     STAR, LSTAR, CSTAR, FMASK, KERNEL_GS_BASE were not saved/restored when
+     switching between dom0 and dom1 VMCS. Dom1's `swapgs` corrupted dom0's
+     KERNEL_GS_BASE → next interrupt in dom0 used wrong per-CPU base → double fault.
+     Fix: manual RDMSR in `deactivate()`, WRMSR in `activate()`.
+
+  2. **Instruction length for EPT violations** (`capavisor/src/hypercall.rs`):
+     `VMEXIT_INSTRUCTION_LEN` is undefined for EPT violations (Intel SDM §27.2.1).
+     Hardware returned 3 for a 4-byte `mov [rax+0x10], r13d` → RIP landed mid-instruction
+     → page fault. Fix: decode full instruction length from ModR/M (SIB, disp8/disp32)
+     in `decode_mmio_insn()`. Capavisor uses decoded length for EPT violations, falling
+     back to `next_instruction()` for other exit types.
+
+  3. **Per-exit EPT logging** (`capavisor/src/hypercall.rs`):
+     Added `[EPT]` and `[EPT-DEC]` serial_println! lines for every EPT exit: GPA, RIP,
+     qualification, decoded register, THHV constant, is_write, value, length.
+
+  Results after fixes:
+  - Dom0 double fault eliminated (MSR fix)
+  - 202 EPT exits processed correctly (instruction length fix)
+  - IOAPIC redirect table fully read and restored (registers 0x10-0x3F)
+  - Dom1 reached trace 0x347 (past `enable_IR_x2apic` completely)
+  - Dom1 reached 0x313/0x314 (past `x86_late_time_init` → `setup_boot_APIC_clock`)
+  - Dom1 reached 0x301, 0x7 (further into boot)
+
+  Current trace sequence (kernel #24):
+  ```
+  0x0–0x4f  (early boot) ✅
+  0x210–0x2bb (setup_arch) ✅
+  0x200–0x209 (start_kernel) ✅
+  0x340–0x347 (enable_IR_x2apic — IOAPIC save/restore) ✅
+  0x310–0x314 (x86_late_time_init — setup_boot_APIC_clock) ✅
+  0x301, 0x7
+  → HANG: soft lockup at themis_switch — dom1 stuck in timer calibration loop
+  ```
+
+  **Current blocker**: dom1 hangs in APIC timer calibration (`calibrate_APIC_clock`
+  or `calibrate_delay`) waiting for a timer interrupt that never arrives. No periodic
+  timer source exists to inject interrupts into dom1. See P16.6a for fix.
+
+  **Architecture note — PV IOAPIC (future)**: long-term, IOAPIC will be paravirtualized
+  (inspired by MSHV SynIC) to eliminate MMIO emulation, instruction decode, and RIP
+  length issues. The current MMIO plumbing is the bootstrap path for stock kernels.
+  See P16.6d3 for details.
 
 ---
 
@@ -1166,10 +1213,28 @@ hierarchy (`Hypervisor`, `Vm`, `Vcpu`) using `/dev/mshv` ioctls from Phase 15.
 Follow-on work needed to complete dom1 boot and properly integrate CPUID
 virtualization into the capability/domain-policy model.
 
-- [ ] **P16.6a** — **HLT exit + timer interrupt for dom1**: hypervisor-fw halts
-  waiting for a timer interrupt to continue initialization. CHV returns
-  `VmExit::Ignore` for HLT but no timer interrupt is ever injected. Investigate
-  whether `THHV_IRQFD` or a periodic injection mechanism is needed.
+- [x] **P16.6a** — **HLT exit + timer interrupt for dom1**: ✅ PARTIALLY DONE.
+  HLT handled (CHV returns `VmExit::Ignore`). Timer interrupt injection is the
+  remaining piece — dom1 hangs in `calibrate_APIC_clock` waiting for a timer tick.
+
+  **Timer injection plan (timerfd + IRQFd, Option 1)**:
+  The interrupt injection infrastructure already exists end-to-end:
+  - Capavisor: `THEMIS_INJECT_INTERRUPT` hypercall, Posted Interrupt Descriptors,
+    `inject_via_pid()`, PIR→VMENTRY drain fallback — all working.
+  - thhv.ko: `THHV_IRQFD` ioctl, EventFd→workqueue→`themis_inject_interrupt` — working.
+  - CHV: `register_irqfd(fd, gsi)` calls `THHV_IRQFD` — working.
+
+  What's missing: a **periodic timer source** to trigger the EventFd.
+
+  Implementation (in CHV VMM layer):
+  1. Create a `timerfd` (CLOCK_MONOTONIC) firing at ~1 kHz (1 ms period).
+  2. Register it via `register_irqfd(timerfd, APIC_TIMER_VECTOR)` where
+     APIC_TIMER_VECTOR = 0x30 or whatever the guest's LVTT is configured to.
+  3. On each timerfd expiry, kernel fires the EventFd → thhv.ko injects the
+     interrupt → capavisor sets PIR bit → dom1 receives timer tick on VMENTRY.
+  4. This unblocks `calibrate_APIC_clock` and provides jiffies/scheduling ticks.
+
+  ~30 lines of code in CHV. Uses existing infrastructure, no capavisor changes.
 
 - [ ] **P16.6b** — **MSR exit emulation**: RDMSR/WRMSR are currently silently
   ignored (`VmExit::Ignore`). Firmware and Linux kernel use several MSRs
@@ -1232,6 +1297,29 @@ virtualization into the capability/domain-policy model.
      allowing interrupt delivery to the target vCPU/domain; if yes, inject directly.
 
   This applies to dom1, dom2, dom3 etc. uniformly — no special-casing per depth.
+
+- [ ] **P16.6d3** — **PV IOAPIC + PV APIC timer (long-term, MSHV SynIC-inspired)**:
+  Replace MMIO-emulated IOAPIC and APIC timer with paravirtualized interfaces.
+  Inspired by Hyper-V SynIC (Synthetic Interrupt Controller) and MSHV Linux support.
+
+  **Motivation**: current MMIO IOAPIC path requires per-access EPT exit → capavisor
+  instruction decode → CHV userspace round-trip → response. Each IOAPIC register
+  access costs thousands of cycles. Instruction decode is fragile (must handle all
+  x86 MOV encodings, REX prefixes, SIB bytes, displacement sizes). RIP advancement
+  for EPT violations relies on software decode since `VMEXIT_INSTRUCTION_LEN` is
+  architecturally undefined for EPT violations.
+
+  **Design sketch**:
+  - Guest kernel detects Themis hypervisor via CPUID 0x40000000 ("ThemisCapa")
+  - PV IOAPIC: guest writes redirect table entries via VMCALL (hypercall) instead
+    of MMIO. Capavisor updates internal routing table directly. No instruction decode.
+  - PV timer: guest programs timer via VMCALL or MSR write. Capavisor uses VMX
+    preemption timer to deliver timer interrupts. No MMIO, no APIC timer emulation.
+  - PV EOI: guest signals EOI via synthetic MSR write (like Hyper-V `HV_X64_MSR_EOI`).
+  - Fallback: stock kernels without Themis PV support continue using MMIO path.
+
+  **Prerequisite**: dom1 must boot to login prompt first (P16.6g) using the current
+  MMIO emulation path. PV interfaces layer on top as performance optimizations.
 
 - [ ] **P16.6e** — **Dom1 serial console output**: verify dom1 kernel output
   appears on dom0's console (CHV serial → dom0 stdout → QEMU serial).
