@@ -478,15 +478,58 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
             match (leaf, sub_leaf) {
                 (0x1, _) => {
-                    ecx &= !(1u32 << 31);
+                    ecx &= !(1u32 << 31); // hide hypervisor-present bit
                 }
                 (0x7, 0) => {
-                    // Hide WAITPKG (tpause/umonitor/umwait): ECX bit 5.
-                    ecx &= !(1u32 << 5);
+                    // Hide WAITPKG (ECX bit 5) and all AVX-512 sub-features.
+                    // AVX-512 is advertised by the host but child VMs may not
+                    // have matching XSAVE state configuration, causing
+                    // paranoid_xstate_size_valid failures and userspace #UD
+                    // on XGETBV (BUG-12).  Masking here cascades to CHV's
+                    // CPUID policy so child domains never see AVX-512 either.
+                    const AVX512_EBX: u32 = (1 << 16) // AVX512F
+                        | (1 << 17) // AVX512DQ
+                        | (1 << 21) // AVX512_IFMA
+                        | (1 << 26) // AVX512PF
+                        | (1 << 27) // AVX512ER
+                        | (1 << 28) // AVX512CD
+                        | (1 << 30) // AVX512BW
+                        | (1 << 31); // AVX512VL
+                    const AVX512_ECX: u32 = (1 << 1) // AVX512_VBMI
+                        | (1 << 4)  // PKU/OSPKE
+                        | (1 << 5)  // WAITPKG
+                        | (1 << 6)  // AVX512_VBMI2
+                        | (1 << 11) // AVX512_VNNI
+                        | (1 << 12) // AVX512_BITALG
+                        | (1 << 14); // AVX512_VPOPCNTDQ
+                    const AVX512_EDX: u32 = (1 << 2) // AVX512_4VNNIW
+                        | (1 << 3)  // AVX512_4FMAPS
+                        | (1 << 8)  // AVX512_VP2INTERSECT
+                        | (1 << 23); // AVX512_FP16
+                    ebx &= !AVX512_EBX;
+                    ecx &= !AVX512_ECX;
+                    edx &= !AVX512_EDX;
+                }
+                (0xD, 0) => {
+                    // Restrict XSAVE state to x87 + SSE + AVX only.
+                    // Without AVX-512 features, the XSAVE area must not
+                    // include opmask/ZMM components or sizes won't match.
+                    eax = 0x7;   // bits 0,1,2 = x87 + SSE + AVX
+                    ebx = 0x340; // 832 bytes (512 legacy + 64 header + 256 AVX)
+                    ecx = 0x340;
+                    edx = 0;
                 }
                 (0xD, 1) => {
                     // XSAVES (bit 3): passed through — ENABLE_XSAVES is
                     // set in secondary proc-based controls.
+                    // Fix compact size to match reduced feature set.
+                    ebx = 0x340;
+                    ecx = 0;
+                    edx = 0;
+                }
+                (0xD, sub) if matches!(sub, 5..=7 | 9) => {
+                    // AVX-512 XSAVE component sub-leaves: zero them out.
+                    eax = 0; ebx = 0; ecx = 0; edx = 0;
                 }
                 // Themis hypervisor identification leaves.
                 // Leaf 0x40000000: vendor string "ThemisCapa" (10 bytes) in

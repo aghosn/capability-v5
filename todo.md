@@ -16,7 +16,8 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 ## Current Status
 
 **✅ MILESTONE: dom0 boots to login prompt on 4 CPUs.**
-**🚧 IN PROGRESS: dom1 (nested Ubuntu Noble) boot under CHV on Themis.**
+**✅ MILESTONE: dom1 boots to login prompt on 1 CPU (nested Ubuntu Noble under CHV on Themis).**
+**🚧 IN PROGRESS: dom1 I/O stalls (virtio-blk hung tasks after ~123s), multi-core.**
 
 - Phases 0, 0.5, 1, 2 (partial) completed — workspace, Limine integration, memory/ACPI/PCI, VT-x foundation.
 - Phase 7 (partial) completed — capability engine init, dom0 EPT, e820, ACPI passthrough, DMAR stripping, VMLAUNCH, SMP.
@@ -236,7 +237,22 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
   Was previously only handled for dom0; child exits went through catch-all
   forward-to-parent → CHV ignored → guest stuck in loop.
 
-  **Remaining milestones for dom1 boot**:
+  ✅ CPUID AVX-512 filtering (BUG-12 cascade fix) — restored aggressive
+  AVX-512 masking in dom0 CPUID handler (leaf 7 EBX/ECX/EDX + leaf 0xD
+  sub-leaves 0,1,5-7,9). The BUG-12 fix had been removed when #U6 resolved
+  dom0 directly, but it broke the cascade to dom1: CHV runs in dom0 userspace
+  and generates CPUID policy from capavisor-filtered CPUID. Without filtering,
+  CHV saw AVX-512 → dom1's glibc IFUNC resolver hit XGETBV #UD → init SIGILL
+  → kernel panic. Fix in vmexit.rs CPUID handler; XSAVE sizes fixed to 832
+  bytes (x87+SSE+AVX).
+
+  **Result: dom1 boots to multi-user login prompt on 1 CPU.** No panic, no
+  soft lockup. Systemd, getty, snapd all start. Hung tasks after ~123s
+  (jbd2/vda1-8, systemd-journal) indicate virtio-blk I/O stall — completion
+  interrupts may not be reaching dom1 properly.
+
+  **Remaining milestones**:
+  - [ ] Investigate virtio-blk I/O stall (hung tasks after ~123s)
   - [ ] Enable multi-core for dom1 (CHV_CPUS>1) — SMP bringup
   - [ ] Switch from instrumented debug kernel back to stock cloud image kernel
 
