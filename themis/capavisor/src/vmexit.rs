@@ -1023,7 +1023,7 @@ fn inject_gp(vcpu: &mut ActiveVcpu) {
 }
 
 /// Advance guest RIP by the instruction length that caused the VMEXIT.
-fn next_instruction(vcpu: &mut ActiveVcpu) {
+pub(crate) fn next_instruction(vcpu: &mut ActiveVcpu) {
     let len = vcpu.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN);
     let rip = vcpu.get(vmcs::guest::RIP);
     vcpu.set(vmcs::guest::RIP, rip + len);

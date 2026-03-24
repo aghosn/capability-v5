@@ -15,6 +15,18 @@ use x86::vmx::vmcs;
 const HOST_RSP_ENCODING: u64 = vmcs::host::RSP as u64; // 0x6C14
 const HOST_RIP_ENCODING: u64 = vmcs::host::RIP as u64; // 0x6C16
 
+// ── MSRs not automatically saved/restored by the VMCS ────────────────────── //
+// These must be manually saved on deactivate and restored on activate so that
+// switching between two guests (e.g. dom0 ↔ dom1) doesn't leak MSR state.
+const SYSCALL_MSRS: [u32; 5] = [
+    0xC000_0081, // IA32_STAR
+    0xC000_0082, // IA32_LSTAR
+    0xC000_0083, // IA32_CSTAR
+    0xC000_0084, // IA32_FMASK
+    0xC000_0102, // IA32_KERNEL_GS_BASE
+];
+const NUM_SYSCALL_MSRS: usize = SYSCALL_MSRS.len();
+
 // ── Guest register file ──────────────────────────────────────────────────── //
 
 /// Indices into the guest general-purpose register file.
@@ -71,6 +83,9 @@ pub struct InactiveVcpu {
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
+    /// Saved values for MSRs that the VMCS does not automatically
+    /// save/restore (STAR, LSTAR, CSTAR, FMASK, KERNEL_GS_BASE).
+    syscall_msrs: [u64; NUM_SYSCALL_MSRS],
 }
 
 // SAFETY: After VMCLEAR, the VMCS is flushed to memory and not bound to any
@@ -90,6 +105,7 @@ impl InactiveVcpu {
             vpid,
             launched: false,
             regs: [0u64; REGFILE_SIZE],
+            syscall_msrs: [0u64; NUM_SYSCALL_MSRS],
         }
     }
 
@@ -99,6 +115,10 @@ impl InactiveVcpu {
         unsafe {
             vmx::vmptrld(self.vmcs_phys)
                 .map_err(|_| VmxError::VmcsOperationFailed("vmptrld"))?;
+            // Restore guest MSRs that the VMCS does not handle automatically.
+            for (i, &msr) in SYSCALL_MSRS.iter().enumerate() {
+                x86::msr::wrmsr(msr, self.syscall_msrs[i]);
+            }
         }
         Ok(ActiveVcpu {
             vmcs_phys: self.vmcs_phys,
@@ -108,6 +128,7 @@ impl InactiveVcpu {
             vpid: self.vpid,
             launched: self.launched,
             regs: self.regs,
+            syscall_msrs: self.syscall_msrs,
             _not_send: PhantomData,
         })
     }
@@ -144,6 +165,7 @@ pub struct ActiveVcpu {
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
+    syscall_msrs: [u64; NUM_SYSCALL_MSRS],
     _not_send: PhantomData<*const ()>,
 }
 
@@ -206,6 +228,13 @@ impl ActiveVcpu {
     /// After this call, the VMCS is no longer loaded on any core and the
     /// launch state is reset (next `run()` will VMLAUNCH, not VMRESUME).
     pub fn deactivate(self) -> Result<InactiveVcpu, VmxError> {
+        // Save guest MSRs that the VMCS does not handle automatically.
+        // After VMEXIT, these physical MSRs still hold the guest's values
+        // because the CPU does not load host values for them.
+        let mut saved_msrs = [0u64; NUM_SYSCALL_MSRS];
+        for (i, &msr) in SYSCALL_MSRS.iter().enumerate() {
+            saved_msrs[i] = unsafe { x86::msr::rdmsr(msr) };
+        }
         unsafe {
             vmx::vmclear(self.vmcs_phys)
                 .map_err(|_| VmxError::VmcsOperationFailed("vmclear"))?;
@@ -218,6 +247,7 @@ impl ActiveVcpu {
             vpid: self.vpid,
             launched: false, // VMCLEAR resets the launch state
             regs: self.regs,
+            syscall_msrs: saved_msrs,
         })
     }
 
