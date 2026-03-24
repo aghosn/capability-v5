@@ -896,7 +896,8 @@ pub fn forward_child_exit(
         .expect("[CHILD_EXIT] child PlatformDomain not found");
     let comm_hpa = child_arc.lock().comm_hpas.get(child_vp_id).copied().unwrap_or(0);
 
-    let mut decoded_insn_len: Option<u64> = None;
+    const EXIT_REASON_EPT_VIOLATION: u32 = 48;
+    let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
     if comm_hpa != 0 {
         let hhdm = platform.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
@@ -969,12 +970,8 @@ pub fn forward_child_exit(
         };
 
         // ── MMIO instruction decode for EPT violations ──
-        // For EPT violation exits the `rax` field may not be the correct
-        // operand — the instruction could use any GP register.  Decode the
-        // faulting MOV instruction and fix up the message.
-        // VMEXIT_INSTRUCTION_LEN is architecturally UNDEFINED for EPT violations
-        // (Intel SDM §27.2.1), so we compute the length from the decoded bytes.
-        const EXIT_REASON_EPT_VIOLATION: u32 = 48;
+        // For EPT violations, supply the raw instruction bytes so CHV's
+        // iced-x86 emulator can decode and emulate the faulting instruction.
         let mut msg = msg; // make mutable
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
             let exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
@@ -1000,28 +997,9 @@ pub fn forward_child_exit(
                             core::ptr::copy_nonoverlapping(insn_ptr, insn_bytes.as_mut_ptr(), avail);
                         }
                         msg.instruction_bytes = insn_bytes;
-
-                        if let Some(decoded) = decode_mmio_insn(&insn_bytes) {
-                            decoded_insn_len = Some(decoded.len as u64);
-                            if let Some(gpr) = x86_reg_to_gpr(decoded.x86_reg) {
-                                serial_println!(
-                                    "[EPT-DEC] x86_reg={} thhv={:#x} is_write={} val={:#x} len={}",
-                                    decoded.x86_reg, x86_reg_to_thhv(decoded.x86_reg),
-                                    decoded.is_write, vcpu.reg(gpr), decoded.len
-                                );
-                                if decoded.is_write {
-                                    msg.rax = vcpu.reg(gpr);
-                                }
-                                msg._reserved = x86_reg_to_thhv(decoded.x86_reg);
-                            } else {
-                                serial_println!("[MMIO-DECODE] x86_reg={} no GPR", decoded.x86_reg);
-                            }
-                        } else {
-                            serial_println!(
-                                "[MMIO-DECODE] FAIL rip={:#x} [{:#04x},{:#04x},{:#04x},{:#04x}]",
-                                guest_rip, insn_bytes[0], insn_bytes[1], insn_bytes[2], insn_bytes[3]
-                            );
-                        }
+                        // Instruction decode + RIP advancement is handled by
+                        // CHV's iced-x86 emulator (P16.6i).  We only need to
+                        // supply the raw instruction bytes above.
                     } else {
                         serial_println!("[MMIO-DECODE] EPT fail GPA {:#x}", insn_gpa);
                     }
@@ -1036,15 +1014,12 @@ pub fn forward_child_exit(
     }
 
     // Advance the child's RIP past the faulting instruction while the
-    // child VMCS is still loaded.  The VMM (CHV) only emulates the
-    // device side (set RAX for reads, etc.) — it never touches RIP.
+    // child VMCS is still loaded.
     //
-    // For EPT violations, VMEXIT_INSTRUCTION_LEN is architecturally
-    // undefined, so prefer the length computed by our instruction decoder.
-    if let Some(len) = decoded_insn_len {
-        let rip = vcpu.get(vmcs::guest::RIP);
-        vcpu.set(vmcs::guest::RIP, rip + len);
-    } else {
+    // EPT violations are handled differently: CHV's iced-x86 emulator
+    // decodes the instruction, emulates it, and advances RIP itself.
+    // We must NOT advance RIP here for EPT violations.
+    if !is_ept_violation {
         next_instruction(vcpu);
     }
 
@@ -2214,126 +2189,3 @@ fn guest_gva_to_gpa(ept_root_phys: u64, hhdm: u64, guest_cr3: u64, gva: u64) -> 
     }
     Some(table_gpa | (gva & 0xFFF))
 }
-
-/// Result of decoding an MMIO instruction (MOV to/from memory).
-struct MmioInsn {
-    /// x86 register index (0=RAX, 1=RCX, 2=RDX, 3=RBX, 4=RSP, 5=RBP, 6=RSI, 7=RDI, 8+=R8-R15).
-    x86_reg: u8,
-    /// true if the instruction writes to memory (MOV r→m).
-    is_write: bool,
-    /// Total instruction length in bytes (prefixes + opcode + ModR/M + SIB + disp).
-    len: usize,
-}
-
-/// Decode a MOV instruction at `bytes` to extract the GP register operand.
-/// Handles the common patterns emitted by Linux `readl`/`writel`:
-///   89 ModR/M        → MOV r/m32, r32  (write to memory)
-///   8B ModR/M        → MOV r32, r/m32  (read from memory)
-/// With optional REX prefix (0x40-0x4F) for R8-R15.
-fn decode_mmio_insn(bytes: &[u8]) -> Option<MmioInsn> {
-    let mut i = 0;
-    let mut rex: u8 = 0;
-
-    // Skip legacy prefixes (address-size, operand-size, segment, LOCK, REP).
-    while i < bytes.len() {
-        match bytes[i] {
-            0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 |
-            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 => { i += 1; }
-            _ => break,
-        }
-    }
-    if i >= bytes.len() { return None; }
-
-    // REX prefix (0x40-0x4F)
-    if bytes[i] & 0xF0 == 0x40 {
-        rex = bytes[i];
-        i += 1;
-    }
-    if i + 1 >= bytes.len() { return None; }
-
-    let opcode = bytes[i];
-    let modrm = bytes[i + 1];
-    let reg_field = (modrm >> 3) & 0x7;
-    let rex_r = (rex >> 2) & 1; // REX.R extends reg field
-    let rex_b = rex & 1;        // REX.B extends r/m field
-
-    let x86_reg = reg_field | (rex_r << 3);
-    let is_write = match opcode {
-        0x89 => true,  // MOV r/m, r (write)
-        0x8B => false, // MOV r, r/m (read)
-        _ => return None,
-    };
-
-    // Compute instruction length: prefixes + opcode(1) + ModR/M(1) + SIB? + disp?
-    let mod_field = modrm >> 6;
-    let rm_field = (modrm & 0x7) | (rex_b << 3);
-    let mut len = i + 2; // everything up to and including modrm
-
-    // SIB byte present when mod != 11 and r/m == 4 (or 12 with REX.B)
-    let has_sib = mod_field != 0b11 && (rm_field & 0x7) == 4;
-    if has_sib {
-        len += 1;
-    }
-
-    // Displacement size
-    match mod_field {
-        0b00 => {
-            // [r/m] — except r/m=5 means [RIP+disp32]
-            if (rm_field & 0x7) == 5 {
-                len += 4; // disp32
-            }
-        }
-        0b01 => { len += 1; }  // [r/m + disp8]
-        0b10 => { len += 4; }  // [r/m + disp32]
-        _ => {} // mod=11 is reg-reg (shouldn't happen for MMIO)
-    }
-
-    Some(MmioInsn { x86_reg, is_write, len })
-}
-
-/// Map x86 register encoding (from ModR/M) to the capavisor `Reg` enum.
-fn x86_reg_to_gpr(x86_reg: u8) -> Option<Reg> {
-    match x86_reg {
-        0  => Some(Reg::Rax),
-        1  => Some(Reg::Rcx),
-        2  => Some(Reg::Rdx),
-        3  => Some(Reg::Rbx),
-        // 4 = RSP — not used in normal MMIO MOVs
-        5  => Some(Reg::Rbp),
-        6  => Some(Reg::Rsi),
-        7  => Some(Reg::Rdi),
-        8  => Some(Reg::R8),
-        9  => Some(Reg::R9),
-        10 => Some(Reg::R10),
-        11 => Some(Reg::R11),
-        12 => Some(Reg::R12),
-        13 => Some(Reg::R13),
-        14 => Some(Reg::R14),
-        15 => Some(Reg::R15),
-        _  => None,
-    }
-}
-
-/// Map x86 register encoding to THHV_VP_REG_* constant (for CHV `set_reg_values`).
-fn x86_reg_to_thhv(x86_reg: u8) -> u32 {
-    match x86_reg {
-        0  => 0x00, // RAX
-        1  => 0x02, // RCX
-        2  => 0x03, // RDX
-        3  => 0x01, // RBX
-        4  => 0x10, // RSP
-        5  => 0x06, // RBP
-        6  => 0x04, // RSI
-        7  => 0x05, // RDI
-        8  => 0x07, // R8
-        9  => 0x08, // R9
-        10 => 0x09, // R10
-        11 => 0x0A, // R11
-        12 => 0x0B, // R12
-        13 => 0x0C, // R13
-        14 => 0x0D, // R14
-        15 => 0x0E, // R15
-        _  => 0x00, // fallback to RAX
-    }
-}
-

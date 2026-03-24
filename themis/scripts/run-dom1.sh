@@ -97,7 +97,7 @@ exec "$CHV" \
     --cmdline "console=ttyS0 root=/dev/vda1 rw quiet nokaslr nopv lapic_timer_frequency=1000000000 systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
-    --cpus boot="$CHV_CPUS" \
+    --cpus boot="$CHV_CPUS",max_phys_bits=34 \
     --memory size="$CHV_MEM" \
     --serial tty \
     --console off \

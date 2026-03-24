@@ -168,6 +168,55 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
   length issues. The current MMIO plumbing is the bootstrap path for stock kernels.
   See P16.6d3 for details.
 
+- **Timer injection + ACPI platform debugging (2026-03-24 session 2)** —
+
+  **Progress**:
+  1. ✅ Timer injection via timerfd + IRQFd (1kHz at vector 0xEC) — working
+  2. ✅ irqfd wakeup crash: `thhv_irqfd_wakeup` dereferenced key as pointer;
+     key is `poll_to_key()` value. Fixed: `(__poll_t)(unsigned long)key`.
+  3. ✅ VM-entry failure (exit reason 33): PIR→VMENTRY injection without checking
+     RFLAGS.IF and interruptibility state. Fixed: check before inject, put PIR
+     bit back if guest can't accept.
+  4. ✅ Serial flooding: removed `pr_info` from `thhv_irqfd_inject` and
+     `serial_println!` from `do_inject_interrupt` (both on 1kHz hot path).
+  5. ✅ `lapic_timer_frequency=1000000000` kernel param skips APIC timer calibration.
+  6. ✅ `max_phys_bits=34` — resolves CHV AddressAllocator crash (64-bit MMIO
+     region needs >4GB alignment). phys_bits=32/33 had MMIO64 range < 4GB.
+  7. Dom1 now reaches 117 traces, 204 EPT exits, gets to ACPI init.
+
+  **Current blocker — ACPI platform MMIO decode failure**:
+  CHV places platform devices (GED, CPU manager) at ~16GB (GPA 0x3FFEF0000
+  with phys_bits=34). Guest ioremap works (EPT violations fire correctly at
+  MMIO GPAs). But capavisor's `decode_mmio_insn()` fails on `MOVZX r32,r/m8`
+  (`0F B6 00`) — only handles MOV (0x89/0x8B). When decode fails:
+  - RIP advanced using UNDEFINED `VMEXIT_INSTRUCTION_LEN` (corrupts guest state)
+  - MMIO register/size info not extracted → result not injected properly
+  - Guest crashes with `#PF at 0x3FFFEE00C` (ACPI `_STA` evaluation path)
+
+  **Root cause**: instruction decode in capavisor is fundamentally fragile.
+  Each new instruction variant (MOVZX, MOVSX, byte MOV, etc.) requires more
+  decode logic. This is a bottomless pit.
+
+  **Solution — MSHV-style MMIO emulation (P16.6i)**:
+  Move instruction decode out of capavisor into CHV using CHV's existing
+  x86 emulator infrastructure (iced-x86 + `arch/x86/emulator/`), matching
+  the MSHV backend's architecture. See P16.6i below.
+
+  Platform MMIO EPT exit flow:
+  ```
+  [EPT violation] GPA=0x3fffee004 (MOVZX eax, byte [rax])
+    → dom1 EPT violation → capavisor
+    → reads instruction bytes from guest memory (already works)
+    → fills intercept message: instruction_bytes, GPA, exit_qual
+    → does NOT advance RIP, does NOT decode operands
+    → forwards to dom0 (thhv.ko → CHV)
+    → CHV Themis backend: iced-x86 decodes instruction_bytes
+    → emulator: reads byte from device (mmio_read), zero-extends to EAX
+    → emulator: advances RIP by 3 (instruction length)
+    → CHV sets new registers via set_reg_values (RAX + RIP)
+    → dom0 SWITCH back → capavisor applies new state → dom1 resumes
+  ```
+
 ---
 
 ## Open Implementation Phases
@@ -1298,25 +1347,33 @@ virtualization into the capability/domain-policy model.
 
   This applies to dom1, dom2, dom3 etc. uniformly — no special-casing per depth.
 
-- [ ] **P16.6d3** — **PV IOAPIC + PV APIC timer (long-term, MSHV SynIC-inspired)**:
+- [ ] **P16.6d3** — **PV IOAPIC + PV APIC timer + PV MMIO (long-term, MSHV SynIC-inspired)**:
   Replace MMIO-emulated IOAPIC and APIC timer with paravirtualized interfaces.
   Inspired by Hyper-V SynIC (Synthetic Interrupt Controller) and MSHV Linux support.
 
-  **Motivation**: current MMIO IOAPIC path requires per-access EPT exit → capavisor
-  instruction decode → CHV userspace round-trip → response. Each IOAPIC register
-  access costs thousands of cycles. Instruction decode is fragile (must handle all
-  x86 MOV encodings, REX prefixes, SIB bytes, displacement sizes). RIP advancement
-  for EPT violations relies on software decode since `VMEXIT_INSTRUCTION_LEN` is
-  architecturally undefined for EPT violations.
+  **Motivation**: current MMIO path requires per-access EPT exit → instruction
+  decode (iced-x86 in CHV, P16.6i) → CHV userspace round-trip → response. Each
+  MMIO access costs thousands of cycles. The emulator path (P16.6i) is a correct
+  stepping stone for stock kernels but ultimately unnecessary for enlightened guests.
 
   **Design sketch**:
   - Guest kernel detects Themis hypervisor via CPUID 0x40000000 ("ThemisCapa")
-  - PV IOAPIC: guest writes redirect table entries via VMCALL (hypercall) instead
-    of MMIO. Capavisor updates internal routing table directly. No instruction decode.
+  - **PV MMIO**: guest does `VMCALL(MMIO_WRITE, gpa, val, size)` or
+    `VMCALL(MMIO_READ, gpa, size)` → capavisor forwards structured request to
+    parent → parent dispatches to device → result returned via VMCALL return value.
+    No EPT violation, no instruction bytes, no emulator. Guest provides register,
+    size, direction, value explicitly in hypercall arguments.
+  - PV IOAPIC: guest writes redirect table entries via VMCALL instead
+    of MMIO. Capavisor updates internal routing table directly.
   - PV timer: guest programs timer via VMCALL or MSR write. Capavisor uses VMX
     preemption timer to deliver timer interrupts. No MMIO, no APIC timer emulation.
   - PV EOI: guest signals EOI via synthetic MSR write (like Hyper-V `HV_X64_MSR_EOI`).
-  - Fallback: stock kernels without Themis PV support continue using MMIO path.
+  - Fallback: stock kernels without Themis PV support continue using MMIO + emulator
+    path (P16.6i).
+
+  **Layering**: P16.6i (iced-x86 emulator) handles stock kernels. P16.6d3 (PV MMIO)
+  is the fast path for enlightened kernels. Both coexist — PV path is opt-in via
+  CPUID feature detection.
 
   **Prerequisite**: dom1 must boot to login prompt first (P16.6g) using the current
   MMIO emulation path. PV interfaces layer on top as performance optimizations.
@@ -1337,6 +1394,73 @@ virtualization into the capability/domain-policy model.
   Condition per run: `hpa[i+1] == hpa[i] + PAGE_SIZE` AND same `parent_handle`.
   The `thhv_sent_cap` tracking must be updated to store one entry per run instead of per page.
   Expected result: reduces ~518 capability metadata entries to O(10) for typical allocations.
+
+- [ ] **P16.6i** — **MSHV-style MMIO emulation (move instruction decode to CHV)**:
+  Replace fragile capavisor instruction decode with CHV's existing x86 emulator
+  (iced-x86 + `hypervisor/src/arch/x86/emulator/`), matching the MSHV backend's
+  architecture. This is the current dom1 boot blocker.
+
+  **Background**: MSHV's `hv_x64_memory_intercept_message` provides raw
+  `instruction_bytes[16]` + `instruction_length` from the hypervisor. The VMM
+  (CHV) decodes operands using iced-x86 and emulates. CHV already has this code
+  in `hypervisor/src/mshv/x86_64/emulator.rs` (MshvEmulatorContext) and
+  `hypervisor/src/arch/x86/emulator/` (MOV, MOVZX, CMP, MOVS, STOS, OR handlers).
+  The `mshv_emulator` feature flag enables iced-x86 independently of MSHV.
+
+  **What changes where**:
+
+  | Component | Change | Why |
+  |-----------|--------|-----|
+  | `hypervisor/Cargo.toml` | Add `mshv_emulator` to `themis` feature deps | Enable iced-x86 + emulator for Themis builds |
+  | `hypervisor/src/themis/x86_64/emulator.rs` | NEW: ThemisEmulatorContext | Implements `PlatformEmulator` for Themis vCPU; adapts get/set_regs, mmio_read/write |
+  | `hypervisor/src/themis/mod.rs` | Wire emulator into EPT violation handler | Replace current reactive MMIO dispatch with `emulate_insn_stream()` |
+  | `capavisor/src/hypercall.rs` | Remove `decode_mmio_insn()` + all operand decode | Capavisor only reads instruction bytes into message, does NOT decode or advance RIP |
+  | `capavisor/src/hypercall.rs` | Stop advancing RIP for EPT violations | Emulator handles RIP advancement; CHV sets new RIP via `set_reg_values` |
+
+  **Capavisor changes (simplification)**:
+  - Keep: reading instruction bytes from guest memory via EPT+page-table walk
+  - Keep: filling `msg.instruction_bytes` and computing `instruction_byte_count`
+  - Remove: `decode_mmio_insn()`, `x86_reg_to_gpr()`, `x86_reg_to_thhv()`, `MmioInsn` struct
+  - Remove: RIP advancement for EPT violations (emulator does it)
+  - Remove: register fixup (`msg.rax = vcpu.reg(gpr)`, `msg._reserved = ...`)
+
+  **CHV Themis backend changes**:
+  - Create `ThemisEmulatorContext` implementing `PlatformEmulator`:
+    - `read_memory` / `write_memory`: try guest RAM first, fall back to `vm_ops.mmio_read/write`
+    - `cpu_state`: read all GP regs + special regs from vCPU via `get_reg_values`
+    - `set_cpu_state`: write changed regs back via `set_reg_values`
+    - `fetch`: use instruction_bytes from intercept message (already provided by capavisor)
+  - In EPT violation handler: create emulator, call `emulate_insn_stream(&old_state, &insn_bytes, Some(1))`
+  - Apply new state (registers + RIP) via `update_cpu_state`
+
+  **RIP advancement model (matches MSHV)**:
+  - Capavisor does NOT advance RIP for EPT violations
+  - iced-x86 decoder determines instruction length
+  - Emulator's `emulate_insn_stream` returns new CpuState with RIP advanced
+  - CHV writes new RIP via `set_reg_values` → thhv.ko → VP comm page → capavisor applies
+
+  **Security note**: parent (dom0) already created child (dom1) and provided its
+  kernel code. Allowing parent to set child RIP during MMIO emulation does not
+  add new attack surface. Long-term, capavisor could validate RIP = old_RIP +
+  instruction_length if needed.
+
+  **Implementation order**:
+  1. ✅ P16.6i-1: Enable `mshv_emulator` feature for Themis in Cargo.toml
+  2. ✅ P16.6i-2: Create `ThemisEmulatorContext` in `hypervisor/src/themis/emulator.rs`
+     - Implements `PlatformEmulator` with guest page-table walker (CR3→PML4→PDPT→PD→PT)
+     - `read_memory`/`write_memory`: GVA→GPA translation, RAM→MMIO fallback
+     - `fetch`: returns cached `instruction_bytes` from intercept message
+     - `cpu_state`/`set_cpu_state`: delegates to ThemisVcpu get_regs/set_regs/get_sregs/set_sregs
+  3. ✅ P16.6i-3: Rewrote `handle_mmio_exit` to use `Emulator::emulate_first_insn()`
+     - Removed capavisor's `decode_mmio_insn()`, `MmioInsn`, `x86_reg_to_gpr()`, `x86_reg_to_thhv()`
+     - Capavisor no longer advances RIP for EPT violations
+     - Capavisor still reads instruction bytes into msg.instruction_bytes
+  4. ✅ P16.6i-4: Test: IOAPIC MMIO works (200+ R/W at 0xfec00000), no crashes
+  5. ✅ P16.6i-5: IOAPIC MMIO (0xFEC00000) works through emulator — MOV and REX-prefixed MOV both handled
+
+  **New blocker (not MMIO related)**: exit reason 55 (XSETBV) — capavisor skips
+  the instruction without executing it, XCR0 never gets set, kernel hangs.
+  Needs proper XSETBV handling in capavisor (read ECX/EDX:EAX, execute XSETBV).
 
 
 Replace the current manual sudo-heavy workflow with a fully automated, sudo-free build
