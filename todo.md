@@ -217,6 +217,29 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
     → dom0 SWITCH back → capavisor applies new state → dom1 resumes
   ```
 
+- **P16.6i implemented — MSHV-style MMIO emulation (2026-03-24 session 3)** —
+
+  ✅ Moved instruction decode from capavisor to CHV's iced-x86 emulator.
+  Handles MOV, MOVZX, CMP, MOVS, STOS, OR + all variants out of the box.
+  - `hypervisor/Cargo.toml`: `themis = ["mshv_emulator"]`
+  - `hypervisor/src/themis/emulator.rs` (NEW): ThemisEmulatorContext with
+    x86-64 page-table walker (CR3→PML4→PDPT→PD→PT), GVA→GPA→RAM/MMIO routing
+  - `hypervisor/src/themis/mod.rs`: `handle_mmio_exit` → `emulate_first_insn()`
+  - `capavisor/src/hypercall.rs`: removed decode_mmio_insn, MmioInsn,
+    x86_reg_to_gpr, x86_reg_to_thhv; no RIP advance for EPT violations
+
+  Test result: 200+ IOAPIC MMIO R/W at 0xFEC00000 — all emulated correctly.
+  Previously-crashing MOVZX pattern would now be handled by iced-x86.
+
+  ✅ XSETBV (exit reason 55) — refactored `handle_xsetbv()` into a shared
+  helper in vmexit.rs, called from both dom0 and child domain exit paths.
+  Was previously only handled for dom0; child exits went through catch-all
+  forward-to-parent → CHV ignored → guest stuck in loop.
+
+  **Remaining milestones for dom1 boot**:
+  - [ ] Enable multi-core for dom1 (CHV_CPUS>1) — SMP bringup
+  - [ ] Switch from instrumented debug kernel back to stock cloud image kernel
+
 ---
 
 ## Open Implementation Phases

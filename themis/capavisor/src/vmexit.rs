@@ -112,6 +112,44 @@ pub const EXIT_REASON_EOI_INDUCED: u32 = 45;
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
+/// Handle XSETBV (exit reason 55): guest wants to set XCR0.
+///
+/// Masks the guest-requested value with the host's supported XCR0 bits and
+/// always sets bit 0 (x87 FPU).  Used for both dom0 and child domain exits.
+fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
+    let xcr = vcpu.reg(Reg::Rcx) as u32;
+    let val = (vcpu.reg(Reg::Rdx) << 32) | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
+    if xcr == 0 {
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            core::arch::asm!(
+                "xgetbv",
+                in("ecx") 0u32,
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack),
+            );
+        }
+        let host_xcr0 = ((hi as u64) << 32) | (lo as u64);
+        let safe_val = (val & host_xcr0) | 1;
+        serial_debug!(
+            "[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}",
+            val, host_xcr0, safe_val
+        );
+        unsafe {
+            core::arch::asm!(
+                "xsetbv",
+                in("ecx") 0u32,
+                in("eax") safe_val as u32,
+                in("edx") (safe_val >> 32) as u32,
+                options(nomem, nostack),
+            );
+        }
+    }
+    next_instruction(vcpu);
+}
+
 /// Stub HOST_RIP target — halts if reached without going through `vcpu.run()`.
 ///
 /// `setup_vmcs_for_vp` writes this as HOST_RIP; `ActiveVcpu::run()` overwrites
@@ -362,6 +400,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // the LAPIC is per-vCPU state that doesn't cross domain
                             // boundaries, and the round-trip cost is O(depth).
                             handle_apic_access_exit(vcpu);
+                            return;
+                        }
+                        EXIT_REASON_XSETBV => {
+                            // XSETBV is a host-level operation (sets physical XCR0).
+                            // Handle it in the capavisor like dom0 — don't forward.
+                            handle_xsetbv(vcpu);
                             return;
                         }
                         _ => {
@@ -634,36 +678,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_XSETBV => {
-            let xcr = vcpu.reg(Reg::Rcx) as u32;
-            let val = (vcpu.reg(Reg::Rdx) << 32) | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
-            if xcr == 0 {
-                let host_xcr0: u64;
-                let lo: u32;
-                let hi: u32;
-                core::arch::asm!(
-                    "xgetbv",
-                    in("ecx") 0u32,
-                    out("eax") lo,
-                    out("edx") hi,
-                    options(nomem, nostack),
-                );
-                host_xcr0 = ((hi as u64) << 32) | (lo as u64);
-                let safe_val = (val & host_xcr0) | 1;
-                serial_debug!(
-                    "[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}",
-                    val,
-                    host_xcr0,
-                    safe_val
-                );
-                core::arch::asm!(
-                    "xsetbv",
-                    in("ecx") 0u32,
-                    in("eax") safe_val as u32,
-                    in("edx") (safe_val >> 32) as u32,
-                    options(nomem, nostack),
-                );
-            }
-            next_instruction(vcpu);
+            handle_xsetbv(vcpu);
         }
 
         EXIT_REASON_CR_ACCESS => {
