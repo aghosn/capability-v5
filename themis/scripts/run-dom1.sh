@@ -97,12 +97,12 @@ echo ""
 exec "$CHV" \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc keep_bootcon loglevel=7 no_timer_check systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
+    --cmdline "console=hvc0 earlyprintk=serial,ttyS0,115200 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc keep_bootcon loglevel=7 no_timer_check systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=34 \
     --memory size="$CHV_MEM" \
     --serial tty \
-    --console off \
+    --console tty \
     --seccomp false \
     ${CHV_EXTRA_ARGS:-}

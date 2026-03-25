@@ -17,7 +17,54 @@ If we can, it'd ideally enable to target different platform (e.g., Intel and AMD
 
 **✅ MILESTONE: dom0 boots to login prompt on 4 CPUs.**
 **✅ MILESTONE: dom1 boots to login prompt on 1 CPU (nested Ubuntu Noble under CHV on Themis).**
-**🚧 IN PROGRESS: dom1 I/O stalls (virtio-blk hung tasks after ~123s), multi-core.**
+**🚧 IN PROGRESS: dom1 boot extremely slow (~10min+ to reach initcalls), timer/IO overhead.**
+
+### Current situation (2026-03-25)
+
+**What works**: dom1 reaches systemd, services start, kernel is functional.
+
+**What's slow**: dom1 boot takes 1000+ seconds of wall time. Two root causes identified:
+
+1. **Serial IO exit overhead** — every `printk` character triggers an IO exit (port 0x3F8)
+   that traverses dom1 → capavisor → CHV → serial emulation → return. With `loglevel=7`,
+   tens of thousands of IO exits per boot. This is the dominant bottleneck.
+
+2. **LAPIC timer deadline already passed** — dom1 kernel selects TSC-deadline mode
+   (WRMSR 0x6E0). The capavisor correctly traps and forwards to CHV, which programs a
+   timerfd. However, the multi-layer forwarding latency means `now > deadline` by the
+   time CHV reads it → `delta_tsc=0` → timer fires instantly. This works but may cause
+   scheduling anomalies. 19+ timer firings observed, all with delta=0.
+
+**Diagnostic evidence (from /tmp/out.txt, ~3400 lines)**:
+- `[CHILD-WRMSR]` 15+ exits for MSR 0x6E0 at `rip=0xffffffff810ada28` (lapic_next_deadline)
+- `[THEMIS-TIMER]` 19+ firings in CHV, all with `delta_tsc=0 (0 us)`
+- Zero `[APIC-TIMER]` messages — kernel uses TSC-deadline (not MMIO timer mode)
+- `TSC deadline timer available` — kernel detects and uses TSC-deadline
+- `x2apic: IRQ remapping doesn't support X2APIC mode` — falls back to xAPIC (MMIO)
+- HPET active as secondary clock source
+- `tsc: Fast TSC calibration failed` (CPUID 0x15 not supported), uses HPET fallback
+
+**Key architectural finding**: the LAPIC timer path is fully wired:
+```
+dom1 WRMSR 0x6E0 → VMexit (MSR bitmap traps it)
+  → capavisor child WRMSR catch-all → forward_child_exit()
+  → thhv.ko → CHV handle_wrmsr_exit()
+  → timerfd programmed with deadline delta
+  → timerfd fires → irqfd → thhv → capavisor → inject vector 0xEF into dom1
+```
+The path works end-to-end. The problem is latency, not correctness.
+
+**Commits**:
+- CHV submodule: `f78b04b35` — "themis: WRMSR/LAPIC timer diagnostics and timerfd emulation skeleton"
+- Main repo: `ebcf451` — "capavisor: APIC timer diagnostics and child WRMSR forwarding trace"
+
+**Next steps** (in priority order):
+1. Let current boot run complete — observe how far dom1 gets
+2. Reduce `loglevel` from 7 to 4 in `run-dom1.sh` — immediate ~10x IO exit reduction
+3. Investigate timer delta=0 — may need to handle already-passed deadlines by injecting
+   interrupt directly instead of programming a 0-delay timerfd
+4. Long-term: paravirt console (virtio-console) to eliminate serial IO exits entirely
+5. Long-term: paravirt APIC timer to avoid multi-layer WRMSR forwarding
 
 - Phases 0, 0.5, 1, 2 (partial) completed — workspace, Limine integration, memory/ACPI/PCI, VT-x foundation.
 - Phase 7 (partial) completed — capability engine init, dom0 EPT, e820, ACPI passthrough, DMAR stripping, VMLAUNCH, SMP.
