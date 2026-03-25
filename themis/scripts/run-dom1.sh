@@ -18,7 +18,7 @@ CHV="$BINS/cloud-hypervisor/cloud-hypervisor"
 THHV_KO="$BINS/thhv/thhv.ko"
 DOM1_DISK="$BINS/dom1/dom1.raw"
 
-CHV_CPUS="${CHV_CPUS:-2}"
+CHV_CPUS="${CHV_CPUS:-1}"
 CHV_MEM="${CHV_MEM:-1G}"
 
 if [[ ! -f "$DOM1_DISK" ]]; then
@@ -95,6 +95,7 @@ fi
 echo ""
 
 exec "$CHV" \
+    -v \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
     --cmdline "console=hvc0 earlyprintk=serial,ttyS0,115200 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc keep_bootcon loglevel=7 no_timer_check systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \

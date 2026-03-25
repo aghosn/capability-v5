@@ -425,6 +425,19 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             handle_xsetbv(vcpu);
                             return;
                         }
+                        EXIT_REASON_EPT_VIOLATION => {
+                            let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
+                            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+
+                            // Doorbell fast-path: match GPA against child's doorbell table.
+                            if let Some(true) = handle_ept_doorbell(platform, vcpu, gpa, qual) {
+                                return;
+                            }
+
+                            // No match — forward to parent for MMIO emulation.
+                            crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            return;
+                        }
                         _ => {
                             // Log WRMSR exits from child to diagnose timer issues.
                             if basic_reason == EXIT_REASON_WRMSR {
@@ -897,11 +910,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
             if !platform_ptr.is_null() {
                 let platform = unsafe { &*platform_ptr };
-                if let Some(doorbell_result) = handle_ept_doorbell(platform, vcpu, gpa, qual) {
-                    if doorbell_result {
-                        // Fast-path: child resumes immediately.
-                        return;
-                    }
+                if let Some(true) = handle_ept_doorbell(platform, vcpu, gpa, qual) {
+                    // Fast-path: child resumes immediately.
+                    return;
                 }
             }
 
