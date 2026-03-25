@@ -219,3 +219,55 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 | `0x295` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `acpi_reduced_hw_init()` |
 
 **Next free range: `0x229`**
+
+---
+
+## ⚠️ Verifying Dom1 Output — Do NOT Confuse With Dom0
+
+**Critical rule**: Never claim dom1 has booted based on systemd/kernel messages in
+`/tmp/out.txt` without first verifying those messages come from dom1, not dom0.
+
+### The output streams
+
+| Stream | Source | Where it appears |
+|--------|--------|------------------|
+| Capavisor `serial_println!` | L0 hypervisor | `/tmp/out.txt` (QEMU serial) — always reliable |
+| `[DBG] dom=N val=...` | Guest VMCALL → capavisor | `/tmp/out.txt` — reliable, tagged with domain ID |
+| Dom0 kernel `printk` | Dom0 `console=ttyS0` | `/tmp/out.txt` — dom0's serial goes to QEMU serial |
+| Dom0 systemd output | Dom0 boot services | `/tmp/out.txt` — appears as `[  OK  ]` lines **before** child VMCS creation |
+| Dom1 kernel `printk` | Dom1 `console=ttyS0` → CHV serial | **NOT in `/tmp/out.txt`** unless CHV's serial chains to dom0's ttyS0. See below. |
+
+### How to tell dom0 vs dom1 output apart
+
+1. **Check line ordering**: dom1 output MUST appear **after** the `child VMCS:` line
+   and `[REGISTER_DOORBELL]` lines in `/tmp/out.txt`. If systemd messages appear
+   before these lines, they are **dom0's boot**, not dom1's.
+
+2. **Check kernel version**: dom0 is `6.8.0-101-generic #101-Ubuntu`; dom1 uses
+   the instrumented kernel `6.8.0-dirty #24` (or similar). Look for `Linux version`
+   or `Tainted:` lines to identify which kernel.
+
+3. **Check timestamps**: dom0 systemd starts at dom0 uptime ~12-17s. Dom1 would
+   start at its own t=0 (which maps to a later dom0 uptime).
+
+4. **Use `[DBG] dom=1` lines**: these are the ONLY reliable dom1 progress indicators
+   since they go through the capavisor serial and are tagged with the domain ID.
+
+### Dom1 serial output chain (current issue)
+
+CHV runs with `--serial tty`, which opens `/dev/tty` in dom0. This means:
+
+- Dom1 kernel writes to its virtual ttyS0 (I/O port 0x3F8)
+- CHV's UART emulation captures the bytes
+- CHV writes them to `/dev/tty` inside dom0
+
+**Known issue**: dom1's console output does NOT appear in `/tmp/out.txt`. The
+CHV→`/dev/tty`→dom0 ttyS0→QEMU serial chain may not be working. Possible causes:
+
+- CHV's `/dev/tty` is not connected to dom0's serial console
+- I/O port exits for serial (0x3F8) may not be properly forwarded to CHV
+- CHV's UART emulation in the Themis backend may not be processing the bytes
+
+To verify dom1 boot without serial: use `[DBG]` trace codes (see above), check
+`[CHILD-EXIT]` RIP addresses (kernel virtual addresses `0xffffffff81...` confirm
+Linux is running), and try pinging dom1 (`ping 192.168.100.2` from dom0).

@@ -377,12 +377,29 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                         ),
                                         0x40000001 => (0b00001, 0, 0, 0),
                                         0x40000003 => (256, 1024, 4096, 0),
+                                        // Leaf 0x40000010: Hyper-V TSC frequency
+                                        // ECX = TSC freq in kHz — Linux reads this
+                                        // via hv_get_tsc_khz() when running on Hyper-V.
+                                        0x40000010 => (0, 0, 3000000u32, 0),
                                         _ => (0, 0, 0, 0),
                                     };
                                     vcpu.set_reg(Reg::Rax, eax as u64);
                                     vcpu.set_reg(Reg::Rbx, ebx as u64);
                                     vcpu.set_reg(Reg::Rcx, ecx as u64);
                                     vcpu.set_reg(Reg::Rdx, edx as u64);
+                                    next_instruction(vcpu);
+                                    return;
+                                }
+                                // Leaf 0x15: Time Stamp Counter / Core Crystal Clock
+                                // Linux uses this for fast TSC calibration.
+                                // EAX=denom, EBX=numer, ECX=crystal Hz.
+                                // TSC freq = crystal * numer / denom.
+                                // 25 MHz crystal × 120 / 1 = 3000 MHz.
+                                0x15 => {
+                                    vcpu.set_reg(Reg::Rax, 1u64);         // denominator
+                                    vcpu.set_reg(Reg::Rbx, 120u64);       // numerator
+                                    vcpu.set_reg(Reg::Rcx, 25_000_000u64); // crystal Hz
+                                    vcpu.set_reg(Reg::Rdx, 0u64);
                                     next_instruction(vcpu);
                                     return;
                                 }
@@ -409,6 +426,20 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         _ => {
+                            // Log WRMSR exits from child to diagnose timer issues.
+                            if basic_reason == EXIT_REASON_WRMSR {
+                                use core::sync::atomic::{AtomicU32, Ordering};
+                                static WRMSR_LOG: AtomicU32 = AtomicU32::new(0);
+                                let n = WRMSR_LOG.fetch_add(1, Ordering::Relaxed);
+                                if n < 20 || n % 100 == 0 {
+                                    let ecx = vcpu.reg(Reg::Rcx) as u32;
+                                    let rip = vcpu.get(vmcs::guest::RIP);
+                                    serial_println!(
+                                        "[CHILD-WRMSR] #{} msr={:#x} rip={:#x}",
+                                        n, ecx, rip
+                                    );
+                                }
+                            }
                             // All other exits: forward to parent.
                             crate::hypercall::forward_child_exit(vcpu, basic_reason);
                             return;
@@ -1007,6 +1038,26 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
     let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
     let offset = (qual & 0xFFF) as usize; // byte offset within APIC page
     let acc_type = (qual >> 12) & 0xF;
+
+    // Log LAPIC timer-related register accesses (LVT Timer, Initial Count,
+    // Current Count, Divide Config) to diagnose timer mode selection.
+    const APIC_LVT_TIMER: usize = 0x320;
+    const APIC_TMICT: usize     = 0x380;
+    const APIC_TMCCT: usize     = 0x390;
+    const APIC_TDCR: usize      = 0x3E0;
+    if matches!(offset, APIC_LVT_TIMER | APIC_TMICT | APIC_TMCCT | APIC_TDCR) {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static TIMER_LOG: AtomicU32 = AtomicU32::new(0);
+        let n = TIMER_LOG.fetch_add(1, Ordering::Relaxed);
+        if n < 30 || n % 200 == 0 {
+            let rip = vcpu.get(vmcs::guest::RIP);
+            let rax = vcpu.reg(Reg::Rax) as u32;
+            serial_println!(
+                "[APIC-TIMER] #{} type={} off={:#x} rax={:#x} rip={:#x}",
+                n, acc_type, offset, rax, rip
+            );
+        }
+    }
 
     let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
     if platform_ptr.is_null() {

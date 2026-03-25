@@ -445,17 +445,18 @@ fn do_add_vp(
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };
 
-    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys, first_vp);
+    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys,
+         io_bitmap_a_phys, io_bitmap_b_phys, first_vp);
     {
         let mut pd = arc.lock();
-        // Check if this is the first VP (need extra page for MSR bitmap).
+        // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
         first_vp = pd.msr_bitmap_phys == 0;
-        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap if first VP).
+        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + 2 IO bitmaps if first VP).
         // apic_access_phys comes from the ChangeRights mapping of GPA 0xFEE00000,
         // established during THHV_SEND_SHARED_META — not allocated from META.
         // THHV_META_PAGES_SHARED (4: MSR bitmap + IO bitmaps + EPT root) +
-        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP, comfortably covers 4+1=5.
-        let pages_needed = if first_vp { 4 } else { 3 };
+        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP.
+        let pages_needed = if first_vp { 6 } else { 3 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -468,8 +469,12 @@ fn do_add_vp(
         pid_phys = pd.meta.alloc_frame();
         if first_vp {
             pd.msr_bitmap_phys = pd.meta.alloc_frame();
+            pd.io_bitmap_a_phys = pd.meta.alloc_frame();
+            pd.io_bitmap_b_phys = pd.meta.alloc_frame();
         }
         msr_bitmap_phys = pd.msr_bitmap_phys;
+        io_bitmap_a_phys = pd.io_bitmap_a_phys;
+        io_bitmap_b_phys = pd.io_bitmap_b_phys;
         // apic_access_phys was recorded by apply_update when thhv mapped the
         // APIC-access sentinel page at GPA 0xFEE00000 via THHV_SEND_SHARED_META.
         apic_access_phys = pd.apic_access_phys;
@@ -480,6 +485,73 @@ fn do_add_vp(
     let hhdm = platform.hhdm_offset();
     unsafe {
         core::ptr::write_bytes((pid_phys + hhdm) as *mut u8, 0, 64);
+    }
+
+    // Initialize IO bitmaps: zero (pass-through) then set bits for device ports
+    // that CHV needs to emulate.
+    // IO bitmap A covers ports 0x0000-0x7FFF (bit N = port N).
+    // IO bitmap B covers ports 0x8000-0xFFFF. Only bitmap A is used here.
+    if first_vp && io_bitmap_a_phys != 0 {
+        unsafe {
+            // Zero both pages: all ports pass-through by default.
+            core::ptr::write_bytes((io_bitmap_a_phys + hhdm) as *mut u8, 0, 4096);
+            core::ptr::write_bytes((io_bitmap_b_phys + hhdm) as *mut u8, 0, 4096);
+
+            let bitmap_a = (io_bitmap_a_phys + hhdm) as *mut u8;
+
+            // Helper: set bit for port N → byte N/8, bit N%8.
+            macro_rules! trap_port {
+                ($port:expr) => {
+                    let byte = $port / 8;
+                    let bit  = $port % 8;
+                    let old = bitmap_a.add(byte).read_volatile();
+                    bitmap_a.add(byte).write_volatile(old | (1u8 << bit));
+                };
+            }
+
+            // Serial COM1: 0x3F8-0x3FF (UART emulation for dom1 console)
+            for p in 0x3F8u16..=0x3FF { trap_port!(p as usize); }
+
+            // NOTE: PIT (0x40-0x43), i8042 (0x60,0x64), PM-timer (0x608) intentionally
+            // NOT trapped — CHV's emulated PIT can't deliver IRQ0 back to dom1, so
+            // trapping these causes dom1 to lose its scheduler tick and hang at 0x30.
+            // Dom1 accesses dom0's hardware directly for these; the CHV timer (0xEC)
+            // provides the LAPIC timer tick independently.
+        }
+        serial_println!(
+            "  IO bitmaps: A={:#x} B={:#x} (serial 0x3F8-0x3FF trapped)",
+            io_bitmap_a_phys, io_bitmap_b_phys,
+        );
+    }
+
+    // Initialize MSR bitmap for child domains: zero (pass-through) then trap
+    // WRMSR for IA32_TSC_DEADLINE (0x6E0) so the capavisor can forward
+    // TSC-deadline timer programming to CHV for proper LAPIC timer emulation.
+    //
+    // MSR bitmap layout (1 page = 4096 bytes):
+    //   bytes    0-1023: RDMSR bitmap for MSRs 0x0–0x1FFF
+    //   bytes 1024-2047: RDMSR bitmap for MSRs 0xC0000000–0xC0001FFF
+    //   bytes 2048-3071: WRMSR bitmap for MSRs 0x0–0x1FFF
+    //   bytes 3072-4095: WRMSR bitmap for MSRs 0xC0000000–0xC0001FFF
+    // Bit = 1 ⟹ trap (VM exit); bit = 0 ⟹ pass-through.
+    if first_vp && msr_bitmap_phys != 0 {
+        unsafe {
+            core::ptr::write_bytes((msr_bitmap_phys + hhdm) as *mut u8, 0, 4096);
+
+            let bitmap = (msr_bitmap_phys + hhdm) as *mut u8;
+
+            // Trap WRMSR for IA32_TSC_DEADLINE (0x6E0 = 1760).
+            // Write bitmap for low MSRs starts at byte 2048.
+            const TSC_DEADLINE_MSR: usize = 0x6E0;
+            let byte_off = 2048 + TSC_DEADLINE_MSR / 8;
+            let bit = TSC_DEADLINE_MSR % 8;
+            let old = bitmap.add(byte_off).read_volatile();
+            bitmap.add(byte_off).write_volatile(old | (1u8 << bit));
+        }
+        serial_println!(
+            "  MSR bitmap: {:#x} (WRMSR 0x6E0 trapped)",
+            msr_bitmap_phys,
+        );
     }
 
     // ── Step 2: call into capa engine ──
@@ -499,6 +571,10 @@ fn do_add_vp(
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
                 pd.msr_bitmap_phys = 0;
+                pd.meta.free_frame(io_bitmap_a_phys);
+                pd.meta.free_frame(io_bitmap_b_phys);
+                pd.io_bitmap_a_phys = 0;
+                pd.io_bitmap_b_phys = 0;
                 // apic_access_phys is not from META — do not free it.
             }
             serial_println!("[ADD_VP] capa engine error, META rolled back");
@@ -533,6 +609,8 @@ fn do_add_vp(
                     msr_bitmap_phys,
                     pid_phys,
                     apic_access_phys,
+                    io_bitmap_a_phys,
+                    io_bitmap_b_phys,
                     eptp,
                     vpid,
                 );
@@ -966,6 +1044,10 @@ pub fn forward_child_exit(
             // Fill CPUID leaf/subleaf so CHV emulates the correct leaf.
             cpuid_rax: vcpu.reg(Reg::Rax),
             cpuid_rcx: vcpu.reg(Reg::Rcx),
+            // Fill MSR fields for RDMSR/WRMSR exits (exit reasons 31/32).
+            msr_number: vcpu.reg(Reg::Rcx) as u32,
+            msr_value: ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32)
+                      | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF),
             ..InterceptMessage::default()
         };
 

@@ -77,7 +77,10 @@ else
     [[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
 fi
 
-for f in $(ls /boot/initrd.img-* 2>/dev/null | sort -V); do INITRAMFS_IMG="$f"; done
+for f in $(ls /boot/initrd.img-* 2>/dev/null | sort -V); do
+    # Skip broken/empty files (e.g. interrupted kernel upgrades leave 0-byte .new files)
+    [[ -s "$f" ]] && INITRAMFS_IMG="$f"
+done
 [[ -z "$INITRAMFS_IMG" && -f /boot/initrd.img ]] && INITRAMFS_IMG=/boot/initrd.img
 
 if [[ -z "$KERNEL_IMG" ]]; then echo "ERROR: no kernel found in /boot"; exit 1; fi
@@ -94,7 +97,7 @@ echo ""
 exec "$CHV" \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "console=ttyS0 root=/dev/vda1 rw quiet nokaslr nopv lapic_timer_frequency=1000000000 systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
+    --cmdline "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc keep_bootcon loglevel=7 no_timer_check systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service systemd.mask=multipathd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=34 \

@@ -25,13 +25,23 @@ TEST_BINDIR := $(PWD)/test/bin
 TEST_SRCS   := $(wildcard $(PWD)/test/test_*.c) $(wildcard $(PWD)/test/thhv_test.c)
 TEST_BINS   := $(patsubst $(PWD)/test/%.c,$(TEST_BINDIR)/%,$(TEST_SRCS))
 
+# All C and header sources — used to force kbuild re-invocation when any change.
+THHV_SRCS := $(wildcard $(PWD)/src/*.c) $(wildcard $(PWD)/inc/*.h)
+
 # Build libthemis.a as a no_std static lib with the "ffi" feature.
 $(LIBTHEMIS_A):
 	cd $(LIBTHEMIS_DIR) && \
 	cargo build --release --features ffi --target x86_64-unknown-none
 
-default: $(LIBTHEMIS_A)
+# Force our 'all' target as the default goal, even if Kbuild is present.
+# Without this, GNU Make may pick up Kbuild's obj-m rules as the default goal.
+.DEFAULT_GOAL := all
+
+# Always re-invoke kbuild.  The kernel build system handles its own
+# dependency tracking for C sources; we just need to ensure it runs.
+all: $(LIBTHEMIS_A)
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	@test -f $(PWD)/thhv.ko || { echo "ERROR: thhv.ko not produced"; exit 1; }
 
 # Build against kernel headers from a dom0 guest disk image.
 # Mount the disk first with: sudo bash themis/scripts/mount-guest.sh
@@ -50,4 +60,4 @@ clean:
 	cd $(LIBTHEMIS_DIR) && cargo clean
 	rm -rf $(TEST_BINDIR)
 
-.PHONY: default clean guest tests
+.PHONY: all clean guest tests

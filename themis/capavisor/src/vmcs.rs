@@ -123,7 +123,7 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
     // dom0 keeps its xAPIC MMIO EPT passthrough — no APIC access page.
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, vp_index, false);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, 0, 0, vp_index, false);
     write_host_state();
     write_guest_state();
 
@@ -148,13 +148,15 @@ pub unsafe fn setup_child_vmcs(
     msr_bitmap_phys: u64,
     pid_phys: u64,
     apic_access_phys: u64,
+    io_bitmap_a_phys: u64,
+    io_bitmap_b_phys: u64,
     eptp: u64,
     vpid: u16,
 ) {
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, vpid as usize, true);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, io_bitmap_a_phys, io_bitmap_b_phys, vpid as usize, true);
     write_host_state();
     write_guest_state();
 
@@ -172,6 +174,8 @@ unsafe fn write_control_fields(
     msr_bitmap_phys: u64,
     pid_phys: u64,
     apic_access_phys: u64,
+    io_bitmap_a_phys: u64,
+    io_bitmap_b_phys: u64,
     vp_index: usize,
     child: bool,
 ) {
@@ -196,7 +200,8 @@ unsafe fn write_control_fields(
         | (1 << 28) // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
     if child {
-        primary_desired |= 1 << 7; // HLT_EXITING
+        primary_desired |= 1 << 7;  // HLT_EXITING
+        primary_desired |= 1 << 24; // USE_IO_BITMAPS — selective I/O port trapping (serial UART etc.)
     }
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
     let primary_val = adjust(primary_desired, primary_msr);
@@ -341,9 +346,18 @@ unsafe fn write_control_fields(
     // A zeroed page at phys 0 means no I/O intercepts and no MSR intercepts,
     // which is correct for a pass-through hypervisor at bootstrap time.
     // ── I/O / MSR bitmap addresses ──────────────────────────────────── //
-    // USE_IO_BITMAPS is off, so I/O bitmap addresses are ignored.
-    vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
-    vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
+    // When USE_IO_BITMAPS is set (child VMs), write the IO bitmap physical
+    // addresses.  Each bitmap is 4KB: A covers ports 0x0000-0x7FFF, B covers
+    // 0x8000-0xFFFF.  A set bit causes a VM exit on that port's IN/OUT.
+    if child && io_bitmap_a_phys != 0 {
+        vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, io_bitmap_a_phys)
+            .expect("vmwrite IO bitmap A");
+        vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, io_bitmap_b_phys)
+            .expect("vmwrite IO bitmap B");
+    } else {
+        vmx::vmwrite(control::IO_BITMAP_A_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap A");
+        vmx::vmwrite(control::IO_BITMAP_B_ADDR_FULL as u32, 0).expect("vmwrite IO bitmap B");
+    }
     // MSR bitmap: allocated from META pool, initialized to trap perf MSRs.
     vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, msr_bitmap_phys)
         .expect("vmwrite MSR bitmap");

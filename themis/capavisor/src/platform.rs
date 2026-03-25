@@ -370,6 +370,13 @@ pub struct PlatformDomain {
     /// Allocated from META pool at seal time; 0 until then.
     pub msr_bitmap_phys: u64,
 
+    /// Physical addresses of the I/O bitmap pages (A: ports 0x0000-0x7FFF,
+    /// B: ports 0x8000-0xFFFF).  Used with USE_IO_BITMAPS for child VPs.
+    /// A set bit traps the corresponding port's IN/OUT to the hypervisor.
+    /// Allocated from META pool on first ADD_VP; 0 until then.
+    pub io_bitmap_a_phys: u64,
+    pub io_bitmap_b_phys: u64,
+
     /// Physical address of the APIC access page (one per domain, 4 KB).
     /// Used with VIRTUALIZE_APIC_ACCESSES (secondary proc-based bit 0) for
     /// child VPs — xAPIC MMIO accesses to 0xFEE00000 fault to this page
@@ -446,6 +453,8 @@ impl PlatformDomain {
             vps: Vec::new(),
             comm_hpas: Vec::new(),
             msr_bitmap_phys: 0,
+            io_bitmap_a_phys: 0,
+            io_bitmap_b_phys: 0,
             apic_access_phys: 0,
             domcomm: None,
             doorbells: Vec::new(),
