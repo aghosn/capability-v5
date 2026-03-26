@@ -421,11 +421,19 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             }
                         }
                         EXIT_REASON_APIC_ACCESS => {
-                            // Handle LAPIC MMIO accesses for child domains natively
-                            // using the same virtual APIC page mechanism as dom0.
-                            // Forwarding to the parent is architecturally wrong:
-                            // the LAPIC is per-vCPU state that doesn't cross domain
-                            // boundaries, and the round-trip cost is O(depth).
+                            // Handle most LAPIC accesses locally (virtual APIC page).
+                            // ICR writes (offset 0x300) are forwarded to CHV so
+                            // it can detect IPI delivery modes (INIT/SIPI) and
+                            // manage AP lifecycle — capavisor stays boot-agnostic.
+                            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+                            let offset = qual & 0xFFF;
+                            let acc_type = (qual >> 12) & 0xF;
+                            if offset == 0x300 && acc_type == 1 {
+                                // ICR low write — forward to parent VMM.
+                                crate::hypercall::forward_child_exit(
+                                    vcpu, EXIT_REASON_APIC_ACCESS);
+                                return;
+                            }
                             handle_apic_access_exit(vcpu);
                             return;
                         }
@@ -486,7 +494,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             vcpu.set(vmcs::guest::CS_LIMIT, 0xFFFF);
             vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, 0x009B);
             vcpu.set(vmcs::guest::RIP, 0);
-            vcpu.set(vmcs::guest::CR0, 0x30);
+            // CR0 must satisfy IA32_VMX_CR0_FIXED0 (PE + ET + NE required by VMX).
+            vcpu.set(vmcs::guest::CR0, unsafe { crate::vmcs::vmcs_adjust_cr0(0x30) });
             vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
             vcpu.set(
                 vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,

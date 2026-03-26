@@ -18,7 +18,7 @@ CHV="$BINS/cloud-hypervisor/cloud-hypervisor"
 THHV_KO="$BINS/thhv/thhv.ko"
 DOM1_DISK="$BINS/dom1/dom1.raw"
 
-CHV_CPUS="${CHV_CPUS:-1}"
+CHV_CPUS="${CHV_CPUS:-2}"
 CHV_MEM="${CHV_MEM:-1G}"
 
 if [[ ! -f "$DOM1_DISK" ]]; then
@@ -96,7 +96,7 @@ exec "$CHV" \
     -v \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=4 no_timer_check init=/bin/bash" \
+    --cmdline "earlyprintk=serial,ttyS0,115200 keep_bootcon console=ttyS0,115200 console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=7 no_timer_check init=/bin/bash" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=34 \
@@ -104,4 +104,4 @@ exec "$CHV" \
     --serial tty \
     --console tty \
     --seccomp false \
-    ${CHV_EXTRA_ARGS:-} 2>/tmp/chv-stderr.log
+    ${CHV_EXTRA_ARGS:-} >/tmp/chv-stdout.log 2>/tmp/chv-stderr.log

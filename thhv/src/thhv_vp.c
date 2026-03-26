@@ -49,6 +49,17 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 	if (!mutex_trylock(&vp->run_lock))
 		return -EBUSY;
 
+	/* Block if this VP is in wait-for-SIPI state (mp_state == 3).
+	 * The BSP will send INIT+SIPI via CHV → SET_VP_STATE(ACTIVITY_STATE=0)
+	 * which transitions mp_state to 0 and wakes us. */
+	if (vp->mp_state == 3) {
+		ret = wait_event_interruptible(vp->sipi_wq, vp->mp_state != 3);
+		if (ret) {
+			mutex_unlock(&vp->run_lock);
+			return ret;
+		}
+	}
+
 	if (part->sched_policy == THHV_SCHED_SYNC) {
 		/*
 		 * Sync mode: the calling thread's VP is "donated" to the
@@ -290,9 +301,31 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	}
 
 	/* Write all register values into the COMM page + set dirty bits.
-	 * The capavisor will validate and apply them at SWITCH time. */
+	 * The capavisor will validate and apply them at SWITCH time.
+	 *
+	 * Special case: ACTIVITY_STATE manages the software wait-for-SIPI
+	 * mechanism.  Value 3 blocks future VP_RUN calls; value 0 unblocks
+	 * and wakes any sleeping thread. */
 	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
 	for (i = 0; i < hdr.count; i++) {
+		if (regs[i].name == THHV_VP_REG_ACTIVITY_STATE) {
+			if (regs[i].value == 3) {
+				vp->mp_state = 3;
+				/* Don't write to COMM page — we handle
+				 * the wait in thhv_vp_run(), not in the
+				 * capavisor VMCS. */
+			} else {
+				if (vp->mp_state == 3) {
+					vp->mp_state = 0;
+					wake_up_interruptible(&vp->sipi_wq);
+				}
+				/* Write ACTIVITY_STATE=0 to COMM page so
+				 * capavisor applies it to the VMCS. */
+				thhv_comm_set_reg(comm, (unsigned int)regs[i].name,
+						  regs[i].value);
+			}
+			continue;
+		}
 		thhv_comm_set_reg(comm, (unsigned int)regs[i].name, regs[i].value);
 	}
 
@@ -483,6 +516,8 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	mutex_init(&vp->run_lock);
 	init_waitqueue_head(&vp->exit_wq);
 	atomic_set(&vp->exit_pending, 0);
+	vp->mp_state = 0; /* runnable */
+	init_waitqueue_head(&vp->sipi_wq);
 
 	/* Pin META + COMM pages from userspace. */
 	ret = thhv_vp_pin_pages(vp, cv.meta_uaddr, meta_nr, cv.comm_uaddr);

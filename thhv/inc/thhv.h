@@ -1016,6 +1016,14 @@ struct thhv_vp {
 	wait_queue_head_t exit_wq;
 	atomic_t exit_pending;
 
+	/* MP state: software wait-for-SIPI.
+	 * 0 = runnable, 3 = waiting-for-SIPI.
+	 * When mp_state == 3, thhv_vp_run() blocks on sipi_wq until
+	 * a SET_VP_STATE(ACTIVITY_STATE=0) transitions mp_state to 0.
+	 * This mirrors KVM's in-kernel MP state management. */
+	int mp_state;
+	wait_queue_head_t sipi_wq;
+
 	/* Exit info buffer for userspace. */
 	u8 exit_msg[256];
 
