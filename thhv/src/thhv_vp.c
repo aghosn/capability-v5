@@ -65,6 +65,13 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 			ret = themis_switch(part->domain_handle, vp->vp_index);
 			if (ret != -EAGAIN)
 				break;
+			/* Drain DomainComm RX on every ERR_RETRY iteration.
+			 * Doorbells hit via the capavisor fast-path queue
+			 * notifications here; if we don't drain between
+			 * SWITCH retries the child may deadlock waiting for
+			 * a completion interrupt whose doorbell was never
+			 * forwarded to CHV. */
+			thhv_drain_domcomm_rx(part);
 			if (signal_pending(current)) {
 				mutex_unlock(&vp->run_lock);
 				return -EINTR;

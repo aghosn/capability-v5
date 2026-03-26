@@ -162,7 +162,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         | opcodes::THEMIS_ENUMERATE => Some(HypercallResult::unimpl()),
 
         _ => {
-            serial_println!("[VMCALL] unknown opcode {:#x}", opcode);
+            serial_debug!("[VMCALL] unknown opcode {:#x}", opcode);
             Some(HypercallResult::error(errors::ERR_INVALID))
         }
     }
@@ -1058,7 +1058,7 @@ pub fn forward_child_exit(
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
             let exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-            serial_println!(
+            serial_debug!(
                 "[EPT] gpa={:#x} rip={:#x} qual={:#x} rax={:#x}",
                 gpa, guest_rip, exit_qual, vcpu.reg(Reg::Rax)
             );
@@ -1135,6 +1135,19 @@ pub fn forward_child_exit(
     let parent_instr_len = parent_active.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
         .unwrap_or(3); // VMCALL is 3 bytes
     parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
+
+    // Inject any deferred host interrupt that arrived while the child was running.
+    // This ensures dom0's timer ticks (and other interrupts) are delivered even
+    // though we deferred them to avoid constant context switches.
+    {
+        use crate::vmexit::DEFERRED_HOST_VECTOR;
+        let pending = DEFERRED_HOST_VECTOR[core_id as usize]
+            .swap(0, core::sync::atomic::Ordering::Relaxed);
+        if pending != 0 {
+            let intr_info = (1u64 << 31) | (pending as u64);
+            parent_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+        }
+    }
 
     serial_debug!(
         "[CHILD_EXIT] swapped back dom={}→{} vp={}→{}",
@@ -1493,6 +1506,14 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // xAPIC MMIO EOI path.  The processor clears bit 31 automatically after delivery.
     let intr_info = (1u64 << 31) | (vector as u64);
     handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+
+    // Clear any deferred host vector — we're already returning to dom0.
+    // The next SWITCH re-entry will pick up future interrupts.
+    {
+        use crate::vmexit::DEFERRED_HOST_VECTOR;
+        DEFERRED_HOST_VECTOR[core_id as usize]
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+    }
 
     // Advance dom0's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY.
     // This allows the Linux kernel driver to return from themis_switch(-EAGAIN),
@@ -2051,11 +2072,29 @@ fn do_inject_interrupt(
 
     let hhdm = platform.hhdm_offset();
 
-    // VP is not currently running on this core — is_remote = false means
-    // we set the PIR bit and let the next VMRESUME pick it up.
-    // TODO: check if VP is live on a remote core (async mode) and send
-    // a posted-interrupt IPI (vector 0xF2) instead.
-    unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+    // Write the vector into the VP's Posted-Interrupt Descriptor (PIR).
+    // Use is_remote=true: if the VP is currently live on a core (inside
+    // a SWITCH), the notification IPI wakes the processor so it processes
+    // PIR → vIRR without needing a full VM exit cycle.  If the VP is
+    // stopped, the IPI is harmless and the PIR bit is picked up on the
+    // next VMRESUME.
+    unsafe { inject_via_pid(pid_phys, hhdm, vector, true) };
+
+    static INJECT_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = INJECT_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 20 || n % 500 == 0 {
+        // Read NDST from PID (offset 40, bits [31:0] = xAPIC destination)
+        let ndst = unsafe {
+            core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
+        };
+        let on = unsafe {
+            core::ptr::read_volatile(((pid_phys + hhdm) + 32) as *const u32)
+        };
+        serial_println!(
+            "[INJECT-INTR] #{} vec={} vp={} pid={:#x} ndst={:#x} on={}",
+            n, vector, vp_id, pid_phys, ndst, on
+        );
+    }
 
     HypercallResult::success()
 }

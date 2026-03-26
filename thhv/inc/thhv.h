@@ -737,7 +737,7 @@ struct thhv_irqfd {
 	__s32 fd;
 	__u32 gsi;
 	__u32 flags;
-	__u32 rsvd;
+	__u32 vector;   /* MSI vector to inject (0 = use gsi as vector) */
 };
 
 #define THHV_IRQFD_FLAG_DEASSIGN  (1u << 0)

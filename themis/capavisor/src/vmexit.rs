@@ -23,6 +23,17 @@ pub static DOMCOMM_GPA: AtomicU64 = AtomicU64::new(0);
 /// Dom0 DomainComm region size in pages.
 pub static DOMCOMM_PAGES: AtomicU32 = AtomicU32::new(0);
 
+/// Per-core deferred host interrupt vector.
+/// When a physical interrupt fires while a child is running, we save the vector
+/// here and re-enter the child instead of doing a full context switch to dom0.
+/// Value 0 = no pending interrupt; non-zero = vector to inject on next child→dom0 transition.
+/// MAX_CORES = 64 should be sufficient for any reasonable system.
+const MAX_CORES: usize = 64;
+pub static DEFERRED_HOST_VECTOR: [AtomicU32; MAX_CORES] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_CORES]
+};
+
 // ── x2APIC MSR range (SDM Vol 3 §10.12.1) ──────────────────────────────── //
 // In x2APIC mode every APIC register is accessed via MSRs 0x800–0x83F.
 // We virtualise these through the VAPIC page rather than letting the guest
@@ -301,10 +312,25 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
                             // Physical interrupt fired while child was running.
                             // ACKNOWLEDGE_INTERRUPT_ON_EXIT already sent EOI to the LAPIC.
-                            // Read the acknowledged vector and forward it to the handler domain
-                            // (dom0 in Phase 1) via lazy-unwind + VMENTRY injection.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
+
+                            // Rate-limited diagnostic
+                            static CHILD_EXT_INT_COUNT: core::sync::atomic::AtomicU64 =
+                                core::sync::atomic::AtomicU64::new(0);
+                            let n = CHILD_EXT_INT_COUNT
+                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if n < 10 || n % 10000 == 0 {
+                                serial_println!(
+                                    "[CHILD-EXTINT] #{} vector={} dom={}",
+                                    n, vector, domain_id
+                                );
+                            }
+
+                            // Forward the interrupt to dom0. This causes a full
+                            // context switch (VMCLEAR child → VMPTRLD dom0 → return
+                            // ERR_RETRY) which allows thhv to drain the DomainComm
+                            // RX ring (processing any queued doorbell notifications).
                             crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
                             return;
                         }

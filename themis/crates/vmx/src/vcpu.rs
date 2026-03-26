@@ -27,6 +27,66 @@ const SYSCALL_MSRS: [u32; 5] = [
 ];
 const NUM_SYSCALL_MSRS: usize = SYSCALL_MSRS.len();
 
+// ── FPU / SSE / AVX extended state ──────────────────────────────────────── //
+// The VMCS does NOT save/restore XMM/YMM registers across VM exits.
+// Without explicit XSAVE/XRSTOR, switching between child and dom0 causes
+// dom0 userspace (CHV) to clobber the child's FPU state.
+
+/// XSAVE area size: 1024 bytes covers x87 (160) + SSE (352 header) +
+/// XSAVE header (64) + AVX YMM_Hi128 (256) = 832 bytes, with room to spare.
+const XSAVE_AREA_SIZE: usize = 1024;
+
+/// XSAVE component mask: x87 (bit 0) + SSE (bit 1) + AVX (bit 2).
+const XSAVE_MASK: u64 = 0x7;
+
+/// 64-byte-aligned buffer for XSAVE/XRSTOR.
+#[repr(C, align(64))]
+pub struct XsaveArea {
+    data: [u8; XSAVE_AREA_SIZE],
+}
+
+impl XsaveArea {
+    pub const fn new() -> Self {
+        Self { data: [0u8; XSAVE_AREA_SIZE] }
+    }
+}
+
+/// Save the current FPU/SSE/AVX state into `area`.
+///
+/// # Safety
+/// `area` must be 64-byte aligned and large enough for the current XCR0.
+#[inline(always)]
+unsafe fn xsave(area: &mut XsaveArea) {
+    let ptr = area.data.as_mut_ptr();
+    let mask_lo = XSAVE_MASK as u32;
+    let mask_hi = (XSAVE_MASK >> 32) as u32;
+    core::arch::asm!(
+        "xsave [{}]",
+        in(reg) ptr,
+        in("eax") mask_lo,
+        in("edx") mask_hi,
+        options(nostack),
+    );
+}
+
+/// Restore FPU/SSE/AVX state from `area`.
+///
+/// # Safety
+/// `area` must contain a valid XSAVE image (or all-zeros for init state).
+#[inline(always)]
+unsafe fn xrstor(area: &XsaveArea) {
+    let ptr = area.data.as_ptr();
+    let mask_lo = XSAVE_MASK as u32;
+    let mask_hi = (XSAVE_MASK >> 32) as u32;
+    core::arch::asm!(
+        "xrstor [{}]",
+        in(reg) ptr,
+        in("eax") mask_lo,
+        in("edx") mask_hi,
+        options(nostack, readonly),
+    );
+}
+
 // ── Guest register file ──────────────────────────────────────────────────── //
 
 /// Indices into the guest general-purpose register file.
@@ -86,6 +146,8 @@ pub struct InactiveVcpu {
     /// Saved values for MSRs that the VMCS does not automatically
     /// save/restore (STAR, LSTAR, CSTAR, FMASK, KERNEL_GS_BASE).
     syscall_msrs: [u64; NUM_SYSCALL_MSRS],
+    /// Saved FPU/SSE/AVX state (XSAVE format).
+    xsave_area: XsaveArea,
 }
 
 // SAFETY: After VMCLEAR, the VMCS is flushed to memory and not bound to any
@@ -106,6 +168,7 @@ impl InactiveVcpu {
             launched: false,
             regs: [0u64; REGFILE_SIZE],
             syscall_msrs: [0u64; NUM_SYSCALL_MSRS],
+            xsave_area: XsaveArea::new(),
         }
     }
 
@@ -119,6 +182,8 @@ impl InactiveVcpu {
             for (i, &msr) in SYSCALL_MSRS.iter().enumerate() {
                 x86::msr::wrmsr(msr, self.syscall_msrs[i]);
             }
+            // Restore guest FPU/SSE/AVX state.
+            xrstor(&self.xsave_area);
         }
         Ok(ActiveVcpu {
             vmcs_phys: self.vmcs_phys,
@@ -129,6 +194,7 @@ impl InactiveVcpu {
             launched: self.launched,
             regs: self.regs,
             syscall_msrs: self.syscall_msrs,
+            xsave_area: self.xsave_area,
             _not_send: PhantomData,
         })
     }
@@ -166,6 +232,7 @@ pub struct ActiveVcpu {
     launched: bool,
     regs: [u64; REGFILE_SIZE],
     syscall_msrs: [u64; NUM_SYSCALL_MSRS],
+    xsave_area: XsaveArea,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -227,7 +294,7 @@ impl ActiveVcpu {
     /// Deactivate this VCPU: VMCLEAR the VMCS and return an InactiveVcpu.
     /// After this call, the VMCS is no longer loaded on any core and the
     /// launch state is reset (next `run()` will VMLAUNCH, not VMRESUME).
-    pub fn deactivate(self) -> Result<InactiveVcpu, VmxError> {
+    pub fn deactivate(mut self) -> Result<InactiveVcpu, VmxError> {
         // Save guest MSRs that the VMCS does not handle automatically.
         // After VMEXIT, these physical MSRs still hold the guest's values
         // because the CPU does not load host values for them.
@@ -235,6 +302,8 @@ impl ActiveVcpu {
         for (i, &msr) in SYSCALL_MSRS.iter().enumerate() {
             saved_msrs[i] = unsafe { x86::msr::rdmsr(msr) };
         }
+        // Save guest FPU/SSE/AVX state before VMCLEAR.
+        unsafe { xsave(&mut self.xsave_area); }
         unsafe {
             vmx::vmclear(self.vmcs_phys)
                 .map_err(|_| VmxError::VmcsOperationFailed("vmclear"))?;
@@ -248,6 +317,7 @@ impl ActiveVcpu {
             launched: false, // VMCLEAR resets the launch state
             regs: self.regs,
             syscall_msrs: saved_msrs,
+            xsave_area: self.xsave_area,
         })
     }
 
