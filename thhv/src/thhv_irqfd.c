@@ -35,9 +35,6 @@ int ret;
 if (READ_ONCE(entry->deassign))
 return;
 
-pr_info_ratelimited("thhv: irqfd_inject gsi=%u vec=%u\n",
-    entry->gsi, entry->vector);
-
 ret = themis_inject_interrupt(entry->partition->domain_handle,
       0, (u8)entry->vector);
 if (ret && ret != -ENOSYS)
@@ -127,7 +124,6 @@ mutex_lock(&part->irqfds.lock);
 list_add_tail(&entry->node, &part->irqfds.list);
 mutex_unlock(&part->irqfds.lock);
 
-pr_info("thhv: irqfd_assign gsi=%u vec=%u fd=%d\n", args.gsi, entry->vector, args.fd);
 return 0;
 }
 

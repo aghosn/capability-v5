@@ -144,10 +144,6 @@ fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
         }
         let host_xcr0 = ((hi as u64) << 32) | (lo as u64);
         let safe_val = (val & host_xcr0) | 1;
-        serial_debug!(
-            "[XSETBV] guest={:#x} host_xcr0={:#x} safe={:#x}",
-            val, host_xcr0, safe_val
-        );
         unsafe {
             core::arch::asm!(
                 "xsetbv",
@@ -315,18 +311,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
 
-                            // Rate-limited diagnostic
-                            static CHILD_EXT_INT_COUNT: core::sync::atomic::AtomicU64 =
-                                core::sync::atomic::AtomicU64::new(0);
-                            let n = CHILD_EXT_INT_COUNT
-                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            if n < 10 || n % 10000 == 0 {
-                                serial_println!(
-                                    "[CHILD-EXTINT] #{} vector={} dom={}",
-                                    n, vector, domain_id
-                                );
-                            }
-
                             // Forward the interrupt to dom0. This causes a full
                             // context switch (VMCLEAR child → VMPTRLD dom0 → return
                             // ERR_RETRY) which allows thhv to drain the DomainComm
@@ -465,20 +449,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         _ => {
-                            // Log WRMSR exits from child to diagnose timer issues.
-                            if basic_reason == EXIT_REASON_WRMSR {
-                                use core::sync::atomic::{AtomicU32, Ordering};
-                                static WRMSR_LOG: AtomicU32 = AtomicU32::new(0);
-                                let n = WRMSR_LOG.fetch_add(1, Ordering::Relaxed);
-                                if n < 20 || n % 100 == 0 {
-                                    let ecx = vcpu.reg(Reg::Rcx) as u32;
-                                    let rip = vcpu.get(vmcs::guest::RIP);
-                                    serial_println!(
-                                        "[CHILD-WRMSR] #{} msr={:#x} rip={:#x}",
-                                        n, ecx, rip
-                                    );
-                                }
-                            }
                             // All other exits: forward to parent.
                             crate::hypercall::forward_child_exit(vcpu, basic_reason);
                             return;
@@ -655,8 +625,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     edx = 0;
                 }
                 (0xDEAD0000..=0xDEADFFFF, _) => {
-                    let code = leaf & 0xFFFF;
-                    serial_debug!("[TRACE] code={:#x}", code);
                     eax = 0;
                     ebx = 0;
                     ecx = 0;
@@ -943,12 +911,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             }
 
             // No doorbell match (or platform not ready) — full intercept path.
-            serial_debug!(
-                "[VMEXIT] EPT violation GPA={:#x} qual={:#x} RIP={:#x} → forward_child_exit",
-                gpa,
-                qual,
-                vcpu.get(vmcs::guest::RIP)
-            );
             crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_EPT_VIOLATION);
         }
 
@@ -1038,11 +1000,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // When REPORT-visibility interrupt delivery to child domains is added,
             // set the relevant bitmap bits and implement parent-chain notification here.
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let vector = (qual & 0xFF) as u8;
-            serial_debug!(
-                "[EOI_INDUCED] vector={} — no-op (EOI-exit bitmap not yet programmed)",
-                vector
-            );
+            let _vector = (qual & 0xFF) as u8;
         }
 
         _other => {
@@ -1358,14 +1316,6 @@ fn handle_ept_doorbell(
 
     // Advance child RIP past the faulting write instruction.
     next_instruction(vcpu);
-
-    serial_debug!(
-        "[DOORBELL] fast-path id={} gpa={:#x} val={:#x} size={}",
-        doorbell_id,
-        matched_gpa,
-        value,
-        size
-    );
 
     Some(true)
 }

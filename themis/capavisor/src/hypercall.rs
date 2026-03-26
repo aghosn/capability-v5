@@ -624,11 +624,6 @@ fn do_add_vp(
             let vcpu = InactiveVcpu::new(vmcs_phys, vapic_phys, msr_bitmap_phys, pid_phys, vpid);
             platform.bootstrap_store_vcpu(child_domain_id, vp_id as usize, vcpu);
 
-            serial_debug!(
-                "[ADD_VP] dom={} vp={} vmcs={:#x} vapic={:#x} pid={:#x} msr_bm={:#x} vpid={}",
-                child_domain_id, vp_id, vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, vpid,
-            );
-
             HypercallResult::success_1(vp_id as u64)
         }
     }
@@ -677,7 +672,6 @@ fn do_switch(
             .unwrap_or(0);
         (child_id, hpa)
     };
-    serial_debug!("[SWITCH] comm_hpa={:#x} for dom={} vp={}", comm_hpa, child_domain_id_pre, vp_idx);
 
     // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
     let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
@@ -686,15 +680,6 @@ fn do_switch(
         let hhdm = platform.hhdm_offset();
         let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
         let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
-        {
-            use core::sync::atomic::{AtomicU32, Ordering};
-            static DIRTY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-            if DIRTY_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 5 {
-                serial_println!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}] dom={} vp={}",
-                    dirty[0], dirty[1], dirty[2], child_domain_id_pre, vp_id);
-            }
-        }
-        serial_debug!("[SWITCH] dirty_mask=[{:#x}, {:#x}, {:#x}]", dirty[0], dirty[1], dirty[2]);
 
         if !dirty.iter().all(|w| *w == 0) {
             // Clear dirty bits atomically before validation so we don't replay them.
@@ -707,24 +692,12 @@ fn do_switch(
                     continue;
                 }
                 let val = comm.read_reg(*reg);
-                serial_debug!("[SWITCH] dirty reg={:?} val={:#x}", reg, val);
-                // Log RIP specifically for first few switches
-                if *reg == VpRegister::Rip {
-                    use core::sync::atomic::{AtomicU32, Ordering};
-                    static RIP_LOG: AtomicU32 = AtomicU32::new(0);
-                    if RIP_LOG.fetch_add(1, Ordering::Relaxed) < 10 {
-                        serial_println!("[SWITCH] RIP dirty val={:#x} dom={} vp={}", val, child_domain_id_pre, vp_id);
-                    }
-                }
                 // Validate via capability engine (write access check only —
                 // do NOT call set_register which would call set_vp_register and
                 // re-mark the dirty bit, causing infinite replay on every run).
                 let check_ok = Capability::check_register_write(
                     caller, child_domain_handle, vp_id, *reg as u64, platform,
                 ).is_ok();
-                if *reg == VpRegister::Rip && !check_ok {
-                    serial_println!("[SWITCH] RIP write DENIED val={:#x}", val);
-                }
                 if check_ok {
                     pending.push((*reg, val));
                 }
@@ -902,13 +875,6 @@ fn do_switch(
         child_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
     }
 
-    serial_debug!(
-        "[SWITCH] swapped dom={}→{} vp={}→{} child_rip={:#x}",
-        parent_domain_id, child_domain_id,
-        parent_vp_id, vp_idx,
-        child_active.get(x86::vmx::vmcs::guest::RIP),
-    );
-
     // ── 9. Replace the monitor loop's ActiveVcpu ──
     unsafe { core::ptr::write(vcpu, child_active); }
 
@@ -954,11 +920,6 @@ pub fn forward_child_exit(
         let policy = c.data.policy.interrupts.get_policy(exit_reason as u8);
         policy.read_set
     };
-
-    serial_debug!(
-        "[CHILD_EXIT] reason={} read_set={:x}",
-        exit_reason, read_set,
-    );
 
     // ── Capa engine: return switch (child → parent) ──
     let return_ctx = Capability::switch(&child_cap, 0, 0, platform)
@@ -1058,10 +1019,6 @@ pub fn forward_child_exit(
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
             let exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-            serial_debug!(
-                "[EPT] gpa={:#x} rip={:#x} qual={:#x} rax={:#x}",
-                gpa, guest_rip, exit_qual, vcpu.reg(Reg::Rax)
-            );
             // Try to decode the instruction at guest RIP.
             let ept_root = {
                 let cd = child_arc.lock();
@@ -1148,12 +1105,6 @@ pub fn forward_child_exit(
             parent_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
         }
     }
-
-    serial_debug!(
-        "[CHILD_EXIT] swapped back dom={}→{} vp={}→{}",
-        child_domain_id, parent_domain_id,
-        child_vp_id, parent_vp_id,
-    );
 
     // Replace the monitor loop's ActiveVcpu with the parent's.
     unsafe { core::ptr::write(vcpu, parent_active); }
@@ -1437,15 +1388,12 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
         if pin_val & (1 << 7) != 0 {
             // Hardware supports posted interrupts — inject via PID (Case A: same core).
-            serial_debug!("[INTR_FWD] v={} Deliver: posting via PID (same-core)", vector);
             let pid_phys = vcpu.pid_phys();
             let hhdm = platform.hhdm_offset();
             unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
-            // VP is on this core; VMRESUME moves PIR → vIRR automatically.
             return;
         } else {
             // PID not supported — fall back to VMENTRY_INTR_INFO injection.
-            serial_debug!("[INTR_FWD] v={} Deliver: fallback VMENTRY injection (no PID)", vector);
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1474,13 +1422,6 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
             return;
         }
     };
-
-    serial_debug!(
-        "[INTR_FWD] v={} child_dom={}:{} → handler_dom={}:{}",
-        vector,
-        intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id,
-        intr_ctx.handler_domain_id, intr_ctx.handler_vp_id,
-    );
 
     // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
     let child_arc = platform.domain_arc(intr_ctx.interrupted_domain_id)
