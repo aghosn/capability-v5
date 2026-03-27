@@ -682,13 +682,6 @@ fn do_switch(
         let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
 
         if !dirty.iter().all(|w| *w == 0) {
-            // Log dirty mask for AP switches (debug SMP bringup)
-            if vp_idx > 0 {
-                serial_println!(
-                    "[SWITCH] dirty mask vp={}: [{:#x}, {:#x}, {:#x}]",
-                    vp_idx, dirty[0], dirty[1], dirty[2]
-                );
-            }
             // Clear dirty bits atomically before validation so we don't replay them.
             for i in 0..3 {
                 comm.dirty_mask[i] &= !dirty[i];
@@ -707,11 +700,6 @@ fn do_switch(
                 ).is_ok();
                 if check_ok {
                     pending.push((*reg, val));
-                } else {
-                    serial_println!(
-                        "[SWITCH] DENIED dirty reg {:?} (disc={:#x}) val={:#x} dom={} vp={}",
-                        reg, *reg as u64, val, child_domain_id_pre, vp_idx
-                    );
                 }
             }
         }
@@ -860,38 +848,6 @@ fn do_switch(
     // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
     for (reg, val) in &vmcs_pending {
         apply_vmcs_reg(&mut child_active, *reg, *val);
-    }
-
-    // Print child GUEST_RIP for first few switches to diagnose RIP issues.
-    {
-        use core::sync::atomic::{AtomicU32, Ordering};
-        static VMENTRY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-        let n = VMENTRY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-        // Always log AP (vp>0) entries, plus first 5 BSP entries
-        if n < 5 || vp_idx > 0 {
-            serial_println!(
-                "[SWITCH] VMENTRY dom={} vp={} GUEST_RIP={:#x} CR0={:#x} CR3={:#x} CR4={:#x} EFER={:#x} VMENTRY_CTL={:#x}",
-                child_domain_id, vp_idx,
-                child_active.get(x86::vmx::vmcs::guest::RIP),
-                child_active.get(x86::vmx::vmcs::guest::CR0),
-                child_active.get(x86::vmx::vmcs::guest::CR3),
-                child_active.get(x86::vmx::vmcs::guest::CR4),
-                child_active.get(x86::vmx::vmcs::guest::IA32_EFER_FULL),
-                child_active.get(x86::vmx::vmcs::control::VMENTRY_CONTROLS),
-            );
-            if vp_idx > 0 {
-                serial_println!(
-                    "[SWITCH]   AP CS={:#x} base={:#x} lim={:#x} ar={:#x} DS_ar={:#x} SS_ar={:#x} ACTIVITY={:#x}",
-                    child_active.get(x86::vmx::vmcs::guest::CS_SELECTOR),
-                    child_active.get(x86::vmx::vmcs::guest::CS_BASE),
-                    child_active.get(x86::vmx::vmcs::guest::CS_LIMIT),
-                    child_active.get(x86::vmx::vmcs::guest::CS_ACCESS_RIGHTS),
-                    child_active.get(x86::vmx::vmcs::guest::DS_ACCESS_RIGHTS),
-                    child_active.get(x86::vmx::vmcs::guest::SS_ACCESS_RIGHTS),
-                    child_active.get(x86::vmx::vmcs::guest::ACTIVITY_STATE),
-                );
-            }
-        }
     }
 
     // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop interrupt
@@ -1124,19 +1080,6 @@ pub fn forward_child_exit(
     let parent_instr_len = parent_active.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
         .unwrap_or(3); // VMCALL is 3 bytes
     parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
-
-    // Inject any deferred host interrupt that arrived while the child was running.
-    // This ensures dom0's timer ticks (and other interrupts) are delivered even
-    // though we deferred them to avoid constant context switches.
-    {
-        use crate::vmexit::DEFERRED_HOST_VECTOR;
-        let pending = DEFERRED_HOST_VECTOR[core_id as usize]
-            .swap(0, core::sync::atomic::Ordering::Relaxed);
-        if pending != 0 {
-            let intr_info = (1u64 << 31) | (pending as u64);
-            parent_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
-        }
-    }
 
     // Replace the monitor loop's ActiveVcpu with the parent's.
     unsafe { core::ptr::write(vcpu, parent_active); }
@@ -1414,32 +1357,36 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Consult the child's interrupt policy for this vector.
     let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
     if child_visibility == InterruptVisibility::Deliver {
-        // Check whether PROCESS_POSTED_INTERRUPTS was actually enabled on the
-        // child's VMCS (hardware may have cleared it if unsupported).
+        // Child owns this vector — inject directly without context switch.
         use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
         let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
         if pin_val & (1 << 7) != 0 {
-            // Hardware supports posted interrupts — inject via PID (Case A: same core).
             let pid_phys = vcpu.pid_phys();
             let hhdm = platform.hhdm_offset();
             unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
             return;
         } else {
-            // PID not supported — fall back to VMENTRY_INTR_INFO injection.
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
         }
     }
 
-    // Report or NotReport: forward to dom0 (the root Deliver domain).
-    let dom0_cap = platform.dom0_cap();
-    let dom0_domain_id = dom0_cap.read().data.id;
+    // Route via SwitchManager (A9): walk domain hierarchy per InterruptPolicy.
+    let handler_domain_id = match platform.route_interrupt(vector, &child_cap, core_id) {
+        Ok((id, _reported)) => id,
+        Err(_) => {
+            serial_debug!("[INTR_FWD] no handler domain for vector {}", vector);
+            let intr_info = (1u64 << 31) | (vector as u64);
+            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            return;
+        }
+    };
 
-    // Lazy-unwind: child VP → Available (n==2), dom0 VP → Running.
+    // Lazy-unwind: child VP → Interrupted, handler VP → Running.
     let intr_ctx = match Capability::deliver_interrupt_vp(
         &child_cap,
-        dom0_domain_id,
+        handler_domain_id,
         core_id,
         vector,
         platform,
@@ -1447,8 +1394,6 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         Ok(ctx) => ctx,
         Err(e) => {
             serial_debug!("[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child", e);
-            // Fallback: re-inject into child via VMENTRY injection so the interrupt
-            // is not lost.  This can happen if the call chain is unexpected.
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1463,124 +1408,30 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         .expect("[INTR_FWD] child deactivate failed");
     child_arc.lock().vps[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
 
-    // Activate dom0 (VMPTRLD) from dom0's VcpuSlot.
+    // Activate handler (VMPTRLD) from handler's VcpuSlot.
     let handler_arc = platform.domain_arc(intr_ctx.handler_domain_id)
         .expect("[INTR_FWD] handler domain not found");
     let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize].take()
         .expect("[INTR_FWD] handler VcpuSlot empty");
     let mut handler_active = handler_inactive.activate()
         .expect("[INTR_FWD] handler activate (VMPTRLD) failed");
-    // Update PID.NDST so remote cores can address notification IPIs to this core.
     unsafe { pid_set_ndst(handler_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
 
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
-    // VMENTRY injection bypasses VID and does not update vISR — safe for dom0's
-    // xAPIC MMIO EOI path.  The processor clears bit 31 automatically after delivery.
     let intr_info = (1u64 << 31) | (vector as u64);
     handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
 
-    // Clear any deferred host vector — we're already returning to dom0.
-    // The next SWITCH re-entry will pick up future interrupts.
-    {
-        use crate::vmexit::DEFERRED_HOST_VECTOR;
-        DEFERRED_HOST_VECTOR[core_id as usize]
-            .store(0, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    // Advance dom0's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY.
-    // This allows the Linux kernel driver to return from themis_switch(-EAGAIN),
-    // check signal_pending(), and either retry or propagate -EINTR to user space.
-    // Without this, the SWITCH vmcall would re-execute after every interrupt and
-    // the driver thread could never receive signals.
+    // Advance handler's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY
+    // with the preempting vector in RDI (per A3 contract).
     let rip = handler_active.get(x86::vmx::vmcs::guest::RIP);
     handler_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
     handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
-    handler_active.set_reg(Reg::Rdi, 0);
+    handler_active.set_reg(Reg::Rdi, vector as u64);
     handler_active.set_reg(Reg::Rsi, 0);
     handler_active.set_reg(Reg::Rdx, 0);
 
     // Replace the monitor loop's ActiveVcpu with the handler's.
-    unsafe { core::ptr::write(vcpu, handler_active); }
-}
-
-/// Yield control from a running child VP back to dom0 without forwarding an
-/// interrupt.  Used by the preemption timer to give dom0 periodic scheduling
-/// opportunities, preventing RCU stalls when a child VP runs for extended periods.
-///
-/// This is a lightweight version of [`forward_interrupt_to_handler`] — it does
-/// the VMCLEAR/VMPTRLD context switch and returns ERR_RETRY, but does not inject
-/// any interrupt vector into dom0.  Any deferred host vector is forwarded if
-/// present; otherwise dom0 resumes cleanly and the SWITCH retry loop in thhv
-/// immediately re-enters the child.
-pub fn yield_child_to_dom0(vcpu: &mut ActiveVcpu) {
-    use x86::vmx::vmcs;
-
-    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
-    assert!(!platform_ptr.is_null());
-    let platform = unsafe { &*platform_ptr };
-
-    let core_id = platform.get_current_core()
-        .expect("[YIELD] get_current_core failed") as u64;
-
-    let child_cap = platform.get_core_cap(core_id as usize)
-        .expect("[YIELD] get_core_cap failed");
-
-    let dom0_cap = platform.dom0_cap();
-    let dom0_domain_id = dom0_cap.read().data.id;
-
-    // Lazy-unwind: child VP → Available, dom0 VP → Running.
-    // Use vector=0 as a placeholder — we may or may not inject it.
-    let intr_ctx = match Capability::deliver_interrupt_vp(
-        &child_cap,
-        dom0_domain_id,
-        core_id,
-        0, // dummy vector — injection is conditional below
-        platform,
-    ) {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            // Cannot yield — just re-enter child.
-            return;
-        }
-    };
-
-    // Deactivate child (VMCLEAR) → store InactiveVcpu.
-    let child_arc = platform.domain_arc(intr_ctx.interrupted_domain_id)
-        .expect("[YIELD] child domain not found");
-    let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let child_inactive = child_active.deactivate()
-        .expect("[YIELD] child deactivate failed");
-    child_arc.lock().vps[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
-
-    // Activate dom0 (VMPTRLD).
-    let handler_arc = platform.domain_arc(intr_ctx.handler_domain_id)
-        .expect("[YIELD] handler domain not found");
-    let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize].take()
-        .expect("[YIELD] handler VcpuSlot empty");
-    let mut handler_active = handler_inactive.activate()
-        .expect("[YIELD] handler activate failed");
-    unsafe { pid_set_ndst(handler_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
-
-    // If a deferred host vector is pending, inject it into dom0.
-    {
-        use crate::vmexit::DEFERRED_HOST_VECTOR;
-        let deferred = DEFERRED_HOST_VECTOR[core_id as usize]
-            .swap(0, core::sync::atomic::Ordering::Relaxed);
-        if deferred != 0 {
-            let intr_info = (1u64 << 31) | (deferred as u64);
-            handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
-        }
-    }
-
-    // Return ERR_RETRY to thhv.
-    let rip = handler_active.get(vmcs::guest::RIP);
-    handler_active.set(vmcs::guest::RIP, rip + 3);
-    handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
-    handler_active.set_reg(Reg::Rdi, 0);
-    handler_active.set_reg(Reg::Rsi, 0);
-    handler_active.set_reg(Reg::Rdx, 0);
-
     unsafe { core::ptr::write(vcpu, handler_active); }
 }
 
@@ -1709,10 +1560,6 @@ fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val:
         } else {
             entry & !IA32E_MODE_GUEST
         };
-        serial_println!(
-            "[EFER-FIX] val={:#x} lma={} entry_ctl={:#x} → {:#x}",
-            val, lma, entry, new_entry
-        );
         if new_entry != entry {
             vcpu.set(x86::vmx::vmcs::control::VMENTRY_CONTROLS, new_entry);
         }

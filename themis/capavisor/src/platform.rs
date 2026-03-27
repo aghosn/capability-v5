@@ -77,7 +77,8 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64,
 use spin::{Mutex, RwLock};
 
 use capability_engine::{
-    CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Update,
+    CapabilityRef, CoreId, CoreState, Domain, DomainId, OpLockGuard, Platform, Result,
+    SwitchManager, Update,
 };
 
 use crate::serial_println;
@@ -920,6 +921,10 @@ pub struct ThemisPlatform {
     /// VT-d DRHD units with allocated IRT pages; written once at boot by
     /// `init_themis`, immutable afterwards (entries updated via `program_irte`).
     pub drhd_units:  Vec<crate::acpi::DhrdUnit>,
+    /// Engine-level switch manager — owns per-core `CoreContext` for
+    /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
+    /// with the capavisor's own `CoreContext` via `set_core_context()`.
+    switch_mgr:      SwitchManager,
 }
 
 // SAFETY: `lapic_ids` uses `UnsafeCell` but is only written once during
@@ -960,12 +965,24 @@ impl ThemisPlatform {
             dom0_cap:     Mutex::new(None),
             vmxon_phys:   Vec::new(),
             drhd_units:   Vec::new(),
+            switch_mgr:   SwitchManager::new(num_cores),
         }
     }
 
     /// Number of physical cores (set at boot from Limine MP response).
     pub fn num_cores(&self) -> usize {
         self.num_cores
+    }
+
+    /// Route an interrupt through the domain hierarchy per `InterruptPolicy`.
+    /// Delegates to `SwitchManager::route_interrupt()`.
+    pub fn route_interrupt(
+        &self,
+        vector: u8,
+        interrupted: &CapabilityRef<Domain>,
+        core_id: u64,
+    ) -> capability_engine::error::Result<(u64, alloc::vec::Vec<u64>)> {
+        self.switch_mgr.route_interrupt(vector, interrupted, core_id)
     }
 
     /// Store per-core VMXON physical addresses (called once by BSP before
@@ -1608,9 +1625,16 @@ impl Platform for ThemisPlatform {
         vp_id: u64,
     ) {
         let domain_id = domain_cap.read().data.id;
+        // Tier 1: capavisor's lock-free per-core state
         self.cores[core_id as usize].domain_id.store(domain_id, Ordering::Release);
         self.cores[core_id as usize].vp_id.store(vp_id as u32, Ordering::Release);
         *self.cores[core_id as usize].domain_cap.lock() = Some(domain_cap.clone());
+        // Engine's SwitchManager CoreContext (for route_interrupt et al.)
+        if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
+            *engine_core.state.write() = CoreState::Running(domain_id);
+            *engine_core.running_vp.write() = Some(vp_id);
+        }
+        // Tier 3: routing maps for IPI targeting
         let mut routing = self.routing.write();
         if let Some(old_domain) = routing.core_to_domain.remove(&core_id) {
             if let Some(set) = routing.domain_to_cores.get_mut(&old_domain) {
@@ -1628,6 +1652,11 @@ impl Platform for ThemisPlatform {
         self.cores[core_id as usize].domain_id.store(IDLE_DOMAIN, Ordering::Release);
         self.cores[core_id as usize].vp_id.store(IDLE_VP, Ordering::Release);
         *self.cores[core_id as usize].domain_cap.lock() = None;
+        // Engine's SwitchManager CoreContext
+        if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
+            *engine_core.state.write() = CoreState::Idle;
+            *engine_core.running_vp.write() = None;
+        }
         let mut routing = self.routing.write();
         if let Some(domain_id) = routing.core_to_domain.remove(&core_id) {
             if let Some(set) = routing.domain_to_cores.get_mut(&domain_id) {
