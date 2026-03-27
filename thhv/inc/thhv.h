@@ -106,6 +106,7 @@
 #define THEMIS_OP_REGISTER_COMM       0x18
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
+#define THEMIS_OP_TOGGLE_DEBUG      0x1d
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 

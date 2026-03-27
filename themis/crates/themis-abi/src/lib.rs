@@ -136,6 +136,10 @@ pub mod opcodes {
     /// Debug print: emit a serial trace message from any domain.
     /// IN:  RDI = 64-bit value to print.  No capability check needed.
     pub const THEMIS_DBG_PRINT:           u64 = 0x1c;
+
+    /// Toggle runtime debug logging.
+    /// IN:  RDI = 1 (enable) or 0 (disable).  No capability check needed.
+    pub const THEMIS_TOGGLE_DEBUG:        u64 = 0x1d;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

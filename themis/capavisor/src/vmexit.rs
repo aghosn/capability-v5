@@ -170,6 +170,50 @@ pub fn monitor_loop(vcpu: &mut ActiveVcpu) -> ! {
                         serial_println!("  VM_INSTRUCTION_ERROR={}", err);
                     }
                 }
+                // Dump all control fields for diagnosis
+                let pin = vcpu.try_get(vmcs::control::PINBASED_EXEC_CONTROLS).unwrap_or(0);
+                let pri = vcpu.try_get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS).unwrap_or(0);
+                let sec = vcpu.try_get(vmcs::control::SECONDARY_PROCBASED_EXEC_CONTROLS).unwrap_or(0);
+                let exit_ctl = vcpu.try_get(vmcs::control::VMEXIT_CONTROLS).unwrap_or(0);
+                let entry_ctl = vcpu.try_get(vmcs::control::VMENTRY_CONTROLS).unwrap_or(0);
+                let eptp = vcpu.try_get(vmcs::control::EPTP_FULL).unwrap_or(0);
+                let vpid = vcpu.try_get(vmcs::control::VPID).unwrap_or(0);
+                let cr0 = vcpu.try_get(vmcs::guest::CR0).unwrap_or(0);
+                let cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
+                let cr4 = vcpu.try_get(vmcs::guest::CR4).unwrap_or(0);
+                let efer = vcpu.try_get(vmcs::guest::IA32_EFER_FULL).unwrap_or(0);
+                let rip = vcpu.try_get(vmcs::guest::RIP).unwrap_or(0);
+                let rflags = vcpu.try_get(vmcs::guest::RFLAGS).unwrap_or(0);
+                let activity = vcpu.try_get(vmcs::guest::ACTIVITY_STATE).unwrap_or(0);
+                let interruptibility = vcpu.try_get(vmcs::guest::INTERRUPTIBILITY_STATE).unwrap_or(0);
+                let link = vcpu.try_get(vmcs::guest::LINK_PTR_FULL).unwrap_or(0);
+                let intr_info = vcpu.try_get(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD).unwrap_or(0);
+                // Posted-interrupt fields (raw VMCS encoding)
+                let pid_addr = vcpu.try_get(0x2016).unwrap_or(0);
+                let notif_vec = vcpu.try_get(0x0002).unwrap_or(0);
+                let vapic = vcpu.try_get(vmcs::control::VIRT_APIC_ADDR_FULL).unwrap_or(0);
+                let tpr_thresh = vcpu.try_get(vmcs::control::TPR_THRESHOLD).unwrap_or(0);
+                let apic_access = vcpu.try_get(0x2014).unwrap_or(0); // APIC_ACCESS_ADDR
+                let io_a = vcpu.try_get(0x2000).unwrap_or(0); // IO_BITMAP_A
+                let io_b = vcpu.try_get(0x2002).unwrap_or(0); // IO_BITMAP_B
+                let msr_bm = vcpu.try_get(0x2004).unwrap_or(0); // MSR_BITMAP
+                serial_println!("  PIN={:#x} PRI={:#x} SEC={:#x}", pin, pri, sec);
+                serial_println!("  EXIT_CTL={:#x} ENTRY_CTL={:#x}", exit_ctl, entry_ctl);
+                serial_println!("  EPTP={:#x} VPID={} VAPIC={:#x} TPR_THR={}", eptp, vpid, vapic, tpr_thresh);
+                serial_println!("  PID_ADDR={:#x} NOTIF_VEC={:#x}", pid_addr, notif_vec);
+                serial_println!("  APIC_ACCESS={:#x} IO_A={:#x} IO_B={:#x} MSR_BM={:#x}", apic_access, io_a, io_b, msr_bm);
+                serial_println!("  CR0={:#x} CR3={:#x} CR4={:#x} EFER={:#x}", cr0, cr3, cr4, efer);
+                serial_println!("  RIP={:#x} RFLAGS={:#x} ACTIVITY={} INTERRUPTIBILITY={:#x}", rip, rflags, activity, interruptibility);
+                serial_println!("  LINK_PTR={:#x} INTR_INFO={:#x}", link, intr_info);
+                // Guest segment info
+                let cs_sel = vcpu.try_get(vmcs::guest::CS_SELECTOR).unwrap_or(0);
+                let cs_ar = vcpu.try_get(vmcs::guest::CS_ACCESS_RIGHTS).unwrap_or(0);
+                let ss_sel = vcpu.try_get(vmcs::guest::SS_SELECTOR).unwrap_or(0);
+                let ss_ar = vcpu.try_get(vmcs::guest::SS_ACCESS_RIGHTS).unwrap_or(0);
+                let tr_ar = vcpu.try_get(vmcs::guest::TR_ACCESS_RIGHTS).unwrap_or(0);
+                let ldtr_ar = vcpu.try_get(vmcs::guest::LDTR_ACCESS_RIGHTS).unwrap_or(0);
+                serial_println!("  CS sel={:#x} ar={:#x}  SS sel={:#x} ar={:#x}", cs_sel, cs_ar, ss_sel, ss_ar);
+                serial_println!("  TR_AR={:#x} LDTR_AR={:#x}", tr_ar, ldtr_ar);
                 halt_forever();
             }
         };
@@ -194,8 +238,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
     static EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
     static LAST_REASON: AtomicU64 = AtomicU64::new(0);
 
-    let _count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
+    let count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_REASON.store(basic_reason as u64, Ordering::Relaxed);
+    // Print every 10000th exit, every VMCALL (18), and every non-CPUID exit
+    if count % 10000 == 0 || basic_reason == 18 {
+        serial_println!("[VMEXIT] #{} reason={}", count, basic_reason);
+    }
 
     //TODO(aghosn): Not sure about this. We have two matches depending on whether we're dom0 or
     //dom1. This should not really be the case, and dom1 will be able to create dom2 later on too.
@@ -500,6 +548,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // fire.  If it does (forced by must_be_1 on this hardware),
             // just VMRESUME — the interrupt is pending and will be delivered
             // to the guest on VM entry.
+            serial_rtdbg!("[DOM0-EXT-INTR]");
         }
 
         EXIT_REASON_CPUID => {
@@ -636,6 +685,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_HLT => {
+            serial_println!("[DOM0-HLT]");
             next_instruction(vcpu);
         }
 
@@ -743,6 +793,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_VMCALL => {
+            serial_println!("[DOM0-VMCALL] rax={:#x}", vcpu.reg(Reg::Rax));
             if let Some(result) = crate::hypercall::handle_vmcall(vcpu) {
                 vcpu.set_reg(Reg::Rax, result.rax);
                 vcpu.set_reg(Reg::Rdi, result.rdi);
@@ -1036,17 +1087,6 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
     const APIC_TMCCT: usize     = 0x390;
     const APIC_TDCR: usize      = 0x3E0;
     if matches!(offset, APIC_LVT_TIMER | APIC_TMICT | APIC_TMCCT | APIC_TDCR) {
-        use core::sync::atomic::{AtomicU32, Ordering};
-        static TIMER_LOG: AtomicU32 = AtomicU32::new(0);
-        let n = TIMER_LOG.fetch_add(1, Ordering::Relaxed);
-        if n < 30 || n % 200 == 0 {
-            let rip = vcpu.get(vmcs::guest::RIP);
-            let rax = vcpu.reg(Reg::Rax) as u32;
-            serial_println!(
-                "[APIC-TIMER] #{} type={} off={:#x} rax={:#x} rip={:#x}",
-                n, acc_type, offset, rax, rip
-            );
-        }
     }
 
     let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);

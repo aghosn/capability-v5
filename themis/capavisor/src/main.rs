@@ -27,6 +27,20 @@ struct AlignedHeap(#[allow(dead_code)] [u8; HEAP_SIZE]);
 /// before any heap-using boot code runs.
 static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
 
+/// Runtime debug toggle — controlled via THEMIS_TOGGLE_DEBUG vmcall.
+/// When true, `serial_rtdbg!` prints are emitted.
+pub(crate) static RUNTIME_DEBUG: AtomicBool = AtomicBool::new(true);
+
+/// Print only when RUNTIME_DEBUG is enabled.
+#[macro_export]
+macro_rules! serial_rtdbg {
+    ($($arg:tt)*) => {
+        if $crate::RUNTIME_DEBUG.load(core::sync::atomic::Ordering::Relaxed) {
+            $crate::serial_println!($($arg)*);
+        }
+    };
+}
+
 mod acpi;
 mod boot;
 mod domain;

@@ -13,6 +13,7 @@
 #include <linux/uaccess.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <linux/delay.h>
 
 #include "thhv.h"
 
@@ -88,7 +89,13 @@ retry_switch:
 				mutex_unlock(&vp->run_lock);
 				return -EINTR;
 			}
-			cond_resched();
+			/* Force a scheduling point so dom0 can service
+			 * timers, network, and SSH even when the child
+			 * is interrupt-heavy.  usleep_range() puts this
+			 * thread to sleep for ~50-100µs, which is long
+			 * enough for the scheduler to run other tasks
+			 * but short enough not to hurt throughput. */
+			usleep_range(50, 100);
 		} while (true);
 
 		if (ret) {

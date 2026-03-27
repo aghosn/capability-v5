@@ -188,6 +188,7 @@ unsafe fn write_control_fields(
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
+    serial_println!("  VMCS pin-based: desired={:#x} msr={:#x} final={:#x} child={}", pin_desired, pin_msr, pin_val, child);
     vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
         .expect("vmwrite pin-based");
 
@@ -205,6 +206,7 @@ unsafe fn write_control_fields(
     }
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
     let primary_val = adjust(primary_desired, primary_msr);
+    serial_println!("  VMCS primary: desired={:#x} final={:#x} child={}", primary_desired, primary_val, child);
     vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary_val)
         .expect("vmwrite primary proc-based");
 
@@ -228,7 +230,9 @@ unsafe fn write_control_fields(
         | (1 << 8) // APIC_REGISTER_VIRT
         | (if child { 1 << 9 } else { 0 }) // VIRTUAL_INTERRUPT_DELIVERY (VID) — requires EXTERNAL_INTERRUPT_EXITING
         | (if child { 1 << 4 } else { 0 }) // VIRTUALIZE_X2APIC — x2APIC MSR reads (0x800-0x8FF) → VAPIC page; requires APIC_REGISTER_VIRT=1
-        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO → EXIT_REASON_APIC_ACCESS (44)
+        // Intel SDM 26.2.1.1: VIRTUALIZE_X2APIC and VIRTUALIZE_APIC_ACCESSES
+        // cannot both be 1.  When child uses x2APIC virtualisation, skip xAPIC MMIO.
+        | (if !child && apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };

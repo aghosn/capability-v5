@@ -105,6 +105,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
     };
 
     let opcode = vcpu.reg(Reg::Rax);
+    serial_println!("[HC] op={:#x} core={}", opcode, core_id);
     let arg0 = vcpu.reg(Reg::Rdi);
     let arg1 = vcpu.reg(Reg::Rsi);
     let arg2 = vcpu.reg(Reg::Rdx);
@@ -151,8 +152,17 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
             Some(do_inject_interrupt(platform, &caller, arg0, arg1 as u32, arg2 as u8)),
 
         opcodes::THEMIS_DBG_PRINT => {
-            let dom_id = caller.read().data.id;
-            serial_println!("[DBG] dom={} val={:#x}", dom_id, arg0);
+            // Silenced — each DBG_PRINT is a VMCALL + serial write,
+            // flooding serial during virtio-pci probe.  Re-enable for debugging.
+            // let dom_id = caller.read().data.id;
+            // serial_println!("[DBG] dom={} val={:#x}", dom_id, arg0);
+            Some(HypercallResult::success())
+        }
+
+        opcodes::THEMIS_TOGGLE_DEBUG => {
+            let enable = arg0 != 0;
+            crate::RUNTIME_DEBUG.store(enable, core::sync::atomic::Ordering::Relaxed);
+            serial_println!("[RTDBG] runtime debug {}", if enable { "ENABLED" } else { "DISABLED" });
             Some(HypercallResult::success())
         }
 
@@ -222,7 +232,6 @@ fn do_send(
 ) -> HypercallResult {
     let attrs = Attributes::from_bits(attrs_bits as u8);
     let gpa_hint = if child_gpa != u64::MAX { Some(child_gpa) } else { None };
-    serial_println!("[SEND] cap={:#x} receiver={:#x} gpa={:#x}", cap_handle, receiver_handle, child_gpa);
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
@@ -230,7 +239,6 @@ fn do_send(
     }) {
         Ok(_) => HypercallResult::success(),
         Err(e) => {
-            serial_println!("[SEND] FAILED: {:?}", e);
             HypercallResult::error(map_error(&e))
         }
     }
@@ -827,6 +835,7 @@ fn do_switch(
                     let if_set = rflags & (1 << 9) != 0;
                     let sti_mov_ss_block = interruptibility & 0x3 != 0;
                     if if_set && !sti_mov_ss_block {
+                        serial_rtdbg!("[PIR] inject vec={} IF=1", vector);
                         // Inject as External Interrupt (type=0), valid (bit 31).
                         let intr_info = (1u64 << 31) | (vector as u64);
                         child_active.set(
@@ -834,6 +843,7 @@ fn do_switch(
                             intr_info,
                         );
                     } else {
+                        serial_rtdbg!("[PIR] vec={} deferred IF={} block={:#x}", vector, if_set, interruptibility);
                         // Guest not ready — put the PIR bit back for next try.
                         unsafe {
                             (*pir_base.add(vector as usize / 64))
@@ -1098,10 +1108,6 @@ fn do_set_intr_policy(
     vector: u8,
     visibility: u64,
 ) -> HypercallResult {
-    serial_println!(
-        "[SET_INTR_POLICY] child={} vec={} vis={}",
-        child_handle, vector, visibility
-    );
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::set_policy(
@@ -1126,10 +1132,6 @@ fn do_set_def_intr_policy(
     child_handle: u64,
     visibility: u64,
 ) -> HypercallResult {
-    serial_println!(
-        "[SET_DEF_INTR_POLICY] child={} vis={}",
-        child_handle, visibility
-    );
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::set_policy(
@@ -1356,6 +1358,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Consult the child's interrupt policy for this vector.
     let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
+    serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.
         use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
@@ -1374,9 +1377,12 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Route via SwitchManager (A9): walk domain hierarchy per InterruptPolicy.
     let handler_domain_id = match platform.route_interrupt(vector, &child_cap, core_id) {
-        Ok((id, _reported)) => id,
-        Err(_) => {
-            serial_debug!("[INTR_FWD] no handler domain for vector {}", vector);
+        Ok((id, _reported)) => {
+            serial_rtdbg!("[INTR_FWD] route vec={} → handler_dom={}", vector, id);
+            id
+        },
+        Err(e) => {
+            serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, e);
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1751,12 +1757,6 @@ fn handle_grow(
         (ring.page_hpas.len() as u32, ring.page_hpas.len() as u32 * 4096)
     };
 
-    serial_println!(
-        "[domcomm] GROW_{} done: {} pages, capacity {}",
-        if is_rx { "RX" } else { "TX" },
-        new_page_count, new_capacity,
-    );
-
     // Send GROW_ACK on the RX ring.
     let ack = domcomm::GrowAck {
         new_page_count,
@@ -1844,11 +1844,6 @@ fn do_register_doorbell(
     pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
     pd.doorbells.push(DoorbellEntry { doorbell_id, gpa, datamatch, size, flags });
 
-    serial_println!(
-        "[REGISTER_DOORBELL] child_dom={} id={} gpa={:#x} size={} flags={:#x}",
-        child_domain_id, doorbell_id, gpa, size, flags
-    );
-
     HypercallResult::success_1(doorbell_id as u64)
 }
 
@@ -1888,9 +1883,6 @@ fn do_unregister_doorbell(
         return HypercallResult::error(errors::ERR_NOTFOUND);
     }
 
-    serial_println!(
-        "[UNREGISTER_DOORBELL] child_dom={} id={}", child_domain_id, doorbell_id
-    );
     HypercallResult::success()
 }
 
@@ -1914,7 +1906,6 @@ fn do_set_themic_vector(
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };
     arc.lock().set_notify_vector(vector as u32);
-    serial_println!("[SET_THEMIC_VECTOR] dom={} vector={:#x}", caller_id, vector);
     HypercallResult::success()
 }
 
@@ -1985,22 +1976,6 @@ fn do_inject_interrupt(
     // loop already calls themis_switch() in a tight loop, so the PIR bit
     // is consumed promptly without an IPI.
     unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
-
-    static INJECT_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    let n = INJECT_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if n < 20 || n % 500 == 0 {
-        // Read NDST from PID (offset 40, bits [31:0] = xAPIC destination)
-        let ndst = unsafe {
-            core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
-        };
-        let on = unsafe {
-            core::ptr::read_volatile(((pid_phys + hhdm) + 32) as *const u32)
-        };
-        serial_println!(
-            "[INJECT-INTR] #{} vec={} vp={} pid={:#x} ndst={:#x} on={}",
-            n, vector, vp_id, pid_phys, ndst, on
-        );
-    }
 
     HypercallResult::success()
 }

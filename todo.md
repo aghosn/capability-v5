@@ -6,7 +6,7 @@
 
 ---
 
-## Current State (2026-03-27, 12:10 UTC)
+## Current State (2026-03-27, 15:15 UTC)
 
 ### What works
 
@@ -22,19 +22,21 @@
 - **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
   See "The Problem" below.
 
-### Uncommitted changes (on top of commit 796c048)
+### Recent commits
 
-Files modified (all uncommitted):
-- `themis/capavisor/src/vmexit.rs` — AP deferral code + 1ms preemption timer (latest attempt)
-- `themis/capavisor/src/hypercall.rs` — `yield_child_to_dom0`, `inject_via_pid` is_remote=false, timer reset removed from do_switch
-- `themis/capavisor/src/platform.rs` — minor additions
-- `themis/capavisor/src/vmcs.rs` — minor additions
+- `c2820b5` — **refactor: clean up interrupt handling** — removed all ad-hoc interrupt
+  mechanisms (DEFERRED_HOST_VECTOR, yield_child_to_dom0, hardcoded dom0 routing, debug logs).
+  Integrated SwitchManager into ThemisPlatform for proper route_interrupt() access. Net -191 lines.
+- `93f9831` — ⚠️ temporary backup before cleanup (can be dropped)
+
+### Uncommitted changes (on top of commit c2820b5)
+
 - `thhv/inc/thhv.h` — `struct thhv_irqfd` added `vp_index` + `rsvd` fields
 - `thhv/src/thhv_irqfd.c` — per-VP irqfd targeting using `entry->vp_index`
 - `thhv/src/thhv_vp.c` — wait-for-SIPI, cond_resched in retry loop, domcomm drain
 - `thhv/src/thhv_part.c` — minor additions
-- `todo.md` — rewritten
-- `themis/docs/archive/27_03_2026.md` — archived old todo
+- `themis/capavisor/src/vmcs.rs` — minor additions
+- `todo.md` — this file
 
 CHV submodule also has per-vCPU irqfd changes (not shown in diff).
 
@@ -132,11 +134,19 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 
 ## Action Plan
 
-### Immediate: fix the nested-virt scheduling problem
+### ✅ Done: Interrupt handling cleanup (commit c2820b5)
 
-- [ ] **S1**: Try `schedule_timeout(1)` in thhv_run_vp EAGAIN loop instead of `cond_resched()`.
+- [x] Code review of ad-hoc interrupt mechanisms (8 findings, 3 critical)
+- [x] Phase 1: Integrate SwitchManager into ThemisPlatform
+- [x] Phase 2: Remove DEFERRED_HOST_VECTOR, yield_child_to_dom0, hardcoded routing,
+  debug logs. Use route_interrupt() + vector-in-RDI. Net -191 lines.
+
+### Next: fix the nested-virt scheduling problem
+
+- [x] **S1**: `schedule_timeout_interruptible(1)` in thhv_run_vp EAGAIN loop instead of `cond_resched()`.
   This guarantees dom0 processes its timer tick before retrying SWITCH. The child then gets
   a full quantum (~4ms at 250Hz) before the next timer interrupt.
+  **Changed in `thhv/src/thhv_vp.c` line 96. Needs testing on dom0.**
 - [ ] **S2**: If S1 doesn't work, try capavisor-side drain: `sti; nop; cli` in VMX root
   before child VMRESUME. Requires capavisor IDT to handle the interrupt.
 - [ ] **S3**: If neither works, try forwarding every interrupt (approach B) but with the
@@ -182,10 +192,10 @@ goes away. The fix we implement for nested-virt should degrade gracefully — it
 |----------|------|-------------|
 | `thhv_run_vp` | thhv_vp.c:38 | Run loop: wait-for-SIPI → SWITCH → EAGAIN retry → intercept msg |
 | `do_switch` | hypercall.rs:~643 | VMCALL handler: VMCLEAR dom0, VMPTRLD child, drain PIR (step 7b), VMRESUME |
-| `forward_interrupt_to_handler` | hypercall.rs:~1400 | Full context switch child→dom0, inject vector via VMENTRY_INTR_INFO |
-| `yield_child_to_dom0` | hypercall.rs:~1516 | Lightweight preemption timer yield, inject deferred vector |
-| `forward_child_exit` | hypercall.rs:~1100 | Forward non-interrupt exits to dom0, inject deferred vector |
+| `forward_interrupt_to_handler` | hypercall.rs:~1400 | Uses route_interrupt() to find handler, context switch child→handler, inject vector |
+| `forward_child_exit` | hypercall.rs:~1070 | Forward non-interrupt exits to dom0 |
 | `inject_via_pid` | hypercall.rs:~1314 | Set PIR bit + optional notification IPI |
+| `route_interrupt` | platform.rs:~979 | Delegates to SwitchManager::route_interrupt() for policy-based routing |
 
 ### Build commands
 
@@ -219,9 +229,8 @@ scp -P 2222 thhv/inc/thhv.h thhv/src/thhv_irqfd.c thhv/src/thhv_vp.c cloud@local
 
 | Name | Value | Notes |
 |------|-------|-------|
-| PREEMPTION_TIMER_TICKS | 3_000_000 (1ms) | Currently set; was 60M (20ms) before |
+| PREEMPTION_TIMER_TICKS | 60_000_000 (~20ms) | Restored from 3M after cleanup |
 | Timer rate divisor | 5 | 1 tick ≈ 10.67ns at 3GHz |
-| DEFERRED_HOST_VECTOR | per-core atomic u32[64] | Stores deferred interrupt vector |
 | ACK_INTERRUPT_ON_EXIT | enabled | Vector in VMEXIT_INTERRUPTION_INFO |
 
 ### VM exit reasons (common)

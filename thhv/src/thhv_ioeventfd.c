@@ -167,7 +167,7 @@ void thhv_drain_domcomm_rx(struct thhv_partition *part)
 			struct thhv_ioeventfd_entry *entry;
 			bool found = false;
 
-			pr_info("thhv: [DBG] DOORBELL_NOTIFY id=%u\n", n->doorbell_id);
+			pr_debug("thhv: DOORBELL_NOTIFY id=%u\n", n->doorbell_id);
 
 			if (payload_size < sizeof(*n)) {
 				pr_warn_ratelimited("thhv: DOORBELL_NOTIFY too small (%u)\n",
@@ -179,15 +179,13 @@ void thhv_drain_domcomm_rx(struct thhv_partition *part)
 			mutex_lock(&part->ioeventfds.lock);
 			list_for_each_entry(entry, &part->ioeventfds.list, node) {
 				if (entry->doorbell_id == n->doorbell_id) {
-					pr_info("thhv: [DBG] signaling eventfd for doorbell_id=%u\n",
-						n->doorbell_id);
 					eventfd_signal(entry->eventfd);
 					found = true;
 					break;
 				}
 			}
 			if (!found)
-				pr_warn_ratelimited("thhv: [DBG] no ioeventfd for doorbell_id=%u\n",
+				pr_warn_ratelimited("thhv: no ioeventfd for doorbell_id=%u\n",
 						    n->doorbell_id);
 			mutex_unlock(&part->ioeventfds.lock);
 
