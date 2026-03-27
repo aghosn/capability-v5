@@ -72,6 +72,7 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		 * check for pending signals and retry; this is the mechanism
 		 * that allows Ctrl-C / SIGINT to interrupt a running VP.
 		 */
+retry_switch:
 		do {
 			ret = themis_switch(part->domain_handle, vp->vp_index);
 			if (ret != -EAGAIN)
@@ -87,6 +88,7 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 				mutex_unlock(&vp->run_lock);
 				return -EINTR;
 			}
+			cond_resched();
 		} while (true);
 
 		if (ret) {
@@ -95,6 +97,28 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		}
 
 		thhv_read_intercept_msg(vp, msg_buf);
+
+		/* HLT exit: guest is idle, waiting for an interrupt.
+		 * Block here until an interrupt is injected (via irqfd
+		 * or THHV_INJECT_INTERRUPT), then retry the SWITCH so
+		 * the capavisor can inject the pending PIR vector and
+		 * re-enter the child.  This prevents busy-spinning. */
+		{
+			struct themic_intercept_message *msg =
+				(struct themic_intercept_message *)msg_buf;
+			if (msg->exit_reason == 12 /* EXIT_REASON_HLT */) {
+				vp->halted = 1;
+				thhv_drain_domcomm_rx(part);
+				ret = wait_event_interruptible(vp->halt_wq,
+					!vp->halted || signal_pending(current));
+				vp->halted = 0;
+				if (signal_pending(current)) {
+					mutex_unlock(&vp->run_lock);
+					return -EINTR;
+				}
+				goto retry_switch;
+			}
+		}
 
 		/* Drain the DomainComm RX ring: signal any ioeventfds whose
 		 * doorbell was hit while the child was running. */
@@ -127,6 +151,23 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 		return -EFAULT;
 
 	return 0;
+}
+
+/* ── Wake a halted VP after interrupt injection ────────────────────────────── */
+
+void thhv_wake_vp(struct thhv_partition *part, u32 vp_index)
+{
+	struct thhv_vp *vp;
+
+	if (vp_index >= part->num_vps)
+		return;
+	vp = part->vps[vp_index];
+	if (!vp)
+		return;
+	if (vp->halted) {
+		vp->halted = 0;
+		wake_up_interruptible(&vp->halt_wq);
+	}
 }
 
 /* ── COMM page register write helper ────────────────────────────────────────── */
@@ -305,7 +346,25 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	 *
 	 * Special case: ACTIVITY_STATE manages the software wait-for-SIPI
 	 * mechanism.  Value 3 blocks future VP_RUN calls; value 0 unblocks
-	 * and wakes any sleeping thread. */
+	 * and wakes any sleeping thread.
+	 *
+	 * Guard against duplicate SIPI: if ACTIVITY_STATE=0 arrives while
+	 * the VP is already running (mp_state != 3), the entire batch is
+	 * silently dropped — the AP has already booted from the first SIPI
+	 * and writing SIPI state to the COMM page would reset it. */
+
+	/* Pre-scan for ACTIVITY_STATE=0 on an already-running VP. */
+	for (i = 0; i < hdr.count; i++) {
+		if (regs[i].name == THHV_VP_REG_ACTIVITY_STATE &&
+		    regs[i].value == 0 && vp->mp_state != 3) {
+			pr_debug("thhv: vp %u: ignoring duplicate SIPI "
+				 "(mp_state=%d, already running)\n",
+				 vp->vp_index, vp->mp_state);
+			ret = 0;
+			goto out;
+		}
+	}
+
 	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
 	for (i = 0; i < hdr.count; i++) {
 		if (regs[i].name == THHV_VP_REG_ACTIVITY_STATE) {
@@ -518,6 +577,8 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	atomic_set(&vp->exit_pending, 0);
 	vp->mp_state = 0; /* runnable */
 	init_waitqueue_head(&vp->sipi_wq);
+	vp->halted = 0;
+	init_waitqueue_head(&vp->halt_wq);
 
 	/* Pin META + COMM pages from userspace. */
 	ret = thhv_vp_pin_pages(vp, cv.meta_uaddr, meta_nr, cv.comm_uaddr);

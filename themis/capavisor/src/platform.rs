@@ -1480,6 +1480,21 @@ impl Platform for ThemisPlatform {
                 // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
                 if is_child && *address == 0xFEE0_0000 && *size == 0x1000 {
                     d.apic_access_phys = *physical;
+
+                    // When hardware does not support VIRTUALIZE_APIC_ACCESSES
+                    // (bit 0 of IA32_VMX_PROCBASED_CTLS2 allowed-1 field),
+                    // skip the EPT mapping so LAPIC MMIO accesses cause EPT
+                    // violations that are forwarded to CHV for emulation.
+                    let secondary_msr = unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
+                    let virt_apic_supported = ((secondary_msr >> 32) & 1) != 0;
+                    if !virt_apic_supported {
+                        serial_println!(
+                            "[APIC] VIRTUALIZE_APIC_ACCESSES not supported — \
+                             skipping EPT map for {:#x} (LAPIC via EPT violations)",
+                            *address
+                        );
+                        return;
+                    }
                 }
 
                 if rights.bits() == 0 {

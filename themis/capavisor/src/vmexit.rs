@@ -24,10 +24,10 @@ pub static DOMCOMM_GPA: AtomicU64 = AtomicU64::new(0);
 pub static DOMCOMM_PAGES: AtomicU32 = AtomicU32::new(0);
 
 /// Per-core deferred host interrupt vector.
-/// When a physical interrupt fires while a child is running, we save the vector
-/// here and re-enter the child instead of doing a full context switch to dom0.
-/// Value 0 = no pending interrupt; non-zero = vector to inject on next child→dom0 transition.
-/// MAX_CORES = 64 should be sufficient for any reasonable system.
+/// When a physical interrupt fires while a child is running and
+/// ACK_INTERRUPT_ON_EXIT consumed it, we must forward it to dom0.
+/// This slot holds the vector temporarily during the child→dom0 transition.
+/// Value 0 = no pending interrupt; non-zero = vector to deliver.
 const MAX_CORES: usize = 64;
 pub static DEFERRED_HOST_VECTOR: [AtomicU32; MAX_CORES] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
@@ -91,10 +91,12 @@ const X2APIC_SELF_IPI: u32 = 0x83F;
 
 // ── Exit reason constants (Intel SDM Vol 3C §27.9.1) ─────────────────────── //
 
-// VMX preemption timer: ~2 seconds at 3 GHz with TSC rate divisor = 5.
+// VMX preemption timer for child scheduling quantum.
 // Timer ticks = desired_ns / (2^N * TSC_period_ns), where N = 5 (typical).
-// For ~2s at 3GHz: 2e9 / 2^5 ≈ 62.5M. Use a round value.
-pub const PREEMPTION_TIMER_TICKS: u64 = 60_000_000;
+// At 3 GHz with TSC rate divisor 5: 1 tick ≈ 10.67 ns.
+// 3M ticks ≈ 1ms — short enough to keep dom0's scheduler responsive,
+// long enough for the child VP to make meaningful progress.
+pub const PREEMPTION_TIMER_TICKS: u64 = 3_000_000;
 
 pub const EXIT_REASON_EXCEPTION_NMI: u32 = 0;
 pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
@@ -202,12 +204,40 @@ pub fn monitor_loop(vcpu: &mut ActiveVcpu) -> ! {
 /// # Safety
 /// The VMCS must be loaded on the current core (guaranteed by `ActiveVcpu`).
 unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
     static EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
     static LAST_REASON: AtomicU64 = AtomicU64::new(0);
 
     let _count = EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_REASON.store(basic_reason as u64, Ordering::Relaxed);
+
+    // Debug: log first child VP1 exits to trace AP trampoline execution
+    {
+        let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+        if !platform_ptr.is_null() {
+            let platform = unsafe { &*platform_ptr };
+            if let Some(core_id) = platform.get_current_core() {
+                let domain_id = platform.core_domain_id(core_id as usize);
+                let vp_idx = platform.get_core_vp(core_id as usize);
+                if domain_id != 0 && domain_id != u64::MAX && vp_idx > 0 {
+                    static AP_EXIT_LOG: AtomicU32 = AtomicU32::new(0);
+                    let n = AP_EXIT_LOG.fetch_add(1, Ordering::Relaxed);
+                    if n < 5 || n % 5000 == 0 {
+                        let rip = vcpu.get(vmcs::guest::RIP);
+                        let cs_base = vcpu.get(vmcs::guest::CS_BASE);
+                        let cr0 = vcpu.get(vmcs::guest::CR0);
+                        let exit_ctl = vcpu.get(vmcs::control::VMEXIT_CONTROLS);
+                        let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+                        let pin_ctl = vcpu.get(vmcs::control::PINBASED_EXEC_CONTROLS);
+                        serial_println!(
+                            "[AP-EXIT] #{} reason={} rip={:#x} cs_base={:#x} cr0={:#x} exit_ctl={:#x} intr={:#x} pin={:#x}",
+                            n, basic_reason, rip, cs_base, cr0, exit_ctl, intr_info, pin_ctl
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     //TODO(aghosn): Not sure about this. We have two matches depending on whether we're dom0 or
     //dom1. This should not really be the case, and dom1 will be able to create dom2 later on too.
@@ -307,14 +337,34 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     match basic_reason {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
                             // Physical interrupt fired while child was running.
-                            // ACKNOWLEDGE_INTERRUPT_ON_EXIT already sent EOI to the LAPIC.
+                            // ACK_INTERRUPT_ON_EXIT already consumed the vector.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
 
-                            // Forward the interrupt to dom0. This causes a full
-                            // context switch (VMCLEAR child → VMPTRLD dom0 → return
-                            // ERR_RETRY) which allows thhv to drain the DomainComm
-                            // RX ring (processing any queued doorbell notifications).
+                            // Defer AP interrupts: store the vector and re-enter
+                            // the child immediately.  The VMX preemption timer
+                            // (~1ms) provides dom0 scheduling windows — when it
+                            // fires, yield_child_to_dom0 injects the deferred
+                            // vector into dom0's VMCS.  This avoids the problem
+                            // where forwarding every interrupt prevents the child
+                            // from executing even a single instruction (KVM nested
+                            // handling always has a pending dom0 LAPIC timer).
+                            // BSP external interrupts are forwarded immediately
+                            // since the BSP doesn't contend with child scheduling.
+                            {
+                                use core::sync::atomic::Ordering;
+                                let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+                                if !platform_ptr.is_null() {
+                                    let platform = unsafe { &*platform_ptr };
+                                    if let Some(cid) = platform.get_current_core() {
+                                        DEFERRED_HOST_VECTOR[cid as usize]
+                                            .store(vector as u32, Ordering::Relaxed);
+                                        return; // VMRESUME child — timer keeps ticking
+                                    }
+                                }
+                            }
+
+                            // Fallback: forward to dom0.
                             crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
                             return;
                         }
@@ -334,10 +384,13 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         EXIT_REASON_VMX_PREEMPTION_TIMER => {
+                            // Child's scheduling quantum expired.  Reset the
+                            // timer for the next quantum and yield to dom0.
                             vcpu.set(
                                 vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
                                 PREEMPTION_TIMER_TICKS,
                             );
+                            crate::hypercall::yield_child_to_dom0(vcpu);
                             return;
                         }
                         EXIT_REASON_INIT_SIGNAL => {

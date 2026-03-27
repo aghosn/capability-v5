@@ -7,11 +7,10 @@
  *
  *   assign   → subscribe to the eventfd's poll waitqueue
  *   wakeup   → eventfd signalled → schedule workqueue item
- *   work fn  → themis_inject_interrupt(domain, vp=0, vector) VMCALL
+ *   work fn  → themis_inject_interrupt(domain, vp_index, vector) VMCALL
  *   deassign → remove_wait_queue, cancel_work_sync, put ctx
  *
- * GSI → vector: treated 1:1 (full MSI routing is P15i future work).
- * VP targeting: always VP 0 (IRTE NDST affinity is P15i future work).
+ * The target VP is specified at assign time via the vp_index field.
  */
 
 #include <linux/eventfd.h>
@@ -36,10 +35,13 @@ if (READ_ONCE(entry->deassign))
 return;
 
 ret = themis_inject_interrupt(entry->partition->domain_handle,
-      0, (u8)entry->vector);
+      entry->vp_index, (u8)entry->vector);
 if (ret && ret != -ENOSYS)
-pr_warn_ratelimited("thhv: irqfd inject failed gsi=%u vec=%u: %d\n",
-    entry->gsi, entry->vector, ret);
+pr_warn_ratelimited("thhv: irqfd inject failed gsi=%u vec=%u vp=%u: %d\n",
+    entry->gsi, entry->vector, entry->vp_index, ret);
+
+/* Wake the target VP if it is blocked in HLT. */
+thhv_wake_vp(entry->partition, entry->vp_index);
 }
 
 /* ── Poll waitqueue wakeup (interrupt/softirq context) ───────────────────── */
@@ -105,6 +107,7 @@ return -ENOMEM;
 
 entry->gsi       = args.gsi;
 entry->vector    = args.vector ? args.vector : args.gsi;
+entry->vp_index  = args.vp_index;
 entry->eventfd   = ctx;
 entry->wqh       = NULL;
 entry->partition = part;

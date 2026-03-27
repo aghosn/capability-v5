@@ -239,6 +239,13 @@ unsafe fn write_control_fields(
     )
     .expect("vmwrite secondary proc-based");
 
+    if apic_access_phys != 0 && (secondary_val & 1) == 0 {
+        serial_println!(
+            "  [WARN] VIRTUALIZE_APIC_ACCESSES not supported by hardware — \
+             LAPIC MMIO will use EPT violation fallback"
+        );
+    }
+
     // XSS-exiting bitmap: only valid when ENABLE_XSAVES (bit 20) is active.
     if secondary_val & (1 << 20) != 0 {
         // 0 = no XSAVES/XRSTORS cause VM exits; all execute natively.

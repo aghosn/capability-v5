@@ -901,6 +901,22 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		/* TODO(P15e): dirty page tracking */
 		return -ENOSYS;
 
+	case THHV_INJECT_INTERRUPT: {
+		struct thhv_inject_interrupt ii;
+
+		if (!part->sealed)
+			return -EINVAL;
+		if (copy_from_user(&ii, uarg, sizeof(ii)))
+			return -EFAULT;
+		if (ii.vp_index >= part->num_vps)
+			return -EINVAL;
+		ret = themis_inject_interrupt(part->domain_handle,
+					      ii.vp_index, ii.vector);
+		if (!ret)
+			thhv_wake_vp(part, ii.vp_index);
+		return ret;
+	}
+
 	default:
 		return -ENOTTY;
 	}

@@ -738,6 +738,8 @@ struct thhv_irqfd {
 	__u32 gsi;
 	__u32 flags;
 	__u32 vector;   /* MSI vector to inject (0 = use gsi as vector) */
+	__u32 vp_index; /* Target VP for injection (default 0 = BSP) */
+	__u32 rsvd;
 };
 
 #define THHV_IRQFD_FLAG_DEASSIGN  (1u << 0)
@@ -834,6 +836,14 @@ struct thhv_set_intr_policy {
 	__u8 pad[6];
 };
 
+/* Inject a virtual interrupt into a child VP's PIR (Pending Interrupt Request).
+ * If the VP is halted (guest executed HLT), it is woken to process the vector. */
+struct thhv_inject_interrupt {
+	__u32 vp_index;
+	__u8  vector;
+	__u8  pad[3];
+};
+
 /* ── Partition-level ioctls ────────────────────────────────────────────────── */
 
 #define THHV_INITIALIZE_PARTITION \
@@ -854,6 +864,8 @@ struct thhv_set_intr_policy {
 	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition)
 #define THHV_SET_INTR_POLICY \
 	_IOW(THHV_IOCTL_MAGIC, 0x18, struct thhv_set_intr_policy)
+#define THHV_INJECT_INTERRUPT \
+	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -938,14 +950,14 @@ struct thhv_ioeventfd_entry {
 };
 
 /*
- * Per-irqfd entry: when the eventfd fires, inject `vector` into VP 0 of
- * the partition via INJECT_INTERRUPT.  GSI→vector mapping via MSI routing
- * is a TODO; currently the ioctl `gsi` field is passed through as the vector.
+ * Per-irqfd entry: when the eventfd fires, inject `vector` into the
+ * specified VP of the partition via INJECT_INTERRUPT.
  */
 struct thhv_irqfd_entry {
 	struct list_head   node;
 	u32                gsi;
 	u32                vector;       /* MSI routing lookup result (TODO) */
+	u32                vp_index;     /* target VP for interrupt injection */
 	struct eventfd_ctx *eventfd;
 	wait_queue_head_t  *wqh;         /* saved during poll, used on deassign */
 	wait_queue_entry_t wait;
@@ -1023,6 +1035,12 @@ struct thhv_vp {
 	 * This mirrors KVM's in-kernel MP state management. */
 	int mp_state;
 	wait_queue_head_t sipi_wq;
+
+	/* HLT blocking: when the guest executes HLT, the VP thread blocks
+	 * on halt_wq until an interrupt is injected (via irqfd or IPI).
+	 * This prevents busy-spinning in the CHV vCPU run loop. */
+	int halted;
+	wait_queue_head_t halt_wq;
 
 	/* Exit info buffer for userspace. */
 	u8 exit_msg[256];
@@ -1121,6 +1139,7 @@ void thhv_irqfd_release_all(struct thhv_partition *part);
 
 /* thhv_vp.c */
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg);
+void thhv_wake_vp(struct thhv_partition *part, u32 vp_index);
 extern const struct file_operations thhv_vp_fops;
 
 /* thhv_translate.c — GPA→HPA translation + capability table */
