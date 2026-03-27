@@ -29,7 +29,7 @@ static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
 
 /// Runtime debug toggle — controlled via THEMIS_TOGGLE_DEBUG vmcall.
 /// When true, `serial_rtdbg!` prints are emitted.
-pub(crate) static RUNTIME_DEBUG: AtomicBool = AtomicBool::new(true);
+pub(crate) static RUNTIME_DEBUG: AtomicBool = AtomicBool::new(false);
 
 /// Print only when RUNTIME_DEBUG is enabled.
 #[macro_export]

@@ -105,7 +105,6 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
     };
 
     let opcode = vcpu.reg(Reg::Rax);
-    serial_println!("[HC] op={:#x} core={}", opcode, core_id);
     let arg0 = vcpu.reg(Reg::Rdi);
     let arg1 = vcpu.reg(Reg::Rsi);
     let arg2 = vcpu.reg(Reg::Rdx);

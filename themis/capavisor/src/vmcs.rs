@@ -188,7 +188,6 @@ unsafe fn write_control_fields(
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
-    serial_println!("  VMCS pin-based: desired={:#x} msr={:#x} final={:#x} child={}", pin_desired, pin_msr, pin_val, child);
     vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
         .expect("vmwrite pin-based");
 
@@ -206,7 +205,6 @@ unsafe fn write_control_fields(
     }
     let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
     let primary_val = adjust(primary_desired, primary_msr);
-    serial_println!("  VMCS primary: desired={:#x} final={:#x} child={}", primary_desired, primary_val, child);
     vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary_val)
         .expect("vmwrite primary proc-based");
 
