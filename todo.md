@@ -6,16 +6,14 @@
 
 ---
 
-## Current State (2026-03-27, 15:15 UTC)
+## Current State (2026-03-27, 20:00 UTC)
 
 ### What works
 
 - **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-101-generic. Stable.
-- **Dom1 (1 CPU)**: boots to login prompt. Custom kernel 6.8.0-dirty under CHV on Themis.
-  Serial console, virtio-blk root. Timer via timerfd/irqfd (vector 0xEC, one-shot armed on
-  WRMSR 0x6E0 TSC_DEADLINE — fires ~1/sec during boot, NOT at 1kHz).
-  LAPIC via Mode B (EPT-trap MMIO emulation with iced-x86 in CHV). CPUID filtered (no AVX-512).
-  Boot takes ~10min due to serial I/O exit overhead.
+  Dom0 no longer freezes when CHV starts dom1 (was: VMCS control violation → halt_forever).
+- **Dom1 (1 CPU, remote)**: boots, reaches virtio_blk probe. SWITCH hypercall succeeds,
+  dom1 kernel initializes (PCI, FPU, memory). Posted interrupts enabled on remote machine.
 
 ### What doesn't work
 
@@ -24,21 +22,27 @@
 
 ### Recent commits
 
+- `7f86f38` — **capavisor: clean up debug instrumentation** — removed all debug prints
+  (VMEXIT counter, DOM0-VMCALL/HLT, HC per-call, VMCS dump). RUNTIME_DEBUG=false.
+- `74a6157` — ⚠️ **fix VMCS control violation + debug instrumentation** —
+  fixed VIRTUALIZE_APIC_ACCESSES set alongside VIRTUALIZE_X2APIC for child VPs
+  (Intel SDM 26.2.1.1 violation → VM_INSTRUCTION_ERROR=7 → halt_forever → dom0 freeze).
+  Added usleep_range in thhv EAGAIN loop. Added toggle-debug tool.
 - `c2820b5` — **refactor: clean up interrupt handling** — removed all ad-hoc interrupt
-  mechanisms (DEFERRED_HOST_VECTOR, yield_child_to_dom0, hardcoded dom0 routing, debug logs).
-  Integrated SwitchManager into ThemisPlatform for proper route_interrupt() access. Net -191 lines.
-- `93f9831` — ⚠️ temporary backup before cleanup (can be dropped)
+  mechanisms. Integrated SwitchManager into ThemisPlatform. Net -191 lines.
 
-### Uncommitted changes (on top of commit c2820b5)
+### Uncommitted changes (on top of 7f86f38)
 
-- `thhv/inc/thhv.h` — `struct thhv_irqfd` added `vp_index` + `rsvd` fields
+- `thhv/inc/thhv.h` — `struct thhv_irqfd` added `vp_index` + `rsvd` fields; THEMIS_OP_TOGGLE_DEBUG
 - `thhv/src/thhv_irqfd.c` — per-VP irqfd targeting using `entry->vp_index`
-- `thhv/src/thhv_vp.c` — wait-for-SIPI, cond_resched in retry loop, domcomm drain
+- `thhv/src/thhv_vp.c` — wait-for-SIPI, usleep_range in retry loop, domcomm drain
+- `thhv/src/thhv_ioeventfd.c` — doorbell prints demoted to pr_debug
 - `thhv/src/thhv_part.c` — minor additions
-- `themis/capavisor/src/vmcs.rs` — minor additions
-- `todo.md` — this file
+- `themis/crates/themis-abi/src/lib.rs` — THEMIS_TOGGLE_DEBUG constant
+- `tools/toggle-debug.c` — standalone VMCALL test tool (new)
+- `tools/toggle-debug` — compiled binary (new)
 
-CHV submodule also has per-vCPU irqfd changes (not shown in diff).
+CHV submodule also has per-VP irqfd changes (not shown in diff).
 
 ---
 
@@ -134,42 +138,60 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 
 ## Action Plan
 
-### ✅ Done: Interrupt handling cleanup (commit c2820b5)
+### Done: Interrupt handling cleanup (commit c2820b5)
 
 - [x] Code review of ad-hoc interrupt mechanisms (8 findings, 3 critical)
 - [x] Phase 1: Integrate SwitchManager into ThemisPlatform
 - [x] Phase 2: Remove DEFERRED_HOST_VECTOR, yield_child_to_dom0, hardcoded routing,
   debug logs. Use route_interrupt() + vector-in-RDI. Net -191 lines.
 
-### Next: fix the nested-virt scheduling problem
+### Done: VMCS control violation fix (commits 74a6157, 7f86f38)
 
-- [x] **S1**: `schedule_timeout_interruptible(1)` in thhv_run_vp EAGAIN loop instead of `cond_resched()`.
-  This guarantees dom0 processes its timer tick before retrying SWITCH. The child then gets
-  a full quantum (~4ms at 250Hz) before the next timer interrupt.
-  **Changed in `thhv/src/thhv_vp.c` line 96. Needs testing on dom0.**
-- [ ] **S2**: If S1 doesn't work, try capavisor-side drain: `sti; nop; cli` in VMX root
-  before child VMRESUME. Requires capavisor IDT to handle the interrupt.
-- [ ] **S3**: If neither works, try forwarding every interrupt (approach B) but with the
-  schedule_timeout fix — the combination might work: forward interrupt to dom0 → dom0 handles
-  it → schedule_timeout ensures timer is rearmed → retry SWITCH → child gets full quantum.
-- [ ] **S4**: Remove AP deferral code in vmexit.rs (use approach B as the base).
-- [ ] **S5**: Test 2-CPU dom1 boot end-to-end. Verify: AP completes hotplug, "Brought up 2 CPUs",
-  dom0 stable (no RCU stall), `cat /proc/cpuinfo` shows 2 processors.
+- [x] Diagnosed dom0 freeze: VIRTUALIZE_APIC_ACCESSES + VIRTUALIZE_X2APIC both set for
+  child VPs (SDM 26.2.1.1 violation). VM_INSTRUCTION_ERROR=7, halt_forever, dom0 loses core.
+- [x] Fixed: VIRTUALIZE_APIC_ACCESSES only set when `!child` in vmcs.rs
+- [x] Added toggle-debug tool for runtime VMCALL testing
+- [x] Added usleep_range(50,100) to thhv VP retry loop (prevents tight spin)
+- [x] Cleaned debug instrumentation into separate commit
+
+### Next: Debug virtio_blk hang (interrupt delivery)
+
+Dom1 reaches virtio_blk probe but first disk I/O never completes. Root cause: zero
+INJECT_INTERRUPT (op=0x1b) VMCALLs observed. CHV is not injecting interrupts to dom1.
+
+Investigation steps:
+- [ ] **V1**: Add `no-posted-interrupts` feature flag to capavisor. When set, disable posted
+  interrupts in VMCS pin-based controls and use the software injection fallback path.
+  This allows testing on platforms without PI and simplifies debugging.
+- [ ] **V2**: Enable thhv dynamic debug and check whether CHV calls INJECT_INTERRUPT ioctl.
+- [ ] **V3**: Instrument the irqfd path in thhv (thhv_irqfd.c) to trace eventfd-to-VMCALL flow.
+- [ ] **V4**: Instrument CHV's Themis backend to trace interrupt injection attempts.
+- [ ] **V5**: Check if the problem is that interrupts are posted (PIR written) but never
+  drained because do_switch's PIR drain (step 7b) doesn't run at the right time.
+
+### Nested-virt scheduling (parked, lower priority)
+
+These were for the 2-CPU dom1 problem, which is a nested-virt artifact. Parked until
+the virtio_blk hang is resolved:
+
+- [x] **S1**: usleep_range in thhv_run_vp EAGAIN loop (done, in 74a6157)
+- [ ] **S2-S5**: Multi-CPU scheduling approaches (deferred)
 
 ### Design principle
 
-On real hardware with posted interrupts: dom0's timer does NOT exit the child. This problem
-goes away. The fix we implement for nested-virt should degrade gracefully — it should be a
-"give dom0 enough time" mechanism, not a fundamental architecture change.
+On real hardware with posted interrupts: dom0's timer does NOT exit the child. The
+nested-virt scheduling problem goes away. The virtio_blk hang is the priority because
+it affects both nested and real hardware.
 
 ### Future work
 
 - [ ] Per-VP irqfd: struct updated, needs end-to-end test
-- [ ] Posted interrupt support when available (eliminates the scheduling problem on real HW)
 - [ ] Paravirt timer (PV MMIO hypercall, P16.6d3)
 - [ ] Reduce serial I/O overhead
 - [ ] CPUID policy in DomainPolicy (P16.6c)
 - [ ] Stock cloud image kernel
+- [ ] VPID bug: child VPID double-incremented (vp_index+1 in write_control_fields,
+  but setup_child_vmcs already passes vpid which is 1-based). Causes TLB overlap.
 
 ---
 
