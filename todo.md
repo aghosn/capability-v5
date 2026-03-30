@@ -6,14 +6,14 @@
 
 ---
 
-## Current State (2026-03-31)
+## Current State (2026-03-30)
 
 ### What works
 
 - **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-101-generic. Stable.
-- **Dom1 (1 CPU, local QEMU)**: **fully boots to multi-user target in ~37s guest time**.
-  Disk I/O works (virtio-blk: partition table read, ext4 mount, fsck).
-  Network works (virtio-net renamed to ens5). All systemd services start.
+- **Dom1 (1 CPU, local QEMU)**: **boots to /bin/bash shell** (~204s guest time).
+  virtio-blk: partition table read, ext4 mount. Kernel fully initializes.
+  Uses `init=/bin/bash` (dom1.raw rootfs), not full systemd.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
   N-level isolation, execute protocol, global system invariant, deep revocation cascade.
 
@@ -21,15 +21,15 @@
 
 - **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
   This is a nested-virtualization scheduling artifact. See "Nested-virt scheduling" below.
-- **Dom1 on real hardware**: not yet tested with the PIR drain fix.
+- **Dom1 on real hardware**: not yet tested with the interrupt-window fix.
 
 ### Recent commits
 
+- `fcbc04f` — **fix: interrupt-window exiting delivers deferred device interrupts**
 - `50ae665` — **fix: PIR drain low→high scan eliminates device interrupt starvation**
 - `289d746` — **capavisor: fix PIR ON bit bug + add virtio pipeline instrumentation**
 - `d508c22` — **capavisor: fix VPID double-increment for child VMs**
 - `69727ab` — **lean: execute protocol model** — A1, lock hierarchy, atomicity, non-destructive ops
-- `7f86f38` — **capavisor: clean up debug instrumentation**
 
 ### Uncommitted changes
 
@@ -159,24 +159,25 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 - [x] Phase 4: Execute protocol model (7 phases, lock hierarchy, A1, non-destructive ops)
 - [x] CDT frame rule: create/seal/revoke_domain preserve CdtWellFormed
 
-### Done: Virtio_blk interrupt starvation fix (commit 50ae665)
+### Done: Virtio_blk interrupt delivery fix (commits 50ae665, fcbc04f)
 
-- [x] Root cause: PIR drain in do_switch scanned high→low (word 3→0), always finding
-  timer (vec=236) before device interrupts (vec 32-36). Only one vector per VMENTRY.
-- [x] Fix: scan low→high (word 0→3) with snapshot-and-restore. Device interrupts
-  injected before timer. Un-injected vectors put back in PIR for next switch.
-- [x] Result: dom1 boots to multi-user in ~37s guest time. Disk I/O, networking,
-  all systemd services work.
-- [x] Debug traces removed (INJECT-PID, INJECT-VERIFY, PIR-INJECT, thhv pr_info)
+- [x] Root cause: PIR drain in do_switch only runs at SWITCH time when guest IF is
+  almost always 0 (inside timer handler). Device interrupts deferred indefinitely.
+- [x] Fix 1 (50ae665): scan PIR low→high so device vectors (word 0) checked before
+  timer (word 3). Snapshot-and-restore for un-injected vectors.
+- [x] Fix 2 (fcbc04f): interrupt-window exiting — when PIR has pending vectors but
+  IF=0, set PRIMARY_PROCBASED bit 2. On VMEXIT reason 7 (interrupt window), drain
+  PIR and inject. Clears bit when PIR empty.
+- [x] Result: dom1 boots to /bin/bash shell. virtio-blk partition table read, ext4
+  mount, kernel init all succeed.
 
 #### Bugs fixed during this investigation
 
-- **PIR ON bit bug (289d746)**: `inject_via_pid(is_remote=false)` set PIR[vector]
-  but NOT PID.ON. Fixed to always set ON.
-- **PIR drain starvation (50ae665)**: High→low scan order caused device interrupts
-  to be permanently starved by timer interrupts.
-- **vIRR merge approach (attempted, reverted)**: Merging PIR→vIRR doesn't work
-  without VIRTUAL_INTERRUPT_DELIVERY (secondary proc-based bit 9).
+- **PIR ON bit bug (289d746)**: `inject_via_pid(is_remote=false)` didn't set PID.ON.
+- **PIR drain starvation (50ae665)**: High→low scan starved device interrupts.
+- **IF=0 defer loop (fcbc04f)**: Without interrupt-window exiting, deferred vectors
+  stayed in PIR across thousands of switches that all saw IF=0.
+- **vIRR merge (attempted, reverted)**: Doesn't work without VIRTUAL_INTERRUPT_DELIVERY.
 
 ### Next: Debug virtio_blk on real hardware + multi-CPU
 
