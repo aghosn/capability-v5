@@ -105,7 +105,7 @@ fn vmx_ctrl_msr(basic_msr: u32, true_msr: u32) -> u64 {
 /// * `vmcs_phys`  — physical address of the (already-initialised) VMCS page
 /// * `vapic_phys` — physical address of the VAPIC page for this VP
 /// * `eptp`       — EPT pointer value from `EptMapper::eptp()`
-/// * `vp_index`   — VP index (used as VPID; 0 is reserved, so VPID = vp_index + 1)
+/// * `vp_index`   — VP index (0-based; VPID written as vp_index + 1)
 ///
 /// HOST_RSP is set to 0 here (placeholder).  `ActiveVcpu::run()` overwrites it
 /// with the caller's RSP before every VMLAUNCH/VMRESUME.
@@ -123,7 +123,7 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
     // dom0 keeps its xAPIC MMIO EPT passthrough — no APIC access page.
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, 0, 0, vp_index, false);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, 0, 0, (vp_index + 1) as u16, false);
     write_host_state();
     write_guest_state();
 
@@ -156,7 +156,7 @@ pub unsafe fn setup_child_vmcs(
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, io_bitmap_a_phys, io_bitmap_b_phys, vpid as usize, true);
+    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, io_bitmap_a_phys, io_bitmap_b_phys, vpid, true);
     write_host_state();
     write_guest_state();
 
@@ -176,7 +176,7 @@ unsafe fn write_control_fields(
     apic_access_phys: u64,
     io_bitmap_a_phys: u64,
     io_bitmap_b_phys: u64,
-    vp_index: usize,
+    vpid: u16,
     child: bool,
 ) {
     // ── Pin-based ──────────────────────────────────────────────────── //
@@ -296,8 +296,10 @@ unsafe fn write_control_fields(
     vmx::vmwrite(control::EPTP_FULL, eptp).expect("vmwrite EPTP");
 
     // ── VPID ──────────────────────────────────────────────────────────── //
-    // VPID 0 is reserved for the VMX-root context; dom0 VPs get 1..=N.
-    vmx::vmwrite(control::VPID as u32, (vp_index + 1) as u64).expect("vmwrite VPID");
+    // VPID 0 is reserved for the VMX-root context. Caller provides the
+    // final 1-based VPID value directly.
+    assert!(vpid != 0, "VPID 0 is reserved for VMX-root");
+    vmx::vmwrite(control::VPID as u32, vpid as u64).expect("vmwrite VPID");
 
     // ── Exception bitmap: do not intercept any exceptions ─────────────────── //
     // All exceptions are handled by the guest's own IDT.
@@ -384,13 +386,13 @@ unsafe fn write_control_fields(
         .expect("vmwrite preemption timer");
 
     // ── Debug: print MSR raw values and adjusted controls ─────────────── //
-    serial_println!("  VMCS controls (VP{}):", vp_index);
+    serial_println!("  VMCS controls (VPID={}):", vpid);
     serial_println!("    pin_msr={:#018x}  pin={:#010x}", pin_msr, pin_val);
     serial_println!("    primary_msr={:#018x}  primary={:#010x}", primary_msr, primary_val);
     serial_println!("    secondary_msr={:#018x}  secondary={:#010x}", secondary_msr, secondary_val);
     serial_println!("    exit_msr={:#018x}  exit={:#010x}", exit_msr, exit_val);
     serial_println!("    entry_msr={:#018x}  entry={:#010x}", entry_msr, entry_val);
-    serial_println!("    EPTP={:#018x}  VPID={}", eptp, vp_index + 1);
+    serial_println!("    EPTP={:#018x}  VPID={}", eptp, vpid);
 
     // ── Posted Interrupt fields (child VPs only) ─────────────────────── //
     // Only write these fields if PROCESS_POSTED_INTERRUPTS was actually set
