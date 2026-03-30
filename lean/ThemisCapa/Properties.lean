@@ -419,4 +419,143 @@ theorem carve_preserves_wellformed
       rw [hupd.regionUnchanged, hpost.accessMatches]
       exact hpre.accessContained
 
+-- ════════════════════════════════════════════════════════════════════
+-- § P18 — Contained Regions Inherit Disjointness
+--
+-- If two containers don't overlap, neither do any regions contained
+-- within them. This is the key lemma for address space isolation.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem contained_disjoint
+    {r1 r2 a b : Access}
+    (hdisjoint : ¬ Access.overlaps r1 r2)
+    (ha : a.contained r1) (hb : b.contained r2) :
+    ¬ Access.overlaps a b := by
+  unfold Access.overlaps Access.contained Access.«end» at *
+  obtain ⟨ha1, ha2, _⟩ := ha
+  obtain ⟨hb1, hb2, _⟩ := hb
+  intro ⟨h1, h2⟩
+  exact hdisjoint ⟨by omega, by omega⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P19 — Alias Preserves Well-Formedness
+--
+-- Adding an alias child preserves WellFormedTree because aliases
+-- don't affect the carved children set.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Describes the parent MemCap state after an alias adds a child. -/
+structure ParentAfterAlias (parent parent' : MemCap) (child : MemCap) : Prop where
+  childrenAppended  : parent'.children = parent.children ++ [child]
+  regionUnchanged   : parent'.region = parent.region
+  carvedUnchanged   : parent'.carvedChildren = parent.carvedChildren
+
+theorem alias_preserves_wellformed
+    (caller : DomCap) (parent parent' : MemCap) (access : Access) (child : MemCap)
+    (hpre : AliasPre caller parent access)
+    (hpost : AliasPost access child)
+    (hwf : WellFormedTree parent)
+    (hupd : ParentAfterAlias parent parent' child) :
+    WellFormedTree parent' := by
+  constructor
+  · -- monotonic
+    intro ch hch
+    rw [hupd.childrenAppended] at hch
+    simp at hch
+    rcases hch with h | rfl
+    · have := hwf.monotonic ch h
+      unfold rightsMonotonic at this ⊢
+      rw [hupd.regionUnchanged]
+      exact this
+    · unfold rightsMonotonic
+      rw [hupd.regionUnchanged, hpost.accessMatches]
+      exact hpre.accessContained.2.2
+  · -- carvedDisjoint: carved children unchanged by alias
+    intro c1 c2 hc1 hc2 hneq
+    rw [hupd.carvedUnchanged] at hc1 hc2
+    exact hwf.carvedDisjoint c1 c2 hc1 hc2 hneq
+  · -- childrenContained
+    intro ch hch
+    rw [hupd.childrenAppended] at hch
+    simp at hch
+    rcases hch with h | rfl
+    · have := hwf.childrenContained ch h
+      unfold Access.contained at this ⊢
+      rw [hupd.regionUnchanged]
+      exact this
+    · unfold Access.contained
+      rw [hupd.regionUnchanged, hpost.accessMatches]
+      exact hpre.accessContained
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P20 — Revoke Preserves Well-Formedness
+--
+-- Removing children from the CDT preserves WellFormedTree because
+-- all remaining children still satisfy the invariants.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Describes the parent MemCap state after revoking children. -/
+structure ParentAfterRevoke (parent parent' : MemCap) : Prop where
+  childrenSubset    : ∀ ch ∈ parent'.children, ch ∈ parent.children
+  regionUnchanged   : parent'.region = parent.region
+  carvedSubset      : ∀ ch ∈ parent'.carvedChildren, ch ∈ parent.carvedChildren
+
+theorem revoke_preserves_wellformed
+    (parent parent' : MemCap)
+    (hwf : WellFormedTree parent)
+    (hupd : ParentAfterRevoke parent parent') :
+    WellFormedTree parent' := by
+  constructor
+  · -- monotonic: subset of children still monotonic
+    intro ch hch
+    have := hwf.monotonic ch (hupd.childrenSubset ch hch)
+    unfold rightsMonotonic at this ⊢
+    rw [hupd.regionUnchanged]
+    exact this
+  · -- carvedDisjoint: subset of carved children still pairwise disjoint
+    intro c1 c2 hc1 hc2 hneq
+    exact hwf.carvedDisjoint c1 c2
+      (hupd.carvedSubset c1 hc1) (hupd.carvedSubset c2 hc2) hneq
+  · -- childrenContained: subset of children still contained
+    intro ch hch
+    have := hwf.childrenContained ch (hupd.childrenSubset ch hch)
+    unfold Access.contained at this ⊢
+    rw [hupd.regionUnchanged]
+    exact this
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P21 — Address Space Isolation
+--
+-- The main isolation theorem: any two access ranges contained in
+-- disjoint carved siblings are themselves disjoint. This guarantees
+-- that domains with capabilities from different carved subtrees
+-- have non-overlapping physical memory views.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- General isolation: any accesses contained in disjoint carved siblings
+    are disjoint. Covers descendants at any depth. -/
+theorem subtree_isolation
+    (parent c1 c2 : MemCap) (a b : Access)
+    (hwf : WellFormedTree parent)
+    (hc1 : c1 ∈ parent.carvedChildren)
+    (hc2 : c2 ∈ parent.carvedChildren)
+    (hne : c1 ≠ c2)
+    (ha : a.contained c1.region.access)
+    (hb : b.contained c2.region.access) :
+    ¬ Access.overlaps a b :=
+  contained_disjoint (hwf.carvedDisjoint c1 c2 hc1 hc2 hne) ha hb
+
+/-- Corollary: immediate children of disjoint carved siblings are disjoint. -/
+theorem descendant_isolation
+    (parent c1 c2 d1 d2 : MemCap)
+    (hwf : WellFormedTree parent) (hwf1 : WellFormedTree c1) (hwf2 : WellFormedTree c2)
+    (hc1 : c1 ∈ parent.carvedChildren) (hc2 : c2 ∈ parent.carvedChildren)
+    (hne : c1 ≠ c2)
+    (hd1 : d1 ∈ c1.children) (hd2 : d2 ∈ c2.children) :
+    ¬ Access.overlaps d1.region.access d2.region.access :=
+  subtree_isolation parent c1 c2 d1.region.access d2.region.access
+    hwf hc1 hc2 hne
+    (hwf1.childrenContained d1 hd1)
+    (hwf2.childrenContained d2 hd2)
+
 end ThemisCapa
