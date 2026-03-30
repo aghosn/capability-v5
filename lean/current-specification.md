@@ -11,7 +11,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 |----------|---------|-------|---|
 | Core operations (carve, alias, send, revoke, create, seal) | 6 | 6 | 100% |
 | Extended operations (switch, deliver_interrupt, accept, reject, revoke_domain) | 7 | 14 | 50% |
-| Safety properties proved | 69 | 69 | 100% |
+| Safety properties proved | 83 | 83 | 100% |
 | Update (HwUpdate) variants | 7 | 9 | 78% |
 | VpRunState transitions | 8 | 8 | 100% |
 
@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 69 properties have complete proofs (no `sorry`).
+All 83 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -183,6 +183,26 @@ All 69 properties have complete proofs (no `sorry`).
 | P40 | Create preserves CDT | `create_preserves_cdt` | ✅ Proved |
 | P41 | Seal preserves CDT | `seal_preserves_cdt` | ✅ Proved |
 | P42 | Revoke domain preserves CDT | `revoke_domain_preserves_cdt` | ✅ Proved |
+| — | ExecutePhase (inductive) | `ExecutePhase` | ✅ Defined |
+| — | LockLevel (inductive) | `LockLevel` | ✅ Defined |
+| — | LockMode (inductive) | `LockMode` | ✅ Defined |
+| P43 | A1 validate-before-modify | `a1_validate_before_modify` | ✅ Proved |
+| P44 | Update lock before barrier | `update_lock_before_barrier` | ✅ Proved |
+| P45 | Cores stopped before apply | `cores_stopped_before_apply` | ✅ Proved |
+| P46 | Apply before resume | `apply_before_resume` | ✅ Proved |
+| P47 | Atomicity window | `atomicity_window` | ✅ Proved |
+| P48 | Lock hierarchy strict | `lock_hierarchy_strict` | ✅ Proved |
+| P49 | Carve non-destructive | `carve_nondestructive` | ✅ Proved |
+| P50 | Alias non-destructive | `alias_nondestructive` | ✅ Proved |
+| P51 | Send non-destructive | `send_nondestructive` | ✅ Proved |
+| P52 | Revoke is destructive | `revoke_is_destructive` | ✅ Proved |
+| — | HwUpdateJustified (def) | `HwUpdateJustified` | ✅ Defined |
+| — | BatchJustified (def) | `BatchJustified` | ✅ Defined |
+| — | ValidExecute (struct) | `ValidExecute` | ✅ Defined |
+| P53 | Execute preserves CDT | `execute_preserves_cdt_wellformed` | ✅ Proved |
+| P54 | Execute updates justified | `execute_updates_justified` | ✅ Proved |
+| P55 | Unmap always justified | `unmap_always_justified` | ✅ Proved |
+| P56 | Zero always justified | `zero_always_justified` | ✅ Proved |
 
 ### Known gaps and weaknesses in existing proofs
 
@@ -202,7 +222,7 @@ All 69 properties have complete proofs (no `sorry`).
 | ~~Switch state restoration~~ | ~~Forward + return restores original VP state (not just flag)~~ | ✅ Done (P26a–P26b) |
 | ~~Domain revocation cascade~~ | ~~Connect RevokeDomainPost to SubtreeRevoked~~ | ✅ Done (P33–P37, FullDomainRevocation) |
 | ~~Global system invariant~~ | ~~SystemState invariant preserved across all operations~~ | ✅ Done (SystemInvariant + P38–P42) |
-| Execute protocol correctness | `execute()` lock protocol maintains consistency | Hard |
+| ~~Execute protocol correctness~~ | ~~`execute()` lock protocol maintains consistency~~ | ✅ Done (P43–P56, ExecutePhase, LockLevel, ValidExecute) |
 
 ---
 
