@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-capability_engine = { package = "capability-engine-v2", path = "../2026", features = ["address_translation"] }
+capability_engine = { package = "capa-engine", path = "../capa-engine", features = ["address_translation"] }
 crossterm = "0.28"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 rustyline = "14.0"

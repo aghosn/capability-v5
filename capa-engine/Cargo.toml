@@ -1,5 +1,5 @@
 [package]
-name = "capability-engine-v2"
+name = "capa-engine"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,8 +8,7 @@ name = "capability_engine"
 path = "src/lib.rs"
 
 [[bin]]
-name = "capability-engine-v2"
-path = "src/main.rs"
+name = "capa-engine"
 
 [features]
 # Default: hosted OS environment (Linux/macOS/Windows).  Uses parking_lot which

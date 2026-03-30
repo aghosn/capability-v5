@@ -557,15 +557,15 @@ Implementation is split into three phases matching the design. Phase 1 is the im
 - Files: `vmexit.rs`, `hypercall.rs`.
 
 **Step 4 — `SwitchContext.interrupt_return` and `do_switch` update** (`intr-p1-switch-ctx`)
-- Add `interrupt_return: Option<u8>` to `SwitchContext` in `2026/src/switch.rs`.
-- In `switch_domain_forward` (`2026/src/capability.rs` ~line 2544): when the target VP is `Suspended { vector, .. }`, populate `SwitchContext.interrupt_return = Some(vector)`.
+- Add `interrupt_return: Option<u8>` to `SwitchContext` in `capa-engine/src/switch.rs`.
+- In `switch_domain_forward` (`capa-engine/src/capability.rs` ~line 2544): when the target VP is `Suspended { vector, .. }`, populate `SwitchContext.interrupt_return = Some(vector)`.
 - In `do_switch` (`hypercall.rs` ~line 506): after `Capability::switch` returns, if `SwitchContext.interrupt_return == Some(V)`, set guest `RDI = V as u64` (interrupt return reason) and `RAX = SUCCESS`, then advance RIP. This is how `Report` domains discover their callee was interrupted.
-- Files: `2026/src/switch.rs`, `2026/src/capability.rs`, `themis/capavisor/src/hypercall.rs`.
+- Files: `capa-engine/src/switch.rs`, `capa-engine/src/capability.rs`, `themis/capavisor/src/hypercall.rs`.
 
 **Step 5 — Phase 1 validation** (`intr-p1-test`)
 - Run existing C7 test (`test_child_hlt.c`): confirm no RCU stall after the test completes.
 - Write a new userspace test (`test_intr_forward.c`): dom0 runs a child that loops; confirm timer ticks are received by dom0 at the expected rate while the child is active.
-- Run `cargo test` in `2026/` to confirm no regressions in the capability engine unit tests.
+- Run `cargo test` in `capa-engine/` to confirm no regressions in the capability engine unit tests.
 
 ---
 

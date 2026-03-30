@@ -4,7 +4,7 @@
 # Usage:
 #   bash themis/scripts/build-bins-docker.sh
 #   PROFILE=release bash themis/scripts/build-bins-docker.sh
-#   BINS_TARGETS=chv,2026 bash themis/scripts/build-bins-docker.sh
+#   BINS_TARGETS=chv,capa-engine bash themis/scripts/build-bins-docker.sh
 #
 # Passes PROFILE, BINS_TARGETS, and KHEADERS_DIR through to the container.
 # The themis-build image should contain the native build prerequisites already.
@@ -26,7 +26,7 @@ usage() {
 Usage:
   bash themis/scripts/build-bins-docker.sh
   PROFILE=release bash themis/scripts/build-bins-docker.sh
-  BINS_TARGETS=chv,2026 bash themis/scripts/build-bins-docker.sh
+  BINS_TARGETS=chv,capa-engine bash themis/scripts/build-bins-docker.sh
 USAGE
 }
 

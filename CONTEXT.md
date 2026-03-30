@@ -301,7 +301,7 @@ capability-v5/
 │   └── hypervisor/src/themis/  # Themis backend: ThemisHypervisor/Vm/Vcpu
 │       └── mod.rs              # Full backend (~1250 lines)
 │
-├── 2026/                       # CLI / integration tests (Rust workspace)
+├── capa-engine/                       # CLI / integration tests (Rust workspace)
 └── todo.md                     # Authoritative task tracker
 ```
 
@@ -517,7 +517,7 @@ your task:
 |------------|----------------|
 | `skills/debugging-dom-boot.md` | Debugging an early-boot hang in a guest domain (dom1, nested Linux). Covers `themis_trace()` VMCALL instrumentation and the trace code registry. |
 | `skills/running-inside-dom0.md` | Booting Themis + dom0 under QEMU, capturing the full trace to `/tmp/out.txt`, SSH-ing into dom0 in parallel, and diagnosing hangs or crashes. |
-| `skills/working-on-capability-engine.md` | Modifying `2026/` — domain-mediated API, locking model (shared vs. exclusive, `execute()`), running `cargo test` / `cargo loom` / `cargo loom-all`, test policy, verifying CLI-2026. |
+| `skills/working-on-capability-engine.md` | Modifying `capa-engine/` — domain-mediated API, locking model (shared vs. exclusive, `execute()`), running `cargo test` / `cargo loom` / `cargo loom-all`, test policy, verifying capa-cli. |
 | `skills/working-on-capavisor.md` | Modifying `themis/capavisor/` — core invariants (capability-first, adversarial domains, no dom0 privilege, META pool isolation), adding vmexit handlers, adding hypercalls, `ThemisPlatform::apply_update`, active-codebase caveats. |
 
 Read the full skill file, not just this table — the table is a routing guide only.

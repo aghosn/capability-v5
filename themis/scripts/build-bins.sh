@@ -4,12 +4,12 @@
 # Usage:
 #   bash themis/scripts/build-bins.sh
 #   PROFILE=release bash themis/scripts/build-bins.sh
-#   BINS_TARGETS=thhv,chv,2026 bash themis/scripts/build-bins.sh
+#   BINS_TARGETS=thhv,chv,capa-engine bash themis/scripts/build-bins.sh
 #   KHEADERS_DIR=/path/to/linux-headers bash themis/scripts/build-bins.sh
 #
 # Environment knobs:
 #   PROFILE       debug | release (default: debug)
-#   BINS_TARGETS  all | comma-separated subset of: capavisor,chv,2026,thhv
+#   BINS_TARGETS  all | comma-separated subset of: capavisor,chv,capa-engine,thhv
 #   KHEADERS_DIR  explicit kernel headers tree for thhv.ko builds
 
 set -euo pipefail
@@ -17,7 +17,7 @@ set -euo pipefail
 # When invoked via `cargo build-bins` from the repo root, the parent cargo
 # process (stable) injects RUSTUP_TOOLCHAIN=stable into the environment,
 # which overrides rust-toolchain.toml files in sub-workspaces.  Unset it so
-# each workspace (themis/, cloud-hypervisor/, 2026/) resolves its own toolchain.
+# each workspace (themis/, cloud-hypervisor/, capa-engine/) resolves its own toolchain.
 unset RUSTUP_TOOLCHAIN
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +33,7 @@ usage() {
 Usage:
   bash themis/scripts/build-bins.sh
   PROFILE=release bash themis/scripts/build-bins.sh
-  BINS_TARGETS=thhv,chv,2026 bash themis/scripts/build-bins.sh
+  BINS_TARGETS=thhv,chv,capa-engine bash themis/scripts/build-bins.sh
   KHEADERS_DIR=/path/to/linux-headers bash themis/scripts/build-bins.sh
 USAGE
 }
@@ -79,12 +79,12 @@ if [[ "$BINS_TARGETS" != "all" ]]; then
         _target="${_target,,}"
         [[ -z "$_target" ]] && continue
         case "$_target" in
-            capavisor|chv|cloud-hypervisor|2026|thhv)
+            capavisor|chv|cloud-hypervisor|capa-engine|thhv)
                 SELECTED_TARGETS+=("$_target")
                 ;;
             *)
                 echo "ERROR: unknown BINS_TARGETS entry '$_raw'" >&2
-                echo "       Supported values: all, capavisor, chv, 2026, thhv" >&2
+                echo "       Supported values: all, capavisor, chv, capa-engine, thhv" >&2
                 exit 1
                 ;;
         esac
@@ -186,14 +186,14 @@ else
     echo "→ [cloud-hypervisor] skipped"
 fi
 
-if should_build 2026; then
-    echo "→ [2026] cargo ${CARGO_BUILD_ARGS[*]}"
+if should_build capa-engine; then
+    echo "→ [capa-engine] cargo ${CARGO_BUILD_ARGS[*]}"
     (
-        cd "$REPO_ROOT/2026"
+        cd "$REPO_ROOT/capa-engine"
         cargo "${CARGO_BUILD_ARGS[@]}"
     )
 else
-    echo "→ [2026] skipped"
+    echo "→ [capa-engine] skipped"
 fi
 
 if should_build thhv; then

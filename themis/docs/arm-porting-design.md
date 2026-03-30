@@ -17,7 +17,7 @@ _policy_ layer is portable; the _mechanism_ layer is not.
 Rough breakdown:
 - ~30 % of the capavisor codebase is architecture-independent today.
 - ~70 % is Intel/x86-64-specific and must be re-implemented for ARM.
-- Zero new logic needs to be added to the capability engine (`2026/` crate).
+- Zero new logic needs to be added to the capability engine (`capa-engine/` crate).
 
 ---
 
@@ -25,7 +25,7 @@ Rough breakdown:
 
 | Component | Location | Notes |
 |-----------|----------|-------|
-| Capability engine | `2026/src/` | Pure logic, no arch assumptions |
+| Capability engine | `capa-engine/src/` | Pure logic, no arch assumptions |
 | Hypercall opcode table | `themis-abi/src/lib.rs` | Opcodes are arch-neutral integers |
 | DomainComm ring buffer protocol | `themis-abi/src/domcomm.rs` | Pure data protocol |
 | Memory inventory & partitioning | `capavisor/src/mem/inventory.rs`, `meta_alloc.rs` | Physical address math |
@@ -524,7 +524,7 @@ Before committing to this design, the following questions need answers:
 
 ## 7. What Does NOT Need to Change
 
-- The entire `2026/` capability engine workspace
+- The entire `capa-engine/` capability engine workspace
 - `themis-abi` opcode numbers and error codes
 - DomainComm ring buffer format
 - The `THEMIS_SWITCH` synchronous scheduling model

@@ -23,7 +23,7 @@ interrupt routing correctness with scheduling workarounds.
 
 ## Architecture: What the Capability Engine Provides
 
-The engine (under `2026/src/`) has a complete interrupt model that the capavisor
+The engine (under `capa-engine/src/`) has a complete interrupt model that the capavisor
 should be using:
 
 ### InterruptPolicy & VectorPolicy (`domain.rs`)
@@ -398,9 +398,9 @@ On real hardware with VT-x posted interrupts:
 
 | File | Role in Interrupt Handling |
 |------|---------------------------|
-| `2026/src/switch.rs` | `route_interrupt()`, `resume_after_interrupt()` — **NOT USED** |
-| `2026/src/capability.rs` | `deliver_interrupt_vp()` — used but with wrong handler |
-| `2026/src/domain.rs` | `InterruptPolicy`, `VectorPolicy`, `VpRunState` |
+| `capa-engine/src/switch.rs` | `route_interrupt()`, `resume_after_interrupt()` — **NOT USED** |
+| `capa-engine/src/capability.rs` | `deliver_interrupt_vp()` — used but with wrong handler |
+| `capa-engine/src/domain.rs` | `InterruptPolicy`, `VectorPolicy`, `VpRunState` |
 | `themis/capavisor/src/vmexit.rs` | Exit dispatch, DEFERRED_HOST_VECTOR, preemption timer |
 | `themis/capavisor/src/hypercall.rs` | `forward_interrupt_to_handler`, `yield_child_to_dom0`, `do_inject_interrupt`, `inject_via_pid`, `do_switch` PIR drain |
 | `thhv/src/thhv_vp.c` | `thhv_run_vp` EAGAIN loop, HLT wait/wake |

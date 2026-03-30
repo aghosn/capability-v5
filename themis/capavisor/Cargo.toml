@@ -16,7 +16,7 @@ verbose = []
 no-posted-interrupts = []
 
 [dependencies]
-capability-engine-v2  = { workspace = true }
+capa-engine  = { workspace = true }
 x86                   = { workspace = true }
 x2apic                = { workspace = true }
 acpi                  = { workspace = true }

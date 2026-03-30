@@ -1,11 +1,11 @@
 # CLI Simulator
 
-The CLI (`CLI-2026/`) is an interactive REPL for experimenting with the capability engine. It wraps the engine library and provides named references, session management, and visualisation on top of the raw capability API.
+The CLI (`CLI-capa-engine/`) is an interactive REPL for experimenting with the capability engine. It wraps the engine library and provides named references, session management, and visualisation on top of the raw capability API.
 
 ## Quick Start
 
 ```bash
-cd CLI-2026
+cd capa-cli
 cargo run
 ```
 
@@ -21,7 +21,7 @@ cap> view app
 ## Architecture
 
 ```
-CLI-2026/
+CLI-capa-engine/
 ├── src/
 │   ├── main.rs              — REPL loop, rustyline integration
 │   ├── state.rs             — CliState: named maps for domains, memories, channels
@@ -54,7 +54,7 @@ The CLI holds no capability logic of its own — every operation delegates to `c
 
 ## Command Reference
 
-See the [CLI README](../../CLI-2026/README.md) for the full command table, number formats, and troubleshooting.
+See the [CLI README](../../CLI-capa-engine/README.md) for the full command table, number formats, and troubleshooting.
 
 ## Tutorials
 
@@ -67,4 +67,4 @@ cap> tutos        # list all tutorials
 cap> tutos 1      # run tutorial 1
 ```
 
-Tutorials are plain-text scripts in `CLI-2026/tutos/` with `@msg` annotations for explanatory text. They are executed through the same `load` mechanism as saved sessions and are integration-tested via `cargo test --test tutorial_tests`.
+Tutorials are plain-text scripts in `CLI-capa-engine/tutos/` with `@msg` annotations for explanatory text. They are executed through the same `load` mechanism as saved sessions and are integration-tested via `cargo test --test tutorial_tests`.

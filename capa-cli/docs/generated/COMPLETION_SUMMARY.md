@@ -1,4 +1,4 @@
-# CLI-2026 Extensions Completion Summary
+# capa-cli Extensions Completion Summary
 
 All tasks from `todo.md` have been successfully completed!
 
@@ -6,7 +6,7 @@ All tasks from `todo.md` have been successfully completed!
 
 ### Changes Made
 
-**File: CLI-2026/src/main.rs**
+**File: CLI-capa-engine/src/main.rs**
 - Enhanced `cmd_revoke()` function to support both memory region and domain revocation (lines 464-542)
 - Domain revocation now properly cascades to all children domains and their capabilities
 - Automatically detects whether to revoke memory regions or domains based on capability type
@@ -26,12 +26,12 @@ revoke root_mem mem1              # Revokes memory capability
 
 ### Changes Made
 
-**File: 2026/src/domain.rs**
+**File: capa-engine/src/domain.rs**
 - Added `allocate_memory_handle()` method (lines 383-391)
 - Added `allocate_domain_handle()` method (lines 393-401)
 - Methods find the first unused handle starting from 1
 
-**File: CLI-2026/src/main.rs**
+**File: CLI-capa-engine/src/main.rs**
 - Updated `cmd_send()` to automatically allocate handles (line 401)
 - Removed handle parameter from send command usage
 - Updated help text to reflect the change
@@ -51,11 +51,11 @@ revoke root_mem mem1              # Revokes memory capability
 
 ### Changes Made
 
-**File: 2026/src/attest.rs**
+**File: capa-engine/src/attest.rs**
 - Updated `attest_memory_region()` to include owner and handle (lines 81-82)
 - Metadata now shows: owner, handle, kind, status, access, attributes, and children count
 
-**File: CLI-2026/src/main.rs**
+**File: CLI-capa-engine/src/main.rs**
 - Enhanced `cmd_list()` to display comprehensive memory region information (lines 797-810)
 - Shows: kind, owner, handle, attributes, and children count for each memory region
 
@@ -69,7 +69,7 @@ Memory Regions:
 
 ### Changes Made
 
-**File: CLI-2026/src/main.rs**
+**File: CLI-capa-engine/src/main.rs**
 - Added `domain_id_to_name` HashMap to CliState for reverse domain lookup (line 25)
 - Updated `cmd_init()` and `cmd_create_domain()` to track domain names (lines 205, 268)
 - Enhanced `cmd_switch()` to support two formats (lines 600-709):
@@ -104,7 +104,7 @@ Active Domains per Core:
 
 ### Changes Made
 
-**File: CLI-2026/src/main.rs**
+**File: CLI-capa-engine/src/main.rs**
 - Enhanced `cmd_interrupt()` to support two formats (lines 714-790):
   - **New format**: `interrupt <vector> <core>` - Delivers to current domain on core
   - **Legacy format**: `interrupt <vector> <domain> <core>` - Explicit target

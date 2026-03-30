@@ -17,7 +17,7 @@ An interactive command-line interface for experimenting with the Capability Engi
 ## Installation
 
 ```bash
-cd CLI-2026
+cd capa-cli
 cargo build --release
 ```
 
@@ -196,8 +196,8 @@ cap> seal child1
 cap> export-as-unit-test test_basic.rs
 
 # Place the generated test in the engine test suite and run it
-$ cp test_basic.rs ../2026/tests/
-$ cd ../2026 && cargo test test_basic
+$ cp test_basic.rs ../capa-engine/tests/
+$ cd ../capa-engine && cargo test test_basic
 ```
 
 ## Examples
@@ -273,6 +273,6 @@ accept-capability receiver 0
 | `rustyline` | Interactive line editing, history, tab completion |
 | `colored` | Terminal colour output |
 | `parking_lot` | Efficient `RwLock` for shared state |
-| `capability-engine-v2` | Core capability and domain logic |
+| `capa-engine` | Core capability and domain logic |
 
 Commands are organised in `src/commands/` by concern: `domain`, `memory`, `info`, `execution`, `session_cmd`, `tutos`. The dispatcher in `mod.rs` routes parsed input to the appropriate handler. Tab completion and inline hints are driven by the static `COMMANDS` table in `src/completer.rs`.

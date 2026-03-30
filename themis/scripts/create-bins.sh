@@ -72,7 +72,7 @@ fi
 mkdir -p \
     "$MNT/thhv/tests" \
     "$MNT/cloud-hypervisor" \
-    "$MNT/2026/tests" \
+    "$MNT/capa-engine/tests" \
     "$MNT/nested"
 
 cat > "$MNT/version.txt" <<'META'

@@ -16,7 +16,7 @@ resolver = "2"
 
 # Shared dependency versions for all workspace members.
 [workspace.dependencies]
-capability-engine-v2 = { path = "../2026", default-features = false, features = ["address_translation"] }
+capa-engine = { path = "../capa-engine", default-features = false, features = ["address_translation"] }
 
 x86                    = { version = "0.52",  default-features = false }
 x2apic                 = { version = "0.5",   default-features = false }

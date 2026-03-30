@@ -96,7 +96,7 @@ Used by all unit and integration tests. A minimal in-process implementation:
 
 Used by loom exhaustive-interleaving tests. Identical structure to `TestPlatform` but uses `loom::sync::RwLock` so loom can intercept all synchronisation decisions.
 
-### `CliPlatform` (`CLI-2026/src/platform.rs`)
+### `CliPlatform` (`CLI-capa-engine/src/platform.rs`)
 
 Used by the interactive CLI simulator. A hosted, multi-core-simulating implementation:
 

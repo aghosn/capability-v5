@@ -1,19 +1,19 @@
-# Skill: Working on the Capability Engine (2026/)
+# Skill: Working on the Capability Engine (capa-engine/)
 
 ## When to Use
 
 Use this skill when you need to:
-- Modify, extend, or debug the `2026/` capability engine crate.
+- Modify, extend, or debug the `capa-engine/` capability engine crate.
 - Add new capability operations or extend existing ones.
 - Write or update tests for the engine.
-- Verify that changes do not regress the CLI-2026 simulator.
+- Verify that changes do not regress the capa-cli simulator.
 - Understand the locking model before touching concurrent paths.
 
 ---
 
 ## Background: What the Capability Engine Is
 
-`2026/` is a `no_std`-compatible Rust library (`capability-engine-v2`) that implements
+`capa-engine/` is a `no_std`-compatible Rust library (`capa-engine`) that implements
 a capability-based security system for managing trust domains with composable isolation.
 It is platform-independent and hardware-agnostic — the only hardware contact point is the
 `Platform` trait (see below).
@@ -27,7 +27,7 @@ called after the capability tree mutation succeeds.
 ## Module Map
 
 ```
-2026/src/
+capa-engine/src/
   lib.rs           — crate root; all public re-exports
   capability.rs    — Capability<T> tree nodes; CDT ops; extension traits
   domain.rs        — Domain, DomainPolicy, MonitorAPI, VP states, interrupt policy
@@ -166,7 +166,7 @@ apply it manually — `execute()` handles that. The batch is visible to tests vi
 ### Standard Tests (unit + integration)
 
 ```bash
-cd 2026/
+cd capa-engine/
 cargo test
 ```
 
@@ -190,7 +190,7 @@ Loom systematically explores every valid thread interleaving. Run with `--releas
 bookkeeping is CPU-intensive and release mode is 5–10× faster.
 
 ```bash
-cd 2026/
+cd capa-engine/
 
 # Run the main loom suite (no address_translation)
 cargo loom
@@ -199,7 +199,7 @@ cargo loom
 cargo loom-all
 ```
 
-These are cargo aliases defined in `2026/.cargo/config.toml`. Expanded forms:
+These are cargo aliases defined in `capa-engine/.cargo/config.toml`. Expanded forms:
 
 ```bash
 # cargo loom expands to:
@@ -249,13 +249,13 @@ this as a concurrency bug.
 
 ---
 
-## Verifying the CLI-2026 Still Works
+## Verifying the capa-cli Still Works
 
-`CLI-2026/` is the reference interactive simulator for the capability engine. It depends
-on `2026/` with the `address_translation` feature enabled. After any engine change:
+`capa-cli/` is the reference interactive simulator for the capability engine. It depends
+on `capa-engine/` with the `address_translation` feature enabled. After any engine change:
 
 ```bash
-cd CLI-2026/
+cd capa-cli/
 cargo build --release
 ```
 
@@ -303,7 +303,7 @@ To wire the engine into a new hardware target (e.g., ARM capavisor):
 
 Reference implementations to study:
 - `tests/common/mod.rs` — `TestPlatform` (minimal, single-core, used by all unit tests)
-- `CLI-2026/src/platform.rs` — `CliPlatform` (hosted, multi-core simulation, uses `UpdateProcessor`)
+- `capa-cli/src/platform.rs` — `CliPlatform` (hosted, multi-core simulation, uses `UpdateProcessor`)
 - `themis/capavisor/src/platform.rs` — `ThemisPlatform` (x86 bare-metal, VT-x, EPT)
 
 ---
@@ -312,15 +312,15 @@ Reference implementations to study:
 
 | What | Where | Command |
 |------|-------|---------|
-| All public exports | `2026/src/lib.rs` | — |
-| Domain-mediated ops | `2026/src/capability.rs` | — |
-| Platform trait | `2026/src/platform.rs` | — |
-| Locking design | `2026/docs/implementation/concurrency.md` | — |
-| Update variants | `2026/docs/implementation/updates.md` | — |
-| API lifecycle | `2026/docs/semantics/api.md` | — |
-| Module overview | `2026/docs/implementation/readme.md` | — |
-| Run all tests | `2026/` | `cargo test` |
-| Run loom suite | `2026/` | `cargo loom` |
-| Run loom + translation | `2026/` | `cargo loom-all` |
-| Build CLI | `CLI-2026/` | `cargo build --release` |
-| Run CLI interactively | `CLI-2026/` | `cargo run` |
+| All public exports | `capa-engine/src/lib.rs` | — |
+| Domain-mediated ops | `capa-engine/src/capability.rs` | — |
+| Platform trait | `capa-engine/src/platform.rs` | — |
+| Locking design | `capa-engine/docs/implementation/concurrency.md` | — |
+| Update variants | `capa-engine/docs/implementation/updates.md` | — |
+| API lifecycle | `capa-engine/docs/semantics/api.md` | — |
+| Module overview | `capa-engine/docs/implementation/readme.md` | — |
+| Run all tests | `capa-engine/` | `cargo test` |
+| Run loom suite | `capa-engine/` | `cargo loom` |
+| Run loom + translation | `capa-engine/` | `cargo loom-all` |
+| Build CLI | `capa-cli/` | `cargo build --release` |
+| Run CLI interactively | `capa-cli/` | `cargo run` |

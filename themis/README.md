@@ -13,7 +13,7 @@ each forming a nested trust hierarchy enforced in hardware via Intel VT-x / EPT
 (AMD SVM / NPT planned).
 
 The design is documented in `../todo.md` and the EuroS&P paper draft in
-`../2026/`.  This directory is the implementation root.
+`../capa-engine/`.  This directory is the implementation root.
 
 ---
 
@@ -61,7 +61,7 @@ themis/
 └── themis.gdbinit      # GDB init: symbol load, print-cr3 helper
 ```
 
-The capability engine lives at `../2026/` and is referenced as a workspace
+The capability engine lives at `../capa-engine/` and is referenced as a workspace
 path dependency.
 
 ---

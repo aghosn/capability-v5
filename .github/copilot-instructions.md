@@ -16,7 +16,7 @@ code, you **must** read the context files listed below.
 
 ## Task-Specific Skills (read the relevant file before touching that area)
 
-- `skills/working-on-capability-engine.md` — when modifying `2026/` (domain-mediated
+- `skills/working-on-capability-engine.md` — when modifying `capa-engine/` (domain-mediated
   API, locking model, `execute()`, tests, loom)
 - `skills/working-on-capavisor.md` — when modifying `themis/capavisor/` (core
   invariants, vmexit/hypercall handlers, `apply_update`, `ThemisPlatform`)
@@ -68,9 +68,9 @@ L0  Capavisor (Themis)           — bare-metal, capability-enforced
 
 | What | Command | When |
 |------|---------|------|
-| Engine unit tests | `cd 2026/ && cargo test` | After any `2026/` change |
-| Loom concurrency | `cd 2026/ && cargo loom` | After concurrent code change |
-| CLI build check | `cd CLI-2026/ && cargo build --release` | After engine API change |
+| Engine unit tests | `cd capa-engine/ && cargo test` | After any `capa-engine/` change |
+| Loom concurrency | `cd capa-engine/ && cargo loom` | After concurrent code change |
+| CLI build check | `cd capa-cli/ && cargo build --release` | After engine API change |
 | Full bin rebuild | `cargo build-bins` (repo root) | After capavisor/thhv/CHV change |
 | Boot stack | `cd themis/ && cargo themis 2>&1 \| tee /tmp/out.txt` | Integration test |
 
@@ -78,8 +78,8 @@ L0  Capavisor (Themis)           — bare-metal, capability-enforced
 
 ```
 capability-v5/
-├── 2026/                    # Capability engine (no_std Rust library)
-├── CLI-2026/                # Interactive CLI simulator for engine
+├── capa-engine/              # Capability engine (no_std Rust library)
+├── capa-cli/                # Interactive CLI simulator for engine
 ├── themis/capavisor/        # Bare-metal hypervisor (L0)
 ├── thhv/                    # Dom0 kernel module (Linux driver)
 ├── cloud-hypervisor/        # VMM fork (Themis backend)

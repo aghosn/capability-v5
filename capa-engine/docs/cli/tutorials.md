@@ -33,7 +33,7 @@ These build on the basics to demonstrate realistic system architectures.
 
 ## Writing Tutorials
 
-Tutorials are plain-text files in `CLI-2026/tutos/`. Each line is either:
+Tutorials are plain-text files in `CLI-capa-engine/tutos/`. Each line is either:
 
 - A CLI command (executed normally)
 - `@msg <text>` — printed as explanatory text (not executed)

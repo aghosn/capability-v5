@@ -97,4 +97,4 @@ See `todo.md` (Phase 15) for the full implementation roadmap.
 
 ## Design
 
-Full design document: `2026/docs/design/thhv_themis/thhv_themis.md`
+Full design document: `capa-engine/docs/design/thhv_themis/thhv_themis.md`

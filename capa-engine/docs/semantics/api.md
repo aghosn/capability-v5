@@ -2,7 +2,7 @@
 
 This document describes the full lifecycle of a capability system session using the CLI command vocabulary. It shows how operations compose and depend on one another.
 
-The CLI (`CLI-2026/`) is the reference interactive environment for experimenting with these operations. All examples below use `cap>` to denote CLI prompts. See the [tutorial index](../cli/tutorials.md) for 13 interactive walkthroughs covering each operation.
+The CLI (`CLI-capa-engine/`) is the reference interactive environment for experimenting with these operations. All examples below use `cap>` to denote CLI prompts. See the [tutorial index](../cli/tutorials.md) for 13 interactive walkthroughs covering each operation.
 
 ---
 

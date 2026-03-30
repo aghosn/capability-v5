@@ -151,4 +151,4 @@ has_pending_updates(core_id)           → bool
 get_cores_with_pending_updates()       → Vec<CoreId>
 ```
 
-This is the simulation-side analogue of the IPI + barrier protocol used in real deployments. The CLI platform (`CLI-2026/src/platform.rs`) uses `UpdateProcessor` to drive simulated address-space changes.
+This is the simulation-side analogue of the IPI + barrier protocol used in real deployments. The CLI platform (`CLI-capa-engine/src/platform.rs`) uses `UpdateProcessor` to drive simulated address-space changes.

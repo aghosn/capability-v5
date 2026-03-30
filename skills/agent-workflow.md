@@ -19,7 +19,7 @@ what you are working on. Load it alongside any task-specific skill.
    - Open phases relevant to your task.
 
 3. **Read any task-specific skills** from `skills/` that apply to your work:
-   - Working on `2026/`: read `skills/working-on-capability-engine.md`
+   - Working on `capa-engine/`: read `skills/working-on-capability-engine.md`
    - Booting / testing inside dom0 or capavisor: read `skills/running-inside-dom0.md`
    - Debugging dom boot: read `skills/debugging-dom-boot.md`
 
@@ -107,8 +107,8 @@ what changed and why without reading git diff output.
 - **Never leave the repo with a broken build.** If you break something while
   investigating and cannot fix it in the session, revert your changes and document the
   approach in the debugging stack note instead.
-- After any change to `2026/`, run `cargo test` from `2026/` and confirm it passes.
-- After any change to `CLI-2026/`, run `cargo build --release` from `CLI-2026/`.
+- After any change to `capa-engine/`, run `cargo test` from `capa-engine/` and confirm it passes.
+- After any change to `capa-cli/`, run `cargo build --release` from `capa-cli/`.
 - After any change to `themis/`, run `cargo build-bins` and note the result.
 - If a build fails, record the error in the debugging stack note before stopping.
 
@@ -136,7 +136,7 @@ Skills are plain markdown files. An agent can (and should) read several:
 ```
 Before starting, read:
   skills/agent-workflow.md          ← always
-  skills/working-on-capability-engine.md   ← when touching 2026/
+  skills/working-on-capability-engine.md   ← when touching capa-engine/
   skills/running-inside-dom0.md     ← when running tests in dom0
   skills/debugging-dom-boot.md      ← when debugging a kernel boot hang
 ```

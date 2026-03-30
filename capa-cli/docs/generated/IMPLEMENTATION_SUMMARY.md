@@ -7,7 +7,7 @@ Successfully created an interactive CLI simulator for the Capability Engine V2 w
 ## Location
 
 ```
-/home/aghosn/Documents/Programs/capability-v5/CLI-2026/
+/home/aghosn/Documents/Programs/capability-v5/CLI-capa-engine/
 ```
 
 ## Key Features Implemented
@@ -91,7 +91,7 @@ The CLI maintains complete state:
 ## Architecture
 
 ```
-CLI-2026/
+CLI-capa-engine/
 ├── Cargo.toml              # Dependencies (capability_engine, rustyline, colored, parking_lot)
 ├── src/
 │   ├── main.rs             # Main CLI implementation (767 lines)
@@ -103,7 +103,7 @@ CLI-2026/
 
 ## Dependencies
 
-- `capability_engine` (capability-engine-v2) - The core engine
+- `capability_engine` (capa-engine) - The core engine
 - `rustyline` v14.0 - Interactive line editing
 - `colored` v2.1 - Terminal colors
 - `parking_lot` v0.12 - RwLock implementation
@@ -130,7 +130,7 @@ CLI-2026/
 
 ### Basic Workflow
 ```bash
-$ cd CLI-2026
+$ cd capa-cli
 $ cargo run
 
 cap> init root 0x1000000
@@ -167,10 +167,10 @@ Goodbye!
 ### Running Generated Tests
 ```bash
 # Copy generated test to engine's test directory
-$ cp my_test.rs ../2026/tests/
+$ cp my_test.rs ../capa-engine/tests/
 
 # Run the test
-$ cd ../2026
+$ cd ../capa-engine
 $ cargo test my_test
 ```
 
@@ -197,7 +197,7 @@ Potential improvements:
 
 The CLI builds successfully:
 ```bash
-$ cd CLI-2026
+$ cd capa-cli
 $ cargo build
    Compiling capability-cli v0.1.0
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.44s
@@ -205,7 +205,7 @@ $ cargo build
 
 All 148 tests in the main engine pass:
 ```bash
-$ cd ../2026
+$ cd ../capa-engine
 $ cargo test
    ...
    test result: ok. 148 passed; 0 failed; 0 ignored

@@ -16,7 +16,7 @@ below. Skipping them leads to axiom violations and wasted sessions.
 
 | Area | Skill file |
 |------|-----------|
-| `2026/` (capability engine) | @skills/working-on-capability-engine.md |
+| `capa-engine/` (capability engine) | @skills/working-on-capability-engine.md |
 | `themis/capavisor/` | @skills/working-on-capavisor.md |
 | Booting / testing in dom0 | @skills/running-inside-dom0.md |
 | Debugging guest boot hangs | @skills/debugging-dom-boot.md |
@@ -52,9 +52,9 @@ L0  Capavisor (Themis)           — bare-metal, capability-enforced
 - **Update `todo.md`** at session end with: completed items, in-progress debugging
   notes (with "Next step"), and files modified with reasons.
 - **Build commands:**
-  - `cd 2026/ && cargo test` — after any engine change
-  - `cd 2026/ && cargo loom` — after any concurrent code change
-  - `cd CLI-2026/ && cargo build --release` — after any engine API change
+  - `cd capa-engine/ && cargo test` — after any engine change
+  - `cd capa-engine/ && cargo loom` — after any concurrent code change
+  - `cd capa-cli/ && cargo build --release` — after any engine API change
   - `cargo build-bins` — after any capavisor/thhv/CHV change (from repo root)
 
 ## Sub-Agent Guidance

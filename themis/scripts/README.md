@@ -175,8 +175,8 @@ Key artifact locations inside dom0:
 - `/opt/bins/thhv/thhv.ko`
 - `/opt/bins/thhv/tests/*`
 - `/opt/bins/cloud-hypervisor/cloud-hypervisor`
-- `/opt/bins/2026/capability-engine-v2`
-- `/opt/bins/2026/tests/*` (if test binaries were built)
+- `/opt/bins/capa-engine/capa-engine`
+- `/opt/bins/capa-engine/tests/*` (if test binaries were built)
 - `/opt/bins/nested/bzImage` and `/opt/bins/nested/rootfs.img` (optional)
 
 ## Troubleshooting

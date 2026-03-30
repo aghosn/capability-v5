@@ -33,7 +33,7 @@ reference, but rebuilt with modern tooling and AI-assisted development.
 The original Tyche remains the authoritative reference for the security model, attestation
 design, and hardware interaction patterns.  Where this rewrite diverges, the design rationale
 is documented in [`CONTEXT.md`](CONTEXT.md) and the design docs under
-[`2026/docs/design/`](2026/docs/design/).
+[`capa-engine/docs/design/`](capa-engine/docs/design/).
 
 ---
 
@@ -61,7 +61,7 @@ themis/             Capavisor source (bare-metal Rust, x86_64-unknown-none)
   target/           Build output (git-ignored)
 thhv/               Linux kernel module — Themis host-to-VM interface (/dev/thhv)
 cloud-hypervisor/   Forked cloud-hypervisor with Themis VMM backend (submodule)
-2026/               Research workspace (EuroS&P paper, design docs, tools)
+capa-engine/           Capability engine (no_std Rust library) (EuroS&P paper, design docs, tools)
 Dockerfile.build    Build environment image (Ubuntu 24.04 + Rust nightly + LLVM)
 ```
 
@@ -196,7 +196,7 @@ The GDB stub listens on `localhost:1234` by default (`GDB_PORT` to override).
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_MEM` | `4G` | Guest RAM |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM acceleration when available |
-| `BINS_TARGETS` | `all` | Comma-separated subset: `capavisor,chv,2026,thhv` |
+| `BINS_TARGETS` | `all` | Comma-separated subset: `capavisor,chv,capa-engine,thhv` |
 
 Full variable reference: [`themis/scripts/README.md`](themis/scripts/README.md).
 
@@ -209,7 +209,7 @@ After a successful boot, inside dom0:
 ```
 /opt/bins/thhv/thhv.ko               Themis kernel module
 /opt/bins/cloud-hypervisor/           cloud-hypervisor binary
-/opt/bins/2026/capability-engine-v2  capability engine test binary
+/opt/bins/capa-engine/capa-engine  capability engine test binary
 /home/cloud/bins -> /opt/bins         convenience symlink
 ```
 
@@ -225,5 +225,5 @@ ls /dev/thhv   # should appear
 
 - [`CONTEXT.md`](CONTEXT.md) — design axioms, component map, hypercall ABI, conventions
 - [`themis/scripts/README.md`](themis/scripts/README.md) — full script and variable reference
-- [`2026/docs/design/`](2026/docs/design/) — design documents (attestation, address translation, interrupt virtualisation)
+- [`capa-engine/docs/design/`](capa-engine/docs/design/) — design documents (attestation, address translation, interrupt virtualisation)
 - [`todo.md`](todo.md) — implementation task tracker

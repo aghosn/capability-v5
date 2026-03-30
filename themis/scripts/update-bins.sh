@@ -74,9 +74,9 @@ should_package() {
     return 1
 }
 
-copy_2026_tests() {
-    local cargo_toml="$REPO_ROOT/2026/Cargo.toml"
-    local deps_dir="$REPO_ROOT/2026/target/$PROFILE/deps"
+copy_capa-engine_tests() {
+    local cargo_toml="$REPO_ROOT/capa-engine/Cargo.toml"
+    local deps_dir="$REPO_ROOT/capa-engine/target/$PROFILE/deps"
     local test_name=""
     local candidate=""
     local copied=0
@@ -87,7 +87,7 @@ copy_2026_tests() {
         shopt -s nullglob
         for candidate in "$deps_dir/${test_name}-"*; do
             if [[ -f "$candidate" && -x "$candidate" ]]; then
-                cp "$candidate" "$MNT/2026/tests/"
+                cp "$candidate" "$MNT/capa-engine/tests/"
                 copied=1
             fi
         done
@@ -136,7 +136,7 @@ fi
 mkdir -p \
     "$MNT/thhv/tests" \
     "$MNT/cloud-hypervisor" \
-    "$MNT/2026/tests" \
+    "$MNT/capa-engine/tests" \
     "$MNT/nested"
 
 # ── README ───────────────────────────────────────────────────────────────────
@@ -170,14 +170,14 @@ Login: `cloud` / `cloud123`
 | `dom1/dom1-seed.img` | Dom1 cloud-init seed (first boot) |
 | `thhv/thhv.ko` | Themis kernel module |
 | `thhv/tests/` | Themis unit tests |
-| `2026/` | Capability engine binaries and tests |
+| `capa-engine/` | Capability engine binaries and tests |
 | `nested/` | Nested kernel / rootfs (if built) |
 EOF
 
 THHV_KO="$REPO_ROOT/thhv/thhv.ko"
 THHV_TEST_DIR="$REPO_ROOT/thhv/test/bin"
 CHV_BIN="$REPO_ROOT/cloud-hypervisor/target/$PROFILE/cloud-hypervisor"
-CAPENG_BIN="$REPO_ROOT/2026/target/$PROFILE/capability-engine-v2"
+CAPENG_BIN="$REPO_ROOT/capa-engine/target/$PROFILE/capa-engine"
 
 if should_package thhv; then
     if [[ -f "$THHV_KO" ]]; then
@@ -217,13 +217,13 @@ if [[ -f "$DOM1_IMG" ]]; then
     echo "  ✔ dom1/dom1.raw + hypervisor-fw packed into bins"
 fi
 
-if should_package 2026; then
+if should_package capa-engine; then
     if [[ -f "$CAPENG_BIN" ]]; then
-        cp "$CAPENG_BIN" "$MNT/2026/capability-engine-v2"
+        cp "$CAPENG_BIN" "$MNT/capa-engine/capa-engine"
     else
         warn_missing "$CAPENG_BIN"
     fi
-    copy_2026_tests
+    copy_capa-engine_tests
 fi
 
 if [[ -n "$NESTED_KERNEL" ]]; then

@@ -5,6 +5,7 @@ on:
     branches: [ "v2026.1" ]
     paths:
       - '2026/*'
+      - 'capa-engine/*'
   pull_request:
     branches: [ "v2026.1" ]
   workflow_dispatch: 
@@ -23,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./2026
+        working-directory: ./capa-engine
 
     steps:
     - uses: actions/checkout@v4

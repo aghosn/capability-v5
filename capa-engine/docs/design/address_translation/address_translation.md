@@ -753,7 +753,7 @@ logic touches the engine.
 | Step | Scope | Depends on |
 |------|-------|------------|
 | **3a** | Attestation: include GPA base per memory region in report (uses `find_gpa_for_hpa(hpa, 1)` to handle split entries from view-aware insert) | 2d |
-| **3b** | CLI: enable `address_translation` feature by default in `CLI-2026/Cargo.toml` | 2.5a |
+| **3b** | CLI: enable `address_translation` feature by default in `CLI-capa-engine/Cargo.toml` | 2.5a |
 | **3c** | CLI: `view` command shows GPA Address Space section alongside HPA view (Mapped entries with "(identity)" tag, Blocked entries in red) | 3a, 3b |
 | **3d** | CLI: `attest` shows GPA info (automatic via engine-side report changes) | 3a |
 | **3e** | CLI: `send <mem> <domain> [attrs] [at <gpa>]` — parses optional GPA hint, calls `send_at` | 2.5a, 3b |

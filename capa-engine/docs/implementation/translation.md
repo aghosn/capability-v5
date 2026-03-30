@@ -176,7 +176,7 @@ At `accept_at` time: `effective_gpa = gpa_override.or(pending.gpa_hint)`.
 - View-aware insert: carved children create blocked gaps in receiver
 - Deadlock regression: never-sent carve, alias subtree
 
-### Tutorial test (`CLI-2026/tests/tutorial_tests.rs`)
+### Tutorial test (`CLI-capa-engine/tests/tutorial_tests.rs`)
 
 Tutorial 08 (GPA Address Translation) runs as part of `cargo test` in the CLI.
 

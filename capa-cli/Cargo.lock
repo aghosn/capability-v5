@@ -9,22 +9,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
-name = "capability-cli"
-version = "0.1.0"
-dependencies = [
- "capability-engine-v2",
- "colored",
- "crossterm",
- "parking_lot",
- "rustyline",
-]
-
-[[package]]
-name = "capability-engine-v2"
+name = "capa-engine"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
  "spin",
+]
+
+[[package]]
+name = "capability-cli"
+version = "0.1.0"
+dependencies = [
+ "capa-engine",
+ "colored",
+ "crossterm",
+ "parking_lot",
+ "rustyline",
 ]
 
 [[package]]
