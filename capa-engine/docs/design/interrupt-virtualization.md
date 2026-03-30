@@ -470,11 +470,11 @@ The driver must communicate three things to the capavisor that are not knowable 
 
 ### Implementation Status
 
-*(Updated 2026-03-16)*
+*(Updated 2026-03-30)*
 
 | Component | Status | Notes |
 |---|---|---|
-| Phase 1: VAPIC + VID + forwarding | ✅ Done | `intr-p1-*` commits; `forward_interrupt_to_handler`, `SET_INTR_POLICY` wired |
+| Phase 1: VAPIC + VID + forwarding | ⚠️ Partial | Hardware configured (`intr-p1-*` commits), but capavisor does NOT call `route_interrupt()` — handler hardcoded to dom0 (A9 violation, see §Gap Analysis). `DEFERRED_HOST_VECTOR` removed in `c2820b5`. |
 | Phase 2: Posted Interrupts + PID | ✅ Done | `intr-p2-*` commits; `inject_via_pid`, notification vector `0xF2`, cross-core IPI |
 | Phase 3: VT-d Interrupt Remapping | ✅ Done | `intr-p3-*` commits; IRTE alloc, IR enable, `program_domain_irtes` at seal/revoke |
 | APICv: VIRTUALIZE_X2APIC (bit 4) | ✅ Done | `e6ebc30`; x2APIC MSR reads via VAPIC page, no exit |
@@ -488,9 +488,13 @@ The driver must communicate three things to the capavisor that are not knowable 
 | Notification vector | ✅ Done | `NOTIFY_VEC = 0xF2` reserved in `hypercall.rs` |
 | GET_REG / SET_REG via COMM page | ✅ Done | `get_vp_register`/`set_vp_register` read/write `VpCommPage` directly |
 | `IRTE.NDST` sync on VP activation | ✅ Done | `sync_irte_ndst` called in `do_switch` after VMPTRLD; updates NDST for all Deliver-vector IRTEs. **Needs end-to-end test once real device assignment is in use.** |
+| Deliver fast-path in vmexit handler | ❌ Not done | `EXIT_REASON_EXTERNAL_INTERRUPT` always routes upward; no VectorPolicy check for `Deliver` re-inject (see §Gap Analysis) |
+| `route_interrupt()` used by capavisor | ❌ Not done | `forward_interrupt_to_handler()` hardcodes `platform.dom0_cap()` instead of calling engine's `route_interrupt()` (see §Gap Analysis) |
+| `do_inject_interrupt` policy check | ❌ Not done | PIR write bypasses `apply_update()` — no per-vector injection policy enforcement (partial A1 violation) |
 | EOI-exit bitmap update on policy change | ❌ Open | See Open Question 4; requires VMPTRLD+vmwrite on target VP's VMCS |
-| `THHV_IRQFD` fd-triggered injection | ❌ Not implemented | Needs PID write + notification IPI from kernel thread |
-| `THHV_IOEVENTFD` MMIO exit → userspace | ❌ Not implemented | Needs EPT violation routing to userspace fd |
+| `THHV_IRQFD` fd-triggered injection | ✅ Done | `thhv_irqfd.c`: eventfd → workqueue → `VMCALL_INJECT_INTERRUPT` → `inject_via_pid`. Implemented. |
+| `THHV_IOEVENTFD` MMIO exit → eventfd | ✅ Done | `thhv_ioeventfd.c`: doorbell GPA → capavisor EPT fast-path → DomainComm → `eventfd_signal`. Implemented. |
+| Virtio I/O end-to-end (virtio_blk) | ❌ Broken | dom1 reaches virtio_blk probe but first I/O never completes. Zero INJECT_INTERRUPT VMCALLs observed. See §Virtio I/O Path. |
 
 ### Key Design Constraint: LAPIC Timer Interrupts
 
@@ -611,4 +615,376 @@ This is a large separate milestone, tracked under its own phase. The primary ste
 - Must be implemented before `MSHV_ASSIGN_DEVICE` (Phase 16e) is correct.
 
 See todo items `intr-p3-*` for detailed breakdown (added when Phase 2 is complete).
+
+---
+
+## Virtio I/O Path
+
+*(Added 2026-03-30)*
+
+Virtio block I/O is the first real end-to-end test of the interrupt injection
+pipeline. Understanding the full data flow is essential for diagnosing the current
+virtio_blk hang (dom1 probes the device but first disk I/O never completes).
+
+### Full Virtio Request–Completion Pipeline
+
+```
+dom1 guest (L2)                 capavisor (L0)           thhv driver (L1 kernel)    CHV (L1 userspace)
+───────────────                 ──────────────           ───────────────────────    ──────────────────
+
+1. virtio_blk submits I/O
+   Guest writes descriptors
+   to virtqueue (shared memory)
+
+2. Guest writes virtio kick
+   register (MMIO notification
+   address, typically
+   GPA 0xd0000000 + offset)
+   ────────────────────────────→ 3. EPT violation VMEXIT
+                                    (EXIT_REASON=48)
+                                    GPA = kick register addr
+
+                                 Check doorbell table:
+                                 ┌─ Match found (fast-path):
+                                 │  a. Write DoorbellNotify
+                                 │     to parent DomainComm
+                                 │     RX ring
+                                 │  b. Advance child RIP
+                                 │  c. VMRESUME child
+                                 │     (child resumes immediately)
+                                 │
+                                 └─ No match (slow path):
+                                    forward_child_exit()
+                                    → SWITCH returns to dom0
+                                    → thhv copies exit info
+                                    → CHV handles as MMIO
+
+4. (Child resumed, continues)
+
+                                                          5. thhv_drain_domcomm_rx()
+                                                             after SWITCH returns, or
+                                                             on next DomainComm poll
+                                                             → sees DOORBELL_NOTIFY
+                                                             → matches doorbell_id
+                                                               to eventfd
+                                                             → eventfd_signal(fd)
+                                                          ─────────────────────────→ 6. CHV virtio worker
+                                                                                       wakes on eventfd
+                                                                                       Processes virtqueue:
+                                                                                       reads descriptors,
+                                                                                       does actual disk I/O,
+                                                                                       writes completion
+                                                                                       descriptors back
+
+                                                                                    7. CHV signals IRQFD
+                                                                                       eventfd (completion
+                                                                                       interrupt for dom1)
+                                                          ←─────────────────────────
+                                                          8. thhv_irqfd_inject()
+                                                             workqueue handler fires
+                                                             Looks up GSI→vector
+                                                             from MSI routing table
+                                                             → themis_inject_interrupt
+                                                               (domain, vp_id, vector)
+                                                             = VMCALL(INJECT_INTERRUPT)
+                                 ←────────────────────────
+                                 9. do_inject_interrupt()
+                                    Validates child cap
+                                    Gets pid_phys from
+                                    VcpuSlot
+                                    → inject_via_pid(
+                                        pid_phys, hhdm,
+                                        vector, false)
+                                    PIR[vector] = 1
+
+10. On next VMRESUME of dom1:
+    do_switch step 7b drains
+    PIR → vIRR. VID delivers
+    interrupt to guest IDT.
+    virtio_blk completion ISR
+    fires → I/O completes.
+```
+
+### Current Failure Point (2026-03-30)
+
+Zero `INJECT_INTERRUPT` (opcode 0x1B) VMCALLs are observed during dom1 boot.
+This means the pipeline is broken somewhere between steps 2–8. The failure
+could be at any link:
+
+| Link | Hypothesis | How to verify |
+|------|-----------|---------------|
+| Step 2→3 | Doorbell GPA not registered (IOEventFd not set up) | Instrument `VMCALL_REGISTER_DOORBELL` in capavisor; check if CHV calls `register_ioeventfd` |
+| Step 3 | EPT violation occurs but no doorbell match → falls to slow path | Add doorbell-miss counter in `handle_ept_violation` |
+| Step 5 | DomainComm RX ring not drained (thhv doesn't poll it, or ring is full) | Instrument `thhv_drain_domcomm_rx` — is it called? Does it find messages? |
+| Step 5→6 | eventfd not signaled (doorbell_id → eventfd mapping missing) | Instrument eventfd_signal path in thhv_ioeventfd.c |
+| Step 6→7 | CHV processes virtqueue but doesn't signal completion eventfd | Instrument CHV's virtio completion path |
+| Step 7→8 | IRQFD eventfd fires but workqueue handler doesn't run | Instrument `thhv_irqfd_inject` entry |
+| Step 8→9 | VMCALL reaches capavisor but fails validation | Instrument `do_inject_interrupt` entry + return code |
+
+**Debugging strategy**: Instrument from the middle outward. Start at step 5
+(`thhv_drain_domcomm_rx`) since it's the bridge between capavisor and userspace.
+If DomainComm messages are arriving but eventfds aren't signaled, the problem is
+in thhv's doorbell→eventfd mapping. If no DomainComm messages arrive, the problem
+is in the capavisor's doorbell fast-path or in IOEventFd registration.
+
+---
+
+## Implementation Gap Analysis
+
+*(Added 2026-03-30. Based on code review in `themis/docs/interrupt-handling-review.md`)*
+
+The hardware infrastructure (VAPIC, VID, PID, VT-d IR) is fully implemented and
+working. The gaps are in the **software wiring** — the capavisor does not use the
+capability engine's interrupt model. This section catalogues the gaps between the
+design (above) and the current implementation.
+
+### Gap 1: `route_interrupt()` Not Called (Critical — A9 Violation)
+
+**Design**: `forward_interrupt_to_handler()` should call `route_interrupt(vector,
+&child_cap, core_id)` to walk the domain CDT and find the handler domain based on
+`VectorPolicy`.
+
+**Reality**: The handler is hardcoded to `platform.dom0_cap()`:
+```rust
+// hypercall.rs — CURRENT (WRONG)
+let dom0_cap = platform.dom0_cap();
+let dom0_domain_id = dom0_cap.read().data.id;
+```
+
+**Consequence**: Interrupts always route to dom0 regardless of `InterruptPolicy`.
+Works for the current 2-level hierarchy (dom0 → dom1) but is fundamentally broken
+for deeper hierarchies (dom0 → dom1 → dom2) and violates A9.
+
+**Fix**: Replace the hardcoded dom0 lookup with:
+```rust
+let (handler_domain_id, _reported_to) = route_interrupt(vector, &child_cap, core_id);
+```
+
+### Gap 2: No `Deliver` Fast-Path in VMEXIT Handler (Performance)
+
+**Design** (§Interrupt Routing Flows): When a physical interrupt fires during child
+execution and the child's `VectorPolicy` for that vector is `Deliver`, the capavisor
+should set `vIRR[V]` in the child's VAPIC and VMRESUME immediately — no domain
+switch, no lazy-unwind.
+
+**Reality**: All child external interrupts go through `forward_interrupt_to_handler()`,
+which always does a full domain switch to the handler (dom0). There is no
+VectorPolicy check at the point where `EXIT_REASON_EXTERNAL_INTERRUPT` is handled.
+
+**Consequence**: Even interrupts the child "owns" (e.g., virtual device interrupts
+posted via IRQFD that happen to fire physically while the child runs) cause a full
+VMCLEAR/VMPTRLD/domain-switch cycle. This is the exact opposite of the design goal
+(§Goal 2: "Interrupts a child domain 'owns' must be delivered without requiring
+capavisor involvement").
+
+**Fix**: In `vmexit.rs` `EXIT_REASON_EXTERNAL_INTERRUPT` handler for child VPs:
+```rust
+let policy = child_domain.policy.interrupts.get_policy(vector);
+match policy.visibility {
+    InterruptVisibility::Deliver => {
+        // Fast-path: re-inject into child, no domain switch
+        set_virr_bit(child_vapic_hpa, vector);
+        return; // VMRESUME child
+    }
+    _ => {
+        // Route upward via lazy-unwind
+        forward_interrupt_to_handler(vcpu, vector);
+    }
+}
+```
+
+### Gap 3: `do_inject_interrupt()` Bypasses `apply_update()` (A1 Partial Violation)
+
+**Design** (A1): "Capability engine validates before any hardware change."
+
+**Reality**: `do_inject_interrupt()` validates that the caller holds a capability to
+the child domain, but the actual PIR write is a direct hardware operation:
+```rust
+unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+```
+
+There is no `Update::InjectInterrupt` variant, so:
+- No per-vector injection policy enforcement at the hardware level
+- Not auditable through the capability engine's update path
+- The `InterruptPolicy` on the target domain is not checked — any parent holding
+  a child handle can inject any vector
+
+**Fix** (lower priority): Add `Update::InjectInterrupt { domain_id, vp_id, vector }`
+to the update enum. The engine checks that the injecting domain's `VectorPolicy`
+for that vector permits injection (e.g., a domain with `NotReport` policy for vector
+V should not be able to inject V into a child).
+
+### Gap 4: RDI Not Set to Vector on Interrupt Return
+
+**Design** (A3): "SWITCH call returns early with RDI = preempting vector."
+
+**Reality**: `forward_interrupt_to_handler()` sets `RDI = 0`:
+```rust
+handler_active.set_reg(Reg::Rdi, 0);  // should be vector
+```
+
+The vector IS injected via `VMENTRY_INTERRUPTION_INFO_FIELD`, so dom0's IDT fires
+correctly. But the VMM (CHV) doesn't know which vector preempted its child — it
+only sees `themis_switch()` returning `-EAGAIN` with no vector info.
+
+**Fix**: Set `RDI = vector as u64` in the ERR_RETRY return path.
+
+---
+
+## Directvisor-Inspired Optimizations
+
+*(Added 2026-03-30)*
+
+**Reference**: Kevin Cheng, Spoorti Doddamani, Tzi-cker Chiueh, Yongheng Li, and
+Kartik Gopalan. "Directvisor: Virtualization for Bare-Metal Cloud." VEE 2020,
+pp. 45–58.
+
+Directvisor demonstrates that **interrupt virtualization is the minimal abstraction**
+needed for multi-tenant bare-metal isolation. VMs execute directly on hardware with
+the hypervisor intervening only for interrupt delivery. This architectural principle
+maps directly onto Themis's capability-based interrupt model.
+
+### Architectural Alignment
+
+| Directvisor Concept | Themis Equivalent | Gap |
+|---------------------|-------------------|-----|
+| Per-VM interrupt bitmap (which vectors belong to which VM) | `VectorPolicy` per domain per vector (`Deliver`/`Report`/`NotReport`) | ❌ Capavisor doesn't consult `VectorPolicy` on `EXIT_REASON_EXTERNAL_INTERRUPT` (Gap 2) |
+| Direct execution (no hypervisor for most operations) | `Deliver` policy: guest handles interrupt natively via vIRR/VID | ❌ Not implemented — all interrupts route through handler domain switch |
+| Posted interrupt injection (VMM → guest, zero exit) | `inject_via_pid()` + PIR + notification IPI | ✅ Implemented |
+| Interrupt remapping (device → guest, zero exit) | VT-d IRTE programmed per domain at seal time | ✅ Implemented |
+| Minimal hypervisor interposition | Lazy-unwind: only interpose for `Report`/`NotReport` vectors | ✅ Designed; ❌ not wired |
+
+### Key Directvisor Insight for Themis
+
+Directvisor's contribution is showing that a hypervisor can achieve near-native
+performance by virtualizing **only** interrupt delivery while letting VMs execute
+directly on hardware for everything else. Themis goes further: the capability model
+provides per-vector, per-domain granularity via `VectorPolicy`, and the CDT hierarchy
+enables multi-level delegation (a feature Directvisor's flat model lacks).
+
+The current implementation gap is that Themis has all the right infrastructure but
+doesn't use it — every interrupt exits to the full handler-domain-switch path
+regardless of `VectorPolicy`. Closing Gap 2 (the `Deliver` fast-path) is the
+single highest-impact optimization and brings Themis in line with Directvisor's
+performance model.
+
+### Optimization O1: Deliver Fast-Path (Directvisor Parity)
+
+When a physical interrupt fires during child VP execution and the child's policy
+for that vector is `Deliver`:
+
+```
+Current:  VMEXIT → forward_interrupt_to_handler → VMCLEAR child → VMPTRLD dom0
+          → inject to dom0 → dom0 handles → dom0 re-SWITCHes to child
+          Total: 2 × VMCS swap + dom0 scheduling overhead
+
+Optimized: VMEXIT → check VectorPolicy → set vIRR[V] → VMRESUME child
+           Total: 1 vIRR write (~10 cycles) + VMRESUME
+```
+
+This is the exact model Directvisor uses for interrupts belonging to a VM. The
+~1000× reduction in interrupt handling latency (VMCS swap overhead vs vIRR write)
+is the primary performance benefit.
+
+**Capability semantics**: The `Deliver` fast-path is safe because the capability
+engine already validated the child's `VectorPolicy` when it was set (at seal time
+or via `SET_INTR_POLICY`). The capavisor is merely respecting the policy that was
+already authorized through the capability interface.
+
+### Optimization O2: Paravirtualized Virtio Notification (Beyond Directvisor)
+
+Standard virtio notification path:
+```
+Guest MMIO write → EPT violation VMEXIT → doorbell lookup → DomainComm → IPI → eventfd
+```
+
+PV optimization (future, P16.6d3):
+```
+Guest VMCALL (PV kick) → capavisor direct doorbell dispatch → return to guest
+```
+
+The PV path eliminates the EPT fault/walk overhead (~200 cycles on real hardware).
+This goes beyond Directvisor's model (which relies on trap-and-emulate for device
+I/O) by using an explicit hypercall interface for the performance-critical virtio
+kick notification.
+
+**Capability semantics**: The PV kick hypercall must validate that the calling
+domain holds a capability that permits doorbell notifications (doorbell_id is
+resolved through the capability engine). This is a natural extension of the existing
+`VMCALL_REGISTER_DOORBELL` mechanism.
+
+**Prerequisite**: Requires a modified guest virtio-pci driver (or a PV transport)
+that uses VMCALL for kick instead of MMIO write. This is a medium-term optimization.
+
+### Optimization O3: Interrupt Coalescing for Batched I/O
+
+For high-throughput virtio workloads (storage, network), the guest may generate
+many I/O requests in rapid succession. Each request triggers a separate doorbell
+notification → separate eventfd signal → separate interrupt injection.
+
+**Coalescing strategy** (inspired by Directvisor's batched interrupt delivery):
+1. **Doorbell coalescing**: If a doorbell notification is already pending in the
+   DomainComm RX ring for the same doorbell_id, skip the duplicate notification.
+   The VMM will process all pending virtqueue entries when it wakes.
+2. **Interrupt injection coalescing**: If a PIR bit for the same vector is already
+   set (the previous interrupt hasn't been delivered yet), skip the notification
+   IPI. The interrupt will be delivered on the next VMRESUME.
+
+Both forms of coalescing are naturally supported by the existing hardware:
+- PIR is a bitmap — setting an already-set bit is a no-op.
+- `PID.ON` prevents duplicate notification IPIs (if ON=1, no IPI is sent).
+
+No code change is needed for the PIR-level coalescing; it's inherent in the
+Posted Interrupt hardware design. DomainComm-level coalescing requires a
+"pending notification" bitmap per doorbell_id (future optimization).
+
+---
+
+## Phase 4 — Correct Routing + Deliver Fast-Path (`intr-p4-*`)
+
+*(Added 2026-03-30)*
+
+**Goal**: Close the gap between the design (above) and the implementation.
+Wire `route_interrupt()` and add the `Deliver` fast-path. This phase has no
+hardware changes — it is purely software wiring in the capavisor.
+
+**Step 1 — Wire `route_interrupt()` in `forward_interrupt_to_handler()`** (`intr-p4-route`)
+- Replace hardcoded `platform.dom0_cap()` with `route_interrupt(vector, &child_cap, core_id)`.
+- Pass the returned `handler_domain_id` to `deliver_interrupt_vp()`.
+- Set `RDI = vector` on ERR_RETRY return.
+- Remove any remaining references to hardcoded dom0 handler.
+- Files: `hypercall.rs`.
+
+**Step 2 — Add `Deliver` fast-path in VMEXIT handler** (`intr-p4-deliver`)
+- In `vmexit.rs` `EXIT_REASON_EXTERNAL_INTERRUPT` for child VPs:
+  1. Read V from `VMEXIT_INTERRUPTION_INFO[7:0]`.
+  2. Look up child's `VectorPolicy` for V.
+  3. If `Deliver`: set `vIRR[V]` in child's VAPIC page, VMRESUME (no domain switch).
+  4. If `Report`/`NotReport`: call `forward_interrupt_to_handler(vcpu, V)` (which now
+     uses `route_interrupt()`).
+- Files: `vmexit.rs`.
+
+**Step 3 — Add `Update::InjectInterrupt` for capability audit trail** (`intr-p4-audit`)
+- Add `InjectInterrupt { domain_id, vp_id, vector }` to the `Update` enum.
+- In `do_inject_interrupt()`: go through `execute()` with an operation that produces
+  `Update::InjectInterrupt`, then `apply_update()` performs the PIR write.
+- The engine checks that the calling domain's `VectorPolicy` for the target vector
+  permits injection.
+- Files: `capa-engine/src/capability.rs`, `capa-engine/src/domain.rs`,
+  `themis/capavisor/src/platform.rs`, `themis/capavisor/src/hypercall.rs`.
+
+**Step 4 — Phase 4 validation** (`intr-p4-test`)
+- Unit test: `route_interrupt()` returns correct handler for 3-level hierarchy
+  (d0→d1→d2) with mixed policies.
+- Integration test: dom1 boot with `Deliver` fast-path enabled — timer interrupts
+  for dom0 are routed up, virtio interrupts for dom1 are re-injected.
+- Run `cargo test` in `capa-engine/` to confirm no regressions.
+
+### Phase 4 Dependency on Virtio Debugging
+
+Phase 4 is independent of the virtio_blk debugging (which is about the *injection*
+pipeline, not *routing*). However, Phase 4 Step 2 (Deliver fast-path) could mask
+the virtio_blk bug by re-injecting dom0's timer interrupts faster, giving the child
+more execution time. **Debug the virtio_blk pipeline first** (see §Virtio I/O Path)
+to establish a clean baseline, then apply Phase 4 for correctness.
 

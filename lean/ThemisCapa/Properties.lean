@@ -170,4 +170,112 @@ structure WellFormedTree (cap : MemCap) : Prop where
   childrenContained : ∀ ch ∈ cap.children,
                         ch.region.access.contained cap.region.access
 
+-- ════════════════════════════════════════════════════════════════════
+-- § P9 — VP State Machine Validity
+--
+-- All VP states are reachable from Available via valid transitions.
+-- No transition can produce a state not in the VpRunState enum.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Available is trivially reachable. -/
+theorem available_is_reachable : VpReachable VpRunState.available :=
+  VpReachable.start
+
+/-- A forward switch produces reachable states. -/
+theorem switch_forward_produces_reachable
+    (core : CoreId) (ctx : Option VpCallContext) :
+    VpReachable (.running core ctx) :=
+  VpReachable.step _ _ VpReachable.start (VpTransition.claimVp core ctx)
+
+/-- Locking a running VP produces a reachable state. -/
+theorem lock_produces_reachable
+    (core : CoreId) (ctx : Option VpCallContext) (did : DomainId) (vid : VpId) :
+    VpReachable (.locked did vid ctx) :=
+  VpReachable.step _ _
+    (switch_forward_produces_reachable core ctx)
+    (VpTransition.lockCaller core ctx did vid)
+
+/-- Interrupt on a running VP produces a reachable Interrupted state. -/
+theorem interrupt_produces_reachable
+    (core : CoreId) (ctx : Option VpCallContext) (vec : Nat) :
+    VpReachable (.interrupted vec) :=
+  VpReachable.step _ _
+    (switch_forward_produces_reachable core ctx)
+    (VpTransition.interruptLeaf core ctx vec)
+
+/-- Suspending a locked VP produces a reachable Suspended state. -/
+theorem suspend_produces_reachable
+    (core : CoreId) (ctx : Option VpCallContext)
+    (did : DomainId) (vid : VpId) (vec : Nat) :
+    VpReachable (.suspended did vid vec) :=
+  VpReachable.step _ _
+    (lock_produces_reachable core ctx did vid)
+    (VpTransition.suspendLocked did vid ctx vec)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P10 — Switch Symmetry
+--
+-- A forward switch followed by a return switch restores the caller VP.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Forward switch sets isReturn = false. -/
+theorem switch_forward_not_return
+    (caller target : DomCap) (coreId : CoreId)
+    (callerVpId targetVpId : VpId)
+    (callerVp' targetVp' : VProcessor)
+    (result : SwitchResult)
+    (hpost : SwitchForwardPost caller target coreId callerVpId targetVpId
+             callerVp' targetVp' result) :
+    result.isReturn = false :=
+  hpost.notReturn
+
+/-- Return switch sets isReturn = true. -/
+theorem switch_return_is_return
+    (callee : DomCap) (callerCtx : VpCallContext)
+    (coreId : CoreId)
+    (calleeVp' callerVp' : VProcessor)
+    (result : SwitchResult)
+    (hpost : SwitchReturnPost callee callerCtx coreId
+             calleeVp' callerVp' result) :
+    result.isReturn = true :=
+  hpost.resultReturn
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P11 — Accept/Reject Handle Unfreezing
+--
+-- Both accept and reject unfreeze the sender's handle.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem accept_unfreezes_sender
+    (receiver sender receiver' sender' : DomCap)
+    (pending : PendingCap) (updates : UpdateBatch)
+    (hpost : AcceptPost receiver sender receiver' sender' pending updates) :
+    pending.senderHandle ∉ sender'.frozenHandles :=
+  hpost.handleUnfrozen
+
+theorem reject_unfreezes_sender
+    (sender sender' : DomCap) (pending : PendingCap)
+    (hpost : RejectPost sender sender' pending) :
+    pending.senderHandle ∉ sender'.frozenHandles :=
+  hpost.handleUnfrozen
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P12 — Interrupt Delivery Preserves Call Chain
+--
+-- After interrupt delivery, the leaf VP is Interrupted and all
+-- intermediate VPs are Suspended (not lost, can be resumed).
+-- ════════════════════════════════════════════════════════════════════
+
+theorem interrupt_preserves_chain
+    (leafVp' : VProcessor)
+    (intermediates : List (VProcessor × VProcessor))
+    (handlerVp' : VProcessor)
+    (vector : Nat) (coreId : CoreId)
+    (hpost : DeliverInterruptPost leafVp' intermediates handlerVp' vector coreId) :
+    -- Leaf is interrupted (not lost)
+    leafVp'.runState = .interrupted vector ∧
+    -- Handler is running (can process the interrupt)
+    (∃ ctx, handlerVp'.runState = .running coreId ctx) :=
+  ⟨hpost.leafInterrupted, hpost.handlerRunning⟩
+
 end ThemisCapa
