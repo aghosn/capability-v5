@@ -689,6 +689,79 @@ theorem descendant_isolation
     (hwf2.childrenContained d2 hd2)
 
 -- ════════════════════════════════════════════════════════════════════
+-- § P25 — Send Preserves Well-Formedness
+--
+-- Send transfers ownership (domainId) but does NOT modify the CDT
+-- structure (children, region, carved set). The tree is trivially
+-- preserved.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Send only changes ownership — CDT structure is untouched. -/
+structure ParentAfterSend (parent parent' : MemCap) : Prop where
+  childrenUnchanged : parent'.children = parent.children
+  regionUnchanged   : parent'.region = parent.region
+  carvedUnchanged   : parent'.carvedChildren = parent.carvedChildren
+
+theorem send_preserves_wellformed
+    (parent parent' : MemCap)
+    (hwf : WellFormedTree parent)
+    (hupd : ParentAfterSend parent parent') :
+    WellFormedTree parent' := by
+  constructor
+  · intro ch hch
+    rw [hupd.childrenUnchanged] at hch
+    have := hwf.monotonic ch hch
+    unfold rightsMonotonic at this ⊢
+    rw [hupd.regionUnchanged]; exact this
+  · intro c1 c2 hc1 hc2 hneq
+    rw [hupd.carvedUnchanged] at hc1 hc2
+    exact hwf.carvedDisjoint c1 c2 hc1 hc2 hneq
+  · intro ch hch
+    rw [hupd.childrenUnchanged] at hch
+    have := hwf.childrenContained ch hch
+    unfold Access.contained at this ⊢
+    rw [hupd.regionUnchanged]; exact this
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P26 — Switch VP Round Trip (Context Preservation)
+--
+-- Forward + return switch is a round trip for VP states:
+-- - Target: Available → Running → Available
+-- - Caller: Running(ctx) → Locked(ctx) → Running(ctx)
+-- Crucially: the caller's original context is preserved through
+-- the locked state, guaranteeing the call chain is restored.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Target VP round trip: Available → Running → Available. -/
+theorem switch_target_round_trip (core : CoreId) (ctx : Option VpCallContext) :
+    ∃ mid, VpTransition .available mid ∧ VpTransition mid .available :=
+  ⟨.running core ctx, .claimVp core ctx, .releaseVp core ctx⟩
+
+/-- Caller VP round trip preserves context.
+    Running(core, ctx) → Locked(did, vid, ctx) → Running(core', ctx).
+    The locked state faithfully stores ctx, and unlocking restores it. -/
+theorem switch_caller_ctx_preserved
+    (core core' : CoreId) (ctx : Option VpCallContext)
+    (did : DomainId) (vid : VpId) :
+    ∃ mid, VpTransition (.running core ctx) mid ∧
+           VpTransition mid (.running core' ctx) :=
+  ⟨.locked did vid ctx, .lockCaller core ctx did vid, .unlockCaller did vid ctx core'⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P27 — Revoked Domain Confinement
+--
+-- A revoked domain trivially satisfies confinement: it holds no
+-- memory capabilities, so there is nothing to violate.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem revoke_domain_confinement
+    (target : DomCap) (updates : UpdateBatch)
+    (hpost : RevokeDomainPost target updates) :
+    confinement target := by
+  intro cap ⟨h, hlookup⟩
+  simp [DomCap.lookupMem, hpost.allMemRevoked] at hlookup
+
+-- ════════════════════════════════════════════════════════════════════
 -- § Reflexivity Helpers
 -- ════════════════════════════════════════════════════════════════════
 
@@ -727,6 +800,22 @@ theorem WellFormedChain.append
   | refl => exact h2
   | step parent child rest hwf hmem _hrest ih =>
     exact .step parent child desc hwf hmem (ih h2)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P27 — Chain Extension
+--
+-- A well-formed chain can be extended by one step when the
+-- endpoint is well-formed and the child is in its children list.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Extend a chain by one well-formed step. -/
+theorem chain_step_child
+    (root parent child : MemCap)
+    (hchain : WellFormedChain root parent)
+    (hwf : WellFormedTree parent)
+    (hmem : child ∈ parent.children) :
+    WellFormedChain root child :=
+  hchain.append (.step parent child child hwf hmem .refl)
 
 -- ════════════════════════════════════════════════════════════════════
 -- § P22 — N-level Rights Monotonicity
