@@ -1,0 +1,10 @@
+name = "ThemisCapa"
+version = "0.1.0"
+defaultTargets = ["themiscapa"]
+
+[[lean_lib]]
+name = "ThemisCapa"
+
+[[lean_exe]]
+name = "themiscapa"
+root = "Main"
