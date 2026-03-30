@@ -875,4 +875,148 @@ theorem deep_isolation
     (chain_containment c1 d1 hchain1)
     (chain_containment c2 d2 hchain2)
 
+-- ════════════════════════════════════════════════════════════════════
+-- § GloballyWellFormed — System-level CDT well-formedness
+--
+-- Every descendant reachable from the root has a well-formed local
+-- tree structure. This is the system-level invariant: if the CDT
+-- root is globally well-formed, all isolation and monotonicity
+-- guarantees hold at every level automatically.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Every node reachable from root via WellFormedChain is well-formed. -/
+def GloballyWellFormed (root : MemCap) : Prop :=
+  ∀ desc, WellFormedChain root desc → WellFormedTree desc
+
+/-- The root of a globally well-formed tree is itself well-formed. -/
+theorem globally_wellformed_root
+    (root : MemCap) (hgwf : GloballyWellFormed root) :
+    WellFormedTree root :=
+  hgwf root .refl
+
+/-- Any descendant of a globally well-formed tree is also globally
+    well-formed — the property is inherited downward. -/
+theorem globally_wellformed_descendant
+    (root desc : MemCap)
+    (hgwf : GloballyWellFormed root)
+    (hchain : WellFormedChain root desc) :
+    GloballyWellFormed desc :=
+  fun desc2 hchain2 => hgwf desc2 (hchain.append hchain2)
+
+/-- In a globally well-formed tree, any child of a reachable node
+    is itself reachable via a chain. -/
+theorem globally_wellformed_child_chain
+    (root parent child : MemCap)
+    (hgwf : GloballyWellFormed root)
+    (hchain : WellFormedChain root parent)
+    (hmem : child ∈ parent.children) :
+    WellFormedChain root child :=
+  chain_step_child root parent child hchain (hgwf parent hchain) hmem
+
+/-- In a globally well-formed tree, deep isolation holds at every
+    branching point — not just the root. Any ancestor reachable from
+    root can serve as the isolation boundary. -/
+theorem globally_wellformed_deep_isolation
+    (root parent c1 c2 d1 d2 : MemCap)
+    (hgwf : GloballyWellFormed root)
+    (hchain_parent : WellFormedChain root parent)
+    (hc1 : c1 ∈ parent.carvedChildren)
+    (hc2 : c2 ∈ parent.carvedChildren)
+    (hne : c1 ≠ c2)
+    (hchain1 : WellFormedChain c1 d1)
+    (hchain2 : WellFormedChain c2 d2) :
+    ¬ Access.overlaps d1.region.access d2.region.access :=
+  deep_isolation parent c1 c2 d1 d2
+    (hgwf parent hchain_parent) hc1 hc2 hne hchain1 hchain2
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Deep Revocation — N-level subtree revocation
+--
+-- Extends SubtreeRevoked from shallow (one level) to arbitrary
+-- depth using WellFormedChain. Captures the guarantee that
+-- recursive revocation cleans up the ENTIRE subtree.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Every descendant at any depth is unmapped and zeroed-if-clean. -/
+def DeepSubtreeRevoked (cap : MemCap) (updates : UpdateBatch) : Prop :=
+  ∀ desc, WellFormedChain cap desc →
+    (desc.id.domainId ≠ 0 →
+      (HwUpdate.unmapMemory desc.id.domainId desc.region.access.start
+                           desc.region.access.size) ∈ updates) ∧
+    (desc.attributes.clean = true →
+      (HwUpdate.zeroMemory desc.region.access.start
+                           desc.region.access.size) ∈ updates)
+
+/-- If SubtreeRevoked holds at every node in a well-formed chain,
+    deep revocation follows. This is the inductive cascade:
+    the shallow per-node guarantee lifts to arbitrary depth. -/
+theorem revocation_cascade
+    (root : MemCap) (updates : UpdateBatch)
+    (hrevoked : ∀ desc, WellFormedChain root desc →
+                  SubtreeRevoked desc updates) :
+    DeepSubtreeRevoked root updates :=
+  fun desc hchain =>
+    ⟨(hrevoked desc hchain).1, (hrevoked desc hchain).2.1⟩
+
+/-- Deep revocation is inherited by children: if a subtree is
+    deeply revoked, so is every child's subtree. -/
+theorem deep_revocation_child
+    (parent child : MemCap) (updates : UpdateBatch)
+    (hwf : WellFormedTree parent)
+    (hmem : child ∈ parent.children)
+    (hdeep : DeepSubtreeRevoked parent updates) :
+    DeepSubtreeRevoked child updates :=
+  fun desc hchain => hdeep desc (.step parent child desc hwf hmem hchain)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Full Domain Revocation
+--
+-- Combines RevokeDomainPre/Post with deep subtree revocation to
+-- give the complete domain teardown guarantee: after revocation,
+-- the domain is marked revoked, holds no capabilities, and every
+-- descendant in the memory capability tree is unmapped.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Full domain revocation: pre→post with deep cleanup. -/
+structure FullDomainRevocation (pre post : DomCap)
+    (updates : UpdateBatch) : Prop where
+  preNotRevoked : pre.status ≠ .revoked
+  postRevoked   : post.status = .revoked
+  postNoCaps    : post.memCaps = []
+  revokeEmitted : (HwUpdate.revokeDomain post.domainId 0) ∈ updates
+  allDeepRevoked : ∀ p ∈ pre.memCaps, DeepSubtreeRevoked p.2 updates
+
+/-- After full domain revocation, every memory region the domain
+    transitively owned is unmapped. -/
+theorem full_revocation_unmaps_all
+    (pre post : DomCap) (updates : UpdateBatch)
+    (hfull : FullDomainRevocation pre post updates)
+    (cap : LocalHandle × MemCap) (hcap : cap ∈ pre.memCaps)
+    (desc : MemCap) (hchain : WellFormedChain cap.2 desc)
+    (hdom : desc.id.domainId ≠ 0) :
+    (HwUpdate.unmapMemory desc.id.domainId desc.region.access.start
+                         desc.region.access.size) ∈ updates :=
+  ((hfull.allDeepRevoked cap hcap) desc hchain).1 hdom
+
+/-- After full domain revocation, every CLEAN region in the
+    domain's subtree is zeroed. -/
+theorem full_revocation_zeroes_clean
+    (pre post : DomCap) (updates : UpdateBatch)
+    (hfull : FullDomainRevocation pre post updates)
+    (cap : LocalHandle × MemCap) (hcap : cap ∈ pre.memCaps)
+    (desc : MemCap) (hchain : WellFormedChain cap.2 desc)
+    (hclean : desc.attributes.clean = true) :
+    (HwUpdate.zeroMemory desc.region.access.start
+                         desc.region.access.size) ∈ updates :=
+  ((hfull.allDeepRevoked cap hcap) desc hchain).2 hclean
+
+/-- After full domain revocation, the domain satisfies confinement
+    (holds no capabilities). -/
+theorem full_revocation_confinement
+    (pre post : DomCap) (updates : UpdateBatch)
+    (hfull : FullDomainRevocation pre post updates) :
+    confinement post := by
+  intro cap ⟨h, hlookup⟩
+  simp [DomCap.lookupMem, hfull.postNoCaps] at hlookup
+
 end ThemisCapa

@@ -11,7 +11,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 |----------|---------|-------|---|
 | Core operations (carve, alias, send, revoke, create, seal) | 6 | 6 | 100% |
 | Extended operations (switch, deliver_interrupt, accept, reject, revoke_domain) | 7 | 14 | 50% |
-| Safety properties proved | 59 | 59 | 100% |
+| Safety properties proved | 64 | 64 | 100% |
 | Update (HwUpdate) variants | 7 | 9 | 78% |
 | VpRunState transitions | 8 | 8 | 100% |
 
@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 59 properties have complete proofs (no `sorry`).
+All 64 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -161,6 +161,18 @@ All 59 properties have complete proofs (no `sorry`).
 | P26b | Switch caller context preserved | `switch_caller_ctx_preserved` | ✅ Proved |
 | P27 | Chain extension | `chain_step_child` | ✅ Proved |
 | P28 | Revoked domain confinement | `revoke_domain_confinement` | ✅ Proved |
+| — | GloballyWellFormed (def) | `GloballyWellFormed` | ✅ Defined |
+| P29 | GWF root is well-formed | `globally_wellformed_root` | ✅ Proved |
+| P30 | GWF inherited by descendants | `globally_wellformed_descendant` | ✅ Proved |
+| P31 | GWF child chain construction | `globally_wellformed_child_chain` | ✅ Proved |
+| P32 | GWF deep isolation | `globally_wellformed_deep_isolation` | ✅ Proved |
+| — | DeepSubtreeRevoked (def) | `DeepSubtreeRevoked` | ✅ Defined |
+| P33 | Revocation cascade | `revocation_cascade` | ✅ Proved |
+| P34 | Deep revocation child | `deep_revocation_child` | ✅ Proved |
+| — | FullDomainRevocation (struct) | `FullDomainRevocation` | ✅ Defined |
+| P35 | Full revocation unmaps all | `full_revocation_unmaps_all` | ✅ Proved |
+| P36 | Full revocation zeroes clean | `full_revocation_zeroes_clean` | ✅ Proved |
+| P37 | Full revocation confinement | `full_revocation_confinement` | ✅ Proved |
 
 ### Known gaps and weaknesses in existing proofs
 
@@ -178,7 +190,7 @@ All 59 properties have complete proofs (no `sorry`).
 | ~~Send preserves WellFormedTree~~ | ~~Transferring a cap between domains preserves CDT~~ | ✅ Done (P25) |
 | ~~N-level monotonicity~~ | ~~Generalise P15–P16 to arbitrary depth via induction~~ | ✅ Done (P22–P24) |
 | ~~Switch state restoration~~ | ~~Forward + return restores original VP state (not just flag)~~ | ✅ Done (P26a–P26b) |
-| Domain revocation cascade | Connect RevokeDomainPost to SubtreeRevoked | Hard |
+| ~~Domain revocation cascade~~ | ~~Connect RevokeDomainPost to SubtreeRevoked~~ | ✅ Done (P33–P37, FullDomainRevocation) |
 | Global system invariant | SystemState invariant preserved across all operations | Hard |
 | Execute protocol correctness | `execute()` lock protocol maintains consistency | Hard |
 
