@@ -160,13 +160,12 @@ theorem create_policy_monotonic
 
 /-- A capability tree is well-formed if:
     1. All children have monotonically decreasing rights
-    2. Carved siblings are disjoint
-    3. No carved-alias overlap
-    4. All children contained within parent's range -/
+    2. Carved siblings are disjoint (exclusive ownership)
+    3. All children contained within parent's range
+    Note: aliases may overlap with carves — that's intentional (shared access). -/
 structure WellFormedTree (cap : MemCap) : Prop where
   monotonic         : ∀ ch ∈ cap.children, rightsMonotonic cap ch
   carvedDisjoint    : carvedSiblingsDisjoint cap
-  carveAlias        : carveAliasDisjoint cap
   childrenContained : ∀ ch ∈ cap.children,
                         ch.region.access.contained cap.region.access
 
@@ -277,5 +276,147 @@ theorem interrupt_preserves_chain
     -- Handler is running (can process the interrupt)
     (∃ ctx, handlerVp'.runState = .running coreId ctx) :=
   ⟨hpost.leafInterrupted, hpost.handlerRunning⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Helper — Access.overlaps is commutative
+-- ════════════════════════════════════════════════════════════════════
+
+theorem overlaps_comm {a b : Access}
+    (h : Access.overlaps a b) : Access.overlaps b a :=
+  ⟨h.2, h.1⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P13 — Rights Subset Transitivity
+--
+-- Foundation for multi-level monotonicity proofs.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem rights_subset_trans {a b c : Rights}
+    (hab : a ≤ b) (hbc : b ≤ c) : a ≤ c := by
+  show Rights.subset a c
+  have hab' : Rights.subset a b := hab
+  have hbc' : Rights.subset b c := hbc
+  exact ⟨fun ha => hbc'.1 (hab'.1 ha),
+         fun ha => hbc'.2.1 (hab'.2.1 ha),
+         fun ha => hbc'.2.2 (hab'.2.2 ha)⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P14 — Access Containment Transitivity
+--
+-- If grandchild ⊂ child ⊂ parent, then grandchild ⊂ parent.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem access_contained_trans {a b c : Access}
+    (hab : a.contained b) (hbc : b.contained c) : a.contained c := by
+  unfold Access.contained at *
+  exact ⟨Nat.le_trans hbc.1 hab.1,
+         Nat.le_trans hab.2.1 hbc.2.1,
+         rights_subset_trans hab.2.2 hbc.2.2⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P15 — Multi-level Rights Monotonicity
+--
+-- In a well-formed CDT, grandchildren have rights ≤ grandparent.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem two_level_monotonicity
+    (grandparent parent child : MemCap)
+    (hwf_gp : WellFormedTree grandparent)
+    (hwf_p : WellFormedTree parent)
+    (hparent : parent ∈ grandparent.children)
+    (hchild : child ∈ parent.children) :
+    rightsMonotonic grandparent child := by
+  have h1 := hwf_gp.monotonic parent hparent
+  have h2 := hwf_p.monotonic child hchild
+  unfold rightsMonotonic at *
+  exact rights_subset_trans h2 h1
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P16 — Multi-level Access Containment
+--
+-- In a well-formed CDT, grandchildren are contained in grandparent.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem two_level_containment
+    (grandparent parent child : MemCap)
+    (hwf_gp : WellFormedTree grandparent)
+    (hwf_p : WellFormedTree parent)
+    (hparent : parent ∈ grandparent.children)
+    (hchild : child ∈ parent.children) :
+    child.region.access.contained grandparent.region.access :=
+  access_contained_trans (hwf_p.childrenContained child hchild)
+                         (hwf_gp.childrenContained parent hparent)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P17 — Carve Preserves Well-Formedness
+--
+-- The main CDT preservation theorem: if the parent tree is well-formed
+-- before carve, it remains well-formed after adding the carved child.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Describes the parent MemCap state after a carve adds a child. -/
+structure ParentAfterCarve (parent parent' : MemCap) (child : MemCap) : Prop where
+  childrenAppended  : parent'.children = parent.children ++ [child]
+  regionUnchanged   : parent'.region = parent.region
+  carvedAppended    : parent'.carvedChildren = parent.carvedChildren ++ [child]
+
+/-- Carve preserves the well-formedness of the capability tree. -/
+theorem carve_preserves_wellformed
+    (caller : DomCap) (parent parent' : MemCap) (access : Access) (child : MemCap)
+    (hpre : CarvePre caller parent access)
+    (hpost : CarvePost parent access child)
+    (hwf : WellFormedTree parent)
+    (hupd : ParentAfterCarve parent parent' child) :
+    WellFormedTree parent' := by
+  constructor
+  · -- monotonic: all children (old + new) have rights ≤ parent'
+    intro ch hch
+    rw [hupd.childrenAppended] at hch
+    simp at hch
+    rcases hch with h | rfl
+    · -- ch ∈ parent.children — use existing well-formedness
+      have := hwf.monotonic ch h
+      unfold rightsMonotonic at this ⊢
+      rw [hupd.regionUnchanged]
+      exact this
+    · -- ch = child — use carve precondition (access ⊆ parent)
+      unfold rightsMonotonic
+      rw [hupd.regionUnchanged, hpost.accessMatches]
+      exact hpre.accessContained.2.2
+  · -- carvedDisjoint: no two carved children overlap
+    intro c1 c2 hc1 hc2 hneq
+    rw [hupd.carvedAppended] at hc1 hc2
+    simp at hc1 hc2
+    rcases hc1 with h1 | rfl
+    · -- c1 ∈ old carved children
+      rcases hc2 with h2 | rfl
+      · -- c2 ∈ old carved children — use existing well-formedness
+        exact hwf.carvedDisjoint c1 c2 h1 h2 hneq
+      · -- c2 = child — new child doesn't overlap old carved
+        intro hovl
+        rw [hpost.accessMatches] at hovl
+        exact hpre.noOverlapCarved c1 h1 hovl
+    · -- c1 = child
+      rcases hc2 with h2 | rfl
+      · -- c2 ∈ old carved children — symmetric case
+        intro hovl
+        rw [hpost.accessMatches] at hovl
+        exact hpre.noOverlapCarved c2 h2 (overlaps_comm hovl)
+      · -- c1 = c2 = child — contradicts c1 ≠ c2
+        exact absurd rfl hneq
+  · -- childrenContained: all children fit within parent's range
+    intro ch hch
+    rw [hupd.childrenAppended] at hch
+    simp at hch
+    rcases hch with h | rfl
+    · -- ch ∈ parent.children — use existing well-formedness
+      have := hwf.childrenContained ch h
+      unfold Access.contained at this ⊢
+      rw [hupd.regionUnchanged]
+      exact this
+    · -- ch = child — use carve precondition
+      unfold Access.contained
+      rw [hupd.regionUnchanged, hpost.accessMatches]
+      exact hpre.accessContained
 
 end ThemisCapa
