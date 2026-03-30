@@ -209,8 +209,8 @@ it affects both nested and real hardware.
 - [ ] Reduce serial I/O overhead
 - [ ] CPUID policy in DomainPolicy (P16.6c)
 - [ ] Stock cloud image kernel
-- [ ] VPID bug: child VPID double-incremented (vp_index+1 in write_control_fields,
-  but setup_child_vmcs already passes vpid which is 1-based). Causes TLB overlap.
+- [x] VPID bug: child VPID double-incremented — fixed in `d508c22`.
+  `write_control_fields` now takes final 1-based vpid directly.
 
 ---
 
