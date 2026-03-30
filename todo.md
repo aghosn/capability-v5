@@ -25,6 +25,8 @@
 
 ### Recent commits
 
+- `289d746` — **capavisor: fix PIR ON bit bug + add virtio pipeline instrumentation**
+- `d508c22` — **capavisor: fix VPID double-increment for child VMs**
 - `69727ab` — **lean: execute protocol model** — A1, lock hierarchy, atomicity, non-destructive ops
 - `2fbe176` — **lean: SystemInvariant + master isolation + CDT frame rule**
 - `3b1e348` — **lean: GloballyWellFormed + deep revocation cascade**
@@ -178,15 +180,58 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 Dom1 reaches virtio_blk probe but first disk I/O never completes. Root cause: zero
 INJECT_INTERRUPT (op=0x1b) VMCALLs observed. CHV is not injecting interrupts to dom1.
 
+#### Bugs found this session
+
+- **PIR ON bit bug (FIXED in 289d746)**: `inject_via_pid(is_remote=false)` set PIR[vector]
+  but NOT PID.ON. Per SDM §29.6, hardware only processes PIR→vIRR on VMENTRY when ON=1.
+  Both `do_inject_interrupt` and `forward_interrupt_to_handler` with Deliver visibility
+  were affected. Interrupts were silently lost when posted interrupts were enabled.
+
+- **Potential GSI→vector ordering issue (SUSPECTED)**: CHV's `register_irqfd` resolves
+  GSI→vector via `gsi_vectors` map at registration time. If `set_gsi_routing` hasn't been
+  called yet, vector=0. thhv falls back to `args.gsi` as vector (line 109 of thhv_irqfd.c),
+  which may not match the actual MSI-X vector the guest expects. Need to verify ordering
+  in CHV logs: `[THEMIS-DBG] register_irqfd gsi=N vec=V` vs `gsi_routing` output.
+
+#### Instrumentation added (289d746)
+
+Capavisor `serial_rtdbg!` traces (enabled by toggle-debug tool at /tmp/toggle-debug):
+- `[INJECT] vec=V vp=N handle=H` — every INJECT_INTERRUPT VMCALL
+- `[DOORBELL] EPT gpa=G sz=S val=V #db=N` — every doorbell-candidate EPT violation
+- `[DOORBELL] match db_id=I → parent enq=E` — successful doorbell notification
+- `[DOORBELL] no match gpa=G` — EPT write that didn't match any doorbell
+- `[REG_DB] id=I gpa=G sz=S flags=F` — each doorbell registration
+
+CHV already has `eprintln` for `register_irqfd` and `set_gsi_routing` (no code change needed).
+
+#### Pipeline analysis (complete)
+
+```
+Guest writes kick → EPT violation → doorbell fast-path → DoorbellNotify → DomainComm RX
+  → thhv drains → eventfd_signal() → CHV wakes → disk I/O → IRQFD eventfd
+    → thhv_irqfd_inject() → INJECT_INTERRUPT VMCALL → inject_via_pid() → PIR[V]
+      → VMENTRY ON=1 → PIR→vIRR → guest sees interrupt → I/O completes
+```
+
+Full pipeline is wired end-to-end. Doorbell fast-path, DomainComm, eventfd, irqfd all
+confirmed in code review. The break is somewhere between steps 1-5 (before INJECT_INTERRUPT).
+
+#### Debugging plan (requires remote machine)
+
+1. Boot with RUNTIME_DEBUG enabled, observe [REG_DB], [DOORBELL], [INJECT] traces
+2. Check CHV stderr for `register_irqfd` ordering vs `gsi_routing`
+3. Enable thhv dynamic debug: `echo module thhv +p > /sys/kernel/debug/dynamic_debug/control`
+4. If no [DOORBELL] traces: doorbell not registered or EPT not matching
+5. If [DOORBELL] but no [INJECT]: domcomm ring or eventfd/irqfd issue
+6. If [INJECT] seen: PIR ON fix should now deliver the interrupt
+
 Investigation steps:
+- [x] **V5**: PIR ON bit bug — FIXED in 289d746
 - [ ] **V1**: Add `no-posted-interrupts` feature flag to capavisor. When set, disable posted
   interrupts in VMCS pin-based controls and use the software injection fallback path.
-  This allows testing on platforms without PI and simplifies debugging.
 - [ ] **V2**: Enable thhv dynamic debug and check whether CHV calls INJECT_INTERRUPT ioctl.
 - [ ] **V3**: Instrument the irqfd path in thhv (thhv_irqfd.c) to trace eventfd-to-VMCALL flow.
 - [ ] **V4**: Instrument CHV's Themis backend to trace interrupt injection attempts.
-- [ ] **V5**: Check if the problem is that interrupts are posted (PIR written) but never
-  drained because do_switch's PIR drain (step 7b) doesn't run at the right time.
 
 ### Nested-virt scheduling (parked, lower priority)
 
