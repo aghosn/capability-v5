@@ -855,12 +855,32 @@ fn do_switch(
                     }
 
                     // Put remaining (un-injected) vectors back in PIR for next switch.
+                    let mut remaining = false;
                     for i in 0..4usize {
                         if pir_snapshot[i] != 0 {
+                            remaining = true;
                             unsafe {
                                 (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel)
                             };
                         }
+                    }
+
+                    // If vectors remain in PIR (IF=0 or multiple pending), enable
+                    // interrupt-window exiting so we get a VMEXIT when guest IF
+                    // becomes 1 and we can inject then.
+                    let primary = child_active.get(
+                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+                    if remaining {
+                        child_active.set(
+                            x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+                            primary | (1 << 2),
+                        );
+                    } else {
+                        // No more pending — clear interrupt-window exiting.
+                        child_active.set(
+                            x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+                            primary & !(1 << 2),
+                        );
                     }
                 }
             }
@@ -896,6 +916,77 @@ fn do_switch(
 // ── Child exit forwarding ────────────────────────────────────────────────── //
 
 /// Called from `handle_vmexit` when the current domain is not dom0.
+///
+/// Called on EXIT_REASON_INTERRUPT_WINDOW (7): the guest's IF just became 1.
+/// Drain PIR, inject lowest pending vector, and manage the interrupt-window
+/// exiting bit based on whether vectors remain.
+pub fn drain_pir_on_interrupt_window(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+) {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use x86::vmx::vmcs;
+
+    let pid_phys = vcpu.pid_phys();
+    if pid_phys == 0 {
+        // No PID — just clear the interrupt-window exiting bit.
+        let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary & !(1 << 2));
+        return;
+    }
+
+    let hhdm = platform.hhdm_offset();
+    let pir_base = (pid_phys + hhdm) as *const AtomicU64;
+
+    // Atomically swap out all PIR words.
+    let mut pir_snapshot = [0u64; 4];
+    let mut any_set = false;
+    for i in 0..4 {
+        pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
+        if pir_snapshot[i] != 0 { any_set = true; }
+    }
+
+    // Clear ON bit.
+    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+    unsafe { (*on_ptr).store(0, Ordering::Release) };
+
+    if any_set {
+        // Find lowest pending vector (device-first).
+        let mut inject_vec: Option<u8> = None;
+        for i in 0..4usize {
+            if pir_snapshot[i] != 0 {
+                let bit = pir_snapshot[i].trailing_zeros();
+                inject_vec = Some((i * 64 + bit as usize) as u8);
+                pir_snapshot[i] &= !(1u64 << bit);
+                break;
+            }
+        }
+
+        if let Some(vector) = inject_vec {
+            let intr_info = (1u64 << 31) | (vector as u64);
+            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+        }
+    }
+
+    // Put remaining vectors back.
+    let mut remaining = false;
+    for i in 0..4usize {
+        if pir_snapshot[i] != 0 {
+            remaining = true;
+            unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
+        }
+    }
+
+    // Clear interrupt-window exiting if no more pending vectors.
+    let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+    if remaining {
+        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary | (1 << 2));
+    } else {
+        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary & !(1 << 2));
+    }
+}
+
+/// Forward a child-domain VM exit to its parent (dom0).
 ///
 /// Reads the child's interrupt policy for this exit reason to determine
 /// which registers to copy back to the child's COMM page (so the parent

@@ -89,6 +89,7 @@ pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
 pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
 pub const EXIT_REASON_INIT_SIGNAL: u32 = 3;
 pub const EXIT_REASON_SIPI: u32 = 4;
+pub const EXIT_REASON_INTERRUPT_WINDOW: u32 = 7;
 pub const EXIT_REASON_CPUID: u32 = 10;
 pub const EXIT_REASON_HLT: u32 = 12;
 pub const EXIT_REASON_VMCALL: u32 = 18;
@@ -295,6 +296,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
                             crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
+                            return;
+                        }
+                        EXIT_REASON_INTERRUPT_WINDOW => {
+                            // Guest IF just became 1 — drain PIR and inject pending
+                            // device interrupt that was deferred because IF was 0.
+                            crate::hypercall::drain_pir_on_interrupt_window(vcpu, platform);
                             return;
                         }
                         EXIT_REASON_EXCEPTION_NMI => {
