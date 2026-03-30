@@ -184,7 +184,8 @@ unsafe fn write_control_fields(
     if child {
         pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
         pin_desired |= 1 << 3; // NMI_EXITING — NMIs from child VM always exit to capavisor
-        pin_desired |= 1 << 7; // PROCESS_POSTED_INTERRUPTS
+        #[cfg(not(feature = "no-posted-interrupts"))]
+        { pin_desired |= 1 << 7; } // PROCESS_POSTED_INTERRUPTS
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
@@ -404,7 +405,7 @@ unsafe fn write_control_fields(
         vmx::vmwrite(VMCS_POSTED_INTR_DESCRIPTOR_ADDR, pid_phys)
             .expect("vmwrite posted-intr descriptor addr");
     } else if child {
-        serial_println!("  [WARN] PROCESS_POSTED_INTERRUPTS not supported by hardware — PID disabled");
+        serial_println!("  [INFO] Posted interrupts disabled — using software PIR drain fallback");
     }
 }
 

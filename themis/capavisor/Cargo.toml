@@ -11,6 +11,9 @@ path              = "src/main.rs"
 [features]
 # Enable verbose per-VMEXIT / SWITCH / CHILD_EXIT serial tracing.
 verbose = []
+# Force-disable posted interrupts even when hardware supports them.
+# Uses the software PIR→VMENTRY_INTR_INFO drain fallback in do_switch.
+no-posted-interrupts = []
 
 [dependencies]
 capability-engine-v2  = { workspace = true }
