@@ -1214,7 +1214,6 @@ fn handle_ept_doorbell(
     // EPT qualification bit 1 = data write; bit 0 = data read; bit 2 = instr fetch.
     let is_write = (qual & (1 << 1)) != 0;
     if !is_write {
-        // Only data writes can match doorbells.
         return Some(false);
     }
 
@@ -1224,9 +1223,7 @@ fn handle_ept_doorbell(
     let child_arc = platform.domain_arc(child_domain_id)?;
     let child_pd = child_arc.lock();
 
-    // Extract write size from EPT exit qualification bits [4:3] (encoded access size).
-    // Bits [4:3]: 0 = 1B, 1 = 2B, 2 = 4B, 3 = 8B.  Not always reliable for all
-    // instruction types, but sufficient for the common virtio kick case (32-bit store).
+    // Extract write size from EPT exit qualification bits [4:3].
     let write_size: u32 = match (qual >> 3) & 0x3 {
         0 => 1,
         1 => 2,
@@ -1234,9 +1231,10 @@ fn handle_ept_doorbell(
         _ => 8,
     };
 
-    // The written value is in RAX for simple MOV stores (best-effort; not always correct
-    // for all instruction encodings).  For datamatch we do a best-effort check.
     let written_value = vcpu.reg(Reg::Rax);
+
+    serial_rtdbg!("[DOORBELL] EPT gpa={:#x} sz={} val={:#x} #db={}",
+        gpa, write_size, written_value, child_pd.doorbells.len());
 
     let matched: Option<(u32, u64, u64, u32)> = child_pd.doorbells.iter().find_map(|e| {
         if e.gpa != gpa {
@@ -1255,14 +1253,14 @@ fn handle_ept_doorbell(
 
     let (doorbell_id, matched_gpa, value, size) = match matched {
         Some(m) => m,
-        None => return Some(false),
+        None => {
+            serial_rtdbg!("[DOORBELL] no match gpa={:#x}", gpa);
+            return Some(false);
+        }
     };
 
-    // Drop child lock before accessing parent (lock order: child < parent would invert).
     drop(child_pd);
 
-    // Resolve parent domain.  In the SWITCH model, `PlatformDomain::parent` holds
-    // the parent domain ID.
     let parent_domain_id = {
         let guard = child_arc.lock();
         guard.parent?
@@ -1285,16 +1283,11 @@ fn handle_ept_doorbell(
             core::mem::size_of::<domcomm::DoorbellNotify>(),
         )
     };
-    parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
-
-    // In async mode (future): send notify_vector IPI to parent core so it can
-    // process the doorbell without waiting for the child to exit.
-    // let _notify_vec = parent_pd.get_notify_vector();
-    // unsafe { send_notify_ipi(parent_core_lapic, notify_vec) };
+    let enqueued = parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
+    serial_rtdbg!("[DOORBELL] match db_id={} → parent enq={}", doorbell_id, enqueued);
 
     drop(parent_pd);
 
-    // Advance child RIP past the faulting write instruction.
     next_instruction(vcpu);
 
     Some(true)

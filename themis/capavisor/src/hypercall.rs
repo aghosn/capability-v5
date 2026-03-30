@@ -1257,16 +1257,16 @@ fn current_lapic_id() -> u32 {
 /// `pid_phys` must be a valid 64-byte aligned PID page accessible via HHDM.
 unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) {
     unsafe { pid_set_pir(pid_phys, hhdm, vector) };
-    if is_remote {
-        let on_already_set = unsafe { pid_test_and_set_on(pid_phys, hhdm) };
-        if !on_already_set {
-            // We set ON=1 first — send the notification IPI to wake the remote core.
-            let ndst = unsafe {
-                core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
-            };
-            let notify_vec = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
-            unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
-        }
+    // Always set ON so the processor processes PIR→vIRR on the next VMENTRY
+    // (SDM §29.6: hardware only merges PIR into vIRR when ON=1).
+    let on_already_set = unsafe { pid_test_and_set_on(pid_phys, hhdm) };
+    if is_remote && !on_already_set {
+        // Remote VP: send the notification IPI to wake that core out of guest mode.
+        let ndst = unsafe {
+            core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
+        };
+        let notify_vec = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
+        unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
     }
 }
 
@@ -1843,6 +1843,8 @@ fn do_register_doorbell(
     pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
     pd.doorbells.push(DoorbellEntry { doorbell_id, gpa, datamatch, size, flags });
 
+    serial_rtdbg!("[REG_DB] id={} gpa={:#x} sz={} flags={:#x}", doorbell_id, gpa, size, flags);
+
     HypercallResult::success_1(doorbell_id as u64)
 }
 
@@ -1926,6 +1928,7 @@ fn do_inject_interrupt(
     vp_id: u32,
     vector: u8,
 ) -> HypercallResult {
+    serial_rtdbg!("[INJECT] vec={} vp={} handle={:#x}", vector, vp_id, child_domain_handle);
     if vector == 0 {
         return HypercallResult::error(errors::ERR_INVALID);
     }
