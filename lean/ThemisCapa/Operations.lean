@@ -51,11 +51,13 @@ structure AliasPre (caller : DomCap) (parent : MemCap) (access : Access) : Prop 
   notMeta          : parent.region.attributes.meta = false
   notFrozen        : parent.id.subHandle ∉ caller.frozenHandles
 
-structure AliasPost (access : Access) (child : MemCap) : Prop where
-  kindIsAlias     : child.region.kind = .alias
-  statusIsAliased : child.region.status = .aliased
-  accessMatches   : child.region.access = access
-  noChildren      : child.children = []
+structure AliasPost (parent : MemCap) (access : Access) (child : MemCap) : Prop where
+  kindIsAlias       : child.region.kind = .alias
+  statusIsAliased   : child.region.status = .aliased
+  accessMatches     : child.region.access = access
+  subHandleAssigned : child.id.subHandle = parent.nextChildSub
+  depthIncremented  : child.id.depth = parent.id.depth + 1
+  noChildren        : child.children = []
 
 -- ════════════════════════════════════════════════════════════════════
 -- § SEND — transfer memory capability between domains

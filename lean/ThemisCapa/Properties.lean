@@ -37,7 +37,7 @@ theorem carve_preserves_monotonicity
 theorem alias_preserves_monotonicity
     (caller : DomCap) (parent : MemCap) (access : Access) (child : MemCap)
     (hpre : AliasPre caller parent access)
-    (hpost : AliasPost access child) :
+    (hpost : AliasPost parent access child) :
     rightsMonotonic parent child := by
   unfold rightsMonotonic
   rw [hpost.accessMatches]
@@ -55,7 +55,9 @@ def carvedSiblingsDisjoint (cap : MemCap) : Prop :=
   ∀ c1 c2 : MemCap, c1 ∈ cap.carvedChildren → c2 ∈ cap.carvedChildren →
     c1 ≠ c2 → ¬ Access.overlaps c1.region.access c2.region.access
 
-/-- A carved child does not overlap any alias sibling. -/
+/-- A carved child does not overlap any alias sibling.
+    Note: NOT part of WellFormedTree — aliases intentionally share memory
+    with carves. Only enforced for alias parents (CarvePre.aliasNoOverlap). -/
 def carveAliasDisjoint (cap : MemCap) : Prop :=
   ∀ c ∈ cap.carvedChildren, ∀ a ∈ cap.aliasChildren,
     ¬ Access.overlaps c.region.access a.region.access
@@ -96,10 +98,35 @@ theorem carve_requires_authority
     caller.isSealed ∧ caller.policy.api.canCarve = true :=
   ⟨hpre.callerSealed, hpre.hasPermission⟩
 
+theorem alias_requires_authority
+    (caller : DomCap) (parent : MemCap) (access : Access)
+    (hpre : AliasPre caller parent access) :
+    caller.isSealed ∧ caller.policy.api.canAlias = true :=
+  ⟨hpre.callerSealed, hpre.hasPermission⟩
+
 theorem send_requires_authority
     (caller : DomCap) (cap : MemCap) (receiver : DomCap)
     (hpre : SendPre caller cap receiver) :
     caller.isSealed ∧ caller.policy.api.canSend = true :=
+  ⟨hpre.callerSealed, hpre.hasPermission⟩
+
+theorem revoke_requires_authority
+    (caller : DomCap) (parent : MemCap) (childSub : SubHandle)
+    (hpre : RevokePre caller parent childSub) :
+    caller.isSealed ∧ caller.policy.api.canRevoke = true :=
+  ⟨hpre.callerSealed, hpre.hasPermission⟩
+
+theorem create_requires_authority
+    (parent : DomCap) (policy : DomainPolicy)
+    (hpre : CreatePre parent policy) :
+    parent.isSealed ∧ parent.policy.api.canCreate = true :=
+  ⟨hpre.parentSealed, hpre.hasPermission⟩
+
+theorem switch_requires_authority
+    (caller target : DomCap) (coreId : CoreId) (targetVpId : VpId)
+    (callerVp targetVp : VProcessor)
+    (hpre : SwitchForwardPre caller target coreId targetVpId callerVp targetVp) :
+    caller.isSealed ∧ caller.policy.api.canSwitch = true :=
   ⟨hpre.callerSealed, hpre.hasPermission⟩
 
 -- ════════════════════════════════════════════════════════════════════
@@ -119,14 +146,38 @@ theorem revoke_is_complete
 -- § P6 — No Authority Amplification
 --
 -- Sending capability C to domain D gives D exactly the rights in C.
--- The receiver never gains more rights than the sender had.
+-- The mapping emitted uses the capability's rights, not more.
 -- ════════════════════════════════════════════════════════════════════
 
-theorem send_no_amplification
-    (cap : MemCap) :
-    -- The capability's rights do not change during send
-    cap.region.access.rights = cap.region.access.rights :=
-  rfl
+/-- Exclusive carve send: receiver's mapping uses exactly cap's rights. -/
+theorem send_no_amplification_carve
+    (cap : MemCap) (caller receiver caller' receiver' : DomCap)
+    (updates : UpdateBatch)
+    (hpost : SendPost cap caller receiver caller' receiver' updates)
+    (hcarve : cap.region.kind = .carve) (hexcl : cap.region.status = .exclusive) :
+    ∃ hpa, (HwUpdate.mapMemory receiver.domainId hpa hpa
+              cap.region.access.size cap.region.access.rights) ∈ updates :=
+  (hpost.carveExclusive hcarve hexcl).2
+
+/-- Alias send: receiver's mapping uses exactly cap's rights. -/
+theorem send_no_amplification_alias
+    (cap : MemCap) (caller receiver caller' receiver' : DomCap)
+    (updates : UpdateBatch)
+    (hpost : SendPost cap caller receiver caller' receiver' updates)
+    (halias : cap.region.kind = .alias) :
+    ∃ hpa, (HwUpdate.mapMemory receiver.domainId hpa hpa
+              cap.region.access.size cap.region.access.rights) ∈ updates :=
+  hpost.aliasSend halias
+
+/-- Exclusive carve send: caller's mapping is revoked. -/
+theorem send_revokes_caller
+    (cap : MemCap) (caller receiver caller' receiver' : DomCap)
+    (updates : UpdateBatch)
+    (hpost : SendPost cap caller receiver caller' receiver' updates)
+    (hcarve : cap.region.kind = .carve) (hexcl : cap.region.status = .exclusive) :
+    (HwUpdate.unmapMemory caller.domainId cap.region.access.start
+                         cap.region.access.size) ∈ updates :=
+  (hpost.carveExclusive hcarve hexcl).1
 
 -- ════════════════════════════════════════════════════════════════════
 -- § P7 — Sealed Domain Immutability
@@ -153,6 +204,36 @@ theorem create_policy_monotonic
     (hpre : CreatePre parent policy) :
     policy.cores ⊆ parent.policy.cores ∧ policy.api ≤ parent.policy.api :=
   ⟨hpre.coresMonotonic, hpre.apiMonotonic⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P3b — Confinement Theorems
+--
+-- Every derived capability has depth > 0 (was not created ex nihilo).
+-- This proves the `confinement` definition holds after each operation.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Carve always produces a derived capability (depth > 0). -/
+theorem carve_produces_derived
+    (parent : MemCap) (access : Access) (child : MemCap)
+    (hpost : CarvePost parent access child) :
+    child.id.depth > 0 := by
+  rw [hpost.depthIncremented]; omega
+
+/-- Alias always produces a derived capability (depth > 0). -/
+theorem alias_produces_derived
+    (parent : MemCap) (access : Access) (child : MemCap)
+    (hpost : AliasPost parent access child) :
+    child.id.depth > 0 := by
+  rw [hpost.depthIncremented]; omega
+
+/-- A newly created domain has no capabilities, so confinement holds vacuously. -/
+theorem create_confinement
+    (parent : DomCap) (newDom : DomCap) (newId : DomainId)
+    (updates : UpdateBatch)
+    (hpost : CreatePost parent newDom newId updates) :
+    confinement newDom := by
+  intro cap ⟨h, hlookup⟩
+  simp [DomCap.lookupMem, hpost.noMemCaps] at hlookup
 
 -- ════════════════════════════════════════════════════════════════════
 -- § Well-formedness of the CDT
@@ -210,6 +291,55 @@ theorem suspend_produces_reachable
   VpReachable.step _ _
     (lock_produces_reachable core ctx did vid)
     (VpTransition.suspendLocked did vid ctx vec)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P9f — VP Transition Exhaustiveness
+--
+-- Characterize the COMPLETE set of possible next states from each
+-- VP state. This proves that invalid transitions are impossible.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- From Available, the only transition leads to Running. -/
+theorem available_only_to_running :
+    ∀ s, VpTransition .available s → ∃ core ctx, s = .running core ctx := by
+  intro s h; cases h with
+  | claimVp core ctx => exact ⟨core, ctx, rfl⟩
+
+/-- From Running, transitions lead to Locked, Available, or Interrupted. -/
+theorem running_next_states :
+    ∀ s core ctx, VpTransition (.running core ctx) s →
+      (∃ did vid, s = .locked did vid ctx) ∨
+      s = .available ∨
+      (∃ vec, s = .interrupted vec) := by
+  intro s core ctx h
+  cases h with
+  | lockCaller _ _ did vid => exact Or.inl ⟨did, vid, rfl⟩
+  | releaseVp _ _ => exact Or.inr (Or.inl rfl)
+  | interruptLeaf _ _ vec => exact Or.inr (Or.inr ⟨vec, rfl⟩)
+
+/-- From Locked, transitions lead to Running or Suspended. -/
+theorem locked_next_states :
+    ∀ s did vid prevCtx, VpTransition (.locked did vid prevCtx) s →
+      (∃ core, s = .running core prevCtx) ∨
+      (∃ vec, s = .suspended did vid vec) := by
+  intro s did vid prevCtx h
+  cases h with
+  | unlockCaller _ _ _ core => exact Or.inl ⟨core, rfl⟩
+  | suspendLocked _ _ _ vec => exact Or.inr ⟨vec, rfl⟩
+
+/-- From Interrupted, the only transition leads to Available. -/
+theorem interrupted_only_to_available :
+    ∀ s vec, VpTransition (.interrupted vec) s → s = .available := by
+  intro s vec h; cases h with
+  | clearInterrupted _ => rfl
+
+/-- From Suspended, the only transition leads to Running. -/
+theorem suspended_only_to_running :
+    ∀ s did vid vec, VpTransition (.suspended did vid vec) s →
+      ∃ core ctx, s = .running core ctx := by
+  intro s did vid vec h
+  cases h with
+  | resumeSuspended _ _ _ core ctx => exact ⟨core, ctx, rfl⟩
 
 -- ════════════════════════════════════════════════════════════════════
 -- § P10 — Switch Symmetry
@@ -453,7 +583,7 @@ structure ParentAfterAlias (parent parent' : MemCap) (child : MemCap) : Prop whe
 theorem alias_preserves_wellformed
     (caller : DomCap) (parent parent' : MemCap) (access : Access) (child : MemCap)
     (hpre : AliasPre caller parent access)
-    (hpost : AliasPost access child)
+    (hpost : AliasPost parent access child)
     (hwf : WellFormedTree parent)
     (hupd : ParentAfterAlias parent parent' child) :
     WellFormedTree parent' := by
