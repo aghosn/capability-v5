@@ -11,7 +11,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 |----------|---------|-------|---|
 | Core operations (carve, alias, send, revoke, create, seal) | 6 | 6 | 100% |
 | Extended operations (switch, deliver_interrupt, accept, reject, revoke_domain) | 7 | 14 | 50% |
-| Safety properties proved | 20 | 20 | 100% |
+| Safety properties proved | 33 | 33 | 100% |
 | Update (HwUpdate) variants | 7 | 9 | 78% |
 | VpRunState transitions | 8 | 8 | 100% |
 
@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 27 properties have complete proofs (no `sorry`).
+All 33 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -134,15 +134,9 @@ All 27 properties have complete proofs (no `sorry`).
 | P6 | No authority amplification | `send_no_amplification` | ✅ Proved |
 | P7 | Sealed domain immutability | `seal_freezes_policy` | ✅ Proved |
 | P8 | Policy monotonicity | `create_policy_monotonic` | ✅ Proved |
-| P9a | Available is reachable | `available_is_reachable` | ✅ Proved |
-| P9b | Running is reachable | `switch_forward_produces_reachable` | ✅ Proved |
-| P9c | Locked is reachable | `lock_produces_reachable` | ✅ Proved |
-| P9d | Interrupted is reachable | `interrupt_produces_reachable` | ✅ Proved |
-| P9e | Suspended is reachable | `suspend_produces_reachable` | ✅ Proved |
-| P10a | Forward switch not return | `switch_forward_not_return` | ✅ Proved |
-| P10b | Return switch is return | `switch_return_is_return` | ✅ Proved |
-| P11a | Accept unfreezes sender | `accept_unfreezes_sender` | ✅ Proved |
-| P11b | Reject unfreezes sender | `reject_unfreezes_sender` | ✅ Proved |
+| P9a–e | VP state reachability | `available_is_reachable` ... `suspend_produces_reachable` | ✅ Proved |
+| P10a–b | Switch symmetry | `switch_forward_not_return`, `switch_return_is_return` | ✅ Proved |
+| P11a–b | Accept/reject unfreeze | `accept_unfreezes_sender`, `reject_unfreezes_sender` | ✅ Proved |
 | P12 | Interrupt preserves chain | `interrupt_preserves_chain` | ✅ Proved |
 | — | Overlaps symmetry | `overlaps_comm` | ✅ Proved |
 | P13 | Rights subset transitivity | `rights_subset_trans` | ✅ Proved |
@@ -150,15 +144,18 @@ All 27 properties have complete proofs (no `sorry`).
 | P15 | Multi-level monotonicity | `two_level_monotonicity` | ✅ Proved |
 | P16 | Multi-level containment | `two_level_containment` | ✅ Proved |
 | P17 | Carve preserves WellFormedTree | `carve_preserves_wellformed` | ✅ Proved |
+| P18 | Contained disjointness | `contained_disjoint` | ✅ Proved |
+| P19 | Alias preserves WellFormedTree | `alias_preserves_wellformed` | ✅ Proved |
+| P20 | Revoke preserves WellFormedTree | `revoke_preserves_wellformed` | ✅ Proved |
+| P21 | Address space isolation | `subtree_isolation`, `descendant_isolation` | ✅ Proved |
 
 ### Properties not yet stated
 
 | Property | Description | Difficulty |
 |----------|-------------|------------|
-| Alias preserves WellFormedTree | Same as P17 but for alias operations | Medium |
-| Revoke preserves WellFormedTree | Removing a child preserves CDT invariants | Medium |
-| Address space isolation | Two sealed domains with disjoint trees have disjoint EPTs | Medium |
 | No capability forgery | Impossible to hold capability without derivation chain | Medium |
+| Send preserves WellFormedTree | Transferring a cap between domains preserves CDT | Medium |
+| Execute protocol correctness | `execute()` lock protocol maintains consistency | Hard |
 
 ---
 
@@ -199,8 +196,10 @@ These are entire subsystems not yet modelled in Lean:
 - ✅ Proved Access containment transitivity (P14)
 - ✅ Proved multi-level monotonicity (P15) and containment (P16)
 - ✅ Proved `carve_preserves_wellformed` — main CDT preservation theorem (P17)
+- ✅ Proved `contained_disjoint` — key isolation lemma (P18)
+- ✅ Proved `alias_preserves_wellformed` (P19) and `revoke_preserves_wellformed` (P20)
+- ✅ Proved `subtree_isolation` + `descendant_isolation` — address space isolation (P21)
 - ✅ Fixed WellFormedTree: removed incorrect carveAlias (aliases may overlap carves)
-- ✅ Added `overlaps_comm` helper and `ParentAfterCarve` structure
 
 ### Phase 3 — Extensions
 - Model COMM page lifecycle (register_comm, add_vp)
