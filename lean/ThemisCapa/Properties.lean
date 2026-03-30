@@ -688,4 +688,102 @@ theorem descendant_isolation
     (hwf1.childrenContained d1 hd1)
     (hwf2.childrenContained d2 hd2)
 
+-- ════════════════════════════════════════════════════════════════════
+-- § Reflexivity Helpers
+-- ════════════════════════════════════════════════════════════════════
+
+theorem Rights.subset_refl (a : Rights) : a ≤ a :=
+  ⟨id, id, id⟩
+
+theorem Access.contained_refl (a : Access) : a.contained a := by
+  unfold Access.contained Access.«end»
+  exact ⟨Nat.le_refl _, Nat.le_refl _, Rights.subset_refl _⟩
+
+-- ════════════════════════════════════════════════════════════════════
+-- § WellFormedChain — N-level CDT reasoning
+--
+-- A chain of well-formed ancestors from root to descendant. Each
+-- step requires the parent to be well-formed, enabling inductive
+-- proofs over arbitrary CDT depth.
+-- ════════════════════════════════════════════════════════════════════
+
+/-- A chain of well-formed ancestors from root to descendant.
+    Each step requires the parent node to be well-formed. -/
+inductive WellFormedChain : MemCap → MemCap → Prop where
+  | refl : WellFormedChain cap cap
+  | step : ∀ parent child rest,
+      WellFormedTree parent →
+      child ∈ parent.children →
+      WellFormedChain child rest →
+      WellFormedChain parent rest
+
+/-- Chains compose: if root→mid and mid→desc, then root→desc. -/
+theorem WellFormedChain.append
+    {root mid desc : MemCap}
+    (h1 : WellFormedChain root mid)
+    (h2 : WellFormedChain mid desc) :
+    WellFormedChain root desc := by
+  induction h1 with
+  | refl => exact h2
+  | step parent child rest hwf hmem _hrest ih =>
+    exact .step parent child desc hwf hmem (ih h2)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P22 — N-level Rights Monotonicity
+--
+-- Rights never increase along ANY well-formed chain in the CDT,
+-- regardless of depth. Generalizes P15 from 2-level to N-level.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem chain_rights_monotonic
+    (root desc : MemCap)
+    (hchain : WellFormedChain root desc) :
+    rightsMonotonic root desc := by
+  induction hchain with
+  | refl => unfold rightsMonotonic; exact Rights.subset_refl _
+  | step parent child rest hwf hmem _hrest ih =>
+    have hpc := hwf.monotonic child hmem
+    unfold rightsMonotonic at *
+    exact rights_subset_trans ih hpc
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P23 — N-level Containment
+--
+-- Descendants are always contained within their root ancestor's
+-- access range, regardless of depth.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem chain_containment
+    (root desc : MemCap)
+    (hchain : WellFormedChain root desc) :
+    desc.region.access.contained root.region.access := by
+  induction hchain with
+  | refl => exact Access.contained_refl _
+  | step parent child rest hwf hmem _hrest ih =>
+    exact access_contained_trans ih (hwf.childrenContained child hmem)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § P24 — Deep Isolation (N-level Address Space Isolation)
+--
+-- The crown jewel: descendants at ANY depth in disjoint carved
+-- subtrees are disjoint. If two domains derive their memory
+-- capabilities from different carved branches of the CDT, their
+-- physical memory views cannot overlap — no matter how many
+-- carve/alias operations were performed in between.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem deep_isolation
+    (parent c1 c2 d1 d2 : MemCap)
+    (hwf : WellFormedTree parent)
+    (hc1 : c1 ∈ parent.carvedChildren)
+    (hc2 : c2 ∈ parent.carvedChildren)
+    (hne : c1 ≠ c2)
+    (hchain1 : WellFormedChain c1 d1)
+    (hchain2 : WellFormedChain c2 d2) :
+    ¬ Access.overlaps d1.region.access d2.region.access :=
+  contained_disjoint
+    (hwf.carvedDisjoint c1 c2 hc1 hc2 hne)
+    (chain_containment c1 d1 hchain1)
+    (chain_containment c2 d2 hchain2)
+
 end ThemisCapa

@@ -11,7 +11,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 |----------|---------|-------|---|
 | Core operations (carve, alias, send, revoke, create, seal) | 6 | 6 | 100% |
 | Extended operations (switch, deliver_interrupt, accept, reject, revoke_domain) | 7 | 14 | 50% |
-| Safety properties proved | 47 | 47 | 100% |
+| Safety properties proved | 53 | 53 | 100% |
 | Update (HwUpdate) variants | 7 | 9 | 78% |
 | VpRunState transitions | 8 | 8 | 100% |
 
@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 47 properties have complete proofs (no `sorry`).
+All 53 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -150,6 +150,12 @@ All 47 properties have complete proofs (no `sorry`).
 | P19 | Alias preserves WellFormedTree | `alias_preserves_wellformed` | ✅ Proved |
 | P20 | Revoke preserves WellFormedTree | `revoke_preserves_wellformed` | ✅ Proved |
 | P21 | Address space isolation | `subtree_isolation`, `descendant_isolation` | ✅ Proved |
+| — | Rights subset reflexivity | `Rights.subset_refl` | ✅ Proved |
+| — | Access contained reflexivity | `Access.contained_refl` | ✅ Proved |
+| — | WellFormedChain composition | `WellFormedChain.append` | ✅ Proved |
+| P22 | N-level rights monotonicity | `chain_rights_monotonic` | ✅ Proved |
+| P23 | N-level containment | `chain_containment` | ✅ Proved |
+| P24 | Deep isolation (N-level) | `deep_isolation` | ✅ Proved |
 
 ### Known gaps and weaknesses in existing proofs
 
@@ -165,7 +171,7 @@ All 47 properties have complete proofs (no `sorry`).
 | Property | Description | Difficulty |
 |----------|-------------|------------|
 | Send preserves WellFormedTree | Transferring a cap between domains preserves CDT | Medium |
-| N-level monotonicity | Generalise P15–P16 to arbitrary depth via induction | Medium |
+| ~~N-level monotonicity~~ | ~~Generalise P15–P16 to arbitrary depth via induction~~ | ✅ Done (P22–P24) |
 | Switch state restoration | Forward + return restores original VP state (not just flag) | Medium |
 | Domain revocation cascade | Connect RevokeDomainPost to SubtreeRevoked | Hard |
 | Global system invariant | SystemState invariant preserved across all operations | Hard |
