@@ -797,8 +797,9 @@ fn do_switch(
     // ── 7b. PIR → VMENTRY_INTR_INFO drain (no-hardware-PID fallback) ──
     // When PROCESS_POSTED_INTERRUPTS is not supported by hardware, the processor
     // ignores the PID page on VMENTRY.  inject_via_pid() still writes PIR bits
-    // as a software queue.  Drain one pending vector here and inject it via
-    // VMENTRY_INTR_INFO so the child receives it on this VMENTRY.
+    // as a software queue.  We atomically snapshot-and-clear ALL PIR words,
+    // inject the LOWEST pending vector (device interrupts before timer) via
+    // VMENTRY_INTR_INFO, and put remaining vectors back in PIR for next switch.
     {
         use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
         use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -808,46 +809,58 @@ fn do_switch(
             if pid_phys != 0 {
                 let hhdm = platform.hhdm_offset();
                 let pir_base = (pid_phys + hhdm) as *const AtomicU64;
-                // Scan PIR words 0–3 (256 bits) for the highest pending vector.
-                let mut found: Option<u8> = None;
-                for i in (0..4usize).rev() {
-                    let word = unsafe { (*pir_base.add(i)).load(Ordering::Acquire) };
-                    if word != 0 {
-                        let bit = 63 - word.leading_zeros();
-                        let vector = (i * 64 + bit as usize) as u8;
-                        // Atomically clear this PIR bit before injection.
-                        unsafe {
-                            (*pir_base.add(i)).fetch_and(!(1u64 << bit), Ordering::AcqRel)
-                        };
-                        found = Some(vector);
-                        break;
-                    }
+
+                // Atomically swap out all PIR words to get a consistent snapshot.
+                let mut pir_snapshot = [0u64; 4];
+                let mut any_set = false;
+                for i in 0..4 {
+                    pir_snapshot[i] = unsafe {
+                        (*pir_base.add(i)).swap(0, Ordering::AcqRel)
+                    };
+                    if pir_snapshot[i] != 0 { any_set = true; }
                 }
-                // Clear the ON (Outstanding Notification) bit regardless.
+
+                // Clear the ON (Outstanding Notification) bit.
                 let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
                 unsafe { (*on_ptr).store(0, Ordering::Release) };
-                if let Some(vector) = found {
-                    // Check guest can accept external interrupts before injection.
+
+                if any_set {
                     let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
                     let interruptibility =
                         child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
                     let if_set = rflags & (1 << 9) != 0;
                     let sti_mov_ss_block = interruptibility & 0x3 != 0;
+
                     if if_set && !sti_mov_ss_block {
-                        serial_rtdbg!("[PIR] inject vec={} IF=1", vector);
-                        // Inject as External Interrupt (type=0), valid (bit 31).
-                        let intr_info = (1u64 << 31) | (vector as u64);
-                        child_active.set(
-                            x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                            intr_info,
-                        );
-                    } else {
-                        serial_rtdbg!("[PIR] vec={} deferred IF={} block={:#x}", vector, if_set, interruptibility);
-                        // Guest not ready — put the PIR bit back for next try.
-                        unsafe {
-                            (*pir_base.add(vector as usize / 64))
-                                .fetch_or(1u64 << (vector as usize % 64), Ordering::AcqRel)
-                        };
+                        // Guest can accept interrupts — find the LOWEST pending
+                        // vector to prioritize device interrupts over timer.
+                        let mut inject_vec: Option<u8> = None;
+                        for i in 0..4usize {
+                            if pir_snapshot[i] != 0 {
+                                let bit = pir_snapshot[i].trailing_zeros();
+                                inject_vec = Some((i * 64 + bit as usize) as u8);
+                                // Clear this bit from the snapshot.
+                                pir_snapshot[i] &= !(1u64 << bit);
+                                break;
+                            }
+                        }
+
+                        if let Some(vector) = inject_vec {
+                            let intr_info = (1u64 << 31) | (vector as u64);
+                            child_active.set(
+                                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                                intr_info,
+                            );
+                        }
+                    }
+
+                    // Put remaining (un-injected) vectors back in PIR for next switch.
+                    for i in 0..4usize {
+                        if pir_snapshot[i] != 0 {
+                            unsafe {
+                                (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel)
+                            };
+                        }
                     }
                 }
             }

@@ -36,9 +36,9 @@ return;
 
 ret = themis_inject_interrupt(entry->partition->domain_handle,
       entry->vp_index, (u8)entry->vector);
-if (ret && ret != -ENOSYS)
-pr_warn_ratelimited("thhv: irqfd inject failed gsi=%u vec=%u vp=%u: %d\n",
-    entry->gsi, entry->vector, entry->vp_index, ret);
+if (ret)
+pr_warn("thhv: irqfd inject ret=%d gsi=%u vec=%u vp=%u\n",
+    ret, entry->gsi, entry->vector, entry->vp_index);
 
 /* Wake the target VP if it is blocked in HLT. */
 thhv_wake_vp(entry->partition, entry->vp_index);
@@ -53,8 +53,9 @@ struct thhv_irqfd_entry *entry =
 container_of(wait, struct thhv_irqfd_entry, wait);
 __poll_t flags = (__poll_t)(unsigned long)key;
 
-if ((flags & EPOLLIN) && !READ_ONCE(entry->deassign))
+if ((flags & EPOLLIN) && !READ_ONCE(entry->deassign)) {
 schedule_work(&entry->work);
+}
 
 return 0;
 }
