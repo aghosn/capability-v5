@@ -6,7 +6,7 @@
 
 ---
 
-## Current State (2026-03-27, 20:00 UTC)
+## Current State (2026-03-30, 13:30 UTC)
 
 ### What works
 
@@ -14,22 +14,27 @@
   Dom0 no longer freezes when CHV starts dom1 (was: VMCS control violation → halt_forever).
 - **Dom1 (1 CPU, remote)**: boots, reaches virtio_blk probe. SWITCH hypercall succeeds,
   dom1 kernel initializes (PCI, FPU, memory). Posted interrupts enabled on remote machine.
+- **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
+  N-level isolation, execute protocol, global system invariant, deep revocation cascade.
 
 ### What doesn't work
 
 - **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
   See "The Problem" below.
+- **Dom1 virtio_blk**: disk I/O never completes (zero INJECT_INTERRUPT VMCALLs observed).
 
 ### Recent commits
 
-- `7f86f38` — **capavisor: clean up debug instrumentation** — removed all debug prints
-  (VMEXIT counter, DOM0-VMCALL/HLT, HC per-call, VMCS dump). RUNTIME_DEBUG=false.
-- `74a6157` — ⚠️ **fix VMCS control violation + debug instrumentation** —
-  fixed VIRTUALIZE_APIC_ACCESSES set alongside VIRTUALIZE_X2APIC for child VPs
-  (Intel SDM 26.2.1.1 violation → VM_INSTRUCTION_ERROR=7 → halt_forever → dom0 freeze).
-  Added usleep_range in thhv EAGAIN loop. Added toggle-debug tool.
-- `c2820b5` — **refactor: clean up interrupt handling** — removed all ad-hoc interrupt
-  mechanisms. Integrated SwitchManager into ThemisPlatform. Net -191 lines.
+- `69727ab` — **lean: execute protocol model** — A1, lock hierarchy, atomicity, non-destructive ops
+- `2fbe176` — **lean: SystemInvariant + master isolation + CDT frame rule**
+- `3b1e348` — **lean: GloballyWellFormed + deep revocation cascade**
+- `c87ed0c` — **lean: send preservation, switch round-trip, chain extension**
+- `eed6593` — **lean: N-level inductive proofs (WellFormedChain, P22-P24)**
+- `7a22185` — **lean: fix proof gaps G1-G4, VP exhaustiveness + confinement**
+- `025286e` — **lean: Phase 2b — alias/revoke preservation + address space isolation**
+- `4198bdb` — **lean: Phase 2 — CDT preservation, transitivity**
+- `1893712` — **lean: Phase 1 — VP transitions, interrupts, accept/reject**
+- `7f86f38` — **capavisor: clean up debug instrumentation**
 
 ### Uncommitted changes (on top of 7f86f38)
 
@@ -153,6 +158,20 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 - [x] Added toggle-debug tool for runtime VMCALL testing
 - [x] Added usleep_range(50,100) to thhv VP retry loop (prevents tight spin)
 - [x] Cleaned debug instrumentation into separate commit
+
+### Done: Lean 4 formal specification (83 theorems, 0 sorry)
+
+- [x] Phase 1: Core operation specs (carve, alias, send, revoke, create, seal, switch, accept, reject, interrupt)
+- [x] Phase 1: VP transitions (all 8) + reachability + exhaustiveness (12 theorems)
+- [x] Phase 2: CDT preservation — carve/alias/revoke/send preserve WellFormedTree
+- [x] Phase 2: Transitivity, multi-level monotonicity, containment, address space isolation
+- [x] Phase 3: Fix proof gaps G1-G4, add confinement theorems
+- [x] Phase 3: N-level inductive proofs (WellFormedChain, deep isolation)
+- [x] Phase 4: GloballyWellFormed + deep revocation cascade (FullDomainRevocation)
+- [x] Phase 4: SystemInvariant (CDT, CoreExclusive, UniqueIds, PolicyMonotonic)
+- [x] Phase 4: Master system isolation theorem
+- [x] Phase 4: Execute protocol model (7 phases, lock hierarchy, A1, non-destructive ops)
+- [x] CDT frame rule: create/seal/revoke_domain preserve CdtWellFormed
 
 ### Next: Debug virtio_blk hang (interrupt delivery)
 

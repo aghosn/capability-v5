@@ -230,13 +230,14 @@ All 83 properties have complete proofs (no `sorry`).
 
 These are entire subsystems not yet modelled in Lean:
 
-1. **Execution model (`execute()`)** — the lock-acquire → mutate → apply-updates
-   protocol. Important for proving that hardware state always reflects capability
-   state (A1 invariant).
+1. ~~**Execution model (`execute()`)**~~ — ✅ Modelled (ExecutePhase, LockLevel,
+   ValidExecute). Phase ordering proves A1. Lock hierarchy proves deadlock-freedom.
+   Non-destructive operation classification justifies shared/exclusive lock discipline.
 
-2. **Concurrency** — shared vs exclusive lock semantics, cross-core IPI + barrier
-   protocol. The Rust code uses `loom` for exhaustive testing; the Lean spec
-   currently assumes sequential execution.
+2. **Concurrency** — shared vs exclusive lock semantics beyond the sequential model.
+   Cross-core IPI + barrier protocol. The Rust code uses `loom` for exhaustive testing;
+   the Lean spec currently assumes sequential execution. Full linearizability proof would
+   require a concurrency framework (e.g., Iris-style).
 
 3. **Address translation** — `send_at`/`accept_at` GPA hints, view computation,
    and the `AddressSpaceView` diff mechanism. Important for proving EPT correctness.
