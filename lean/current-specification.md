@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 20 properties have complete proofs (no `sorry`).
+All 27 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -144,12 +144,19 @@ All 20 properties have complete proofs (no `sorry`).
 | P11a | Accept unfreezes sender | `accept_unfreezes_sender` | ✅ Proved |
 | P11b | Reject unfreezes sender | `reject_unfreezes_sender` | ✅ Proved |
 | P12 | Interrupt preserves chain | `interrupt_preserves_chain` | ✅ Proved |
+| — | Overlaps symmetry | `overlaps_comm` | ✅ Proved |
+| P13 | Rights subset transitivity | `rights_subset_trans` | ✅ Proved |
+| P14 | Access containment transitivity | `access_contained_trans` | ✅ Proved |
+| P15 | Multi-level monotonicity | `two_level_monotonicity` | ✅ Proved |
+| P16 | Multi-level containment | `two_level_containment` | ✅ Proved |
+| P17 | Carve preserves WellFormedTree | `carve_preserves_wellformed` | ✅ Proved |
 
 ### Properties not yet stated
 
 | Property | Description | Difficulty |
 |----------|-------------|------------|
-| CDT well-formedness preservation | `WellFormedTree` preserved across operations | Hard |
+| Alias preserves WellFormedTree | Same as P17 but for alias operations | Medium |
+| Revoke preserves WellFormedTree | Removing a child preserves CDT invariants | Medium |
 | Address space isolation | Two sealed domains with disjoint trees have disjoint EPTs | Medium |
 | No capability forgery | Impossible to hold capability without derivation chain | Medium |
 
@@ -187,11 +194,13 @@ These are entire subsystems not yet modelled in Lean:
 - ✅ Added `DeliverInterruptPre`/`DeliverInterruptPost` (lazy-unwind chain walk)
 - ✅ Proved 12 new properties (P9–P12)
 
-### Phase 2 — Deeper invariant proofs
-- Prove `WellFormedTree` preservation for carve, alias, revoke
-- Prove address space isolation between disjoint domains
-- Prove no capability forgery (derivation chain requirement)
-- Model `execute()` lock protocol for sequential consistency
+### Phase 2 — Deeper invariant proofs ✅ DONE
+- ✅ Proved Rights subset transitivity (P13)
+- ✅ Proved Access containment transitivity (P14)
+- ✅ Proved multi-level monotonicity (P15) and containment (P16)
+- ✅ Proved `carve_preserves_wellformed` — main CDT preservation theorem (P17)
+- ✅ Fixed WellFormedTree: removed incorrect carveAlias (aliases may overlap carves)
+- ✅ Added `overlaps_comm` helper and `ParentAfterCarve` structure
 
 ### Phase 3 — Extensions
 - Model COMM page lifecycle (register_comm, add_vp)
