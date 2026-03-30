@@ -6,50 +6,34 @@
 
 ---
 
-## Current State (2026-03-30, 13:30 UTC)
+## Current State (2026-03-31)
 
 ### What works
 
 - **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-101-generic. Stable.
-  Dom0 no longer freezes when CHV starts dom1 (was: VMCS control violation → halt_forever).
-- **Dom1 (1 CPU, remote)**: boots, reaches virtio_blk probe. SWITCH hypercall succeeds,
-  dom1 kernel initializes (PCI, FPU, memory). Posted interrupts enabled on remote machine.
+- **Dom1 (1 CPU, local QEMU)**: **fully boots to multi-user target in ~37s guest time**.
+  Disk I/O works (virtio-blk: partition table read, ext4 mount, fsck).
+  Network works (virtio-net renamed to ens5). All systemd services start.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
   N-level isolation, execute protocol, global system invariant, deep revocation cascade.
 
 ### What doesn't work
 
 - **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
-  See "The Problem" below.
-- **Dom1 virtio_blk**: disk I/O never completes (zero INJECT_INTERRUPT VMCALLs observed).
+  This is a nested-virtualization scheduling artifact. See "Nested-virt scheduling" below.
+- **Dom1 on real hardware**: not yet tested with the PIR drain fix.
 
 ### Recent commits
 
+- `50ae665` — **fix: PIR drain low→high scan eliminates device interrupt starvation**
 - `289d746` — **capavisor: fix PIR ON bit bug + add virtio pipeline instrumentation**
 - `d508c22` — **capavisor: fix VPID double-increment for child VMs**
 - `69727ab` — **lean: execute protocol model** — A1, lock hierarchy, atomicity, non-destructive ops
-- `2fbe176` — **lean: SystemInvariant + master isolation + CDT frame rule**
-- `3b1e348` — **lean: GloballyWellFormed + deep revocation cascade**
-- `c87ed0c` — **lean: send preservation, switch round-trip, chain extension**
-- `eed6593` — **lean: N-level inductive proofs (WellFormedChain, P22-P24)**
-- `7a22185` — **lean: fix proof gaps G1-G4, VP exhaustiveness + confinement**
-- `025286e` — **lean: Phase 2b — alias/revoke preservation + address space isolation**
-- `4198bdb` — **lean: Phase 2 — CDT preservation, transitivity**
-- `1893712` — **lean: Phase 1 — VP transitions, interrupts, accept/reject**
 - `7f86f38` — **capavisor: clean up debug instrumentation**
 
-### Uncommitted changes (on top of 7f86f38)
+### Uncommitted changes
 
-- `thhv/inc/thhv.h` — `struct thhv_irqfd` added `vp_index` + `rsvd` fields; THEMIS_OP_TOGGLE_DEBUG
-- `thhv/src/thhv_irqfd.c` — per-VP irqfd targeting using `entry->vp_index`
-- `thhv/src/thhv_vp.c` — wait-for-SIPI, usleep_range in retry loop, domcomm drain
-- `thhv/src/thhv_ioeventfd.c` — doorbell prints demoted to pr_debug
-- `thhv/src/thhv_part.c` — minor additions
-- `themis/crates/themis-abi/src/lib.rs` — THEMIS_TOGGLE_DEBUG constant
-- `tools/toggle-debug.c` — standalone VMCALL test tool (new)
-- `tools/toggle-debug` — compiled binary (new)
-
-CHV submodule also has per-VP irqfd changes (not shown in diff).
+None — all changes committed.
 
 ---
 
@@ -175,63 +159,26 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 - [x] Phase 4: Execute protocol model (7 phases, lock hierarchy, A1, non-destructive ops)
 - [x] CDT frame rule: create/seal/revoke_domain preserve CdtWellFormed
 
-### Next: Debug virtio_blk hang (interrupt delivery)
+### Done: Virtio_blk interrupt starvation fix (commit 50ae665)
 
-Dom1 reaches virtio_blk probe but first disk I/O never completes. Root cause: zero
-INJECT_INTERRUPT (op=0x1b) VMCALLs observed. CHV is not injecting interrupts to dom1.
+- [x] Root cause: PIR drain in do_switch scanned high→low (word 3→0), always finding
+  timer (vec=236) before device interrupts (vec 32-36). Only one vector per VMENTRY.
+- [x] Fix: scan low→high (word 0→3) with snapshot-and-restore. Device interrupts
+  injected before timer. Un-injected vectors put back in PIR for next switch.
+- [x] Result: dom1 boots to multi-user in ~37s guest time. Disk I/O, networking,
+  all systemd services work.
+- [x] Debug traces removed (INJECT-PID, INJECT-VERIFY, PIR-INJECT, thhv pr_info)
 
-#### Bugs found this session
+#### Bugs fixed during this investigation
 
-- **PIR ON bit bug (FIXED in 289d746)**: `inject_via_pid(is_remote=false)` set PIR[vector]
-  but NOT PID.ON. Per SDM §29.6, hardware only processes PIR→vIRR on VMENTRY when ON=1.
-  Both `do_inject_interrupt` and `forward_interrupt_to_handler` with Deliver visibility
-  were affected. Interrupts were silently lost when posted interrupts were enabled.
+- **PIR ON bit bug (289d746)**: `inject_via_pid(is_remote=false)` set PIR[vector]
+  but NOT PID.ON. Fixed to always set ON.
+- **PIR drain starvation (50ae665)**: High→low scan order caused device interrupts
+  to be permanently starved by timer interrupts.
+- **vIRR merge approach (attempted, reverted)**: Merging PIR→vIRR doesn't work
+  without VIRTUAL_INTERRUPT_DELIVERY (secondary proc-based bit 9).
 
-- **Potential GSI→vector ordering issue (SUSPECTED)**: CHV's `register_irqfd` resolves
-  GSI→vector via `gsi_vectors` map at registration time. If `set_gsi_routing` hasn't been
-  called yet, vector=0. thhv falls back to `args.gsi` as vector (line 109 of thhv_irqfd.c),
-  which may not match the actual MSI-X vector the guest expects. Need to verify ordering
-  in CHV logs: `[THEMIS-DBG] register_irqfd gsi=N vec=V` vs `gsi_routing` output.
-
-#### Instrumentation added (289d746)
-
-Capavisor `serial_rtdbg!` traces (enabled by toggle-debug tool at /tmp/toggle-debug):
-- `[INJECT] vec=V vp=N handle=H` — every INJECT_INTERRUPT VMCALL
-- `[DOORBELL] EPT gpa=G sz=S val=V #db=N` — every doorbell-candidate EPT violation
-- `[DOORBELL] match db_id=I → parent enq=E` — successful doorbell notification
-- `[DOORBELL] no match gpa=G` — EPT write that didn't match any doorbell
-- `[REG_DB] id=I gpa=G sz=S flags=F` — each doorbell registration
-
-CHV already has `eprintln` for `register_irqfd` and `set_gsi_routing` (no code change needed).
-
-#### Pipeline analysis (complete)
-
-```
-Guest writes kick → EPT violation → doorbell fast-path → DoorbellNotify → DomainComm RX
-  → thhv drains → eventfd_signal() → CHV wakes → disk I/O → IRQFD eventfd
-    → thhv_irqfd_inject() → INJECT_INTERRUPT VMCALL → inject_via_pid() → PIR[V]
-      → VMENTRY ON=1 → PIR→vIRR → guest sees interrupt → I/O completes
-```
-
-Full pipeline is wired end-to-end. Doorbell fast-path, DomainComm, eventfd, irqfd all
-confirmed in code review. The break is somewhere between steps 1-5 (before INJECT_INTERRUPT).
-
-#### Debugging plan (requires remote machine)
-
-1. Boot with RUNTIME_DEBUG enabled, observe [REG_DB], [DOORBELL], [INJECT] traces
-2. Check CHV stderr for `register_irqfd` ordering vs `gsi_routing`
-3. Enable thhv dynamic debug: `echo module thhv +p > /sys/kernel/debug/dynamic_debug/control`
-4. If no [DOORBELL] traces: doorbell not registered or EPT not matching
-5. If [DOORBELL] but no [INJECT]: domcomm ring or eventfd/irqfd issue
-6. If [INJECT] seen: PIR ON fix should now deliver the interrupt
-
-Investigation steps:
-- [x] **V5**: PIR ON bit bug — FIXED in 289d746
-- [ ] **V1**: Add `no-posted-interrupts` feature flag to capavisor. When set, disable posted
-  interrupts in VMCS pin-based controls and use the software injection fallback path.
-- [ ] **V2**: Enable thhv dynamic debug and check whether CHV calls INJECT_INTERRUPT ioctl.
-- [ ] **V3**: Instrument the irqfd path in thhv (thhv_irqfd.c) to trace eventfd-to-VMCALL flow.
-- [ ] **V4**: Instrument CHV's Themis backend to trace interrupt injection attempts.
+### Next: Debug virtio_blk on real hardware + multi-CPU
 
 ### Nested-virt scheduling (parked, lower priority)
 
