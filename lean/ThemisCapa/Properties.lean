@@ -1019,4 +1019,122 @@ theorem full_revocation_confinement
   intro cap ⟨h, hlookup⟩
   simp [DomCap.lookupMem, hfull.postNoCaps] at hlookup
 
+-- ════════════════════════════════════════════════════════════════════
+-- § System Invariant — Global consistency of the capability system
+--
+-- The complete invariant that must hold across the entire Themis
+-- system. Composed of four independent components:
+-- 1. CDT well-formedness at every level
+-- 2. Core exclusivity (at most one VP per core)
+-- 3. Domain ID uniqueness
+-- 4. Policy monotonicity (child ≤ parent)
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Every memory capability root in every domain is globally well-formed. -/
+def CdtWellFormed (s : SystemState) : Prop :=
+  ∀ d ∈ s.domains, ∀ p ∈ d.memCaps, GloballyWellFormed p.2
+
+/-- At most one VP is Running on each physical core. -/
+def CoreExclusive (s : SystemState) : Prop :=
+  ∀ d1 ∈ s.domains, ∀ d2 ∈ s.domains,
+    ∀ vp1 ∈ d1.vps, ∀ vp2 ∈ d2.vps,
+      ∀ core ctx1 ctx2,
+        vp1.runState = .running core ctx1 →
+        vp2.runState = .running core ctx2 →
+        d1.domainId = d2.domainId ∧ vp1.id = vp2.id
+
+/-- Domain IDs are unique within the system. -/
+def UniqueIds (s : SystemState) : Prop :=
+  ∀ d1 ∈ s.domains, ∀ d2 ∈ s.domains,
+    d1.domainId = d2.domainId → d1 = d2
+
+/-- Child domain policies never exceed parent policies. -/
+def PolicyMonotonic (s : SystemState) : Prop :=
+  ∀ d ∈ s.domains, ∀ child ∈ d.children,
+    child.policy.api ≤ d.policy.api ∧
+    child.policy.cores ⊆ d.policy.cores
+
+/-- The complete system invariant. -/
+structure SystemInvariant (s : SystemState) : Prop where
+  cdtWellFormed   : CdtWellFormed s
+  coreExclusive   : CoreExclusive s
+  uniqueIds       : UniqueIds s
+  policyMonotonic : PolicyMonotonic s
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Master Isolation Theorem
+--
+-- In a system satisfying the invariant, any two memory regions
+-- that descend from different carved branches of ANY common
+-- ancestor in ANY domain are physically disjoint. This holds
+-- regardless of which domains ultimately own the capabilities.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem system_isolation
+    (s : SystemState) (hinv : SystemInvariant s)
+    (d : DomCap) (hd : d ∈ s.domains)
+    (cap : LocalHandle × MemCap) (hcap : cap ∈ d.memCaps)
+    (ancestor c1 c2 d1 d2 : MemCap)
+    (hreach : WellFormedChain cap.2 ancestor)
+    (hc1 : c1 ∈ ancestor.carvedChildren)
+    (hc2 : c2 ∈ ancestor.carvedChildren)
+    (hne : c1 ≠ c2)
+    (hchain1 : WellFormedChain c1 d1)
+    (hchain2 : WellFormedChain c2 d2) :
+    ¬ Access.overlaps d1.region.access d2.region.access :=
+  let gwf := globally_wellformed_descendant cap.2 ancestor
+               (hinv.cdtWellFormed d hd cap hcap) hreach
+  deep_isolation ancestor c1 c2 d1 d2
+    (globally_wellformed_root ancestor gwf)
+    hc1 hc2 hne hchain1 hchain2
+
+-- ════════════════════════════════════════════════════════════════════
+-- § CDT Well-Formedness Frame Rule
+--
+-- CdtWellFormed is preserved by any state transition where each
+-- domain's memCaps are either cleared or inherited from the old
+-- state. Covers create, seal, revoke_domain, and any operation
+-- that doesn't structurally modify the CDT.
+-- ════════════════════════════════════════════════════════════════════
+
+theorem cdt_wellformed_frame
+    (s s' : SystemState)
+    (hcdt : CdtWellFormed s)
+    (hframe : ∀ d ∈ s'.domains,
+      d.memCaps = [] ∨ ∃ d0 ∈ s.domains, d.memCaps = d0.memCaps) :
+    CdtWellFormed s' := by
+  intro d hd p hp
+  rcases hframe d hd with heq | ⟨d0, hd0, heq⟩
+  · rw [heq] at hp; simp at hp
+  · rw [heq] at hp; exact hcdt d0 hd0 p hp
+
+/-- Corollary: creating a domain preserves CdtWellFormed. -/
+theorem create_preserves_cdt
+    (s s' : SystemState) (hcdt : CdtWellFormed s)
+    (parent newDom : DomCap) (newId : DomainId) (updates : UpdateBatch)
+    (hpost : CreatePost parent newDom newId updates)
+    (hframe : ∀ d ∈ s'.domains, d = newDom ∨ d ∈ s.domains) :
+    CdtWellFormed s' :=
+  cdt_wellformed_frame s s' hcdt (fun d hd =>
+    match hframe d hd with
+    | .inl heq => .inl (heq ▸ hpost.noMemCaps)
+    | .inr hold => .inr ⟨d, hold, rfl⟩)
+
+/-- Corollary: sealing a domain preserves CdtWellFormed. -/
+theorem seal_preserves_cdt
+    (s s' : SystemState) (hcdt : CdtWellFormed s)
+    (hframe : ∀ d ∈ s'.domains, ∃ d0 ∈ s.domains, d.memCaps = d0.memCaps) :
+    CdtWellFormed s' :=
+  cdt_wellformed_frame s s' hcdt (fun d hd =>
+    let ⟨d0, hd0, heq⟩ := hframe d hd
+    .inr ⟨d0, hd0, heq⟩)
+
+/-- Corollary: domain revocation preserves CdtWellFormed. -/
+theorem revoke_domain_preserves_cdt
+    (s s' : SystemState) (hcdt : CdtWellFormed s)
+    (hframe : ∀ d ∈ s'.domains,
+      d.memCaps = [] ∨ ∃ d0 ∈ s.domains, d.memCaps = d0.memCaps) :
+    CdtWellFormed s' :=
+  cdt_wellformed_frame s s' hcdt hframe
+
 end ThemisCapa

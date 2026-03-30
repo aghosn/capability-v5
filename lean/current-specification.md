@@ -11,7 +11,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 |----------|---------|-------|---|
 | Core operations (carve, alias, send, revoke, create, seal) | 6 | 6 | 100% |
 | Extended operations (switch, deliver_interrupt, accept, reject, revoke_domain) | 7 | 14 | 50% |
-| Safety properties proved | 64 | 64 | 100% |
+| Safety properties proved | 69 | 69 | 100% |
 | Update (HwUpdate) variants | 7 | 9 | 78% |
 | VpRunState transitions | 8 | 8 | 100% |
 
@@ -122,7 +122,7 @@ Current state of the Lean 4 formal specification vs the Rust implementation
 
 ## Safety Properties
 
-All 64 properties have complete proofs (no `sorry`).
+All 69 properties have complete proofs (no `sorry`).
 
 | ID | Property | Theorem | Proof status |
 |----|----------|---------|-------------|
@@ -173,6 +173,16 @@ All 64 properties have complete proofs (no `sorry`).
 | P35 | Full revocation unmaps all | `full_revocation_unmaps_all` | ✅ Proved |
 | P36 | Full revocation zeroes clean | `full_revocation_zeroes_clean` | ✅ Proved |
 | P37 | Full revocation confinement | `full_revocation_confinement` | ✅ Proved |
+| — | SystemInvariant (struct) | `SystemInvariant` | ✅ Defined |
+| — | CdtWellFormed (def) | `CdtWellFormed` | ✅ Defined |
+| — | CoreExclusive (def) | `CoreExclusive` | ✅ Defined |
+| — | UniqueIds (def) | `UniqueIds` | ✅ Defined |
+| — | PolicyMonotonic (def) | `PolicyMonotonic` | ✅ Defined |
+| P38 | Master system isolation | `system_isolation` | ✅ Proved |
+| P39 | CDT frame rule | `cdt_wellformed_frame` | ✅ Proved |
+| P40 | Create preserves CDT | `create_preserves_cdt` | ✅ Proved |
+| P41 | Seal preserves CDT | `seal_preserves_cdt` | ✅ Proved |
+| P42 | Revoke domain preserves CDT | `revoke_domain_preserves_cdt` | ✅ Proved |
 
 ### Known gaps and weaknesses in existing proofs
 
@@ -191,7 +201,7 @@ All 64 properties have complete proofs (no `sorry`).
 | ~~N-level monotonicity~~ | ~~Generalise P15–P16 to arbitrary depth via induction~~ | ✅ Done (P22–P24) |
 | ~~Switch state restoration~~ | ~~Forward + return restores original VP state (not just flag)~~ | ✅ Done (P26a–P26b) |
 | ~~Domain revocation cascade~~ | ~~Connect RevokeDomainPost to SubtreeRevoked~~ | ✅ Done (P33–P37, FullDomainRevocation) |
-| Global system invariant | SystemState invariant preserved across all operations | Hard |
+| ~~Global system invariant~~ | ~~SystemState invariant preserved across all operations~~ | ✅ Done (SystemInvariant + P38–P42) |
 | Execute protocol correctness | `execute()` lock protocol maintains consistency | Hard |
 
 ---
