@@ -29,6 +29,7 @@
 
 ### Recent commits
 
+- `ec3ebc4` — **feat: lean-exec — executable Lean 4 model of capability engine (phases 1-9)**
 - `1931c23` — **feat: make attestation on-demand — driver requests via ATTEST_SELF**
 - `acfaa3b` — **feat: thhv attestation ioctls — ATTEST_SELF + READ_PCR**
 - `46d1358` — **feat: signed attestation hypercall + TPM PCR read**
@@ -225,6 +226,25 @@ the child. Deliver on preemption timer expiry (~20ms quantum). Gated behind
 
 - [ ] Test interrupt-window fix + PIR drain on real hardware (posted interrupts)
 - [ ] Boot dom1 with stock Ubuntu kernel (not custom bzImage)
+
+### Done: lean-exec — Executable Lean 4 model (commit ec3ebc4)
+
+- [x] Project setup: lakefile.toml, lean-toolchain, ThemisCapa dependency
+- [x] Core types: BEq/Hashable/ToString/Decidable instances for all ThemisCapa types
+- [x] ExecState with flat domain/memcap maps, CapaM monad (ExceptT+StateM)
+- [x] Memory operations: init, carve, alias, send, accept, reject, revoke
+- [x] Domain operations: create, seal, revoke_domain (recursive)
+- [x] Channel operations: getChan, send/accept/reject channel
+- [x] VP & switch: state machine, switch fwd/ret, deliver interrupt (lazy-unwind)
+- [x] Policy & registers: set/get policy, set/get register, interrupt policy
+- [x] Query & attestation: compute address space, enumerate, attest
+- [x] Engine dispatch (30 command variants) + CLI REPL with session file loading
+- [ ] FFI bridge: @[export] functions + Rust lean-backend feature in capa-cli
+- [ ] Testing: #eval unit tests, scenario replay, differential testing vs Rust engine
+
+**3034 lines of Lean 4.** REPL supports same command syntax as capa-cli.
+Imports ThemisCapa proof model types; refinement proofs can bridge executable
+functions to the 83 existing safety theorems.
 
 ### Future work
 
