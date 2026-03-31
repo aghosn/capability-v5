@@ -214,34 +214,17 @@ pub struct HwUpdate {
 
 ## Implementation Phases
 
-### Phase 10a: `backend.rs` — Define the trait + DTOs
-Create `capa-cli/src/backend.rs` with the `Backend` trait and all DTO structs
-listed above. Pure type definitions, no logic.
+### Phase 10a: `backend.rs` — Define the trait + DTOs ✅ DONE
+Created `capa-cli/src/backend.rs` with `Backend` trait (~30 methods) and all
+DTO structs. Commit `f3c4e82`.
 
-### Phase 10b: `rust_backend.rs` — Wrap existing capa-engine
-Create `capa-cli/src/rust_backend.rs`:
+### Phase 10b: `rust_backend.rs` — Wrap existing capa-engine ✅ DONE
+Created `capa-cli/src/rust_backend.rs` (1065 lines). Wraps all `Capability::*`
+calls with UID tracking, handle resolution, error/update conversion. Uses
+domain-mediated API throughout (except init bootstrap and `add_vprocessor`
+which has no mediated API). Commit `f3c4e82`.
 
-```rust
-pub struct RustBackend {
-    platform: Arc<CliPlatform>,
-    domains: HashMap<DomainId, Arc<RwLock<Capability<Domain>>>>,
-    mem_caps: HashMap<MemCapUid, Arc<RwLock<Capability<MemoryRegion>>>>,
-    next_uid: u64,
-    num_cores: usize,
-}
-```
-
-Each trait method:
-1. Resolves `DomainId → Arc<RwLock<Capability<Domain>>>` via `self.domains`
-2. Resolves `MemCapUid → Arc<RwLock<Capability<MemoryRegion>>>` via `self.mem_caps`
-3. Finds `LocalHandle` by pointer comparison (existing `find_*_handle` logic)
-4. Calls the existing `Capability::*` method
-5. Registers new capabilities in internal maps, assigns new UIDs
-6. Converts `UpdateBatch` → `Vec<HwUpdate>`
-
-Query methods read capability fields and build DTOs.
-
-### Phase 10c: Refactor CLI to use Backend trait
+### Phase 10c: Refactor CLI to use Backend trait ← NEXT
 Four sub-steps (can be done incrementally, one file at a time):
 
 1. **`state.rs`**: Replace `domains`/`memories` with `domain_names`/`mem_names` +
