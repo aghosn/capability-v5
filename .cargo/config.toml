@@ -1,5 +1,3 @@
 [alias]
 build-bins = "run --manifest-path themis/xtask/Cargo.toml -- build-bins"
 build-bins-docker = "run --manifest-path themis/xtask/Cargo.toml -- build-bins-docker"
-cli-rust = "run --release --manifest-path capa-cli/Cargo.toml -- --backend rust"
-cli-lean = "run --release --manifest-path capa-cli/Cargo.toml --features lean-backend -- --backend lean"

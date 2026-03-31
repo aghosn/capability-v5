@@ -25,17 +25,18 @@ cargo build --release
 ## Usage
 
 ```bash
-# Default: Rust backend (capa-engine)
-cargo run --release
-# or
-./target/release/capability-cli
+# From the repo root — cargo aliases (recommended):
+cargo cli-rust            # Rust backend (capa-engine)
+cargo cli-lean            # Lean backend (lean-exec via C FFI)
 
-# Lean backend (lean-exec via C FFI, requires --features lean-backend)
-cargo run --release --features lean-backend -- --backend lean
+# Or from the capa-cli directory:
+cargo run --release                                          # Rust (default)
+cargo run --release --features lean-backend -- --backend lean # Lean
 ```
 
 The `--backend` flag selects which engine computes state transitions. The CLI
-handles all parsing and display identically for both backends.
+handles all parsing and display identically for both backends. The prompt shows
+which backend is active: `cap[rust]>` or `cap[lean]>`.
 
 **Differential testing:** run the same session through both backends and diff:
 
