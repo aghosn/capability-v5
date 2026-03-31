@@ -1168,20 +1168,6 @@ impl ThemisPlatform {
     /// packed arrays of mem_cap, dom_cap, and pa_map entries.
     ///
     /// Must be called after `bootstrap_init_domcomm`.
-    pub fn bootstrap_write_attestation(
-        &self,
-        domain_id: DomainId,
-        payload: &[u8],
-    ) {
-        use themis_abi::domcomm;
-        let arc = self.domains
-            .get(domain_id)
-            .unwrap_or_else(|| panic!("bootstrap_write_attestation: domain not registered"));
-        let mut d = arc.lock();
-        let wrote = d.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, payload);
-        assert!(wrote > 0, "bootstrap_write_attestation: RX ring full or too small");
-    }
-
     /// Get the DomainComm GPA and page count for a domain (for CPUID / e820).
     pub fn domcomm_info(&self, domain_id: DomainId) -> Option<(u64, u32)> {
         let arc = self.domains.get(domain_id)?;

@@ -532,12 +532,24 @@ int thhv_pa_map_init_from_attestation(void)
 	if (ret)
 		return ret;
 
+	/* Request attestation from the capavisor (on-demand, not pre-populated). */
+	{
+		u64 attest_size = 0;
+
+		ret = themis_attest_self(0, 0, 0, 0, &attest_size);
+		if (ret) {
+			pr_err("thhv: ATTEST_SELF hypercall failed (%d)\n", ret);
+			return ret;
+		}
+		pr_info("thhv: ATTEST_SELF ok — %llu bytes enqueued\n", attest_size);
+	}
+
 	/* Allocate buffer for the attestation message payload. */
 	buf = kzalloc(DOMCOMM_MAX_PAYLOAD, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	/* Dequeue the pre-populated attestation message. */
+	/* Dequeue the attestation message that ATTEST_SELF just enqueued. */
 	ret = domcomm_rx_dequeue(&thhv_domcomm.rx, buf, DOMCOMM_MAX_PAYLOAD,
 				 &msg_type, &payload_size);
 	if (ret) {

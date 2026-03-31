@@ -367,9 +367,17 @@ fn do_revoke_domain(
 
 /// ATTEST_SELF (0x0C): self-attestation of the calling domain.
 ///
-/// IN:  RDI..RCX = nonce (4 × u64 = 32 bytes, verifier-supplied)
-/// OUT: Signed attestation report delivered to caller's DomainComm RX ring.
-///      RDI = report size in bytes (0 if DomainComm not initialized).
+/// ATTEST_SELF (0x17): on-demand domain attestation.
+///
+/// Behaviour depends on the nonce value:
+///   nonce == 0  →  Full domain config (AttestReport + MemCapEntry[] +
+///                  DomCapEntry[] + PaMapEntry[]).  Used by thhv at module init.
+///   nonce != 0  →  Signed attestation (SignedAttestReport with Ed25519).
+///                  Used for remote / TPM-anchored attestation.
+///
+/// IN:  RDI..RCX = nonce (4 × u64 = 32 bytes)
+/// OUT: Report delivered to caller's DomainComm RX ring.
+///      RDI = payload size in bytes (0 if DomainComm not initialized).
 fn do_attest_self(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -378,76 +386,152 @@ fn do_attest_self(
     nonce_2: u64,
     nonce_3: u64,
 ) -> HypercallResult {
-    use sha2::{Sha256, Digest};
+    use alloc::vec::Vec;
     use themis_abi::domcomm;
 
-    let report = capability_engine::attest::attest_domain(caller);
-    let domain_id = report.domain_id;
+    fn as_bytes<T: Sized>(val: &T) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                val as *const T as *const u8,
+                core::mem::size_of::<T>(),
+            )
+        }
+    }
 
-    // Build the binary AttestReport (same as boot-time format).
-    let attest_hdr = domcomm::AttestReport {
+    let is_signed = nonce_0 != 0 || nonce_1 != 0 || nonce_2 != 0 || nonce_3 != 0;
+
+    // Snapshot the domain's capabilities under the read lock.
+    let domain = caller.read();
+    let domain_id = domain.data.id;
+    let num_vps = domain.data.policy.num_vprocessors as u32;
+    let api_flags = domain.data.policy.api.bits() as u32;
+
+    let mem_entries: Vec<domcomm::MemCapEntry> = domain
+        .data
+        .memory_capabilities
+        .iter()
+        .filter_map(|(_handle, weak)| {
+            let cap_ref = weak.upgrade()?;
+            let c = cap_ref.read();
+            Some(domcomm::MemCapEntry {
+                handle: c.sub_handle,
+                gpa_start: c.data.access.start,
+                size: c.data.access.size,
+                rights: c.data.access.rights.bits() as u32,
+                attributes: c.owned.attributes.bits() as u32,
+                hpa_start: c.data.access.start, // identity for root domain
+            })
+        })
+        .collect();
+
+    let dom_entries: Vec<domcomm::DomCapEntry> = domain
+        .data
+        .domain_capabilities
+        .iter()
+        .filter_map(|(handle, weak)| {
+            let cap_ref = weak.upgrade()?;
+            let c = cap_ref.read();
+            Some(domcomm::DomCapEntry {
+                handle: *handle,
+                domain_id: c.data.id,
+            })
+        })
+        .collect();
+
+    // PA entries from non-META memory capabilities (GPA == HPA identity).
+    let pa_entries: Vec<domcomm::PaMapEntry> = mem_entries
+        .iter()
+        .filter(|e| e.attributes & (Attributes::META as u32) == 0)
+        .filter(|e| e.size > 0)
+        .map(|e| domcomm::PaMapEntry {
+            gpa_start: e.gpa_start,
+            hpa_start: e.hpa_start,
+            size: e.size,
+        })
+        .collect();
+
+    drop(domain); // Release read lock before platform domain lock.
+
+    let hdr = domcomm::AttestReport {
         domain_id,
         flags: 0,
-        num_vps: 0,
-        api_flags: 0,
-        nr_mem_caps: 0,
-        nr_dom_caps: 0,
-        nr_pa_entries: 0,
+        num_vps,
+        api_flags,
+        nr_mem_caps: mem_entries.len() as u32,
+        nr_dom_caps: dom_entries.len() as u32,
+        nr_pa_entries: pa_entries.len() as u32,
         chunk_index: 0,
         total_chunks: 1,
         reserved: 0,
     };
-    let hdr_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &attest_hdr as *const domcomm::AttestReport as *const u8,
-            core::mem::size_of::<domcomm::AttestReport>(),
-        )
-    };
 
-    // Assemble the nonce from the 4 register arguments.
-    let mut nonce = [0u8; 32];
-    nonce[0..8].copy_from_slice(&nonce_0.to_le_bytes());
-    nonce[8..16].copy_from_slice(&nonce_1.to_le_bytes());
-    nonce[16..24].copy_from_slice(&nonce_2.to_le_bytes());
-    nonce[24..32].copy_from_slice(&nonce_3.to_le_bytes());
+    if is_signed {
+        use sha2::{Sha256, Digest};
 
-    // Sign: Ed25519(SHA-256(report_bytes ‖ nonce))
-    let mut hasher = Sha256::new();
-    hasher.update(hdr_bytes);
-    hasher.update(&nonce);
-    let digest = hasher.finalize();
-    let signature = crate::attestation::sign(&digest);
-    let pub_key = crate::attestation::public_key();
+        let mut nonce = [0u8; 32];
+        nonce[0..8].copy_from_slice(&nonce_0.to_le_bytes());
+        nonce[8..16].copy_from_slice(&nonce_1.to_le_bytes());
+        nonce[16..24].copy_from_slice(&nonce_2.to_le_bytes());
+        nonce[24..32].copy_from_slice(&nonce_3.to_le_bytes());
 
-    // Build SignedAttestReport
-    let signed = domcomm::SignedAttestReport {
-        report: attest_hdr,
-        signature,
-        pub_key,
-        nonce,
-    };
-    let signed_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &signed as *const domcomm::SignedAttestReport as *const u8,
-            core::mem::size_of::<domcomm::SignedAttestReport>(),
-        )
-    };
+        let mut hasher = Sha256::new();
+        hasher.update(as_bytes(&hdr));
+        hasher.update(&nonce);
+        let digest = hasher.finalize();
+        let signature = crate::attestation::sign(&digest);
+        let pub_key = crate::attestation::public_key();
 
-    // Deliver via DomainComm RX ring.
-    let pd = match platform.get_platform_domain(domain_id) {
-        Some(pd) => pd,
-        None => return HypercallResult::success_1(0),
-    };
-    let mut pd_locked = pd.lock();
-    if pd_locked.domcomm.is_none() {
-        return HypercallResult::success_1(0);
+        let signed = domcomm::SignedAttestReport {
+            report: hdr,
+            signature,
+            pub_key,
+            nonce,
+        };
+
+        let pd = match platform.get_platform_domain(domain_id) {
+            Some(pd) => pd,
+            None => return HypercallResult::success_1(0),
+        };
+        let mut pd_locked = pd.lock();
+        if pd_locked.domcomm.is_none() {
+            return HypercallResult::success_1(0);
+        }
+        let wrote = pd_locked.domcomm_rx_enqueue(
+            domcomm::msg_types::ATTEST,
+            as_bytes(&signed),
+        );
+        if wrote == 0 {
+            return HypercallResult::error(errors::ERR_BUSY);
+        }
+        HypercallResult::success_1(core::mem::size_of::<domcomm::SignedAttestReport>() as u64)
+    } else {
+        // Full domain config — same wire format the thhv driver expects.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(as_bytes(&hdr));
+        for e in &mem_entries {
+            payload.extend_from_slice(as_bytes(e));
+        }
+        for e in &dom_entries {
+            payload.extend_from_slice(as_bytes(e));
+        }
+        for e in &pa_entries {
+            payload.extend_from_slice(as_bytes(e));
+        }
+
+        let pd = match platform.get_platform_domain(domain_id) {
+            Some(pd) => pd,
+            None => return HypercallResult::success_1(0),
+        };
+        let mut pd_locked = pd.lock();
+        if pd_locked.domcomm.is_none() {
+            return HypercallResult::success_1(0);
+        }
+        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload);
+        if wrote == 0 {
+            return HypercallResult::error(errors::ERR_BUSY);
+        }
+        HypercallResult::success_1(payload.len() as u64)
     }
-    let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, signed_bytes);
-    if wrote == 0 {
-        return HypercallResult::error(errors::ERR_BUSY);
-    }
-
-    HypercallResult::success_1(signed_bytes.len() as u64)
 }
 
 /// READ_PCR (0x1E): read a TPM PCR value (capavisor-mediated, read-only).
