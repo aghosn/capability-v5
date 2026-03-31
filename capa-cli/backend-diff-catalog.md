@@ -8,7 +8,7 @@ categories.
 
 ---
 
-## Category 1: Core State After Init (affects ALL tutorials)
+## Category 1: Core State After Init — RESOLVED
 
 **Symptom:** After `init`, Rust shows the root domain running on all cores;
 Lean shows all cores as `idle`.
@@ -39,7 +39,7 @@ set `CoreState.runningDomain domId i` + mark VPs as running.
 
 ---
 
-## Category 2: Rights Display Format (affects ALL tutorials)
+## Category 2: Rights Display Format — RESOLVED
 
 **Symptom:** Lean appends `-` for missing rights; Rust omits them.
 
@@ -95,19 +95,15 @@ Fundamental **semantic difference in update generation philosophy**:
 
 ---
 
-## Category 4: Switch Fails ("no domain on core") (affects tutos 4, 5, 9+)
+## Category 4: Switch Fails (affects tutos 4, 5, 9+)
 
-**Symptom:** `switch` commands fail in Lean:
+**Status: RESOLVED** (combination of Cat 1 fix + VP creation fix)
 
-```
-Lean:  ✗ Failed to VP-switch: Invalid operation: InvalidOperation: no domain on core
-```
-
-**Root cause:** Consequence of Category 1 — since init doesn't place root on
-cores, `getCoreState` returns `idle`, and `switchForward` can't find the
-caller domain.
-
-**Impact:** High — blocks all context switching tutorials.
+**Root causes (two bugs):**
+1. Cores were idle after init → fixed in Cat 1.
+2. `ffiCreateDomain` hardcoded `numVps := 0` instead of computing from
+   core mask → `switchForward` couldn't find target VPs. Fixed by setting
+   `numVps := coreList.length`.
 
 **Fix location:** Resolves automatically when Category 1 is fixed.
 
@@ -115,7 +111,7 @@ caller domain.
 
 ---
 
-## Category 5: Memory Ownership Not Transferred on Send (affects tutos 4, 8+)
+## Category 5: Memory Ownership Display — RESOLVED
 
 **Symptom:** After `send mem child`, memory still shows `owner: root` in Lean.
 
