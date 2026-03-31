@@ -17,6 +17,8 @@ mod platform;
 mod session;
 mod state;
 mod update_processor;
+pub mod backend;
+pub mod rust_backend;
 
 use completer::CliHelper;
 use state::CliState;
