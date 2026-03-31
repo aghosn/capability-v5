@@ -628,11 +628,11 @@ def ffiListDomains : IO UInt32 := do
   pure 0
 
 private partial def memCapToJson (st : ExecState) (uid : MemCapUid)
-    (localHandle : Nat) (ownerId : DomainId) : String :=
+    (localHandle : Nat) : String :=
   match st.getMemCap uid with
   | some cap =>
     let children := cap.childUids.toList.map fun childUid =>
-      memCapToJson st childUid 0 cap.capId.domainId
+      memCapToJson st childUid 0
     jsonObj [
       ("uid", jsonNum uid),
       ("local_handle", jsonNum localHandle),
@@ -642,7 +642,7 @@ private partial def memCapToJson (st : ExecState) (uid : MemCapUid)
       ("kind", jsonStr (toString cap.region.kind)),
       ("status", jsonStr (toString cap.region.status)),
       ("attributes", jsonStr (toString cap.attributes)),
-      ("owner_id", jsonNum ownerId),
+      ("owner_id", jsonNum cap.capId.domainId),
       ("num_children", jsonNum cap.childUids.size),
       ("children", jsonArr children) ]
   | none => jsonNull
@@ -653,7 +653,7 @@ def ffiGetDomainMemCaps (domId : UInt64) : IO UInt32 := do
   let some dom := st.getDomain domId.toNat
     | returnError .notFound
   let caps := dom.memCaps.map fun (handle, uid) =>
-    memCapToJson st uid handle domId.toNat
+    memCapToJson st uid handle
   gResultStr.set (jsonArr caps)
   pure 0
 

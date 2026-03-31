@@ -1,0 +1,8 @@
+# Capability CLI session — replay with: load test_from_cli.txt
+init root 0x1000000
+create-domain root child1 15 GET,ATTEST,SWITCH
+carve r0 mem1 0x1000 0x1000 RWX
+send mem1 child1 CLEAN
+seal child1
+view child1
+attest child1

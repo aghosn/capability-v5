@@ -56,9 +56,9 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × MemCapUid) := do
 
   -- Build core list [0, 1, ..., numCores-1]
   let coreList := (List.range numCores)
-  -- Build VP array: one VP per core
+  -- Build VP array: one VP per core, marked running on their core
   let vps := (List.range numCores).map (fun i =>
-    { id := i, runState := VpRunState.available : VProcessor })
+    { id := i, runState := VpRunState.running i none : VProcessor })
 
   let policy : DomainPolicy :=
     { cores := coreList
@@ -74,6 +74,10 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × MemCapUid) := do
       nextMemHandle := 1 }
 
   CapaM.setDomain domId rootDomain
+
+  -- Schedule root domain on all cores (match Rust init behaviour)
+  for i in List.range numCores do
+    CapaM.setCoreState i (.runningDomain domId i)
 
   -- Create root memory capability
   let rootCap : ExecMemCap :=

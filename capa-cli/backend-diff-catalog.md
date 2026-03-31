@@ -3,8 +3,8 @@
 Systematic comparison of `--backend rust` vs `--backend lean` output across
 all 15 tutorials. Generated 2026-03-31.
 
-**Status:** All 15 tutorials show differences. The issues are categorized below
-from most impactful (breaks many tests) to least.
+**Status:** All 15 tutorials show differences. Root causes traced for top 4
+categories.
 
 ---
 
@@ -18,18 +18,24 @@ Rust:  ✓ Core 0: root (ID: 0)
 Lean:  ○ Core 0: idle
 ```
 
-**Root cause:** Rust `init` assigns the root domain to all cores via
-`CreateDomain` updates. Lean `init` creates the domain but does not set
-`CoreState.runningDomain` for any core.
+**Root cause traced:**
 
-**Impact:** High — blocks all `switch` and `interrupt` operations since
-they require "no domain on core" to be false.
+- **Rust** (`capa-cli/src/rust_backend.rs:284–293`): `init()` explicitly
+  schedules root on every core via `platform.set_core_context()` and marks
+  each VP as `VpRunState::Running`.
 
-**Fix location:** `lean-exec/LeanExec/Operations/Domain.lean` (`init`) or
-`lean-exec/LeanExec/FFI.lean` (`ffiInit`). After creating root domain,
-set `cores[i] = .runningDomain rootId 0` for all cores.
+- **Lean** (`lean-exec/LeanExec/Operations/Memory.lean:47–93`): `init()`
+  creates the root domain with VPs in `VpRunState.available` (not running)
+  and never calls `setCoreState`. The cores array comes from
+  `ExecState.empty` (`State.lean:44`) which fills with `CoreState.idle`.
 
-**Tutorials affected:** 1–15 (all)
+**Divergence:** Rust init assigns root to all cores imperatively. Lean init
+only creates the domain + memory — it never touches the cores array. This is
+the single most impactful difference: it blocks all `switch` and `interrupt`
+operations (Category 4).
+
+**Fix:** In Lean `init`, after creating root domain, loop over all cores and
+set `CoreState.runningDomain domId i` + mark VPs as running.
 
 ---
 
@@ -42,18 +48,19 @@ Rust:  RW
 Lean:  RW-
 ```
 
-Also sometimes raw `Rights { bits: 1 }` instead of `R`.
+**Root cause traced:**
 
-**Root cause:** Lean `ToString Rights` instance prints all three positions
-(`R--`, `RW-`, `RWX`). Rust `Rights::fmt` omits missing flags (`R`, `RW`, `RWX`).
+This is **NOT an engine difference**. Both engines produce the same rights
+values internally. The difference is in the **CLI adapter layer**:
 
-**Impact:** Low — cosmetic only, but breaks textual diffing.
+- **Rust** (`capa-cli/src/rust_backend.rs:222–228`): `format_rights_val()`
+  uses compact format — omits trailing characters for unset bits.
+- **Lean** (`lean/ThemisCapa/Types.lean` ToString instance): Produces
+  3-char format with `-` placeholders (`RW-`, `R--`).
 
-**Fix location:** `lean-exec/LeanExec/Types.lean` — change the `ToString Rights`
-instance to omit trailing dashes. OR: `lean-exec/LeanExec/FFI.lean` — format
-rights strings to match Rust convention in JSON output.
-
-**Tutorials affected:** 1–15 (all)
+**Fix:** Either change `RustBackend::format_rights_val()` to use 3-char
+format, or change Lean's `ToString Rights` to omit dashes. Trivial either
+way.
 
 ---
 
@@ -66,16 +73,23 @@ Rust:  ℹ MMU updates: 1 map(s), 0 unmap(s), 0 zero(s)
 Lean:  ℹ MMU updates: 0 map(s), 1 unmap(s), 0 zero(s)
 ```
 
-Also: Lean emits an extra unmap on initial `carve` from root.
+**Root cause traced:**
 
-**Root cause:** The Lean `carve` operation produces an `unmapMemory` update
-(to shrink the parent) instead of a `mapMemory` update (to create the child
-mapping). The Rust engine produces `MapMemory` for newly carved regions.
+Fundamental **semantic difference in update generation philosophy**:
 
-**Impact:** High — update semantics inverted.
+- **Rust** (`capa-engine/src/view.rs:234–291`): Uses `view_diff()` — a
+  sweep-line algorithm that diffs the domain's address space before and
+  after the carve. The resulting updates represent **what changed in the
+  domain's address-space view**. After carving, the child's region may
+  appear with different rights → `ChangeRights` → can be Map or Unmap.
 
-**Fix location:** `lean-exec/LeanExec/Operations/Memory.lean` — the `carve`
-function's update generation logic.
+- **Lean** (`lean-exec/LeanExec/Operations/Memory.lean:161–163`): Hardcodes
+  `HwUpdate.unmapMemory` for every carve. Semantics: "parent lost exclusive
+  access to the carved region."
+
+**Design question for user:** Which model is correct?
+- Rust model: update = "what changed in the EPT" (hardware-oriented)
+- Lean model: update = "parent gave up access" (capability-oriented)
 
 **Tutorials affected:** 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 
@@ -110,16 +124,17 @@ Rust:  • app1_mem [0x80000..0xc0000) RWX (owner: app1, ...)
 Lean:  • app1_mem [0x80000..0xc0000) RWX (owner: root, ...)
 ```
 
-**Root cause:** The Lean `send` operation transfers the capability to the
-receiver's pending queue but the query JSON serialization reports the original
-owner from `ExecMemCap.capId.domainId` rather than the new owner after
-acceptance.
+**Root cause traced:**
 
-**Impact:** Medium — affects display correctness, may indicate deeper
-ownership tracking issue.
+Both engines **correctly update `cap.capId.domainId`** during send/accept.
+The bug is in the **FFI serialization layer**:
 
-**Fix location:** `lean-exec/LeanExec/Operations/Memory.lean` (send/accept)
-or `lean-exec/LeanExec/FFI.lean` (query serialization).
+- **`ffiGetDomainMemCaps`** (`lean-exec/LeanExec/FFI.lean:655`): Passes the
+  **querying domain's ID** (`domId.toNat`) as `owner_id` in every JSON
+  entry, instead of reading `cap.capId.domainId` (the actual owner).
+
+**Fix:** In `ffiGetDomainMemCaps`, read `cap.capId.domainId` and use that
+as the owner_id field in the JSON output.
 
 **Tutorials affected:** 4, 8, 10, 11, 12, 13
 

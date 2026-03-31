@@ -220,12 +220,11 @@ fn convert_updates(batch: &UpdateBatch) -> Vec<HwUpdate> {
 }
 
 fn format_rights_val(r: Rights) -> String {
-    let mut s = String::new();
-    if r.has(Rights::READ) { s.push('R'); }
-    if r.has(Rights::WRITE) { s.push('W'); }
-    if r.has(Rights::EXECUTE) { s.push('X'); }
-    if s.is_empty() { s.push_str("NONE"); }
-    s
+    let rd = if r.has(Rights::READ) { 'R' } else { '-' };
+    let wr = if r.has(Rights::WRITE) { 'W' } else { '-' };
+    let ex = if r.has(Rights::EXECUTE) { 'X' } else { '-' };
+    let s = format!("{}{}{}", rd, wr, ex);
+    if s == "---" { "NONE".to_string() } else { s }
 }
 
 fn format_attributes_val(a: Attributes) -> String {
