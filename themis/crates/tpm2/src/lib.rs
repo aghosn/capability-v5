@@ -22,4 +22,4 @@
 mod tis;
 mod commands;
 
-pub use tis::{Tpm2, Tpm2Error};
+pub use tis::{Tpm2, Tpm2Error, TIS_BASE};

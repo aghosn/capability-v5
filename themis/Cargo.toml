@@ -23,10 +23,15 @@ x86                    = { version = "0.52",  default-features = false }
 x2apic                 = { version = "0.5",   default-features = false }
 acpi                   = { version = "6",     default-features = false, features = ["alloc", "aml"] }
 pci_types              = { version = "0.10",  default-features = false }
-spin                   = { version = "0.10",  default-features = false, features = ["mutex", "spin_mutex", "rwlock"] }
+spin                   = { version = "0.10",  default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once"] }
 limine                 = { version = "0.5",   default-features = false }
 linked_list_allocator  = { version = "0.10",  default-features = false, features = ["use_spin"] }
 bitflags               = { version = "2",     default-features = false }
+
+# Cryptography (no_std, no SIMD — bare-metal x86_64-unknown-none with -sse,-sse2)
+ed25519-dalek          = { version = "2",     default-features = false }
+sha2                   = { version = "0.10",  default-features = false }
+zeroize                = { version = "1",     default-features = false }
 
 # Workspace-internal crates
 vtd          = { path = "crates/vtd" }

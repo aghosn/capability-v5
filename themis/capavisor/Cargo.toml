@@ -26,7 +26,12 @@ limine                = { workspace = true }
 linked_list_allocator = { workspace = true }
 
 vtd          = { workspace = true }
+tpm2         = { workspace = true }
 themis-abi   = { workspace = true }
 ept          = { workspace = true }
 capavisor-pt = { workspace = true }
 vmx          = { workspace = true }
+
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+zeroize       = { workspace = true }

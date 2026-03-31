@@ -42,6 +42,7 @@ macro_rules! serial_rtdbg {
 }
 
 mod acpi;
+mod attestation;
 mod boot;
 mod domain;
 mod gdt;
@@ -181,6 +182,44 @@ pub extern "C" fn _start() -> ! {
     serial_println!("  Themis capavisor — Limine OK");
     serial_println!("========================================");
     serial_println!();
+
+    // ── Attested boot: keygen + SHA-256 + TPM PCR extend ─────────────────── //
+    // Must happen before any domain exists.  The key pair is stored in a
+    // static inside META (capavisor address space, never in any domain's EPT).
+    {
+        let hhdm_offset = HHDM_REQUEST.get_response()
+            .expect("no HHDM response (early)").offset();
+        if let Some(ka) = KERNEL_ADDR_REQUEST.get_response() {
+            // Limine tells us where it loaded the capavisor binary.
+            // We need the physical base + size to hash the binary image.
+            let phys_base = ka.physical_base();
+            let virt_base = ka.virtual_base();
+            // Compute kernel size from the memory map: find the kernel/modules entries.
+            let entries = MEMMAP_REQUEST.get_response()
+                .expect("no memory map response (early)").entries();
+            let mut kernel_end: u64 = 0;
+            for e in entries {
+                if e.entry_type == limine::memory_map::EntryType::EXECUTABLE_AND_MODULES {
+                    let end = e.base + e.length;
+                    if end > kernel_end {
+                        kernel_end = end;
+                    }
+                }
+            }
+            let kernel_size = if kernel_end > phys_base {
+                kernel_end - phys_base
+            } else {
+                // Fallback: use a reasonable upper bound (16 MiB)
+                serial_println!("[attest] WARNING: could not determine kernel size, using 16 MiB");
+                16 * 1024 * 1024
+            };
+            serial_println!("[attest] capavisor binary: phys={:#x} virt={:#x} size={:#x} ({} KiB)",
+                phys_base, virt_base, kernel_size, kernel_size / 1024);
+            attestation::init(phys_base, kernel_size, hhdm_offset);
+        } else {
+            serial_println!("[attest] WARNING: no KernelAddressRequest — skipping attestation init");
+        }
+    }
 
     // Unpack Limine responses.
     let hhdm_offset = HHDM_REQUEST.get_response()
