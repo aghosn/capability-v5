@@ -86,7 +86,9 @@ fn rdrand64() -> u64 {
 /// `kernel_phys_base` and `kernel_size` describe the capavisor binary's
 /// in-memory image (from Limine's ExecutableAddressRequest).
 /// `hhdm_offset` is the higher-half direct map offset for MMIO access.
-pub fn init(kernel_phys_base: u64, kernel_size: u64, hhdm_offset: u64) {
+/// `tpm_mmio_mapped` indicates whether the TPM TIS MMIO region is present
+/// in the memory map (safe to access via HHDM).
+pub fn init(kernel_phys_base: u64, kernel_size: u64, hhdm_offset: u64, tpm_mmio_mapped: bool) {
     serial_println!("[attest] Initializing attestation subsystem...");
 
     // Step 1: Generate Ed25519 key pair from RDRAND
@@ -129,8 +131,16 @@ pub fn init(kernel_phys_base: u64, kernel_size: u64, hhdm_offset: u64) {
         measurement[0], measurement[1], measurement[2], measurement[3],
         measurement[28], measurement[29], measurement[30], measurement[31]);
 
-    // Step 3: Extend TPM PCR 11 (if TPM is present)
-    let tpm_available = try_extend_pcr(hhdm_offset, &measurement);
+    // Step 3: Extend TPM PCR 11 (if TPM is present and MMIO is mapped)
+    let tpm_available = if tpm_mmio_mapped {
+        serial_println!("[attest] probing TPM at phys {:#x} (virt {:#x})...",
+            tpm2::TIS_BASE, tpm2::TIS_BASE + hhdm_offset);
+        try_extend_pcr(hhdm_offset, &measurement)
+    } else {
+        serial_println!("[attest] TPM MMIO region ({:#x}) not in memory map — skipping TPM",
+            tpm2::TIS_BASE);
+        false
+    };
 
     // Step 4: Store state
     ATTEST_STATE.call_once(|| AttestationState {
