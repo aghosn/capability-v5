@@ -86,9 +86,14 @@ fn main() {
     // Load command history
     let _ = rl.load_history(".capability_cli_history");
 
+    let prompt = format!("{}{}{} ",
+        "cap".bright_green().bold(),
+        format!("[{}]", backend_name).bright_yellow(),
+        ">".bright_green().bold());
+
     // Main REPL loop
     loop {
-        let readline = rl.readline(&format!("{} ", "cap>".bright_green().bold()));
+        let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
                 let line = line.trim();
