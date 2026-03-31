@@ -410,11 +410,11 @@ fn do_attest_self(
         .data
         .memory_capabilities
         .iter()
-        .filter_map(|(_handle, weak)| {
+        .filter_map(|(handle, weak)| {
             let cap_ref = weak.upgrade()?;
             let c = cap_ref.read();
             Some(domcomm::MemCapEntry {
-                handle: c.sub_handle,
+                handle: *handle,
                 gpa_start: c.data.access.start,
                 size: c.data.access.size,
                 rights: c.data.access.rights.bits() as u32,

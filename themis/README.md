@@ -72,8 +72,9 @@ All dependencies are standard packages. Install them in one go:
 
 ```sh
 sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso ovmf
-# Optional: software TPM for attested boot testing
-sudo apt install swtpm
+# Optional: software TPM for attested boot testing (requires swtpm ≥ 0.8;
+# swtpm 0.7.x deadlocks with QEMU 8.x + OVMF during TPM init)
+sudo apt install swtpm swtpm-tools
 ```
 
 | Tool | Purpose | Package |
@@ -157,7 +158,7 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
 | `QEMU_BIOS` | `0` | Set to `1` for legacy BIOS (default is UEFI/OVMF) |
-| `QEMU_TPM` | `0` | Set to `1` to attach a software TPM 2.0 (swtpm). Auto-starts swtpm if not already running. Requires `swtpm` package (`sudo apt install swtpm`). |
+| `QEMU_TPM` | `0` | Set to `1` to attach a software TPM 2.0 (swtpm via `tpm-crb`). Auto-starts swtpm if not already running. **Requires swtpm ≥ 0.8** (`sudo apt install swtpm swtpm-tools`). |
 | `PROFILE` | `debug` | `release` for optimised build |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
 
@@ -417,9 +418,14 @@ boot and function correctly — attestation simply degrades gracefully.
 
 ### QEMU with software TPM
 
+> **Note:** Requires `swtpm` ≥ 0.8.  Version 0.7.x (Ubuntu 24.04 default) deadlocks
+> with QEMU 8.x + OVMF during early firmware TPM initialization.  The TPM CRB
+> device (`tpm-crb`) is used instead of `tpm-tis` to avoid ISA interrupt conflicts
+> with `kernel-irqchip=split`.
+
 ```sh
-# Install swtpm (one-time)
-sudo apt install swtpm
+# Install swtpm (one-time) — check version with: swtpm --version
+sudo apt install swtpm swtpm-tools
 
 # Boot with TPM enabled
 QEMU_TPM=1 cargo themis
