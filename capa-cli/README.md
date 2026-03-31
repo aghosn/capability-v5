@@ -4,6 +4,7 @@ An interactive command-line interface for experimenting with the Capability Engi
 
 ## Features
 
+- **Swappable Backend**: Run against the Rust `capa-engine` or the Lean `lean-exec` model — same CLI, same session files, differential testing built-in
 - **Interactive REPL**: Experiment with capability operations in real-time
 - **Tab Completion & Inline Hints**: Complete command names and capability names with TAB; usage hints appear as you type
 - **Command History**: Navigate previous commands with arrow keys (persisted in `.capability_cli_history`)
@@ -24,9 +25,24 @@ cargo build --release
 ## Usage
 
 ```bash
-cargo run
+# Default: Rust backend (capa-engine)
+cargo run --release
 # or
 ./target/release/capability-cli
+
+# Lean backend (lean-exec via C FFI, requires --features lean-backend)
+cargo run --release --features lean-backend -- --backend lean
+```
+
+The `--backend` flag selects which engine computes state transitions. The CLI
+handles all parsing and display identically for both backends.
+
+**Differential testing:** run the same session through both backends and diff:
+
+```bash
+./target/release/capability-cli < session.txt > rust_out.txt 2>&1
+./target/release/capability-cli --backend lean < session.txt > lean_out.txt 2>&1
+diff rust_out.txt lean_out.txt
 ```
 
 ## Quick Start
@@ -276,3 +292,8 @@ accept-capability receiver 0
 | `capa-engine` | Core capability and domain logic |
 
 Commands are organised in `src/commands/` by concern: `domain`, `memory`, `info`, `execution`, `session_cmd`, `tutos`. The dispatcher in `mod.rs` routes parsed input to the appropriate handler. Tab completion and inline hints are driven by the static `COMMANDS` table in `src/completer.rs`.
+
+The `Backend` trait (`src/backend.rs`) defines the abstraction boundary between
+the CLI and the engine. `RustBackend` (`src/rust_backend.rs`) wraps `capa-engine`;
+`LeanBackend` (`src/lean_backend.rs`) will call `lean-exec` via C FFI.
+See `refactoring-plan.md` for the full roadmap.
