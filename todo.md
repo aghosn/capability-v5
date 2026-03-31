@@ -269,6 +269,10 @@ functions to the 83 existing safety theorems.
 - [ ] Reduce serial I/O overhead
 - [ ] CPUID policy in DomainPolicy (P16.6c)
 - [ ] Stock cloud image kernel
+- [ ] Attestation: driver should always request a signed report (nonce≠0) in addition
+  to the config blob (nonce=0).  Currently the driver only calls ATTEST_SELF(nonce=0)
+  at insmod and gets unsigned config.  The signed path exists but is unused by thhv.
+- [ ] Attestation: test with real TPM (swtpm ≥ 0.8 or bare metal)
 - [x] VPID bug: child VPID double-incremented — fixed in `d508c22`.
   `write_control_fields` now takes final 1-based vpid directly.
 
