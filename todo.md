@@ -179,21 +179,26 @@ before the child VMRESUME to drain pending LAPIC interrupts.
   stayed in PIR across thousands of switches that all saw IF=0.
 - **vIRR merge (attempted, reverted)**: Doesn't work without VIRTUAL_INTERRUPT_DELIVERY.
 
-### Next: Debug virtio_blk on real hardware + multi-CPU
+### Next: Quantum scheduling for multi-core dom1 (`quantum-sched`)
 
-### Nested-virt scheduling (parked, lower priority)
+Design doc: [`themis/docs/quantum-sched.md`](themis/docs/quantum-sched.md)
 
-These were for the 2-CPU dom1 problem, which is a nested-virt artifact. Parked until
-the virtio_blk hang is resolved:
+Dom1 AP can't boot in nested virt — dom0's timer preempts the child after ~10
+instructions per 4ms period. Fix: defer parent-bound interrupts and re-enter
+the child. Deliver on preemption timer expiry (~20ms quantum). Gated behind
+`feature = "quantum-sched"`.
 
-- [x] **S1**: usleep_range in thhv_run_vp EAGAIN loop (done, in 74a6157)
-- [ ] **S2-S5**: Multi-CPU scheduling approaches (deferred)
+- [ ] Add `quantum-sched` feature flag to capavisor Cargo.toml
+- [ ] Add per-core `deferred_vector` storage to CoreContext
+- [ ] Modify EXTERNAL_INTERRUPT handler: defer parent-bound vectors
+- [ ] Modify PREEMPTION_TIMER handler: flush deferred vector via lazy-unwind
+- [ ] Handle multiple deferred interrupts (flush-before-store)
+- [ ] Test with CHV_CPUS=2
 
-### Design principle
+### Next: Test on real hardware + stock kernel boot
 
-On real hardware with posted interrupts: dom0's timer does NOT exit the child. The
-nested-virt scheduling problem goes away. The virtio_blk hang is the priority because
-it affects both nested and real hardware.
+- [ ] Test interrupt-window fix + PIR drain on real hardware (posted interrupts)
+- [ ] Boot dom1 with stock Ubuntu kernel (not custom bzImage)
 
 ### Future work
 
