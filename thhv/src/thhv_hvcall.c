@@ -126,11 +126,20 @@ int themis_get_chan(u64 domain, u64 *out_handle)
 	return __themis_to_errno(status);
 }
 
-int themis_attest_self(u64 *out_lo, u64 *out_hi)
+int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
+		       u64 *out_size)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ATTEST_SELF,
-				     0, 0, 0, 0, 0,
-				     out_lo, out_hi, NULL);
+				     nonce_0, nonce_1, nonce_2, nonce_3, 0,
+				     out_size, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
+int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_READ_PCR,
+				     (u64)pcr_index, 0, 0, 0, 0,
+				     out_r0, out_r1, out_r2);
 	return __themis_to_errno(status);
 }
 

@@ -121,6 +121,50 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 	case THHV_QUERY:
 		return thhv_dev_query(uarg);
 
+	case THHV_ATTEST_SELF: {
+		struct thhv_attest_self as;
+		u64 nonce_0, nonce_1, nonce_2, nonce_3, report_size;
+		int ret;
+
+		if (copy_from_user(&as, uarg, sizeof(as)))
+			return -EFAULT;
+
+		memcpy(&nonce_0, &as.nonce[0],  8);
+		memcpy(&nonce_1, &as.nonce[8],  8);
+		memcpy(&nonce_2, &as.nonce[16], 8);
+		memcpy(&nonce_3, &as.nonce[24], 8);
+
+		ret = themis_attest_self(nonce_0, nonce_1, nonce_2, nonce_3,
+					&report_size);
+		if (ret)
+			return ret;
+
+		as.report_size = report_size;
+		if (copy_to_user(uarg, &as, sizeof(as)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case THHV_READ_PCR: {
+		struct thhv_read_pcr rp;
+		u64 r0, r1, r2;
+		int ret;
+
+		if (copy_from_user(&rp, uarg, sizeof(rp)))
+			return -EFAULT;
+
+		ret = themis_read_pcr(rp.pcr_index, &r0, &r1, &r2);
+		if (ret)
+			return ret;
+
+		memcpy(&rp.digest[0],  &r0, 8);
+		memcpy(&rp.digest[8],  &r1, 8);
+		memcpy(&rp.digest[16], &r2, 8);
+		if (copy_to_user(uarg, &rp, sizeof(rp)))
+			return -EFAULT;
+		return 0;
+	}
+
 	/*
 	 * THHV_SET_PA_MAP is intentionally not exposed here.
 	 * The PA map should be populated automatically by the driver

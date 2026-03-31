@@ -77,6 +77,7 @@
 #define THEMIS_HC_SET_THEMIC_VECTOR  0x17
 #define THEMIS_HC_REGISTER_COMM      0x18
 #define THEMIS_HC_INJECT_INTERRUPT   0x1b
+#define THEMIS_HC_READ_PCR           0x1e
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
 
@@ -107,6 +108,7 @@
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
+#define THEMIS_OP_READ_PCR          0x1e
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -816,6 +818,43 @@ struct thhv_query {
 #define THHV_SET_PA_MAP \
 	_IOW(THHV_IOCTL_MAGIC, 0x04, struct thhv_set_pa_map)
 
+/* ── Attestation ioctls (device-level) ─────────────────────────────────────── */
+
+/*
+ * THHV_ATTEST_SELF — request a signed self-attestation from the capavisor.
+ *
+ * The capavisor signs an AttestReport with its Ed25519 private key and
+ * delivers the SignedAttestReport (168 bytes) to dom0's DomainComm RX ring.
+ * The nonce is a 32-byte verifier-supplied challenge.
+ *
+ * Returns: report_size (bytes written to DomainComm RX ring) in result field.
+ */
+struct thhv_attest_self {
+	__u8  nonce[32];     /* in: verifier-supplied nonce */
+	__u64 report_size;   /* out: bytes written to RX ring (0 if no DomainComm) */
+};
+
+#define THHV_ATTEST_SELF \
+	_IOWR(THHV_IOCTL_MAGIC, 0x05, struct thhv_attest_self)
+
+/*
+ * THHV_READ_PCR — read a TPM PCR value via the capavisor.
+ *
+ * The TPM is capavisor-exclusive (not mapped into dom0's EPT).
+ * This ioctl provides read-only access to PCR values for verification.
+ *
+ * Returns: first 24 bytes of the PCR digest (3 × u64).
+ *          Full 32-byte digest not available via register return path.
+ */
+struct thhv_read_pcr {
+	__u32 pcr_index;     /* in: PCR index (e.g., 11) */
+	__u32 rsvd;
+	__u8  digest[24];    /* out: first 24 bytes of PCR SHA-256 value */
+};
+
+#define THHV_READ_PCR \
+	_IOWR(THHV_IOCTL_MAGIC, 0x06, struct thhv_read_pcr)
+
 /* ── Interrupt policy visibility values ────────────────────────────────────── */
 
 #define THHV_INTR_VISIBILITY_DELIVER     0  /* Domain receives the interrupt directly */
@@ -1108,7 +1147,9 @@ int themis_accept(u64 pending_id, u64 *out_handle);
 int themis_reject(u64 pending_id);
 int themis_switch(u64 target_domain, u64 vp_id);
 int themis_get_chan(u64 domain, u64 *out_handle);
-int themis_attest_self(u64 *out_lo, u64 *out_hi);
+int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
+		       u64 *out_size);
+int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2);
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
 int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);
 int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value);
