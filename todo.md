@@ -6,7 +6,7 @@
 
 ---
 
-## Current State (2026-03-30)
+## Current State (2026-03-31)
 
 ### What works
 
@@ -16,6 +16,10 @@
   Uses `init=/bin/bash` (dom1.raw rootfs), not full systemd.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
   N-level isolation, execute protocol, global system invariant, deep revocation cascade.
+- **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
+  at capavisor _start(). Signed attestation hypercall (ATTEST_SELF with nonce).
+  On-demand domain config via ATTEST_SELF(nonce=0). TPM driver (no_std TIS MMIO).
+  QEMU swtpm integration. thhv ioctls for ATTEST_SELF + READ_PCR.
 
 ### What doesn't work
 
@@ -25,11 +29,14 @@
 
 ### Recent commits
 
+- `1931c23` — **feat: make attestation on-demand — driver requests via ATTEST_SELF**
+- `acfaa3b` — **feat: thhv attestation ioctls — ATTEST_SELF + READ_PCR**
+- `46d1358` — **feat: signed attestation hypercall + TPM PCR read**
+- `02145cc` — **feat: attested boot — Ed25519 keygen + SHA-256 measurement + TPM PCR extend**
+- `a468cca` — **feat: add TPM 2.0 TIS driver crate and QEMU swtpm integration**
+- `b19ceb7` — **Ground work for TPM attestation (ABI types)**
 - `fcbc04f` — **fix: interrupt-window exiting delivers deferred device interrupts**
 - `50ae665` — **fix: PIR drain low→high scan eliminates device interrupt starvation**
-- `289d746` — **capavisor: fix PIR ON bit bug + add virtio pipeline instrumentation**
-- `d508c22` — **capavisor: fix VPID double-increment for child VMs**
-- `69727ab` — **lean: execute protocol model** — A1, lock hierarchy, atomicity, non-destructive ops
 
 ### Uncommitted changes
 
@@ -170,6 +177,25 @@ before the child VMRESUME to drain pending LAPIC interrupts.
   PIR and inject. Clears bit when PIR empty.
 - [x] Result: dom1 boots to /bin/bash shell. virtio-blk partition table read, ext4
   mount, kernel init all succeed.
+
+### Done: TPM attested boot (Phase 20, commits b19ceb7..1931c23)
+
+- [x] P20a: ABI types — SignedAttestReport (192B), BootAttestation (128B), THEMIS_READ_PCR
+- [x] P20b: Capavisor _start() keygen — RDRAND-seeded Ed25519 + SHA-256(binary ‖ pub_key)
+- [x] P20c: Minimal no_std TPM 2.0 TIS MMIO driver crate (themis/crates/tpm2)
+- [x] P20d: Boot integration — AttestationState in spin::Once, PCR 11 extend
+- [x] P20e: Signed attestation hypercall (ATTEST_SELF with nonce) + TPM PCR read
+- [x] P20f: QEMU swtpm integration (QEMU_TPM=1 env var, setup-swtpm.sh)
+- [x] P20g: thhv ioctls — THHV_ATTEST_SELF (0x05), THHV_READ_PCR (0x06)
+- [x] P20h: On-demand attestation — removed boot-time push, driver requests via ATTEST_SELF
+
+**Architecture**: TPM is capavisor-exclusive (MMIO at 0xFED40000 in META pool, never in
+any domain's EPT). Ed25519 keys are ephemeral (fresh each boot). Nonce=0 returns domain
+config (mem_caps, dom_caps, PA map). Nonce≠0 returns Ed25519-signed report.
+
+**Not yet tested end-to-end**: Needs QEMU_TPM=1 boot + thhv rebuild inside VM.
+The thhv changes (on-demand attestation request) are the critical path — must verify
+the driver successfully gets the attestation via VMCALL at module_init.
 
 #### Bugs fixed during this investigation
 
