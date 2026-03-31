@@ -208,7 +208,7 @@ impl CliHelper {
             | ("accept-capability", 1) | ("reject-capability", 1)
             | ("get-chan", 1)
             | ("accept-channel", 1) | ("reject-channel", 1) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (domain)", name),
@@ -219,7 +219,7 @@ impl CliHelper {
             }
             // create-domain: first arg is parent domain
             ("create-domain", 1) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (parent domain)", name),
@@ -230,7 +230,7 @@ impl CliHelper {
             }
             // carve/alias: first arg is parent memory
             ("carve", 1) | ("alias", 1) => {
-                for name in state.memories.keys() {
+                for name in state.mem_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (parent memory)", name),
@@ -239,9 +239,9 @@ impl CliHelper {
                     }
                 }
             }
-            // send: first arg is memory, second arg is domain
+            // send: first arg is memory or channel, second arg is domain
             ("send", 1) => {
-                for name in state.memories.keys() {
+                for name in state.mem_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (memory)", name),
@@ -249,9 +249,17 @@ impl CliHelper {
                         });
                     }
                 }
+                for name in state.domain_names.keys() {
+                    if name.starts_with(prefix) {
+                        candidates.push(Pair {
+                            display: format!("{} (channel/domain)", name),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
             }
             ("send", 2) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (domain)", name),
@@ -262,7 +270,7 @@ impl CliHelper {
             }
             // revoke: first arg is parent (domain or memory), second arg is child
             ("revoke", 1) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (domain)", name),
@@ -270,7 +278,7 @@ impl CliHelper {
                         });
                     }
                 }
-                for name in state.memories.keys() {
+                for name in state.mem_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (memory)", name),
@@ -280,7 +288,7 @@ impl CliHelper {
                 }
             }
             ("revoke", 2) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (domain)", name),
@@ -288,7 +296,7 @@ impl CliHelper {
                         });
                     }
                 }
-                for name in state.memories.keys() {
+                for name in state.mem_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (memory)", name),
@@ -299,7 +307,7 @@ impl CliHelper {
             }
             // switch: first arg is domain
             ("switch", 1) => {
-                for name in state.domains.keys() {
+                for name in state.domain_names.keys() {
                     if name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: format!("{} (domain)", name),

@@ -1,11 +1,10 @@
-//! Memory-related commands: carve, alias, send
+//! Memory-related commands routed through the Backend trait.
 
-use capability_engine::*;
 use colored::*;
 
-use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights, format_attributes};
+use crate::parser::{parse_attributes, parse_number, parse_rights, format_rights};
 use crate::session::Command;
-use crate::state::{CliState, find_domain_handle, find_domain_owner, find_memory_handle};
+use crate::state::CliState;
 use crate::update_processor::process_updates;
 
 /// Carve exclusive memory from parent
@@ -20,43 +19,26 @@ pub fn cmd_carve(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let size = parse_number(args[3])?;
     let rights = parse_rights(args[4])?;
 
-    let access = Access::new(start, size, rights);
-
-    let parent = state
-        .memories
+    let parent_uid = *state
+        .mem_names
         .get(parent_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
-        .clone();
+        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?;
 
-    // Find the owner domain and the handle it holds for parent.
-    let owner_id = parent.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-    let parent_handle = find_memory_handle(&owner, &parent)
-        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
+    let owner_id = *state
+        .mem_owners
+        .get(&parent_uid)
+        .ok_or_else(|| format!("Owner of memory '{}' not found", parent_name))?;
 
-    let platform = state.platform.clone();
-    let (child_handle, batch) = execute(&*platform, false, || {
-        Capability::carve(&owner, parent_handle, access)
-            .map(|(h, _sub, b)| (h, b))
-    }).map_err(|e| format!("Failed to carve: {:?}", e))?;
+    let (child_uid, updates) = state
+        .backend
+        .carve(owner_id, parent_uid, start, size, rights.bits())
+        .map_err(|e| format!("Failed to carve: {}", e))?;
 
-    // Retrieve the child Arc from owner's memory table.
-    let child = owner
-        .read()
-        .data
-        .memory_capabilities
-        .get(&child_handle)
-        .and_then(|w| w.upgrade())
-        .ok_or("Internal error: child not found in owner table after carve")?;
+    state.mem_names.insert(child_name.to_string(), child_uid);
+    state.mem_owners.insert(child_uid, owner_id);
 
-    state.memories.insert(child_name.to_string(), child);
+    process_updates(state, &updates);
 
-    // Process updates
-    process_updates(state, &batch);
-
-    // Record command
     state.session.add_command(Command::Carve {
         parent: parent_name.to_string(),
         name: child_name.to_string(),
@@ -89,37 +71,26 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     let size = parse_number(args[3])?;
     let rights = parse_rights(args[4])?;
 
-    let access = Access::new(start, size, rights);
-
-    let parent = state
-        .memories
+    let parent_uid = *state
+        .mem_names
         .get(parent_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?
-        .clone();
+        .ok_or_else(|| format!("Memory region '{}' not found", parent_name))?;
 
-    // Find the owner domain and its handle for parent.
-    let owner_id = parent.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-    let parent_handle = find_memory_handle(&owner, &parent)
-        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
+    let owner_id = *state
+        .mem_owners
+        .get(&parent_uid)
+        .ok_or_else(|| format!("Owner of memory '{}' not found", parent_name))?;
 
-    let (child_handle, _) = Capability::alias(&owner, parent_handle, access)
-        .map_err(|e| format!("Failed to alias: {:?}", e))?;
+    let (child_uid, updates) = state
+        .backend
+        .alias(owner_id, parent_uid, start, size, rights.bits())
+        .map_err(|e| format!("Failed to alias: {}", e))?;
 
-    // Retrieve the child Arc from owner's memory table.
-    let child = owner
-        .read()
-        .data
-        .memory_capabilities
-        .get(&child_handle)
-        .and_then(|w| w.upgrade())
-        .ok_or("Internal error: child not found in owner table after alias")?;
+    state.mem_names.insert(child_name.to_string(), child_uid);
+    state.mem_owners.insert(child_uid, owner_id);
 
-    state.memories.insert(child_name.to_string(), child);
+    process_updates(state, &updates);
 
-    // Record command
     state.session.add_command(Command::Alias {
         parent: parent_name.to_string(),
         name: child_name.to_string(),
@@ -140,41 +111,61 @@ pub fn cmd_alias(state: &mut CliState, args: &[&str]) -> std::result::Result<(),
     Ok(())
 }
 
-/// Send memory capability to domain
+/// Send memory or channel capability to domain
 pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     // Detect channel send: first arg is a domain cap (channel), not a memory region.
-    if args.len() >= 1 && state.domains.contains_key(args[0]) {
+    if !args.is_empty() && state.domain_names.contains_key(args[0]) {
         if args.len() != 2 {
             return Err("Usage: send <chan> <receiver>".to_string());
         }
-        let chan_name     = args[0];
+        let chan_name = args[0];
         let receiver_name = args[1];
 
-        let chan_ref = state.domains.get(chan_name).unwrap().clone();
-        let receiver = state.domains.get(receiver_name)
-            .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+        let chan_id = *state.domain_names.get(chan_name).unwrap();
+        let receiver_id = *state
+            .domain_names
+            .get(receiver_name)
+            .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?;
 
-        // Infer sender from who owns the channel cap — mirrors memory send's owner lookup.
-        let (caller_name, caller, chan_handle) = find_domain_owner(state, &chan_ref)
+        // Infer caller from who owns the channel cap
+        let caller_id = *state
+            .domain_parents
+            .get(&chan_id)
             .ok_or_else(|| format!("No domain found that owns channel '{}'", chan_name))?;
 
-        let recv_handle = find_domain_handle(&caller, &receiver)
-            .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", receiver_name, caller_name))?;
+        let caller_name = state
+            .get_domain_name(caller_id)
+            .ok_or_else(|| format!("Caller domain ID {} not found", caller_id))?
+            .to_string();
 
-        Capability::<Domain>::send_channel(&caller, chan_handle, recv_handle, Attributes::NONE)
-            .map_err(|e| format!("send failed: {:?}", e))?;
+        state
+            .backend
+            .send_channel(caller_id, chan_id, receiver_id)
+            .map_err(|e| format!("send failed: {}", e))?;
 
-        let recv_sealed = receiver.read().data.is_sealed();
-        if recv_sealed {
+        // Check if receiver is sealed (channel becomes pending) or not (transferred)
+        let is_sealed = state
+            .backend
+            .list_domains()
+            .iter()
+            .any(|d| d.id == receiver_id && d.status == "Sealed");
+
+        if is_sealed {
             println!(
                 "{} Channel '{}' sent to '{}' (pending — use accept-channel or reject-channel)",
-                "✓".bright_green().bold(), chan_name.bright_white(), receiver_name.bright_white(),
+                "✓".bright_green().bold(),
+                chan_name.bright_white(),
+                receiver_name.bright_white(),
             );
         } else {
-            state.domains.remove(chan_name);
+            state.domain_names.remove(chan_name);
+            state.domain_id_to_name.remove(&chan_id);
+            state.domain_parents.remove(&chan_id);
             println!(
                 "{} Channel '{}' transferred to '{}'",
-                "✓".bright_green().bold(), chan_name.bright_white(), receiver_name.bright_white(),
+                "✓".bright_green().bold(),
+                chan_name.bright_white(),
+                receiver_name.bright_white(),
             );
         }
 
@@ -195,7 +186,8 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let domain_name = args[1];
 
     // Parse optional attrs and "at <gpa>" from remaining args.
-    let mut attrs = Attributes::NONE;
+    let mut attrs_parsed = false;
+    let mut attrs_bits: u8 = 0;
     let mut gpa_hint: Option<u64> = None;
     let mut i = 2;
     while i < args.len() {
@@ -205,54 +197,55 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
             }
             gpa_hint = Some(parse_number(args[i + 1])?);
             i += 2;
-        } else if gpa_hint.is_none() && attrs == Attributes::NONE {
-            attrs = parse_attributes(args[i])?;
+        } else if gpa_hint.is_none() && !attrs_parsed {
+            let parsed = parse_attributes(args[i])?;
+            attrs_bits = parsed.bits();
+            attrs_parsed = true;
             i += 1;
         } else {
             return Err("Usage: send <mem> <domain> [attrs] [at <gpa>]".to_string());
         }
     }
 
-    let mem = state
-        .memories
+    let mem_uid = *state
+        .mem_names
         .get(mem_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?
-        .clone();
+        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?;
 
-    let domain = state
-        .domains
+    let receiver_id = *state
+        .domain_names
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    // Find the sender domain
-    let sender_domain_id = mem.read().owned.owner;
-    let sender_domain = state
-        .get_domain_cap_by_id(sender_domain_id)
-        .ok_or_else(|| format!("Sender domain (ID: {}) not found", sender_domain_id))?;
+    // Check if receiver is sealed before send (for the message)
+    let is_sealed = state
+        .backend
+        .list_domains()
+        .iter()
+        .any(|d| d.id == receiver_id && d.status == "Sealed");
 
-    // Find the sender's handle for this memory capability
-    let sender_handle = find_memory_handle(&sender_domain, &mem)
-        .ok_or_else(|| "Memory capability not found in sender's table".to_string())?;
+    let updates = state
+        .backend
+        .send(mem_uid, receiver_id, attrs_bits, gpa_hint)
+        .map_err(|e| format!("Failed to send: {}", e))?;
 
-    let is_sealed = domain.read().data.is_sealed();
+    process_updates(state, &updates);
 
-    let platform = state.platform.clone();
-    let (_, batch) = execute(&*platform, !is_sealed, || {
-        let recv_h = find_domain_handle(&sender_domain, &domain)
-            .ok_or(CapaError::NotFound)?;
-        let updates = Capability::send_at(&sender_domain, sender_handle, recv_h, attrs, gpa_hint)?;
-        Ok(((), updates))
-    }).map_err(|e| format!("Failed to send: {:?}", e))?;
+    // When the receiver is not sealed, ownership transfers immediately.
+    if !is_sealed {
+        state.mem_owners.insert(mem_uid, receiver_id);
+    }
 
-    // Process updates
-    process_updates(state, &batch);
-
-    // Record command
+    // Record command — reconstruct the attrs string for the session recorder.
+    let attrs_str = if attrs_parsed {
+        args[2].to_string()
+    } else {
+        "NONE".to_string()
+    };
     state.session.add_command(Command::Send {
         mem: mem_name.to_string(),
         domain: domain_name.to_string(),
-        attrs: format_attributes(&attrs),
+        attrs: attrs_str,
         gpa_hint,
     });
 
@@ -280,13 +273,6 @@ pub fn cmd_send(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
 }
 
 /// Register a memory capability as a COMM page bound to a child domain's VP.
-///
-/// Usage: `register-comm <mem> <child_domain> <vp_id>`
-///
-/// The named memory region must be an exclusive carve owned by the calling
-/// domain.  The engine sets COMM|CLEAN on the capability and binds it to
-/// the specified VP of the child domain.  Multiple COMM pages can be
-/// registered for the same child.
 pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     if args.len() != 3 {
         return Err("Usage: register-comm <mem> <child_domain> <vp_id>".to_string());
@@ -298,38 +284,27 @@ pub fn cmd_register_comm(state: &mut CliState, args: &[&str]) -> std::result::Re
         .parse()
         .map_err(|_| format!("Invalid vp_id: '{}'", args[2]))?;
 
-    let mem = state
-        .memories
+    let mem_uid = *state
+        .mem_names
         .get(mem_name)
-        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?
-        .clone();
+        .ok_or_else(|| format!("Memory region '{}' not found", mem_name))?;
 
-    let owner_id = mem.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-    let mem_handle = find_memory_handle(&owner, &mem)
-        .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", mem_name))?;
+    let owner_id = *state
+        .mem_owners
+        .get(&mem_uid)
+        .ok_or_else(|| format!("Owner of memory '{}' not found", mem_name))?;
 
-    let child = state
-        .domains
+    let child_id = *state
+        .domain_names
         .get(child_domain_name)
-        .ok_or_else(|| format!("Child domain '{}' not found", child_domain_name))?
-        .clone();
-    let child_domain_handle = find_domain_handle(&owner, &child)
-        .ok_or_else(|| format!(
-            "Child domain '{}' not found in owner's capability table",
-            child_domain_name
-        ))?;
+        .ok_or_else(|| format!("Child domain '{}' not found", child_domain_name))?;
 
-    let platform = state.platform.clone();
-    let (_, batch) = execute(&*platform, false, || {
-        Capability::<Domain>::register_comm(&owner, mem_handle, child_domain_handle, vp_id)
-            .map(|b| ((), b))
-    })
-    .map_err(|e| format!("register-comm failed: {:?}", e))?;
+    let updates = state
+        .backend
+        .register_comm(owner_id, mem_uid, child_id, vp_id)
+        .map_err(|e| format!("register-comm failed: {}", e))?;
 
-    process_updates(state, &batch);
+    process_updates(state, &updates);
 
     state.session.add_command(Command::RegisterComm {
         mem: mem_name.to_string(),

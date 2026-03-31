@@ -1,72 +1,31 @@
-//! Execution commands: switch, interrupt
+//! Execution commands routed through the Backend trait.
 
-use capability_engine::*;
 use colored::*;
 
 use crate::parser::parse_number;
 use crate::session::Command;
-use crate::state::{CliState, find_domain_handle};
+use crate::state::CliState;
 
 /// Switch between domains on a core using the VP-aware domain-mediated API.
 ///
 /// Supported formats:
-/// 1. `switch <core>`                  — return to the VP that called into the current domain
-/// 2. `switch <domain> <core> <vp_id>` — call into `<domain>` VP `<vp_id>` from the current VP
-///
-/// Both operations go through `Capability::switch` (handle=0 signals return),
-/// which enforces all VP invariants (sealed caller, SWITCH permission, VP availability, etc.)
-/// and updates platform core tracking transparently.
+/// 1. `switch <core>`                   — return to the VP that called into the current domain
+/// 2. `switch <domain> <core> <vp_id>`  — call into `<domain>` VP `<vp_id>` from the current VP
 pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     match args.len() {
         // ── VP return: switch <core> ─────────────────────────────────────────
         1 => {
             let core = parse_number(args[0])?;
 
-            let core_ref = state
-                .platform
-                .get_core(core)
-                .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
+            let ctx = state
+                .backend
+                .switch_return(core)
+                .map_err(|e| format!("Failed to return: {}", e))?;
 
-            let current_state = core_ref.state.read();
-            let domain_id = match *current_state {
-                CoreState::Running(id) => id,
-                CoreState::Idle => return Err(format!("Core {} is idle, no domain to return from", core)),
-            };
-            drop(current_state);
-
-            let domain_name = state
-                .get_domain_name(domain_id)
-                .ok_or_else(|| format!("Domain ID {} not found in name mapping", domain_id))?
+            let from_name = state
+                .get_domain_name(ctx.from_domain)
+                .unwrap_or("unknown")
                 .to_string();
-
-            let domain_ref = state
-                .domains
-                .get(&domain_name)
-                .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
-                .clone();
-
-            // Tell the platform which core is executing this call.
-            state.platform.set_current_core(Some(core));
-
-            let ctx = execute(
-                state.platform.as_ref(),
-                false,
-                || {
-                    // handle=0 signals "return to caller VP" in switch_domain.
-                    let ctx = Capability::<Domain>::switch(
-                        &domain_ref,
-                        0,
-                        0,
-                        state.platform.as_ref(),
-                    )?;
-                    Ok((ctx, UpdateBatch::new()))
-                },
-            )
-            .map(|(ctx, _)| ctx)
-            .map_err(|e| format!("Failed to return: {:?}", e))?;
-
-            state.platform.set_current_core(None);
-
             let to_name = state
                 .get_domain_name(ctx.to_domain)
                 .unwrap_or("unknown")
@@ -74,7 +33,7 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 
             state.session.add_command(Command::Switch {
                 core,
-                from: domain_name.clone(),
+                from: from_name.clone(),
                 to: to_name.clone(),
                 vp_id: None,
             });
@@ -83,10 +42,14 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 "{} Returned on core {} from domain '{}' (VP {}) to domain '{}' (VP {})",
                 "✓".bright_green().bold(),
                 core,
-                domain_name.bright_white(),
-                ctx.from_vp_id.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+                from_name.bright_white(),
+                ctx.from_vp
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 to_name.bright_white(),
-                ctx.to_vp_id.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+                ctx.to_vp
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
             );
 
             Ok(())
@@ -98,59 +61,20 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
             let core = parse_number(args[1])?;
             let to_vp_id = parse_number(args[2])?;
 
-            let core_ref = state
-                .platform
-                .get_core(core)
-                .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
+            let to_id = *state
+                .domain_names
+                .get(to_name)
+                .ok_or_else(|| format!("Domain '{}' not found", to_name))?;
 
-            let current_state = core_ref.state.read();
-            let domain_id = match *current_state {
-                CoreState::Running(id) => id,
-                CoreState::Idle => return Err(format!("Core {} is idle, cannot VP-switch", core)),
-            };
-            drop(current_state);
+            let ctx = state
+                .backend
+                .switch_forward(to_id, core, to_vp_id)
+                .map_err(|e| format!("Failed to VP-switch: {}", e))?;
 
             let from_name = state
-                .get_domain_name(domain_id)
-                .ok_or_else(|| format!("Domain ID {} not found", domain_id))?
+                .get_domain_name(ctx.from_domain)
+                .unwrap_or("unknown")
                 .to_string();
-            let from_ref = state
-                .domains
-                .get(&from_name)
-                .ok_or_else(|| format!("Domain '{}' not found", from_name))?
-                .clone();
-            let to_ref = state
-                .domains
-                .get(to_name)
-                .ok_or_else(|| format!("Domain '{}' not found", to_name))?
-                .clone();
-
-            // Find the LocalHandle that from_ref holds for to_ref.
-            let to_handle = find_domain_handle(&from_ref, &to_ref)
-                .ok_or_else(|| format!(
-                    "Domain '{}' does not hold a handle to '{}'", from_name, to_name
-                ))?;
-
-            // Tell the platform which core is executing this call.
-            state.platform.set_current_core(Some(core));
-
-            let ctx = execute(
-                state.platform.as_ref(),
-                false,
-                || {
-                    let ctx = Capability::<Domain>::switch(
-                        &from_ref,
-                        to_handle,
-                        to_vp_id,
-                        state.platform.as_ref(),
-                    )?;
-                    Ok((ctx, UpdateBatch::new()))
-                },
-            )
-            .map(|(ctx, _)| ctx)
-            .map_err(|e| format!("Failed to VP-switch: {:?}", e))?;
-
-            state.platform.set_current_core(None);
 
             state.session.add_command(Command::Switch {
                 core,
@@ -164,9 +88,13 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 "✓".bright_green().bold(),
                 core,
                 from_name.bright_white(),
-                ctx.from_vp_id.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+                ctx.from_vp
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 to_name.bright_white(),
-                ctx.to_vp_id.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()),
+                ctx.to_vp
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
             );
 
             Ok(())
@@ -181,78 +109,55 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
 /// 1. Simple format: interrupt <vector> <core> (delivers to current domain on core)
 /// 2. Explicit format: interrupt <vector> <domain> <core>
 pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
-    let (vector, domain, domain_name, core) = if args.len() == 2 {
+    let (vector, domain_id, domain_name, core) = if args.len() == 2 {
         // Simple format: interrupt <vector> <core>
         let vector = parse_number(args[0])? as u8;
         let core = parse_number(args[1])?;
 
-        // Get current domain on this core
-        let core_ref = state
-            .platform
-            .get_core(core)
-            .map_err(|e| format!("Core {} not found: {:?}", core, e))?;
+        // Get current domain on this core from backend
+        let core_states = state.backend.get_core_states();
+        let cs = core_states
+            .iter()
+            .find(|c| c.core_id == core)
+            .ok_or_else(|| format!("Core {} not found", core))?;
 
-        let current_state = core_ref.state.read();
-        let domain_id = match *current_state {
-            CoreState::Running(id) => id,
-            CoreState::Idle => {
-                return Err(format!("Core {} is idle, no domain to deliver interrupt to", core));
-            }
-        };
-        drop(current_state);
+        let domain_id = cs
+            .domain_id
+            .ok_or_else(|| {
+                format!(
+                    "Core {} is idle, no domain to deliver interrupt to",
+                    core
+                )
+            })?;
 
         let domain_name = state
             .get_domain_name(domain_id)
             .ok_or_else(|| format!("Current domain ID {} not found in name mapping", domain_id))?
             .to_string();
 
-        let domain = state
-            .domains
-            .get(&domain_name)
-            .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
-
-        (vector, domain.clone(), domain_name, core)
+        (vector, domain_id, domain_name, core)
     } else if args.len() == 3 {
         // Explicit format: interrupt <vector> <domain> <core>
         let vector = parse_number(args[0])? as u8;
         let domain_name = args[1];
         let core = parse_number(args[2])?;
 
-        let domain = state
-            .domains
+        let domain_id = *state
+            .domain_names
             .get(domain_name)
             .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-        (vector, domain.clone(), domain_name.to_string(), core)
+        (vector, domain_id, domain_name.to_string(), core)
     } else {
-        return Err("Usage: interrupt <vector> <core> OR interrupt <vector> <domain> <core>".to_string());
+        return Err(
+            "Usage: interrupt <vector> <core> OR interrupt <vector> <domain> <core>".to_string(),
+        );
     };
 
-    let interrupted_id = domain.read().data.id;
-
-    let (handler_id, reported_to) = state
-        .platform
-        .route_interrupt(vector, &domain, core)
-        .map_err(|e| format!("Failed to route interrupt: {:?}", e))?;
-
-    // VP-aware interrupt delivery (lazy-unwind model).
-    //
-    // When VPs are configured on the core, this walks the VP call chain from
-    // the interrupted VP up to the DELIVER handler VP, setting:
-    //   - interrupted VP: Running → Interrupted (frozen, not claimable)
-    //   - intermediate VPs: Locked → Suspended (claimable, frees callee on resume)
-    //   - handler VP: Locked → Running (woken to handle the interrupt)
-    //
-    // Falls back to a simple core-state update when VPs are not set up
-    // (e.g. domains switched via the non-VP SwitchManager path).
-    let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
-        &domain, handler_id, core, vector, state.platform.as_ref(),
-    );
-
-    if vp_delivery.is_err() && handler_id != interrupted_id {
-        // Non-VP fallback: just redirect the core to the handler domain.
-        state.platform.set_core_domain_by_id(core, handler_id);
-    }
+    state
+        .backend
+        .deliver_interrupt(vector, domain_id, core)
+        .map_err(|e| format!("Failed to deliver interrupt: {}", e))?;
 
     // Record command
     state.session.add_command(Command::Interrupt {
@@ -261,52 +166,46 @@ pub fn cmd_interrupt(state: &mut CliState, args: &[&str]) -> std::result::Result
         core,
     });
 
-    // Show interrupt routing information
+    // Show interrupt delivery
     println!(
-        "{} Interrupt {} on core {}: interrupted domain '{}' (ID: {})",
+        "{} Interrupt {} on core {}: delivered to domain '{}' (ID: {})",
         "⚡".bright_yellow().bold(),
         vector,
         core,
         domain_name.bright_white(),
-        interrupted_id
+        domain_id
     );
 
-    // Show reported domains if any
-    if !reported_to.is_empty() {
-        println!("  {} Reported to {} domain(s): {:?}",
-            "→".bright_blue(),
-            reported_to.len(),
-            reported_to
-        );
-    }
-
-    // Find handler domain name
-    let handler_name = state
-        .get_domain_name(handler_id)
-        .ok_or_else(|| format!("Handler domain ID {} not found in name mapping", handler_id))?;
-
-    // Show routing result
-    if handler_id != interrupted_id {
-        println!(
-            "{} Routed to handler domain '{}' (ID: {})",
-            "✓".bright_green().bold(),
-            handler_name.bright_white(),
-            handler_id
-        );
-        println!(
-            "  {} Automatically switched core {} from '{}' to '{}'",
-            "→".bright_blue(),
-            core,
-            domain_name.bright_white(),
-            handler_name.bright_white()
-        );
-    } else {
-        println!(
-            "{} Delivered to domain '{}' (ID: {})",
-            "✓".bright_green().bold(),
-            handler_name.bright_white(),
-            handler_id
-        );
+    // Check if the core switched to a different domain (handler routing)
+    let core_states = state.backend.get_core_states();
+    if let Some(cs) = core_states.iter().find(|c| c.core_id == core) {
+        if let Some(new_id) = cs.domain_id {
+            if new_id != domain_id {
+                let handler_name = state
+                    .get_domain_name(new_id)
+                    .unwrap_or("unknown");
+                println!(
+                    "{} Routed to handler domain '{}' (ID: {})",
+                    "✓".bright_green().bold(),
+                    handler_name.bright_white(),
+                    new_id
+                );
+                println!(
+                    "  {} Automatically switched core {} from '{}' to '{}'",
+                    "→".bright_blue(),
+                    core,
+                    domain_name.bright_white(),
+                    handler_name.bright_white()
+                );
+            } else {
+                println!(
+                    "{} Delivered to domain '{}' (ID: {})",
+                    "✓".bright_green().bold(),
+                    domain_name.bright_white(),
+                    domain_id
+                );
+            }
+        }
     }
 
     Ok(())

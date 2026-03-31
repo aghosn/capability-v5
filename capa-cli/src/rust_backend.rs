@@ -36,6 +36,9 @@ pub struct RustBackend {
     next_uid: MemCapUid,
     /// Counter for engine-level capability / sub-handle IDs.
     next_cap_id: u64,
+    /// Counter for synthetic channel domain IDs (channels share `data.id`
+    /// in the engine, so we assign unique IDs here to avoid collisions).
+    next_chan_id: DomainId,
     num_cores: usize,
 }
 
@@ -47,6 +50,7 @@ impl RustBackend {
             mem_caps: HashMap::new(),
             next_uid: 0,
             next_cap_id: 0,
+            next_chan_id: u64::MAX,
             num_cores,
         }
     }
@@ -60,6 +64,13 @@ impl RustBackend {
     fn alloc_cap_id(&mut self) -> u64 {
         let id = self.next_cap_id;
         self.next_cap_id += 1;
+        id
+    }
+
+    /// Allocate a unique synthetic ID for a channel domain.
+    fn alloc_chan_id(&mut self) -> DomainId {
+        let id = self.next_chan_id;
+        self.next_chan_id -= 1;
         id
     }
 
@@ -506,7 +517,7 @@ impl Backend for RustBackend {
             .upgrade()
             .ok_or(BackendError::NotFound)?;
 
-        let chan_id = chan_ref.read().data.id;
+        let chan_id = self.alloc_chan_id();
         self.domains.insert(chan_id, chan_ref);
 
         Ok(chan_id)
@@ -545,7 +556,7 @@ impl Backend for RustBackend {
             .upgrade()
             .ok_or(BackendError::NotFound)?;
 
-        let chan_id = chan_ref.read().data.id;
+        let chan_id = self.alloc_chan_id();
         self.domains.insert(chan_id, chan_ref);
 
         Ok(chan_id)

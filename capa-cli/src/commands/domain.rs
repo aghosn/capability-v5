@@ -1,13 +1,28 @@
-//! Domain-related commands: init, create-domain, seal, revoke, set-interrupt-policy, enumerate-pending, accept-capability
+//! Domain-related commands routed through the Backend trait.
+//!
+//! Every operation goes through `state.backend.*` — no direct `capability_engine`
+//! calls except for type-level imports used in argument parsing.
 
-use capability_engine::*;
 use colored::*;
-use std::sync::Arc;
 
 use crate::parser::{format_api, parse_api, parse_number};
 use crate::session::Command;
-use crate::state::{CliState, find_domain_handle, find_domain_owner, find_memory_handle};
+use crate::state::CliState;
 use crate::update_processor::process_updates;
+
+// InterruptVisibility values (Deliver=0, Report=1, NotReport=2) — matches
+// capability_engine::InterruptVisibility enum discriminants.
+fn parse_visibility(s: &str) -> std::result::Result<u64, String> {
+    match s.to_uppercase().as_str() {
+        "DELIVER" => Ok(0),
+        "REPORT" => Ok(1),
+        "NOTREPORT" => Ok(2),
+        _ => Err(format!(
+            "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
+            s
+        )),
+    }
+}
 
 /// Initialize root domain and memory region
 pub fn cmd_init(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
@@ -18,52 +33,29 @@ pub fn cmd_init(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     let name = args[0];
     let size = parse_number(args[1])?;
 
-    // Create root domain with the specified number of cores
-    let root_domain = Domain::new_root(state.num_cores);
-    let root_cap_id = state.next_id();
-    let root = Capability::new_root(0, root_cap_id, root_domain);
-    let root_name = name.to_string();
+    let result = state
+        .backend
+        .init(size)
+        .map_err(|e| format!("Failed to initialize: {}", e))?;
 
-    // Track domain name for reverse lookup
-    state.register_domain_name(0, root_name.clone());
-    state.domains.insert(root_name.clone(), root.clone());
+    let domain_id = result.domain_id;
+    let mem_uid = result.mem_uid;
 
-    // Create root memory region
-    let root_region = MemoryRegion::new_root(0x0, size);
-    let mem_cap_id = state.next_id();
-    let mem_root = Capability::new_root(0, mem_cap_id, root_region);
-    let mem_name = "r0".to_string();
-    state.memories.insert(mem_name.clone(), mem_root.clone());
+    state.register_domain_name(domain_id, name.to_string());
+    state.mem_names.insert("r0".to_string(), mem_uid);
+    state.mem_owners.insert(mem_uid, domain_id);
 
-    // Register memory capability with root domain
-    root.write()
-        .data
-        .add_memory_capability(mem_cap_id, Arc::downgrade(&mem_root));
-
-    // Automatically schedule root domain on all cores and initialise VP run-states.
-    let num_cores = state.num_cores as u64;
-    state.platform.register_domain(0, None);
-    for core_id in 0..num_cores {
-        state.platform.set_core_context(core_id, &root, core_id);
-
-        // Mark root VP[core_id] as Running on core_id so VP-aware switches work.
-        let vp = root.read().data.policy.vprocessor_states.get(core_id as usize).cloned();
-        if let Some(vp_arc) = vp {
-            *vp_arc.run_state.write() = VpRunState::Running { core: core_id, caller: None };
-        }
-    }
-
-    // Record command
     state.session.add_command(Command::Init {
         name: name.to_string(),
         size,
     });
 
+    let num_cores = state.num_cores;
     println!(
         "{} Created root domain '{}' and memory region '{}' (size: 0x{:x})",
         "✓".bright_green().bold(),
-        root_name.bright_white(),
-        mem_name.bright_white(),
+        name.bright_white(),
+        "r0".bright_white(),
         size
     );
     println!(
@@ -86,51 +78,21 @@ pub fn cmd_create_domain(state: &mut CliState, args: &[&str]) -> std::result::Re
     let cores = parse_number(args[2])?;
     let api = parse_api(args[3])?;
 
-    let child_policy = DomainPolicy::new_restricted(cores, api);
-
-    let parent = state
-        .domains
+    let parent_id = *state
+        .domain_names
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
 
-    let parent_id = parent.read().data.id;
+    let (child_id, updates) = state
+        .backend
+        .create_domain(parent_id, cores, api.bits() as u64)
+        .map_err(|e| format!("Failed to create child: {}", e))?;
 
-    // Use the domain-mediated interface: allocates handle, sets owner_domain, registers in table.
-    let child_handle =
-        Capability::create(&parent, child_policy)
-            .map(|(h, _batch)| h)
-            .map_err(|e| format!("Failed to create child: {:?}", e))?;
-
-    // Retrieve the new child Arc from parent's table.
-    let child = parent
-        .read()
-        .data
-        .domain_capabilities
-        .get(&child_handle)
-        .and_then(|w| w.upgrade())
-        .ok_or("Internal error: child not found in parent table after creation")?;
-
-    let child_id = child.read().data.id;
-
-    // Add VPs (no longer auto-created in Domain::new)
-    let num_vps = child.read().data.policy.num_vprocessors;
-    for _ in 0..num_vps {
-        child
-            .write()
-            .data
-            .add_vprocessor()
-            .map_err(|e| format!("Failed to add VP: {:?}", e))?;
-    }
-
-    // Track domain name for reverse lookup
     state.register_domain_name(child_id, child_name.to_string());
-    state.domains.insert(child_name.to_string(), child);
+    state.domain_parents.insert(child_id, parent_id);
 
-    // Register with platform
-    state.platform.register_domain(child_id, Some(parent_id));
+    process_updates(state, &updates);
 
-    // Record command
     state.session.add_command(Command::CreateDomain {
         parent: parent_name.to_string(),
         name: child_name.to_string(),
@@ -156,25 +118,21 @@ pub fn cmd_seal(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     }
 
     let domain_name = args[0];
-    let domain = state
-        .domains
+    let child_id = *state
+        .domain_names
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    // Find the owner domain and the handle it holds for this domain.
-    let owner_id = domain.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
+    let owner_id = *state
+        .domain_parents
+        .get(&child_id)
+        .ok_or_else(|| format!("Owner of domain '{}' not found", domain_name))?;
 
-    let cap_handle = find_domain_handle(&owner, &domain)
-        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
+    state
+        .backend
+        .seal(owner_id, child_id)
+        .map_err(|e| format!("Failed to seal: {}", e))?;
 
-    Capability::seal(&owner, cap_handle)
-        .map_err(|e| format!("Failed to seal: {:?}", e))?;
-
-    // Record command
     state.session.add_command(Command::Seal {
         domain: domain_name.to_string(),
     });
@@ -197,27 +155,20 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     let parent_name = args[0];
     let child_name = args[1];
 
-    // Try to revoke as memory region first
-    if let (Some(parent), Some(child)) = (
-        state.memories.get(parent_name).cloned(),
-        state.memories.get(child_name).cloned(),
+    // Try memory revoke first
+    if let (Some(&parent_uid), Some(&child_uid)) = (
+        state.mem_names.get(parent_name),
+        state.mem_names.get(child_name),
     ) {
-        let child_sub = child.read().sub_handle;
+        let owner_id = *state
+            .mem_owners
+            .get(&parent_uid)
+            .ok_or_else(|| format!("Owner of memory '{}' not found", parent_name))?;
 
-        // Find the owner of the parent memory and its handle for parent
-        let owner_id = parent.read().owned.owner;
-        let owner = state
-            .get_domain_cap_by_id(owner_id)
-            .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-        let parent_handle = find_memory_handle(&owner, &parent)
-            .ok_or_else(|| format!("Memory '{}' not found in owner's capability table", parent_name))?;
-
-        let platform = state.platform.clone();
-        let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke(&owner, parent_handle, child_sub)?;
-            Ok(((), updates))
-        })
-        .map_err(|e| format!("Failed to revoke memory: {:?}", e))?;
+        let updates = state
+            .backend
+            .revoke_mem(owner_id, parent_uid, child_uid)
+            .map_err(|e| format!("Failed to revoke memory: {}", e))?;
 
         println!(
             "{} Revoked memory '{}' from '{}'",
@@ -226,10 +177,13 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
             parent_name.bright_white()
         );
 
-        // Process updates (this will remove revoked capabilities from state)
-        process_updates(state, &batch);
+        process_updates(state, &updates);
 
-        // Record command
+        // Remove the child from state maps
+        if let Some(uid) = state.mem_names.remove(child_name) {
+            state.mem_owners.remove(&uid);
+        }
+
         state.session.add_command(Command::Revoke {
             parent: parent_name.to_string(),
             child: child_name.to_string(),
@@ -238,20 +192,15 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
         return Ok(());
     }
 
-    // Try to revoke as domain
-    if let (Some(parent), Some(child)) = (
-        state.domains.get(parent_name).cloned(),
-        state.domains.get(child_name).cloned(),
+    // Try domain revoke
+    if let (Some(&parent_id), Some(&child_id)) = (
+        state.domain_names.get(parent_name),
+        state.domain_names.get(child_name),
     ) {
-        let child_handle = find_domain_handle(&parent, &child)
-            .ok_or_else(|| format!("Domain '{}' not found in parent '{}' capability table", child_name, parent_name))?;
-
-        let platform = state.platform.clone();
-        let (_, batch) = execute(&*platform, true, || {
-            let updates = Capability::revoke_domain(&parent, child_handle)?;
-            Ok(((), updates))
-        })
-        .map_err(|e| format!("Failed to revoke domain: {:?}", e))?;
+        let updates = state
+            .backend
+            .revoke_domain(parent_id, child_id)
+            .map_err(|e| format!("Failed to revoke domain: {}", e))?;
 
         println!(
             "{} Revoked domain '{}' from '{}' - cascading to all children and capabilities",
@@ -260,10 +209,8 @@ pub fn cmd_revoke(state: &mut CliState, args: &[&str]) -> std::result::Result<()
             parent_name.bright_white()
         );
 
-        // Process updates (this will remove revoked domains and their capabilities from state)
-        process_updates(state, &batch);
+        process_updates(state, &updates);
 
-        // Record command
         state.session.add_command(Command::Revoke {
             parent: parent_name.to_string(),
             child: child_name.to_string(),
@@ -291,33 +238,27 @@ pub fn cmd_set_interrupt_policy(
     let vector = parse_number(args[1])? as u8;
     let visibility = parse_visibility(args[2])?;
 
-    let domain = state
-        .domains
+    let child_id = *state
+        .domain_names
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    let owner_id = domain.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-    let cap_handle = find_domain_handle(&owner, &domain)
-        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
+    let owner_id = *state
+        .domain_parents
+        .get(&child_id)
+        .ok_or_else(|| format!("Owner of domain '{}' not found", domain_name))?;
 
-    Capability::set_policy(
-        &owner,
-        cap_handle,
-        PolicyIdentifier::VectorVisibility(vector),
-        visibility as u64,
-    )
-    .map_err(|e| format!("Failed to set interrupt policy: {:?}", e))?;
+    state
+        .backend
+        .set_interrupt_policy(owner_id, child_id, vector, visibility)
+        .map_err(|e| format!("Failed to set interrupt policy: {}", e))?;
 
     println!(
-        "{} Set interrupt policy for vector {} on domain '{}': {:?}",
+        "{} Set interrupt policy for vector {} on domain '{}': {}",
         "✓".bright_green().bold(),
         vector,
         domain_name.bright_white(),
-        visibility as u64
+        visibility
     );
 
     Ok(())
@@ -335,47 +276,29 @@ pub fn cmd_set_default_interrupt_policy(
     let domain_name = args[0];
     let visibility = parse_visibility(args[1])?;
 
-    let domain = state
-        .domains
+    let child_id = *state
+        .domain_names
         .get(domain_name)
-        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    let owner_id = domain.read().owned.owner;
-    let owner = state
-        .get_domain_cap_by_id(owner_id)
-        .ok_or_else(|| format!("Owner domain (ID: {}) not found", owner_id))?;
-    let cap_handle = find_domain_handle(&owner, &domain)
-        .ok_or_else(|| format!("Domain '{}' not found in owner's capability table", domain_name))?;
+    let owner_id = *state
+        .domain_parents
+        .get(&child_id)
+        .ok_or_else(|| format!("Owner of domain '{}' not found", domain_name))?;
 
-    Capability::set_policy(
-        &owner,
-        cap_handle,
-        PolicyIdentifier::DefaultInterruptVisibility,
-        visibility as u64,
-    )
-    .map_err(|e| format!("Failed to set default interrupt policy: {:?}", e))?;
+    state
+        .backend
+        .set_policy(owner_id, child_id, "default-visibility", visibility)
+        .map_err(|e| format!("Failed to set default interrupt policy: {}", e))?;
 
     println!(
-        "{} Set default interrupt policy for domain '{}': {:?}",
+        "{} Set default interrupt policy for domain '{}': {}",
         "✓".bright_green().bold(),
         domain_name.bright_white(),
-        visibility as u64
+        visibility
     );
 
     Ok(())
-}
-
-fn parse_visibility(s: &str) -> std::result::Result<InterruptVisibility, String> {
-    match s.to_uppercase().as_str() {
-        "DELIVER" => Ok(InterruptVisibility::Deliver),
-        "REPORT" => Ok(InterruptVisibility::Report),
-        "NOTREPORT" => Ok(InterruptVisibility::NotReport),
-        _ => Err(format!(
-            "Invalid visibility: {}. Use DELIVER, REPORT, or NOTREPORT",
-            s
-        )),
-    }
 }
 
 /// Set any policy on a child domain: set-policy <parent> <child> <policy> <value>
@@ -394,24 +317,19 @@ pub fn cmd_set_policy(
     let policy_str = args[2];
     let value = parse_number(args[3])?;
 
-    let parent = state
-        .domains
+    let parent_id = *state
+        .domain_names
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
-        .clone();
-    let child = state
-        .domains
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
+    let child_id = *state
+        .domain_names
         .get(child_name)
-        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?;
 
-    let cap_handle = find_domain_handle(&parent, &child)
-        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
-
-    let policy_id = parse_policy_id(policy_str)?;
-
-    Capability::set_policy(&parent, cap_handle, policy_id, value)
-        .map_err(|e| format!("Failed to set policy: {:?}", e))?;
+    state
+        .backend
+        .set_policy(parent_id, child_id, policy_str, value)
+        .map_err(|e| format!("Failed to set policy: {}", e))?;
 
     println!(
         "{} Set policy '{}' = {} on domain '{}' (via '{}')",
@@ -431,33 +349,26 @@ pub fn cmd_get_policy(
     args: &[&str],
 ) -> std::result::Result<(), String> {
     if args.len() != 3 {
-        return Err(
-            "Usage: get-policy <parent> <child> <policy>".to_string(),
-        );
+        return Err("Usage: get-policy <parent> <child> <policy>".to_string());
     }
 
     let parent_name = args[0];
     let child_name = args[1];
     let policy_str = args[2];
 
-    let parent = state
-        .domains
+    let parent_id = *state
+        .domain_names
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
-        .clone();
-    let child = state
-        .domains
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
+    let child_id = *state
+        .domain_names
         .get(child_name)
-        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?;
 
-    let cap_handle = find_domain_handle(&parent, &child)
-        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
-
-    let policy_id = parse_policy_id(policy_str)?;
-
-    let value = Capability::get_policy(&parent, cap_handle, policy_id)
-        .map_err(|e| format!("Failed to get policy: {:?}", e))?;
+    let value = state
+        .backend
+        .get_policy(parent_id, child_id, policy_str)
+        .map_err(|e| format!("Failed to get policy: {}", e))?;
 
     println!(
         "{} Policy '{}' on domain '{}': {}",
@@ -485,22 +396,19 @@ pub fn cmd_set_register(
     let reg_id = parse_number(args[3])?;
     let value = parse_number(args[4])?;
 
-    let parent = state
-        .domains
+    let parent_id = *state
+        .domain_names
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
-        .clone();
-    let child = state
-        .domains
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
+    let child_id = *state
+        .domain_names
         .get(child_name)
-        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?;
 
-    let cap_handle = find_domain_handle(&parent, &child)
-        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
-
-    Capability::set_register(&parent, cap_handle, vp_id, reg_id, value, state.platform.as_ref())
-        .map_err(|e| format!("Failed to set register: {:?}", e))?;
+    state
+        .backend
+        .set_register(parent_id, child_id, vp_id, reg_id, value)
+        .map_err(|e| format!("Failed to set register: {}", e))?;
 
     println!(
         "{} Set VP[{}] reg[{}] = {} on domain '{}'",
@@ -528,22 +436,19 @@ pub fn cmd_get_register(
     let vp_id = parse_number(args[2])?;
     let reg_id = parse_number(args[3])?;
 
-    let parent = state
-        .domains
+    let parent_id = *state
+        .domain_names
         .get(parent_name)
-        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?
-        .clone();
-    let child = state
-        .domains
+        .ok_or_else(|| format!("Domain '{}' not found", parent_name))?;
+    let child_id = *state
+        .domain_names
         .get(child_name)
-        .ok_or_else(|| format!("Domain '{}' not found", child_name))?
-        .clone();
+        .ok_or_else(|| format!("Domain '{}' not found", child_name))?;
 
-    let cap_handle = find_domain_handle(&parent, &child)
-        .ok_or_else(|| format!("Domain '{}' not found in '{}' capability table", child_name, parent_name))?;
-
-    let value = Capability::get_register(&parent, cap_handle, vp_id, reg_id, state.platform.as_ref())
-        .map_err(|e| format!("Failed to get register: {:?}", e))?;
+    let value = state
+        .backend
+        .get_register(parent_id, child_id, vp_id, reg_id)
+        .map_err(|e| format!("Failed to get register: {}", e))?;
 
     println!(
         "{} VP[{}] reg[{}] on domain '{}': {}",
@@ -557,46 +462,6 @@ pub fn cmd_get_register(
     Ok(())
 }
 
-fn parse_policy_id(s: &str) -> std::result::Result<PolicyIdentifier, String> {
-    if s.eq_ignore_ascii_case("cores") {
-        return Ok(PolicyIdentifier::Cores);
-    }
-    if s.eq_ignore_ascii_case("api-monitor") {
-        return Ok(PolicyIdentifier::ApiMonitor);
-    }
-    if s.eq_ignore_ascii_case("default-visibility") {
-        return Ok(PolicyIdentifier::DefaultInterruptVisibility);
-    }
-    if let Some(rest) = s.strip_prefix("vector-visibility:") {
-        let v = rest.parse::<u8>().map_err(|_| format!("Invalid vector: {}", rest))?;
-        return Ok(PolicyIdentifier::VectorVisibility(v));
-    }
-    if let Some(rest) = s.strip_prefix("vector-read:") {
-        let (vec_str, word) = parse_vector_word(rest)?;
-        let v = vec_str.parse::<u8>().map_err(|_| format!("Invalid vector: {}", vec_str))?;
-        return Ok(PolicyIdentifier::VectorRegReadSet(v, word));
-    }
-    if let Some(rest) = s.strip_prefix("vector-write:") {
-        let (vec_str, word) = parse_vector_word(rest)?;
-        let v = vec_str.parse::<u8>().map_err(|_| format!("Invalid vector: {}", vec_str))?;
-        return Ok(PolicyIdentifier::VectorRegWriteSet(v, word));
-    }
-    Err(format!("Unknown policy: '{}'. Use: cores, api-monitor, default-visibility, vector-visibility:<v>, vector-read:<v>[:<word>], vector-write:<v>[:<word>]", s))
-}
-
-/// Parse "vector[:word]" — word defaults to 0.
-fn parse_vector_word(s: &str) -> std::result::Result<(&str, u8), String> {
-    if let Some((vec_part, word_part)) = s.split_once(':') {
-        let w = word_part.parse::<u8>().map_err(|_| format!("Invalid word index: {}", word_part))?;
-        if w >= 3 {
-            return Err(format!("Word index must be 0..2, got {}", w));
-        }
-        Ok((vec_part, w))
-    } else {
-        Ok((s, 0))
-    }
-}
-
 /// Enumerate pending capabilities for a sealed domain
 pub fn cmd_enumerate_pending(
     state: &mut CliState,
@@ -607,15 +472,14 @@ pub fn cmd_enumerate_pending(
     }
 
     let domain_name = args[0];
-    let domain = state
-        .domains
+    let domain_id = *state
+        .domain_names
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    let domain_read = domain.read();
-    let pending_ids = domain_read.data.get_pending_ids();
+    let pending = state.backend.get_pending_caps(domain_id);
 
-    if pending_ids.is_empty() {
+    if pending.is_empty() {
         println!(
             "  {} No pending capabilities for domain '{}'",
             "ℹ".bright_blue(),
@@ -630,25 +494,28 @@ pub fn cmd_enumerate_pending(
         domain_name.bright_white()
     );
 
-    for pending_id in pending_ids {
-        if let Some(pending_cap) = domain_read.data.pending_capabilities.get(&pending_id) {
-            if let Some(mem_ref) = pending_cap.cap.upgrade() {
-                let mem = mem_ref.read();
-                println!(
-                    "  {} [ID: {}] Memory [0x{:x}..0x{:x}) {:?} (sender: {})",
-                    "→".bright_blue(),
-                    pending_id,
-                    mem.data.access.start,
-                    mem.data.access.end(),
-                    mem.data.access.rights,
-                    pending_cap.sender_domain_id
-                );
-            }
+    for p in &pending {
+        if p.is_domain {
+            println!(
+                "  {} [ID: {}] Channel (sender: {})",
+                "→".bright_blue(),
+                p.pending_id,
+                p.sender_id
+            );
+        } else {
+            println!(
+                "  {} [ID: {}] Memory [0x{:x}..0x{:x}) {} (sender: {})",
+                "→".bright_blue(),
+                p.pending_id,
+                p.start,
+                p.end,
+                p.rights,
+                p.sender_id
+            );
         }
     }
     println!();
 
-    // Record command
     state.session.add_command(Command::EnumeratePending {
         domain: domain_name.to_string(),
     });
@@ -677,32 +544,30 @@ pub fn cmd_accept_capability(
         None
     };
 
-    let domain = state
-        .domains
+    let domain_id = *state
+        .domain_names
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    // Accept the pending memory capability using accept_at
-    let platform = state.platform.clone();
-    let (handle, batch) = execute(&*platform, false, || {
-        let (h, updates) = Capability::accept_at(domain, pending_id, gpa_override)?;
-        Ok((h, updates))
-    })
-    .map_err(|e| format!("Failed to accept capability: {:?}", e))?;
+    let (mem_uid, updates) = state
+        .backend
+        .accept(domain_id, pending_id, gpa_override)
+        .map_err(|e| format!("Failed to accept capability: {}", e))?;
 
-    // Process updates
-    process_updates(state, &batch);
+    process_updates(state, &updates);
+
+    // Track the accepted memory's ownership
+    state.mem_owners.insert(mem_uid, domain_id);
 
     let gpa_msg = gpa_override.map_or(String::new(), |g| format!(" at GPA {:#x}", g));
     println!(
-        "{} Accepted pending memory capability {} as handle {}{}",
+        "{} Accepted pending memory capability {} as uid {}{}",
         "✓".bright_green().bold(),
         pending_id,
-        handle,
+        mem_uid,
         gpa_msg,
     );
 
-    // Record command
     state.session.add_command(Command::AcceptCapability {
         domain: domain_name.to_string(),
         pending_id,
@@ -712,27 +577,36 @@ pub fn cmd_accept_capability(
 }
 
 /// Obtain a channel capability: get-chan <target> <chan_name>
-/// The caller is inferred as the domain that owns <target> in its capability table.
+/// The caller is inferred as the parent of <target>.
 pub fn cmd_get_chan(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
     if args.len() != 2 {
         return Err("Usage: get-chan <target> <chan_name>".to_string());
     }
     let target_name = args[0];
-    let chan_name   = args[1];
+    let chan_name = args[1];
 
-    let target = state.domains.get(target_name)
-        .ok_or_else(|| format!("Domain '{}' not found", target_name))?.clone();
+    let target_id = *state
+        .domain_names
+        .get(target_name)
+        .ok_or_else(|| format!("Domain '{}' not found", target_name))?;
 
-    let (caller_name, caller, target_handle) = find_domain_owner(state, &target)
+    let caller_id = *state
+        .domain_parents
+        .get(&target_id)
         .ok_or_else(|| format!("No domain found that owns '{}'", target_name))?;
 
-    let chan_handle = Capability::get_chan(&caller, target_handle)
-        .map_err(|e| format!("get-chan failed: {:?}", e))?;
+    let caller_name = state
+        .get_domain_name(caller_id)
+        .ok_or_else(|| format!("Caller domain ID {} not found", caller_id))?
+        .to_string();
 
-    let chan_ref = caller.read().data.domain_capabilities[&chan_handle].upgrade()
-        .ok_or("Internal error: channel cap not found after creation")?;
+    let chan_id = state
+        .backend
+        .get_chan(caller_id, target_id)
+        .map_err(|e| format!("get-chan failed: {}", e))?;
 
-    state.domains.insert(chan_name.to_string(), chan_ref);
+    state.register_domain_name(chan_id, chan_name.to_string());
+    state.domain_parents.insert(chan_id, caller_id);
 
     state.session.add_command(Command::GetChan {
         caller: caller_name.clone(),
@@ -751,24 +625,29 @@ pub fn cmd_get_chan(state: &mut CliState, args: &[&str]) -> std::result::Result<
 }
 
 /// Accept a pending channel: accept-channel <receiver> <pending_id> <chan_name>
-pub fn cmd_accept_channel(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_accept_channel(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 3 {
         return Err("Usage: accept-channel <receiver> <pending_id> <chan_name>".to_string());
     }
     let receiver_name = args[0];
-    let pending_id    = parse_number(args[1])?;
-    let chan_name     = args[2];
+    let pending_id = parse_number(args[1])?;
+    let chan_name = args[2];
 
-    let receiver = state.domains.get(receiver_name)
-        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+    let receiver_id = *state
+        .domain_names
+        .get(receiver_name)
+        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?;
 
-    let new_handle = Capability::<Domain>::accept_channel(&receiver, pending_id)
-        .map_err(|e| format!("accept-channel failed: {:?}", e))?;
+    let chan_id = state
+        .backend
+        .accept_channel(receiver_id, pending_id)
+        .map_err(|e| format!("accept-channel failed: {}", e))?;
 
-    let chan_ref = receiver.read().data.domain_capabilities[&new_handle].upgrade()
-        .ok_or("Internal error: channel not found after accept")?;
-
-    state.domains.insert(chan_name.to_string(), chan_ref);
+    state.register_domain_name(chan_id, chan_name.to_string());
+    state.domain_parents.insert(chan_id, receiver_id);
 
     state.session.add_command(Command::AcceptChannel {
         receiver: receiver_name.to_string(),
@@ -777,28 +656,34 @@ pub fn cmd_accept_channel(state: &mut CliState, args: &[&str]) -> std::result::R
     });
 
     println!(
-        "{} '{}' accepted channel as '{}' (handle: {})",
+        "{} '{}' accepted channel as '{}'",
         "✓".bright_green().bold(),
         receiver_name.bright_white(),
         chan_name.bright_white(),
-        new_handle,
     );
     Ok(())
 }
 
 /// Reject a pending channel: reject-channel <receiver> <pending_id>
-pub fn cmd_reject_channel(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+pub fn cmd_reject_channel(
+    state: &mut CliState,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     if args.len() != 2 {
         return Err("Usage: reject-channel <receiver> <pending_id>".to_string());
     }
     let receiver_name = args[0];
-    let pending_id    = parse_number(args[1])?;
+    let pending_id = parse_number(args[1])?;
 
-    let receiver = state.domains.get(receiver_name)
-        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?.clone();
+    let receiver_id = *state
+        .domain_names
+        .get(receiver_name)
+        .ok_or_else(|| format!("Domain '{}' not found", receiver_name))?;
 
-    Capability::<Domain>::reject_channel(&receiver, pending_id)
-        .map_err(|e| format!("reject-channel failed: {:?}", e))?;
+    state
+        .backend
+        .reject_channel(receiver_id, pending_id)
+        .map_err(|e| format!("reject-channel failed: {}", e))?;
 
     state.session.add_command(Command::RejectChannel {
         receiver: receiver_name.to_string(),
@@ -825,13 +710,15 @@ pub fn cmd_reject_capability(
     let domain_name = args[0];
     let pending_id = parse_number(args[1])?;
 
-    let domain = state
-        .domains
+    let domain_id = *state
+        .domain_names
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    Capability::reject(domain, pending_id)
-        .map_err(|e| format!("Failed to reject capability: {:?}", e))?;
+    state
+        .backend
+        .reject(domain_id, pending_id)
+        .map_err(|e| format!("Failed to reject capability: {}", e))?;
 
     println!(
         "{} Rejected pending capability {} for domain '{}'",
@@ -840,7 +727,6 @@ pub fn cmd_reject_capability(
         domain_name.bright_white()
     );
 
-    // Record command
     state.session.add_command(Command::RejectCapability {
         domain: domain_name.to_string(),
         pending_id,
@@ -848,3 +734,4 @@ pub fn cmd_reject_capability(
 
     Ok(())
 }
+

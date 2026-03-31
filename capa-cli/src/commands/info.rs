@@ -1,11 +1,12 @@
-//! Information commands: attest, view, list, mem-usage
+//! Information commands routed through the Backend trait.
+//!
+//! All data comes from Backend query methods (list_domains, get_domain_mem_caps,
+//! get_address_space, get_core_states, attest) — no direct capability_engine access.
 
-use capability_engine::*;
-use capability_engine::domain::PendingCapability;
 use colored::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
+use crate::backend::{DomainId, MemCapInfoDto, MemCapUid};
 use crate::session::Command;
 use crate::state::CliState;
 
@@ -16,31 +17,22 @@ pub fn cmd_attest(state: &mut CliState, args: &[&str]) -> std::result::Result<()
     }
 
     let domain_name = args[0];
-    let domain = state
-        .domains
+    let domain_id = *state
+        .domain_names
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    // Sealed domains must have ATTEST permission to produce an attestation report.
-    {
-        let d = domain.read();
-        if d.data.is_sealed() && !d.data.policy.api.attest() {
-            return Err(format!(
-                "Domain '{}' does not have ATTEST permission",
-                domain_name
-            ));
-        }
-    }
+    let report = state
+        .backend
+        .attest(domain_id)
+        .map_err(|e| format!("Failed to attest: {}", e))?;
 
-    let attestation = attest_domain(domain);
-
-    // Record command
     state.session.add_command(Command::Attest {
         domain: domain_name.to_string(),
     });
 
     println!("\n{}", "Attestation Report:".bright_cyan().bold());
-    println!("{}", attestation.report);
+    println!("{}", report);
 
     Ok(())
 }
@@ -52,62 +44,44 @@ pub fn cmd_view(state: &mut CliState, args: &[&str]) -> std::result::Result<(), 
     }
 
     let domain_name = args[0];
-    let domain = state
-        .domains
+    let domain_id = *state
+        .domain_names
         .get(domain_name)
         .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
 
-    let view = compute_address_space(domain);
+    let regions = state.backend.get_address_space(domain_id);
 
-    // Record command
     state.session.add_command(Command::View {
         domain: domain_name.to_string(),
     });
 
-    println!("\n{}", "Address Space View (HPA):".bright_cyan().bold());
-    println!("{}", view);
-
-    // GPA Address Space from the domain's AddressMap.
-    {
-        let d = domain.read();
-        let entries = d.data.address_map.entries();
-        if entries.is_empty() {
-            println!("{}", "GPA Address Space: (empty)".dimmed());
-        } else {
-            println!("{}", "GPA Address Space:".bright_cyan().bold());
-            for (gpa, entry) in entries {
-                match entry {
-                    capability_engine::translation::MapEntry::Mapped(m) => {
-                        let tag = if *gpa == m.hpa_start {
-                            " (identity)".dimmed().to_string()
-                        } else {
-                            String::new()
-                        };
-                        println!(
-                            "  GPA {:#x}..{:#x} → HPA {:#x} {}{}",
-                            gpa,
-                            gpa + m.size,
-                            m.hpa_start,
-                            m.rights,
-                            tag
-                        );
-                    }
-                    capability_engine::translation::MapEntry::Blocked { hpa_start, size } => {
-                        println!(
-                            "  GPA {:#x}..{:#x} → {} (HPA {:#x})",
-                            gpa,
-                            gpa + size,
-                            "BLOCKED".red(),
-                            hpa_start
-                        );
-                    }
-                }
-            }
+    println!("\n{}", "Address Space View:".bright_cyan().bold());
+    if regions.is_empty() {
+        println!("  (empty)");
+    } else {
+        for r in &regions {
+            let tag = if r.is_identity_mapped {
+                " (identity)".dimmed().to_string()
+            } else {
+                String::new()
+            };
+            println!(
+                "  GPA {:#x}..{:#x} → HPA {:#x} {}{}",
+                r.gpa,
+                r.gpa + r.size,
+                r.hpa,
+                r.rights,
+                tag
+            );
         }
     }
 
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Memory tree visualization (DTO-based)
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Memory region node for hierarchical tree visualization
 #[derive(Debug, Clone)]
@@ -115,97 +89,90 @@ struct MemoryNode {
     name: String,
     start: u64,
     end: u64,
-    kind: RegionKind,
-    status: RegionStatus,
+    kind: String,
     is_meta: bool,
     children: Vec<MemoryNode>,
     owner_name: String,
 }
 
-/// Build hierarchical memory tree from state
-fn build_memory_tree(state: &CliState) -> Vec<MemoryNode> {
-    let mut roots = Vec::new();
-    let all_names: HashSet<String> = state.memories.keys().cloned().collect();
-    let mut child_names: HashSet<String> = HashSet::new();
+/// Build a reverse map from MemCapUid → user-assigned name
+fn build_uid_to_name(state: &CliState) -> HashMap<MemCapUid, String> {
+    state.mem_names.iter().map(|(n, &uid)| (uid, n.clone())).collect()
+}
 
-    // Build parent -> children mapping based on address containment
-    let mut parent_children: HashMap<String, Vec<String>> = HashMap::new();
+/// Convert a MemCapInfoDto to a MemoryNode, recursively including children.
+fn dto_to_node(
+    dto: &MemCapInfoDto,
+    uid_to_name: &HashMap<MemCapUid, String>,
+    id_to_name: &HashMap<DomainId, String>,
+) -> MemoryNode {
+    let name = uid_to_name
+        .get(&dto.uid)
+        .cloned()
+        .unwrap_or_else(|| format!("uid:{}", dto.uid));
 
-    for (parent_name, parent_mem) in &state.memories {
-        let p = parent_mem.read();
-        let parent_start = p.data.access.start;
-        let parent_end = p.data.access.end();
+    let owner_name = id_to_name
+        .get(&dto.owner_id)
+        .cloned()
+        .unwrap_or_else(|| format!("DOM{}", dto.owner_id));
 
-        for (child_name, child_mem) in &state.memories {
-            if child_name == parent_name {
-                continue;
-            }
-            let c = child_mem.read();
-            let child_start = c.data.access.start;
-            let child_end = c.data.access.end();
+    let is_meta = dto.attributes.contains("META");
 
-            // Check if child is within parent's range and is actually a child
-            if child_start >= parent_start && child_end <= parent_end && p.children.len() > 0 {
-                // Verify by Arc pointer identity to avoid false matches when two regions
-                // share the same address range (e.g., a carve and an alias at identical ranges)
-                let child_ptr = Arc::as_ptr(child_mem);
-                let is_child = p.children.iter().any(|child_ref| {
-                    Arc::as_ptr(child_ref) == child_ptr
-                });
+    let children: Vec<MemoryNode> = dto
+        .children
+        .iter()
+        .map(|c| dto_to_node(c, uid_to_name, id_to_name))
+        .collect();
 
-                if is_child {
-                    parent_children.entry(parent_name.clone())
-                        .or_insert_with(Vec::new)
-                        .push(child_name.clone());
-                    child_names.insert(child_name.clone());
-                }
-            }
+    MemoryNode {
+        name,
+        start: dto.start,
+        end: dto.end,
+        kind: dto.kind.clone(),
+        is_meta,
+        children,
+        owner_name,
+    }
+}
+
+/// Collect all MemCapInfoDtos from all domains and find root-level ones.
+fn collect_root_mem_nodes(state: &CliState) -> Vec<MemoryNode> {
+    let uid_to_name = build_uid_to_name(state);
+    let domains = state.backend.list_domains();
+
+    // Collect all top-level mem cap DTOs across all domains.
+    let mut all_dtos: Vec<MemCapInfoDto> = Vec::new();
+    for d in &domains {
+        all_dtos.extend(state.backend.get_domain_mem_caps(d.id));
+    }
+
+    // Collect all UIDs that appear as children of other DTOs.
+    let mut child_uids: HashSet<MemCapUid> = HashSet::new();
+    fn collect_child_uids(dto: &MemCapInfoDto, set: &mut HashSet<MemCapUid>) {
+        for child in &dto.children {
+            set.insert(child.uid);
+            collect_child_uids(child, set);
+        }
+    }
+    for dto in &all_dtos {
+        collect_child_uids(dto, &mut child_uids);
+    }
+
+    // Deduplicate by uid — keep the first occurrence.
+    let mut seen: HashSet<MemCapUid> = HashSet::new();
+    let mut root_dtos: Vec<&MemCapInfoDto> = Vec::new();
+    for dto in &all_dtos {
+        if !child_uids.contains(&dto.uid) && seen.insert(dto.uid) {
+            root_dtos.push(dto);
         }
     }
 
-    // Build nodes recursively, starting from roots
-    fn build_node(name: &str, state: &CliState, parent_children: &HashMap<String, Vec<String>>) -> Option<MemoryNode> {
-        let mem = state.memories.get(name)?;
-        let m = mem.read();
-
-        let owner_name = state.get_domain_name(m.owned.owner)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("DOM{}", m.owned.owner));
-
-        let mut children_nodes = Vec::new();
-
-        // Get children from the map
-        if let Some(children) = parent_children.get(name) {
-            for child_name in children {
-                if let Some(child_node) = build_node(child_name, state, parent_children) {
-                    children_nodes.push(child_node);
-                }
-            }
-        }
-
-        children_nodes.sort_by_key(|n| n.start);
-
-        Some(MemoryNode {
-            name: name.to_string(),
-            start: m.data.access.start,
-            end: m.data.access.end(),
-            kind: m.data.kind.clone(),
-            status: m.data.status,
-            is_meta: m.owned.attributes.meta(),
-            children: children_nodes,
-            owner_name,
-        })
-    }
-
-    // Get root nodes (those not in child_names)
-    for name in all_names.difference(&child_names) {
-        if let Some(node) = build_node(name, state, &parent_children) {
-            roots.push(node);
-        }
-    }
-
-    roots.sort_by_key(|n| n.start);
-    roots
+    let mut nodes: Vec<MemoryNode> = root_dtos
+        .iter()
+        .map(|dto| dto_to_node(dto, &uid_to_name, &state.domain_id_to_name))
+        .collect();
+    nodes.sort_by_key(|n| n.start);
+    nodes
 }
 
 /// Convert a physical address to bar position
@@ -213,314 +180,218 @@ fn addr_to_bar_pos(addr: u64, total_size: u64, bar_width: usize) -> usize {
     ((addr as f64 / total_size as f64) * bar_width as f64) as usize
 }
 
-/// Maximum width for capability names in the first column.
-/// Adjust this value to control the layout of the address space display.
 const NAME_COLUMN_WIDTH: usize = 20;
 
-/// Draw a horizontal bar representing a memory region
-fn draw_memory_bar(node: &MemoryNode, _depth: usize, total_size: u64, carved_bar_ranges: &[(usize, usize)]) {
+fn draw_memory_bar(
+    node: &MemoryNode,
+    total_size: u64,
+    carved_bar_ranges: &[(usize, usize)],
+) {
     let bar_width = 40;
-
-    // Calculate bar position and width based on actual address ranges
     let bar_start = addr_to_bar_pos(node.start, total_size, bar_width);
     let bar_end = addr_to_bar_pos(node.end, total_size, bar_width);
     let bar_size = (bar_end - bar_start).max(1);
 
-    // Choose color based on kind, status, and META attribute:
-    //   META => purple, Carve + Exclusive => cyan, Carve + Aliased => green, Alias => yellow
     let (bar_char, color_fn): (char, fn(&str) -> colored::ColoredString) = if node.is_meta {
         ('█', |s| s.bright_purple())
     } else {
-        match (node.kind, node.status) {
-            (RegionKind::Carve, RegionStatus::Exclusive) => ('█', |s| s.bright_cyan()),
-            (RegionKind::Carve, RegionStatus::Aliased)   => ('█', |s| s.bright_green()),
-            (RegionKind::Alias, _)                       => ('▓', |s| s.bright_yellow()),
+        match node.kind.as_str() {
+            "Alias" => ('▓', |s| s.bright_yellow()),
+            _ => ('█', |s| s.bright_cyan()),
         }
     };
 
-    // Truncate name if too long, ensuring it fits within NAME_COLUMN_WIDTH
     let display_name = if node.name.len() > NAME_COLUMN_WIDTH {
         format!("{}...", &node.name[..NAME_COLUMN_WIDTH - 3])
     } else {
         node.name.clone()
     };
 
-    // Print name with fixed width, left-aligned and padded
-    print!("{:<width$} ", display_name.bright_white(), width = NAME_COLUMN_WIDTH);
+    print!(
+        "{:<width$} ",
+        display_name.bright_white(),
+        width = NAME_COLUMN_WIDTH
+    );
 
-    // Add leading spaces to align bar by physical address
     for _ in 0..bar_start {
         print!(" ");
     }
 
-    // Draw the bar itself
     for i in 0..bar_size {
         let bar_pos = bar_start + i;
-        // Use pre-computed bar positions for carved ranges to guarantee alignment
-        let is_carved = carved_bar_ranges.iter().any(|(s, e)| bar_pos >= *s && bar_pos < *e);
-
+        let is_carved = carved_bar_ranges
+            .iter()
+            .any(|(s, e)| bar_pos >= *s && bar_pos < *e);
         if is_carved {
-            print!("{}", color_fn("░"));  // Greyed out for carved portion
+            print!("{}", color_fn("░"));
         } else {
-            print!("{}", color_fn(&bar_char.to_string()));  // Full color for available portion
+            print!("{}", color_fn(&bar_char.to_string()));
         }
     }
 
-    // Add trailing spaces to fill the bar width and ensure alignment
     for _ in (bar_start + bar_size)..bar_width {
         print!(" ");
     }
 
-    // Show address range and owner
-    println!("  [0x{:x}..0x{:x}) {}",
-        node.start, node.end, node.owner_name.bright_magenta());
+    println!(
+        "  [0x{:x}..0x{:x}) {}",
+        node.start,
+        node.end,
+        node.owner_name.bright_magenta()
+    );
 }
 
-/// Display memory tree hierarchically with horizontal bars
-fn display_memory_tree(nodes: &[MemoryNode], depth: usize, total_size: u64) {
+fn display_memory_tree(nodes: &[MemoryNode], total_size: u64) {
     let bar_width = 40;
     for node in nodes {
-        // Pre-compute bar positions for carved children so they align exactly with child bars
-        // Grey out ALL carved regions in the parent display
-        let carved_bar_ranges: Vec<(usize, usize)> = node.children.iter()
-            .filter(|c| matches!(c.kind, RegionKind::Carve))
+        let carved_bar_ranges: Vec<(usize, usize)> = node
+            .children
+            .iter()
+            .filter(|c| c.kind != "Alias")
             .map(|c| {
                 let start_pos = addr_to_bar_pos(c.start, total_size, bar_width);
                 let end_pos = addr_to_bar_pos(c.end, total_size, bar_width);
-                // Ensure carved regions occupy at least 1 character in the display
-                let end_pos = if end_pos == start_pos { start_pos + 1 } else { end_pos };
+                let end_pos = if end_pos == start_pos {
+                    start_pos + 1
+                } else {
+                    end_pos
+                };
                 (start_pos, end_pos)
             })
             .collect();
 
-        draw_memory_bar(node, depth, total_size, &carved_bar_ranges);
+        draw_memory_bar(node, total_size, &carved_bar_ranges);
 
-        // Recursively display children
         if !node.children.is_empty() {
-            display_memory_tree(&node.children, depth + 1, total_size);
+            display_memory_tree(&node.children, total_size);
         }
     }
 }
 
-/// Display physical address space visualization inspired by Figure 3
 fn display_physical_address_space(state: &CliState) {
-    if state.memories.is_empty() {
+    let roots = collect_root_mem_nodes(state);
+    if roots.is_empty() {
         println!("  (no memory allocated)");
         return;
     }
 
-    let tree = build_memory_tree(state);
-
-    if tree.is_empty() {
-        println!("  (no memory allocated)");
-        return;
+    fn max_end(nodes: &[MemoryNode]) -> u64 {
+        nodes
+            .iter()
+            .map(|n| {
+                let child_max = max_end(&n.children);
+                n.end.max(child_max)
+            })
+            .max()
+            .unwrap_or(0)
     }
 
-    // Find total address space size for visualization
-    let max_end = state.memories.values()
-        .map(|m| m.read().data.access.end())
-        .max()
-        .unwrap_or(0);
+    let total_size = max_end(&roots);
 
     println!();
     println!("  Memory Hierarchy (horizontal bars show address ranges):");
     println!("  {}", "─".repeat(70));
 
-    display_memory_tree(&tree, 0, max_end);
+    display_memory_tree(&roots, total_size);
 
     println!();
-    println!("  Legend: {} = Carved (exclusive), {} = Carved (from alias), {} = Aliased",
-        "█".bright_cyan(), "█".bright_green(), "▓".bright_yellow());
-    println!("          {} = Meta, {} = Carved portion in parent",
-        "█".bright_purple(), "░".bright_cyan());
+    println!(
+        "  Legend: {} = Carved, {} = Aliased, {} = Meta, {} = Carved portion in parent",
+        "█".bright_cyan(),
+        "▓".bright_yellow(),
+        "█".bright_purple(),
+        "░".bright_cyan()
+    );
 }
 
-/// Compute logical memory footprint (bytes) of a single domain capability node.
-///
-/// Counts the fixed inline struct size plus all heap-allocated payloads.
-/// Child pointers in `children` are counted (the pointer storage), but the child
-/// objects themselves are NOT — they appear as their own entries when the caller
-/// iterates over `state.domains`.
-fn domain_logical_bytes(cap: &Capability<Domain>) -> usize {
-    let mut bytes = std::mem::size_of::<Capability<Domain>>();
+// ─────────────────────────────────────────────────────────────────────────────
+// mem-usage (simplified — uses DTOs instead of internal struct sizes)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // children Vec heap buffer: one CapabilityRef<Domain> pointer per child
-    bytes += cap.children.len() * std::mem::size_of::<CapabilityRef<Domain>>();
-
-    // memory_capabilities BTreeMap: key + value per entry
-    bytes += cap.data.memory_capabilities.len()
-        * (std::mem::size_of::<LocalHandle>() + std::mem::size_of::<CapabilityWeak<MemoryRegion>>());
-
-    // domain_capabilities BTreeMap: key + value per entry
-    bytes += cap.data.domain_capabilities.len()
-        * (std::mem::size_of::<LocalHandle>() + std::mem::size_of::<CapabilityWeak<Domain>>());
-
-    // pending_capabilities BTreeMap: key + value per entry
-    bytes += cap.data.pending_capabilities.len()
-        * (std::mem::size_of::<u64>() + std::mem::size_of::<PendingCapability>());
-
-    // interrupt policy overrides BTreeMap: key + value per entry
-    bytes += cap.data.policy.interrupts.overrides.len()
-        * (std::mem::size_of::<u8>() + std::mem::size_of::<VectorPolicy>());
-
-    // vprocessor_states Vec: each VProcessorState struct + its heap contents
-    for vp in &cap.data.policy.vprocessor_states {
-        bytes += std::mem::size_of::<VProcessorState>();
-        // platform_data Vec payload
-        bytes += vp.platform_data.len();
-    }
-
-    bytes
-}
-
-/// Compute logical memory footprint (bytes) of a single memory capability node.
-fn memory_logical_bytes(cap: &Capability<MemoryRegion>) -> usize {
-    let mut bytes = std::mem::size_of::<Capability<MemoryRegion>>();
-
-    // children Vec heap buffer: one CapabilityRef<MemoryRegion> pointer per child
-    bytes += cap.children.len() * std::mem::size_of::<CapabilityRef<MemoryRegion>>();
-
-    bytes
-}
-
-/// Report logical memory usage of all capability engine objects
 pub fn cmd_mem_usage(state: &mut CliState) -> std::result::Result<(), String> {
-    struct DomainRow {
-        name: String,
-        id: u64,
-        status: DomainStatus,
-        num_children: usize,
-        num_mem_caps: usize,
-        num_domain_caps: usize,
-        num_pending: usize,
-        num_irq_overrides: usize,
-        bytes: usize,
-    }
+    let domains = state.backend.list_domains();
 
-    let mut domain_rows: Vec<DomainRow> = state
-        .domains
-        .iter()
-        .map(|(name, arc)| {
-            let cap = arc.read();
-            DomainRow {
-                name: name.clone(),
-                id: cap.data.id,
-                status: cap.data.status,
-                num_children: cap.children.len(),
-                num_mem_caps: cap.data.memory_capabilities.len(),
-                num_domain_caps: cap.data.domain_capabilities.len(),
-                num_pending: cap.data.pending_capabilities.len(),
-                num_irq_overrides: cap.data.policy.interrupts.overrides.len(),
-                bytes: domain_logical_bytes(&cap),
-            }
-        })
-        .collect();
-    domain_rows.sort_by_key(|r| r.id);
-
-    struct MemRow {
-        name: String,
-        kind: RegionKind,
-        start: u64,
-        end: u64,
-        num_children: usize,
-        bytes: usize,
-    }
-
-    let mut mem_rows: Vec<MemRow> = state
-        .memories
-        .iter()
-        .map(|(name, arc)| {
-            let cap = arc.read();
-            MemRow {
-                name: name.clone(),
-                kind: cap.data.kind,
-                start: cap.data.access.start,
-                end: cap.data.access.end(),
-                num_children: cap.children.len(),
-                bytes: memory_logical_bytes(&cap),
-            }
-        })
-        .collect();
-    mem_rows.sort_by_key(|r| r.start);
-
-    let total_domain_bytes: usize = domain_rows.iter().map(|r| r.bytes).sum();
-    let total_mem_bytes: usize = mem_rows.iter().map(|r| r.bytes).sum();
-    let grand_total = total_domain_bytes + total_mem_bytes;
-
-    println!("\n{}", "Memory Usage Report (logical sizes):".bright_cyan().bold());
+    println!(
+        "\n{}",
+        "Memory Usage Report (object counts):".bright_cyan().bold()
+    );
     println!("{}", "─".repeat(72));
 
-    // Domains section
     println!(
-        "\n{} {} total, {} bytes",
+        "\n{} {} total",
         "Domains:".bright_yellow().bold(),
-        domain_rows.len(),
-        total_domain_bytes
+        domains.len()
     );
-    if domain_rows.is_empty() {
+    if domains.is_empty() {
         println!("  (none)");
     } else {
         println!(
-            "  {:<16} {:>4}  {:<10}  {:>9}  {:>8}  {:>8}  {:>8}  {:>6}  {:>8}",
-            "Name", "ID", "Status", "#Children", "#MemCaps", "#DomCaps", "#Pending", "#IRQs", "Bytes"
-        );
-        println!("  {}", "─".repeat(80));
-        for r in &domain_rows {
-            println!(
-                "  {:<16} {:>4}  {:<10}  {:>9}  {:>8}  {:>8}  {:>8}  {:>6}  {:>8}",
-                r.name,
-                r.id,
-                format!("{:?}", r.status),
-                r.num_children,
-                r.num_mem_caps,
-                r.num_domain_caps,
-                r.num_pending,
-                r.num_irq_overrides,
-                r.bytes
-            );
-        }
-    }
-
-    // Memory regions section
-    println!(
-        "\n{} {} total, {} bytes",
-        "Memory Regions:".bright_yellow().bold(),
-        mem_rows.len(),
-        total_mem_bytes
-    );
-    if mem_rows.is_empty() {
-        println!("  (none)");
-    } else {
-        println!(
-            "  {:<16}  {:<6}  {:<28}  {:>9}  {:>8}",
-            "Name", "Kind", "Range", "#Children", "Bytes"
+            "  {:<16} {:>4}  {:<10}  {:>6}  {:>8}  {:>8}  {:>8}",
+            "Name", "ID", "Status", "#VPs", "#MemCaps", "#DomCaps", "#Pending"
         );
         println!("  {}", "─".repeat(72));
-        for r in &mem_rows {
+        for d in &domains {
+            let name = state
+                .get_domain_name(d.id)
+                .unwrap_or("?")
+                .to_string();
+            let mem_caps = state.backend.get_domain_mem_caps(d.id);
+            let dom_caps = state.backend.get_domain_dom_caps(d.id);
+            let pending = state.backend.get_pending_caps(d.id);
             println!(
-                "  {:<16}  {:<6}  [{:#010x}..{:#010x})  {:>9}  {:>8}",
-                r.name,
-                format!("{:?}", r.kind),
-                r.start,
-                r.end,
-                r.num_children,
-                r.bytes
+                "  {:<16} {:>4}  {:<10}  {:>6}  {:>8}  {:>8}  {:>8}",
+                name,
+                d.id,
+                d.status,
+                d.num_vps,
+                mem_caps.len(),
+                dom_caps.len(),
+                pending.len()
             );
         }
     }
 
-    // Summary
-    println!("\n{}", "Summary:".bright_yellow().bold());
-    println!("  {:<22}  {:>8} bytes", "Domains:", total_domain_bytes);
-    println!("  {:<22}  {:>8} bytes", "Memory regions:", total_mem_bytes);
-    println!("  {}", "─".repeat(36));
-    println!("  {:<22}  {:>8} bytes", "Total:", grand_total);
-    println!();
+    // Memory regions summary
+    let uid_to_name = build_uid_to_name(state);
+    let mut all_mem_info: HashMap<MemCapUid, MemCapInfoDto> = HashMap::new();
+    for d in &domains {
+        for mc in state.backend.get_domain_mem_caps(d.id) {
+            fn collect(dto: &MemCapInfoDto, map: &mut HashMap<MemCapUid, MemCapInfoDto>) {
+                map.entry(dto.uid).or_insert_with(|| dto.clone());
+                for c in &dto.children {
+                    collect(c, map);
+                }
+            }
+            collect(&mc, &mut all_mem_info);
+        }
+    }
+
     println!(
-        "{}",
-        "Note: logical sizes only; excludes allocator overhead, Arc ref-counts, and RwLock state."
-            .bright_black()
+        "\n{} {} total",
+        "Memory Regions:".bright_yellow().bold(),
+        all_mem_info.len()
     );
+    if all_mem_info.is_empty() {
+        println!("  (none)");
+    } else {
+        println!(
+            "  {:<16}  {:<6}  {:<28}  {:>9}",
+            "Name", "Kind", "Range", "#Children"
+        );
+        println!("  {}", "─".repeat(64));
+        let mut sorted: Vec<_> = all_mem_info.values().collect();
+        sorted.sort_by_key(|m| m.start);
+        for m in sorted {
+            let name = uid_to_name
+                .get(&m.uid)
+                .cloned()
+                .unwrap_or_else(|| format!("uid:{}", m.uid));
+            println!(
+                "  {:<16}  {:<6}  [{:#010x}..{:#010x})  {:>9}",
+                name, m.kind, m.start, m.end, m.num_children
+            );
+        }
+    }
     println!();
 
     Ok(())
@@ -530,75 +401,82 @@ pub fn cmd_mem_usage(state: &mut CliState) -> std::result::Result<(), String> {
 pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
     // Show active domains per core
     println!("\n{}", "Active Domains per Core:".bright_cyan().bold());
-    for core_id in 0..state.num_cores {
-        if let Ok(core_ref) = state.platform.get_core(core_id as u64) {
-            let core_state = core_ref.state.read();
-            match *core_state {
-                CoreState::Running(domain_id) => {
-                    let domain_name = state
-                        .get_domain_name(domain_id)
-                        .unwrap_or("unknown");
-                    println!(
-                        "  {} Core {}: {} (ID: {})",
-                        "✓".bright_green(),
-                        core_id,
-                        domain_name.bright_white(),
-                        domain_id
-                    );
-                }
-                CoreState::Idle => {
-                    println!("  {} Core {}: {}", "○".bright_black(), core_id, "idle".bright_black());
-                }
+    let core_states = state.backend.get_core_states();
+    for cs in &core_states {
+        match cs.domain_id {
+            Some(id) => {
+                let domain_name = state.get_domain_name(id).unwrap_or("unknown");
+                println!(
+                    "  {} Core {}: {} (ID: {})",
+                    "✓".bright_green(),
+                    cs.core_id,
+                    domain_name.bright_white(),
+                    id
+                );
+            }
+            None => {
+                println!(
+                    "  {} Core {}: {}",
+                    "○".bright_black(),
+                    cs.core_id,
+                    "idle".bright_black()
+                );
             }
         }
     }
 
     println!("\n{}", "Domains:".bright_cyan().bold());
-    if state.domains.is_empty() {
+    let domains = state.backend.list_domains();
+    if domains.is_empty() {
         println!("  (none)");
     } else {
-        for (name, domain) in &state.domains {
-            let d = domain.read();
-            if d.is_channel() {
-                // Resolve channel target to show the actual domain it points to
-                if let Some(target) = d.channel_target.as_ref().and_then(|w| w.upgrade()) {
-                    let target = target.read();
-                    println!(
-                        "  {} {} (Channel → Domain ID: {}, status: {:?})",
-                        "•".bright_yellow(),
-                        name.bright_white(),
-                        target.data.id,
-                        target.data.status
-                    );
-                } else {
-                    println!(
-                        "  {} {} (Channel, target unavailable)",
-                        "•".bright_yellow(),
-                        name.bright_white(),
-                    );
-                }
-            } else {
+        for d in &domains {
+            let name = state
+                .get_domain_name(d.id)
+                .unwrap_or("?")
+                .to_string();
+            if d.is_channel {
+                let target_name = d
+                    .channel_target
+                    .and_then(|t| state.get_domain_name(t))
+                    .unwrap_or("unknown");
                 println!(
-                    "  {} {} (ID: {}, status: {:?})",
+                    "  {} {} (Channel → Domain ID: {}, status: {})",
                     "•".bright_yellow(),
                     name.bright_white(),
-                    d.data.id,
-                    d.data.status
+                    d.channel_target.map_or(0, |t| t),
+                    d.status
+                );
+                let _ = target_name; // used above implicitly
+            } else {
+                println!(
+                    "  {} {} (ID: {}, status: {})",
+                    "•".bright_yellow(),
+                    name.bright_white(),
+                    d.id,
+                    d.status
                 );
             }
-            let pending_ids = d.data.get_pending_ids();
-            if !pending_ids.is_empty() {
-                println!("    {} Pending capabilities ({}):", "⏸".bright_yellow(), pending_ids.len());
-                for pending_id in pending_ids {
-                    if let Some(pending_cap) = d.data.pending_capabilities.get(&pending_id) {
-                        if let Some(m) = pending_cap.cap.upgrade() {
-                            let m = m.read();
-                            println!(
-                                "      [ID: {}] Memory [0x{:x}..0x{:x}) {} (sender: {})",
-                                pending_id, m.data.access.start, m.data.access.end(), m.data.access.rights,
-                                pending_cap.sender_domain_id
-                            );
-                        }
+
+            // Show pending capabilities
+            let pending = state.backend.get_pending_caps(d.id);
+            if !pending.is_empty() {
+                println!(
+                    "    {} Pending capabilities ({}):",
+                    "⏸".bright_yellow(),
+                    pending.len()
+                );
+                for p in &pending {
+                    if p.is_domain {
+                        println!(
+                            "      [ID: {}] Channel (sender: {})",
+                            p.pending_id, p.sender_id
+                        );
+                    } else {
+                        println!(
+                            "      [ID: {}] Memory [0x{:x}..0x{:x}) {} (sender: {})",
+                            p.pending_id, p.start, p.end, p.rights, p.sender_id
+                        );
                     }
                 }
             }
@@ -606,22 +484,45 @@ pub fn cmd_list(state: &mut CliState) -> std::result::Result<(), String> {
     }
 
     println!("\n{}", "Memory Regions:".bright_cyan().bold());
-    if state.memories.is_empty() {
+    if state.mem_names.is_empty() {
         println!("  (none)");
     } else {
-        for (name, mem) in &state.memories {
-            let m = mem.read();
-            println!(
-                "  {} {} {} (kind: {:?}, owner: {}, sub_handle: {}, attrs: {}, children: {})",
-                "•".bright_yellow(),
-                name.bright_white(),
-                m.data.access,
-                m.data.kind,
-                m.owned.owner,
-                m.sub_handle,
-                m.owned.attributes,
-                m.children.len()
-            );
+        // Build uid → info map from all domains
+        let all_domains = state.backend.list_domains();
+        let mut mem_info_map: HashMap<MemCapUid, MemCapInfoDto> = HashMap::new();
+        for d in &all_domains {
+            for mc in state.backend.get_domain_mem_caps(d.id) {
+                fn collect(dto: &MemCapInfoDto, map: &mut HashMap<MemCapUid, MemCapInfoDto>) {
+                    map.entry(dto.uid).or_insert_with(|| dto.clone());
+                    for c in &dto.children {
+                        collect(c, map);
+                    }
+                }
+                collect(&mc, &mut mem_info_map);
+            }
+        }
+
+        let mut sorted_mems: Vec<_> = state.mem_names.iter().collect();
+        sorted_mems.sort_by_key(|(_, uid)| **uid);
+
+        for (name, uid) in &sorted_mems {
+            if let Some(info) = mem_info_map.get(uid) {
+                let owner_name = state
+                    .get_domain_name(info.owner_id)
+                    .unwrap_or("?");
+                println!(
+                    "  {} {} [0x{:x}..0x{:x}) {} (kind: {}, owner: {}, attrs: {}, children: {})",
+                    "•".bright_yellow(),
+                    name.bright_white(),
+                    info.start,
+                    info.end,
+                    info.rights,
+                    info.kind,
+                    owner_name,
+                    info.attributes,
+                    info.num_children
+                );
+            }
         }
     }
 
