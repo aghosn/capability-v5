@@ -13,6 +13,7 @@
 #   QEMU_BIOS=1             use legacy BIOS instead of UEFI (default: 0)
 #   QEMU_NET=1              enable user-mode networking (default: 1)
 #   QEMU_NET_FWD            extra port forwards (e.g. "hostfwd=tcp::8080-:8080")
+#   QEMU_TPM=1              enable TPM 2.0 via swtpm (default: 0)
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
 
 set -euo pipefail
@@ -88,6 +89,25 @@ if [[ -f "$WORKSPACE_ROOT/guest/bins.img" ]]; then
     BINS_ARGS+="-device virtio-blk-pci,drive=bins "
 fi
 
+# ── TPM (swtpm) ──────────────────────────────────────────────────────────────
+TPM_ARGS=""
+if [[ "${QEMU_TPM:-0}" == "1" ]]; then
+    SWTPM_SOCK="/tmp/themis-swtpm/swtpm.sock"
+    if [[ ! -S "$SWTPM_SOCK" ]]; then
+        echo "→ Starting swtpm automatically..."
+        bash "$SCRIPT_DIR/setup-swtpm.sh"
+    fi
+    if [[ -S "$SWTPM_SOCK" ]]; then
+        TPM_ARGS="-chardev socket,id=chrtpm,path=$SWTPM_SOCK"
+        TPM_ARGS+=" -tpmdev emulator,id=tpm0,chardev=chrtpm"
+        TPM_ARGS+=" -device tpm-tis,tpmdev=tpm0"
+        echo "  + TPM 2.0 (swtpm): $SWTPM_SOCK"
+    else
+        echo "  WARNING: QEMU_TPM=1 but swtpm socket not found at $SWTPM_SOCK"
+        echo "           Run: bash scripts/setup-swtpm.sh"
+    fi
+fi
+
 # ── Networking ───────────────────────────────────────────────────────────────
 NET_ARGS=""
 if [[ "${QEMU_NET:-1}" == "1" ]]; then
@@ -112,5 +132,6 @@ exec qemu-system-x86_64 \
     -no-reboot \
     ${DISK_ARGS} \
     ${BINS_ARGS} \
+    ${TPM_ARGS} \
     ${NET_ARGS} \
     ${QEMU_EXTRA_ARGS:-}

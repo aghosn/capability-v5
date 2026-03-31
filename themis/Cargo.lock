@@ -201,6 +201,10 @@ name = "themis-abi"
 version = "0.1.0"
 
 [[package]]
+name = "tpm2"
+version = "0.1.0"
+
+[[package]]
 name = "vmx"
 version = "0.1.0"
 dependencies = [

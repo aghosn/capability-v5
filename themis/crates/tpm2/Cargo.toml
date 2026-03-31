@@ -1,0 +1,7 @@
+[package]
+name    = "tpm2"
+version = "0.1.0"
+edition = "2021"
+
+# no_std — this crate is linked directly into the bare-metal capavisor binary.
+[dependencies]

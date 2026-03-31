@@ -7,6 +7,7 @@ members = [
     "crates/capavisor-pt",
     "crates/vmx",
     "crates/libthemis",
+    "crates/tpm2",
 ]
 # xtask is a host-side build helper; keep it OUT of the bare-metal workspace
 # so that plain `cargo check/build` does not try to compile it for x86_64-unknown-none.
@@ -29,6 +30,7 @@ bitflags               = { version = "2",     default-features = false }
 
 # Workspace-internal crates
 vtd          = { path = "crates/vtd" }
+tpm2         = { path = "crates/tpm2" }
 themis-abi   = { path = "crates/themis-abi" }
 ept          = { path = "crates/ept" }
 capavisor-pt = { path = "crates/capavisor-pt" }
