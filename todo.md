@@ -19,7 +19,10 @@
 - **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
   at capavisor _start(). Signed attestation hypercall (ATTEST_SELF with nonce).
   On-demand domain config via ATTEST_SELF(nonce=0). TPM driver (no_std TIS MMIO).
-  QEMU swtpm integration. thhv ioctls for ATTEST_SELF + READ_PCR.
+  QEMU swtpm integration (tpm-crb; **requires swtpm ≥ 0.8** — 0.7.x deadlocks
+  with QEMU 8.x + OVMF). thhv ioctls for ATTEST_SELF + READ_PCR.
+  **Verified end-to-end**: boot without TPM + ATTEST_SELF → 53 capabilities delivered
+  to driver (cap table loads, PA map populated except pre-existing overlap at 0x80000000).
 
 ### What doesn't work
 
@@ -29,7 +32,10 @@
 
 ### Recent commits
 
-- `ec3ebc4` — **feat: lean-exec — executable Lean 4 model of capability engine (phases 1-9)**
+- `0c8c7ac` — **fix: LocalHandle in attestation + tpm-crb + swtpm ≥ 0.8 docs**
+- `c7c669e` — **fix: safe TPM probe + correct binary size calculation**
+- `c99055e` — **docs: TPM / attested boot section in README**
+- `eaa779f` — **fix: curve25519-dalek fiat backend for no-SSE target**
 - `1931c23` — **feat: make attestation on-demand — driver requests via ATTEST_SELF**
 - `acfaa3b` — **feat: thhv attestation ioctls — ATTEST_SELF + READ_PCR**
 - `46d1358` — **feat: signed attestation hypercall + TPM PCR read**
