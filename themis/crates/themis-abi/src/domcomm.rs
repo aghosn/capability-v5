@@ -227,6 +227,70 @@ pub struct EnumCapReq {
     pub handle: u64,
 }
 
+// ── Signed attestation report ─────────────────────────────────────────────── //
+
+/// Signed attestation report wrapping `AttestReport` with an Ed25519 signature.
+///
+/// The signature covers `SHA-256(report_bytes ‖ nonce)` where `report_bytes`
+/// is the flat `AttestReport` header plus the variable-length capability arrays.
+///
+/// A remote verifier checks:
+/// 1. `Ed25519_verify(pub_key, SHA-256(report_bytes ‖ nonce), signature)`
+/// 2. TPM quote PCR[11] == SHA-256(capavisor_binary ‖ boot_info ‖ pub_key)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SignedAttestReport {
+    pub report: AttestReport,
+    /// Ed25519 signature (64 bytes).
+    pub signature: [u8; ATTEST_SIG_SIZE],
+    /// Capavisor's attestation public key (Ed25519, 32 bytes).
+    pub pub_key: [u8; ATTEST_KEY_SIZE],
+    /// Verifier-supplied nonce (32 bytes, passed via hypercall args).
+    pub nonce: [u8; ATTEST_NONCE_SIZE],
+}
+
+// ── Boot attestation handoff ─────────────────────────────────────────────── //
+
+/// Magic value for `BootAttestation` ("THM_ATST" as little-endian u64).
+pub const BOOT_ATTEST_MAGIC: u64 = 0x5453_5441_5F4D_4854;
+
+/// PCR index used for the capavisor boot measurement.
+pub const ATTEST_PCR_INDEX: u32 = 11;
+
+/// Ed25519 key size in bytes.
+pub const ATTEST_KEY_SIZE: usize = 32;
+
+/// Ed25519 signature size in bytes.
+pub const ATTEST_SIG_SIZE: usize = 64;
+
+/// Nonce size in bytes (4 × u64 registers).
+pub const ATTEST_NONCE_SIZE: usize = 32;
+
+/// Boot attestation handoff structure.
+///
+/// Written by the bootloader (or capavisor early boot) into a known memory
+/// region. The capavisor reads it during `_start()`, stores the signing key
+/// in META memory, and **zeroes the entire struct** (especially `priv_key`)
+/// before creating any domain.
+///
+/// Layout: 128 bytes total, `#[repr(C)]` for C interop with the bootloader.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BootAttestation {
+    /// Magic value — must equal `BOOT_ATTEST_MAGIC`.
+    pub magic: u64,
+    /// Ed25519 public key (32 bytes).
+    pub pub_key: [u8; ATTEST_KEY_SIZE],
+    /// Ed25519 private key seed (32 bytes). **ZERO AFTER READING.**
+    pub priv_key: [u8; ATTEST_KEY_SIZE],
+    /// SHA-256(capavisor_binary ‖ boot_info ‖ pub_key).
+    pub measurement: [u8; 32],
+    /// PCR index used (should be `ATTEST_PCR_INDEX`).
+    pub pcr_index: u32,
+    /// Reserved for future use (padding to 128 bytes).
+    pub reserved: [u8; 20],
+}
+
 // ── Compile-time layout assertions ───────────────────────────────────────── //
 
 const _: () = {
@@ -243,4 +307,6 @@ const _: () = {
     assert!(core::mem::size_of::<DoorbellNotify>() == 32);
     assert!(core::mem::size_of::<ErrorMsg>() == 16);
     assert!(core::mem::size_of::<EnumCapReq>() == 8);
+    assert!(core::mem::size_of::<SignedAttestReport>() == 168);
+    assert!(core::mem::size_of::<BootAttestation>() == 128);
 };

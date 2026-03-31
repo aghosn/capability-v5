@@ -140,6 +140,12 @@ pub mod opcodes {
     /// Toggle runtime debug logging.
     /// IN:  RDI = 1 (enable) or 0 (disable).  No capability check needed.
     pub const THEMIS_TOGGLE_DEBUG:        u64 = 0x1d;
+
+    /// Read a TPM PCR value (capavisor-mediated, read-only).
+    /// IN:  RDI = pcr_index
+    /// OUT: signed attestation report delivered via DomainComm RX ring;
+    ///      RDI = report size in bytes (0 if TPM not available)
+    pub const THEMIS_READ_PCR:            u64 = 0x1e;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //
