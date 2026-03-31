@@ -121,7 +121,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SEAL => Some(do_seal(platform, &caller, arg0)),
         opcodes::THEMIS_REVOKE_MEM => Some(do_revoke_mem(platform, &caller, arg0, arg1)),
         opcodes::THEMIS_REVOKE_DOMAIN => Some(do_revoke_domain(platform, &caller, arg0)),
-        opcodes::THEMIS_ATTEST_SELF => Some(do_attest_self(&caller)),
+        opcodes::THEMIS_ATTEST_SELF => Some(do_attest_self(platform, &caller, arg0, arg1, arg2, arg3)),
         opcodes::THEMIS_REGISTER_COMM => Some(do_register_comm(platform, &caller, arg0, arg1, arg2)),
         opcodes::THEMIS_DOMCOMM_NOTIFY => Some(do_domcomm_notify(platform, &caller)),
         opcodes::THEMIS_ADD_VP => Some(do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys())),
@@ -164,6 +164,8 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
             serial_println!("[RTDBG] runtime debug {}", if enable { "ENABLED" } else { "DISABLED" });
             Some(HypercallResult::success())
         }
+
+        opcodes::THEMIS_READ_PCR => Some(do_read_pcr(arg0 as u32)),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN
@@ -364,12 +366,123 @@ fn do_revoke_domain(
 }
 
 /// ATTEST_SELF (0x0C): self-attestation of the calling domain.
-fn do_attest_self(caller: &CapabilityRef<Domain>) -> HypercallResult {
+///
+/// IN:  RDI..RCX = nonce (4 × u64 = 32 bytes, verifier-supplied)
+/// OUT: Signed attestation report delivered to caller's DomainComm RX ring.
+///      RDI = report size in bytes (0 if DomainComm not initialized).
+fn do_attest_self(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    nonce_0: u64,
+    nonce_1: u64,
+    nonce_2: u64,
+    nonce_3: u64,
+) -> HypercallResult {
+    use sha2::{Sha256, Digest};
+    use themis_abi::domcomm;
+
     let report = capability_engine::attest::attest_domain(caller);
-    // Return domain_id in RDI. The full report string is not easily
-    // passed through registers — a future GET_REG-based approach will
-    // allow retrieval of the full attestation blob.
-    HypercallResult::success_1(report.domain_id)
+    let domain_id = report.domain_id;
+
+    // Build the binary AttestReport (same as boot-time format).
+    let attest_hdr = domcomm::AttestReport {
+        domain_id,
+        flags: 0,
+        num_vps: 0,
+        api_flags: 0,
+        nr_mem_caps: 0,
+        nr_dom_caps: 0,
+        nr_pa_entries: 0,
+        chunk_index: 0,
+        total_chunks: 1,
+        reserved: 0,
+    };
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &attest_hdr as *const domcomm::AttestReport as *const u8,
+            core::mem::size_of::<domcomm::AttestReport>(),
+        )
+    };
+
+    // Assemble the nonce from the 4 register arguments.
+    let mut nonce = [0u8; 32];
+    nonce[0..8].copy_from_slice(&nonce_0.to_le_bytes());
+    nonce[8..16].copy_from_slice(&nonce_1.to_le_bytes());
+    nonce[16..24].copy_from_slice(&nonce_2.to_le_bytes());
+    nonce[24..32].copy_from_slice(&nonce_3.to_le_bytes());
+
+    // Sign: Ed25519(SHA-256(report_bytes ‖ nonce))
+    let mut hasher = Sha256::new();
+    hasher.update(hdr_bytes);
+    hasher.update(&nonce);
+    let digest = hasher.finalize();
+    let signature = crate::attestation::sign(&digest);
+    let pub_key = crate::attestation::public_key();
+
+    // Build SignedAttestReport
+    let signed = domcomm::SignedAttestReport {
+        report: attest_hdr,
+        signature,
+        pub_key,
+        nonce,
+    };
+    let signed_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &signed as *const domcomm::SignedAttestReport as *const u8,
+            core::mem::size_of::<domcomm::SignedAttestReport>(),
+        )
+    };
+
+    // Deliver via DomainComm RX ring.
+    let pd = match platform.get_platform_domain(domain_id) {
+        Some(pd) => pd,
+        None => return HypercallResult::success_1(0),
+    };
+    let mut pd_locked = pd.lock();
+    if pd_locked.domcomm.is_none() {
+        return HypercallResult::success_1(0);
+    }
+    let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, signed_bytes);
+    if wrote == 0 {
+        return HypercallResult::error(errors::ERR_BUSY);
+    }
+
+    HypercallResult::success_1(signed_bytes.len() as u64)
+}
+
+/// READ_PCR (0x1E): read a TPM PCR value (capavisor-mediated, read-only).
+///
+/// IN:  RDI = pcr_index
+/// OUT: RDI..RCX = PCR value (4 × u64 = 32 bytes, big-endian packed)
+///      RAX = SUCCESS if TPM available, ERR_NOTFOUND if no TPM
+fn do_read_pcr(pcr_index: u32) -> HypercallResult {
+    if !crate::attestation::tpm_available() {
+        return HypercallResult::error(errors::ERR_NOTFOUND);
+    }
+
+    let hhdm_offset = crate::HHDM_REQUEST
+        .get_response()
+        .expect("no HHDM response")
+        .offset();
+
+    let tpm = tpm2::Tpm2::new(tpm2::TIS_BASE + hhdm_offset);
+    match tpm.pcr_read(pcr_index) {
+        Ok(digest) => {
+            // Pack 32 bytes into 4 × u64 (little-endian)
+            let rdi = u64::from_le_bytes(digest[0..8].try_into().unwrap());
+            let rsi = u64::from_le_bytes(digest[8..16].try_into().unwrap());
+            let rdx = u64::from_le_bytes(digest[16..24].try_into().unwrap());
+            // RDX is the third return register; we can't return the 4th via
+            // HypercallResult (only rax/rdi/rsi/rdx). Return first 24 bytes.
+            HypercallResult {
+                rax: errors::SUCCESS,
+                rdi,
+                rsi,
+                rdx,
+            }
+        }
+        Err(_) => HypercallResult::error(errors::ERR_INVALID),
+    }
 }
 
 /// REGISTER_COMM (0x18): register a COMM page bound to a child domain's VP.
