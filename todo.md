@@ -21,8 +21,11 @@
   On-demand domain config via ATTEST_SELF(nonce=0). TPM driver (no_std TIS MMIO).
   QEMU swtpm integration (tpm-crb; **requires swtpm ≥ 0.8** — 0.7.x deadlocks
   with QEMU 8.x + OVMF). thhv ioctls for ATTEST_SELF + READ_PCR.
-  **Verified end-to-end**: boot without TPM + ATTEST_SELF → 53 capabilities delivered
-  to driver (cap table loads, PA map populated except pre-existing overlap at 0x80000000).
+  **Verified end-to-end (no TPM)**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
+  50 PA map entries loaded by thhv driver with zero errors. PCI BAR overlap at
+  0x80000000 fixed (merge overlapping passthrough regions). COMM page duplicate
+  fixed (exclude COMM-attributed caps from PA entries).
+  **With TPM**: blocked — swtpm 0.7.3 deadlocks with QEMU 8.x + OVMF (needs ≥ 0.8).
 
 ### What doesn't work
 
@@ -32,6 +35,7 @@
 
 ### Recent commits
 
+- `8d91531` — **fix: merge overlapping PCI BAR regions + exclude COMM from PA map**
 - `0c8c7ac` — **fix: LocalHandle in attestation + tpm-crb + swtpm ≥ 0.8 docs**
 - `c7c669e` — **fix: safe TPM probe + correct binary size calculation**
 - `c99055e` — **docs: TPM / attested boot section in README**
@@ -200,17 +204,23 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 any domain's EPT). Ed25519 keys are ephemeral (fresh each boot). Nonce=0 returns domain
 config (mem_caps, dom_caps, PA map). Nonce≠0 returns Ed25519-signed report.
 
-**Not yet tested end-to-end**: Needs QEMU_TPM=1 boot + thhv rebuild inside VM.
-The thhv changes (on-demand attestation request) are the critical path — must verify
-the driver successfully gets the attestation via VMCALL at module_init.
+**Tested end-to-end (no TPM)**: Driver loads attestation at `insmod` time via ATTEST_SELF
+VMCALL. 52 mem_caps + 1 dom_cap + 50 PA map entries loaded, zero errors. Full dom0 boot
+stable. **With TPM**: blocked — swtpm 0.7.3 deadlocks with QEMU 8.x + OVMF (needs ≥ 0.8).
 
-#### Bugs fixed during this investigation
+#### Bugs fixed during TPM attestation testing
 
-- **PIR ON bit bug (289d746)**: `inject_via_pid(is_remote=false)` didn't set PID.ON.
-- **PIR drain starvation (50ae665)**: High→low scan starved device interrupts.
-- **IF=0 defer loop (fcbc04f)**: Without interrupt-window exiting, deferred vectors
-  stayed in PIR across thousands of switches that all saw IF=0.
-- **vIRR merge (attempted, reverted)**: Doesn't work without VIRTUAL_INTERRUPT_DELIVERY.
+- **Safe TPM probe (c7c669e)**: MMIO read at unmapped 0xFED40000 → #PF → triple fault.
+  Fixed: check Limine memory map for TPM region before probe.
+- **Binary size calculation (c7c669e)**: `EXECUTABLE_AND_MODULES` includes vmlinuz+initrd;
+  taking max(end) gave ~4 GB. Fixed: find entry containing `phys_base`.
+- **LocalHandle vs SubHandle (0c8c7ac)**: `do_attest_self` used `c.sub_handle` (tree identity)
+  instead of `*handle` (domain-local BTreeMap key) — two caps from different parents
+  could share `sub_handle`, causing duplicate handle=1 in attestation report.
+- **PCI BAR overlap (8d91531)**: Passthrough regions from e820 RESERVED and PCI BARs
+  overlapped at 0x80000000. Fixed: merge overlapping regions (take union).
+- **COMM PA map duplicate (8d91531)**: COMM cap and underlying carved memory share same
+  GPA; both appeared in PA entries. Fixed: exclude COMM-attributed caps from PA map.
 
 ### Next: Quantum scheduling for multi-core dom1 (`quantum-sched`)
 
