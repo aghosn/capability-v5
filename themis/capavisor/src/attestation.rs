@@ -83,12 +83,14 @@ fn rdrand64() -> u64 {
 /// Must be called once from `_start()` after serial init and heap init,
 /// before any domain is created.
 ///
-/// `kernel_phys_base` and `kernel_size` describe the capavisor binary's
-/// in-memory image (from Limine's ExecutableAddressRequest).
-/// `hhdm_offset` is the higher-half direct map offset for MMIO access.
+/// `elf_file_addr` is the virtual address of the raw ELF file bytes (from
+/// Limine's `ExecutableFileRequest`).  This is the pristine binary as loaded
+/// from the boot medium — deterministic and excludes `.bss`.
+/// `elf_file_size` is the size of that raw ELF file in bytes.
+/// `hhdm_offset` is the higher-half direct map offset for TPM MMIO access.
 /// `tpm_mmio_mapped` indicates whether the TPM TIS MMIO region is present
 /// in the memory map (safe to access via HHDM).
-pub fn init(kernel_phys_base: u64, kernel_size: u64, hhdm_offset: u64, tpm_mmio_mapped: bool) {
+pub fn init(elf_file_addr: u64, elf_file_size: u64, hhdm_offset: u64, tpm_mmio_mapped: bool) {
     serial_println!("[attest] Initializing attestation subsystem...");
 
     // Step 1: Generate Ed25519 key pair from RDRAND
@@ -106,18 +108,17 @@ pub fn init(kernel_phys_base: u64, kernel_size: u64, hhdm_offset: u64, tpm_mmio_
         pub_key_bytes[0], pub_key_bytes[1], pub_key_bytes[2], pub_key_bytes[3],
         pub_key_bytes[28], pub_key_bytes[29], pub_key_bytes[30], pub_key_bytes[31]);
 
-    // Step 2: Compute measurement = SHA-256(capavisor_binary ‖ pub_key)
+    // Step 2: Compute measurement = SHA-256(elf_file ‖ pub_key)
     //
-    // We hash the capavisor's in-memory image (the ELF loaded by Limine)
-    // concatenated with the public key.  On real hardware, boot_info would
-    // also be included; for now we include the binary + pub_key which is
-    // sufficient to bind the key to this specific capavisor build.
+    // We hash the raw ELF file (the pristine binary from the boot medium,
+    // provided by Limine's ExecutableFileRequest) concatenated with the
+    // public key.  This is deterministic and reproducible — a verifier can
+    // independently hash the same ELF file.  Unlike the in-memory loaded
+    // image, the raw ELF excludes .bss and any runtime-mutated state.
     let measurement = {
         let mut hasher = Sha256::new();
-        // Hash the capavisor binary image
-        let binary_ptr = (kernel_phys_base + hhdm_offset) as *const u8;
         let binary_slice = unsafe {
-            core::slice::from_raw_parts(binary_ptr, kernel_size as usize)
+            core::slice::from_raw_parts(elf_file_addr as *const u8, elf_file_size as usize)
         };
         hasher.update(binary_slice);
         hasher.update(&pub_key_bytes);

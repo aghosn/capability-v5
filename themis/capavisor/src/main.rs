@@ -10,7 +10,7 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use limine::request::{ExecutableAddressRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
+use limine::request::{ExecutableAddressRequest, ExecutableFileRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
@@ -123,6 +123,7 @@ macro_rules! serial_debug {
 #[used] static MP_REQUEST:          MpRequest               = MpRequest::new();
 #[used] static MODULE_REQUEST:      ModuleRequest           = ModuleRequest::new();
 #[used] static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+#[used] static KERNEL_FILE_REQUEST: ExecutableFileRequest    = ExecutableFileRequest::new();
 
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
@@ -189,44 +190,38 @@ pub extern "C" fn _start() -> ! {
     {
         let hhdm_offset = HHDM_REQUEST.get_response()
             .expect("no HHDM response (early)").offset();
-        if let Some(ka) = KERNEL_ADDR_REQUEST.get_response() {
-            // Limine tells us where it loaded the capavisor binary.
-            // We need the physical base + size to hash the binary image.
-            let phys_base = ka.physical_base();
-            let virt_base = ka.virtual_base();
-            // Find the memory map entry that contains the capavisor binary.
-            // EXECUTABLE_AND_MODULES includes both the capavisor and Limine modules
-            // (vmlinuz, initrd), so we must find only the entry containing phys_base.
-            let entries = MEMMAP_REQUEST.get_response()
-                .expect("no memory map response (early)").entries();
-            let mut kernel_size: u64 = 0;
-            for e in entries {
-                if e.entry_type == limine::memory_map::EntryType::EXECUTABLE_AND_MODULES
-                    && e.base <= phys_base && phys_base < e.base + e.length
-                {
-                    kernel_size = e.base + e.length - phys_base;
-                    break;
-                }
-            }
-            if kernel_size == 0 {
-                // Fallback: use a reasonable upper bound (16 MiB)
-                serial_println!("[attest] WARNING: could not determine kernel size, using 16 MiB");
-                kernel_size = 16 * 1024 * 1024;
-            }
-            // Check if the TPM TIS MMIO region (0xFED40000) is covered by any
-            // memory map entry.  Limine's HHDM only maps regions present in the
-            // memory map; if the TPM address isn't there (no TPM device), an
-            // MMIO read would #PF → triple-fault.
-            let tpm_mmio_mapped = entries.iter().any(|e| {
-                let end = e.base + e.length;
-                tpm2::TIS_BASE >= e.base && tpm2::TIS_BASE < end
-            });
-            serial_println!("[attest] capavisor binary: phys={:#x} virt={:#x} size={:#x} ({} KiB)",
-                phys_base, virt_base, kernel_size, kernel_size / 1024);
-            attestation::init(phys_base, kernel_size, hhdm_offset, tpm_mmio_mapped);
+
+        // Get the raw ELF file bytes from Limine.  This is the pristine binary
+        // as loaded from the boot medium — deterministic and excludes .bss.
+        // We use this for the boot measurement hash rather than the in-memory
+        // loaded image (which includes .bss already mutated by early init).
+        let elf_file = KERNEL_FILE_REQUEST.get_response()
+            .expect("no ExecutableFileRequest response")
+            .file();
+        let elf_addr = elf_file.addr() as u64;
+        let elf_size = elf_file.size();
+
+        // Also get load addresses for logging.
+        let (phys_base, virt_base) = if let Some(ka) = KERNEL_ADDR_REQUEST.get_response() {
+            (ka.physical_base(), ka.virtual_base())
         } else {
-            serial_println!("[attest] WARNING: no KernelAddressRequest — skipping attestation init");
-        }
+            (0, 0)
+        };
+
+        // Check if the TPM TIS MMIO region (0xFED40000) is covered by any
+        // memory map entry.  Limine's HHDM only maps regions present in the
+        // memory map; if the TPM address isn't there (no TPM device), an
+        // MMIO read would #PF → triple-fault.
+        let entries = MEMMAP_REQUEST.get_response()
+            .expect("no memory map response (early)").entries();
+        let tpm_mmio_mapped = entries.iter().any(|e| {
+            let end = e.base + e.length;
+            tpm2::TIS_BASE >= e.base && tpm2::TIS_BASE < end
+        });
+
+        serial_println!("[attest] capavisor: phys={:#x} virt={:#x} elf_file={:#x} elf_size={:#x} ({} KiB)",
+            phys_base, virt_base, elf_addr, elf_size, elf_size / 1024);
+        attestation::init(elf_addr, elf_size, hhdm_offset, tpm_mmio_mapped);
     }
 
     // Unpack Limine responses.
