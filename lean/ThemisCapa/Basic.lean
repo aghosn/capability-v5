@@ -10,6 +10,7 @@ namespace ThemisCapa
 -- § Rights — 3-bit permission bitmap
 -- ════════════════════════════════════════════════════════════════════
 
+-- TODO: write ∨ execute → read
 structure Rights where
   read    : Bool
   write   : Bool
@@ -49,7 +50,7 @@ structure Attributes where
   hash  : Bool   -- content hashed for attestation
   clean : Bool   -- zeroed on revocation
   vital : Bool   -- revoking region also revokes owning domain
-  meta  : Bool   -- monitor-only memory; excluded from guest address space
+  «meta»  : Bool   -- monitor-only memory; excluded from guest address space
   comm  : Bool   -- parent-owned communication buffer
 deriving DecidableEq, Repr
 
@@ -71,9 +72,35 @@ namespace Access
 
 def «end» (a : Access) : Nat := a.start + a.size
 
+def startIncluded (a b : Access) : Prop :=
+  (b.start ≤ a.start ∧ a.start < b.end ∧ a.size > 0) ∨
+  (b.start < a.end ∧ a.end ≤ b.end ∧ a.size > 0)
+
 /-- Two accesses overlap iff their ranges intersect. -/
+def overlaps' (a b : Access) : Prop :=
+  let start := max a.start b.start
+  let «end» := min a.end b.end
+  «end» ≥ start
+
+-- TODO: overlaps and overlaps' are not equivalent
+
 def overlaps (a b : Access) : Prop :=
+  ¬ (a.end ≤ b.start ∨ a.start ≥ b.end)
+
+def overlaps'' (a b : Access) : Prop :=
   a.start < b.end ∧ b.start < a.end
+
+example (a b : Access) : overlaps a b ↔ overlaps b a := by
+  simp [overlaps]
+  grind
+
+example (a b : Access) : overlaps' a b ↔ overlaps' b a := by
+  simp [overlaps']
+  grind
+
+example (a b : Access) : overlaps a b ↔ overlaps'' a b := by
+  simp [overlaps, overlaps'', «end»]
+  grind
 
 /-- `a` is contained in `b` iff `a` is a subrange with subset rights. -/
 def contained (a b : Access) : Prop :=
@@ -100,6 +127,7 @@ inductive RegionKind where
   | alias
 deriving DecidableEq, Repr
 
+-- TODO: this can be derived from the capa tree and the region kinds
 inductive RegionStatus where
   | exclusive
   | aliased
@@ -112,13 +140,14 @@ deriving DecidableEq, Repr
 inductive DomainStatus where
   | unsealed
   | sealed
-  | revoked
+  | revoked -- TODO: unclear whether needed for the spec
 deriving DecidableEq, Repr
 
 -- ════════════════════════════════════════════════════════════════════
 -- § Error type
 -- ════════════════════════════════════════════════════════════════════
 
+-- TODO: seems implementation specific
 inductive CapaError where
   | domainRevoked
   | invalidAccess
@@ -134,5 +163,47 @@ inductive CapaError where
 deriving DecidableEq, Repr
 
 abbrev CapaResult (α : Type) := Except CapaError α
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Alternative
+-- ════════════════════════════════════════════════════════════════════
+
+namespace Alternative
+
+  structure MonitorAPI where
+    canCreate           : Bool
+    canSet              : Bool
+    canGet              : Bool
+    canSend             : Bool
+    canSeal             : Bool
+    canAttest           : Bool
+    canEnumerate        : Bool
+    canSwitch           : Bool
+    canAlias            : Bool
+    canCarve            : Bool
+    canRevoke           : Bool
+    canGetChan          : Bool
+    canReceiveAfterSeal : Bool
+
+  /- Well-formedness:
+  - all ids are unique
+  - a capa is uniquely owned by a domain
+  - conditions on children
+  -/
+  structure MemCapa where
+    id : Nat
+    attributes : Attributes
+    access : Access
+    kind : RegionKind
+    children : List MemCapa
+
+  -- TODO: interrupts
+  structure DomCapa where
+    id : Nat
+    monitorAPI : MonitorAPI
+    memCaps : List Nat
+    children : List DomCapa
+
+end Alternative
 
 end ThemisCapa

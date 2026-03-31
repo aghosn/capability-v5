@@ -22,6 +22,8 @@ structure CarvePre (caller : DomCap) (parent : MemCap) (access : Access) : Prop 
   hasPermission    : caller.policy.api.canCarve = true
   accessContained  : access.contained parent.region.access
   noOverlapCarved  : parent.noOverlapWithCarved access
+  -- TODO: aliasNoOverlap and noOverlapCarved redundant
+  -- no overlap with any
   -- For alias parents, no overlap with ANY child (carved or alias)
   aliasNoOverlap   : parent.region.kind = .alias → parent.noOverlapWithAny access
   notComm          : parent.region.attributes.comm = false

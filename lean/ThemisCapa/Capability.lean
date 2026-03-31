@@ -12,7 +12,7 @@ namespace ThemisCapa
 
 structure MemoryRegion where
   kind       : RegionKind
-  status     : RegionStatus
+  status     : RegionStatus -- TODO
   access     : Access
   attributes : Attributes
 deriving Repr
