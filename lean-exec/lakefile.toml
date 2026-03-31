@@ -1,0 +1,14 @@
+name = "LeanExec"
+version = "0.1.0"
+defaultTargets = ["leanexec"]
+
+[[require]]
+name = "ThemisCapa"
+path = "../lean"
+
+[[lean_lib]]
+name = "LeanExec"
+
+[[lean_exe]]
+name = "leanexec"
+root = "Main"
