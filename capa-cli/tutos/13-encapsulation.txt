@@ -21,7 +21,7 @@ init root 0x40000000
 
 # Create parent domain with full permissions to manage its memory
 @msg 📋 Step 2: Create parent domain with memory management permissions
-create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND,RECEIVE_AFTER_SEAL
+create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND,RECEIVE_AFTER_SEAL,CREATE
 
 @msg
 @msg ✓ Parent can carve, alias, and send memory to its children

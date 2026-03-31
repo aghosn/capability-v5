@@ -14,7 +14,7 @@
 # Initialize
 @msg 📋 Step 1: Set up domain hierarchy
 init root 0x200000
-create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL
+create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,CREATE,SET
 
 @msg
 @msg ✓ Created parent domain (1 VP for core 0)
