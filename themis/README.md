@@ -72,6 +72,8 @@ All dependencies are standard packages. Install them in one go:
 
 ```sh
 sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso ovmf
+# Optional: software TPM for attested boot testing
+sudo apt install swtpm
 ```
 
 | Tool | Purpose | Package |
@@ -155,6 +157,7 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
 | `QEMU_BIOS` | `0` | Set to `1` for legacy BIOS (default is UEFI/OVMF) |
+| `QEMU_TPM` | `0` | Set to `1` to attach a software TPM 2.0 (swtpm). Auto-starts swtpm if not already running. Requires `swtpm` package (`sudo apt install swtpm`). |
 | `PROFILE` | `debug` | `release` for optimised build |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
 
@@ -385,6 +388,62 @@ capavisor _start  (BSP, interrupts off)
 ```
 
 See `../todo.md` for the full implementation plan (Phases 0–14).
+
+---
+
+## TPM / Attested Boot
+
+Themis implements attested boot using an optional TPM 2.0 (software or hardware).
+The TPM is **capavisor-exclusive** — its MMIO region (`0xFED40000`) is never
+mapped into any domain's EPT, just like the IOMMU.
+
+### Boot-time flow
+
+1. `_start()` → Ed25519 key pair generated from RDRAND
+2. Measurement = SHA-256(capavisor\_binary ‖ pub\_key)
+3. TPM PCR 11 extended with the measurement (if TPM present)
+4. Keys stored in a capavisor-only static (META pool)
+
+### No TPM? No problem
+
+If no TPM is detected (probe fails), the capavisor continues normally:
+- Ed25519 keygen and measurement still happen (only RDRAND needed)
+- `ATTEST_SELF` hypercall works — capability enumeration + signing are TPM-independent
+- `READ_PCR` hypercall returns `ERR_NOTFOUND`
+- The only thing missing is the hardware-rooted measurement chain (PCR 11 not extended)
+
+This means **bare metal without a TPM** and **QEMU without `QEMU_TPM=1`** both
+boot and function correctly — attestation simply degrades gracefully.
+
+### QEMU with software TPM
+
+```sh
+# Install swtpm (one-time)
+sudo apt install swtpm
+
+# Boot with TPM enabled
+QEMU_TPM=1 cargo themis
+
+# swtpm lifecycle (optional — run-qemu.sh auto-starts it)
+bash scripts/setup-swtpm.sh          # start
+bash scripts/setup-swtpm.sh stop     # stop
+bash scripts/setup-swtpm.sh reset    # wipe state + restart
+```
+
+### Driver-side flow
+
+The thhv driver requests attestation **on-demand** at module init — it is not
+pre-populated at boot.  This means `rmmod thhv && insmod thhv.ko` gets fresh data:
+
+```
+insmod thhv.ko
+  → thhv_init()
+    → domcomm_init()                     # map COMM pages
+    → themis_attest_self(0,0,0,0)        # VMCALL: request domain config
+      ← capavisor enumerates capabilities, enqueues on RX ring
+    → domcomm_rx_dequeue()               # read AttestReport + entries
+    → parse cap table, PA map, self-handle
+```
 
 ---
 
