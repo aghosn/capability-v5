@@ -19,16 +19,59 @@ mod state;
 mod update_processor;
 pub mod backend;
 pub mod rust_backend;
+#[cfg(feature = "lean-backend")]
+pub mod lean_backend;
 
 use completer::CliHelper;
+use rust_backend::RustBackend;
 use state::CliState;
 
+fn create_backend(backend_name: &str, num_cores: usize) -> Box<dyn backend::Backend + Send + Sync> {
+    match backend_name {
+        "rust" => Box::new(RustBackend::new(num_cores)),
+        #[cfg(feature = "lean-backend")]
+        "lean" => Box::new(lean_backend::LeanBackend::new(num_cores)),
+        #[cfg(not(feature = "lean-backend"))]
+        "lean" => {
+            eprintln!("Lean backend not available. Rebuild with: cargo build --features lean-backend");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("Unknown backend '{}'. Valid options: rust, lean", other);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
+    // Parse --backend flag from CLI args
+    let args: Vec<String> = std::env::args().collect();
+    let mut backend_name = "rust";
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--backend" {
+            if i + 1 < args.len() {
+                // Leak to get 'static — fine, it's a CLI
+                backend_name = Box::leak(args[i + 1].clone().into_boxed_str());
+                i += 2;
+                continue;
+            } else {
+                eprintln!("--backend requires an argument (rust or lean)");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let num_cores = 4;
+    let backend = create_backend(backend_name, num_cores);
+
     println!("{}", "=== Capability Engine CLI Simulator ===".bright_cyan().bold());
+    println!("Backend: {}", backend_name.bright_yellow());
     println!("Type 'help' for available commands, 'exit' to quit");
     println!("{}", "Press TAB for command completion and hints\n".bright_black());
 
-    let state = Arc::new(RwLock::new(CliState::new(4))); // 4 cores
+    let state = Arc::new(RwLock::new(CliState::new(num_cores, backend)));
 
     // Configure rustyline with our custom helper
     let config = Config::builder()

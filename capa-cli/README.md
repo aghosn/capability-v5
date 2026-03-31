@@ -295,5 +295,18 @@ Commands are organised in `src/commands/` by concern: `domain`, `memory`, `info`
 
 The `Backend` trait (`src/backend.rs`) defines the abstraction boundary between
 the CLI and the engine. `RustBackend` (`src/rust_backend.rs`) wraps `capa-engine`;
-`LeanBackend` (`src/lean_backend.rs`) will call `lean-exec` via C FFI.
+`LeanBackend` (`src/lean_backend.rs`, feature-gated behind `lean-backend`) calls
+`lean-exec` via C FFI through a thin wrapper (`lean_ffi/lean_wrapper.c`).
+
+### Building with Lean Backend
+
+Prerequisites:
+1. Lean 4 toolchain installed via [elan](https://github.com/leanprover/elan) (v4.29.0+)
+2. `lean-exec` built: `cd lean-exec && lake build`
+
+```bash
+cargo build --release --features lean-backend
+./target/release/capability-cli --backend lean
+```
+
 See `refactoring-plan.md` for the full roadmap.

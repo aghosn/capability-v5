@@ -8,7 +8,6 @@ use parking_lot::RwLock;
 use capability_engine::{Capability, Domain, LocalHandle, MemoryRegion};
 
 use crate::backend::{Backend, DomainId, MemCapUid};
-use crate::rust_backend::RustBackend;
 use crate::session::Session;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,15 +79,15 @@ pub struct CliState {
 }
 
 impl CliState {
-    /// Create a new CLI state with the specified number of cores
-    pub fn new(num_cores: usize) -> Self {
+    /// Create a new CLI state with the given backend
+    pub fn new(num_cores: usize, backend: Box<dyn Backend + Send + Sync>) -> Self {
         CliState {
             domain_names: HashMap::new(),
             mem_names: HashMap::new(),
             mem_owners: HashMap::new(),
             domain_parents: HashMap::new(),
             domain_id_to_name: HashMap::new(),
-            backend: Box::new(RustBackend::new(num_cores)),
+            backend,
             session: Session::new(),
             num_cores,
             auto_list: false,
@@ -104,5 +103,16 @@ impl CliState {
     pub fn register_domain_name(&mut self, domain_id: DomainId, name: String) {
         self.domain_id_to_name.insert(domain_id, name.clone());
         self.domain_names.insert(name, domain_id);
+    }
+
+    /// Reset all state — clears name maps, resets backend, starts new session.
+    pub fn reset(&mut self) {
+        self.domain_names.clear();
+        self.mem_names.clear();
+        self.mem_owners.clear();
+        self.domain_parents.clear();
+        self.domain_id_to_name.clear();
+        self.backend.reset(self.num_cores);
+        self.session = Session::new();
     }
 }

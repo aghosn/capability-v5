@@ -59,11 +59,8 @@ pub fn cmd_clear_session(state: &mut CliState) -> std::result::Result<(), String
 
 /// Reset CLI to initial state
 pub fn cmd_reset(state: &mut CliState) -> std::result::Result<(), String> {
-    // Get the current number of cores before resetting
     let num_cores = state.num_cores;
-
-    // Replace state with a fresh one
-    *state = CliState::new(num_cores);
+    state.reset();
 
     println!(
         "{} CLI reset to initial state ({} cores)",

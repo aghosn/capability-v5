@@ -224,42 +224,38 @@ calls with UID tracking, handle resolution, error/update conversion. Uses
 domain-mediated API throughout (except init bootstrap and `add_vprocessor`
 which has no mediated API). Commit `f3c4e82`.
 
-### Phase 10c: Refactor CLI to use Backend trait ← NEXT
-Four sub-steps (can be done incrementally, one file at a time):
+### Phase 10c: Refactor CLI to use Backend trait ✅ DONE
+All command handlers refactored to use `state.backend.*` methods. Zero direct
+`capability_engine` access in command handlers. All 8 example sessions pass.
+Commit `e3ede77`.
 
-1. **`state.rs`**: Replace `domains`/`memories` with `domain_names`/`mem_names` +
-   `backend: Box<dyn Backend>`. Remove `platform` field (moved into backend).
+### Phase 10d: Lean FFI exports ✅ DONE
+Created `lean-exec/LeanExec/FFI.lean` (756 lines) with 39 `@[export]` C-callable
+functions. Global `IO.Ref ExecState` for single-threaded state. Error codes,
+handle resolution, JSON serialization for queries, update buffer access.
+Builds cleanly, all 39 symbols verified in `.c.o.export`. Commit `c723c8a`.
 
-2. **`commands/domain.rs`**: Replace `Capability::create(...)` with
-   `state.backend.create_domain(parent_id, cores, api)`. Replace all Arc
-   lookups with DomainId/MemCapUid lookups from `state.domain_names`/`mem_names`.
+### Phase 10e: `lean_backend.rs` — Call Lean via FFI ✅ DONE
+Created three components:
+1. **`lean_ffi/lean_wrapper.c`** — Thin C wrapper handling Lean IO result
+   unwrapping (lean_object* → plain C types). 39 wrapper functions.
+2. **`lean_ffi/lean_wrapper.h`** — C header declarations.
+3. **`build.rs`** — Compiles C wrapper with `cc` crate, archives Lean objects,
+   links Lean runtime (libleanrt, libInit, libLean, libStd, libleancpp + deps).
+   Only active when `lean-backend` feature is enabled.
+4. **`src/lean_backend.rs`** — `LeanBackend` struct implementing `Backend` trait
+   via `unsafe extern "C"` FFI calls. JSON parsing with `serde_json` for queries.
 
-3. **`commands/memory.rs`**: Replace `Capability::carve/alias/send/accept/reject`
-   with `state.backend.carve/alias/send/accept/reject`. The backend resolves
-   sender domain + handles internally.
+Feature flag: `cargo build --features lean-backend`
+Builds cleanly in both default and lean-backend configurations.
+All 8 example sessions pass with lean-backend build (using RustBackend).
 
-4. **`commands/execution.rs`**: Replace `Capability::<Domain>::switch` with
-   `state.backend.switch_forward/switch_return`.
+### Phase 10f: `--backend` flag ← NEXT
+- Add `--backend rust|lean` CLI argument (default: rust)
+- In `main.rs`, instantiate the appropriate backend based on the flag
 
-5. **`commands/info.rs`**: Replace all `.data.*` reads with
-   `state.backend.list_domains()`, `state.backend.get_domain_mem_caps(id)`, etc.
-
-6. **`update_processor.rs`**: Work with `Vec<HwUpdate>` instead of `UpdateBatch`.
-
-### Phase 10d: Lean FFI exports
-In `lean-exec/LeanExec/FFI.lean`, export C-callable functions matching each
-Backend method. Build lean-exec as a shared library.
-
-### Phase 10e: `lean_backend.rs` — Call Lean via FFI
-Create `capa-cli/src/lean_backend.rs` (feature-gated behind `lean-backend`):
-- Links against `libleanexec.so`
-- Each trait method calls the corresponding `extern "C"` function
-- Marshals Rust types to/from C primitives
-
-### Phase 10f: `--backend` flag + differential testing
-- Add `--backend rust|lean` CLI argument
-- Create `tests/diff-test.sh`: runs tutorial sessions through both backends,
-  diffs output
+### Phase 11: Differential testing
+- Create script that runs session files through both backends and diffs output
 
 ## File Changes Summary
 
