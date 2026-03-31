@@ -1,6 +1,12 @@
 [build]
 target = "x86_64-unknown-none"
 
+[env]
+# Force curve25519-dalek to use the pure-Rust "fiat" backend instead of
+# auto-detecting SIMD.  Our target has -sse,-sse2 so the SIMD backend
+# fails at LLVM lowering.
+CURVE25519_DALEK_BACKEND = "fiat"
+
 [target.x86_64-unknown-none]
 rustflags = [
     # Soft-float ABI: disable SSE/SSE2 until the FPU is initialised in early boot.
