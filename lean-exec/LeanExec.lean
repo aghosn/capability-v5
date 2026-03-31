@@ -9,3 +9,4 @@ import LeanExec.Operations.Policy
 import LeanExec.Operations.Query
 import LeanExec.Engine
 import LeanExec.Cli
+import LeanExec.FFI
