@@ -366,3 +366,108 @@ fn test_receive_after_seal_default_values() {
         DomainPolicy::new_restricted(0b1, MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL));
     assert!(with_receive.receive_after_seal());
 }
+
+// ==================== Caller API Enforcement ====================
+//
+// These tests verify that the CALLER domain's own API policy is checked,
+// not the caller's parent's policy. Regression tests for a bug where
+// validate_operation() traversed owned.owner_domain (= parent) instead
+// of checking the caller's own data.policy.
+
+/// Helper: create a sealed root domain capability.
+fn root_cap() -> CapabilityRef<Domain> {
+    Capability::new_root(0, 0, Domain::new_root(4))
+}
+
+/// Helper: create a sealed child under `parent` with the given API, return its Arc.
+fn sealed_child_with_api(
+    parent: &CapabilityRef<Domain>,
+    api: MonitorAPI,
+) -> (CapabilityRef<Domain>, LocalHandle) {
+    let policy = DomainPolicy::new_restricted(0b1111, api);
+    let num_vps = policy.num_vprocessors;
+    let (h, _) = Capability::create(parent, policy).unwrap();
+    let child = parent
+        .read()
+        .data
+        .domain_capabilities[&h]
+        .upgrade()
+        .unwrap();
+    for _ in 0..num_vps as u64 {
+        child.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(parent, h).unwrap();
+    (child, h)
+}
+
+#[test]
+fn test_create_requires_create_api() {
+    let root = root_cap();
+    // Give child everything EXCEPT CREATE
+    let api = MonitorAPI::from_bits(
+        MonitorAPI::GET | MonitorAPI::SET | MonitorAPI::SEAL | MonitorAPI::SWITCH | MonitorAPI::REVOKE,
+    );
+    let (child, _) = sealed_child_with_api(&root, api);
+
+    let grandchild_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::from_bits(MonitorAPI::GET));
+    let err = Capability::create(&child, grandchild_policy).unwrap_err();
+    assert_eq!(err, CapaError::ApiNotAllowed);
+}
+
+#[test]
+fn test_create_succeeds_with_create_api() {
+    let root = root_cap();
+    let api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
+    let (child, _) = sealed_child_with_api(&root, api);
+
+    let grandchild_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::from_bits(MonitorAPI::SEAL));
+    assert!(Capability::create(&child, grandchild_policy).is_ok());
+}
+
+#[test]
+fn test_revoke_requires_revoke_api() {
+    let root = root_cap();
+    // Give child CREATE + SEAL but NOT REVOKE
+    let api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
+    let (child, _) = sealed_child_with_api(&root, api);
+
+    // Child creates a grandchild
+    let gc_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::from_bits(MonitorAPI::SEAL));
+    let (gc_h, _) = Capability::create(&child, gc_policy).unwrap();
+    Capability::seal(&child, gc_h).unwrap();
+
+    let err = Capability::revoke_domain(&child, gc_h).unwrap_err();
+    assert_eq!(err, CapaError::ApiNotAllowed);
+}
+
+#[test]
+fn test_set_policy_requires_set_api() {
+    let root = root_cap();
+    // Give child CREATE but NOT SET
+    let api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
+    let (child, _) = sealed_child_with_api(&root, api);
+
+    let gc_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::from_bits(MonitorAPI::SEAL));
+    let (gc_h, _) = Capability::create(&child, gc_policy).unwrap();
+
+    let err = Capability::set_policy(
+        &child, gc_h, PolicyIdentifier::Cores, 0b0001,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::ApiNotAllowed);
+}
+
+#[test]
+fn test_get_policy_requires_get_api() {
+    let root = root_cap();
+    // Give child CREATE + SEAL but NOT GET
+    let api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
+    let (child, _) = sealed_child_with_api(&root, api);
+
+    let gc_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::from_bits(MonitorAPI::SEAL));
+    let (gc_h, _) = Capability::create(&child, gc_policy).unwrap();
+
+    let err = Capability::get_policy(
+        &child, gc_h, PolicyIdentifier::Cores,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::ApiNotAllowed);
+}

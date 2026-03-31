@@ -211,8 +211,11 @@ fn test_cores_monotonicity_same_value_ok() {
 #[test]
 fn test_api_monotonicity_violated() {
     let parent = root();
-    // Constrained parent: only GET | SWITCH
-    let parent_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::SWITCH);
+    // Constrained parent: GET | SWITCH | CREATE | SET | SEAL (needs CREATE to make grandchild,
+    // SET to call set_policy, SEAL to seal itself)
+    let parent_api = MonitorAPI::from_bits(
+        MonitorAPI::GET | MonitorAPI::SWITCH | MonitorAPI::CREATE | MonitorAPI::SET | MonitorAPI::SEAL,
+    );
     let (_, c_h) =
         make_child(&parent, DomainPolicy::new_restricted(0b1111, parent_api));
     seal(&parent, c_h);

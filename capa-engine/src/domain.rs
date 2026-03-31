@@ -656,6 +656,22 @@ impl Domain {
         matches!(self.status, DomainStatus::Sealed)
     }
 
+    /// Validate that this domain is sealed and has the required API permission.
+    ///
+    /// Use this when the **caller domain itself** needs a permission check
+    /// (e.g., CREATE, SET, GET, REVOKE).  In contrast, [`OwnedCapability::validate_operation`]
+    /// checks the *owner* of a child capability — appropriate for operations
+    /// on resources owned by the caller.
+    pub fn require_api(&self, required_api: u16) -> Result<()> {
+        if !self.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+        if !self.policy.api.has(required_api) {
+            return Err(CapaError::ApiNotAllowed);
+        }
+        Ok(())
+    }
+
     /// Check if domain is revoked
     pub fn is_revoked(&self) -> bool {
         matches!(self.status, DomainStatus::Revoked)

@@ -631,11 +631,7 @@ impl Capability<Domain> {
     ) -> Result<CapabilityRef<Domain>> {
         let parent = parent_ref.read();
 
-        if !parent.data.is_sealed() {
-            return Err(CapaError::DomainNotSealed);
-        }
-
-        parent.owned.validate_operation(MonitorAPI::CREATE)?;
+        parent.data.require_api(MonitorAPI::CREATE)?;
 
         policy.is_subset_of(&parent.data.policy)?;
 
@@ -673,7 +669,7 @@ impl Capability<Domain> {
     ) -> Result<UpdateBatch> {
         let mut parent = parent_ref.write();
 
-        parent.owned.validate_operation(MonitorAPI::REVOKE)?;
+        parent.data.require_api(MonitorAPI::REVOKE)?;
 
         let child_ref = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
 
@@ -2911,7 +2907,7 @@ impl Capability<Domain> {
         value: u64,
     ) -> Result<()> {
         // Validate caller has SET permission.
-        caller.read().owned.validate_operation(MonitorAPI::SET)?;
+        caller.read().data.require_api(MonitorAPI::SET)?;
 
         // Retrieve child.
         let child_weak = caller
@@ -3024,7 +3020,7 @@ impl Capability<Domain> {
         child_handle: LocalHandle,
         id: PolicyIdentifier,
     ) -> Result<u64> {
-        caller.read().owned.validate_operation(MonitorAPI::GET)?;
+        caller.read().data.require_api(MonitorAPI::GET)?;
 
         let child_weak = caller
             .read()
@@ -3078,7 +3074,7 @@ impl Capability<Domain> {
         value: u64,
         platform: &dyn Platform,
     ) -> Result<()> {
-        caller.read().owned.validate_operation(MonitorAPI::SET)?;
+        caller.read().data.require_api(MonitorAPI::SET)?;
 
         let (child_domain_id, write_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
@@ -3104,7 +3100,7 @@ impl Capability<Domain> {
         reg_id: u64,
         platform: &dyn Platform,
     ) -> Result<()> {
-        caller.read().owned.validate_operation(MonitorAPI::SET)?;
+        caller.read().data.require_api(MonitorAPI::SET)?;
 
         let (_child_domain_id, write_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, false)?;
@@ -3138,7 +3134,7 @@ impl Capability<Domain> {
         reg_id: u64,
         platform: &dyn Platform,
     ) -> Result<u64> {
-        caller.read().owned.validate_operation(MonitorAPI::GET)?;
+        caller.read().data.require_api(MonitorAPI::GET)?;
 
         let (child_domain_id, read_set) =
             register_access_check(caller, child_handle, vp_id, reg_id, platform, true)?;
