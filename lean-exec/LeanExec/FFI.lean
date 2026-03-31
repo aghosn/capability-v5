@@ -311,11 +311,12 @@ def ffiRevokeMem (owner parentUid childUid : UInt64) : IO UInt32 := do
 
 @[export lean_exec_create_domain]
 def ffiCreateDomain (parentId cores api : UInt64) : IO UInt32 := do
+  let coreList := coreMaskToList cores.toNat
   let policy : DomainPolicy := {
-    cores := coreMaskToList cores.toNat
+    cores := coreList
     api := apiFromBits api.toNat
     interrupts := { defaultPolicy := .deliver, perVector := [] }
-    numVps := 0 }
+    numVps := coreList.length }
   let result ← runOp (LeanExec.create parentId.toNat policy)
   match result with
   | .ok (_, newId, updates) =>
