@@ -348,11 +348,30 @@ pub fn platform(
         // Add PCI memory BARs to passthrough regions so they are mapped in
         // the EPT.  Firmware (OVMF) assigned these addresses; dom0 needs
         // direct MMIO access to drive devices.
+        // Merge with any existing passthrough region that overlaps (e.g. a
+        // RESERVED e820 entry spanning part of the PCI MMIO window).
         for bar in &bars {
-            passthrough_regions.push(PhysRegion {
-                base: bar.base,
-                length: bar.size,
-            });
+            let bar_end = bar.base + bar.size;
+            let mut merged = false;
+            for r in passthrough_regions.iter_mut() {
+                let r_end = r.base + r.length;
+                // Check for any overlap
+                if r.base < bar_end && bar.base < r_end {
+                    // Extend existing region to cover the union
+                    let new_base = r.base.min(bar.base);
+                    let new_end = r_end.max(bar_end);
+                    r.base = new_base;
+                    r.length = new_end - new_base;
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                passthrough_regions.push(PhysRegion {
+                    base: bar.base,
+                    length: bar.size,
+                });
+            }
         }
         _pci_bar_regions = Some(bars);
         pci_devices = Some(devices);

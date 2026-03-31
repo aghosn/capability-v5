@@ -438,10 +438,13 @@ fn do_attest_self(
         })
         .collect();
 
-    // PA entries from non-META memory capabilities (GPA == HPA identity).
+    // PA entries from non-META, non-COMM memory capabilities (GPA == HPA identity).
+    // COMM pages share the same GPA as their underlying carved memory, so
+    // including both would create duplicate PA map entries.
     let pa_entries: Vec<domcomm::PaMapEntry> = mem_entries
         .iter()
         .filter(|e| e.attributes & (Attributes::META as u32) == 0)
+        .filter(|e| e.attributes & (Attributes::COMM as u32) == 0)
         .filter(|e| e.size > 0)
         .map(|e| domcomm::PaMapEntry {
             gpa_start: e.gpa_start,
