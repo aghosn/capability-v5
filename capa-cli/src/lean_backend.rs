@@ -2,8 +2,14 @@
 //!
 //! Gated behind the `lean-backend` cargo feature.
 //! The Lean state is global (single-threaded); only one LeanBackend instance may exist.
+//!
+//! The Lean engine uses `CapNodeId` as its internal flat-store key (replacing Arc
+//! pointers). This is NOT the same as the CLI-facing `MemCapUid`. This module
+//! maintains the `CapNodeId ↔ MemCapUid` mapping, mirroring how `rust_backend.rs`
+//! manages `Arc ↔ MemCapUid`.
 
 use crate::backend::*;
+use std::collections::HashMap;
 use std::ffi::CStr;
 
 // ─── C FFI declarations (from lean_ffi/lean_wrapper.c) ───
@@ -267,6 +273,11 @@ fn parse_mem_cap_info(v: &Value) -> MemCapInfoDto {
 
 pub struct LeanBackend {
     num_cores: usize,
+    /// CapNodeId (Lean engine internal) → MemCapUid (CLI-facing)
+    node_to_uid: HashMap<u64, MemCapUid>,
+    /// MemCapUid (CLI-facing) → CapNodeId (Lean engine internal)
+    uid_to_node: HashMap<MemCapUid, u64>,
+    next_uid: MemCapUid,
 }
 
 impl LeanBackend {
@@ -275,7 +286,29 @@ impl LeanBackend {
         if rc != 0 {
             panic!("Failed to initialize Lean runtime");
         }
-        LeanBackend { num_cores }
+        LeanBackend {
+            num_cores,
+            node_to_uid: HashMap::new(),
+            uid_to_node: HashMap::new(),
+            next_uid: 0,
+        }
+    }
+
+    /// Register a CapNodeId and return its CLI-facing MemCapUid.
+    fn register_node(&mut self, node_id: u64) -> MemCapUid {
+        if let Some(&uid) = self.node_to_uid.get(&node_id) {
+            return uid;
+        }
+        let uid = self.next_uid;
+        self.next_uid += 1;
+        self.node_to_uid.insert(node_id, uid);
+        self.uid_to_node.insert(uid, node_id);
+        uid
+    }
+
+    /// Resolve a CLI-facing MemCapUid to the Lean engine's CapNodeId.
+    fn resolve_node(&self, uid: MemCapUid) -> Result<u64> {
+        self.uid_to_node.get(&uid).copied().ok_or(BackendError::NotFound)
     }
 }
 
@@ -285,14 +318,17 @@ impl Backend for LeanBackend {
     fn init(&mut self, size: u64) -> Result<InitResult> {
         let code = unsafe { lean_ffi_init(size, self.num_cores as u64) };
         check(code)?;
-        Ok(InitResult {
-            domain_id: get_result1(),
-            mem_uid: get_result2(),
-        })
+        let domain_id = get_result1();
+        let root_node = get_result2();
+        let mem_uid = self.register_node(root_node);
+        Ok(InitResult { domain_id, mem_uid })
     }
 
     fn reset(&mut self, num_cores: usize) {
         self.num_cores = num_cores;
+        self.node_to_uid.clear();
+        self.uid_to_node.clear();
+        self.next_uid = 0;
         unsafe {
             lean_ffi_reset(num_cores as u64);
         }
@@ -308,9 +344,12 @@ impl Backend for LeanBackend {
         size: u64,
         rights: u8,
     ) -> Result<(MemCapUid, Vec<HwUpdate>)> {
-        let code = unsafe { lean_ffi_carve(owner, parent, start, size, rights as u64) };
+        let parent_node = self.resolve_node(parent)?;
+        let code = unsafe { lean_ffi_carve(owner, parent_node, start, size, rights as u64) };
         check(code)?;
-        Ok((get_result1(), read_updates()))
+        let child_node = get_result1();
+        let child_uid = self.register_node(child_node);
+        Ok((child_uid, read_updates()))
     }
 
     fn alias(
@@ -321,9 +360,12 @@ impl Backend for LeanBackend {
         size: u64,
         rights: u8,
     ) -> Result<(MemCapUid, Vec<HwUpdate>)> {
-        let code = unsafe { lean_ffi_alias(owner, parent, start, size, rights as u64) };
+        let parent_node = self.resolve_node(parent)?;
+        let code = unsafe { lean_ffi_alias(owner, parent_node, start, size, rights as u64) };
         check(code)?;
-        Ok((get_result1(), read_updates()))
+        let child_node = get_result1();
+        let child_uid = self.register_node(child_node);
+        Ok((child_uid, read_updates()))
     }
 
     fn send(
@@ -333,11 +375,12 @@ impl Backend for LeanBackend {
         attrs: u8,
         gpa: Option<u64>,
     ) -> Result<Vec<HwUpdate>> {
+        let mem_node = self.resolve_node(mem)?;
         let (gpa_val, has_gpa) = match gpa {
             Some(g) => (g, 1u64),
             None => (0, 0),
         };
-        let code = unsafe { lean_ffi_send(mem, receiver, attrs as u64, gpa_val, has_gpa) };
+        let code = unsafe { lean_ffi_send(mem_node, receiver, attrs as u64, gpa_val, has_gpa) };
         check(code)?;
         Ok(read_updates())
     }
@@ -354,7 +397,9 @@ impl Backend for LeanBackend {
         };
         let code = unsafe { lean_ffi_accept(domain, pending_id, gpa_val, has_gpa) };
         check(code)?;
-        Ok((get_result1(), read_updates()))
+        let node_id = get_result1();
+        let uid = self.register_node(node_id);
+        Ok((uid, read_updates()))
     }
 
     fn reject(&mut self, domain: DomainId, pending_id: u64) -> Result<()> {
@@ -368,7 +413,9 @@ impl Backend for LeanBackend {
         parent: MemCapUid,
         child: MemCapUid,
     ) -> Result<Vec<HwUpdate>> {
-        let code = unsafe { lean_ffi_revoke_mem(owner, parent, child) };
+        let parent_node = self.resolve_node(parent)?;
+        let child_node = self.resolve_node(child)?;
+        let code = unsafe { lean_ffi_revoke_mem(owner, parent_node, child_node) };
         check(code)?;
         Ok(read_updates())
     }
@@ -443,7 +490,8 @@ impl Backend for LeanBackend {
         comm: MemCapUid,
         vp_id: u32,
     ) -> Result<Vec<HwUpdate>> {
-        let code = unsafe { lean_ffi_add_vp(parent, child, comm, vp_id as u64) };
+        let comm_node = self.resolve_node(comm)?;
+        let code = unsafe { lean_ffi_add_vp(parent, child, comm_node, vp_id as u64) };
         check(code)?;
         Ok(read_updates())
     }
@@ -455,7 +503,8 @@ impl Backend for LeanBackend {
         child: DomainId,
         vp_id: u32,
     ) -> Result<Vec<HwUpdate>> {
-        let code = unsafe { lean_ffi_register_comm(owner, mem, child, vp_id as u64) };
+        let mem_node = self.resolve_node(mem)?;
+        let code = unsafe { lean_ffi_register_comm(owner, mem_node, child, vp_id as u64) };
         check(code)?;
         Ok(read_updates())
     }

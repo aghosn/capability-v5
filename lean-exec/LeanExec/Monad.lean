@@ -50,25 +50,25 @@ def allocDomainId : CapaM DomainId := do
 
 -- ── Memory capability helpers ──
 
-def getMemCap (uid : MemCapUid) : CapaM ExecMemCap := do
+def getMemCap (uid : CapNodeId) : CapaM ExecMemCap := do
   let s ← getState
   match s.getMemCap uid with
   | some c => pure c
   | none => CapaM.throw .notFound
 
-def setMemCap (uid : MemCapUid) (c : ExecMemCap) : CapaM Unit :=
+def setMemCap (uid : CapNodeId) (c : ExecMemCap) : CapaM Unit :=
   modifyState (·.setMemCap uid c)
 
-def allocCapUid : CapaM MemCapUid := do
+def allocNodeId : CapaM CapNodeId := do
   let s ← getState
-  let (s', uid) := s.allocCapUid
+  let (s', uid) := s.allocNodeId
   setState s'
   pure uid
 
 /-- Look up a memory cap owned by a domain via its local handle. -/
 def getDomainMemCap (domId : DomainId) (handle : LocalHandle) : CapaM ExecMemCap := do
   let dom ← getDomain domId
-  match dom.lookupMemUid handle with
+  match dom.lookupNodeId handle with
   | some uid => getMemCap uid
   | none => CapaM.throw .notFound
 

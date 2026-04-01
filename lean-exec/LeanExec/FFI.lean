@@ -69,7 +69,7 @@ def returnError (e : CapaError) : IO UInt32 := do
 -- § Handle resolution helpers
 -- ════════════════════════════════════════════════════════════════════
 
-def resolveMemHandle (st : ExecState) (domId : DomainId) (uid : MemCapUid)
+def resolveMemHandle (st : ExecState) (domId : DomainId) (uid : CapNodeId)
     : Option LocalHandle :=
   match st.getDomain domId with
   | some dom => (dom.memCaps.find? (fun p => p.2 == uid)).map Prod.fst
@@ -81,15 +81,15 @@ def resolveDomHandle (st : ExecState) (parentId childId : DomainId)
   | some dom => (dom.domCaps.find? (fun p => p.2 == childId)).map Prod.fst
   | none => none
 
-def findMemOwner (st : ExecState) (uid : MemCapUid) : Option DomainId :=
+def findNodeOwner (st : ExecState) (uid : CapNodeId) : Option DomainId :=
   match st.getMemCap uid with
   | some cap => some cap.capId.domainId
   | none => none
 
-def findMemUidByHandle (st : ExecState) (domId : DomainId) (handle : LocalHandle)
-    : Option MemCapUid :=
+def findNodeByHandle (st : ExecState) (domId : DomainId) (handle : LocalHandle)
+    : Option CapNodeId :=
   match st.getDomain domId with
-  | some dom => dom.lookupMemUid handle
+  | some dom => dom.lookupNodeId handle
   | none => none
 
 -- ════════════════════════════════════════════════════════════════════
@@ -229,7 +229,7 @@ def ffiCarve (owner parentUid start size rights : UInt64) : IO UInt32 := do
   match result with
   | .ok (childHandle, _, updates) =>
     let st' ← gState.get
-    let some childUid := findMemUidByHandle st' owner.toNat childHandle
+    let some childUid := findNodeByHandle st' owner.toNat childHandle
       | returnError (.invalidOperation "child UID not found after carve")
     gResult1.set childUid.toUInt64
     storeUpdates updates
@@ -248,7 +248,7 @@ def ffiAlias (owner parentUid start size rights : UInt64) : IO UInt32 := do
   match result with
   | .ok (childHandle, _) =>
     let st' ← gState.get
-    let some childUid := findMemUidByHandle st' owner.toNat childHandle
+    let some childUid := findNodeByHandle st' owner.toNat childHandle
       | returnError (.invalidOperation "child UID not found after alias")
     gResult1.set childUid.toUInt64
     storeUpdates []
@@ -258,7 +258,7 @@ def ffiAlias (owner parentUid start size rights : UInt64) : IO UInt32 := do
 @[export lean_exec_send]
 def ffiSend (memUid receiverId attrs gpaVal hasGpa : UInt64) : IO UInt32 := do
   let st ← gState.get
-  let some callerId := findMemOwner st memUid.toNat
+  let some callerId := findNodeOwner st memUid.toNat
     | returnError .notFound
   let some capHandle := resolveMemHandle st callerId memUid.toNat
     | returnError .notFound
@@ -278,7 +278,7 @@ def ffiAccept (domId pendingId gpaVal hasGpa : UInt64) : IO UInt32 := do
   match result with
   | .ok (recvHandle, updates) =>
     let st' ← gState.get
-    let some memUid := findMemUidByHandle st' domId.toNat recvHandle
+    let some memUid := findNodeByHandle st' domId.toNat recvHandle
       | returnError (.invalidOperation "mem UID not found after accept")
     gResult1.set memUid.toUInt64
     storeUpdates updates
@@ -628,7 +628,7 @@ def ffiListDomains : IO UInt32 := do
   gResultStr.set (jsonArr domains)
   pure 0
 
-private partial def memCapToJson (st : ExecState) (uid : MemCapUid)
+private partial def memCapToJson (st : ExecState) (uid : CapNodeId)
     (localHandle : Nat) : String :=
   match st.getMemCap uid with
   | some cap =>
@@ -682,7 +682,7 @@ def ffiGetPendingCaps (domId : UInt64) : IO UInt32 := do
   let some dom := st.getDomain domId.toNat
     | returnError .notFound
   let memPending := dom.pendingMem.map fun pm =>
-    let (s, e, r) := match st.getMemCap pm.memCapUid with
+    let (s, e, r) := match st.getMemCap pm.capNodeId with
       | some cap => (cap.region.access.start,
           cap.region.access.start + cap.region.access.size,
           toString cap.region.access.rights)

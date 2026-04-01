@@ -34,7 +34,7 @@ private def hasCarveOverlapForAlias (s : ExecState) (parent : ExecMemCap)
     | none => false
 
 /-- Find the local handle for a memcap UID in a domain's memCaps list. -/
-private def findHandle (dom : ExecDomain) (uid : MemCapUid) : Option LocalHandle :=
+private def findHandle (dom : ExecDomain) (uid : CapNodeId) : Option LocalHandle :=
   (dom.memCaps.find? (fun p => p.2 == uid)).map Prod.fst
 
 -- ════════════════════════════════════════════════════════════════════
@@ -44,7 +44,7 @@ private def findHandle (dom : ExecDomain) (uid : MemCapUid) : Option LocalHandle
 /-- Create the root domain (id=0, sealed) and root memory capability
     (start=0, size=memSize, RWX, Carve, Exclusive).
     Returns (domainId, rootCapUid). -/
-def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × MemCapUid) := do
+def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × CapNodeId) := do
   -- Build initial state
   let initState := ExecState.empty numCores
   CapaM.setState initState
@@ -52,7 +52,7 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × MemCapUid) := do
   -- Allocate domain id (will be 0)
   let domId ← CapaM.allocDomainId
   -- Allocate root cap uid (will be 0)
-  let rootUid ← CapaM.allocCapUid
+  let rootUid ← CapaM.allocNodeId
 
   -- Build core list [0, 1, ..., numCores-1]
   let coreList := (List.range numCores)
@@ -110,7 +110,7 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.requireApi caller (·.canCarve)
   CapaM.requireNotFrozen caller parentHandle
 
-  let parentUid ← match caller.lookupMemUid parentHandle with
+  let parentUid ← match caller.lookupNodeId parentHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let parent ← CapaM.getMemCap parentUid
@@ -130,7 +130,7 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (!hasCarveOverlap s parent access) .regionOverlap
 
   -- Allocate child
-  let childUid ← CapaM.allocCapUid
+  let childUid ← CapaM.allocNodeId
   let childSub := parent.nextChildSub
 
   let childCap : ExecMemCap :=
@@ -183,7 +183,7 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.requireApi caller (·.canAlias)
   CapaM.requireNotFrozen caller parentHandle
 
-  let parentUid ← match caller.lookupMemUid parentHandle with
+  let parentUid ← match caller.lookupNodeId parentHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let parent ← CapaM.getMemCap parentUid
@@ -203,7 +203,7 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (!hasCarveOverlapForAlias s parent access) .regionOverlap
 
   -- Allocate child
-  let childUid ← CapaM.allocCapUid
+  let childUid ← CapaM.allocNodeId
   let childSub := parent.nextChildSub
 
   let childCap : ExecMemCap :=
@@ -252,7 +252,7 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
   CapaM.requireApi caller (·.canSend)
   CapaM.requireNotFrozen caller capHandle
 
-  let capUid ← match caller.lookupMemUid capHandle with
+  let capUid ← match caller.lookupNodeId capHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let cap ← CapaM.getMemCap capUid
@@ -304,7 +304,7 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
       { pendingId := pendingId
         senderDomId := callerId
         senderHandle := capHandle
-        memCapUid := capUid
+        capNodeId := capUid
         attributes := attrs }
     let recv'' := { recv' with pendingMem := recv'.pendingMem ++ [pending] }
     CapaM.setDomain receiverId recv''
@@ -331,7 +331,7 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
   let sender ← CapaM.getDomain pending.senderDomId
   CapaM.requireNotRevoked sender
 
-  let cap ← CapaM.getMemCap pending.memCapUid
+  let cap ← CapaM.getMemCap pending.capNodeId
 
   -- Remove pending entry
   let receiver' := { receiver with
@@ -339,7 +339,7 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
 
   -- Allocate handle and add cap to receiver
   let (receiver'', recvHandle) := receiver'.allocMemHandle
-  let receiver''' := receiver''.addMemCap recvHandle pending.memCapUid
+  let receiver''' := receiver''.addMemCap recvHandle pending.capNodeId
   CapaM.setDomain receiverId receiver'''
 
   -- Remove cap from sender's memCaps
@@ -350,7 +350,7 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
 
   -- Update cap ownership
   let cap' := { cap with capId := { cap.capId with domainId := receiverId } }
-  CapaM.setMemCap pending.memCapUid cap'
+  CapaM.setMemCap pending.capNodeId cap'
 
   -- Determine GPA
   let gpa := gpaOverride.getD cap.region.access.start
@@ -399,7 +399,7 @@ partial def revoke (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.requireApi caller (·.canRevoke)
   CapaM.requireNotFrozen caller parentHandle
 
-  let parentUid ← match caller.lookupMemUid parentHandle with
+  let parentUid ← match caller.lookupNodeId parentHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let parent ← CapaM.getMemCap parentUid

@@ -56,7 +56,7 @@ inductive Command where
 structure CliState where
   execState   : ExecState
   domainNames : List (String × DomainId)
-  memNames    : List (String × MemCapUid)
+  memNames    : List (String × CapNodeId)
   chanNames   : List (String × (DomainId × LocalHandle))
   currentCore : Option CoreId
 
@@ -72,7 +72,7 @@ def empty : CliState :=
 def lookupDomain (st : CliState) (name : String) : Option DomainId :=
   (st.domainNames.find? (fun p => p.1 == name)).map Prod.snd
 
-def lookupMem (st : CliState) (name : String) : Option MemCapUid :=
+def lookupMem (st : CliState) (name : String) : Option CapNodeId :=
   (st.memNames.find? (fun p => p.1 == name)).map Prod.snd
 
 def lookupChan (st : CliState) (name : String) : Option (DomainId × LocalHandle) :=
@@ -81,7 +81,7 @@ def lookupChan (st : CliState) (name : String) : Option (DomainId × LocalHandle
 def registerDomain (st : CliState) (name : String) (id : DomainId) : CliState :=
   { st with domainNames := st.domainNames ++ [(name, id)] }
 
-def registerMem (st : CliState) (name : String) (uid : MemCapUid) : CliState :=
+def registerMem (st : CliState) (name : String) (uid : CapNodeId) : CliState :=
   { st with memNames := st.memNames ++ [(name, uid)] }
 
 def registerChan (st : CliState) (name : String) (domId : DomainId) (handle : LocalHandle) : CliState :=
@@ -103,7 +103,7 @@ private def domainName (st : CliState) (id : DomainId) : String :=
   | none => s!"dom{id}"
 
 /-- Find the local handle for a memcap UID in a specific domain. -/
-private def findMemHandle (dom : ExecDomain) (uid : MemCapUid) : Option LocalHandle :=
+private def findMemHandle (dom : ExecDomain) (uid : CapNodeId) : Option LocalHandle :=
   (dom.memCaps.find? (fun p => p.2 == uid)).map Prod.fst
 
 /-- Find the local handle for a child domain ID in a parent's domCaps. -/
@@ -205,7 +205,7 @@ private def formatList (st : CliState) : String := Id.run do
     if !dom.pendingMem.isEmpty then
       out := out ++ s!"    PendingMem:\n"
       for pm in dom.pendingMem do
-        out := out ++ s!"      pending#{pm.pendingId}: from {domainName st pm.senderDomId} uid={pm.memCapUid} attrs={pm.attributes}\n"
+        out := out ++ s!"      pending#{pm.pendingId}: from {domainName st pm.senderDomId} uid={pm.capNodeId} attrs={pm.attributes}\n"
     if !dom.pendingDom.isEmpty then
       out := out ++ s!"    PendingDom:\n"
       for pd in dom.pendingDom do
@@ -502,7 +502,7 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
       if pendingMem.isEmpty && pendingDom.isEmpty then
         out := out ++ "  <none>\n"
       for pm in pendingMem do
-        out := out ++ s!"  Mem pending#{pm.pendingId}: from {domainName st' pm.senderDomId} uid={pm.memCapUid} attrs={pm.attributes}\n"
+        out := out ++ s!"  Mem pending#{pm.pendingId}: from {domainName st' pm.senderDomId} uid={pm.capNodeId} attrs={pm.attributes}\n"
       for pd in pendingDom do
         out := out ++ s!"  Dom pending#{pd.pendingId}: from {domainName st' pd.senderDomId} target={domainName st' pd.targetDomId}\n"
       pure out

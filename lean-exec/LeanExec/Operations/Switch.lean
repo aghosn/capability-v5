@@ -58,7 +58,7 @@ def addVp (callerId : DomainId) (childHandle : LocalHandle)
   CapaM.requireUnsealed child
   CapaM.guard (vpId < child.policy.numVps) (.invalidOperation "vpId exceeds policy.numVps")
   CapaM.guard (findVpById child vpId |>.isNone) (.invalidOperation "VP already exists")
-  let commUid ← match caller.lookupMemUid commHandle with
+  let commUid ← match caller.lookupNodeId commHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let comm ← CapaM.getMemCap commUid
@@ -97,7 +97,7 @@ def registerComm (callerId : DomainId) (commHandle : LocalHandle)
   -- Check no existing COMM binding for this VP
   CapaM.guard (child.commBindings.all fun (_, vid, _) => vid != vpId)
     (.invalidOperation "VP already has COMM binding")
-  let commUid ← match caller.lookupMemUid commHandle with
+  let commUid ← match caller.lookupNodeId commHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
   let comm ← CapaM.getMemCap commUid

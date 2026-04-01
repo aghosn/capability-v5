@@ -101,9 +101,9 @@ private partial def revokeOneDomain (targetId : DomainId) : CapaM UpdateBatch :=
     | none => pure ()
   -- 6. Process COMM bindings (generate uncommRegion updates)
   let mut commUpdates : UpdateBatch := []
-  for (commTargetDom, vpId, memCapUid) in commBindingsList do
+  for (commTargetDom, vpId, capNodeId) in commBindingsList do
     let s ← CapaM.getState
-    match s.getMemCap memCapUid with
+    match s.getMemCap capNodeId with
     | some cap =>
       commUpdates := commUpdates ++
         [HwUpdate.uncommRegion targetId commTargetDom vpId

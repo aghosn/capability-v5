@@ -17,14 +17,14 @@ open ThemisCapa
 structure ExecState where
   /-- All domains, keyed by DomainId. -/
   domains      : List (DomainId × ExecDomain)
-  /-- All memory capabilities (flat store), keyed by MemCapUid. -/
-  memCaps      : List (MemCapUid × ExecMemCap)
+  /-- All memory capabilities (flat store), keyed by CapNodeId. -/
+  memCaps      : List (CapNodeId × ExecMemCap)
   /-- Per-core scheduling state. -/
   cores        : Array CoreState
   /-- Next domain ID to allocate. -/
   nextDomainId : DomainId
   /-- Next memory capability UID to allocate. -/
-  nextCapUid   : MemCapUid
+  nextCapUid   : CapNodeId
   /-- Which core is currently executing (for VP-aware operations). -/
   currentCore  : Option CoreId
   /-- VP register file: (domainId, vpId, regId) → value.
@@ -70,19 +70,19 @@ def allocDomainId (s : ExecState) : ExecState × DomainId :=
 
 -- ── Memory capability lookups ──
 
-def getMemCap (s : ExecState) (uid : MemCapUid) : Option ExecMemCap :=
+def getMemCap (s : ExecState) (uid : CapNodeId) : Option ExecMemCap :=
   (s.memCaps.find? (fun p => p.1 == uid)).map Prod.snd
 
-def setMemCap (s : ExecState) (uid : MemCapUid) (c : ExecMemCap) : ExecState :=
+def setMemCap (s : ExecState) (uid : CapNodeId) (c : ExecMemCap) : ExecState :=
   if s.memCaps.any (fun p => p.1 == uid) then
     { s with memCaps := s.memCaps.map (fun p => if p.1 == uid then (uid, c) else p) }
   else
     { s with memCaps := s.memCaps ++ [(uid, c)] }
 
-def removeMemCap (s : ExecState) (uid : MemCapUid) : ExecState :=
+def removeMemCap (s : ExecState) (uid : CapNodeId) : ExecState :=
   { s with memCaps := s.memCaps.filter (fun p => p.1 != uid) }
 
-def allocCapUid (s : ExecState) : ExecState × MemCapUid :=
+def allocNodeId (s : ExecState) : ExecState × CapNodeId :=
   ({ s with nextCapUid := s.nextCapUid + 1 }, s.nextCapUid)
 
 -- ── Core state ──
@@ -127,7 +127,7 @@ partial def findFallback (s : ExecState) (domId : DomainId) : DomainId :=
   | none => 0
 
 /-- Collect all memory capability UIDs in a subtree rooted at uid. -/
-partial def collectSubtree (s : ExecState) (uid : MemCapUid) : List MemCapUid :=
+partial def collectSubtree (s : ExecState) (uid : CapNodeId) : List CapNodeId :=
   match s.getMemCap uid with
   | some cap => uid :: cap.childUids.toList.flatMap (s.collectSubtree ·)
   | none => []

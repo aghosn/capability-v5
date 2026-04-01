@@ -251,17 +251,17 @@ def MonitorAPI.subsetB (a b : MonitorAPI) : Bool :=
 -- ════════════════════════════════════════════════════════════════════
 
 /-- Unique identifier for a memory capability in the flat store. -/
-abbrev MemCapUid := Nat
+abbrev CapNodeId := Nat
 
 /-- A flattened memory capability node. Children are stored as UIDs
     rather than inline subtrees. -/
 structure ExecMemCap where
-  uid          : MemCapUid
+  uid          : CapNodeId
   capId        : CapId
   region       : MemoryRegion
   attributes   : Attributes
-  parentUid    : Option MemCapUid
-  childUids    : Array MemCapUid
+  parentUid    : Option CapNodeId
+  childUids    : Array CapNodeId
   nextChildSub : SubHandle
 deriving Repr
 
@@ -270,7 +270,7 @@ structure PendingMemCap where
   pendingId    : Nat
   senderDomId  : DomainId
   senderHandle : LocalHandle
-  memCapUid    : MemCapUid
+  capNodeId    : CapNodeId
   attributes   : Attributes
 deriving Repr
 
@@ -288,8 +288,8 @@ structure ExecDomain where
   status        : DomainStatus
   policy        : DomainPolicy
   vps           : Array VProcessor
-  /-- Memory capabilities owned by this domain: LocalHandle → MemCapUid. -/
-  memCaps       : List (LocalHandle × MemCapUid)
+  /-- Memory capabilities owned by this domain: LocalHandle → CapNodeId. -/
+  memCaps       : List (LocalHandle × CapNodeId)
   /-- Child domain capabilities: LocalHandle → child DomainId. -/
   domCaps       : List (LocalHandle × DomainId)
   /-- Channel capabilities: LocalHandle → target DomainId. -/
@@ -302,7 +302,7 @@ structure ExecDomain where
   nextPendingId : Nat
   parentDomId   : Option DomainId
   /-- COMM bindings: (target domain, vp_id, memcap uid) -/
-  commBindings  : List (DomainId × VpId × MemCapUid)
+  commBindings  : List (DomainId × VpId × CapNodeId)
 deriving Repr
 
 namespace ExecDomain
@@ -324,7 +324,7 @@ def empty (id : DomainId) (parent : Option DomainId) (policy : DomainPolicy) : E
     parentDomId := parent
     commBindings := [] }
 
-def lookupMemUid (d : ExecDomain) (h : LocalHandle) : Option MemCapUid :=
+def lookupNodeId (d : ExecDomain) (h : LocalHandle) : Option CapNodeId :=
   (d.memCaps.find? (fun p => p.1 == h)).map Prod.snd
 
 def lookupDomId (d : ExecDomain) (h : LocalHandle) : Option DomainId :=
@@ -349,7 +349,7 @@ def allocDomHandle (d : ExecDomain) : ExecDomain × LocalHandle :=
 def allocPendingId (d : ExecDomain) : ExecDomain × Nat :=
   ({ d with nextPendingId := d.nextPendingId + 1 }, d.nextPendingId)
 
-def addMemCap (d : ExecDomain) (h : LocalHandle) (uid : MemCapUid) : ExecDomain :=
+def addMemCap (d : ExecDomain) (h : LocalHandle) (uid : CapNodeId) : ExecDomain :=
   { d with memCaps := d.memCaps ++ [(h, uid)] }
 
 def removeMemCap (d : ExecDomain) (h : LocalHandle) : ExecDomain :=
