@@ -341,8 +341,8 @@ binding to prevent cross-user attestation replay.
 - [ ] P20j-3: ABI — extend `SignedAttestReport` with user_pub_key + TPM quote fields
 - [ ] P20j-4: Hypercall — `do_attest_self` reads `AttestRequest` from TX ring, sequence verify
 - [ ] P20j-5: thhv — mutex + TX enqueue + RX dequeue for signed attestation ioctl
-- [ ] P20j-6: Userspace test — verify Ed25519 sig, nonce, user_pub_key, TPM quote
-- [ ] P20j-7: Documentation — update attestation.md + this file
+- [x] P20j-6: Userspace test — Ed25519 + RSA-2048 crypto verification (test_attestation.c)
+- [x] P20j-7: Documentation — attestation.md + todo.md updated
 
 ### Done: TPM MMIO probe fix (P20i, commit 65f3283)
 

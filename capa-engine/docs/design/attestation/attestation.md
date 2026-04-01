@@ -370,7 +370,7 @@ the canonical reference.
 
 ---
 
-## 14. Full TPM Attestation with User Binding (P20j)
+## 14. Full TPM Attestation with User Binding (P20j) — DONE
 
 ### Two-Layer Attestation Model
 
@@ -529,3 +529,28 @@ in `try_tpm()` after `PCR_Extend`.  The handle is stored in `AttestationState`.
 
 For future CRB support: the control area address from the TPM2 table would be
 used directly (it's at `TIS_BASE + 0x40` for QEMU's CRB implementation).
+
+### Verification Test (P20j-6)
+
+`thhv/test/test_attestation.c` performs end-to-end cryptographic verification:
+
+1. **Unsigned path**: Calls ioctl with nonce=0, verifies report returned.
+2. **Signed path**: Sends random nonce + user\_pub\_key, then:
+   - Verifies nonce and user\_pub\_key are echoed correctly
+   - **Ed25519 verify**: Reconstructs `SHA-256(report ‖ nonce ‖ user_pub_key)`,
+     verifies signature against capavisor's public key (OpenSSL EVP)
+   - **TPM RSA-2048 verify**: Parses TPMT\_SIGNATURE header
+     (`alg=RSASSA, hash=SHA256`), reconstructs RSA public key from AK modulus
+     (e=65537), verifies signature over TPMS\_ATTEST blob (OpenSSL EVP)
+
+Build: `cargo build-bins` (links `-lcrypto`)
+Run: `sudo /opt/bins/thhv/tests/test_attestation` inside dom0
+
+### Bug Fixes During Implementation
+
+- **ioctl RX ring leak**: The unsigned ioctl path issued VMCALL but never
+  dequeued the report from the RX ring, leaving stale data that would poison
+  subsequent signed attestation calls. Fixed: both paths now dequeue under
+  `attest_lock` mutex.
+- **Stack overflow risk**: `struct thhv_attest_self` (~4KB) was on the kernel
+  stack. Moved to `kmalloc`/`kfree`.

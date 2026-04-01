@@ -51,6 +51,10 @@ guest:
 # Build all userspace test binaries into test/bin/.
 tests: $(TEST_BINS)
 
+$(TEST_BINDIR)/test_attestation: $(PWD)/test/test_attestation.c $(PWD)/inc/thhv.h
+	@mkdir -p $(TEST_BINDIR)
+	$(CC) -Wall -Wextra -O2 -I$(PWD)/inc -o $@ $< -lcrypto
+
 $(TEST_BINDIR)/%: $(PWD)/test/%.c $(PWD)/inc/thhv.h
 	@mkdir -p $(TEST_BINDIR)
 	$(CC) -Wall -Wextra -O2 -I$(PWD)/inc -o $@ $<

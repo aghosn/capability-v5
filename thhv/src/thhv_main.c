@@ -124,83 +124,93 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 		return thhv_dev_query(uarg);
 
 	case THHV_ATTEST_SELF: {
-		struct thhv_attest_self as;
-		int ret;
+		struct thhv_attest_self *as;
+		u64 report_size;
+		u32 rx_msg_type;
+		u32 rx_payload_size;
+		int is_signed = 0;
+		int ret, i;
 
-		if (copy_from_user(&as, uarg, sizeof(as)))
+		as = kmalloc(sizeof(*as), GFP_KERNEL);
+		if (!as)
+			return -ENOMEM;
+
+		if (copy_from_user(as, uarg, sizeof(*as))) {
+			kfree(as);
 			return -EFAULT;
+		}
 
-		/* Check if this is a signed attestation request
-		 * (non-zero nonce or user_pub_key).
-		 */
-		{
-			int is_signed = 0;
-			int i;
-
-			for (i = 0; i < 32; i++) {
-				if (as.nonce[i] != 0 || as.user_pub_key[i] != 0) {
-					is_signed = 1;
-					break;
-				}
-			}
-
-			if (is_signed) {
-				/* Signed path: use TX ring + mutex. */
-				u8 req_payload[64];
-				u64 tx_sequence;
-				u64 report_size;
-				u32 rx_msg_type;
-				u32 rx_payload_size;
-
-				memcpy(req_payload, as.nonce, 32);
-				memcpy(req_payload + 32, as.user_pub_key, 32);
-
-				mutex_lock(&attest_lock);
-
-				ret = domcomm_tx_enqueue(&thhv_domcomm.tx,
-							DOMCOMM_MSG_ATTEST_REQ,
-							req_payload, 64,
-							&tx_sequence);
-				if (ret) {
-					mutex_unlock(&attest_lock);
-					return ret;
-				}
-
-				ret = themis_attest_self_signed(tx_sequence,
-							       &report_size);
-				if (ret) {
-					mutex_unlock(&attest_lock);
-					return ret;
-				}
-
-				ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
-							as.report_buf,
-							sizeof(as.report_buf),
-							&rx_msg_type,
-							&rx_payload_size);
-				mutex_unlock(&attest_lock);
-
-				if (ret)
-					return ret;
-				if (rx_msg_type != DOMCOMM_MSG_ATTEST)
-					return -EPROTO;
-
-				as.report_size = rx_payload_size;
-			} else {
-				/* Unsigned path: legacy register-based. */
-				u64 report_size;
-
-				ret = themis_attest_self(0, 0, 0, 0,
-							&report_size);
-				if (ret)
-					return ret;
-				as.report_size = report_size;
+		for (i = 0; i < 32; i++) {
+			if (as->nonce[i] != 0 || as->user_pub_key[i] != 0) {
+				is_signed = 1;
+				break;
 			}
 		}
 
-		if (copy_to_user(uarg, &as, sizeof(as)))
-			return -EFAULT;
-		return 0;
+		if (is_signed) {
+			/* Signed path: enqueue request on TX, VMCALL,
+			 * dequeue response from RX. */
+			u8 req_payload[64];
+			u64 tx_sequence;
+
+			memcpy(req_payload, as->nonce, 32);
+			memcpy(req_payload + 32, as->user_pub_key, 32);
+
+			mutex_lock(&attest_lock);
+
+			ret = domcomm_tx_enqueue(&thhv_domcomm.tx,
+						DOMCOMM_MSG_ATTEST_REQ,
+						req_payload, 64,
+						&tx_sequence);
+			if (ret) {
+				mutex_unlock(&attest_lock);
+				kfree(as);
+				return ret;
+			}
+
+			ret = themis_attest_self_signed(tx_sequence,
+						       &report_size);
+			if (ret) {
+				mutex_unlock(&attest_lock);
+				kfree(as);
+				return ret;
+			}
+		} else {
+			/* Unsigned path: register-based VMCALL. */
+			mutex_lock(&attest_lock);
+
+			ret = themis_attest_self(0, 0, 0, 0, &report_size);
+			if (ret) {
+				mutex_unlock(&attest_lock);
+				kfree(as);
+				return ret;
+			}
+		}
+
+		/* Both paths enqueue the report on the RX ring. */
+		ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
+					as->report_buf,
+					sizeof(as->report_buf),
+					&rx_msg_type,
+					&rx_payload_size);
+		mutex_unlock(&attest_lock);
+
+		if (ret) {
+			kfree(as);
+			return ret;
+		}
+		if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
+			kfree(as);
+			return -EPROTO;
+		}
+
+		as->report_size = rx_payload_size;
+
+		if (copy_to_user(uarg, as, sizeof(*as)))
+			ret = -EFAULT;
+
+		kfree(as);
+		return ret;
 	}
 
 	case THHV_READ_PCR: {
