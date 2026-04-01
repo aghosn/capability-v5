@@ -1,0 +1,55 @@
+# Regression: register-comm validation guards
+# Tests all rejection paths in register_comm:
+#   - COMM cap must be carved (not alias)
+#   - cannot re-register (already COMM)
+#   - VP index must be valid
+#   - cannot bind two COMM pages to the same VP
+#   - second COMM on different VP succeeds
+#   - cannot carve/alias from COMM cap
+#
+# Related: commit 90f4807 (harden register_comm)
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+init root 0x100000
+
+# Create child with 2 VPs
+create-domain root child 0b0011 SWITCH
+seal child
+
+# Carve test regions from root memory
+carve r0 c1 0x0 0x1000 RW
+carve r0 c2 0x2000 0x1000 RW
+carve r0 c3 0x4000 0x1000 RW
+alias r0 a1 0x10000 0x1000 R
+
+# ── Test 1: Alias cannot be registered as COMM ────────────────────────────────
+@msg ── Test 1: COMM rejects alias (must be carved)
+register-comm a1 child 0
+
+# ── Test 2: Valid COMM registration succeeds ──────────────────────────────────
+@msg ── Test 2: Valid COMM registration succeeds
+register-comm c1 child 0
+
+# ── Test 3: Re-register same cap (already COMM) ──────────────────────────────
+@msg ── Test 3: Re-register same cap fails (already COMM)
+register-comm c1 child 1
+
+# ── Test 4: Invalid VP index ─────────────────────────────────────────────────
+@msg ── Test 4: Invalid VP index rejected
+register-comm c2 child 99
+
+# ── Test 5: Second COMM page on same VP rejected ─────────────────────────────
+@msg ── Test 5: Duplicate VP binding rejected
+register-comm c2 child 0
+
+# ── Test 6: Second COMM page on different VP succeeds ─────────────────────────
+@msg ── Test 6: Different VP succeeds
+register-comm c3 child 1
+
+# ── Test 7: Carve from COMM cap rejected ──────────────────────────────────────
+@msg ── Test 7: Cannot carve from COMM cap
+carve c1 sub_c1 0x0 0x100 R
+
+# ── Test 8: Alias from COMM cap rejected ──────────────────────────────────────
+@msg ── Test 8: Cannot alias from COMM cap
+alias c1 sub_a1 0x0 0x100 R

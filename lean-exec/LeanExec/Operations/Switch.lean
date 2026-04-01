@@ -92,11 +92,8 @@ def registerComm (callerId : DomainId) (commHandle : LocalHandle)
   let caller ← CapaM.getDomain callerId
   CapaM.requireSealed caller
   CapaM.requireApi caller (·.canSet)
-  let child ← CapaM.getDomain childDomId
-  CapaM.guard (findVpById child vpId |>.isSome) (.invalidOperation "VP does not exist")
-  -- Check no existing COMM binding for this VP
-  CapaM.guard (child.commBindings.all fun (_, vid, _) => vid != vpId)
-    (.invalidOperation "VP already has COMM binding")
+  -- Resolve cap handle and check it is not frozen
+  CapaM.requireNotFrozen caller commHandle
   let commUid ← match caller.lookupNodeId commHandle with
     | some uid => pure uid
     | none => CapaM.throw .notFound
@@ -105,8 +102,16 @@ def registerComm (callerId : DomainId) (commHandle : LocalHandle)
     (.invalidOperation "COMM cap must be carved")
   CapaM.guard (comm.region.status == .exclusive)
     (.invalidOperation "COMM cap must be exclusive")
-  CapaM.guard (!comm.attributes.comm)
-    (.invalidOperation "cap already marked COMM")
+  CapaM.guard (comm.childUids.isEmpty)
+    (.invalidOperation "COMM cap must be a leaf (no children)")
+  CapaM.guard (!comm.attributes.meta && !comm.attributes.comm)
+    (.invalidOperation "capability already carries the COMM or META attribute")
+  -- Validate child domain and VP
+  let child ← CapaM.getDomain childDomId
+  CapaM.guard (findVpById child vpId |>.isSome) (.invalidOperation "VP does not exist")
+  -- Check no existing COMM binding for this VP
+  CapaM.guard (child.commBindings.all fun (_, vid, _) => vid != vpId)
+    (.invalidOperation "VP already has COMM binding")
   -- Record COMM binding
   let child ← CapaM.getDomain childDomId
   let child' := { child with commBindings := child.commBindings ++ [(callerId, vpId, commUid)] }
