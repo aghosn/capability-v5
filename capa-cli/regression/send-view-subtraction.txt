@@ -1,0 +1,24 @@
+# Regression: send with carved children produces correct fragment updates
+# When sending a parent that has carved children, the MMU updates must only
+# cover the visible fragments (parent range minus carved children), not the
+# full parent range. Otherwise carved children still owned by the sender
+# would be incorrectly unmapped from the sender's EPT.
+#
+# Related: view subtraction fix in Lean send/accept paths
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+init root 0x100000
+
+create-domain root guest 0b1111 SEND,REVOKE
+
+# ── Carve a parent with a child subtracted ────────────────────────────────────
+carve r0 parent 0x10000 0x10000 RWX
+carve parent child_carved 0x14000 0x4000 RW
+
+# ── Send parent to guest — updates must be 2 unmaps + 2 maps ─────────────────
+@msg ── Send parent with carved child (expect 2 map + 2 unmap)
+send parent guest
+
+# ── Verify child is still owned by root ───────────────────────────────────────
+@msg ── List should show child_carved still owned by root
+list root

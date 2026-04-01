@@ -15,6 +15,38 @@ open ThemisCapa
 -- § Helpers
 -- ════════════════════════════════════════════════════════════════════
 
+/-- Subtract a single range [cs, ce) from a list of segments,
+    producing the remaining visible portions. -/
+private def subtractOne (segments : List (Nat × Nat)) (cs ce : Nat)
+    : List (Nat × Nat) :=
+  segments.flatMap fun (s, sz) =>
+    let e := s + sz
+    if ce ≤ s || cs ≥ e then [(s, sz)]
+    else
+      let before := if cs > s then [(s, cs - s)] else []
+      let after  := if ce < e then [(ce, e - ce)] else []
+      before ++ after
+
+/-- Subtract a list of carved ranges from a base range. -/
+private def subtractRanges (start : Nat) (size : Nat)
+    (carved : List (Nat × Nat)) : List (Nat × Nat) :=
+  carved.foldl (fun segs (cs, csz) => subtractOne segs cs (cs + csz)) [(start, size)]
+
+/-- Compute the visible fragments of a memory cap's range after subtracting
+    all carved children. This is needed for correct EPT update generation:
+    when a parent is sent/unmapped, only its visible portions (not covered
+    by carved children) should be affected. -/
+private def visibleFragments (s : ExecState) (cap : ExecMemCap)
+    : List (Nat × Nat) :=
+  let carvedRanges := cap.childUids.toList.filterMap fun childUid =>
+    match s.getMemCap childUid with
+    | some child =>
+      if child.region.kind == .carve then
+        some (child.region.access.start, child.region.access.size)
+      else none
+    | none => none
+  subtractRanges cap.region.access.start cap.region.access.size carvedRanges
+
 /-- Check whether any carved child of `parent` overlaps `access`. -/
 private def hasCarveOverlap (s : ExecState) (parent : ExecMemCap)
     (access : Access) : Bool :=
@@ -298,21 +330,26 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     let recv'' := recv'.addMemCap recvHandle capUid
     CapaM.setDomain receiverId recv''
 
-    -- Generate EPT updates
-    -- Carved caps: unmap from caller (parent still subtracts carved range) + map to receiver
-    -- Alias caps: NO unmap from caller (parent's EPT unaffected by alias removal) + map to receiver
+    -- Generate EPT updates using visible fragments (cap range minus carved children).
+    -- This ensures carved children retained by the sender are NOT unmapped.
+    -- Alias caps: NO unmap from caller (parent's EPT unaffected by alias removal)
     -- META caps: excluded from EPT entirely, no map/unmap
+    let s ← CapaM.getState
+    let fragments := visibleFragments s cap
+    let gpaOffset := gpa - cap.region.access.start
     let callerUnmap : UpdateBatch :=
       if cap.region.kind == .carve then
-        [HwUpdate.unmapMemory callerId cap.region.access.start cap.region.access.size]
+        fragments.map fun (start, size) =>
+          HwUpdate.unmapMemory callerId start size
       else
         []
     let receiverMap : UpdateBatch :=
       if attrs.meta then
         []
       else
-        [HwUpdate.mapMemory receiverId gpa cap.region.access.start
-          cap.region.access.size cap.region.access.rights]
+        fragments.map fun (start, size) =>
+          HwUpdate.mapMemory receiverId (start + gpaOffset) start
+            size cap.region.access.rights
     let updates := callerUnmap ++ receiverMap
     pure updates
   else do
@@ -385,21 +422,26 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
   -- Determine GPA
   let gpa := gpaOverride.getD cap.region.access.start
 
-  -- Generate EPT updates
-  -- Carved caps: unmap from sender + map to receiver
-  -- Alias caps: no unmap from sender (alias doesn't affect parent view)
-  -- META caps: excluded from EPT, no map/unmap
-  let senderUnmap : UpdateBatch :=
-    if cap.attributes.meta then []
-    else if cap.region.kind == .carve then
-      [HwUpdate.unmapMemory pending.senderDomId cap.region.access.start cap.region.access.size]
-    else []
-  let receiverMap : UpdateBatch :=
-    if cap.attributes.meta then []
-    else
-      [HwUpdate.mapMemory receiverId gpa cap.region.access.start
-        cap.region.access.size cap.region.access.rights]
-  let updates := senderUnmap ++ receiverMap
+  -- Generate EPT updates using visible fragments (cap range minus carved children).
+    -- Carved caps: unmap visible fragments from sender + map to receiver
+    -- Alias caps: no unmap from sender (alias doesn't affect parent view)
+    -- META caps: excluded from EPT, no map/unmap
+    let s ← CapaM.getState
+    let fragments := visibleFragments s cap
+    let gpaOffset := gpa - cap.region.access.start
+    let senderUnmap : UpdateBatch :=
+      if cap.attributes.meta then []
+      else if cap.region.kind == .carve then
+        fragments.map fun (start, size) =>
+          HwUpdate.unmapMemory pending.senderDomId start size
+      else []
+    let receiverMap : UpdateBatch :=
+      if cap.attributes.meta then []
+      else
+        fragments.map fun (start, size) =>
+          HwUpdate.mapMemory receiverId (start + gpaOffset) start
+            size cap.region.access.rights
+    let updates := senderUnmap ++ receiverMap
 
   pure (recvHandle, updates)
 
