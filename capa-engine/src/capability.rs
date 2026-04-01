@@ -2070,8 +2070,9 @@ impl Capability<Domain> {
 
         let child_domain_id: DomainId;
 
-        // Validate cap: must be Carve, Exclusive, owned by caller, not already COMM.
-        {
+        // Validate cap: must be Carve, Exclusive, leaf, owned by caller,
+        // not META, not already COMM.
+        let cap_owned = {
             let c = cap_ref.read();
             if c.owned.owner != owner_id {
                 return Err(CapaError::PermissionDenied);
@@ -2082,20 +2083,45 @@ impl Capability<Domain> {
             if c.data.status != RegionStatus::Exclusive {
                 return Err(CapaError::PermissionDenied);
             }
-            if c.owned.attributes.comm() {
+            if !c.children.is_empty() {
+                return Err(CapaError::PermissionDenied);
+            }
+            if c.owned.attributes.meta() || c.owned.attributes.comm() {
                 return Err(CapaError::InvalidOperation(
-                    "capability already carries the COMM attribute".into(),
+                    "capability already carries the COMM or META attribute".into(),
                 ));
             }
-        }
+            c.owned.clone()
+            // c (cap_ref.read()) released here
+        };
+        // Validate AFTER releasing cap_ref.read() to avoid ABBA deadlock
+        // (same pattern as carve/alias/send).
+        cap_owned.validate_operation(MonitorAPI::SET)?;
 
-        // Read child domain ID and validate VP index.
+        // Read child domain ID, validate VP index, and check no existing
+        // COMM binding for this VP.
         {
             let child_r = child_ref.read();
             child_domain_id = child_r.data.id;
             if vp_id as usize >= child_r.data.policy.num_vprocessors {
                 return Err(CapaError::InvalidOperation(
                     "vp_id exceeds child domain VP count".into(),
+                ));
+            }
+            // Each VP may have at most one COMM binding.
+            let already_bound = child_r.data.comm_bindings.iter().any(|weak| {
+                weak.upgrade()
+                    .map(|cap| {
+                        cap.read()
+                            .data
+                            .comm_binding
+                            .map_or(false, |b| b.vp_id == vp_id)
+                    })
+                    .unwrap_or(false)
+            });
+            if already_bound {
+                return Err(CapaError::InvalidOperation(
+                    "VP already has a COMM binding".into(),
                 ));
             }
         }
