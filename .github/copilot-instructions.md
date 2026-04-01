@@ -18,6 +18,8 @@ code, you **must** read the context files listed below.
 
 - `skills/working-on-capability-engine.md` — when modifying `capa-engine/` (domain-mediated
   API, locking model, `execute()`, tests, loom)
+- `skills/working-on-lean-exec.md` — when modifying `lean-exec/` (executable Lean 4
+  model of capa-engine, FFI bridge, differential testing vs Rust backend)
 - `skills/working-on-capavisor.md` — when modifying `themis/capavisor/` (core
   invariants, vmexit/hypercall handlers, `apply_update`, `ThemisPlatform`)
 - `skills/running-inside-dom0.md` — when booting Themis + dom0 under QEMU, SSH,

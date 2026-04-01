@@ -17,6 +17,7 @@ below. Skipping them leads to axiom violations and wasted sessions.
 | Area | Skill file |
 |------|-----------|
 | `capa-engine/` (capability engine) | @skills/working-on-capability-engine.md |
+| `lean-exec/` (Lean executable model) | @skills/working-on-lean-exec.md |
 | `themis/capavisor/` | @skills/working-on-capavisor.md |
 | Booting / testing in dom0 | @skills/running-inside-dom0.md |
 | Debugging guest boot hangs | @skills/debugging-dom-boot.md |
