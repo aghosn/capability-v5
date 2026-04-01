@@ -401,7 +401,7 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 		}
 		ring->page_vas[old_nr + i] = va;
 	}
-	ring->nr_pages  = old_nr + nr_pages;
+	ring->nr_pages  = old_nr + i;
 	ring->capacity  = ring->nr_pages * PAGE_SIZE;
 
 	/* Re-read head/tail pointers (capavisor may have updated page_count). */
