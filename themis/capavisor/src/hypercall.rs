@@ -489,6 +489,11 @@ fn do_attest_self(
             signature,
             pub_key,
             nonce,
+            user_pub_key: [0u8; 32], // TODO(P20j-4): populate from TX ring AttestRequest
+            tpm_quote_size: 0,       // TODO(P20j-4): populate from TPM2_Quote
+            tpm_sig_size: 0,
+            ak_pub_size: 0,
+            reserved: 0,
         };
 
         let pd = match platform.get_platform_domain(domain_id) {

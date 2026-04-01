@@ -15,7 +15,7 @@
 
 #![allow(dead_code)]
 
-use crate::commands::{self, CMD_BUF_SIZE, SHA256_DIGEST_SIZE};
+use crate::commands::{self, CMD_BUF_SIZE, QuoteResult, SHA256_DIGEST_SIZE};
 
 // ── TIS MMIO register offsets (locality 0) ───────────────────────────────── //
 
@@ -332,5 +332,33 @@ impl Tpm2 {
         let mut resp = [0u8; CMD_BUF_SIZE];
         let len = self.transact(&cmd, &mut resp)?;
         commands::parse_get_random_response(&resp[..len], out).ok_or(Tpm2Error::BadResponse)
+    }
+
+    /// Create an RSA-2048 primary signing key under the Owner hierarchy.
+    ///
+    /// Returns `(key_handle, public_key_modulus)` where the modulus is
+    /// the 256-byte big-endian RSA-2048 N value.
+    pub fn create_primary_rsa(&self) -> Result<(u32, [u8; 256]), Tpm2Error> {
+        let cmd = commands::build_create_primary_rsa();
+        let mut resp = [0u8; CMD_BUF_SIZE];
+        let len = self.transact(&cmd, &mut resp)?;
+        commands::parse_create_primary_response(&resp[..len]).ok_or(Tpm2Error::BadResponse)
+    }
+
+    /// Generate a TPM2_Quote: the TPM signs the selected PCR with the given key.
+    ///
+    /// `ak_handle` is the signing key (e.g., from [`create_primary_rsa`]).
+    /// `qualifying_data` is a nonce/challenge (up to 64 bytes).
+    /// `pcr_index` selects which PCR to include in the quote.
+    pub fn quote(
+        &self,
+        ak_handle: u32,
+        qualifying_data: &[u8],
+        pcr_index: u32,
+    ) -> Result<QuoteResult, Tpm2Error> {
+        let cmd = commands::build_quote(ak_handle, qualifying_data, pcr_index);
+        let mut resp = [0u8; CMD_BUF_SIZE];
+        let len = self.transact(&cmd, &mut resp)?;
+        commands::parse_quote_response(&resp[..len]).ok_or(Tpm2Error::BadResponse)
     }
 }

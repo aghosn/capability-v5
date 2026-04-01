@@ -227,26 +227,55 @@ pub struct EnumCapReq {
     pub handle: u64,
 }
 
-// ── Signed attestation report ─────────────────────────────────────────────── //
+// ── Signed attestation report + request ──────────────────────────────────── //
 
-/// Signed attestation report wrapping `AttestReport` with an Ed25519 signature.
+/// Attestation request payload (TX ring, domain → capavisor).
 ///
-/// The signature covers `SHA-256(report_bytes ‖ nonce)` where `report_bytes`
-/// is the flat `AttestReport` header plus the variable-length capability arrays.
+/// Sent via `DOMCOMM_MSG_ATTEST_REQ` on the TX ring before issuing
+/// `ATTEST_SELF` VMCALL with `arg0=1, arg1=msg_sequence`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AttestRequest {
+    /// Verifier-supplied nonce (32 bytes, freshness challenge).
+    pub nonce: [u8; ATTEST_NONCE_SIZE],
+    /// Verifier's public key (32 bytes, bound into the signature).
+    pub user_pub_key: [u8; ATTEST_KEY_SIZE],
+}
+
+/// Signed attestation report with user binding and optional TPM quote.
+///
+/// The signature covers `SHA-256(report_bytes ‖ nonce ‖ user_pub_key)`.
+/// If a TPM is available, the response also includes a TPM2_Quote
+/// (TPM-signed proof of PCR values).
+///
+/// Variable-length: the fixed header is followed by TPM data blobs
+/// when `tpm_quote_size > 0`.
 ///
 /// A remote verifier checks:
-/// 1. `Ed25519_verify(pub_key, SHA-256(report_bytes ‖ nonce), signature)`
-/// 2. TPM quote PCR[11] == SHA-256(capavisor_binary ‖ boot_info ‖ pub_key)
+/// 1. `Ed25519_verify(pub_key, SHA-256(report_bytes ‖ nonce ‖ user_pub_key), signature)`
+/// 2. TPM quote signature valid under `ak_pub`
+/// 3. PCR[11] in quote == SHA-256(capavisor_binary ‖ pub_key)
+/// 4. `nonce` and `user_pub_key` match what was sent
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SignedAttestReport {
     pub report: AttestReport,
-    /// Ed25519 signature (64 bytes).
+    /// Ed25519 signature (64 bytes) over SHA-256(report ‖ nonce ‖ user_pub_key).
     pub signature: [u8; ATTEST_SIG_SIZE],
     /// Capavisor's attestation public key (Ed25519, 32 bytes).
     pub pub_key: [u8; ATTEST_KEY_SIZE],
-    /// Verifier-supplied nonce (32 bytes, passed via hypercall args).
+    /// Verifier-supplied nonce (32 bytes).
     pub nonce: [u8; ATTEST_NONCE_SIZE],
+    /// Verifier's public key (32 bytes, bound into the signature).
+    pub user_pub_key: [u8; ATTEST_KEY_SIZE],
+    /// Size of the TPMS_ATTEST blob following this header (0 if no TPM).
+    pub tpm_quote_size: u16,
+    /// Size of the TPM signature blob following the quote (0 if no TPM).
+    pub tpm_sig_size: u16,
+    /// Size of the AK public area following the signature (0 if no TPM).
+    pub ak_pub_size: u16,
+    /// Reserved, must be 0.
+    pub reserved: u16,
 }
 
 // ── Boot attestation handoff ─────────────────────────────────────────────── //
@@ -307,6 +336,7 @@ const _: () = {
     assert!(core::mem::size_of::<DoorbellNotify>() == 32);
     assert!(core::mem::size_of::<ErrorMsg>() == 16);
     assert!(core::mem::size_of::<EnumCapReq>() == 8);
-    assert!(core::mem::size_of::<SignedAttestReport>() == 168);
+    assert!(core::mem::size_of::<AttestRequest>() == 64);
+    assert!(core::mem::size_of::<SignedAttestReport>() == 208);
     assert!(core::mem::size_of::<BootAttestation>() == 128);
 };

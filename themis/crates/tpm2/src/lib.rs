@@ -4,11 +4,13 @@
 //! `0xFED4_0000`.  This is sufficient for both real hardware TPM 2.0 chips
 //! and QEMU's swtpm emulator (which presents a TIS-compatible device).
 //!
-//! Only the commands needed by the capavisor's attested boot are implemented:
+//! Implemented commands:
 //! - [`Tpm2::startup`] — `TPM2_Startup(TPM_SU_CLEAR)`
 //! - [`Tpm2::pcr_extend`] — `TPM2_PCR_Extend` (SHA-256)
 //! - [`Tpm2::pcr_read`] — `TPM2_PCR_Read` (SHA-256)
 //! - [`Tpm2::get_random`] — `TPM2_GetRandom`
+//! - [`Tpm2::create_primary_rsa`] — `TPM2_CreatePrimary` (RSA-2048 signing key)
+//! - [`Tpm2::quote`] — `TPM2_Quote` (PCR attestation)
 //!
 //! # Safety
 //!
@@ -22,4 +24,5 @@
 mod tis;
 mod commands;
 
+pub use commands::QuoteResult;
 pub use tis::{Tpm2, Tpm2Error, TIS_BASE};
