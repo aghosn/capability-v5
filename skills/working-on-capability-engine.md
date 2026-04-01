@@ -238,7 +238,11 @@ this as a concurrency bug.
 
 ## Test Policy
 
-- **Modify existing code** → run `cargo test` and `cargo loom` before committing.
+- **Every code change** → run `cargo test` **and** `cargo loom-all` before committing.
+  Both must pass. No exceptions.
+- **Logic bug fixes** → add a regression test that fails without the fix and passes with it.
+  Every validation check (guard, error return) in the engine must have a corresponding
+  unit test that exercises that specific rejection path.
 - **Add a new feature** → add at least one unit or integration test in the appropriate
   `tests/unit/` or `tests/integration/` file. For any new concurrent code path, add a
   loom scenario in `tests/concurrency/`.

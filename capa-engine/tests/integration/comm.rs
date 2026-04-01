@@ -385,7 +385,164 @@ fn test_comm_revocation_zeroes_memory() {
     assert!(has_zero, "revoking a COMM cap must emit ZeroMemory (CLEAN)");
 }
 
-// ── 13. Child revocation auto-releases COMM bindings ─────────────────────────
+// ── 13. Caller must be sealed (validate_operation) ──────────────────────────
+
+/// register_comm on an unsealed domain must fail with DomainNotSealed,
+/// because validate_operation(SET) requires the caller to be sealed.
+#[test]
+fn test_comm_requires_caller_sealed() {
+    let parent = make_unsealed_domain();
+    let root = register_root_mem(&parent, 1);
+    // Create child manually (unsealed parent can't go through Capability::create
+    // which itself requires sealing, so we seal, create, then test with an
+    // unsealed grandparent-like setup).  Instead, use a sealed parent that
+    // creates a child, then test register_comm from an unsealed caller.
+    //
+    // Simpler approach: use make_domain for parent, create child, then unseal
+    // can't work (seal is one-way).  So: test that an unsealed domain that
+    // owns a carved cap and a child domain handle gets DomainNotSealed.
+    //
+    // The trick: create everything while sealed, then create a *second*
+    // unsealed domain that holds the same handles.
+    drop(root);
+    let sealed_parent = make_domain();
+    let _root2 = register_root_mem(&sealed_parent, 1);
+    let (child_dh, _) =
+        Capability::create(&sealed_parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
+            .unwrap();
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&sealed_parent, 1, Access::new(0x0, 0x1000, Rights::RW))
+            .unwrap();
+
+    // Create an unsealed domain and give it the same cap + child handles
+    let unsealed = make_unsealed_domain();
+    {
+        let cap_weak = sealed_parent.read().data.get_memory_capability(carved_h).unwrap().clone();
+        let child_weak = sealed_parent.read().data.get_domain_capability(child_dh).unwrap().clone();
+        let cap_arc = cap_weak.upgrade().unwrap();
+        let child_arc = child_weak.upgrade().unwrap();
+        // Transfer ownership
+        cap_arc.write().owned.owner = unsealed.read().data.id;
+        cap_arc.write().owned.owner_domain = Some(Arc::downgrade(&unsealed));
+        unsealed.write().data.add_memory_capability(carved_h, Arc::downgrade(&cap_arc));
+        unsealed.write().data.add_domain_capability(child_dh, Arc::downgrade(&child_arc));
+    }
+
+    let result = Capability::<Domain>::register_comm(&unsealed, carved_h, child_dh, 0);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainNotSealed,
+        "register_comm from unsealed domain must fail with DomainNotSealed"
+    );
+}
+
+// ── 14. Caller must have SET API ─────────────────────────────────────────────
+
+/// register_comm must fail with ApiNotAllowed when caller lacks SET permission.
+#[test]
+fn test_comm_requires_set_api() {
+    // ALL minus SET
+    let api_no_set = MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::SET);
+    let policy = DomainPolicy::new_restricted(0b1111, api_no_set);
+    let mut domain = Domain::new(policy);
+    domain.seal().unwrap();
+    let parent = Arc::new(RwLock::new(Capability {
+        owned: Ownership::new(0),
+        sub_handle: 0,
+        depth: 0,
+        next_child_sub: 1,
+        data: domain,
+        channel_target: None,
+        parent: std::sync::Weak::new(),
+        children: Vec::new(),
+    }));
+    let _root = register_root_mem(&parent, 1);
+
+    // Create child — child API must be a subset of parent's (monotonicity).
+    let (child_dh, _) =
+        Capability::create(&parent, DomainPolicy::new_restricted(0b1111, api_no_set))
+            .unwrap();
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    let result = Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::ApiNotAllowed,
+        "register_comm without SET API must fail with ApiNotAllowed"
+    );
+}
+
+// ── 15. META cap cannot be registered as COMM ────────────────────────────────
+
+/// A capability with the META attribute must be rejected by register_comm.
+#[test]
+fn test_comm_rejects_meta_cap() {
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // Manually set META attribute on the carved cap.
+    {
+        let cap_ref = parent.read().data.get_memory_capability(carved_h).unwrap().upgrade().unwrap();
+        cap_ref.write().owned.attributes = Attributes::from_bits(Attributes::META).canonicalize();
+    }
+
+    let result = Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0);
+    assert!(
+        matches!(result.unwrap_err(), CapaError::InvalidOperation(_)),
+        "register_comm must reject a cap with META attribute"
+    );
+}
+
+// ── 16. Cap with children cannot be registered as COMM ───────────────────────
+
+/// A capability that has been carved from (has children) must be rejected,
+/// even if it somehow retains Exclusive status.
+#[test]
+fn test_comm_rejects_cap_with_children() {
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
+    // Carve a sub-region — this makes the parent cap non-Exclusive AND adds a child.
+    let _ = Capability::<Domain>::carve(&parent, carved_h, Access::new(0x0, 0x1000, Rights::RW));
+
+    // The carved cap now has children (and is no longer Exclusive).
+    // register_comm should reject it (either via Exclusive or children check).
+    let result = Capability::<Domain>::register_comm(&parent, carved_h, child_dh, 0);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::PermissionDenied,
+        "register_comm must reject a cap that has children"
+    );
+}
+
+// ── 17. Duplicate COMM binding for same VP rejected ──────────────────────────
+
+/// Binding two different COMM pages to the same VP must be rejected.
+#[test]
+fn test_comm_duplicate_vp_binding_rejected() {
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+
+    let (h1, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (h2, _, _) =
+        Capability::<Domain>::carve(&parent, 1, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+
+    // First COMM binding to VP 0 succeeds.
+    Capability::<Domain>::register_comm(&parent, h1, child_dh, 0).unwrap();
+
+    // Second COMM binding to the same VP 0 must fail.
+    let result = Capability::<Domain>::register_comm(&parent, h2, child_dh, 0);
+    assert!(
+        matches!(result.unwrap_err(), CapaError::InvalidOperation(_)),
+        "binding a second COMM page to the same VP must return InvalidOperation"
+    );
+}
+
+// ── 18. Child revocation auto-releases COMM bindings ─────────────────────────
 
 /// When a child domain is revoked, all parent-owned COMM pages bound to it
 /// must have their COMM attribute and comm_binding cleared, and UncommRegion

@@ -501,6 +501,10 @@ int domcomm_init(void)
 	struct domcomm_header *hdr;
 	int ret;
 
+	/* Idempotency: already mapped (e.g. driver reload after rmmod/insmod). */
+	if (dc->initialized)
+		return 0;
+
 	cpuid(THHV_CPUID_DOMCOMM_LEAF, &eax, &ebx, &ecx, &edx);
 
 	gpa = ((u64)ebx << 32) | eax;
