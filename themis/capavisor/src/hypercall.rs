@@ -533,25 +533,21 @@ fn do_attest_self(
         let mut ak_pub_size: u16 = 0;
 
         if let Some((ak_handle, ak_modulus)) = crate::attestation::ak_info() {
-            let hhdm_offset = crate::HHDM_REQUEST
-                .get_response()
-                .expect("no HHDM response")
-                .offset();
-            let tpm = tpm2::Tpm2::new(tpm2::TIS_BASE + hhdm_offset);
-
-            match tpm.quote(ak_handle, &nonce, themis_abi::domcomm::ATTEST_PCR_INDEX) {
-                Ok(qr) => {
-                    tpm_quote_size = qr.attest_size as u16;
-                    tpm_sig_size = qr.sig_size as u16;
-                    tpm_quote_buf[..qr.attest_size].copy_from_slice(&qr.attest_data[..qr.attest_size]);
-                    tpm_sig_buf[..qr.sig_size].copy_from_slice(&qr.signature[..qr.sig_size]);
-                    ak_pub_buf = *ak_modulus;
-                    ak_pub_size = 256;
-                    serial_println!("[attest] TPM2_Quote OK — attest={} sig={} bytes",
-                        qr.attest_size, qr.sig_size);
-                }
-                Err(e) => {
-                    serial_println!("[attest] TPM2_Quote failed: {:?} (continuing without)", e);
+            if let Some(tpm) = crate::attestation::tpm_driver() {
+                match tpm.quote(ak_handle, &nonce, themis_abi::domcomm::ATTEST_PCR_INDEX) {
+                    Ok(qr) => {
+                        tpm_quote_size = qr.attest_size as u16;
+                        tpm_sig_size = qr.sig_size as u16;
+                        tpm_quote_buf[..qr.attest_size].copy_from_slice(&qr.attest_data[..qr.attest_size]);
+                        tpm_sig_buf[..qr.sig_size].copy_from_slice(&qr.signature[..qr.sig_size]);
+                        ak_pub_buf = *ak_modulus;
+                        ak_pub_size = 256;
+                        serial_println!("[attest] TPM2_Quote OK — attest={} sig={} bytes",
+                            qr.attest_size, qr.sig_size);
+                    }
+                    Err(e) => {
+                        serial_println!("[attest] TPM2_Quote failed: {:?} (continuing without)", e);
+                    }
                 }
             }
         }
@@ -625,12 +621,9 @@ fn do_read_pcr(pcr_index: u32) -> HypercallResult {
         return HypercallResult::error(errors::ERR_NOTFOUND);
     }
 
-    let hhdm_offset = crate::HHDM_REQUEST
-        .get_response()
-        .expect("no HHDM response")
-        .offset();
-
-    let tpm = tpm2::Tpm2::new(tpm2::TIS_BASE + hhdm_offset);
+    let Some(tpm) = crate::attestation::tpm_driver() else {
+        return HypercallResult::error(errors::ERR_NOTFOUND);
+    };
     match tpm.pcr_read(pcr_index) {
         Ok(digest) => {
             // Pack 32 bytes into 4 × u64 (little-endian)

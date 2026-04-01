@@ -15,7 +15,7 @@
 
 #![allow(dead_code)]
 
-use crate::commands::{self, CMD_BUF_SIZE, QuoteResult, SHA256_DIGEST_SIZE};
+use crate::commands::{self, CMD_BUF_SIZE};
 
 // ── TIS MMIO register offsets (locality 0) ───────────────────────────────── //
 
@@ -64,21 +64,14 @@ pub enum Tpm2Error {
 ///
 /// The MMIO base address is configurable (defaults to [`TIS_BASE`]).
 /// All register accesses are volatile MMIO reads/writes.
-pub struct Tpm2 {
+pub(crate) struct TisTransport {
     base: u64,
 }
 
-impl Tpm2 {
-    /// Create a new TPM driver for the given MMIO base address.
-    ///
-    /// Does NOT perform any I/O — call [`Tpm2::probe`] to check for presence.
+impl TisTransport {
+    /// Create a new TIS transport for the given MMIO base address.
     pub const fn new(base: u64) -> Self {
-        Tpm2 { base }
-    }
-
-    /// Create a driver at the default TIS address (`0xFED4_0000`).
-    pub const fn default() -> Self {
-        Tpm2::new(TIS_BASE)
+        TisTransport { base }
     }
 
     // ── Low-level MMIO ───────────────────────────────────────────────────
@@ -251,7 +244,7 @@ impl Tpm2 {
     // ── Full command transaction ──────────────────────────────────────────
 
     /// Send a command and receive the response.
-    fn transact(
+    pub(crate) fn transact(
         &self,
         cmd: &commands::CmdBuf,
         resp: &mut [u8; CMD_BUF_SIZE],
@@ -273,92 +266,5 @@ impl Tpm2 {
         }
 
         Ok(len)
-    }
-
-    // ── Public API ───────────────────────────────────────────────────────
-
-    /// Send `TPM2_Startup(TPM_SU_CLEAR)`.
-    ///
-    /// Safe to call even if the TPM is already started (e.g., by firmware) —
-    /// in that case the TPM returns `TPM_RC_INITIALIZE`, which this function
-    /// treats as success.
-    pub fn startup(&self) -> Result<(), Tpm2Error> {
-        if !self.probe() {
-            return Err(Tpm2Error::NotPresent);
-        }
-        let cmd = commands::build_startup();
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        match self.transact(&cmd, &mut resp) {
-            Ok(_) => Ok(()),
-            Err(Tpm2Error::TpmError(rc)) if rc == commands::TPM2_RC_INITIALIZE => {
-                // Already started — not an error
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Extend PCR `pcr_index` with a SHA-256 `digest`.
-    ///
-    /// The new PCR value becomes `SHA-256(old_value ‖ digest)`.
-    pub fn pcr_extend(
-        &self,
-        pcr_index: u32,
-        digest: &[u8; SHA256_DIGEST_SIZE],
-    ) -> Result<(), Tpm2Error> {
-        let cmd = commands::build_pcr_extend(pcr_index, digest);
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        self.transact(&cmd, &mut resp)?;
-        Ok(())
-    }
-
-    /// Read PCR `pcr_index` from the SHA-256 bank.
-    ///
-    /// Returns the 32-byte digest value.
-    pub fn pcr_read(&self, pcr_index: u32) -> Result<[u8; SHA256_DIGEST_SIZE], Tpm2Error> {
-        let cmd = commands::build_pcr_read(pcr_index);
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        let len = self.transact(&cmd, &mut resp)?;
-        commands::parse_pcr_read_response(&resp[..len]).ok_or(Tpm2Error::BadResponse)
-    }
-
-    /// Get `count` random bytes from the TPM's hardware RNG.
-    ///
-    /// Returns the number of bytes actually written to `out` (may be less
-    /// than `count` if the TPM returns fewer).
-    pub fn get_random(&self, out: &mut [u8]) -> Result<usize, Tpm2Error> {
-        let count = out.len().min(32) as u16; // TPM spec: max 32 bytes per call
-        let cmd = commands::build_get_random(count);
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        let len = self.transact(&cmd, &mut resp)?;
-        commands::parse_get_random_response(&resp[..len], out).ok_or(Tpm2Error::BadResponse)
-    }
-
-    /// Create an RSA-2048 primary signing key under the Owner hierarchy.
-    ///
-    /// Returns `(key_handle, public_key_modulus)` where the modulus is
-    /// the 256-byte big-endian RSA-2048 N value.
-    pub fn create_primary_rsa(&self) -> Result<(u32, [u8; 256]), Tpm2Error> {
-        let cmd = commands::build_create_primary_rsa();
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        let len = self.transact(&cmd, &mut resp)?;
-        commands::parse_create_primary_response(&resp[..len]).ok_or(Tpm2Error::BadResponse)
-    }
-
-    /// Generate a TPM2_Quote: the TPM signs the selected PCR with the given key.
-    ///
-    /// `ak_handle` is the signing key (e.g., from [`create_primary_rsa`]).
-    /// `qualifying_data` is a nonce/challenge (up to 64 bytes).
-    /// `pcr_index` selects which PCR to include in the quote.
-    pub fn quote(
-        &self,
-        ak_handle: u32,
-        qualifying_data: &[u8],
-        pcr_index: u32,
-    ) -> Result<QuoteResult, Tpm2Error> {
-        let cmd = commands::build_quote(ak_handle, qualifying_data, pcr_index);
-        let mut resp = [0u8; CMD_BUF_SIZE];
-        let len = self.transact(&cmd, &mut resp)?;
-        commands::parse_quote_response(&resp[..len]).ok_or(Tpm2Error::BadResponse)
     }
 }

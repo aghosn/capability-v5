@@ -240,12 +240,9 @@ pub extern "C" fn _start() -> ! {
     // The ACPI TPM2 table tells us if a TPM is present.  If so, map its MMIO
     // region (not in Limine's HHDM) and probe + extend PCR 11.
     if let Some(ref tpm_info) = platform.acpi.tpm {
-        // TIS base is always 0xFED40000 on x86 (TCG PC Client spec).
-        // The TPM2 ACPI table confirms presence; the address is spec-defined.
-        let tis_base = tpm2::TIS_BASE;
-        serial_println!("[attest] ACPI TPM2 found (start_method={}, control_area={:#x}) — probing TIS at {:#x}",
-            tpm_info.start_method, tpm_info.control_area, tis_base);
-        attestation::try_tpm(tis_base, hhdm_offset);
+        serial_println!("[attest] ACPI TPM2 found (start_method={}, control_area={:#x})",
+            tpm_info.start_method, tpm_info.control_area);
+        attestation::try_tpm(tpm_info.start_method, tpm_info.control_area, hhdm_offset);
     } else {
         serial_println!("[attest] No ACPI TPM2 table — TPM not available");
     }

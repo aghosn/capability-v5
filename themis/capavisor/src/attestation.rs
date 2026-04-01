@@ -48,6 +48,11 @@ static AK_HANDLE: AtomicU32 = AtomicU32::new(0);
 /// Only valid when AK_AVAILABLE is true. Written once by BSP before any AP runs.
 static mut AK_PUB_MODULUS: [u8; 256] = [0u8; 256];
 
+/// TPM transport info for reconstructing the driver in hypercall context.
+/// Stores (start_method, virtual_address). Written once by BSP in try_tpm().
+static TPM_START_METHOD: AtomicU32 = AtomicU32::new(0);
+static TPM_VIRT_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 struct AttestationState {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
@@ -157,34 +162,52 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64) {
 
 /// Probe the TPM and extend PCR 11 with the boot measurement.
 ///
-/// Called after ACPI parsing discovers a TPM2 table.  Maps the TPM's TIS
-/// MMIO region into the HHDM (Limine doesn't map device MMIO), then probes,
-/// sends TPM2_Startup, and extends PCR 11.
+/// Called after ACPI parsing discovers a TPM2 table.  Maps the TPM's MMIO
+/// region into the HHDM, probes, sends TPM2_Startup, and extends PCR 11.
 ///
-/// `tpm_phys_base` is the physical base of the TIS MMIO region (typically
-/// `0xFED4_0000` — the TCG-spec-defined fixed address for x86).
-/// `hhdm_offset` is the Limine HHDM offset for phys→virt translation.
-pub fn try_tpm(tpm_phys_base: u64, hhdm_offset: u64) {
+/// Transport selection based on ACPI `StartMethod`:
+/// - `6` → TIS (FIFO) at `0xFED4_0000`
+/// - `7` → CRB at `control_area` address
+pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
     let state = ATTEST_STATE.get().expect("attestation not initialized");
 
-    // Map the TIS MMIO region (5 pages: localities 0–4) into the HHDM.
-    // Limine base revision 3 only maps RAM/ACPI/bootloader regions; device
-    // MMIO like the TPM needs explicit page table entries.
-    const TIS_SIZE: u64 = 0x5000; // 5 × 4 KiB pages
-    serial_println!("[attest] Mapping TPM TIS MMIO: phys {:#x}..{:#x}",
-        tpm_phys_base, tpm_phys_base + TIS_SIZE);
-    crate::mem::map_phys_range(tpm_phys_base, TIS_SIZE, hhdm_offset);
-
-    let tpm_virt = tpm_phys_base + hhdm_offset;
-    let tpm = Tpm2::new(tpm_virt);
+    let tpm = match start_method {
+        6 => {
+            let tis_phys = tpm2::TIS_BASE;
+            const TIS_SIZE: u64 = 0x5000;
+            serial_println!("[attest] TIS transport: mapping phys {:#x}..{:#x}",
+                tis_phys, tis_phys + TIS_SIZE);
+            crate::mem::map_phys_range(tis_phys, TIS_SIZE, hhdm_offset);
+            let va = tis_phys + hhdm_offset;
+            TPM_START_METHOD.store(start_method, Ordering::Relaxed);
+            TPM_VIRT_ADDR.store(va, Ordering::Relaxed);
+            Tpm2::new(va)
+        }
+        7 | 8 => {
+            // CRB: all registers at fixed offsets from TIS_BASE (locality base).
+            // The ACPI control_area (e.g., 0xFED40040) just confirms CRB mode.
+            let crb_phys = tpm2::TIS_BASE;
+            const CRB_SIZE: u64 = 0x5000; // same 5-page region as TIS
+            serial_println!("[attest] CRB transport: mapping phys {:#x}..{:#x}",
+                crb_phys, crb_phys + CRB_SIZE);
+            crate::mem::map_phys_range(crb_phys, CRB_SIZE, hhdm_offset);
+            let va = crb_phys + hhdm_offset;
+            TPM_START_METHOD.store(start_method, Ordering::Relaxed);
+            TPM_VIRT_ADDR.store(va, Ordering::Relaxed);
+            Tpm2::new_crb(va)
+        }
+        _ => {
+            serial_println!("[attest] Unsupported TPM start_method={} — skipping", start_method);
+            return;
+        }
+    };
 
     if !tpm.probe() {
-        serial_println!("[attest] No TPM detected at phys {:#x} (virt {:#x})",
-            tpm_phys_base, tpm_virt);
+        serial_println!("[attest] No TPM detected (start_method={})", start_method);
         return;
     }
 
-    serial_println!("[attest] TPM detected at phys {:#x}", tpm_phys_base);
+    serial_println!("[attest] TPM detected (start_method={})", start_method);
 
     // Startup (may already be done by firmware — that's OK)
     if let Err(e) = tpm.startup() {
@@ -269,13 +292,26 @@ pub fn ak_info() -> Option<(u32, &'static [u8; 256])> {
         return None;
     }
     let handle = AK_HANDLE.load(Ordering::Relaxed);
-    // Safety: AK_AVAILABLE acquire synchronizes with the release store
-    // that happened after AK_PUB_MODULUS was written.
     // Safety: AK_PUB_MODULUS was fully written before the Release store to
-    // AK_AVAILABLE, and this Acquire load synchronizes with it. Use raw
-    // pointer to avoid the deprecated shared-reference-to-mutable-static lint.
+    // AK_AVAILABLE, and this Acquire load synchronizes with it.
     let modulus = unsafe { &*core::ptr::addr_of!(AK_PUB_MODULUS) };
     Some((handle, modulus))
+}
+
+/// Create a TPM driver instance using the transport detected at boot.
+///
+/// Returns `None` if no TPM was detected.
+pub fn tpm_driver() -> Option<Tpm2> {
+    if !TPM_AVAILABLE.load(Ordering::Acquire) {
+        return None;
+    }
+    let sm = TPM_START_METHOD.load(Ordering::Relaxed);
+    let va = TPM_VIRT_ADDR.load(Ordering::Relaxed);
+    match sm {
+        6 => Some(Tpm2::new(va)),
+        7 | 8 => Some(Tpm2::new_crb(va)),
+        _ => None,
+    }
 }
 
 /// Sign `data` with the capavisor's Ed25519 signing key.
