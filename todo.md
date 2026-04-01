@@ -19,13 +19,14 @@
 - **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
   at capavisor _start(). Signed attestation hypercall (ATTEST_SELF with nonce).
   On-demand domain config via ATTEST_SELF(nonce=0). TPM driver (no_std TIS MMIO).
-  QEMU swtpm integration (tpm-crb; **requires swtpm ≥ 0.8** — 0.7.x deadlocks
-  with QEMU 8.x + OVMF). thhv ioctls for ATTEST_SELF + READ_PCR.
+  QEMU swtpm integration (tpm-crb). thhv ioctls for ATTEST_SELF + READ_PCR.
   **Verified end-to-end (no TPM)**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
   50 PA map entries loaded by thhv driver with zero errors. PCI BAR overlap at
   0x80000000 fixed (merge overlapping passthrough regions). COMM page duplicate
   fixed (exclude COMM-attributed caps from PA entries).
-  **With TPM**: blocked — swtpm 0.7.3 deadlocks with QEMU 8.x + OVMF (needs ≥ 0.8).
+  **With TPM**: swtpm deadlock fixed (was connecting QEMU chardev to wrong
+  swtpm socket). TPM probe skips — capavisor memory map check too conservative
+  for device MMIO at 0xFED40000.
 
 ### What doesn't work
 
@@ -206,7 +207,8 @@ config (mem_caps, dom_caps, PA map). Nonce≠0 returns Ed25519-signed report.
 
 **Tested end-to-end (no TPM)**: Driver loads attestation at `insmod` time via ATTEST_SELF
 VMCALL. 52 mem_caps + 1 dom_cap + 50 PA map entries loaded, zero errors. Full dom0 boot
-stable. **With TPM**: blocked — swtpm 0.7.3 deadlocks with QEMU 8.x + OVMF (needs ≥ 0.8).
+stable. **With TPM**: swtpm deadlock fixed (wrong socket wiring). TPM probe
+skips because 0xFED40000 MMIO not in Limine memory map — needs probe fix.
 
 #### Bugs fixed during TPM attestation testing
 
@@ -272,7 +274,7 @@ functions to the 83 existing safety theorems.
 - [ ] Attestation: driver should always request a signed report (nonce≠0) in addition
   to the config blob (nonce=0).  Currently the driver only calls ATTEST_SELF(nonce=0)
   at insmod and gets unsigned config.  The signed path exists but is unused by thhv.
-- [ ] Attestation: test with real TPM (swtpm ≥ 0.8 or bare metal)
+- [ ] Attestation: test with real TPM (bare metal or working swtpm probe)
 - [x] VPID bug: child VPID double-incremented — fixed in `d508c22`.
   `write_control_fields` now takes final 1-based vpid directly.
 

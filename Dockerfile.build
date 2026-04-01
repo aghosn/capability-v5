@@ -34,12 +34,10 @@ RUN apt-get update \
     qemu-utils \
     wget \
     xorriso \
+    # Optional: software TPM for attested boot testing (swtpm ≥ 0.8 recommended)
+    swtpm \
+    swtpm-tools \
  && rm -rf /var/lib/apt/lists/*
-
-# Build swtpm ≥ 0.8 from source (Ubuntu 24.04 ships 0.7.3 which deadlocks
-# with QEMU 8.x + OVMF during TPM CRB init).
-COPY themis/scripts/install-swtpm.sh /tmp/install-swtpm.sh
-RUN bash /tmp/install-swtpm.sh && rm /tmp/install-swtpm.sh
 
 # themis/rust-toolchain.toml currently pins channel=nightly,
 # target=x86_64-unknown-none, and the listed components below.
