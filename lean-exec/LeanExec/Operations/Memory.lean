@@ -446,9 +446,15 @@ partial def revoke (callerId : DomainId) (parentHandle : LocalHandle)
     let cap ← CapaM.getMemCap uid
     let ownerId := cap.capId.domainId
 
-    -- Unmap from owning domain
-    updates := updates ++ [HwUpdate.unmapMemory ownerId
-      cap.region.access.start cap.region.access.size]
+    -- Unmap from owning domain (skip META/COMM — not in EPT)
+    if !cap.attributes.meta && !cap.attributes.comm then
+      updates := updates ++ [HwUpdate.unmapMemory ownerId
+        cap.region.access.start cap.region.access.size]
+
+    -- Unregister COMM binding
+    if cap.attributes.comm then
+      updates := updates ++ [HwUpdate.uncommRegion ownerId ownerId 0
+        cap.region.access.start cap.region.access.size]
 
     -- Zero if CLEAN
     if cap.attributes.clean then
