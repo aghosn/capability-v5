@@ -160,6 +160,8 @@ pub mod errors {
     pub const ERR_BUSY:       u64 = 6;
     /// Child VP was preempted by a physical interrupt; caller should retry SWITCH.
     pub const ERR_RETRY:      u64 = 7;
+    /// TX ring message sequence mismatch (concurrent attestation race).
+    pub const ERR_RACE:       u64 = 8;
     pub const ERR_UNIMPL:     u64 = u64::MAX;
 }
 

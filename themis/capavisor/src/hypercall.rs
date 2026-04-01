@@ -367,24 +367,23 @@ fn do_revoke_domain(
 
 /// ATTEST_SELF (0x0C): self-attestation of the calling domain.
 ///
-/// ATTEST_SELF (0x17): on-demand domain attestation.
-///
-/// Behaviour depends on the nonce value:
-///   nonce == 0  →  Full domain config (AttestReport + MemCapEntry[] +
+/// Behaviour depends on arg0:
+///   arg0 == 0  →  Unsigned domain config (AttestReport + MemCapEntry[] +
 ///                  DomCapEntry[] + PaMapEntry[]).  Used by thhv at module init.
-///   nonce != 0  →  Signed attestation (SignedAttestReport with Ed25519).
-///                  Used for remote / TPM-anchored attestation.
+///   arg0 == 1  →  Signed attestation with user binding + optional TPM quote.
+///                  Reads AttestRequest {nonce, user_pub_key} from TX ring.
+///                  arg1 = expected TX ring message sequence (defense in depth).
 ///
-/// IN:  RDI..RCX = nonce (4 × u64 = 32 bytes)
+/// IN:  RDI = mode (0=unsigned, 1=signed), RSI = tx_sequence (if signed)
 /// OUT: Report delivered to caller's DomainComm RX ring.
 ///      RDI = payload size in bytes (0 if DomainComm not initialized).
 fn do_attest_self(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
-    nonce_0: u64,
-    nonce_1: u64,
-    nonce_2: u64,
-    nonce_3: u64,
+    arg0: u64,
+    arg1: u64,
+    _arg2: u64,
+    _arg3: u64,
 ) -> HypercallResult {
     use alloc::vec::Vec;
     use themis_abi::domcomm;
@@ -398,7 +397,7 @@ fn do_attest_self(
         }
     }
 
-    let is_signed = nonce_0 != 0 || nonce_1 != 0 || nonce_2 != 0 || nonce_3 != 0;
+    let is_signed = arg0 == 1;
 
     // Snapshot the domain's capabilities under the read lock.
     let domain = caller.read();
@@ -439,8 +438,6 @@ fn do_attest_self(
         .collect();
 
     // PA entries from non-META, non-COMM memory capabilities (GPA == HPA identity).
-    // COMM pages share the same GPA as their underlying carved memory, so
-    // including both would create duplicate PA map entries.
     let pa_entries: Vec<domcomm::PaMapEntry> = mem_entries
         .iter()
         .filter(|e| e.attributes & (Attributes::META as u32) == 0)
@@ -471,31 +468,9 @@ fn do_attest_self(
     if is_signed {
         use sha2::{Sha256, Digest};
 
-        let mut nonce = [0u8; 32];
-        nonce[0..8].copy_from_slice(&nonce_0.to_le_bytes());
-        nonce[8..16].copy_from_slice(&nonce_1.to_le_bytes());
-        nonce[16..24].copy_from_slice(&nonce_2.to_le_bytes());
-        nonce[24..32].copy_from_slice(&nonce_3.to_le_bytes());
+        let expected_seq = arg1;
 
-        let mut hasher = Sha256::new();
-        hasher.update(as_bytes(&hdr));
-        hasher.update(&nonce);
-        let digest = hasher.finalize();
-        let signature = crate::attestation::sign(&digest);
-        let pub_key = crate::attestation::public_key();
-
-        let signed = domcomm::SignedAttestReport {
-            report: hdr,
-            signature,
-            pub_key,
-            nonce,
-            user_pub_key: [0u8; 32], // TODO(P20j-4): populate from TX ring AttestRequest
-            tpm_quote_size: 0,       // TODO(P20j-4): populate from TPM2_Quote
-            tpm_sig_size: 0,
-            ak_pub_size: 0,
-            reserved: 0,
-        };
-
+        // Dequeue AttestRequest from the caller's TX ring.
         let pd = match platform.get_platform_domain(domain_id) {
             Some(pd) => pd,
             None => return HypercallResult::success_1(0),
@@ -504,14 +479,112 @@ fn do_attest_self(
         if pd_locked.domcomm.is_none() {
             return HypercallResult::success_1(0);
         }
+
+        let mut tx_buf = [0u8; 128];
+        let (msg_type, payload_size, msg_seq) = match pd_locked.domcomm_tx_dequeue(&mut tx_buf) {
+            Some(r) => r,
+            None => {
+                serial_println!("[attest] ATTEST_SELF(signed): no message on TX ring");
+                return HypercallResult::error(errors::ERR_BADSTATE);
+            }
+        };
+
+        if msg_type != domcomm::msg_types::ATTEST_REQ {
+            serial_println!("[attest] ATTEST_SELF(signed): unexpected TX msg type {:#x} (expected ATTEST_REQ {:#x})",
+                msg_type, domcomm::msg_types::ATTEST_REQ);
+            return HypercallResult::error(errors::ERR_BADSTATE);
+        }
+
+        // Defense in depth (A2): verify sequence matches what domain told us.
+        if msg_seq != expected_seq {
+            serial_println!("[attest] ATTEST_SELF(signed): sequence mismatch (msg={}, expected={})",
+                msg_seq, expected_seq);
+            return HypercallResult::error(errors::ERR_RACE);
+        }
+
+        if payload_size < core::mem::size_of::<domcomm::AttestRequest>() {
+            serial_println!("[attest] ATTEST_SELF(signed): payload too small ({} < {})",
+                payload_size, core::mem::size_of::<domcomm::AttestRequest>());
+            return HypercallResult::error(errors::ERR_BADSTATE);
+        }
+
+        // Parse AttestRequest (TOCTOU-safe: tx_buf is a local copy).
+        let attest_req: domcomm::AttestRequest = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const domcomm::AttestRequest)
+        };
+        let nonce = attest_req.nonce;
+        let user_pub_key = attest_req.user_pub_key;
+
+        // Sign: SHA-256(report ‖ nonce ‖ user_pub_key)
+        let mut hasher = Sha256::new();
+        hasher.update(as_bytes(&hdr));
+        hasher.update(&nonce);
+        hasher.update(&user_pub_key);
+        let digest = hasher.finalize();
+        let signature = crate::attestation::sign(&digest);
+        let pub_key = crate::attestation::public_key();
+
+        // TPM2_Quote if AK is available.
+        let mut tpm_quote_buf = [0u8; 512];
+        let mut tpm_sig_buf = [0u8; 512];
+        let mut tpm_quote_size: u16 = 0;
+        let mut tpm_sig_size: u16 = 0;
+        let mut ak_pub_buf = [0u8; 256];
+        let mut ak_pub_size: u16 = 0;
+
+        if let Some((ak_handle, ak_modulus)) = crate::attestation::ak_info() {
+            let hhdm_offset = crate::HHDM_REQUEST
+                .get_response()
+                .expect("no HHDM response")
+                .offset();
+            let tpm = tpm2::Tpm2::new(tpm2::TIS_BASE + hhdm_offset);
+
+            match tpm.quote(ak_handle, &nonce, themis_abi::domcomm::ATTEST_PCR_INDEX) {
+                Ok(qr) => {
+                    tpm_quote_size = qr.attest_size as u16;
+                    tpm_sig_size = qr.sig_size as u16;
+                    tpm_quote_buf[..qr.attest_size].copy_from_slice(&qr.attest_data[..qr.attest_size]);
+                    tpm_sig_buf[..qr.sig_size].copy_from_slice(&qr.signature[..qr.sig_size]);
+                    ak_pub_buf = *ak_modulus;
+                    ak_pub_size = 256;
+                    serial_println!("[attest] TPM2_Quote OK — attest={} sig={} bytes",
+                        qr.attest_size, qr.sig_size);
+                }
+                Err(e) => {
+                    serial_println!("[attest] TPM2_Quote failed: {:?} (continuing without)", e);
+                }
+            }
+        }
+
+        let signed_hdr = domcomm::SignedAttestReport {
+            report: hdr,
+            signature,
+            pub_key,
+            nonce,
+            user_pub_key,
+            tpm_quote_size,
+            tpm_sig_size,
+            ak_pub_size,
+            reserved: 0,
+        };
+
+        // Build variable-length payload: fixed header + TPM blobs.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(as_bytes(&signed_hdr));
+        if tpm_quote_size > 0 {
+            payload.extend_from_slice(&tpm_quote_buf[..tpm_quote_size as usize]);
+            payload.extend_from_slice(&tpm_sig_buf[..tpm_sig_size as usize]);
+            payload.extend_from_slice(&ak_pub_buf[..ak_pub_size as usize]);
+        }
+
         let wrote = pd_locked.domcomm_rx_enqueue(
             domcomm::msg_types::ATTEST,
-            as_bytes(&signed),
+            &payload,
         );
         if wrote == 0 {
             return HypercallResult::error(errors::ERR_BUSY);
         }
-        HypercallResult::success_1(core::mem::size_of::<domcomm::SignedAttestReport>() as u64)
+        HypercallResult::success_1(payload.len() as u64)
     } else {
         // Full domain config — same wire format the thhv driver expects.
         let mut payload = Vec::new();
@@ -1932,7 +2005,7 @@ fn do_domcomm_notify(
         let result = pd_locked.domcomm_tx_dequeue(&mut buf);
         match result {
             None => break,
-            Some((msg_type, payload_size)) => {
+            Some((msg_type, payload_size, _seq)) => {
                 match msg_type {
                     domcomm::msg_types::GROW_RX | domcomm::msg_types::GROW_TX => {
                         let is_rx = msg_type == domcomm::msg_types::GROW_RX;

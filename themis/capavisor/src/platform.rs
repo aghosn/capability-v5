@@ -629,7 +629,7 @@ impl PlatformDomain {
     ///
     /// Security: bounds-checks all domain-supplied values. Copies the message
     /// header before inspecting it to avoid TOCTOU on shared memory.
-    pub fn domcomm_tx_dequeue(&mut self, buf: &mut [u8]) -> Option<(u32, usize)> {
+    pub fn domcomm_tx_dequeue(&mut self, buf: &mut [u8]) -> Option<(u32, usize, u64)> {
         use themis_abi::domcomm;
 
         let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
@@ -723,7 +723,7 @@ impl PlatformDomain {
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
             tx.tail = (tail + total_size) as u32;
 
-            Some((msg_hdr.message_type, payload_size))
+            Some((msg_hdr.message_type, payload_size, msg_hdr.sequence))
         }
     }
 
