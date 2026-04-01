@@ -26,18 +26,19 @@ Together these allow a remote verifier to establish:
 | `do_attest_self` hypercall (0x0C) | `capavisor/src/hypercall.rs` | Done (signed) |
 | `THEMIS_ATTEST` (0x0D) hypercall dispatch | `hypercall.rs` | Done |
 | Ed25519 keygen + SHA-256 measurement | `capavisor/src/attestation.rs` | Done |
-| TPM 2.0 TIS MMIO driver | `themis/crates/tpm2/` | Done |
+| TPM 2.0 driver (TIS + CRB transports) | `themis/crates/tpm2/` | Done (P20k) |
 | QEMU swtpm integration | `scripts/setup-swtpm.sh`, `run-qemu.sh` | Done |
 | thhv ioctls (ATTEST_SELF, READ_PCR) | `thhv/` | Done |
 | On-demand attestation (driver requests) | `thhv/` + `capavisor/` | Done |
 | TPM MMIO probe from ACPI | `capavisor/src/acpi.rs` | Done (P20i) |
 | TPM exclusion from dom0 EPT + ACPI strip | `capavisor/src/boot.rs`, `acpi.rs` | Done (P20i) |
-| **TPM2_CreatePrimary + Quote** | `themis/crates/tpm2/` | **Planned (P20j)** |
-| **User pub_key binding in attestation** | `hypercall.rs`, `domcomm.rs` | **Planned (P20j)** |
-| **TX ring attestation request** | `thhv/`, `hypercall.rs` | **Planned (P20j)** |
-| **Userspace verification test** | `thhv/tests/` | **Planned (P20j)** |
+| TPM2_CreatePrimary + Quote | `themis/crates/tpm2/` | Done (P20j) |
+| User pub_key binding in attestation | `hypercall.rs`, `domcomm.rs` | Done (P20j) |
+| TX ring attestation request | `thhv/`, `hypercall.rs` | Done (P20j) |
+| Userspace crypto verification test | `thhv/test/test_attestation.c` | Done (P20j) |
+| CRB transport + runtime selection | `tpm2/src/crb.rs`, `attestation.rs` | Done (P20k) |
 
-**Current work** (§14): Full TPM attestation — TPM2_Quote + user identity binding.
+All attestation features are **complete and tested**.
 
 ---
 
@@ -191,7 +192,8 @@ swtpm socket --tpm2 \
 # QEMU extra args (chardev connects to the ctrl socket):
 -chardev socket,id=chrtpm,path=/tmp/themis-swtpm/swtpm-sock
 -tpmdev emulator,id=tpm0,chardev=chrtpm
--device tpm-tis,tpmdev=tpm0
+-device tpm-crb,tpmdev=tpm0     # CRB (default)
+# -device tpm-tis,tpmdev=tpm0   # TIS (alternative, use QEMU_TIS=1)
 ```
 
 > **Bug history**: the original setup used separate `--server` and `--ctrl` sockets
@@ -199,8 +201,12 @@ swtpm socket --tpm2 \
 > commands) → swtpm's `recv_msg` blocked forever → deadlock.  Fixed in commit
 > `9246045` by connecting to `--ctrl` only.
 
-Use `tpm-tis` (not `tpm-crb`) because our driver (`themis/crates/tpm2/`) implements
-the TIS FIFO interface.  CRB uses a different register protocol.
+The capavisor auto-detects the transport from the ACPI TPM2 table's StartMethod field:
+- **StartMethod=6** → TIS (FIFO byte-at-a-time interface)
+- **StartMethod=7** → CRB (bulk memory-mapped command/response buffers)
+
+**CRB is the default** since it is the modern transport and offers better performance.
+Use `QEMU_TIS=1` to fall back to TIS.
 
 Automated: `QEMU_TPM=1 cargo themis` — see `themis/scripts/setup-swtpm.sh` and
 `run-qemu.sh` for the integration.
@@ -209,20 +215,25 @@ Reading PCR 11 from dom0:
 ```bash
 tpm2_pcrread sha256:11
 ```
+Note: dom0 **cannot** access the TPM directly — its MMIO region is excluded from
+dom0's EPT.  PCR reads are only available via the `READ_PCR` ioctl (capavisor proxies).
 
 ### Real Hardware (TPM 2.0)
 
 Real hardware has a physical TPM 2.0 chip (most x86_64 laptops/servers since 2016).
-The capavisor talks to it via:
-- **FIFO interface** (TIS — TPM Interface Specification): MMIO at 0xFED40000
-- Or **CRB interface** (Command Response Buffer): MMIO at ACPI TPM2 table address
+The capavisor reads the ACPI TPM2 table to determine the transport:
 
-The TIS base address `0xFED40000` is fixed by the TCG PC Client Platform spec.
+- **TIS** (StartMethod=6): FIFO interface at 0xFED40000. Byte-at-a-time
+  register access. Simpler but slower.
+- **CRB** (StartMethod=7): Command Response Buffer at ACPI-advertised address.
+  Bulk memory-mapped buffers. Modern default on most hardware.
+
+Both transports use the same MMIO base (0xFED40000) with different register layouts.
 The ACPI TPM2 table confirms TPM presence and provides the start method.
 
-For dom0 verification: use `tpm2-tools` (`tpm2_quote`, `tpm2_pcrread`).
-Note: dom0 cannot access the TPM directly — its MMIO region is excluded from
-dom0's EPT (capavisor-exclusive, like META pages).
+For dom0 verification: use the `test_attestation` binary which performs full
+Ed25519 + TPM RSA-2048 signature verification. Dom0 cannot access the TPM
+directly — its MMIO region is excluded from dom0's EPT (capavisor-exclusive).
 
 ---
 
@@ -554,3 +565,86 @@ Run: `sudo /opt/bins/thhv/tests/test_attestation` inside dom0
   `attest_lock` mutex.
 - **Stack overflow risk**: `struct thhv_attest_self` (~4KB) was on the kernel
   stack. Moved to `kmalloc`/`kfree`.
+
+---
+
+## 15. CRB Transport Support (P20k) — DONE
+
+### Motivation
+
+TIS (FIFO) was the original TPM transport. CRB (Command Response Buffer) is the
+modern interface specified in TCG PC Client Platform TPM Profile (PTP) rev 4.
+Most real hardware since ~2018 defaults to CRB. Supporting both ensures Themis
+works on all TPM 2.0 platforms.
+
+### Architecture
+
+The TPM driver uses an enum-based dispatch (no `dyn Trait`, compatible with `no_std`):
+
+```rust
+pub enum Tpm2 {
+    Tis(TisTransport),   // FIFO interface (StartMethod=6)
+    Crb(CrbTransport),   // Command Response Buffer (StartMethod=7)
+}
+```
+
+Transport selection happens at boot in `attestation.rs::try_tpm()`, which reads
+the ACPI TPM2 table's `StartMethod` field.
+
+### CRB Register Layout (TCG PTP Spec Table 18)
+
+All offsets from locality base (0xFED40000):
+
+| Register | Offset | Description |
+|----------|--------|-------------|
+| LOC_STATE | 0x00 | Locality state (TPM assigned, active locality) |
+| LOC_CTRL | 0x08 | Locality control (request/relinquish) |
+| LOC_STS | 0x0C | Locality status (granted, been seized) |
+| INTF_ID | 0x30 | Interface ID (type, version, vendor) |
+| CTRL_REQ | 0x40 | Control request (goReady, goIdle) |
+| CTRL_STS | 0x44 | Control status (tpmIdle, tpmSts) |
+| CTRL_CANCEL | 0x48 | Cancel current command |
+| CTRL_START | 0x4C | Start command processing |
+| CTRL_CMD_SIZE | 0x58 | Command buffer size |
+| CTRL_CMD_LADDR | 0x5C | Command buffer physical address (low 32) |
+| CTRL_CMD_HADDR | 0x60 | Command buffer physical address (high 32) |
+| CTRL_RSP_SIZE | 0x64 | Response buffer size |
+| CTRL_RSP_ADDR | 0x68 | Response buffer physical address |
+| DATA_BUFFER | 0x80 | Shared command/response data buffer |
+
+**Key insight**: `CTRL_CMD_LADDR` and `CTRL_RSP_ADDR` return **physical addresses**.
+In the capavisor (paging enabled, HHDM mapping), we use the data buffer at the
+well-known offset 0x80 from the already-mapped locality base instead of reading
+these registers. This avoids physical-to-virtual translation issues.
+
+### CRB transact() Flow
+
+1. Request locality 0 (write LOC_CTRL, poll LOC_STS)
+2. Send goReady (write CTRL_REQ, poll CTRL_STS for tpmIdle=0)
+3. Write command bytes to data buffer (locality_base + 0x80)
+4. Write CTRL_START = 1 to trigger TPM processing
+5. Poll CTRL_START until it clears (TPM done)
+6. Read response from data buffer, parse response header for size
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `themis/crates/tpm2/src/crb.rs` | NEW: CRB transport implementation |
+| `themis/crates/tpm2/src/tis.rs` | Refactored: `Tpm2` → `TisTransport` |
+| `themis/crates/tpm2/src/lib.rs` | `Tpm2` enum with dispatch to TIS/CRB |
+| `themis/capavisor/src/attestation.rs` | `try_tpm()` takes StartMethod, selects transport |
+| `themis/capavisor/src/hypercall.rs` | Uses `tpm_driver()` accessor |
+| `themis/scripts/run-qemu.sh` | CRB default; `QEMU_TIS=1` for TIS |
+
+### Testing
+
+Both transports pass the full attestation test suite:
+```
+QEMU_TPM=1 cargo themis                  # CRB (default)
+QEMU_TPM=1 QEMU_TIS=1 cargo themis      # TIS (fallback)
+# Then in dom0:
+sudo insmod /opt/bins/thhv/thhv.ko
+sudo /opt/bins/thhv/tests/test_attestation
+# → ALL TESTS PASSED (Ed25519 + TPM RSA-2048 verification)
+```
