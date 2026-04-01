@@ -336,6 +336,45 @@ fn test_meta_revocation_triggers_domain_revoke() {
     );
 }
 
+// ── 7b. META send rejects regions with children ─────────────────────────────
+
+/// An exclusive region that still has children (carved sub-regions) must be
+/// rejected when sent with META — the children would remain in the tree with
+/// inconsistent semantics (parent excluded from EPT but children still mapped).
+#[test]
+fn test_meta_send_rejects_region_with_children() {
+    let sender = make_sealed_domain();
+    let receiver = make_unsealed_domain();
+
+    let _mem = register_root_mem(&sender, 1);
+
+    // Carve a child from the root region — parent is still Exclusive but now
+    // has a non-empty children list.
+    let (_carved_h, _carved_sub, _) = Capability::<Domain>::carve(
+        &sender,
+        1,
+        Access::new(0x0, 0x1000, Rights::RWX),
+    )
+    .unwrap();
+
+    sender
+        .write()
+        .data
+        .add_domain_capability(10, Arc::downgrade(&receiver));
+
+    let result = Capability::<Domain>::send(
+        &sender,
+        1,
+        10,
+        Attributes::from_bits(Attributes::META),
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::PermissionDenied,
+        "exclusive region with children must be rejected for META send"
+    );
+}
+
 // ── 8. META with sealed receiver: pending / accept flow ───────────────────────
 
 /// Sending META to a sealed domain follows the normal freeze/pending/accept

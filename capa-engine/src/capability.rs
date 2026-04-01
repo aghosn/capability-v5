@@ -1179,7 +1179,15 @@ impl Capability<Domain> {
                 return Err(CapaError::PermissionDenied);
             }
             // Only exclusive (unbroken chain of carves) regions may be sent as META.
+            // Note: checking Exclusive implicitly covers the Carve requirement —
+            // only carved regions can be Exclusive (aliases are always Aliased).
+            // Additionally, the region must be a leaf (no children): if a parent
+            // with children were marked META (excluded from EPT), the children
+            // would remain in the tree with inconsistent address-space semantics.
             if attrs.meta() && c.data.status != RegionStatus::Exclusive {
+                return Err(CapaError::PermissionDenied);
+            }
+            if attrs.meta() && !c.children.is_empty() {
                 return Err(CapaError::PermissionDenied);
             }
         }
