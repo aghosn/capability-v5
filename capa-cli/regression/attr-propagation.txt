@@ -1,0 +1,30 @@
+# Regression: attribute propagation
+# Verifies: carve/alias start with NONE, send applies attrs, canonicalize works
+
+# Setup
+init root 0x100000
+
+# Carve regions from r0
+carve r0 m1 0x0 0x10000 RWX
+carve r0 m2 0x20000 0x4000 RW
+
+# Alias a region
+alias r0 a1 0x10000 0x1000 R
+
+# Show attrs — should all be NONE
+list
+
+# Create a sealed child that can receive after seal
+create-domain root child 0b11 GET,ATTEST,REVOKE,SWITCH,RECEIVE_AFTER_SEAL
+
+# Send m2 with META attribute — canonicalize should add CLEAN+VITAL
+send m2 child META
+
+# Send a1 with no attributes
+send a1 child
+
+# Show root's remaining caps
+list
+
+# Show child — should see received caps with correct attrs
+attest child

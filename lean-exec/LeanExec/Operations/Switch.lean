@@ -116,9 +116,9 @@ def registerComm (callerId : DomainId) (commHandle : LocalHandle)
   let child ← CapaM.getDomain childDomId
   let child' := { child with commBindings := child.commBindings ++ [(callerId, vpId, commUid)] }
   CapaM.setDomain childDomId child'
-  -- Mark cap as COMM
+  -- Mark cap as COMM (canonicalize: COMM implies CLEAN)
   let comm ← CapaM.getMemCap commUid
-  let comm' := { comm with attributes := { comm.attributes with comm := true } }
+  let comm' := { comm with attributes := canonicalizeAttrs { comm.attributes with comm := true } }
   CapaM.setMemCap commUid comm'
   pure [HwUpdate.commRegion callerId childDomId vpId
     comm.region.access.start comm.region.access.size]

@@ -142,8 +142,8 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
         { kind := .carve
           status := .exclusive
           access := access
-          attributes := parent.attributes }
-      attributes := parent.attributes
+          attributes := Attributes.empty }
+      attributes := Attributes.empty
       parentUid := some parentUid
       childUids := #[]
       nextChildSub := 0 }
@@ -215,8 +215,8 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
         { kind := .alias
           status := .aliased
           access := access
-          attributes := parent.attributes }
-      attributes := parent.attributes
+          attributes := Attributes.empty }
+      attributes := Attributes.empty
       parentUid := some parentUid
       childUids := #[]
       nextChildSub := 0 }
@@ -266,6 +266,9 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
   let receiver ← CapaM.getDomain receiverId
   CapaM.requireNotRevoked receiver
 
+  -- Canonicalize: META → CLEAN+VITAL, COMM → CLEAN
+  let attrs := canonicalizeAttrs attrs
+
   -- Determine GPA for the receiver (use hint or default to access.start)
   let gpa := gpaHint.getD cap.region.access.start
 
@@ -273,8 +276,10 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     -- Immediate transfer: remove from caller, add to receiver
     CapaM.modifyDomain callerId (·.removeMemCap capHandle)
 
-    -- Update cap ownership
-    let cap' := { cap with capId := { cap.capId with domainId := receiverId } }
+    -- Update cap ownership and apply attributes
+    let cap' := { cap with
+      capId := { cap.capId with domainId := receiverId }
+      attributes := attrs }
     CapaM.setMemCap capUid cap'
 
     -- Allocate handle in receiver
@@ -293,6 +298,10 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     -- Sealed receiver: check canReceiveAfterSeal
     CapaM.guard receiver.policy.api.canReceiveAfterSeal
       (.invalidOperation "sealed receiver lacks canReceiveAfterSeal")
+
+    -- Apply attributes at freeze time (matches Rust: attrs set before pending)
+    let cap' := { cap with attributes := attrs }
+    CapaM.setMemCap capUid cap'
 
     -- Freeze sender's handle
     CapaM.modifyDomain callerId (·.freeze capHandle)

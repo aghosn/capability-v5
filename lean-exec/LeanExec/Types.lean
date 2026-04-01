@@ -50,6 +50,13 @@ instance : ToString Attributes where
       |> (if a.comm then (·.push "COMM") else id)
     if parts.isEmpty then "NONE" else ",".intercalate parts.toList
 
+/-- Canonicalize: META implies CLEAN + VITAL; COMM implies CLEAN only.
+    Call at registration/send time so revocation logic needs no special cases. -/
+def canonicalizeAttrs (a : Attributes) : Attributes :=
+  if a.meta then { a with clean := true, vital := true }
+  else if a.comm then { a with clean := true }
+  else a
+
 instance : BEq Access where
   beq a b := a.start == b.start && a.size == b.size && a.rights == b.rights
 
