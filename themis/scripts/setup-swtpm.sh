@@ -6,8 +6,10 @@
 #   bash scripts/setup-swtpm.sh --stop   # stop swtpm
 #   bash scripts/setup-swtpm.sh --reset  # wipe state + restart
 #
-# The swtpm socket is created at /tmp/themis-swtpm/swtpm.sock.
-# QEMU's run-qemu.sh picks it up when QEMU_TPM=1 is set.
+# The swtpm control socket is created at /tmp/themis-swtpm/swtpm-sock.
+# QEMU's run-qemu.sh connects its chardev to this socket when QEMU_TPM=1.
+# IMPORTANT: QEMU connects to the --ctrl socket, NOT --server.  Using a
+# separate --server socket causes QEMU to deadlock during TPM init.
 
 set -euo pipefail
 
@@ -25,8 +27,7 @@ if [[ "$_maj" -lt "$MIN_MAJOR" ]] || { [[ "$_maj" -eq "$MIN_MAJOR" ]] && [[ "$_m
 fi
 
 SWTPM_DIR="/tmp/themis-swtpm"
-SWTPM_SOCK="$SWTPM_DIR/swtpm.sock"
-SWTPM_CTRL="$SWTPM_DIR/swtpm.ctrl"
+SWTPM_SOCK="$SWTPM_DIR/swtpm-sock"
 SWTPM_STATE="$SWTPM_DIR/state"
 SWTPM_PID="$SWTPM_DIR/swtpm.pid"
 
@@ -45,7 +46,7 @@ stop_swtpm() {
         fi
         rm -f "$SWTPM_PID"
     fi
-    rm -f "$SWTPM_SOCK" "$SWTPM_CTRL"
+    rm -f "$SWTPM_SOCK"
 }
 
 case "${1:-}" in
@@ -70,24 +71,27 @@ if [[ -f "$SWTPM_PID" ]]; then
         exit 0
     fi
     # Stale PID file
-    rm -f "$SWTPM_PID" "$SWTPM_SOCK" "$SWTPM_CTRL"
+    rm -f "$SWTPM_PID" "$SWTPM_SOCK"
 fi
 
 # Check swtpm is installed
 if ! command -v swtpm &>/dev/null; then
     echo "ERROR: swtpm not found. Install with:"
-    echo "  sudo apt install swtpm swtpm-tools"
+    echo "  bash scripts/install-swtpm.sh"
     exit 1
 fi
 
 mkdir -p "$SWTPM_STATE"
 
 echo "→ Starting swtpm (TPM 2.0 emulator)"
+# QEMU's tpm_emulator backend connects to the --ctrl socket and uses the
+# PTM protocol for both control and TPM commands.  Do NOT add a separate
+# --server socket — that causes QEMU to connect to the wrong endpoint and
+# deadlock.  Do NOT add --flags startup-clear — the firmware (SeaBIOS/OVMF)
+# sends TPM2_Startup itself.
 swtpm socket --tpm2 \
-    --server "type=unixio,path=$SWTPM_SOCK" \
-    --ctrl "type=unixio,path=$SWTPM_CTRL" \
     --tpmstate "dir=$SWTPM_STATE" \
-    --flags not-need-init,startup-clear \
+    --ctrl "type=unixio,path=$SWTPM_SOCK" \
     --daemon \
     --pid "file=$SWTPM_PID"
 

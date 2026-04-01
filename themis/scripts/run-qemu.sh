@@ -92,7 +92,7 @@ fi
 # ── TPM (swtpm) ──────────────────────────────────────────────────────────────
 TPM_ARGS=""
 if [[ "${QEMU_TPM:-0}" == "1" ]]; then
-    SWTPM_SOCK="/tmp/themis-swtpm/swtpm.sock"
+    SWTPM_SOCK="/tmp/themis-swtpm/swtpm-sock"
     if [[ ! -S "$SWTPM_SOCK" ]]; then
         echo "→ Starting swtpm automatically..."
         bash "$SCRIPT_DIR/setup-swtpm.sh"
