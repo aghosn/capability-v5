@@ -11,6 +11,19 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Version gate: swtpm 0.7.x deadlocks with QEMU 8.x + OVMF ────────────
+MIN_MAJOR=0; MIN_MINOR=8
+_ver=$(swtpm --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "0.0.0")
+_maj=$(echo "$_ver" | cut -d. -f1); _min=$(echo "$_ver" | cut -d. -f2)
+if [[ "$_maj" -lt "$MIN_MAJOR" ]] || { [[ "$_maj" -eq "$MIN_MAJOR" ]] && [[ "$_min" -lt "$MIN_MINOR" ]]; }; then
+    echo "ERROR: swtpm $_ver is too old (need ≥ ${MIN_MAJOR}.${MIN_MINOR})." >&2
+    echo "       Version 0.7.x deadlocks with QEMU 8.x + OVMF." >&2
+    echo "       Upgrade:  bash scripts/install-swtpm.sh" >&2
+    exit 1
+fi
+
 SWTPM_DIR="/tmp/themis-swtpm"
 SWTPM_SOCK="$SWTPM_DIR/swtpm.sock"
 SWTPM_CTRL="$SWTPM_DIR/swtpm.ctrl"

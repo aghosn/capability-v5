@@ -72,9 +72,9 @@ All dependencies are standard packages. Install them in one go:
 
 ```sh
 sudo apt install qemu-system-x86 qemu-utils cloud-image-utils xorriso ovmf
-# Optional: software TPM for attested boot testing (requires swtpm ≥ 0.8;
-# swtpm 0.7.x deadlocks with QEMU 8.x + OVMF during TPM init)
-sudo apt install swtpm swtpm-tools
+# Optional: software TPM for attested boot testing (built from source;
+# Ubuntu 24.04's swtpm 0.7.x deadlocks with QEMU 8.x + OVMF)
+bash scripts/install-swtpm.sh
 ```
 
 | Tool | Purpose | Package |
@@ -158,7 +158,7 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
 | `QEMU_BIOS` | `0` | Set to `1` for legacy BIOS (default is UEFI/OVMF) |
-| `QEMU_TPM` | `0` | Set to `1` to attach a software TPM 2.0 (swtpm via `tpm-crb`). Auto-starts swtpm if not already running. **Requires swtpm ≥ 0.8** (`sudo apt install swtpm swtpm-tools`). |
+| `QEMU_TPM` | `0` | Set to `1` to attach a software TPM 2.0 (swtpm via `tpm-crb`). Auto-starts swtpm if not already running. **Requires swtpm ≥ 0.8** (run `bash scripts/install-swtpm.sh`). |
 | `PROFILE` | `debug` | `release` for optimised build |
 | `QEMU_EXTRA_ARGS` | *(empty)* | Appended verbatim to QEMU command |
 
@@ -424,8 +424,9 @@ boot and function correctly — attestation simply degrades gracefully.
 > with `kernel-irqchip=split`.
 
 ```sh
-# Install swtpm (one-time) — check version with: swtpm --version
-sudo apt install swtpm swtpm-tools
+# Install swtpm from source (one-time) — Ubuntu 24.04's 0.7.x is broken
+bash scripts/install-swtpm.sh
+# Check version: swtpm --version (must be ≥ 0.8)
 
 # Boot with TPM enabled
 QEMU_TPM=1 cargo themis
