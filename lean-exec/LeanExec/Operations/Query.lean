@@ -89,10 +89,12 @@ def attest (callerId : DomainId) (targetHandle : LocalHandle)
   CapaM.requireSealed target
   pure (targetId * 997 + target.memCaps.length * 31)
 
-/-- Self-attestation: hash of the domain's own ID + memory count. -/
+/-- Self-attestation: hash of the domain's own ID + memory count.
+    If sealed, requires ATTEST API permission (Rust returns permissionDenied). -/
 def attestSelf (domId : DomainId) : CapaM Nat := do
   let dom ← CapaM.getDomain domId
-  CapaM.requireSealed dom
+  if dom.isSealed then
+    CapaM.guard dom.policy.api.canAttest .permissionDenied
   pure (domId * 997 + dom.memCaps.length * 31)
 
 end LeanExec
