@@ -270,22 +270,30 @@ functions to the 83 existing safety theorems.
 ### In progress: lean-exec differential testing
 
 Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
-15 tutorial scenarios. Categories resolved: J (UID allocation), boundary fix
-(CapNodeId rename). Categories remaining:
+15 tutorial scenarios. **8/15 tutos now match** (01–04, 06, 11, 13 + index).
 
 | Cat | Issue | Tutos | Status |
 |-----|-------|-------|--------|
-| A | Carve produces unmap instead of map | 12 | ❌ |
+| A | Carve/send/accept/revoke MMU update semantics | 12 | ✅ Fixed (7bc3429, 5dbddcc, a3854d8) |
+| I | Attributes (CLEAN/VITAL/META) not propagated | 2 | ✅ Fixed (1c5e218) |
+| C | Source VP index shows "?" | 2 | ✅ Fixed (c4edf0b) |
+| J | UID allocation | — | ✅ Fixed (e9b869a) |
+| L | Error messages differ | several | ✅ Mostly fixed (c4edf0b) |
 | D | Send to sealed domain queued as pending | 3 | ❌ |
-| F | Revoke doesn't cascade | 1 | ❌ |
+| B | View/attest shows only hash (no full domain info) | 5 | ❌ Biggest remaining blocker |
 | E | Interrupt delivery fails ("chain broken") | 1 | ❌ |
-| B | View/attest shows only hash | 5 | ❌ |
-| I | Attributes (CLEAN/VITAL/META/HASH) not propagated | 2 | ❌ |
-| H | Domain owner names wrong | 2 | ❌ |
-| C | Source VP index shows "?" | 2 | ❌ |
-| G | Attest rejects unsealed domain | 1 | ❌ |
-| K | GPA overlap check missing | 1 | ❌ |
-| L | Error messages differ (cosmetic + deeper issues) | several | in progress |
+| F | Revoke doesn't cascade (domain + children not cleaned) | 1 | ❌ |
+| H | Domain owner names wrong in display | 2 | ❌ |
+| G | Attest succeeds on unsealed domain (should reject) | 1 | ❌ |
+| K | GPA overlap check missing in send | 1 | ❌ |
+
+**Remaining tutos by difficulty:**
+- **09** (1 line): cosmetic UID display in address space view
+- **12** (4 lines): Cat G — attest on unsealed domain
+- **05** (16 lines): Cat E — interrupt chain tracking in switch
+- **07, 10** (58, 38 lines): dominated by Cat B (attest output format)
+- **08** (45 lines): Cat B + Cat K (GPA overlap check)
+- **14, 15** (127, 149 lines): Cat B + Cat D + Cat H
 
 **⚠ Validation audit needed (discovered via Cat L):** Investigating error message
 differences revealed that `register_comm` was missing 4 validation checks that
