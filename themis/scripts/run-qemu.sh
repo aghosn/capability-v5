@@ -14,7 +14,7 @@
 #   QEMU_NET=1              enable user-mode networking (default: 1)
 #   QEMU_NET_FWD            extra port forwards (e.g. "hostfwd=tcp::8080-:8080")
 #   QEMU_TPM=1              enable TPM 2.0 via swtpm (default: 0)
-#   QEMU_CRB=1              use CRB transport instead of TIS (requires QEMU_TPM=1)
+#   QEMU_TIS=1              use TIS transport instead of CRB (requires QEMU_TPM=1)
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
 
 set -euo pipefail
@@ -101,12 +101,12 @@ if [[ "${QEMU_TPM:-0}" == "1" ]]; then
     if [[ -S "$SWTPM_SOCK" ]]; then
         TPM_ARGS="-chardev socket,id=chrtpm,path=$SWTPM_SOCK"
         TPM_ARGS+=" -tpmdev emulator,id=tpm0,chardev=chrtpm"
-        if [[ "${QEMU_CRB:-0}" == "1" ]]; then
-            TPM_ARGS+=" -device tpm-crb,tpmdev=tpm0"
-            echo "  + TPM 2.0 CRB (swtpm): $SWTPM_SOCK"
-        else
+        if [[ "${QEMU_TIS:-0}" == "1" ]]; then
             TPM_ARGS+=" -device tpm-tis,tpmdev=tpm0"
             echo "  + TPM 2.0 TIS (swtpm): $SWTPM_SOCK"
+        else
+            TPM_ARGS+=" -device tpm-crb,tpmdev=tpm0"
+            echo "  + TPM 2.0 CRB (swtpm): $SWTPM_SOCK"
         fi
     else
         echo "  WARNING: QEMU_TPM=1 but swtpm socket not found at $SWTPM_SOCK"
