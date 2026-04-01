@@ -125,9 +125,9 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (!parent.attributes.meta)
     (.invalidOperation "cannot carve META region")
 
-  -- No overlap with existing carved children
+  -- No overlap with existing carved children (Rust returns invalidAccess, not regionOverlap)
   let s ← CapaM.getState
-  CapaM.guard (!hasCarveOverlap s parent access) .regionOverlap
+  CapaM.guard (!hasCarveOverlap s parent access) .invalidAccess
 
   -- Allocate child
   let childUid ← CapaM.allocNodeId
@@ -162,9 +162,14 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   let caller''' := caller''.addMemCap handle childUid
   CapaM.setDomain callerId caller'''
 
-  -- Generate updates: unmap carved range from caller (carve removes from parent's visible space)
+  -- Generate updates:
+  -- Same rights as parent → no visible EPT change (child replaces parent sub-range at same rights)
+  -- Different rights → remap the carved range at the child's (reduced) rights
   let updates : UpdateBatch :=
-    [HwUpdate.unmapMemory callerId access.start access.size]
+    if access.rights == parent.region.access.rights then
+      []
+    else
+      [HwUpdate.mapMemory callerId access.start access.start access.size access.rights]
 
   pure (handle, childSub, updates)
 
@@ -198,9 +203,9 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (!parent.attributes.meta)
     (.invalidOperation "cannot alias META region")
 
-  -- Aliases can overlap other aliases but NOT carved children
+  -- Aliases can overlap other aliases but NOT carved children (Rust returns invalidAccess)
   let s ← CapaM.getState
-  CapaM.guard (!hasCarveOverlapForAlias s parent access) .regionOverlap
+  CapaM.guard (!hasCarveOverlapForAlias s parent access) .invalidAccess
 
   -- Allocate child
   let childUid ← CapaM.allocNodeId
@@ -289,15 +294,26 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     CapaM.setDomain receiverId recv''
 
     -- Generate EPT updates
-    let updates : UpdateBatch :=
-      [ HwUpdate.unmapMemory callerId cap.region.access.start cap.region.access.size,
-        HwUpdate.mapMemory receiverId gpa cap.region.access.start
-          cap.region.access.size cap.region.access.rights ]
+    -- Carved caps: unmap from caller (parent still subtracts carved range) + map to receiver
+    -- Alias caps: NO unmap from caller (parent's EPT unaffected by alias removal) + map to receiver
+    -- META caps: excluded from EPT entirely, no map/unmap
+    let callerUnmap : UpdateBatch :=
+      if cap.region.kind == .carve then
+        [HwUpdate.unmapMemory callerId cap.region.access.start cap.region.access.size]
+      else
+        []
+    let receiverMap : UpdateBatch :=
+      if attrs.meta then
+        []
+      else
+        [HwUpdate.mapMemory receiverId gpa cap.region.access.start
+          cap.region.access.size cap.region.access.rights]
+    let updates := callerUnmap ++ receiverMap
     pure updates
   else do
-    -- Sealed receiver: check canReceiveAfterSeal
+    -- Sealed receiver: check canReceiveAfterSeal (Rust returns permissionDenied)
     CapaM.guard receiver.policy.api.canReceiveAfterSeal
-      (.invalidOperation "sealed receiver lacks canReceiveAfterSeal")
+      .permissionDenied
 
     -- Apply attributes at freeze time (matches Rust: attrs set before pending)
     let cap' := { cap with attributes := attrs }
