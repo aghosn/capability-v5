@@ -119,11 +119,9 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (Access.containedB access parent.region.access)
     .invalidAccess
 
-  -- Parent must not be COMM or META
-  CapaM.guard (!parent.attributes.comm)
-    (.invalidOperation "cannot carve COMM region")
-  CapaM.guard (!parent.attributes.meta)
-    (.invalidOperation "cannot carve META region")
+  -- Parent must not be COMM or META (Rust returns permissionDenied)
+  CapaM.guard (!parent.attributes.comm) .permissionDenied
+  CapaM.guard (!parent.attributes.meta) .permissionDenied
 
   -- No overlap with existing carved children (Rust returns invalidAccess, not regionOverlap)
   let s ← CapaM.getState
@@ -197,11 +195,9 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (Access.containedB access parent.region.access)
     .invalidAccess
 
-  -- Parent must not be COMM or META
-  CapaM.guard (!parent.attributes.comm)
-    (.invalidOperation "cannot alias COMM region")
-  CapaM.guard (!parent.attributes.meta)
-    (.invalidOperation "cannot alias META region")
+  -- Parent must not be COMM or META (Rust returns permissionDenied)
+  CapaM.guard (!parent.attributes.comm) .permissionDenied
+  CapaM.guard (!parent.attributes.meta) .permissionDenied
 
   -- Aliases can overlap other aliases but NOT carved children (Rust returns invalidAccess)
   let s ← CapaM.getState

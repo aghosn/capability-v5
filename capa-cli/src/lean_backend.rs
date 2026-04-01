@@ -520,18 +520,24 @@ impl Backend for LeanBackend {
         let from_domain = get_result1();
         let to_domain = get_result2();
         let result_str = get_result_str();
-        // Parse "isReturn|vector" format
+        // Parse "isReturn|fromVp|toVp|vector" format
         let parts: Vec<&str> = result_str.split('|').collect();
         let is_return = parts.first().map(|s| *s == "true").unwrap_or(false);
-        let interrupt_return = parts
+        let from_vp = parts
             .get(1)
+            .and_then(|s| if s.is_empty() { None } else { s.parse::<u64>().ok() });
+        let to_vp = parts
+            .get(2)
+            .and_then(|s| if s.is_empty() { None } else { s.parse::<u64>().ok() });
+        let interrupt_return = parts
+            .get(3)
             .and_then(|s| if s.is_empty() { None } else { s.parse::<u8>().ok() });
         Ok(SwitchContextDto {
             from_domain,
             to_domain,
             core_id: core,
-            from_vp: None,
-            to_vp: Some(vp_id),
+            from_vp,
+            to_vp,
             is_return,
             interrupt_return,
         })
@@ -543,17 +549,24 @@ impl Backend for LeanBackend {
         let from_domain = get_result1();
         let to_domain = get_result2();
         let result_str = get_result_str();
+        // Parse "isReturn|fromVp|toVp|vector" format
         let parts: Vec<&str> = result_str.split('|').collect();
         let is_return = parts.first().map(|s| *s == "true").unwrap_or(true);
-        let interrupt_return = parts
+        let from_vp = parts
             .get(1)
+            .and_then(|s| if s.is_empty() { None } else { s.parse::<u64>().ok() });
+        let to_vp = parts
+            .get(2)
+            .and_then(|s| if s.is_empty() { None } else { s.parse::<u64>().ok() });
+        let interrupt_return = parts
+            .get(3)
             .and_then(|s| if s.is_empty() { None } else { s.parse::<u8>().ok() });
         Ok(SwitchContextDto {
             from_domain,
             to_domain,
             core_id: core,
-            from_vp: None,
-            to_vp: None,
+            from_vp,
+            to_vp,
             is_return,
             interrupt_return,
         })

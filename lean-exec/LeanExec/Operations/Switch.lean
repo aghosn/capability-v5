@@ -167,7 +167,7 @@ def switchForward (callerId : DomainId) (targetHandle : LocalHandle)
     CapaM.setDomain targetId target'
     -- Update core
     CapaM.setCoreState coreId (.runningDomain targetId targetVpId)
-    pure { fromDomain := callerId, toDomain := targetId, isReturn := false, vector := none }
+    pure { fromDomain := callerId, toDomain := targetId, fromVpId := some callerVpId, toVpId := some targetVpId, isReturn := false, vector := none }
   | .suspended suspDomId suspVpId _ =>
     -- Caller: Running → Locked
     let caller' := updateVp caller callerVpIdx
@@ -189,7 +189,7 @@ def switchForward (callerId : DomainId) (targetHandle : LocalHandle)
       | _ => pure ()
     | none => pure ()
     CapaM.setCoreState coreId (.runningDomain targetId targetVpId)
-    pure { fromDomain := callerId, toDomain := targetId, isReturn := false, vector := none }
+    pure { fromDomain := callerId, toDomain := targetId, fromVpId := some callerVpId, toVpId := some targetVpId, isReturn := false, vector := none }
   | _ => CapaM.throw (.invalidOperation "target VP not available or suspended")
 
 -- ════════════════════════════════════════════════════════════════════
@@ -226,7 +226,7 @@ def switchReturn (calleeDomId : DomainId) (coreId : CoreId)
   CapaM.setDomain callerCtx.domainId callerDom'
   -- Update core
   CapaM.setCoreState coreId (.runningDomain callerCtx.domainId callerCtx.vpId)
-  pure { fromDomain := calleeDomId, toDomain := callerCtx.domainId, isReturn := true, vector := none }
+  pure { fromDomain := calleeDomId, toDomain := callerCtx.domainId, fromVpId := some calleeVp.id, toVpId := some callerCtx.vpId, isReturn := true, vector := none }
 
 -- ════════════════════════════════════════════════════════════════════
 -- § deliverInterrupt — Lazy-unwind interrupt delivery
@@ -289,7 +289,7 @@ partial def deliverInterrupt (vector : Nat) (handlerDomId : DomainId) (coreId : 
       | _ => CapaM.throw (.invalidOperation "intermediate VP not in locked state")
   if !found then
     CapaM.throw (.invalidOperation "handler domain not found in call chain")
-  pure { fromDomain := leafDomId, toDomain := handlerDomId, isReturn := true, vector := some vector }
+  pure { fromDomain := leafDomId, toDomain := handlerDomId, fromVpId := some leafVpId, toVpId := some curVpId, isReturn := true, vector := some vector }
 
 -- ════════════════════════════════════════════════════════════════════
 -- § switch — Unified dispatch

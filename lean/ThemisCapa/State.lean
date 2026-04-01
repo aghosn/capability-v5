@@ -70,6 +70,8 @@ end SystemState
 structure SwitchResult where
   fromDomain : DomainId
   toDomain   : DomainId
+  fromVpId   : Option VpId
+  toVpId     : Option VpId
   isReturn   : Bool
   vector     : Option Nat    -- interrupt vector if returning from interrupt
 

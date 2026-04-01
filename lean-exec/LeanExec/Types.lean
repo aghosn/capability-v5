@@ -114,7 +114,7 @@ instance : ToString CapaError where
   | .regionOverlap => "RegionOverlap"
   | .monotonicityViolation => "MonotonicityViolation"
   | .apiNotAllowed => "ApiNotAllowed"
-  | .invalidOperation msg => s!"InvalidOperation: {msg}"
+  | .invalidOperation msg => msg
 
 instance : BEq MonitorAPI where
   beq a b := a.canCreate == b.canCreate && a.canSet == b.canSet

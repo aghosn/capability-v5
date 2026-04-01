@@ -427,8 +427,10 @@ def ffiRegisterComm (ownerId commUid childId vpId : UInt64) : IO UInt32 := do
 private def storeSwitchResult (sr : SwitchResult) : IO Unit := do
   gResult1.set sr.fromDomain.toUInt64
   gResult2.set sr.toDomain.toUInt64
+  let fromVpStr := match sr.fromVpId with | some v => toString v | none => ""
+  let toVpStr := match sr.toVpId with | some v => toString v | none => ""
   let vecStr := match sr.vector with | some v => toString v | none => ""
-  gResultStr.set s!"{sr.isReturn}|{vecStr}"
+  gResultStr.set s!"{sr.isReturn}|{fromVpStr}|{toVpStr}|{vecStr}"
 
 @[export lean_exec_switch_forward]
 def ffiSwitchForward (targetDomId coreId vpId : UInt64) : IO UInt32 := do
