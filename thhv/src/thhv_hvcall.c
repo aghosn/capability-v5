@@ -135,6 +135,16 @@ int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
 	return __themis_to_errno(status);
 }
 
+int themis_attest_self_signed(u64 tx_sequence, u64 *out_size)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_ATTEST_SELF,
+				     1,            /* arg0 = signed mode flag */
+				     tx_sequence,  /* arg1 = TX ring msg sequence */
+				     0, 0, 0,
+				     out_size, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_READ_PCR,

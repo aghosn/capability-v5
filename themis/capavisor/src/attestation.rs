@@ -19,7 +19,7 @@
 //! - Writes happen only in `init()`, called from `_start()` on the BSP.
 //! - Reads happen only after `AP_LAUNCH_READY` is set (Release/Acquire barrier).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Sha256, Digest};
 use spin::Once;
@@ -37,6 +37,16 @@ static ATTEST_STATE: Once<AttestationState> = Once::new();
 /// Separate from `ATTEST_STATE` because the TPM probe happens later
 /// (after ACPI parsing) than keygen+measurement.
 static TPM_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the AK was successfully created (enables TPM2_Quote).
+static AK_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// TPM Attestation Key handle (valid only when AK_AVAILABLE is true).
+static AK_HANDLE: AtomicU32 = AtomicU32::new(0);
+
+/// TPM Attestation Key RSA-2048 public modulus (256 bytes).
+/// Only valid when AK_AVAILABLE is true. Written once by BSP before any AP runs.
+static mut AK_PUB_MODULUS: [u8; 256] = [0u8; 256];
 
 struct AttestationState {
     signing_key: SigningKey,
@@ -206,6 +216,21 @@ pub fn try_tpm(tpm_phys_base: u64, hhdm_offset: u64) {
         }
     }
 
+    // Create RSA-2048 Attestation Key for TPM2_Quote
+    match tpm.create_primary_rsa() {
+        Ok((handle, pub_modulus)) => {
+            AK_HANDLE.store(handle, Ordering::Relaxed);
+            // Safety: single writer (BSP), before AP_LAUNCH_READY.
+            unsafe { AK_PUB_MODULUS = pub_modulus; }
+            AK_AVAILABLE.store(true, Ordering::Release);
+            serial_println!("[attest] TPM2_CreatePrimary(RSA-2048) OK — AK handle={:#x}", handle);
+        }
+        Err(e) => {
+            serial_println!("[attest] TPM2_CreatePrimary failed: {:?} (no TPM quote available)", e);
+            // Don't return — PCR extend succeeded, just quote won't work.
+        }
+    }
+
     TPM_AVAILABLE.store(true, Ordering::Release);
     serial_println!("[attest] TPM available — PCR extend succeeded");
 }
@@ -234,6 +259,23 @@ pub fn measurement() -> [u8; 32] {
 /// Returns whether a TPM was detected and the PCR extend succeeded.
 pub fn tpm_available() -> bool {
     TPM_AVAILABLE.load(Ordering::Acquire)
+}
+
+/// Returns the AK handle and public modulus if TPM + AK are available.
+///
+/// Returns `None` if no TPM was detected or AK creation failed.
+pub fn ak_info() -> Option<(u32, &'static [u8; 256])> {
+    if !AK_AVAILABLE.load(Ordering::Acquire) {
+        return None;
+    }
+    let handle = AK_HANDLE.load(Ordering::Relaxed);
+    // Safety: AK_AVAILABLE acquire synchronizes with the release store
+    // that happened after AK_PUB_MODULUS was written.
+    // Safety: AK_PUB_MODULUS was fully written before the Release store to
+    // AK_AVAILABLE, and this Acquire load synchronizes with it. Use raw
+    // pointer to avoid the deprecated shared-reference-to-mutable-static lint.
+    let modulus = unsafe { &*core::ptr::addr_of!(AK_PUB_MODULUS) };
+    Some((handle, modulus))
 }
 
 /// Sign `data` with the capavisor's Ed25519 signing key.

@@ -17,6 +17,8 @@
 
 #define THHV_DEV_NAME "thhv"
 
+static DEFINE_MUTEX(attest_lock);
+
 /* ── CPUID detection ───────────────────────────────────────────────────────── */
 
 static bool thhv_detect(void)
@@ -123,23 +125,79 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 
 	case THHV_ATTEST_SELF: {
 		struct thhv_attest_self as;
-		u64 nonce_0, nonce_1, nonce_2, nonce_3, report_size;
 		int ret;
 
 		if (copy_from_user(&as, uarg, sizeof(as)))
 			return -EFAULT;
 
-		memcpy(&nonce_0, &as.nonce[0],  8);
-		memcpy(&nonce_1, &as.nonce[8],  8);
-		memcpy(&nonce_2, &as.nonce[16], 8);
-		memcpy(&nonce_3, &as.nonce[24], 8);
+		/* Check if this is a signed attestation request
+		 * (non-zero nonce or user_pub_key).
+		 */
+		{
+			int is_signed = 0;
+			int i;
 
-		ret = themis_attest_self(nonce_0, nonce_1, nonce_2, nonce_3,
-					&report_size);
-		if (ret)
-			return ret;
+			for (i = 0; i < 32; i++) {
+				if (as.nonce[i] != 0 || as.user_pub_key[i] != 0) {
+					is_signed = 1;
+					break;
+				}
+			}
 
-		as.report_size = report_size;
+			if (is_signed) {
+				/* Signed path: use TX ring + mutex. */
+				u8 req_payload[64];
+				u64 tx_sequence;
+				u64 report_size;
+				u32 rx_msg_type;
+				u32 rx_payload_size;
+
+				memcpy(req_payload, as.nonce, 32);
+				memcpy(req_payload + 32, as.user_pub_key, 32);
+
+				mutex_lock(&attest_lock);
+
+				ret = domcomm_tx_enqueue(&thhv_domcomm.tx,
+							DOMCOMM_MSG_ATTEST_REQ,
+							req_payload, 64,
+							&tx_sequence);
+				if (ret) {
+					mutex_unlock(&attest_lock);
+					return ret;
+				}
+
+				ret = themis_attest_self_signed(tx_sequence,
+							       &report_size);
+				if (ret) {
+					mutex_unlock(&attest_lock);
+					return ret;
+				}
+
+				ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
+							as.report_buf,
+							sizeof(as.report_buf),
+							&rx_msg_type,
+							&rx_payload_size);
+				mutex_unlock(&attest_lock);
+
+				if (ret)
+					return ret;
+				if (rx_msg_type != DOMCOMM_MSG_ATTEST)
+					return -EPROTO;
+
+				as.report_size = rx_payload_size;
+			} else {
+				/* Unsigned path: legacy register-based. */
+				u64 report_size;
+
+				ret = themis_attest_self(0, 0, 0, 0,
+							&report_size);
+				if (ret)
+					return ret;
+				as.report_size = report_size;
+			}
+		}
+
 		if (copy_to_user(uarg, &as, sizeof(as)))
 			return -EFAULT;
 		return 0;

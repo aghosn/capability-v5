@@ -830,8 +830,10 @@ struct thhv_query {
  * Returns: report_size (bytes written to DomainComm RX ring) in result field.
  */
 struct thhv_attest_self {
-	__u8  nonce[32];     /* in: verifier-supplied nonce */
-	__u64 report_size;   /* out: bytes written to RX ring (0 if no DomainComm) */
+	__u8  nonce[32];         /* in: verifier-supplied nonce */
+	__u8  user_pub_key[32];  /* in: verifier's public key (bound into signature) */
+	__u64 report_size;       /* out: total bytes of signed report */
+	__u8  report_buf[4096];  /* out: signed attestation report (variable length) */
 };
 
 #define THHV_ATTEST_SELF \
@@ -1149,6 +1151,7 @@ int themis_switch(u64 target_domain, u64 vp_id);
 int themis_get_chan(u64 domain, u64 *out_handle);
 int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
 		       u64 *out_size);
+int themis_attest_self_signed(u64 tx_sequence, u64 *out_size);
 int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2);
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
 int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);
@@ -1244,7 +1247,8 @@ void domcomm_cleanup(void);
 int  domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 			u32 buf_size, u32 *out_type, u32 *out_payload_size);
 int  domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
-			const void *payload, u32 payload_size);
+			const void *payload, u32 payload_size,
+			u64 *out_sequence);
 int  domcomm_request_grow(bool grow_rx, u32 nr_pages);
 
 /* Global DomainComm instance. */

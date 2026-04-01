@@ -169,7 +169,8 @@ int domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
  *   6. Advance head with release semantics
  */
 int domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
-		       const void *payload, u32 payload_size)
+		       const void *payload, u32 payload_size,
+		       u64 *out_sequence)
 {
 	struct domcomm_msg_header mhdr;
 	u32 total_size, head, tail, used, free_space;
@@ -224,6 +225,10 @@ int domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
 	mhdr.total_size   = total_size;
 	mhdr.sequence     = ring->next_seq++;
 	ring_write(ring, head, &mhdr, sizeof(mhdr));
+
+	/* Return the sequence to the caller if requested. */
+	if (out_sequence)
+		*out_sequence = mhdr.sequence;
 
 	/* Ensure payload + header are visible before advancing head. */
 	smp_wmb();
@@ -339,7 +344,7 @@ int domcomm_request_grow(bool grow_rx, u32 nr_pages)
 	ret = domcomm_tx_enqueue(&dc->tx,
 				 grow_rx ? DOMCOMM_MSG_GROW_RX
 					 : DOMCOMM_MSG_GROW_TX,
-				 &req, sizeof(req));
+				 &req, sizeof(req), NULL);
 	if (ret) {
 		pr_err("thhv: domcomm grow: tx_enqueue failed (%d)\n", ret);
 		goto err_cap_remove;
