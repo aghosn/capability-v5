@@ -30,14 +30,14 @@ Together these allow a remote verifier to establish:
 | QEMU swtpm integration | `scripts/setup-swtpm.sh`, `run-qemu.sh` | Done |
 | thhv ioctls (ATTEST_SELF, READ_PCR) | `thhv/` | Done |
 | On-demand attestation (driver requests) | `thhv/` + `capavisor/` | Done |
-| **TPM MMIO probe from ACPI** | `capavisor/src/acpi.rs` | **In progress** |
-| **TPM exclusion from dom0 EPT** | `capavisor/src/boot.rs` | **In progress** |
+| TPM MMIO probe from ACPI | `capavisor/src/acpi.rs` | Done (P20i) |
+| TPM exclusion from dom0 EPT + ACPI strip | `capavisor/src/boot.rs`, `acpi.rs` | Done (P20i) |
+| **TPM2_CreatePrimary + Quote** | `themis/crates/tpm2/` | **Planned (P20j)** |
+| **User pub_key binding in attestation** | `hypercall.rs`, `domcomm.rs` | **Planned (P20j)** |
+| **TX ring attestation request** | `thhv/`, `hypercall.rs` | **Planned (P20j)** |
+| **Userspace verification test** | `thhv/tests/` | **Planned (P20j)** |
 
-**Remaining work** (§13):
-- Parse ACPI TPM2 table for TPM discovery (replace memory-map scan)
-- Map TPM MMIO via `map_phys_range()` before probing
-- Exclude TPM region from dom0's EPT passthrough (capavisor-exclusive)
-- Test end-to-end with swtpm (PCR extend + readback)
+**Current work** (§14): Full TPM attestation — TPM2_Quote + user identity binding.
 
 ---
 
@@ -295,7 +295,7 @@ P20a–P20h are **done** (see §2).
 
 ---
 
-## 13. TPM MMIO Probe Fix (current work)
+## 13. TPM MMIO Probe Fix (done, commit 65f3283)
 
 ### Problem
 
@@ -367,6 +367,165 @@ or a magic number — it's the hardware standard, analogous to the LAPIC at
 `0xFEE00000` or IOAPIC at `0xFEC00000`.  The ACPI TPM2 table confirms *presence*;
 the address itself comes from the spec.  The `tpm2::TIS_BASE` constant remains as
 the canonical reference.
+
+---
+
+## 14. Full TPM Attestation with User Binding (P20j)
+
+### Two-Layer Attestation Model
+
+The attestation scheme has two interlocking layers:
+
+**Layer 1 — Platform Attestation (TPM Quote)**
+
+The TPM proves that a specific capavisor binary with a specific Ed25519 public key
+is running on genuine hardware:
+
+```
+PCR[11] = SHA-256(capavisor_binary ‖ ed25519_pub_key)
+
+TPM2_Quote(AK, nonce, PCR_selection=[11])
+  → TPMS_ATTEST { magic, type=QUOTE, qualifiedSigner, PCR_digest, nonce, clock... }
+  → signed by RSA-2048 Attestation Key (AK) inside the TPM
+```
+
+The AK is created at boot via `TPM2_CreatePrimary` under the Owner hierarchy.
+Its public key is included in the attestation response so verifiers can check the
+TPM signature.
+
+**Layer 2 — Domain Attestation (Capavisor Signature)**
+
+The capavisor proves a domain's resource configuration for a specific verifier:
+
+```
+Ed25519_sign(capavisor_priv_key, SHA-256(report ‖ nonce ‖ user_pub_key))
+```
+
+The `user_pub_key` is the verifier's public key, binding the attestation to a
+specific requesting party.  This prevents cross-user replay: an attestation
+generated for Alice cannot convince Bob, because Bob's public key is not in the
+signed hash.
+
+**Binding chain:**
+
+```
+TPM manufacturer cert → EK → AK → Quote(PCR[11])
+                                        ↓
+                              PCR[11] contains ed25519_pub_key
+                                        ↓
+                              ed25519_pub_key verifies domain attestation signature
+                                        ↓
+                              signature covers user_pub_key (verifier identity)
+```
+
+### Wire Format
+
+The signed attestation response is variable-length (TPM blobs vary in size):
+
+```
+SignedAttestReportHeader {            // fixed part
+    report: AttestReport,             //  40 bytes — domain state
+    signature: [u8; 64],              //  64 bytes — Ed25519(SHA-256(report ‖ nonce ‖ user_pub_key))
+    pub_key: [u8; 32],                //  32 bytes — capavisor Ed25519 public key
+    nonce: [u8; 32],                  //  32 bytes — echoed back
+    user_pub_key: [u8; 32],           //  32 bytes — verifier's public key (echoed back)
+    tpm_quote_size: u16,              //   2 bytes — TPMS_ATTEST blob length (0 if no TPM)
+    tpm_sig_size: u16,                //   2 bytes — TPM signature length (0 if no TPM)
+    ak_pub_size: u16,                 //   2 bytes — AK public area length (0 if no TPM)
+    reserved: u16,                    //   2 bytes
+}                                     // 240 bytes total fixed header
+// Followed by variable-length TPM data:
+//   tpm_quote[tpm_quote_size]        — raw TPMS_ATTEST bytes
+//   tpm_sig[tpm_sig_size]            — raw TPMT_SIGNATURE bytes
+//   ak_pub[ak_pub_size]              — raw TPMT_PUBLIC bytes
+```
+
+When no TPM is available, all `*_size` fields are 0 and no variable data follows.
+The verifier decides whether Ed25519-only attestation is acceptable.
+
+### Request/Response Protocol
+
+**VMCALL convention:**
+
+| Mode | arg0 | arg1 | Behavior |
+|------|------|------|----------|
+| Unsigned (init) | 0 | 0 | Legacy: nonce=0 via registers, returns PA map + caps |
+| Signed (attest) | 1 | TX ring msg sequence | Read AttestRequest from TX ring |
+
+**Request flow (signed path):**
+
+```
+Userspace                    thhv.ko                  Capavisor
+    │                           │                         │
+    │ ioctl(ATTEST_SELF,        │                         │
+    │   {nonce, user_pub_key})  │                         │
+    │──────────────────────────>│                         │
+    │                           │ mutex_lock(attest_lock) │
+    │                           │ TX enqueue(ATTEST_REQ,  │
+    │                           │   {nonce, user_pub_key})│
+    │                           │   → sequence = S        │
+    │                           │                         │
+    │                           │ VMCALL(0x0C, 1, S, 0,0) │
+    │                           │────────────────────────>│
+    │                           │                         │ dequeue TX head
+    │                           │                         │ verify seq == S
+    │                           │                         │   (ERR_RACE if ≠)
+    │                           │                         │ build report
+    │                           │                         │ Ed25519 sign
+    │                           │                         │ TPM2_Quote(AK,nonce,[11])
+    │                           │                         │ RX enqueue(ATTEST, blob)
+    │                           │<────────────────────────│
+    │                           │ RX dequeue(signed blob) │
+    │                           │ mutex_unlock            │
+    │<──────────────────────────│                         │
+    │ verify Ed25519 sig        │                         │
+    │ verify TPM quote          │                         │
+    │ check nonce, user_pub_key │                         │
+```
+
+**Defense in depth (axiom A2 — dom0 is not trusted):**
+
+1. **thhv (cooperative):** `DEFINE_MUTEX(attest_lock)` serializes the
+   `{TX enqueue, VMCALL}` pair across all vCPUs. Prevents races in practice.
+2. **Capavisor (defensive):** Dequeues TX ring head, verifies
+   `msg.sequence == arg1`. If mismatch → `ERR_RACE`. The capavisor never
+   assumes dom0 correctly serialized its operations.
+
+### TPM Driver Additions
+
+New commands needed in `themis/crates/tpm2/`:
+
+| Command | Code | Purpose |
+|---------|------|---------|
+| `TPM2_CreatePrimary` | `0x0000_0131` | Create RSA-2048 AK under Owner hierarchy |
+| `TPM2_Quote` | `0x0000_0158` | Sign PCR values with AK |
+
+The AK uses RSA-2048 with RSASSA scheme (SHA-256 hash).  Created once at boot
+in `try_tpm()` after `PCR_Extend`.  The handle is stored in `AttestationState`.
+
+`CMD_BUF_SIZE` increases from 256 to 1024 to accommodate the larger
+`CreatePrimary` response (RSA-2048 public key is 256 bytes alone).
+
+### Implementation Phases
+
+| Phase | Todo | Dependencies |
+|-------|------|-------------|
+| 1 (parallel) | P20j-1: TPM driver commands | None |
+| 1 (parallel) | P20j-3: ABI struct updates | None |
+| 2 (parallel) | P20j-2: AK creation at boot | P20j-1 |
+| 2 (parallel) | P20j-5: thhv ABI + ioctl | P20j-3 |
+| 3 | P20j-4: Hypercall handler update | P20j-2, P20j-3 |
+| 4 | P20j-6: Userspace verification test | P20j-4, P20j-5 |
+| 5 | P20j-7: Documentation | All |
+
+### Graceful Degradation
+
+| Scenario | Behavior |
+|----------|----------|
+| TPM present | Full attestation: Ed25519 + TPM Quote |
+| No TPM | Ed25519-only: `tpm_quote_size=0`, verifier decides acceptability |
+| nonce=0 | Unsigned PA map + caps (unchanged, for thhv init) |
+| TX ring sequence mismatch | `ERR_RACE` returned, no attestation |
 
 For future CRB support: the control area address from the TPM2 table would be
 used directly (it's at `TIS_BASE + 0x40` for QEMU's CRB implementation).

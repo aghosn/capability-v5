@@ -258,12 +258,42 @@ the child. Deliver on preemption timer expiry (~20ms quantum). Gated behind
 - [x] Policy & registers: set/get policy, set/get register, interrupt policy
 - [x] Query & attestation: compute address space, enumerate, attest
 - [x] Engine dispatch (30 command variants) + CLI REPL with session file loading
-- [ ] FFI bridge: @[export] functions + Rust lean-backend feature in capa-cli
-- [ ] Testing: #eval unit tests, scenario replay, differential testing vs Rust engine
+- [x] FFI bridge: @[export] functions + Rust lean-backend feature in capa-cli
+- [x] Boundary fix: MemCapUid → CapNodeId rename, UID mapping moved to lean_backend.rs
+- [x] Cat J fix: accept reuses UID (stable identity across transfers)
+- [ ] Testing: differential testing vs Rust engine — 12 categories remaining (see below)
 
 **3034 lines of Lean 4.** REPL supports same command syntax as capa-cli.
 Imports ThemisCapa proof model types; refinement proofs can bridge executable
 functions to the 83 existing safety theorems.
+
+### In progress: lean-exec differential testing
+
+Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
+15 tutorial scenarios. Categories resolved: J (UID allocation), boundary fix
+(CapNodeId rename). Categories remaining:
+
+| Cat | Issue | Tutos | Status |
+|-----|-------|-------|--------|
+| A | Carve produces unmap instead of map | 12 | ❌ |
+| D | Send to sealed domain queued as pending | 3 | ❌ |
+| F | Revoke doesn't cascade | 1 | ❌ |
+| E | Interrupt delivery fails ("chain broken") | 1 | ❌ |
+| B | View/attest shows only hash | 5 | ❌ |
+| I | Attributes (CLEAN/VITAL/META/HASH) not propagated | 2 | ❌ |
+| H | Domain owner names wrong | 2 | ❌ |
+| C | Source VP index shows "?" | 2 | ❌ |
+| G | Attest rejects unsealed domain | 1 | ❌ |
+| K | GPA overlap check missing | 1 | ❌ |
+| L | Error messages differ (cosmetic + deeper issues) | several | in progress |
+
+**⚠ Validation audit needed (discovered via Cat L):** Investigating error message
+differences revealed that `register_comm` was missing 4 validation checks that
+all other mutation operations (carve/alias/send) enforce. Fixed in `90f4807` with
+regression tests. **A systematic audit of all operation validation checks is needed**
+to ensure every operation enforces the complete set of guards (sealed, API, frozen,
+ownership, attribute constraints). This should be done by comparing each operation's
+checks against the canonical pattern established by carve/alias/send.
 
 ### Future work
 
@@ -272,10 +302,39 @@ functions to the 83 existing safety theorems.
 - [ ] Reduce serial I/O overhead
 - [ ] CPUID policy in DomainPolicy (P16.6c)
 - [ ] Stock cloud image kernel
-- [ ] Attestation: driver should always request a signed report (nonce≠0) in addition
-  to the config blob (nonce=0).  Currently the driver only calls ATTEST_SELF(nonce=0)
-  at insmod and gets unsigned config.  The signed path exists but is unused by thhv.
 - [ ] Attestation: test with real TPM (bare metal or working swtpm probe)
+
+### Next: Full TPM attestation with user binding (P20j)
+
+Design doc: [`capa-engine/docs/design/attestation/attestation.md §14`](capa-engine/docs/design/attestation/attestation.md)
+
+**Goal**: Complete the two-layer attestation model — TPM2_Quote (platform proof)
+bundled with Ed25519-signed domain reports (capavisor proof), with user public key
+binding to prevent cross-user attestation replay.
+
+**Two-layer model**:
+- **Layer 1 (Platform)**: TPM2_Quote(AK, nonce, PCR[11]) — TPM signs PCR values
+  with an RSA-2048 Attestation Key. Proves the capavisor binary + pub_key are
+  running on genuine hardware.
+- **Layer 2 (Domain)**: Ed25519 sign SHA-256(report ‖ nonce ‖ user_pub_key) — the
+  capavisor signs the domain configuration for a specific verifier.
+
+**Key design decisions**:
+- `ATTEST_SELF` nonce=0 path unchanged (unsigned PA map for thhv init)
+- Signed path uses DomainComm TX ring to pass `{nonce, user_pub_key}` (64 bytes)
+- VMCALL `arg0=1, arg1=sequence` — flag + TX ring sequence number
+- Defense in depth: thhv mutex (cooperative) + capavisor sequence verification (A2)
+- RSA-2048 AK under Owner hierarchy
+- Graceful degradation: no TPM → Ed25519-only (tpm_quote_size=0)
+
+**Todos**:
+- [ ] P20j-1: TPM driver — `TPM2_CreatePrimary` (RSA-2048) + `TPM2_Quote` commands
+- [ ] P20j-2: Capavisor — AK creation at boot after PCR_Extend in `try_tpm()`
+- [ ] P20j-3: ABI — extend `SignedAttestReport` with user_pub_key + TPM quote fields
+- [ ] P20j-4: Hypercall — `do_attest_self` reads `AttestRequest` from TX ring, sequence verify
+- [ ] P20j-5: thhv — mutex + TX enqueue + RX dequeue for signed attestation ioctl
+- [ ] P20j-6: Userspace test — verify Ed25519 sig, nonce, user_pub_key, TPM quote
+- [ ] P20j-7: Documentation — update attestation.md + this file
 
 ### Done: TPM MMIO probe fix (P20i, commit 65f3283)
 
