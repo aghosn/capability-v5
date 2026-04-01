@@ -24,9 +24,8 @@
   50 PA map entries loaded by thhv driver with zero errors. PCI BAR overlap at
   0x80000000 fixed (merge overlapping passthrough regions). COMM page duplicate
   fixed (exclude COMM-attributed caps from PA entries).
-  **With TPM**: swtpm deadlock fixed (was connecting QEMU chardev to wrong
-  swtpm socket). TPM probe skips — capavisor memory map check too conservative
-  for device MMIO at 0xFED40000.
+  **With TPM**: fully working. ACPI TPM2 table discovery, MMIO mapped
+  explicitly, PCR[11] extended. Dom0 excluded (EPT + ACPI table stripping).
 
 ### What doesn't work
 
@@ -209,8 +208,8 @@ config (mem_caps, dom_caps, PA map). Nonce≠0 returns Ed25519-signed report.
 
 **Tested end-to-end (no TPM)**: Driver loads attestation at `insmod` time via ATTEST_SELF
 VMCALL. 52 mem_caps + 1 dom_cap + 50 PA map entries loaded, zero errors. Full dom0 boot
-stable. **With TPM**: swtpm deadlock fixed (wrong socket wiring). TPM probe
-skips because 0xFED40000 MMIO not in Limine memory map — needs probe fix.
+stable. **With TPM**: fully working — ACPI-based discovery, PCR[11] extended,
+dom0 excluded (EPT + ACPI stripping). See P20i below.
 
 #### Bugs fixed during TPM attestation testing
 
@@ -278,19 +277,20 @@ functions to the 83 existing safety theorems.
   at insmod and gets unsigned config.  The signed path exists but is unused by thhv.
 - [ ] Attestation: test with real TPM (bare metal or working swtpm probe)
 
-### Next: TPM MMIO probe fix (P20i)
+### Done: TPM MMIO probe fix (P20i, commit 65f3283)
 
 Design doc: [`capa-engine/docs/design/attestation/attestation.md §13`](capa-engine/docs/design/attestation/attestation.md)
 
-TPM probe currently skipped — MMIO at 0xFED40000 not in Limine HHDM. Fix:
-discover from ACPI TPM2 table, map explicitly, exclude from dom0 EPT.
+TPM probe fixed — discovered from ACPI TPM2 table, MMIO mapped explicitly,
+excluded from dom0 EPT + ACPI tables stripped. End-to-end verified with swtpm.
 
-- [ ] P20i-1: Parse ACPI TPM2 table in `acpi.rs` (TpmInfo struct, same pattern as DMAR)
-- [ ] P20i-2: Split `attestation::init()` / `try_tpm()`, AtomicBool for tpm_available
-- [ ] P20i-3: Rewire `main.rs` — remove memmap scan, call `try_tpm()` after `platform()`
-- [ ] P20i-4: Exclude TPM region from dom0 passthrough in `boot.rs`
-- [ ] P20i-5: Switch QEMU from `tpm-crb` to `tpm-tis` in `run-qemu.sh`
-- [ ] P20i-6: Test end-to-end — `QEMU_TPM=1`, verify PCR extend + dom0 boot
+- [x] P20i-1: Parse ACPI TPM2 table in `acpi.rs` (TpmInfo struct, same pattern as DMAR)
+- [x] P20i-2: Split `attestation::init()` / `try_tpm()`, AtomicBool for tpm_available
+- [x] P20i-3: Rewire `main.rs` — remove memmap scan, call `try_tpm()` after `platform()`
+- [x] P20i-4: Exclude TPM region from dom0 passthrough in `boot.rs`
+- [x] P20i-5: Switch QEMU from `tpm-crb` to `tpm-tis` in `run-qemu.sh`
+- [x] P20i-6: Strip TPM2 from dom0's ACPI tables (alongside DMAR)
+- [x] P20i-7: Test end-to-end — `QEMU_TPM=1`, PCR extend + dom0 boot verified
 - [x] VPID bug: child VPID double-incremented — fixed in `d508c22`.
   `write_control_fields` now takes final 1-based vpid directly.
 
