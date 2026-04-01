@@ -411,7 +411,7 @@ impl Backend for RustBackend {
             .and_then(|w| w.upgrade())
             .ok_or(BackendError::NotFound)?;
 
-        let uid = self.alloc_uid();
+        let uid = self.uid_for_mem(&child).unwrap_or_else(|| self.alloc_uid());
         self.mem_caps.insert(uid, child);
 
         Ok((uid, convert_updates(&batch)))
