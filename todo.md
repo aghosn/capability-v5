@@ -6,7 +6,7 @@
 
 ---
 
-## Current State (2026-03-31)
+## Current State (2026-04-01)
 
 ### What works
 
@@ -18,14 +18,13 @@
   N-level isolation, execute protocol, global system invariant, deep revocation cascade.
 - **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
   at capavisor _start(). Signed attestation hypercall (ATTEST_SELF with nonce).
-  On-demand domain config via ATTEST_SELF(nonce=0). TPM driver (no_std TIS MMIO).
-  QEMU swtpm integration (tpm-crb). thhv ioctls for ATTEST_SELF + READ_PCR.
-  **Verified end-to-end (no TPM)**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
-  50 PA map entries loaded by thhv driver with zero errors. PCI BAR overlap at
-  0x80000000 fixed (merge overlapping passthrough regions). COMM page duplicate
-  fixed (exclude COMM-attributed caps from PA entries).
-  **With TPM**: fully working. ACPI TPM2 table discovery, MMIO mapped
-  explicitly, PCR[11] extended. Dom0 excluded (EPT + ACPI table stripping).
+  On-demand domain config via ATTEST_SELF(nonce=0). TPM driver supports both
+  **CRB** (default) and **TIS** transports, auto-selected via ACPI StartMethod.
+  QEMU swtpm integration (CRB default, `QEMU_TIS=1` for TIS). thhv ioctls for
+  ATTEST_SELF + READ_PCR. Full crypto verification test (Ed25519 + TPM RSA-2048
+  via OpenSSL EVP).
+  **Verified end-to-end**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
+  50 PA map entries loaded by thhv driver with zero errors.
 
 ### What doesn't work
 
@@ -35,6 +34,10 @@
 
 ### Recent commits
 
+- `bc04fe5` — **chore: make CRB the default TPM transport**
+- `9779e4a` — **feat(P20k): CRB transport support for TPM driver**
+- `71390bc` — **fix: domcomm_request_grow nr_pages on partial memremap failure**
+- `090f835` — **feat(P20j-6,7): attestation crypto verification test + ioctl fixes**
 - `8d91531` — **fix: merge overlapping PCI BAR regions + exclude COMM from PA map**
 - `0c8c7ac` — **fix: LocalHandle in attestation + tpm-crb + swtpm ≥ 0.8 docs**
 - `c7c669e` — **fix: safe TPM probe + correct binary size calculation**
