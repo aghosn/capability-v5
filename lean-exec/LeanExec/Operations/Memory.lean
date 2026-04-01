@@ -377,10 +377,20 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
   let gpa := gpaOverride.getD cap.region.access.start
 
   -- Generate EPT updates
-  let updates : UpdateBatch :=
-    [ HwUpdate.unmapMemory pending.senderDomId cap.region.access.start cap.region.access.size,
-      HwUpdate.mapMemory receiverId gpa cap.region.access.start
-        cap.region.access.size cap.region.access.rights ]
+  -- Carved caps: unmap from sender + map to receiver
+  -- Alias caps: no unmap from sender (alias doesn't affect parent view)
+  -- META caps: excluded from EPT, no map/unmap
+  let senderUnmap : UpdateBatch :=
+    if cap.attributes.meta then []
+    else if cap.region.kind == .carve then
+      [HwUpdate.unmapMemory pending.senderDomId cap.region.access.start cap.region.access.size]
+    else []
+  let receiverMap : UpdateBatch :=
+    if cap.attributes.meta then []
+    else
+      [HwUpdate.mapMemory receiverId gpa cap.region.access.start
+        cap.region.access.size cap.region.access.rights]
+  let updates := senderUnmap ++ receiverMap
 
   pure (recvHandle, updates)
 
