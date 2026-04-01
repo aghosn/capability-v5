@@ -100,9 +100,9 @@ if [[ "${QEMU_TPM:-0}" == "1" ]]; then
     if [[ -S "$SWTPM_SOCK" ]]; then
         TPM_ARGS="-chardev socket,id=chrtpm,path=$SWTPM_SOCK"
         TPM_ARGS+=" -tpmdev emulator,id=tpm0,chardev=chrtpm"
-        # Use tpm-crb (Command Response Buffer) instead of tpm-tis:
-        # tpm-tis is ISA-bus and hangs under kernel-irqchip=split + intel-iommu.
-        TPM_ARGS+=" -device tpm-crb,tpmdev=tpm0"
+        # Use tpm-tis (TPM Interface Specification) — our capavisor driver
+        # (themis/crates/tpm2) implements TIS FIFO protocol, not CRB.
+        TPM_ARGS+=" -device tpm-tis,tpmdev=tpm0"
         echo "  + TPM 2.0 (swtpm): $SWTPM_SOCK"
     else
         echo "  WARNING: QEMU_TPM=1 but swtpm socket not found at $SWTPM_SOCK"

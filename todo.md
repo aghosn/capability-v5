@@ -192,6 +192,8 @@ before the child VMRESUME to drain pending LAPIC interrupts.
 
 ### Done: TPM attested boot (Phase 20, commits b19ceb7..1931c23)
 
+Design doc: [`capa-engine/docs/design/attestation/attestation.md`](capa-engine/docs/design/attestation/attestation.md)
+
 - [x] P20a: ABI types — SignedAttestReport (192B), BootAttestation (128B), THEMIS_READ_PCR
 - [x] P20b: Capavisor _start() keygen — RDRAND-seeded Ed25519 + SHA-256(binary ‖ pub_key)
 - [x] P20c: Minimal no_std TPM 2.0 TIS MMIO driver crate (themis/crates/tpm2)
@@ -275,6 +277,20 @@ functions to the 83 existing safety theorems.
   to the config blob (nonce=0).  Currently the driver only calls ATTEST_SELF(nonce=0)
   at insmod and gets unsigned config.  The signed path exists but is unused by thhv.
 - [ ] Attestation: test with real TPM (bare metal or working swtpm probe)
+
+### Next: TPM MMIO probe fix (P20i)
+
+Design doc: [`capa-engine/docs/design/attestation/attestation.md §13`](capa-engine/docs/design/attestation/attestation.md)
+
+TPM probe currently skipped — MMIO at 0xFED40000 not in Limine HHDM. Fix:
+discover from ACPI TPM2 table, map explicitly, exclude from dom0 EPT.
+
+- [ ] P20i-1: Parse ACPI TPM2 table in `acpi.rs` (TpmInfo struct, same pattern as DMAR)
+- [ ] P20i-2: Split `attestation::init()` / `try_tpm()`, AtomicBool for tpm_available
+- [ ] P20i-3: Rewire `main.rs` — remove memmap scan, call `try_tpm()` after `platform()`
+- [ ] P20i-4: Exclude TPM region from dom0 passthrough in `boot.rs`
+- [ ] P20i-5: Switch QEMU from `tpm-crb` to `tpm-tis` in `run-qemu.sh`
+- [ ] P20i-6: Test end-to-end — `QEMU_TPM=1`, verify PCR extend + dom0 boot
 - [x] VPID bug: child VPID double-incremented — fixed in `d508c22`.
   `write_control_fields` now takes final 1-based vpid directly.
 

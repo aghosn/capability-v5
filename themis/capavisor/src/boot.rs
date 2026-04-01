@@ -619,6 +619,33 @@ pub fn platform(
 
     let cpu_lapic_ids: Vec<u32> = cpus.iter().map(|c| c.lapic_id).collect();
 
+    // ── Exclude TPM MMIO from dom0 passthrough ──────────────────────────── //
+    // If an ACPI TPM2 table was found, the TPM's TIS MMIO region must not be
+    // mapped in dom0's EPT — it is capavisor-exclusive (like META, per A5).
+    // The TIS base (0xFED40000, 5 pages) might overlap a RESERVED e820 region
+    // that was added to passthrough_regions above.  Carve it out.
+    if acpi.tpm.is_some() {
+        let tpm_base = tpm2::TIS_BASE;
+        let tpm_end = tpm_base + 0x5000; // 5 × 4 KiB (localities 0–4)
+        let before = passthrough_regions.len();
+        passthrough_regions.retain(|r| {
+            let r_end = r.base + r.length;
+            // Keep regions that don't overlap the TPM range at all.
+            r_end <= tpm_base || r.base >= tpm_end
+        });
+        // TODO: If a passthrough region partially overlaps the TPM range, we
+        // should split it rather than dropping it entirely.  In practice the
+        // TPM's 5-page region is unlikely to partially overlap a larger
+        // RESERVED entry, but this is a correctness gap to address later.
+        let removed = before - passthrough_regions.len();
+        if removed > 0 {
+            serial_println!(
+                "TPM exclusion:     removed {} passthrough region(s) overlapping {:#x}..{:#x}",
+                removed, tpm_base, tpm_end,
+            );
+        }
+    }
+
     PlatformInfo {
         hhdm_offset,
         partition,
@@ -1602,10 +1629,11 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
         serial_println!("  (no dom0-initrd module)");
     }
 
-    // ── Strip DMAR from ACPI tables exposed to dom0 ──────────────────────── //
-    // Write DMAR-stripped RSDP + XSDT copies into dom0 memory so Linux never
-    // discovers VT-d hardware.  Falls back to 0 (Linux scans for RSDP) if there
-    // is no DMAR table or the platform uses ACPI 1.0.
+    // ── Strip DMAR + TPM2 from ACPI tables exposed to dom0 ─────────────── //
+    // Write stripped RSDP + XSDT copies into dom0 memory so Linux never
+    // discovers VT-d hardware or the TPM (capavisor-exclusive devices).
+    // Falls back to 0 (Linux scans for RSDP) if there are no tables to
+    // strip or the platform uses ACPI 1.0.
     let acpi_rsdp_addr =
         crate::acpi::strip_dmar(info.acpi.rsdp_phys, lx::ACPI_COPY_PHYS, info.hhdm_offset)
             .unwrap_or(0);

@@ -19,23 +19,25 @@ Together these allow a remote verifier to establish:
 
 ## 2. Current State
 
-The following **already exists**:
-
 | Component | Location | Status |
 |-----------|----------|--------|
 | `AttestReport` struct (domain config blob) | `themis-abi/src/domcomm.rs` | Done |
-| `attest_domain()` in capability engine | `capability_engine::attest` | Done (unsigned) |
-| `do_attest_self` hypercall (0x0C) | `capavisor/src/hypercall.rs` | Stub (returns domain_id only) |
-| `THEMIS_ATTEST` (0x0D) hypercall dispatch | `hypercall.rs` | Stub |
-| DomainComm attestation delivery at boot | `capavisor/src/boot.rs:1409` | Done (unsigned) |
+| `attest_domain()` in capability engine | `capability_engine::attest` | Done |
+| `do_attest_self` hypercall (0x0C) | `capavisor/src/hypercall.rs` | Done (signed) |
+| `THEMIS_ATTEST` (0x0D) hypercall dispatch | `hypercall.rs` | Done |
+| Ed25519 keygen + SHA-256 measurement | `capavisor/src/attestation.rs` | Done |
+| TPM 2.0 TIS MMIO driver | `themis/crates/tpm2/` | Done |
+| QEMU swtpm integration | `scripts/setup-swtpm.sh`, `run-qemu.sh` | Done |
+| thhv ioctls (ATTEST_SELF, READ_PCR) | `thhv/` | Done |
+| On-demand attestation (driver requests) | `thhv/` + `capavisor/` | Done |
+| **TPM MMIO probe from ACPI** | `capavisor/src/acpi.rs` | **In progress** |
+| **TPM exclusion from dom0 EPT** | `capavisor/src/boot.rs` | **In progress** |
 
-**What is missing** (this document's scope):
-- Attestation key pair generation (before capavisor starts)
-- PCR extend with hash(capavisor || boot-info || pub_key)
-- Capavisor receives and stores the private key
-- `AttestReport` extended with a signature field
-- `do_attest_self` delivers the full signed blob
-- TPM integration (QEMU swtpm for dev, real TPM 2.0 for hardware)
+**Remaining work** (§13):
+- Parse ACPI TPM2 table for TPM discovery (replace memory-map scan)
+- Map TPM MMIO via `map_phys_range()` before probing
+- Exclude TPM region from dom0's EPT passthrough (capavisor-exclusive)
+- Test end-to-end with swtpm (PCR extend + readback)
 
 ---
 
@@ -173,24 +175,37 @@ TPM2_PCR_Extend(
 
 ### Dev Environment (QEMU + swtpm)
 
-QEMU supports TPM 2.0 emulation via `swtpm`:
+QEMU supports TPM 2.0 emulation via `swtpm`.  The key insight is that QEMU's
+`tpm_emulator` backend talks the **PTM protocol** over swtpm's `--ctrl` socket.
+Start swtpm with `--ctrl` only (no `--server`), and do NOT pass `--flags startup-clear`
+(the firmware sends TPM2_Startup itself).
 
 ```bash
-# Start swtpm (once, before QEMU)
-mkdir -p /tmp/swtpm-state
+# Start swtpm (once, before QEMU) — ctrl socket only
+mkdir -p /tmp/themis-swtpm
 swtpm socket --tpm2 \
-  --server type=unixio,path=/tmp/swtpm.sock \
-  --ctrl type=unixio,path=/tmp/swtpm.ctrl \
-  --tpmstate dir=/tmp/swtpm-state \
-  --flags not-need-init,startup-clear &
+  --ctrl type=unixio,path=/tmp/themis-swtpm/swtpm-sock \
+  --tpmstate dir=/tmp/themis-swtpm \
+  --log file=/tmp/themis-swtpm/swtpm.log,level=5
 
-# QEMU extra args:
--chardev socket,id=chrtpm,path=/tmp/swtpm.sock
+# QEMU extra args (chardev connects to the ctrl socket):
+-chardev socket,id=chrtpm,path=/tmp/themis-swtpm/swtpm-sock
 -tpmdev emulator,id=tpm0,chardev=chrtpm
 -device tpm-tis,tpmdev=tpm0
 ```
 
-The TPM device appears as `/dev/tpm0` in dom0.  Reading PCR 11:
+> **Bug history**: the original setup used separate `--server` and `--ctrl` sockets
+> and connected QEMU's chardev to `--server`.  QEMU sends PTM commands (not raw TPM
+> commands) → swtpm's `recv_msg` blocked forever → deadlock.  Fixed in commit
+> `9246045` by connecting to `--ctrl` only.
+
+Use `tpm-tis` (not `tpm-crb`) because our driver (`themis/crates/tpm2/`) implements
+the TIS FIFO interface.  CRB uses a different register protocol.
+
+Automated: `QEMU_TPM=1 cargo themis` — see `themis/scripts/setup-swtpm.sh` and
+`run-qemu.sh` for the integration.
+
+Reading PCR 11 from dom0:
 ```bash
 tpm2_pcrread sha256:11
 ```
@@ -198,14 +213,16 @@ tpm2_pcrread sha256:11
 ### Real Hardware (TPM 2.0)
 
 Real hardware has a physical TPM 2.0 chip (most x86_64 laptops/servers since 2016).
-The bootloader talks to it via:
+The capavisor talks to it via:
 - **FIFO interface** (TIS — TPM Interface Specification): MMIO at 0xFED40000
 - Or **CRB interface** (Command Response Buffer): MMIO at ACPI TPM2 table address
 
-The Limine-side key generation + PCR extend code must implement a minimal TPM 2.0
-command stack (just `TPM2_PCR_Extend` and optionally `TPM2_GetRandom` for key seeding).
+The TIS base address `0xFED40000` is fixed by the TCG PC Client Platform spec.
+The ACPI TPM2 table confirms TPM presence and provides the start method.
 
 For dom0 verification: use `tpm2-tools` (`tpm2_quote`, `tpm2_pcrread`).
+Note: dom0 cannot access the TPM directly — its MMIO region is excluded from
+dom0's EPT (capavisor-exclusive, like META pages).
 
 ---
 
@@ -258,24 +275,98 @@ P20a (BootAttestation struct + SignedAttestReport in themis-abi)
         └─► P20g (dom0 verification tool: read PCR 11 + verify signed report)
 ```
 
-P20f (QEMU swtpm) is independent of P20b–e and can proceed in parallel.
-P20g requires P20e and P20f.
+P20a–P20h are **done** (see §2).
 
 ---
 
 ## 12. Open Questions
 
-1. **Limine custom module** — does the Limine version we use support custom boot
-   modules with arbitrary entry points, or do we need a separate pre-boot binary
-   loaded as a Limine module that runs before capavisor?
+1. ~~**Limine custom module**~~ — resolved: keygen happens inside capavisor `_start()`
+   using RDRAND (no separate pre-boot binary needed).
 
-2. **Key freshness** — should the Ed25519 key pair be fresh on every boot (ephemeral),
-   or stored in TPM NV memory across reboots?  Ephemeral is simpler and avoids
-   key reuse concerns.  **Recommend ephemeral for initial implementation.**
+2. **Key freshness** — Ed25519 key pair is ephemeral (fresh every boot via RDRAND).
+   **Implemented as recommended.**
 
-3. **Nonce delivery** — the verifier's nonce must reach `do_attest` somehow.  Currently
-   hypercall args are registers (RDI, RSI, RDX).  A 32-byte nonce fits in 4 registers
-   or a shared memory page.  **Use 4 registers (4 × u64 = 32 bytes) for simplicity.**
+3. ~~**Nonce delivery**~~ — resolved: nonce is passed via DomainComm TX ring (32 bytes
+   in the hypercall argument buffer).
 
 4. **DRTM (Intel TxT)** — reduces TCB to just the capability engine, excluding the
    bootloader.  Deferred: prototype with SRTM first, add TxT support later.
+
+---
+
+## 13. TPM MMIO Probe Fix (current work)
+
+### Problem
+
+The capavisor's TPM probe is skipped because:
+
+1. **MMIO not in HHDM** — Limine base revision 3 only maps USABLE, BOOTLOADER,
+   KERNEL+MODULES, and FRAMEBUFFER regions in the HHDM.  The TPM TIS MMIO at
+   `0xFED40000` is device MMIO — not in any Limine memory map entry — so reading
+   it would #PF → triple fault.
+
+2. **Memory map check too conservative** — `main.rs` scans the Limine memory map
+   for the TIS base address.  Since device MMIO isn't in the memory map, the check
+   fails and TPM is skipped.  This was the correct safety measure but wrong
+   discovery mechanism.
+
+3. **TIS vs CRB mismatch** — QEMU was configured with `tpm-crb` but our driver uses
+   TIS.  CRB and TIS have different register protocols (CRB uses control area +
+   command/response buffers; TIS uses FIFO at offset 0x24).
+
+### Solution
+
+1. **ACPI TPM2 table discovery** — parse the ACPI TPM2 table (signature `"TPM2"`,
+   `acpi::sdt::Signature::TPM2`) to confirm TPM presence.  The table contains the
+   start method (TIS vs CRB) and control area address.  This replaces the memory-map
+   scan.  Same pattern as DMAR parsing in `acpi.rs`.
+
+2. **Explicit MMIO mapping** — call `map_phys_range(tpm_base, 0x5000, hhdm_offset)`
+   to add page table entries for the TIS region (5 pages: localities 0–4).  Same
+   approach used for DRHD MMIO regions, ECAM, and COMM pages.
+
+3. **Split attestation init** — keygen + measurement stays early in `_start()`.
+   TPM probe moves to after `boot::platform()` returns (when ACPI info is available).
+   `tpm_available` becomes an `AtomicBool` instead of part of the `Once<>` state.
+
+4. **Dom0 EPT exclusion** — the TPM MMIO region is filtered out of
+   `passthrough_regions` in `boot.rs` so it never appears in dom0's EPT.
+   This makes the TPM capavisor-exclusive (same as META pages, per axiom A5).
+
+5. **QEMU device type** — switch from `tpm-crb` to `tpm-tis` to match our driver.
+   The old "tpm-tis hangs" was actually the wrong-socket bug (§8 bug history).
+
+### ACPI TPM2 table layout (TCG PTP rev 4)
+
+```
+Offset  Size  Field
+0       36    Standard ACPI SDT header
+36       2    Platform Class (0=client, 1=server)
+38       2    Reserved
+40       8    Address of Control Area (u64; 0 for TIS, CRB base for CRB)
+48       4    Start Method (6=MMIO, 7=CRB, 8=CRB+ACPI)
+52      12    Start Method Specific Parameters (optional)
+```
+
+### File changes
+
+| File | Change |
+|------|--------|
+| `capavisor/src/acpi.rs` | Parse TPM2 table → `TpmInfo { control_area, start_method }` |
+| `capavisor/src/attestation.rs` | Split `init()` / `try_tpm()`, AtomicBool |
+| `capavisor/src/main.rs` | Remove memmap scan, wire ACPI → `try_tpm()` |
+| `capavisor/src/boot.rs` | Exclude TPM from `passthrough_regions` |
+| `scripts/run-qemu.sh` | `tpm-crb` → `tpm-tis` |
+
+### Design note: TIS_BASE is spec-defined
+
+The TIS base address `0xFED40000` is the TCG-spec-mandated fixed address for the
+TPM Interface Specification on x86 PC platforms.  It's not an implementation detail
+or a magic number — it's the hardware standard, analogous to the LAPIC at
+`0xFEE00000` or IOAPIC at `0xFEC00000`.  The ACPI TPM2 table confirms *presence*;
+the address itself comes from the spec.  The `tpm2::TIS_BASE` constant remains as
+the canonical reference.
+
+For future CRB support: the control area address from the TPM2 table would be
+used directly (it's at `TIS_BASE + 0x40` for QEMU's CRB implementation).

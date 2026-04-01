@@ -183,6 +183,25 @@ pub struct Iso {
 
 // ── VT-d / DMAR structures ─────────────────────────────────────────────── //
 
+// ── TPM 2.0 ACPI table ────────────────────────────────────────────────── //
+
+/// TPM 2.0 information extracted from the ACPI TPM2 table.
+///
+/// The TPM2 table confirms device presence and provides the start method.
+/// On x86, the TIS MMIO base is always `0xFED4_0000` (TCG PC Client spec);
+/// for CRB, the control area address gives the CRB register base.
+#[derive(Debug, Clone, Copy)]
+pub struct TpmInfo {
+    /// Address of the CRB control area (u64).
+    /// For TIS: typically 0.  For CRB: e.g. `0xFED4_0040`.
+    pub control_area: u64,
+    /// Start method from the TPM2 table.
+    /// 6 = Memory-mapped I/O, 7 = CRB, 8 = CRB with ACPI start.
+    pub start_method: u32,
+}
+
+// ── VT-d / DMAR structures (continued) ─────────────────────────────────── //
+
 /// One PCIe ECAM (Enhanced Configuration Access Mechanism) region from MCFG.
 ///
 /// Covers a contiguous range of PCI buses on a single PCI segment.
@@ -249,6 +268,8 @@ pub struct AcpiInfo {
     /// Flat list of ECAM regions for IOMMU table sizing (same data as
     /// `pci_config_regions` but in a simpler form for boot-time computation).
     pub ecam_regions: Vec<EcamRegion>,
+    /// TPM 2.0 information from the ACPI TPM2 table (if present).
+    pub tpm: Option<TpmInfo>,
     /// Whether a DMAR table was found (VT-d available).
     pub has_dmar: bool,
     /// DRHD units from the DMAR table (populated only when `has_dmar` is true).
@@ -339,6 +360,9 @@ impl AcpiInfo {
         // ── DMAR: check presence and enumerate DRHD units ────────────── //
         let (has_dmar, drhd_units) = parse_dmar(&tables, hhdm_offset);
 
+        // ── TPM2: check for TPM 2.0 device ──────────────────────────── //
+        let tpm = parse_tpm2(&tables, hhdm_offset);
+
         Self {
             rsdp_phys,
             processors,
@@ -347,6 +371,7 @@ impl AcpiInfo {
             has_legacy_pics,
             pci_config_regions,
             ecam_regions,
+            tpm,
             has_dmar,
             drhd_units,
         }
@@ -380,6 +405,65 @@ impl AcpiInfo {
         }
         (root_pages, ctx_pages)
     }
+}
+
+// ── TPM2 parsing ───────────────────────────────────────────────────────── //
+
+/// Parse the ACPI TPM2 table to discover a TPM 2.0 device.
+///
+/// Returns `Some(TpmInfo)` if the TPM2 table is present.
+///
+/// TPM2 table layout (TCG PC Client Platform TPM Profile, rev 4):
+/// ```text
+/// Offset  Size  Field
+///    0     36   Standard ACPI SDT header ("TPM2" signature)
+///   36      2   Platform Class (0 = client, 1 = server)
+///   38      2   Reserved
+///   40      8   Address of Control Area (u64)
+///   48      4   Start Method
+///   52     12   Start Method Specific Parameters (optional)
+/// ```
+fn parse_tpm2<H: acpi::Handler + Clone>(
+    tables: &AcpiTables<H>,
+    hhdm_offset: u64,
+) -> Option<TpmInfo> {
+    use crate::serial_println;
+
+    const TPM2_MIN_SIZE: usize = 52; // 36 (SDT) + 2 + 2 + 8 + 4
+
+    let tpm2_phys = tables
+        .table_headers()
+        .find(|(_, hdr)| hdr.signature == acpi::sdt::Signature::TPM2)
+        .map(|(phys, _)| phys as u64);
+
+    let Some(tpm2_phys) = tpm2_phys else {
+        serial_println!("ACPI: no TPM2 table found");
+        return None;
+    };
+
+    let tpm2_virt = (tpm2_phys + hhdm_offset) as *const u8;
+    let table_len = unsafe {
+        (tpm2_virt.add(4) as *const u32).read_unaligned() as usize
+    };
+
+    if table_len < TPM2_MIN_SIZE {
+        serial_println!("ACPI TPM2: table too short ({} bytes) — skipping", table_len);
+        return None;
+    }
+
+    let control_area = unsafe {
+        (tpm2_virt.add(40) as *const u64).read_unaligned()
+    };
+    let start_method = unsafe {
+        (tpm2_virt.add(48) as *const u32).read_unaligned()
+    };
+
+    serial_println!(
+        "ACPI TPM2: control_area={:#x} start_method={} (table at phys {:#x}, {} bytes)",
+        control_area, start_method, tpm2_phys, table_len,
+    );
+
+    Some(TpmInfo { control_area, start_method })
 }
 
 // ── DMAR parsing ───────────────────────────────────────────────────────── //
@@ -484,10 +568,14 @@ fn parse_dmar<H: acpi::Handler + Clone>(
     (true, units)
 }
 
-// ── DMAR stripping ─────────────────────────────────────────────────────── //
+// ── ACPI table stripping ───────────────────────────────────────────────── //
 
-/// Copy the RSDP and XSDT into `dest_phys` in dom0 memory, removing the DMAR
-/// table pointer so Linux never discovers VT-d hardware.
+/// Copy the RSDP and XSDT into `dest_phys` in dom0 memory, removing
+/// capavisor-exclusive table pointers so Linux never discovers them.
+///
+/// Currently strips:
+/// - **DMAR** — VT-d hardware (capavisor manages IOMMU directly)
+/// - **TPM2** — TPM device (capavisor-exclusive, MMIO excluded from EPT)
 ///
 /// Layout at `dest_phys` after the call:
 /// ```text
@@ -496,8 +584,8 @@ fn parse_dmar<H: acpi::Handler + Clone>(
 /// ```
 ///
 /// Returns `Some(dest_phys)` on success (caller passes this to
-/// `boot_params.acpi_rsdp_addr`).  Returns `None` if there is no DMAR entry
-/// (nothing to strip) or if the RSDP is ACPI 1.0-only (no XSDT).
+/// `boot_params.acpi_rsdp_addr`).  Returns `None` if neither table is
+/// found (nothing to strip) or if the RSDP is ACPI 1.0-only (no XSDT).
 ///
 /// # Safety
 /// `dest_phys` must be a valid, writable dom0-owned physical page accessible
@@ -569,7 +657,7 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
         // Peek at the 4-byte signature of the pointed-to table.
         let table_virt = (table_phys + hhdm_offset) as *const u8;
         let sig = unsafe { core::slice::from_raw_parts(table_virt, 4) };
-        if sig == b"DMAR" {
+        if sig == b"DMAR" || sig == b"TPM2" {
             found_dmar = true;
             continue; // drop this entry
         }
@@ -583,7 +671,7 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
     }
 
     if !found_dmar {
-        return None; // no DMAR present — nothing to strip
+        return None; // no DMAR or TPM2 present — nothing to strip
     }
 
     // ── Update XSDT length and recompute checksum ────────────────────────── //

@@ -19,6 +19,7 @@
 //! - Writes happen only in `init()`, called from `_start()` on the BSP.
 //! - Reads happen only after `AP_LAUNCH_READY` is set (Release/Acquire barrier).
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Sha256, Digest};
 use spin::Once;
@@ -32,11 +33,15 @@ use crate::serial_println;
 /// Global attestation state, initialized once at boot.
 static ATTEST_STATE: Once<AttestationState> = Once::new();
 
+/// Whether a TPM was probed and PCR extend succeeded.
+/// Separate from `ATTEST_STATE` because the TPM probe happens later
+/// (after ACPI parsing) than keygen+measurement.
+static TPM_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
 struct AttestationState {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
     measurement: [u8; 32],
-    tpm_available: bool,
 }
 
 // ── RDRAND-based random byte generation ──────────────────────────────────── //
@@ -78,19 +83,17 @@ fn rdrand64() -> u64 {
 
 // ── Public API ───────────────────────────────────────────────────────────── //
 
-/// Initialize the attestation subsystem.
+/// Initialize the attestation subsystem (keygen + measurement only).
 ///
 /// Must be called once from `_start()` after serial init and heap init,
-/// before any domain is created.
+/// before any domain is created.  TPM probing is deferred to [`try_tpm()`]
+/// which runs after ACPI parsing discovers the TPM base address.
 ///
 /// `elf_file_addr` is the virtual address of the raw ELF file bytes (from
 /// Limine's `ExecutableFileRequest`).  This is the pristine binary as loaded
 /// from the boot medium — deterministic and excludes `.bss`.
 /// `elf_file_size` is the size of that raw ELF file in bytes.
-/// `hhdm_offset` is the higher-half direct map offset for TPM MMIO access.
-/// `tpm_mmio_mapped` indicates whether the TPM TIS MMIO region is present
-/// in the memory map (safe to access via HHDM).
-pub fn init(elf_file_addr: u64, elf_file_size: u64, hhdm_offset: u64, tpm_mmio_mapped: bool) {
+pub fn init(elf_file_addr: u64, elf_file_size: u64) {
     serial_println!("[attest] Initializing attestation subsystem...");
 
     // Step 1: Generate Ed25519 key pair from RDRAND
@@ -132,58 +135,61 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64, hhdm_offset: u64, tpm_mmio_m
         measurement[0], measurement[1], measurement[2], measurement[3],
         measurement[28], measurement[29], measurement[30], measurement[31]);
 
-    // Step 3: Extend TPM PCR 11 (if TPM is present and MMIO is mapped)
-    let tpm_available = if tpm_mmio_mapped {
-        serial_println!("[attest] probing TPM at phys {:#x} (virt {:#x})...",
-            tpm2::TIS_BASE, tpm2::TIS_BASE + hhdm_offset);
-        try_extend_pcr(hhdm_offset, &measurement)
-    } else {
-        serial_println!("[attest] TPM MMIO region ({:#x}) not in memory map — skipping TPM",
-            tpm2::TIS_BASE);
-        false
-    };
-
-    // Step 4: Store state
+    // Step 3: Store state (TPM probe deferred to try_tpm())
     ATTEST_STATE.call_once(|| AttestationState {
         signing_key,
         verifying_key,
         measurement,
-        tpm_available,
     });
 
-    serial_println!("[attest] Attestation subsystem ready (TPM: {})",
-        if tpm_available { "available" } else { "not found" });
+    serial_println!("[attest] Attestation keygen complete (TPM probe deferred)");
 }
 
-/// Try to extend TPM PCR 11 with the measurement digest.
+/// Probe the TPM and extend PCR 11 with the boot measurement.
 ///
-/// Returns `true` if the TPM was found and the extend succeeded.
-fn try_extend_pcr(hhdm_offset: u64, measurement: &[u8; 32]) -> bool {
-    // The TPM TIS interface is at MMIO 0xFED40000.
-    // We access it via the HHDM (higher-half direct map).
-    let tpm = Tpm2::new(tpm2::TIS_BASE + hhdm_offset);
+/// Called after ACPI parsing discovers a TPM2 table.  Maps the TPM's TIS
+/// MMIO region into the HHDM (Limine doesn't map device MMIO), then probes,
+/// sends TPM2_Startup, and extends PCR 11.
+///
+/// `tpm_phys_base` is the physical base of the TIS MMIO region (typically
+/// `0xFED4_0000` — the TCG-spec-defined fixed address for x86).
+/// `hhdm_offset` is the Limine HHDM offset for phys→virt translation.
+pub fn try_tpm(tpm_phys_base: u64, hhdm_offset: u64) {
+    let state = ATTEST_STATE.get().expect("attestation not initialized");
+
+    // Map the TIS MMIO region (5 pages: localities 0–4) into the HHDM.
+    // Limine base revision 3 only maps RAM/ACPI/bootloader regions; device
+    // MMIO like the TPM needs explicit page table entries.
+    const TIS_SIZE: u64 = 0x5000; // 5 × 4 KiB pages
+    serial_println!("[attest] Mapping TPM TIS MMIO: phys {:#x}..{:#x}",
+        tpm_phys_base, tpm_phys_base + TIS_SIZE);
+    crate::mem::map_phys_range(tpm_phys_base, TIS_SIZE, hhdm_offset);
+
+    let tpm_virt = tpm_phys_base + hhdm_offset;
+    let tpm = Tpm2::new(tpm_virt);
 
     if !tpm.probe() {
-        serial_println!("[attest] No TPM detected at {:#x}", tpm2::TIS_BASE);
-        return false;
+        serial_println!("[attest] No TPM detected at phys {:#x} (virt {:#x})",
+            tpm_phys_base, tpm_virt);
+        return;
     }
 
-    serial_println!("[attest] TPM detected at {:#x}", tpm2::TIS_BASE);
+    serial_println!("[attest] TPM detected at phys {:#x}", tpm_phys_base);
 
     // Startup (may already be done by firmware — that's OK)
     if let Err(e) = tpm.startup() {
         serial_println!("[attest] TPM2_Startup failed: {:?}", e);
-        return false;
+        return;
     }
 
-    // Extend PCR 11
-    match tpm.pcr_extend(ATTEST_PCR_INDEX, measurement) {
+    // Extend PCR 11 with the boot measurement
+    match tpm.pcr_extend(ATTEST_PCR_INDEX, &state.measurement) {
         Ok(()) => {
             serial_println!("[attest] TPM2_PCR_Extend(PCR={}) OK", ATTEST_PCR_INDEX);
         }
         Err(e) => {
             serial_println!("[attest] TPM2_PCR_Extend failed: {:?}", e);
-            return false;
+            return;
         }
     }
 
@@ -200,7 +206,8 @@ fn try_extend_pcr(hhdm_offset: u64, measurement: &[u8; 32]) -> bool {
         }
     }
 
-    true
+    TPM_AVAILABLE.store(true, Ordering::Release);
+    serial_println!("[attest] TPM available — PCR extend succeeded");
 }
 
 // ── Accessor functions (for P20e: signed attestation hypercall) ──────────── //
@@ -226,10 +233,7 @@ pub fn measurement() -> [u8; 32] {
 
 /// Returns whether a TPM was detected and the PCR extend succeeded.
 pub fn tpm_available() -> bool {
-    ATTEST_STATE
-        .get()
-        .map(|s| s.tpm_available)
-        .unwrap_or(false)
+    TPM_AVAILABLE.load(Ordering::Acquire)
 }
 
 /// Sign `data` with the capavisor's Ed25519 signing key.

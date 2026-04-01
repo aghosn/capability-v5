@@ -184,17 +184,14 @@ pub extern "C" fn _start() -> ! {
     serial_println!("========================================");
     serial_println!();
 
-    // ── Attested boot: keygen + SHA-256 + TPM PCR extend ─────────────────── //
+    // ── Attested boot: keygen + SHA-256 measurement ────────────────────────── //
     // Must happen before any domain exists.  The key pair is stored in a
     // static inside META (capavisor address space, never in any domain's EPT).
+    // TPM probing is deferred to after ACPI parsing (need TPM2 table to
+    // discover the device address portably).
     {
-        let hhdm_offset = HHDM_REQUEST.get_response()
-            .expect("no HHDM response (early)").offset();
-
         // Get the raw ELF file bytes from Limine.  This is the pristine binary
         // as loaded from the boot medium — deterministic and excludes .bss.
-        // We use this for the boot measurement hash rather than the in-memory
-        // loaded image (which includes .bss already mutated by early init).
         let elf_file = KERNEL_FILE_REQUEST.get_response()
             .expect("no ExecutableFileRequest response")
             .file();
@@ -208,20 +205,9 @@ pub extern "C" fn _start() -> ! {
             (0, 0)
         };
 
-        // Check if the TPM TIS MMIO region (0xFED40000) is covered by any
-        // memory map entry.  Limine's HHDM only maps regions present in the
-        // memory map; if the TPM address isn't there (no TPM device), an
-        // MMIO read would #PF → triple-fault.
-        let entries = MEMMAP_REQUEST.get_response()
-            .expect("no memory map response (early)").entries();
-        let tpm_mmio_mapped = entries.iter().any(|e| {
-            let end = e.base + e.length;
-            tpm2::TIS_BASE >= e.base && tpm2::TIS_BASE < end
-        });
-
         serial_println!("[attest] capavisor: phys={:#x} virt={:#x} elf_file={:#x} elf_size={:#x} ({} KiB)",
             phys_base, virt_base, elf_addr, elf_size, elf_size / 1024);
-        attestation::init(elf_addr, elf_size, hhdm_offset, tpm_mmio_mapped);
+        attestation::init(elf_addr, elf_size);
     }
 
     // Unpack Limine responses.
@@ -249,6 +235,20 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 1: Platform discovery ──────────────────────────────────────── //
     let platform = boot::platform(entries, hhdm_offset, rsdp_phys, cpus, bsp_lapic_id);
+
+    // ── TPM probe (after ACPI discovery) ─────────────────────────────────── //
+    // The ACPI TPM2 table tells us if a TPM is present.  If so, map its MMIO
+    // region (not in Limine's HHDM) and probe + extend PCR 11.
+    if let Some(ref tpm_info) = platform.acpi.tpm {
+        // TIS base is always 0xFED40000 on x86 (TCG PC Client spec).
+        // The TPM2 ACPI table confirms presence; the address is spec-defined.
+        let tis_base = tpm2::TIS_BASE;
+        serial_println!("[attest] ACPI TPM2 found (start_method={}, control_area={:#x}) — probing TIS at {:#x}",
+            tpm_info.start_method, tpm_info.control_area, tis_base);
+        attestation::try_tpm(tis_base, hhdm_offset);
+    } else {
+        serial_println!("[attest] No ACPI TPM2 table — TPM not available");
+    }
 
     // ── ThemisPlatform init: register dom0, hand it the full META pool ──────── //
     // Must happen before boot::vmx() so that VMXON pages can be allocated from
