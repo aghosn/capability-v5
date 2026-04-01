@@ -84,7 +84,7 @@ for f in "${files[@]}"; do
         pass=$((pass + 1))
     else
         echo "  ❌ $name"
-        diff --unified=3 "$TMPDIR/${name}_rust_clean.txt" "$TMPDIR/${name}_lean_clean.txt" | head -30
+        diff --unified=3 "$TMPDIR/${name}_rust_clean.txt" "$TMPDIR/${name}_lean_clean.txt" | head -30 || true
         echo "  ..."
         fail=$((fail + 1))
         failed_names+=("$name")
