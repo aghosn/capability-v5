@@ -258,11 +258,20 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     | none => CapaM.throw .notFound
   let cap ← CapaM.getMemCap capUid
 
-  -- Cap must not be COMM or META (unless exclusive chain — simplified: just block)
+  -- Cap must not already be COMM or META.
   CapaM.guard (!cap.attributes.comm)
-    (.invalidOperation "cannot send COMM region")
+    .permissionDenied
   CapaM.guard (!cap.attributes.meta)
-    (.invalidOperation "cannot send META region")
+    .permissionDenied
+
+  -- META send requires: exclusive status (which implies carve — only carved
+  -- regions can be exclusive) and no children (a parent with children marked
+  -- META would be excluded from EPT while its children remain mapped).
+  if attrs.meta then do
+    CapaM.guard (cap.region.status == .exclusive)
+      .permissionDenied
+    CapaM.guard cap.childUids.isEmpty
+      .permissionDenied
 
   let receiver ← CapaM.getDomain receiverId
   CapaM.requireNotRevoked receiver

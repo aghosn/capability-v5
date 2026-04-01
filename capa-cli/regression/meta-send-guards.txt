@@ -1,0 +1,44 @@
+# Regression: META send validation guards
+# Tests all rejection paths for sending with META attribute:
+#   - META send on alias (non-exclusive) → rejected
+#   - META send on exclusive region with children → rejected
+#   - META send on exclusive leaf region → succeeds
+#   - Already-META region cannot be re-sent
+#   - Already-COMM region cannot be sent with META
+#
+# Related: commit 2838477 (reject META send on regions with children)
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+init root 0x100000
+
+# Create unsealed receiver
+create-domain root recv 0b1111 SEND,REVOKE
+
+# ── Test 1: META send on alias → rejected ─────────────────────────────────────
+@msg ── Test 1: META send on alias rejected (non-exclusive)
+alias r0 a1 0x0 0x1000 RW
+send a1 recv META
+
+# ── Test 2: META send on exclusive with children → rejected ───────────────────
+@msg ── Test 2: META send on region with children rejected
+carve r0 parent 0x10000 0x4000 RWX
+carve parent child_of_parent 0x10000 0x1000 RW
+send parent recv META
+
+# ── Test 3: META send on exclusive leaf → succeeds ────────────────────────────
+@msg ── Test 3: META send on exclusive leaf succeeds
+carve r0 leaf 0x20000 0x1000 RWX
+send leaf recv META
+
+# ── Test 4: Already-META region cannot be re-sent ─────────────────────────────
+@msg ── Test 4: Re-send META region rejected
+create-domain root recv2 0b1111 SEND
+list recv
+
+# ── Test 5: COMM region cannot be sent with META ─────────────────────────────
+@msg ── Test 5: COMM region cannot be sent
+carve r0 comm_cap 0x30000 0x1000 RW
+create-domain root child 0b0011 SWITCH
+seal child
+register-comm comm_cap child 0
+send comm_cap recv META
