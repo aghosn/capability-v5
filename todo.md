@@ -305,9 +305,9 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 **Fixed in 4fccf1c (tutos 07 + 08):**
 - Accept: removed incorrect META check from sender unmap (sender always unmapped for carved caps)
 - Revoke: parent re-map with `parentOwner != childOwner` guard (skips same-owner e.g. COMM)
-- Revoke: VITAL trigger only emits RevokeDomain (no cascade to memory caps, matching Rust)
+- Revoke: VITAL trigger only emits RevokeDomain — **WRONG**: matches Rust bug, needs cascade (see TODO below)
 - computeAddressSpace: `excludeMeta` parameter — view excludes META, attest includes it
-- memCapToJson: skip children owned by revoked domains (matching Rust build_mem_info)
+- memCapToJson: skip children owned by revoked domains — **WORKAROUND**: remove after cascade is implemented
 - Sorted "Removed memory capability" messages for deterministic output
 - GPA support: `gpa` field in PendingMemCap, `gpaOverrides` in ExecDomain
 - GPA stored on send (direct + pending) and accept, applied in computeAddressSpace
@@ -379,9 +379,58 @@ before the domain's state can be fully dismantled. The VITAL path handles phase 
 - `themis/capavisor/src/hypercall.rs:331-336` — `do_revoke_mem` (doesn't post-process batch)
 - `themis/capavisor/src/platform.rs:1563-1572` — `apply_update(RevokeDomain)` (only frees EPT)
 
-**Impact on Lean model**: The Lean differential tests currently match Rust's
-behavior (no cascade on VITAL). When this bug is fixed in Rust, the Lean model
-must be updated to match.
+**Impact on Lean model**: The Lean model should implement the CORRECT behavior
+(cascade on VITAL), not match Rust's bug. See next section.
+
+---
+
+### TODO: Implement VITAL cascade in Lean + revert workarounds
+
+**Context**: During differential testing, Lean was "fixed" to match Rust's buggy
+VITAL behavior (no cascade). This is wrong — the Lean model should be the
+reference for correct behavior. Three changes need to be made:
+
+**1. Add `revokeDomainCascade` to Lean (Memory.lean)**
+
+Implement the cascade that Rust's `revoke_domain_subtree` does (but that the
+VITAL trigger skips). When a VITAL cap triggers domain death:
+
+1. Mark domain + all descendants as revoked (early — prevents VITAL duplicates)
+2. Emit `RevokeDomain` for each with proper fallback
+3. Recursively revoke child domains (DFS)
+4. Process "root memory caps" (parent owned by different domain) — call
+   `revoke` on them from the parent to restore parent's access via re-map
+5. Clean up channels and COMM bindings
+
+Reference: Rust's `revoke_domain_subtree` (capability.rs:695-829) does exactly
+this in 5 phases: early revocation, recursive children, root cap revocation,
+channel cleanup, COMM cleanup.
+
+**2. Remove DTO workaround: filter revoked children from memCapToJson (FFI.lean ~line 669-679)**
+
+This filter hides zombie memory caps (children owned by revoked domains) from
+the attestation DTO. With proper cascade, zombies won't exist — they'll be
+properly revoked and removed from the CDT. Remove the filter.
+
+**3. Review: filter revoked domains from ffiListDomains (FFI.lean ~line 649-650)**
+
+This filter hides revoked domains from list_domains output. This one may actually
+be correct independently — it mirrors what the CLI's `update_processor` does when
+it receives a `RevokeDomain` update (removes the domain from `state.domains`).
+Review whether to keep it as defense-in-depth or remove it.
+
+**Expected outcome**: Lean diverges from Rust on tuto 07 (Lean correct, Rust
+buggy). The diff test should be marked as expected-divergence until the Rust bug
+is fixed.
+
+**Review of all other fixes (15+ changes)**: All other fixes from commits
+`e2e935e` and `4fccf1c` are independently correct:
+- GPA mapping support (Types, Memory, Query, FFI, Engine) — correct
+- GPA overlap check — correct
+- Parent re-map after revoke (childOwner != parentOwner guard) — correct
+- Channel forwarding, accept-removes-sender, attest children — correct
+- Sorted "Removed memory capability" messages — correct (determinism)
+- Accept META unmap fix — correct
 
 ---
 
