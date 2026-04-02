@@ -314,6 +314,77 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 - View command uses identity mapping (GPA=HPA), attest shows actual GPA
 - GPA overlap check uses full cap ranges including carved-out blocked entries
 
+### BUG: VITAL memory revocation does not cascade domain cleanup
+
+**Severity**: High — causes permanent memory range loss.
+
+**Summary**: When a VITAL memory capability is revoked (e.g., a META region),
+the owning domain is killed (EPT torn down, cores redirected), but the domain's
+memory capabilities are never cleaned up. Memory ranges sent to the dead domain
+become permanently inaccessible zombies.
+
+**Two paths to domain death — only one cascades:**
+
+1. **Explicit `revoke-domain parent child_handle`** → calls `revoke_domain_subtree`
+   → recursively revokes child domains, revokes all root memory caps, generates
+   re-map updates so parent domains regain their carved ranges. **Works correctly.**
+
+2. **VITAL trigger** (from `revoke_subtree` when revoking a VITAL memory cap) →
+   only emits `Update::RevokeDomain` in the batch → `execute()` calls
+   `apply_update` (EPT freed) + `on_domain_revoked` (cores redirected) →
+   **no cascade**. Memory caps owned by the dead domain remain as zombies in the
+   CDT tree. Parent domains never get re-map updates for ranges they carved and
+   sent to the dead domain.
+
+**Concrete example:**
+```
+init root 0x40000
+create-domain root app ...
+carve r0 app_code 0x0 0x10000 RWX
+send app_code app
+seal app
+carve r0 monitor_scratch 0x20000 0x4000 RW
+send monitor_scratch app META       # META implies VITAL
+accept-capability app 0
+revoke r0 monitor_scratch           # VITAL fires → app killed
+# Result: app_code [0x0..0x10000) is a zombie.
+# Root's EPT does not map [0x0..0x10000). Nobody can access it.
+# `attest root` still shows app as a child domain.
+```
+
+**Root cause**: `revoke_subtree` (capability.rs:554-555) emits `RevokeDomain` as
+a batch update but does not call `revoke_domain_subtree`. The update tells the
+platform to tear down the EPT and redirect cores (the immediate safety part), but
+nobody triggers the cascade that reclaims memory caps.
+
+**Why the barrier matters**: The two-phase design (emit update → platform applies)
+exists because cores running the dead domain must be stopped and synchronized
+before the domain's state can be fully dismantled. The VITAL path handles phase 1
+(barrier + EPT teardown) but is missing phase 2 (cascade cleanup).
+
+**Possible fixes** (needs design discussion):
+- (a) After `execute` returns in `do_revoke_mem` / the CLI's `revoke_mem`, scan
+  the batch for `RevokeDomain` entries and call `revoke_domain_subtree` for each.
+  The barrier already happened so it's safe, but this adds a second `execute` call.
+- (b) Have `revoke_subtree` call `revoke_domain_subtree` directly when VITAL fires
+  (instead of just emitting the update). This would produce the cascade updates in
+  the same batch, but needs careful lock analysis (domain write lock may conflict).
+- (c) Add a platform callback or notification so the monitor (dom0) knows a domain
+  died and can explicitly call `revoke-domain` to clean up.
+
+**Affected code:**
+- `capa-engine/src/capability.rs:554-555` — VITAL trigger (only emits update)
+- `capa-engine/src/capability.rs:695-760` — `revoke_domain_subtree` (the cascade that should run)
+- `capa-engine/src/platform.rs:414-417` — `on_domain_revoked` (only redirects cores)
+- `themis/capavisor/src/hypercall.rs:331-336` — `do_revoke_mem` (doesn't post-process batch)
+- `themis/capavisor/src/platform.rs:1563-1572` — `apply_update(RevokeDomain)` (only frees EPT)
+
+**Impact on Lean model**: The Lean differential tests currently match Rust's
+behavior (no cascade on VITAL). When this bug is fixed in Rust, the Lean model
+must be updated to match.
+
+---
+
 ### Future work
 
 - [ ] Per-VP irqfd: struct updated, needs end-to-end test
