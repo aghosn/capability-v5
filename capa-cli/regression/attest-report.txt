@@ -1,0 +1,23 @@
+# Regression: attestation report format
+# Verifies: full domain report format matches between Rust and Lean backends.
+# Covers: domain header, API flags, interrupt policy, memory caps with
+#         carved/aliased children, GPA address space, recursive expansion.
+
+# Setup: root + child with memory
+init root 0x100000
+carve r0 m1 0x0 0x10000 RWX
+alias r0 a1 0x10000 0x1000 RW
+
+# Create child with subset API
+create-domain root child 0b11 GET,SEND,ATTEST,CARVE,ALIAS,RECEIVE_AFTER_SEAL
+
+# Send carved region to child before sealing (no attrs argument)
+send m1 child
+
+seal child
+
+# Attest child (has received memory)
+attest child
+
+# Attest root (recursive: includes child section)
+attest root

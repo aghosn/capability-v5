@@ -265,8 +265,11 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         let kindStr := toString cap.region.kind
         let attrsStr := attrsToAttestStr cap.attributes
         let mainLine := s!"  Handle {handle}: {memName} = [{toHexR access.start}..{toHexR access.end}) {access.rights} (kind: {kindStr}, attrs: {attrsStr})\n"
-        -- GPA line (identity mapping)
-        let gpaLine := s!"    GPA: {toHexR access.start} (identity)\n"
+        -- GPA line: only show for child domains (which receive memory via send
+        -- and thus have GPA mappings); root's memcaps have no GPA mapping.
+        let gpaLine := if dom.parentDomId.isSome then
+          s!"    GPA: {toHexR access.start} (identity)\n"
+        else ""
         -- Child carved/aliased lines
         let childLines := cap.childUids.toList.map fun childUid =>
           match s.getMemCap childUid with
@@ -280,16 +283,20 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         s!"  Handle {handle}: {memName} = <not found>\n"
     out := out ++ String.join mcLines
 
-  -- GPA Address Space
-  let addrSpace ← computeAddressSpace domId
-  out := out ++ "\nGPA Address Space:\n"
-  if addrSpace.isEmpty then
-    out := out ++ "  (empty)\n"
+  -- GPA Address Space: only for child domains with GPA mappings
+  if dom.parentDomId.isSome then do
+    let addrSpace ← computeAddressSpace domId
+    out := out ++ "\nGPA Address Space:\n"
+    if addrSpace.isEmpty then
+      out := out ++ "  (empty)\n"
+    else
+      let gpaLines := addrSpace.map fun (start, size, rights) =>
+        let end_ := start + size
+        s!"  GPA {toHexR start}..{toHexR end_} → HPA {toHexR start} {rights} (identity)\n"
+      out := out ++ String.join gpaLines
   else
-    let gpaLines := addrSpace.map fun (start, size, rights) =>
-      let end_ := start + size
-      s!"  GPA {toHexR start}..{toHexR end_} → HPA {toHexR start} {rights} (identity)\n"
-    out := out ++ String.join gpaLines
+    out := out ++ "\nGPA Address Space:\n"
+    out := out ++ "  (empty)\n"
 
   -- Recursive child expansion (one level)
   if expandChildren then
