@@ -51,6 +51,17 @@
 - `4968b9a` — **fix: 2-vCPU dom1 boot — APIC emulation, EOI, IPI routing**
 - `d21dc82` — **fix: child APIC virtualization for multi-vCPU dom1**
 - `f6eb224` — **fix: disable posted interrupts, always use software PIR drain**
+- `e2e935e` — **fix: Lean channel attest, forwarding, accept-removes-sender (19/21)**
+- `294af31` — **fix: Lean carve/alias guard ordering — ownership+META before API check**
+- `470caf7` — **fix: CLI prunes stale mem_caps after memory revoke**
+- `0b432b6` — **fix: prune stale handles from domain table after memory revoke**
+- `fb35948` — **docs: add README for differential testing regression suite**
+- `ce8da26` — **fix: attest GPA heuristic + regression test (Cat B)**
+- `99fa5aa` — **feat: full attestation report in Lean engine (Cat B)**
+- `c33e9bd` — **fix: Lean interrupt routing + visibility mapping + switch encapsulation (Cat E)**
+- `b07697a` — **fix: Lean send/accept uses visible fragments (child subtraction)**
+- `7bfa833` — **fix: Lean META send guards — require exclusive leaf, add regression test**
+- `bc04fe5` — **chore: make CRB the default TPM transport**
 
 ### Uncommitted changes
 
@@ -256,7 +267,7 @@ functions to the 83 existing safety theorems.
 ### In progress: lean-exec differential testing
 
 Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
-15 tutorial scenarios + 6 regression tests. **16/21 tests now match** (01–06, 10–13 + 5 regression).
+15 tutorial scenarios + 6 regression tests. **19/21 tests now match** (01–06, 09–15 + 6 regression).
 
 | Cat | Issue | Tutos | Status |
 |-----|-------|-------|--------|
@@ -268,10 +279,11 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 | E | Interrupt routing + chain walk + switch encapsulation | 1 | ✅ Fixed (c33e9bd) |
 | G | Attest succeeds on unsealed domain (should reject) | 1 | ✅ Fixed (0464477) |
 | B | View/attest shows only hash (no full domain info) | 5 | ✅ Fixed (99fa5aa, ce8da26) |
-| D | Send to sealed domain queued as pending | 3 | ❌ |
-| F | Revoke doesn't cascade (domain + children not cleaned) | 1 | ❌ |
-| H | Domain owner names wrong in display | 2 | ❌ |
-| K | GPA overlap check missing in send | 1 | ❌ |
+| — | Stale handles after revoke (engine + CLI) | 09 | ✅ Fixed (0b432b6, 470caf7) |
+| — | Lean carve/alias guard ordering (ownership before API) | 07 | ✅ Fixed (294af31) |
+| — | Channel attest/forwarding/accept-removes-sender | 14,15 | ✅ Fixed (e2e935e) |
+| D | MMU updates: accept unmap, revoke re-map parent | 07 | ❌ |
+| K | GPA overlap check missing in send | 08 | ❌ |
 
 **Also fixed in Cat B batch:**
 - Child domain default interrupt policy: `.deliverAndClear` (Report), was `.deliver` (Deliver)
@@ -281,11 +293,17 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 - COMM `register-comm` error messages match Rust (PermissionDenied for guards, exact wording)
 - GPA line/address space: only shown for child domains (root has no address_map)
 
+**Also fixed in channel batch (e2e935e):**
+- gChanMap stores target domain ID directly (avoids stale lookups)
+- acceptChannel removes sender's channel handle (matching Rust)
+- Attest Children count includes channels targeting domain (CDT scan)
+- ch0 = Channel → d0 expansion in attest report
+- Channel "domains" appear in list output with correct ordering
+- list_domains sorted by ID (matching Rust)
+
 **Remaining tutos by difficulty:**
-- **09** (1 line): cosmetic — enumerate tree missing `uid:1` line
-- **07** (small): MMU update on accept, error "API not allowed" vs "Permission denied"
-- **08** (medium): Cat K (GPA overlap check, explicit GPA mapping)
-- **14, 15** (larger): Cat D (channel attestation) + Cat H (domain owner names)
+- **07** (medium): MMU update generation — accept needs unmap, revoke needs re-map parent
+- **08** (medium): Cat K (GPA overlap check, explicit GPA mapping via `send ... at <gpa>`)
 
 ### Future work
 
