@@ -440,7 +440,10 @@ impl Backend for RustBackend {
             Ok(((), updates))
         }).map_err(convert_error)?;
 
-        // Clean up revoked mem caps from our table.
+        // Remove the revoked child (and any descendants) from our table.
+        self.prune_stale_mem_caps();
+
+        // Clean up revoked domains from our table.
         self.cleanup_revoked(&batch);
 
         Ok(convert_updates(&batch))
@@ -1023,6 +1026,30 @@ impl RustBackend {
             for uid in to_remove {
                 self.mem_caps.remove(&uid);
             }
+        }
+    }
+
+    /// Remove mem_caps entries whose underlying capability tree node has been
+    /// dropped (no children in any parent's children list). After revoke_child
+    /// drops the subtree Arcs, the only remaining strong ref is in this table.
+    /// A cap is stale if it has no parent (was removed from the tree).
+    fn prune_stale_mem_caps(&mut self) {
+        let stale: Vec<MemCapUid> = self.mem_caps.iter()
+            .filter(|(_, arc)| {
+                let cap = arc.read();
+                // A revoked cap's parent link still exists, but the cap was
+                // removed from the parent's children list. Detect this: if
+                // the cap has a parent but the parent's children no longer
+                // contain this cap, it's been revoked.
+                cap.parent.upgrade().map_or(false, |parent| {
+                    let p = parent.read();
+                    !p.children.iter().any(|c| Arc::ptr_eq(c, arc))
+                })
+            })
+            .map(|(&uid, _)| uid)
+            .collect();
+        for uid in stale {
+            self.mem_caps.remove(&uid);
         }
     }
 }
