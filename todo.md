@@ -51,6 +51,7 @@
 - `4968b9a` — **fix: 2-vCPU dom1 boot — APIC emulation, EOI, IPI routing**
 - `d21dc82` — **fix: child APIC virtualization for multi-vCPU dom1**
 - `f6eb224` — **fix: disable posted interrupts, always use software PIR drain**
+- `4fccf1c` — **fix: Lean META revoke, GPA mapping, overlap check — 21/21 tests pass**
 - `e2e935e` — **fix: Lean channel attest, forwarding, accept-removes-sender (19/21)**
 - `294af31` — **fix: Lean carve/alias guard ordering — ownership+META before API check**
 - `470caf7` — **fix: CLI prunes stale mem_caps after memory revoke**
@@ -267,7 +268,7 @@ functions to the 83 existing safety theorems.
 ### In progress: lean-exec differential testing
 
 Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
-15 tutorial scenarios + 6 regression tests. **19/21 tests now match** (01–06, 09–15 + 6 regression).
+15 tutorial scenarios + 6 regression tests. **21/21 tests now match — ALL PASSING.**
 
 | Cat | Issue | Tutos | Status |
 |-----|-------|-------|--------|
@@ -282,8 +283,8 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 | — | Stale handles after revoke (engine + CLI) | 09 | ✅ Fixed (0b432b6, 470caf7) |
 | — | Lean carve/alias guard ordering (ownership before API) | 07 | ✅ Fixed (294af31) |
 | — | Channel attest/forwarding/accept-removes-sender | 14,15 | ✅ Fixed (e2e935e) |
-| D | MMU updates: accept unmap, revoke re-map parent | 07 | ❌ |
-| K | GPA overlap check missing in send | 08 | ❌ |
+| D | Accept unmap, revoke re-map parent, META handling | 07 | ✅ Fixed (4fccf1c) |
+| K | GPA mapping + overlap check in send | 08 | ✅ Fixed (4fccf1c) |
 
 **Also fixed in Cat B batch:**
 - Child domain default interrupt policy: `.deliverAndClear` (Report), was `.deliver` (Deliver)
@@ -301,9 +302,17 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 - Channel "domains" appear in list output with correct ordering
 - list_domains sorted by ID (matching Rust)
 
-**Remaining tutos by difficulty:**
-- **07** (medium): MMU update generation — accept needs unmap, revoke needs re-map parent
-- **08** (medium): Cat K (GPA overlap check, explicit GPA mapping via `send ... at <gpa>`)
+**Fixed in 4fccf1c (tutos 07 + 08):**
+- Accept: removed incorrect META check from sender unmap (sender always unmapped for carved caps)
+- Revoke: parent re-map with `parentOwner != childOwner` guard (skips same-owner e.g. COMM)
+- Revoke: VITAL trigger only emits RevokeDomain (no cascade to memory caps, matching Rust)
+- computeAddressSpace: `excludeMeta` parameter — view excludes META, attest includes it
+- memCapToJson: skip children owned by revoked domains (matching Rust build_mem_info)
+- Sorted "Removed memory capability" messages for deterministic output
+- GPA support: `gpa` field in PendingMemCap, `gpaOverrides` in ExecDomain
+- GPA stored on send (direct + pending) and accept, applied in computeAddressSpace
+- View command uses identity mapping (GPA=HPA), attest shows actual GPA
+- GPA overlap check uses full cap ranges including carved-out blocked entries
 
 ### Future work
 
