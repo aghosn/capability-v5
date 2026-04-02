@@ -404,6 +404,13 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 // Child quantum expired.  If a deferred vector exists,
                                 // flush to parent so dom0 gets its timer tick.
                                 if let Some(vec) = platform.take_deferred(core_id as usize) {
+                                    // Reset timer BEFORE forward (which does VMCLEAR),
+                                    // so the saved child VMCS has a full quantum for
+                                    // the next SWITCH re-entry.
+                                    vcpu.set(
+                                        vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                                        PREEMPTION_TIMER_TICKS,
+                                    );
                                     crate::hypercall::forward_interrupt_to_handler(vcpu, vec);
                                     return; // monitor loop re-enters parent (dom0)
                                 }
