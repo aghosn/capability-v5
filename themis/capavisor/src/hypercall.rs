@@ -1080,94 +1080,89 @@ fn do_switch(
     // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
     // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
 
-    // ── 7b. PIR → VMENTRY_INTR_INFO drain (no-hardware-PID fallback) ──
-    // When PROCESS_POSTED_INTERRUPTS is not supported by hardware, the processor
-    // ignores the PID page on VMENTRY.  inject_via_pid() still writes PIR bits
-    // as a software queue.  We atomically snapshot-and-clear ALL PIR words,
-    // inject the LOWEST pending vector (device interrupts before timer) via
+    // ── 7b. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
+    // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs), so the processor
+    // ignores the PID page on VMENTRY.  inject_via_pid() writes PIR bits as a
+    // software queue.  We atomically snapshot-and-clear ALL PIR words, inject
+    // the LOWEST pending vector (device interrupts before timer) via
     // VMENTRY_INTR_INFO, and put remaining vectors back in PIR for next switch.
     {
-        use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
         use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-        let pin_val = child_active.get(PINBASED_EXEC_CONTROLS);
-        if pin_val & (1 << 7) == 0 {
-            let pid_phys = child_active.pid_phys();
-            if pid_phys != 0 {
-                let hhdm = platform.hhdm_offset();
-                let pir_base = (pid_phys + hhdm) as *const AtomicU64;
+        let pid_phys = child_active.pid_phys();
+        if pid_phys != 0 {
+            let hhdm = platform.hhdm_offset();
+            let pir_base = (pid_phys + hhdm) as *const AtomicU64;
 
-                // Atomically swap out all PIR words to get a consistent snapshot.
-                let mut pir_snapshot = [0u64; 4];
-                let mut any_set = false;
-                for i in 0..4 {
-                    pir_snapshot[i] = unsafe {
-                        (*pir_base.add(i)).swap(0, Ordering::AcqRel)
-                    };
-                    if pir_snapshot[i] != 0 { any_set = true; }
-                }
+            // Atomically swap out all PIR words to get a consistent snapshot.
+            let mut pir_snapshot = [0u64; 4];
+            let mut any_set = false;
+            for i in 0..4 {
+                pir_snapshot[i] = unsafe {
+                    (*pir_base.add(i)).swap(0, Ordering::AcqRel)
+                };
+                if pir_snapshot[i] != 0 { any_set = true; }
+            }
 
-                // Clear the ON (Outstanding Notification) bit.
-                let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
-                unsafe { (*on_ptr).store(0, Ordering::Release) };
+            // Clear the ON (Outstanding Notification) bit.
+            let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+            unsafe { (*on_ptr).store(0, Ordering::Release) };
 
-                if any_set {
-                    let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
-                    let interruptibility =
-                        child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
-                    let if_set = rflags & (1 << 9) != 0;
-                    let sti_mov_ss_block = interruptibility & 0x3 != 0;
+            if any_set {
+                let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
+                let interruptibility =
+                    child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
+                let if_set = rflags & (1 << 9) != 0;
+                let sti_mov_ss_block = interruptibility & 0x3 != 0;
 
-                    if if_set && !sti_mov_ss_block {
-                        // Guest can accept interrupts — find the LOWEST pending
-                        // vector to prioritize device interrupts over timer.
-                        let mut inject_vec: Option<u8> = None;
-                        for i in 0..4usize {
-                            if pir_snapshot[i] != 0 {
-                                let bit = pir_snapshot[i].trailing_zeros();
-                                inject_vec = Some((i * 64 + bit as usize) as u8);
-                                // Clear this bit from the snapshot.
-                                pir_snapshot[i] &= !(1u64 << bit);
-                                break;
-                            }
-                        }
-
-                        if let Some(vector) = inject_vec {
-                            let intr_info = (1u64 << 31) | (vector as u64);
-                            child_active.set(
-                                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                                intr_info,
-                            );
-                        }
-                    }
-
-                    // Put remaining (un-injected) vectors back in PIR for next switch.
-                    let mut remaining = false;
+                if if_set && !sti_mov_ss_block {
+                    // Guest can accept interrupts — find the LOWEST pending
+                    // vector to prioritize device interrupts over timer.
+                    let mut inject_vec: Option<u8> = None;
                     for i in 0..4usize {
                         if pir_snapshot[i] != 0 {
-                            remaining = true;
-                            unsafe {
-                                (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel)
-                            };
+                            let bit = pir_snapshot[i].trailing_zeros();
+                            inject_vec = Some((i * 64 + bit as usize) as u8);
+                            pir_snapshot[i] &= !(1u64 << bit);
+                            break;
                         }
                     }
 
-                    // If vectors remain in PIR (IF=0 or multiple pending), enable
-                    // interrupt-window exiting so we get a VMEXIT when guest IF
-                    // becomes 1 and we can inject then.
-                    let primary = child_active.get(
-                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
-                    if remaining {
+                    if let Some(vector) = inject_vec {
+                        let intr_info = (1u64 << 31) | (vector as u64);
                         child_active.set(
-                            x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                            primary | (1 << 2),
-                        );
-                    } else {
-                        // No more pending — clear interrupt-window exiting.
-                        child_active.set(
-                            x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                            primary & !(1 << 2),
+                            x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                            intr_info,
                         );
                     }
+                }
+
+                // Put remaining (un-injected) vectors back in PIR for next switch.
+                let mut remaining = false;
+                for i in 0..4usize {
+                    if pir_snapshot[i] != 0 {
+                        remaining = true;
+                        unsafe {
+                            (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel)
+                        };
+                    }
+                }
+
+                // If vectors remain in PIR (IF=0 or multiple pending), enable
+                // interrupt-window exiting so we get a VMEXIT when guest IF
+                // becomes 1 and we can inject then.
+                let primary = child_active.get(
+                    x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+                if remaining {
+                    child_active.set(
+                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+                        primary | (1 << 2),
+                    );
+                } else {
+                    // No more pending — clear interrupt-window exiting.
+                    child_active.set(
+                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+                        primary & !(1 << 2),
+                    );
                 }
             }
         }
@@ -1747,6 +1742,17 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Consult the child's interrupt policy for this vector.
     let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
+
+    // Diagnostic: log first 20 + every 500th call to trace interrupt routing.
+    {
+        use core::sync::atomic::{AtomicU64, Ordering as O};
+        static FWD_COUNT: AtomicU64 = AtomicU64::new(0);
+        let n = FWD_COUNT.fetch_add(1, O::Relaxed);
+        if n < 20 || n % 500 == 0 {
+            serial_println!("[INTR_FWD] #{} vec={:#x} vis={:?} core={}", n, vector, child_visibility, core_id);
+        }
+    }
+
     serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.

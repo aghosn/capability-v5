@@ -184,8 +184,11 @@ unsafe fn write_control_fields(
     if child {
         pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
         pin_desired |= 1 << 3; // NMI_EXITING — NMIs from child VM always exit to capavisor
-        #[cfg(not(feature = "no-posted-interrupts"))]
-        { pin_desired |= 1 << 7; } // PROCESS_POSTED_INTERRUPTS
+        // PROCESS_POSTED_INTERRUPTS (bit 7) intentionally NOT set.
+        // Under nested virtualisation (QEMU/KVM) the host advertises PI
+        // support but L2 posted-interrupt delivery is unreliable.  We use
+        // the software PIR drain in do_switch() instead — it works on both
+        // nested and bare-metal.
     }
     let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
     let pin_val = adjust(pin_desired, pin_msr);
