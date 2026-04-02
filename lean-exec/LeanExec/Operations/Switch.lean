@@ -99,19 +99,20 @@ def registerComm (callerId : DomainId) (commHandle : LocalHandle)
     | none => CapaM.throw .notFound
   let comm ← CapaM.getMemCap commUid
   CapaM.guard (comm.region.kind == .carve)
-    (.invalidOperation "COMM cap must be carved")
+    .permissionDenied
   CapaM.guard (comm.region.status == .exclusive)
-    (.invalidOperation "COMM cap must be exclusive")
+    .permissionDenied
   CapaM.guard (comm.childUids.isEmpty)
-    (.invalidOperation "COMM cap must be a leaf (no children)")
+    .permissionDenied
   CapaM.guard (!comm.attributes.meta && !comm.attributes.comm)
     (.invalidOperation "capability already carries the COMM or META attribute")
   -- Validate child domain and VP
   let child ← CapaM.getDomain childDomId
-  CapaM.guard (findVpById child vpId |>.isSome) (.invalidOperation "VP does not exist")
+  CapaM.guard (vpId < child.policy.numVps)
+    (.invalidOperation "vp_id exceeds child domain VP count")
   -- Check no existing COMM binding for this VP
   CapaM.guard (child.commBindings.all fun (_, vid, _) => vid != vpId)
-    (.invalidOperation "VP already has COMM binding")
+    (.invalidOperation "VP already has a COMM binding")
   -- Record COMM binding
   let child ← CapaM.getDomain childDomId
   let child' := { child with commBindings := child.commBindings ++ [(callerId, vpId, commUid)] }

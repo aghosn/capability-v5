@@ -270,7 +270,7 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
     let api := parseApiString apiStr
     let childPolicy : DomainPolicy :=
       { cores := coreList, api := api
-        interrupts := { defaultPolicy := .deliver, perVector := [] }
+        interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
         numVps := coreList.length }
     let result ← runCapaM stRef (LeanExec.create parentId childPolicy)
     match result with
@@ -664,7 +664,7 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
     -- Self-attestation
     let result ← runCapaM stRef (LeanExec.attestSelf domId)
     match result with
-    | .ok hash => pure s!"Attestation for '{domName}': 0x{toHex hash}"
+    | .ok report => pure report
     | .error e => pure s!"Error: {e}"
 
   | .setInterruptPolicy domName vector visibility => do

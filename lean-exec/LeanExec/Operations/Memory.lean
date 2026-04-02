@@ -102,8 +102,8 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × CapNodeId) := do
     { (ExecDomain.empty domId none policy) with
       status := .sealed
       vps := vps.toArray
-      memCaps := [(0, rootUid)]
-      nextMemHandle := 1 }
+      memCaps := [(1, rootUid)]
+      nextMemHandle := 2 }
 
   CapaM.setDomain domId rootDomain
 

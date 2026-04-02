@@ -315,7 +315,7 @@ def ffiCreateDomain (parentId cores api : UInt64) : IO UInt32 := do
   let policy : DomainPolicy := {
     cores := coreList
     api := apiFromBits api.toNat
-    interrupts := { defaultPolicy := .deliver, perVector := [] }
+    interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
     numVps := coreList.length }
   let result ← runOp (LeanExec.create parentId.toNat policy)
   match result with
@@ -746,8 +746,8 @@ def ffiGetCoreStates : IO UInt32 := do
 def ffiAttest (domId : UInt64) : IO UInt32 := do
   let result ← runOp (LeanExec.attestSelf domId.toNat)
   match result with
-  | .ok hash =>
-    gResultStr.set s!"Attestation hash: 0x{toHex hash}"
+  | .ok report =>
+    gResultStr.set report
     pure 0
   | .error e => returnError e
 

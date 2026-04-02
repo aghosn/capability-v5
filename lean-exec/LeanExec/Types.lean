@@ -325,8 +325,8 @@ def empty (id : DomainId) (parent : Option DomainId) (policy : DomainPolicy) : E
     frozenHandles := []
     pendingMem := []
     pendingDom := []
-    nextMemHandle := 0
-    nextDomHandle := 0
+    nextMemHandle := 1
+    nextDomHandle := 1
     nextPendingId := 0
     parentDomId := parent
     commBindings := [] }
