@@ -28,17 +28,26 @@
 
 ### What doesn't work
 
+- **Dom1 (1 CPU) — bash hang**: kernel fully initializes and drops into
+  `init=/bin/bash`, but the shell is non-functional (`ls` hangs). Likely cause:
+  `init=/bin/bash` doesn't mount `/proc`, `/sys`, or `/dev`, and missing `PATH`.
+  Could also be marginal interrupt delivery for user-space disk I/O. Needs a
+  quick diagnostic (mount filesystems, try commands) before deeper investigation.
 - **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
   This is a nested-virtualization scheduling artifact. See "Nested-virt scheduling" below.
+- **Dom1 stock kernel + systemd**: not yet attempted. Currently uses custom
+  instrumented bzImage with `init=/bin/bash`. Goal: full Ubuntu boot with stock
+  6.8.0-101-generic kernel and systemd init.
 - **Dom1 on real hardware**: not yet tested with the interrupt-window fix.
 
 ### Recent commits
 
+- `ce8da26` — **fix: attest GPA heuristic + regression test (Cat B)**
+- `99fa5aa` — **feat: full attestation report in Lean engine (Cat B)**
 - `c33e9bd` — **fix: Lean interrupt routing + visibility mapping + switch encapsulation (Cat E)**
 - `b07697a` — **fix: Lean send/accept uses visible fragments (child subtraction)**
 - `7bfa833` — **fix: Lean META send guards — require exclusive leaf, add regression test**
 - `bc04fe5` — **chore: make CRB the default TPM transport**
-- `9779e4a` — **feat(P20k): CRB transport support for TPM driver**
 
 ### Uncommitted changes
 
@@ -46,93 +55,19 @@ None — all changes committed.
 
 ---
 
-## The Problem: Child VP Scheduling on Nested Virtualization
+## Nested Virtualization Scheduling Problem
 
-### Architecture reminder
+Full analysis, approaches tried, and the `quantum-sched` solution are documented in
+the consolidated design document:
 
-```
-QEMU+KVM (actual L0, physical host)
-  └─ Capavisor (L0 logical, VMX root inside KVM guest)
-       └─ Dom0 (L1, Ubuntu, 4 CPUs) → thhv.ko
-            └─ CHV (userspace) → ioctls
-                 └─ Dom1 (L2, custom Linux, 2 CPUs) → the child VM
-```
+> **[`capa-engine/docs/design/interrupt-virtualization.md`](capa-engine/docs/design/interrupt-virtualization.md)**
+> §Nested Virtualization Scheduling
 
-**Critical**: We develop on QEMU+KVM. Our "L0" capavisor is actually an L1 guest in KVM.
-Dom1 is L2 in KVM terms. On real hardware, the capavisor would be true L0.
-
-### The scheduling loop
-
-1. CHV calls `ioctl(RUN_VP)` → `thhv_run_vp()` in kernel
-2. thhv calls `themis_switch()` VMCALL → capavisor
-3. Capavisor: VMCLEAR dom0 VMCS, VMPTRLD child VMCS, VMRESUME child
-4. Child runs until VM exit
-5. On exit: capavisor handles exit, returns control to dom0 (ERR_RETRY) or CHV (intercept message)
-6. thhv: if EAGAIN, `cond_resched()` then goto retry_switch
-
-### What goes wrong — three approaches tried, all fail
-
-**Approach A: Defer AP interrupts + preemption timer yield**
-- Child external interrupt → ACK vector → store in DEFERRED_HOST_VECTOR → VMRESUME child immediately
-- Preemption timer fires → yield to dom0, inject deferred vector
-- **Result at 20ms quantum**: AP reaches cpuhp_ap_sync_alive, but dom0 starves → RCU stall at ~688s
-- **Result at 1ms quantum**: Dom0 hung_task warnings, SSH unresponsive. Too much VMCLEAR/VMPTRLD overhead.
-- **Why it fails**: dom0's timer interrupt is consumed by capavisor (ACK_INTERRUPT_ON_EXIT), never
-  delivered to dom0's IDT → scheduler_tick() never runs → TIF_NEED_RESCHED never set → dom0 starves
-
-**Approach B: Forward ALL child interrupts to dom0** (mirrors KVM's local_irq_enable)
-- Child external interrupt → `forward_interrupt_to_handler` → switch to dom0 VMCS, inject vector
-- Dom0 IDT handles the interrupt → scheduler runs naturally
-- **Result**: Dom0 stays healthy (SSH alive!) but AP stuck at RIP=0x0 — never executes one instruction
-- **Why it fails**: The interrupt is vector 0xEC = dom0's LAPIC timer (scheduler tick at ~250Hz).
-  In nested virt, KVM always has dom0's LAPIC timer pending or about to fire. The VMCLEAR/VMPTRLD/
-  VMRESUME sequence for the child takes so long in nested virt that dom0's timer deadline is already
-  past by the time the child's VMRESUME completes → KVM immediately exits → AP executes 0 instructions.
-  This is a **nested virtualization artifact** — on real hardware, VMRESUME is ~microseconds and
-  the child would execute thousands of instructions between 250Hz ticks.
-
-**Approach C: Deferred + 1ms preemption timer (hybrid)**
-- Defer AP interrupts (like A) but with 1ms quantum (3M ticks at 3GHz, rate divisor 5)
-- **Result**: Dom0 shows hung_task warnings. SSH intermittently responsive. Child may be making
-  some progress but very slowly. The 1ms quantum may cause too much context-switch overhead.
-
-### Key insight: this is a nested virtualization problem
-
-On real hardware:
-- VMRESUME is ~1μs, child runs ~4ms between 250Hz timer ticks = ~4000 instructions minimum
-- With posted interrupts (PI), dom0's timer would NOT cause a child VM exit at all
-- The "forward every interrupt" approach (B) would work perfectly
-
-On QEMU+KVM (our dev env):
-- Our VMRESUME is a nested VMRESUME → KVM overhead → ~100s of μs or more
-- Dom0's LAPIC timer fires before the child executes ANY instruction
-- Posted interrupts are not available (nested PI not supported by KVM)
-
-### User's suggestion to explore
-
-**"Flush writes to child, return to dom0, let dom0 drain interrupts, then do a pure switch"**
-
-The idea: after SET_VP_STATE writes the child's registers, return to dom0. Dom0 handles its
-pending LAPIC timer (scheduler tick fires, gets rearmed for next tick). THEN call SWITCH.
-The child now has a full quantum until the next timer tick.
-
-Current flow: SET_VP_STATE (ioctl) → RUN_VP (ioctl) → SWITCH vmcall → child runs
-With this change: between RUN_VP and SWITCH, dom0 would drain pending interrupts first.
-
-This could translate to: in `thhv_run_vp`, instead of `cond_resched()` on EAGAIN,
-do `schedule_timeout(1)` (sleep 1 jiffy = 1-4ms) to guarantee dom0 gets a full timer
-tick before retrying. Or: have the capavisor itself do `sti; nop; cli` in VMX root
-before the child VMRESUME to drain pending LAPIC interrupts.
-
-### Other observations
-
-- The timerfd/irqfd path for dom1's timer is NOT the cause of the 0xEC flood.
-  The flood is dom0's OWN scheduler tick (hrtimer → LAPIC), not the irqfd injection.
-  Dom1's timerfd fires ~1/sec during boot (large TSC deltas).
-- Dom1 uses TSC-deadline mode (WRMSR 0x6E0). CHV arms a timerfd. When it fires:
-  timerfd → eventfd → thhv workqueue → INJECT_INTERRUPT vmcall → capavisor sets PIR bit.
-  PIR is drained by do_switch step 7b on next VMRESUME (software fallback, not hardware PI).
-- `inject_via_pid` changed to is_remote=false to avoid notification IPI causing immediate exit.
+**TL;DR**: On QEMU+KVM, nested VMRESUME takes ~100μs. Dom0's LAPIC timer (250Hz)
+fires before child executes any instructions → AP can't boot. Three approaches
+failed (A: defer all/starve dom0, B: forward all/0 instructions, C: hybrid/overhead).
+Fix: `quantum-sched` feature — defer only parent-bound interrupts, re-enter child
+(same VMCS, cheap), deliver deferred vector on preemption timer (~20ms).
 
 ---
 
@@ -216,26 +151,102 @@ dom0 excluded (EPT + ACPI stripping). See P20i below.
 - **COMM PA map duplicate (8d91531)**: COMM cap and underlying carved memory share same
   GPA; both appeared in PA entries. Fixed: exclude COMM-attributed caps from PA map.
 
-### Next: Quantum scheduling for multi-core dom1 (`quantum-sched`)
+### Next: Phase 0 — Quick diagnostic: 1-CPU bash hang
 
-Design doc: [`themis/docs/quantum-sched.md`](themis/docs/quantum-sched.md)
+Before tackling multi-core, verify whether the hang is a real I/O bug or just
+`init=/bin/bash` environment limitations. Boot 1-CPU dom1 and try:
 
-Dom1 AP can't boot in nested virt — dom0's timer preempts the child after ~10
-instructions per 4ms period. Fix: defer parent-bound interrupts and re-enter
-the child. Deliver on preemption timer expiry (~20ms quantum). Gated behind
-`feature = "quantum-sched"`.
+```bash
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+ls /
+```
 
-- [ ] Add `quantum-sched` feature flag to capavisor Cargo.toml
-- [ ] Add per-core `deferred_vector` storage to CoreContext
-- [ ] Modify EXTERNAL_INTERRUPT handler: defer parent-bound vectors
-- [ ] Modify PREEMPTION_TIMER handler: flush deferred vector via lazy-unwind
-- [ ] Handle multiple deferred interrupts (flush-before-store)
-- [ ] Test with CHV_CPUS=2
+- [ ] If `ls` works after mounts → hang was missing filesystems (not a bug)
+- [ ] If `ls` still hangs → interrupt delivery issue, must investigate before Phase 1
 
-### Next: Test on real hardware + stock kernel boot
+### Next: Phase 1 — Quantum scheduling for multi-core dom1 (`quantum-sched`)
 
+Design doc: [`capa-engine/docs/design/interrupt-virtualization.md` §Nested Virtualization Scheduling](capa-engine/docs/design/interrupt-virtualization.md)
+
+**Problem**: Dom1 AP can't boot in nested virt — dom0's LAPIC timer (0xEC,
+250Hz) preempts the child after ~0 instructions per VMRESUME. The current code
+does VMCLEAR child → VMPTRLD dom0 → inject timer → dom0 runs → thhv retries
+→ VMCLEAR dom0 → VMPTRLD child → VMRESUME child. That's 2 expensive VMCS
+switches (each ~100µs+ on nested virt) for 0 useful child instructions.
+
+**Fix**: Defer parent-bound interrupts and re-enter the child via the same
+VMCS (cheap — no VMCLEAR/VMPTRLD). The child gets ~4ms of real execution
+until the next timer tick. Deferred vectors are delivered via the preemption
+timer or flush-before-store. Gated behind `feature = "quantum-sched"`.
+
+**Why this avoids Approach A's failure**: Approach A consumed vectors (ACK'd
+from LAPIC) but never re-injected them into dom0. This design uses the proven
+`forward_interrupt_to_handler()` path for delivery — just delayed to the
+quantum boundary.
+
+#### Implementation steps
+
+- [ ] **1.1**: Add `quantum-sched = []` feature to `themis/capavisor/Cargo.toml`
+- [ ] **1.2**: Add `deferred_vector: AtomicU16` to `CoreContext` in `platform.rs`
+  (0 = none, 1–255 = vector). Add `set_deferred(core_id, vector)` and
+  `take_deferred(core_id) -> Option<u8>` helpers on `ThemisPlatform`.
+- [ ] **1.3**: Add `is_parent_bound_vector(platform, vector) -> bool` helper.
+  Reads child's interrupt policy via `get_core_cap(core_id)` — parent-bound
+  means visibility ≠ `InterruptVisibility::Deliver`.
+- [ ] **1.4**: Modify `EXIT_REASON_EXTERNAL_INTERRUPT` handler (vmexit.rs, child path).
+  When `quantum-sched` enabled and vector is parent-bound:
+  - If `deferred_vector` empty → store vector, `return` (re-enter child, same VMCS)
+  - If `deferred_vector` set → flush old via `forward_interrupt_to_handler`
+    (dom0 switch), store new vector as deferred
+  When vector is child-owned → forward immediately (unchanged).
+- [ ] **1.5**: Modify `EXIT_REASON_VMX_PREEMPTION_TIMER` handler (vmexit.rs, child path).
+  When `quantum-sched` enabled and deferred vector exists → flush via
+  `forward_interrupt_to_handler` (dom0 switch, child suspended).
+  When no deferred vector → reset timer (unchanged).
+- [ ] **1.6**: (Optional) Drain deferred in `do_switch` — before activating child VMCS,
+  check for leftover deferred vector. If set, inject into dom0 (already active)
+  and return `ERR_RETRY`. Ensures dom0 is caught up before child gets new quantum.
+- [ ] **1.7**: Build and test. `cargo build-bins` with `quantum-sched` feature.
+  Boot with `CHV_CPUS=2`. **Success criteria**: AP completes SMP init, dom0 stays
+  responsive (SSH works), kernel prints "SMP: Total of 2 processors activated".
+
+#### Files modified
+
+| File | Change |
+|------|--------|
+| `themis/capavisor/Cargo.toml` | `quantum-sched = []` feature |
+| `themis/capavisor/src/platform.rs` | `deferred_vector` in CoreContext + helpers |
+| `themis/capavisor/src/vmexit.rs` | Conditional deferral in ext-intr + preemption-timer handlers |
+| `themis/capavisor/src/hypercall.rs` | `is_parent_bound_vector()` helper + optional do_switch drain |
+
+### Next: Phase 2 — Stock kernel + systemd boot
+
+**Goal**: Boot dom1 with unmodified Ubuntu 6.8.0-101-generic kernel and full
+systemd init (no `init=/bin/bash`).
+
+- [ ] **2.1**: Modify `run-dom1.sh`: remove `init=/bin/bash` from kernel cmdline.
+  Stock kernel already has `CONFIG_VIRTIO_BLK=y`, `CONFIG_EXT4_FS=y`,
+  `CONFIG_VIRTIO_NET=y` built-in — no initramfs needed for basic boot.
+  Kernel fallback path in run-dom1.sh already selects `/boot/vmlinuz-*`.
+- [ ] **2.2**: Test 1-CPU stock kernel boot (`CHV_CPUS=1`). Watch for:
+  CPUID panics, module loading issues, systemd startup, cloud-init,
+  network setup (tap-dom1, IP 192.168.100.2/24).
+- [ ] **2.3**: Fix issues as they surface. Likely candidates:
+  - CPUID emulation gaps (CHV owns policy, `cloud-hypervisor/arch/src/x86_64/mod.rs`)
+  - initramfs (extract from dom1.raw boot partition if modules needed)
+  - MMIO emulation (systemd probes more devices)
+- [ ] **2.4**: Test multi-core stock kernel (`CHV_CPUS=2` + `quantum-sched`).
+
+### Next: Phase 3 — Stabilization + real hardware
+
+- [ ] Tune quantum size (`PREEMPTION_TIMER_TICKS`) if dom0 responsiveness degrades
+- [ ] Test with 4 CPUs
 - [ ] Test interrupt-window fix + PIR drain on real hardware (posted interrupts)
-- [ ] Boot dom1 with stock Ubuntu kernel (not custom bzImage)
+- [ ] Document what works on nested vs real hardware
+- [ ] Update `HANDOFF.md`
 
 ### Done: lean-exec — Executable Lean 4 model (commit ec3ebc4)
 
@@ -261,7 +272,7 @@ functions to the 83 existing safety theorems.
 ### In progress: lean-exec differential testing
 
 Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
-15 tutorial scenarios + 5 regression tests. **12/20 tests now match** (01–06, 11–13 + 3 regression).
+15 tutorial scenarios + 6 regression tests. **16/21 tests now match** (01–06, 10–13 + 5 regression).
 
 | Cat | Issue | Tutos | Status |
 |-----|-------|-------|--------|
@@ -269,28 +280,28 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 | I | Attributes (CLEAN/VITAL/META) not propagated | 2 | ✅ Fixed (1c5e218) |
 | C | Source VP index shows "?" | 2 | ✅ Fixed (c4edf0b) |
 | J | UID allocation | — | ✅ Fixed (e9b869a) |
-| L | Error messages differ | several | ✅ Mostly fixed (c4edf0b) |
+| L | Error messages differ | several | ✅ Fixed (c4edf0b, ce8da26) |
 | E | Interrupt routing + chain walk + switch encapsulation | 1 | ✅ Fixed (c33e9bd) |
 | G | Attest succeeds on unsealed domain (should reject) | 1 | ✅ Fixed (0464477) |
+| B | View/attest shows only hash (no full domain info) | 5 | ✅ Fixed (99fa5aa, ce8da26) |
 | D | Send to sealed domain queued as pending | 3 | ❌ |
-| B | View/attest shows only hash (no full domain info) | 5 | ❌ Biggest remaining blocker |
 | F | Revoke doesn't cascade (domain + children not cleaned) | 1 | ❌ |
 | H | Domain owner names wrong in display | 2 | ❌ |
 | K | GPA overlap check missing in send | 1 | ❌ |
 
+**Also fixed in Cat B batch:**
+- Child domain default interrupt policy: `.deliverAndClear` (Report), was `.deliver` (Deliver)
+- Local handles start at 1 (matching Rust), was 0
+- Attribute separator in attest reports: pipe `|` (matching Rust `Display`)
+- GPA address space sorted by start address
+- COMM `register-comm` error messages match Rust (PermissionDenied for guards, exact wording)
+- GPA line/address space: only shown for child domains (root has no address_map)
+
 **Remaining tutos by difficulty:**
 - **09** (1 line): cosmetic — enumerate tree missing `uid:1` line
-- **07, 10** (smaller): dominated by Cat B (attest output format)
-- **08** (smaller): Cat B + Cat K (GPA overlap check)
-- **14, 15** (larger): Cat B + Cat D + Cat H
-
-**⚠ Validation audit needed (discovered via Cat L):** Investigating error message
-differences revealed that `register_comm` was missing 4 validation checks that
-all other mutation operations (carve/alias/send) enforce. Fixed in `90f4807` with
-regression tests. **A systematic audit of all operation validation checks is needed**
-to ensure every operation enforces the complete set of guards (sealed, API, frozen,
-ownership, attribute constraints). This should be done by comparing each operation's
-checks against the canonical pattern established by carve/alias/send.
+- **07** (small): MMU update on accept, error "API not allowed" vs "Permission denied"
+- **08** (medium): Cat K (GPA overlap check, explicit GPA mapping)
+- **14, 15** (larger): Cat D (channel attestation) + Cat H (domain owner names)
 
 ### Future work
 
@@ -354,12 +365,21 @@ excluded from dom0 EPT + ACPI tables stripped. End-to-end verified with swtpm.
 
 ## Reference
 
+### Design documents
+
+| Document | Path | Content |
+|----------|------|---------|
+| **Interrupt Virtualization** | `capa-engine/docs/design/interrupt-virtualization.md` | Single source of truth: goals, HW background, routing model, gap analysis, nested-virt scheduling, quantum-sched, Directvisor reference, 3 delivery bugs |
+| **Attestation** | `capa-engine/docs/design/attestation/attestation.md` | Two-layer TPM + Ed25519 model |
+| **Address Translation** | `capa-engine/docs/design/address_translation/address_translation.md` | EPT/IOMMU design |
+| **ARM Porting** | `themis/docs/arm-porting-design.md` | ARM GICv4 as PI equivalent |
+
 ### Key files
 
 | File | Role |
 |------|------|
 | `themis/capavisor/src/vmexit.rs` | VMEXIT dispatch, child interrupt handling, preemption timer |
-| `themis/capavisor/src/hypercall.rs` | `do_switch`, `forward_interrupt_to_handler`, `yield_child_to_dom0`, `do_inject_interrupt` |
+| `themis/capavisor/src/hypercall.rs` | `do_switch`, `forward_interrupt_to_handler`, `do_inject_interrupt` |
 | `thhv/src/thhv_vp.c` | `thhv_run_vp` — the critical VP run loop with EAGAIN retry |
 | `thhv/inc/thhv.h` | ioctl structs (irqfd, VP state), shared constants |
 | `cloud-hypervisor/hypervisor/src/themis/mod.rs` | CHV Themis backend, timer emulation, irqfd, SIPI |
