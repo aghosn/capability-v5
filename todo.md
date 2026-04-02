@@ -189,27 +189,27 @@ quantum boundary.
 
 #### Implementation steps
 
-- [ ] **1.1**: Add `quantum-sched = []` feature to `themis/capavisor/Cargo.toml`
-- [ ] **1.2**: Add `deferred_vector: AtomicU16` to `CoreContext` in `platform.rs`
+- [x] **1.1**: Add `quantum-sched = []` feature to `themis/capavisor/Cargo.toml`
+- [x] **1.2**: Add `deferred_vector: AtomicU16` to `CoreContext` in `platform.rs`
   (0 = none, 1–255 = vector). Add `set_deferred(core_id, vector)` and
   `take_deferred(core_id) -> Option<u8>` helpers on `ThemisPlatform`.
-- [ ] **1.3**: Add `is_parent_bound_vector(platform, vector) -> bool` helper.
+- [x] **1.3**: Visibility check inlined in vmexit.rs EXTERNAL_INTERRUPT handler.
   Reads child's interrupt policy via `get_core_cap(core_id)` — parent-bound
   means visibility ≠ `InterruptVisibility::Deliver`.
-- [ ] **1.4**: Modify `EXIT_REASON_EXTERNAL_INTERRUPT` handler (vmexit.rs, child path).
+- [x] **1.4**: Modified `EXIT_REASON_EXTERNAL_INTERRUPT` handler (vmexit.rs, child path).
   When `quantum-sched` enabled and vector is parent-bound:
   - If `deferred_vector` empty → store vector, `return` (re-enter child, same VMCS)
   - If `deferred_vector` set → flush old via `forward_interrupt_to_handler`
     (dom0 switch), store new vector as deferred
   When vector is child-owned → forward immediately (unchanged).
-- [ ] **1.5**: Modify `EXIT_REASON_VMX_PREEMPTION_TIMER` handler (vmexit.rs, child path).
+- [x] **1.5**: Modified `EXIT_REASON_VMX_PREEMPTION_TIMER` handler (vmexit.rs, child path).
   When `quantum-sched` enabled and deferred vector exists → flush via
   `forward_interrupt_to_handler` (dom0 switch, child suspended).
   When no deferred vector → reset timer (unchanged).
-- [ ] **1.6**: (Optional) Drain deferred in `do_switch` — before activating child VMCS,
+- [x] **1.6**: Drain deferred in `do_switch` — before activating child VMCS,
   check for leftover deferred vector. If set, inject into dom0 (already active)
   and return `ERR_RETRY`. Ensures dom0 is caught up before child gets new quantum.
-- [ ] **1.7**: Build and test. `cargo build-bins` with `quantum-sched` feature.
+- [ ] **1.7**: Build and test. Enable `quantum-sched` in build script / ISO.
   Boot with `CHV_CPUS=2`. **Success criteria**: AP completes SMP init, dom0 stays
   responsive (SSH works), kernel prints "SMP: Total of 2 processors activated".
 

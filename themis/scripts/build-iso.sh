@@ -76,12 +76,17 @@ fi
 
 cd "$WORKSPACE_ROOT"
 
+# Optional: CAPAVISOR_FEATURES="quantum-sched" to enable nested-virt scheduling.
 PROFILE="${PROFILE:-debug}"
+FEATURES_FLAG=""
+if [[ -n "${CAPAVISOR_FEATURES:-}" ]]; then
+    FEATURES_FLAG="--features ${CAPAVISOR_FEATURES}"
+fi
 if [[ "$PROFILE" == "release" ]]; then
-    cargo build --release -p capavisor
+    cargo build --release -p capavisor $FEATURES_FLAG
     ELF="target/x86_64-unknown-none/release/capavisor"
 else
-    cargo build -p capavisor
+    cargo build -p capavisor $FEATURES_FLAG
     ELF="target/x86_64-unknown-none/debug/capavisor"
 fi
 
