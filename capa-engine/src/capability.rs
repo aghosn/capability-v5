@@ -1898,6 +1898,7 @@ impl Capability<Domain> {
         let mut w = caller.write();
         #[allow(unused_mut)]
         let mut updates = Capability::revoke_child(&parent_ref, child_sub)?;
+        w.data.prune_stale_memory_capabilities();
         refresh_domain_view(&mut *w);
 
         // Unblock parent's AddressMap entries that were blocked during send.

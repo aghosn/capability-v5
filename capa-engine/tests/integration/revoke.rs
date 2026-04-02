@@ -565,3 +565,25 @@ fn test_revoke_domain_nested_memory_restore() {
     assert!(revoked_domains.contains(&dom1_id), "dom1 must be revoked");
     assert!(revoked_domains.contains(&dom2_id), "dom2 must be revoked");
 }
+
+#[test]
+fn test_revoke_removes_child_handle_from_owner_domain() {
+    let (root, _r0, r0_h) = bootstrap();
+    let child_access = Access::new(0x0, 0x1000, Rights::RW);
+    let (child_h, child_sub, _) = Capability::carve(&root, r0_h, child_access).unwrap();
+
+    // Child handle exists in root's memory_capabilities table
+    assert!(root.read().data.get_memory_capability(child_h).is_some());
+
+    // Revoke the child
+    let _updates = Capability::revoke(&root, r0_h, child_sub).unwrap();
+
+    // After revoke, the child handle must be gone from root's table
+    assert!(
+        root.read().data.get_memory_capability(child_h).is_none(),
+        "revoked child's handle should be removed from owner domain's memory_capabilities"
+    );
+
+    // Parent handle still exists
+    assert!(root.read().data.get_memory_capability(r0_h).is_some());
+}

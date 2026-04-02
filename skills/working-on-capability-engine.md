@@ -163,6 +163,19 @@ apply it manually — `execute()` handles that. The batch is visible to tests vi
 
 ## Running Tests
 
+### ⚠️ Mandatory Pre-Commit Checklist
+
+**All three commands must pass before committing any capa-engine change:**
+
+```bash
+cd capa-engine/
+cargo test          # unit + integration tests (~0.1 s)
+cargo loom-all      # ALL loom suites including address_translation (~3 min)
+```
+
+Do NOT use `cargo loom` (without `-all`) as your final check — it skips the
+`address_translation` concurrency tests. **Always use `cargo loom-all`.**
+
 ### Standard Tests (unit + integration)
 
 ```bash
@@ -192,11 +205,11 @@ bookkeeping is CPU-intensive and release mode is 5–10× faster.
 ```bash
 cd capa-engine/
 
-# Run the main loom suite (no address_translation)
-cargo loom
-
-# Run loom including address-translation concurrency tests
+# ✅ ALWAYS use loom-all (includes address_translation concurrency tests)
 cargo loom-all
+
+# ❌ Do NOT rely on `cargo loom` alone — it skips translation tests
+cargo loom
 ```
 
 These are cargo aliases defined in `capa-engine/.cargo/config.toml`. Expanded forms:
@@ -239,7 +252,7 @@ this as a concurrency bug.
 ## Test Policy
 
 - **Every code change** → run `cargo test` **and** `cargo loom-all` before committing.
-  Both must pass. No exceptions.
+  Both must pass. No exceptions. Do NOT substitute `cargo loom` for `cargo loom-all`.
 - **Logic bug fixes** → add a regression test that fails without the fix and passes with it.
   Every validation check (guard, error return) in the engine must have a corresponding
   unit test that exercises that specific rejection path.

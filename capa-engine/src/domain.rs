@@ -709,6 +709,26 @@ impl Domain {
         result
     }
 
+    /// Remove all entries from `memory_capabilities` whose `Weak` refs can no
+    /// longer be upgraded (the backing `Arc` has been dropped).
+    ///
+    /// # Safety (logical, not `unsafe`)
+    ///
+    /// This is called from `Capability::<Domain>::revoke()` which runs under:
+    ///   1. The **exclusive global lock** (`execute(exclusive=true)`), so no
+    ///      concurrent capability operation can create or drop `Arc`s between
+    ///      `revoke_child` (which drops the subtree) and this call.
+    ///   2. The **per-domain write lock** (`caller.write()`), so no concurrent
+    ///      reader can observe a partially-pruned table.
+    ///
+    /// Together these guarantee that every `Weak` that fails to upgrade here
+    /// genuinely refers to a revoked capability, not to a live one that is
+    /// transiently unreachable.
+    pub fn prune_stale_memory_capabilities(&mut self) {
+        self.memory_capabilities.retain(|_, weak| weak.upgrade().is_some());
+        self.refresh_view();
+    }
+
     /// Remove a domain capability from tracking
     pub fn remove_domain_capability(
         &mut self,
