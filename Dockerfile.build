@@ -27,6 +27,7 @@ RUN apt-get update \
     git \
     grub-pc-bin \
     libclang-dev \
+    libelf-dev \
     libssl-dev \
     llvm \
     mtools \
@@ -37,7 +38,7 @@ RUN apt-get update \
     # Optional: software TPM for attested boot testing (swtpm ≥ 0.8 recommended)
     swtpm \
     swtpm-tools \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/lock
 
 # themis/rust-toolchain.toml currently pins channel=nightly,
 # target=x86_64-unknown-none, and the listed components below.

@@ -65,4 +65,4 @@ exec docker run --rm \
     --env BINS_TARGETS="$BINS_TARGETS" \
     --env KHEADERS_DIR="$KHEADERS_DIR" \
     "$IMAGE" \
-    bash themis/scripts/build-bins.sh "$@"
+    bash -c 'bash themis/scripts/fetch-kheaders.sh && bash themis/scripts/build-bins.sh "$@"' _ "$@"

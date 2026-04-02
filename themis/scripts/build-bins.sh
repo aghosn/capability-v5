@@ -121,8 +121,6 @@ should_build() {
 }
 
 resolve_kheaders_dir() {
-    local candidate_glob=("$WORKSPACE_ROOT/target/kheaders/usr/src/linux-headers-"*-generic)
-
     if [[ -n "$KHEADERS_DIR" ]]; then
         if [[ ! -d "$KHEADERS_DIR" || ! -f "$KHEADERS_DIR/Makefile" ]]; then
             echo "ERROR: KHEADERS_DIR is not a kernel headers tree: $KHEADERS_DIR" >&2
@@ -132,6 +130,27 @@ resolve_kheaders_dir() {
         return 0
     fi
 
+    # Prefer headers matching the pinned dom0 kernel version.
+    local kver_file="$SCRIPT_DIR/dom0-kernel-version.txt"
+    if [[ -f "$kver_file" ]]; then
+        local kver
+        kver="$(tr -d '[:space:]' < "$kver_file")"
+        if [[ -n "$kver" ]]; then
+            local pinned
+            if [[ "$kver" == *-generic ]]; then
+                pinned="$WORKSPACE_ROOT/target/kheaders/usr/src/linux-headers-${kver}"
+            else
+                pinned="$WORKSPACE_ROOT/target/kheaders/usr/src/linux-headers-${kver}-generic"
+            fi
+            if [[ -d "$pinned" && -f "$pinned/Makefile" ]]; then
+                printf '%s\n' "$pinned"
+                return 0
+            fi
+        fi
+    fi
+
+    # Fallback: any available headers.
+    local candidate_glob=("$WORKSPACE_ROOT/target/kheaders/usr/src/linux-headers-"*-generic)
     if (( ${#candidate_glob[@]} > 0 )) && [[ -d "${candidate_glob[0]}" ]]; then
         printf '%s\n' "${candidate_glob[0]}"
         return 0
