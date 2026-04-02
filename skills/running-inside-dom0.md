@@ -53,6 +53,21 @@ cargo themis 2>&1 | tee /tmp/out.txt
 `serial_println!` and dom0 kernel messages go to stdout and are captured in
 `/tmp/out.txt`.
 
+### Enabling quantum-sched (required for multi-core dom1)
+
+To boot dom1 with multiple CPUs, you **must** enable the `quantum-sched`
+feature.  Without it, dom0's 250 Hz LAPIC timer preempts the child before
+any instruction executes (~100 µs nested VMRESUME overhead).
+
+```bash
+cd themis/
+CAPAVISOR_FEATURES=quantum-sched cargo themis 2>&1 | tee /tmp/out.txt
+```
+
+This defers parent-bound interrupts while a child VP runs, then delivers
+them on the next child exit (MMIO/EPT).  The preemption timer caps each
+child quantum at ~20 ms.
+
 **Wait for dom0 to finish booting** (watch `/tmp/out.txt` for the login prompt
 or cloud-init completion), then SSH in from a separate terminal (Step 2).
 
@@ -102,11 +117,11 @@ scp -o StrictHostKeyChecking=no -P 2222 ./myfile cloud@localhost:/home/cloud/
 From a terminal SSH'd into dom0:
 
 ```bash
-# Run dom1 with 1 vCPU (use for debugging; increase CPUs once stable)
-sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
+# Run dom1 with 2 vCPUs (requires quantum-sched, see Step 1)
+sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh
 
-# Default CPU count (multi-core)
-sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+# Run dom1 with 1 vCPU (for debugging without quantum-sched)
+sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
 ```
 
 `thhv.ko` is loaded automatically by `run-dom1.sh` if not already loaded.
@@ -191,13 +206,13 @@ cargo build-bins
 
 # 2. Boot the stack (inside themis/)
 cd themis/
-cargo themis 2>&1 | tee /tmp/out.txt
+CAPAVISOR_FEATURES=quantum-sched cargo themis 2>&1 | tee /tmp/out.txt
 
 # 3. In a separate terminal — SSH into dom0
 ssh cloud@localhost -p 2222
 
-# 4. Inside dom0 — run dom1 (1 vCPU for debugging)
-sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
+# 4. Inside dom0 — run dom1 (2 vCPUs)
+sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh
 
 # 5. Watch traces (from host)
 grep '\[DBG\]' /tmp/out.txt | tail -30
