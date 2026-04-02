@@ -11,7 +11,7 @@
 1. **`CONTEXT.md`** — full architecture, axioms A1–A11, component map
 2. **`todo.md`** — current status, what works/doesn't, action items
 3. **`skills/agent-workflow.md`** — build commands, session hygiene
-4. **`themis/docs/quantum-sched.md`** — next feature design (if working on multi-core)
+4. **`capa-engine/docs/design/interrupt-virtualization.md`** — interrupt model, nested-virt scheduling, quantum-sched design (if working on multi-core or interrupts)
 
 ## What Works Right Now
 
@@ -62,7 +62,7 @@ when guest IF becomes 1. Handler drains PIR and injects immediately.
 
 ### 1. Quantum Scheduling (`quantum-sched`) — multi-core dom1
 
-**Design doc**: `themis/docs/quantum-sched.md` (READ THIS FIRST)
+**Design doc**: `capa-engine/docs/design/interrupt-virtualization.md` §Nested Virtualization Scheduling (READ THIS FIRST)
 
 Defer parent-bound interrupts during child VP execution. Deliver on
 preemption timer expiry (~20ms). Gives child AP a guaranteed quantum.

@@ -470,11 +470,11 @@ The driver must communicate three things to the capavisor that are not knowable 
 
 ### Implementation Status
 
-*(Updated 2026-03-30)*
+*(Updated 2026-04-02)*
 
 | Component | Status | Notes |
 |---|---|---|
-| Phase 1: VAPIC + VID + forwarding | ⚠️ Partial | Hardware configured (`intr-p1-*` commits), but capavisor does NOT call `route_interrupt()` — handler hardcoded to dom0 (A9 violation, see §Gap Analysis). `DEFERRED_HOST_VECTOR` removed in `c2820b5`. |
+| Phase 1: VAPIC + VID + forwarding | ✅ Done | Hardware configured (`intr-p1-*`). `route_interrupt()` wired + `DEFERRED_HOST_VECTOR` removed + RDI=vector in c2820b5. |
 | Phase 2: Posted Interrupts + PID | ✅ Done | `intr-p2-*` commits; `inject_via_pid`, notification vector `0xF2`, cross-core IPI |
 | Phase 3: VT-d Interrupt Remapping | ✅ Done | `intr-p3-*` commits; IRTE alloc, IR enable, `program_domain_irtes` at seal/revoke |
 | APICv: VIRTUALIZE_X2APIC (bit 4) | ✅ Done | `e6ebc30`; x2APIC MSR reads via VAPIC page, no exit |
@@ -488,13 +488,14 @@ The driver must communicate three things to the capavisor that are not knowable 
 | Notification vector | ✅ Done | `NOTIFY_VEC = 0xF2` reserved in `hypercall.rs` |
 | GET_REG / SET_REG via COMM page | ✅ Done | `get_vp_register`/`set_vp_register` read/write `VpCommPage` directly |
 | `IRTE.NDST` sync on VP activation | ✅ Done | `sync_irte_ndst` called in `do_switch` after VMPTRLD; updates NDST for all Deliver-vector IRTEs. **Needs end-to-end test once real device assignment is in use.** |
-| Deliver fast-path in vmexit handler | ❌ Not done | `EXIT_REASON_EXTERNAL_INTERRUPT` always routes upward; no VectorPolicy check for `Deliver` re-inject (see §Gap Analysis) |
-| `route_interrupt()` used by capavisor | ❌ Not done | `forward_interrupt_to_handler()` hardcodes `platform.dom0_cap()` instead of calling engine's `route_interrupt()` (see §Gap Analysis) |
+| `route_interrupt()` used by capavisor | ✅ Done | Fixed in `c2820b5`. `forward_interrupt_to_handler()` now calls `route_interrupt()` and sets `RDI=vector`. See §Gap Analysis. |
+| Deliver fast-path in vmexit handler | ⚠️ Partial | `forward_interrupt_to_handler()` checks child `InterruptVisibility::Deliver` and re-injects via PIR/VMENTRY_INTR_INFO. Full vIRR fast-path not yet in vmexit dispatch. See §Gap Analysis. |
 | `do_inject_interrupt` policy check | ❌ Not done | PIR write bypasses `apply_update()` — no per-vector injection policy enforcement (partial A1 violation) |
 | EOI-exit bitmap update on policy change | ❌ Open | See Open Question 4; requires VMPTRLD+vmwrite on target VP's VMCS |
 | `THHV_IRQFD` fd-triggered injection | ✅ Done | `thhv_irqfd.c`: eventfd → workqueue → `VMCALL_INJECT_INTERRUPT` → `inject_via_pid`. Implemented. |
 | `THHV_IOEVENTFD` MMIO exit → eventfd | ✅ Done | `thhv_ioeventfd.c`: doorbell GPA → capavisor EPT fast-path → DomainComm → `eventfd_signal`. Implemented. |
-| Virtio I/O end-to-end (virtio_blk) | ❌ Broken | dom1 reaches virtio_blk probe but first I/O never completes. Zero INJECT_INTERRUPT VMCALLs observed. See §Virtio I/O Path. |
+| Virtio I/O end-to-end (virtio_blk) | ✅ Done | Fixed in `50ae665` (PIR scan order) + `fcbc04f` (interrupt-window exiting). dom1 1-CPU boots to /bin/bash. See §Interrupt Delivery Bugs. |
+| Nested-virt multi-core scheduling | ❌ Not done | AP gets ~0 instructions per quantum on QEMU+KVM. See §Nested Virtualization Scheduling. |
 
 ### Key Design Constraint: LAPIC Timer Interrupts
 
@@ -705,79 +706,54 @@ dom1 guest (L2)                 capavisor (L0)           thhv driver (L1 kernel)
     fires → I/O completes.
 ```
 
-### Current Failure Point (2026-03-30)
+### Resolved: Virtio Completion Pipeline (2026-03-30 → fixed 2026-04-01)
 
-Zero `INJECT_INTERRUPT` (opcode 0x1B) VMCALLs are observed during dom1 boot.
-This means the pipeline is broken somewhere between steps 2–8. The failure
-could be at any link:
-
-| Link | Hypothesis | How to verify |
-|------|-----------|---------------|
-| Step 2→3 | Doorbell GPA not registered (IOEventFd not set up) | Instrument `VMCALL_REGISTER_DOORBELL` in capavisor; check if CHV calls `register_ioeventfd` |
-| Step 3 | EPT violation occurs but no doorbell match → falls to slow path | Add doorbell-miss counter in `handle_ept_violation` |
-| Step 5 | DomainComm RX ring not drained (thhv doesn't poll it, or ring is full) | Instrument `thhv_drain_domcomm_rx` — is it called? Does it find messages? |
-| Step 5→6 | eventfd not signaled (doorbell_id → eventfd mapping missing) | Instrument eventfd_signal path in thhv_ioeventfd.c |
-| Step 6→7 | CHV processes virtqueue but doesn't signal completion eventfd | Instrument CHV's virtio completion path |
-| Step 7→8 | IRQFD eventfd fires but workqueue handler doesn't run | Instrument `thhv_irqfd_inject` entry |
-| Step 8→9 | VMCALL reaches capavisor but fails validation | Instrument `do_inject_interrupt` entry + return code |
-
-**Debugging strategy**: Instrument from the middle outward. Start at step 5
-(`thhv_drain_domcomm_rx`) since it's the bridge between capavisor and userspace.
-If DomainComm messages are arriving but eventfds aren't signaled, the problem is
-in thhv's doorbell→eventfd mapping. If no DomainComm messages arrive, the problem
-is in the capavisor's doorbell fast-path or in IOEventFd registration.
+The pipeline was originally broken — zero `INJECT_INTERRUPT` VMCALLs observed.
+The root cause was NOT in the pipeline wiring itself (steps 2–8 above) but in
+the **software PIR drain** at the endpoint (step 10). See §Interrupt Delivery
+Bugs for the three bugs fixed: PIR ON bit (289d746), scan order (50ae665), and
+IF=0 deferral (fcbc04f). With those fixes, dom1 boots to `/bin/bash` on 1 CPU
+with working disk I/O.
 
 ---
 
 ## Implementation Gap Analysis
 
-*(Added 2026-03-30. Based on code review in `themis/docs/interrupt-handling-review.md`)*
+*(Added 2026-03-30. Updated 2026-04-02 with resolution status.)*
 
 The hardware infrastructure (VAPIC, VID, PID, VT-d IR) is fully implemented and
-working. The gaps are in the **software wiring** — the capavisor does not use the
-capability engine's interrupt model. This section catalogues the gaps between the
-design (above) and the current implementation.
+working. This section tracks the gaps between the design (above) and the
+implementation.
 
-### Gap 1: `route_interrupt()` Not Called (Critical — A9 Violation)
+**Source**: These gaps were identified in a code review at commit 796c048
+(2026-03-27). The original review document has been retired; its content is
+preserved here.
 
-**Design**: `forward_interrupt_to_handler()` should call `route_interrupt(vector,
-&child_cap, core_id)` to walk the domain CDT and find the handler domain based on
-`VectorPolicy`.
+### Gap 1: `route_interrupt()` Not Called — ✅ FIXED (c2820b5)
 
-**Reality**: The handler is hardcoded to `platform.dom0_cap()`:
-```rust
-// hypercall.rs — CURRENT (WRONG)
-let dom0_cap = platform.dom0_cap();
-let dom0_domain_id = dom0_cap.read().data.id;
-```
+**Problem**: `forward_interrupt_to_handler()` hardcoded `platform.dom0_cap()` as
+the handler instead of calling `route_interrupt()`. Violated A9 for deeper
+hierarchies.
 
-**Consequence**: Interrupts always route to dom0 regardless of `InterruptPolicy`.
-Works for the current 2-level hierarchy (dom0 → dom1) but is fundamentally broken
-for deeper hierarchies (dom0 → dom1 → dom2) and violates A9.
+**Fix** (commit c2820b5): `forward_interrupt_to_handler()` now calls
+`platform.route_interrupt(vector, &child_cap, core_id)` to walk the domain CDT
+and find the correct handler based on `VectorPolicy`. Hardcoded dom0 lookup
+removed.
 
-**Fix**: Replace the hardcoded dom0 lookup with:
-```rust
-let (handler_domain_id, _reported_to) = route_interrupt(vector, &child_cap, core_id);
-```
-
-### Gap 2: No `Deliver` Fast-Path in VMEXIT Handler (Performance)
+### Gap 2: No `Deliver` Fast-Path in VMEXIT Handler — ⚠️ Partial
 
 **Design** (§Interrupt Routing Flows): When a physical interrupt fires during child
 execution and the child's `VectorPolicy` for that vector is `Deliver`, the capavisor
 should set `vIRR[V]` in the child's VAPIC and VMRESUME immediately — no domain
 switch, no lazy-unwind.
 
-**Reality**: All child external interrupts go through `forward_interrupt_to_handler()`,
-which always does a full domain switch to the handler (dom0). There is no
-VectorPolicy check at the point where `EXIT_REASON_EXTERNAL_INTERRUPT` is handled.
+**Current state**: `forward_interrupt_to_handler()` checks child visibility and
+re-injects `Deliver` vectors via PIR/VMENTRY_INTR_INFO (no domain switch). This is
+functionally correct but the check happens inside the function rather than as an
+early exit in the VMEXIT dispatch. A full vIRR-based fast-path in vmexit.rs would
+avoid the function call overhead entirely.
 
-**Consequence**: Even interrupts the child "owns" (e.g., virtual device interrupts
-posted via IRQFD that happen to fire physically while the child runs) cause a full
-VMCLEAR/VMPTRLD/domain-switch cycle. This is the exact opposite of the design goal
-(§Goal 2: "Interrupts a child domain 'owns' must be delivered without requiring
-capavisor involvement").
-
-**Fix**: In `vmexit.rs` `EXIT_REASON_EXTERNAL_INTERRUPT` handler for child VPs:
+**Future fix**: Move the `Deliver` check into `EXIT_REASON_EXTERNAL_INTERRUPT`:
 ```rust
 let policy = child_domain.policy.interrupts.get_policy(vector);
 match policy.visibility {
@@ -793,7 +769,7 @@ match policy.visibility {
 }
 ```
 
-### Gap 3: `do_inject_interrupt()` Bypasses `apply_update()` (A1 Partial Violation)
+### Gap 3: `do_inject_interrupt()` Bypasses `apply_update()` — ❌ Open (low priority)
 
 **Design** (A1): "Capability engine validates before any hardware change."
 
@@ -811,23 +787,25 @@ There is no `Update::InjectInterrupt` variant, so:
 
 **Fix** (lower priority): Add `Update::InjectInterrupt { domain_id, vp_id, vector }`
 to the update enum. The engine checks that the injecting domain's `VectorPolicy`
-for that vector permits injection (e.g., a domain with `NotReport` policy for vector
-V should not be able to inject V into a child).
+for that vector permits injection.
 
-### Gap 4: RDI Not Set to Vector on Interrupt Return
+### Gap 4: RDI Not Set to Vector on Interrupt Return — ✅ FIXED (c2820b5)
 
-**Design** (A3): "SWITCH call returns early with RDI = preempting vector."
+**Problem**: `forward_interrupt_to_handler()` set `RDI = 0` instead of the
+preempting vector. CHV couldn't distinguish which vector preempted a child.
 
-**Reality**: `forward_interrupt_to_handler()` sets `RDI = 0`:
-```rust
-handler_active.set_reg(Reg::Rdi, 0);  // should be vector
-```
+**Fix** (commit c2820b5): `RDI = vector as u64` now set in the ERR_RETRY return
+path, per the A3 lazy-unwind contract.
 
-The vector IS injected via `VMENTRY_INTERRUPTION_INFO_FIELD`, so dom0's IDT fires
-correctly. But the VMM (CHV) doesn't know which vector preempted its child — it
-only sees `themis_switch()` returning `-EAGAIN` with no vector info.
+### Retired Findings (from original code review)
 
-**Fix**: Set `RDI = vector as u64` in the ERR_RETRY return path.
+The following issues from the 2026-03-27 review were also fixed in c2820b5:
+
+- **`DEFERRED_HOST_VECTOR` violating A3 lazy-unwind** — removed entirely.
+  Interrupt deferral is now handled separately via `quantum-sched` feature
+  (see §Nested Virtualization Scheduling).
+- **`yield_child_to_dom0()` passing dummy vector=0** — function removed.
+- **Ungated debug logging** — cleaned up, gated behind `cfg!(feature = "verbose")`.
 
 ---
 
@@ -988,3 +966,231 @@ the virtio_blk bug by re-injecting dom0's timer interrupts faster, giving the ch
 more execution time. **Debug the virtio_blk pipeline first** (see §Virtio I/O Path)
 to establish a clean baseline, then apply Phase 4 for correctness.
 
+---
+
+## Interrupt Delivery Bugs (Lessons Learned)
+
+*(Added 2026-04-02)*
+
+Three bugs were fixed to get 1-CPU dom1 booting to `/bin/bash`. An agent MUST
+understand these to work on interrupt code — they are subtle interactions between
+the software PIR drain fallback, guest interrupt state, and scan order.
+
+### Bug 1: PIR ON bit not set for local injection (fixed in `289d746`)
+
+`inject_via_pid(is_remote=false)` set `PIR[vector]` but did not set `PID.ON`.
+Hardware only processes PIR→vIRR on VMENTRY when `ON=1`. Local injections
+(same-core, no notification IPI) silently dropped vectors.
+
+**Fix**: Always set `PID.ON=1` after writing PIR, regardless of `is_remote`.
+
+### Bug 2: PIR drain scan order starved device interrupts (fixed in `50ae665`)
+
+The software PIR drain in `do_switch` step 7b scanned high→low (PIR word 3→0).
+Timer interrupts (vector 236, word 3) were always found first. Only ONE vector
+can be injected per VMENTRY via `VMENTRY_INTERRUPTION_INFO_FIELD`. Device
+interrupts (vectors in word 0, e.g. virtio-blk) were permanently starved.
+
+**Fix**: Scan PIR low→high (word 0→3) so device vectors are prioritized. Use
+snapshot-and-restore: atomically snapshot all PIR words, inject the lowest
+pending vector, put remaining vectors back in PIR for the next drain cycle.
+
+### Bug 3: IF=0 blocks PIR drain indefinitely (fixed in `fcbc04f`)
+
+The PIR drain only runs at SWITCH time (`do_switch` step 7b). But the guest
+has `IF=0` (inside a timer interrupt handler) on ~97% of drain attempts.
+Device interrupts accumulated in PIR but were never injected because the drain
+checked `RFLAGS.IF` and skipped injection when IF=0.
+
+**Fix**: Interrupt-window exiting. When PIR has pending vectors but the guest
+has `IF=0`, set `PRIMARY_PROCBASED_EXEC_CONTROLS` bit 2 (interrupt-window
+exiting). This forces a VMEXIT when the guest sets `IF=1` (typically via
+`iret` from the timer handler). The new `EXIT_REASON_INTERRUPT_WINDOW` (7)
+handler (`drain_pir_on_interrupt_window`) drains PIR and injects immediately.
+The bit is cleared when PIR is empty.
+
+### Key insight
+
+These three bugs share a theme: the software PIR drain fallback (used when
+hardware posted interrupts are unavailable, i.e. on QEMU+KVM) has subtle
+correctness requirements that the hardware path handles automatically:
+- Hardware always sets ON (Bug 1)
+- Hardware delivers all pending vectors, not just one (Bug 2)
+- Hardware delivers regardless of guest IF state via pending virtual interrupt
+  evaluation on every VMENTRY (Bug 3)
+
+The software fallback must approximate these behaviors manually.
+
+---
+
+## Nested Virtualization Scheduling
+
+*(Added 2026-04-02. Consolidates content from the retired `quantum-sched.md`
+and `todo.md` approach analysis.)*
+
+### The Problem
+
+On nested virtualization (QEMU/KVM dev environment), the capavisor's VMRESUME
+into a child VP takes ~100μs due to nested VMCS overhead. Dom0's LAPIC timer
+fires at ~250Hz (every 4ms), but KVM often has the timer already pending by
+the time the child's VMRESUME completes. Result:
+
+- `EXIT_REASON_EXTERNAL_INTERRUPT` fires immediately after VMRESUME
+- `forward_interrupt_to_handler()` does full lazy-unwind: VMCLEAR child,
+  VMPTRLD dom0, inject timer vector (0xEC)
+- Child VP executes **~0 instructions** per 4ms timer period
+- Dom1's BSP boots (slowly) because its workload is I/O-heavy — each EPT
+  violation exit advances it regardless of preemption
+- Dom1's AP **cannot boot**: CPU-intensive init needs sustained compute time,
+  and Linux has a ~5s timeout for AP check-in
+
+```
+QEMU+KVM (actual L0, physical host)
+  └─ Capavisor (L0 logical, VMX root inside KVM guest)
+       └─ Dom0 (L1, Ubuntu, 4 CPUs) → thhv.ko
+            └─ CHV (userspace) → ioctls
+                 └─ Dom1 (L2, custom Linux, 2 CPUs) → the child VM
+```
+
+On **real hardware**: VMRESUME takes ~1μs, and posted interrupts suppress
+timer exits entirely. This problem does not exist. The `quantum-sched` feature
+should NOT be enabled on bare metal.
+
+### Approaches tried (all failed)
+
+**Approach A: Defer ALL interrupts + preemption timer yield**
+- Child external interrupt → ACK vector → store in `DEFERRED_HOST_VECTOR` →
+  VMRESUME child immediately
+- Preemption timer fires → yield to dom0, inject deferred vector
+- **Result at 20ms quantum**: AP reaches `cpuhp_ap_sync_alive`, but dom0
+  starves → RCU stall at ~688s
+- **Result at 1ms quantum**: Dom0 hung_task warnings, SSH unresponsive
+- **Why it failed**: Dom0's timer interrupt was consumed by capavisor
+  (ACK_INTERRUPT_ON_EXIT) but never delivered to dom0's IDT →
+  `scheduler_tick()` never ran → `TIF_NEED_RESCHED` never set → dom0 starved
+
+**Approach B: Forward ALL child interrupts to dom0** (current code, correct A3)
+- Child external interrupt → `forward_interrupt_to_handler` → switch to dom0
+  VMCS, inject vector
+- Dom0 IDT handles the interrupt → scheduler runs naturally
+- **Result**: Dom0 stays healthy (SSH alive!) but AP stuck at RIP=0x0 — never
+  executes one instruction
+- **Why it fails**: The interrupt is vector 0xEC = dom0's LAPIC timer
+  (scheduler tick at ~250Hz). The VMCLEAR/VMPTRLD/VMRESUME sequence for the
+  child takes so long in nested virt that dom0's timer deadline is already past
+  by the time the child's VMRESUME completes → KVM immediately exits
+
+**Approach C: Deferred + 1ms preemption timer (hybrid)**
+- Defer AP interrupts (like A) but with 1ms quantum
+- **Result**: Dom0 hung_task warnings. SSH intermittently responsive. Too much
+  VMCLEAR/VMPTRLD overhead at 1ms granularity.
+
+### Solution: `quantum-sched` feature
+
+Gate: `feature = "quantum-sched"` in `themis/capavisor/Cargo.toml`.
+
+Instead of immediately switching back to dom0 on every external interrupt,
+**defer** parent-bound interrupts and re-enter the child (same VMCS, no
+expensive VMCLEAR/VMPTRLD). Deliver the deferred interrupt when the VMX
+preemption timer fires (~20ms), giving the child a guaranteed quantum.
+
+**Why this avoids Approach A's failure**: Approach A consumed vectors but never
+delivered them. This design uses the proven `forward_interrupt_to_handler()`
+path for delivery — just delayed to the quantum boundary.
+
+**Key insight**: The re-entry after deferral is a VMRESUME into the **same**
+child VMCS (no VMCLEAR/VMPTRLD). In nested virt, KVM re-enters L2 directly.
+The ACK'd timer is rearmed for +4ms, so the child gets ~4ms of uninterrupted
+execution before the next timer fires. This is dramatically better than 0
+instructions per quantum.
+
+#### Flow: `EXIT_REASON_EXTERNAL_INTERRUPT` (child VP, quantum-sched enabled)
+
+```
+1. ACK_INTERRUPT_ON_EXIT gives us the vector
+2. Check child's InterruptPolicy for this vector
+3a. Child-owned (Deliver visibility):
+    - Inject directly (same as non-quantum-sched path)
+3b. Parent-bound (Report/NotReport):
+    - If deferred_vector is empty: store vector, VMRESUME child (no switch)
+    - If deferred_vector is set: flush old via forward_interrupt_to_handler
+      (dom0 switch), store new vector as deferred
+```
+
+#### Flow: `EXIT_REASON_VMX_PREEMPTION_TIMER` (child VP, quantum-sched enabled)
+
+```
+1. Check deferred_vector for this core
+2a. Vector deferred:
+    - forward_interrupt_to_handler(vcpu, deferred_vector)
+    - Dom0 gets its timer, scheduler_tick() runs
+    - Child is suspended (lazy-unwind)
+    - thhv retries SWITCH → child gets another quantum
+2b. No deferred vector:
+    - Reset preemption timer (current behavior)
+```
+
+#### Per-core state
+
+```rust
+// In platform.rs, added to CoreContext:
+pub deferred_vector: AtomicU16,  // 0 = none, 1-255 = vector
+```
+
+Helper methods on `ThemisPlatform`:
+- `set_deferred(core_id, vector)` — store a deferred vector
+- `take_deferred(core_id) -> Option<u8>` — atomically take (swap to 0)
+
+#### Multiple interrupts
+
+If `deferred_vector` is already set when a new parent-bound interrupt arrives,
+the existing deferred vector is flushed first (via `forward_interrupt_to_handler`),
+then the new one stored. This prevents lost interrupts. In practice, only one
+dom0 timer fires per ~4ms, and our quantum is ~20ms, so at most ~5 deferred
+timers accumulate — but we handle the general case correctly.
+
+#### Constraints
+
+- **Dom0 has no PID page** — cannot use `inject_via_pid()` for dom0. Must use
+  the existing lazy-unwind path which does VMCLEAR/VMPTRLD and injects via
+  `VMENTRY_INTR_INFO`.
+- **Only parent-bound interrupts deferred** — child-owned (`Deliver` visibility)
+  and device interrupts forwarded immediately.
+- **Preemption timer quantum** — currently 60M ticks (~20ms at rate divisor 5,
+  3GHz TSC). Adjustable via `PREEMPTION_TIMER_TICKS`.
+- **A3 lazy-unwind preserved** — the interrupt IS delivered, just batched to
+  the quantum boundary. Same delivery path, same capability checks, same
+  vector injection.
+
+#### Files modified
+
+| File | Change |
+|------|--------|
+| `themis/capavisor/Cargo.toml` | Add `quantum-sched = []` feature |
+| `themis/capavisor/src/platform.rs` | `deferred_vector` in CoreContext + helpers |
+| `themis/capavisor/src/vmexit.rs` | Conditional deferral in ext-intr and preemption-timer handlers |
+| `themis/capavisor/src/hypercall.rs` | `is_parent_bound_vector()` helper |
+
+#### Other observations
+
+- The timerfd/irqfd path for dom1's timer is NOT the cause of the 0xEC flood.
+  The flood is dom0's OWN scheduler tick (hrtimer → LAPIC), not irqfd injection.
+  Dom1's timerfd fires ~1/sec during boot (large TSC deltas).
+- Dom1 uses TSC-deadline mode (WRMSR 0x6E0). CHV arms a timerfd. When it fires:
+  timerfd → eventfd → thhv workqueue → INJECT_INTERRUPT vmcall → capavisor sets
+  PIR bit. PIR is drained by `do_switch` step 7b on next VMRESUME.
+- `inject_via_pid` changed to `is_remote=false` to avoid notification IPI
+  causing immediate exit.
+
+---
+
+## References
+
+| Source | Type | Relevance |
+|--------|------|-----------|
+| Intel SDM Vol 3C §29.6 | Hardware spec | Posted Interrupt Descriptor layout, PIR/ON/SN fields |
+| Intel SDM Vol 3C §25–30 | Hardware spec | VMX, APIC virtualization, exit reasons, VMCS fields |
+| Intel SDM Vol 3C §10.12.1 | Hardware spec | x2APIC MSR range (0x800–0x8FF) |
+| Directvisor (VEE 2020) | Academic paper | Bare-metal interrupt virtualization model. Kevin Cheng et al., "Directvisor: Virtualization for Bare-Metal Cloud." pp. 45–58. |
+| Themis / Tyche (EuroS&P) | Project paper | Capability model, attestation scheme, interrupt policies |
+| Hypervisor-101-in-Rust | Educational | Intel VMX and AMD SVM bare-metal reference (GitHub) |
