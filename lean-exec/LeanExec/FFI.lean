@@ -645,7 +645,8 @@ private def domainInfoToJson (dom : ExecDomain) : String :=
 @[export lean_exec_list_domains]
 def ffiListDomains : IO UInt32 := do
   let st ← gState.get
-  let domains := st.domains.map fun (_, dom) => domainInfoToJson dom
+  let domains := (st.domains.filter fun (_, dom) => dom.status != .revoked).map
+    fun (_, dom) => domainInfoToJson dom
   -- Include channel entries from gChanMap (like Rust's self.domains has channels)
   let chanMap ← gChanMap.get
   let chanEntries := chanMap.map fun (chanId, (_, _, targetDomId)) =>
@@ -665,7 +666,16 @@ private partial def memCapToJson (st : ExecState) (uid : CapNodeId)
     (localHandle : Nat) : String :=
   match st.getMemCap uid with
   | some cap =>
-    let children := cap.childUids.toList.map fun childUid =>
+    -- Skip children whose owner domain is revoked (matches Rust: revoked
+    -- domains are removed from the backend table, so their children are
+    -- silently omitted from the DTO tree).
+    let visibleChildren := cap.childUids.toList.filter fun childUid =>
+      match st.getMemCap childUid with
+      | some c => match st.getDomain c.capId.domainId with
+        | some d => d.status != .revoked
+        | none => false
+      | none => false
+    let children := visibleChildren.map fun childUid =>
       memCapToJson st childUid 0
     jsonObj [
       ("uid", jsonNum uid),
@@ -740,15 +750,17 @@ def ffiGetPendingCaps (domId : UInt64) : IO UInt32 := do
 
 @[export lean_exec_get_address_space]
 def ffiGetAddressSpace (domId : UInt64) : IO UInt32 := do
-  let result ← runOp (LeanExec.computeAddressSpace domId.toNat)
+  -- View command always shows identity mapping (GPA = HPA), matching Rust's
+  -- cached_view which is HPA-based.  GPA overrides only affect attest output.
+  let result ← runOp (LeanExec.computeAddressSpace domId.toNat (excludeMeta := true))
   match result with
   | .ok regions =>
-    let json := regions.map fun (start, size, rights) =>
+    let json := regions.map fun (_gpa, size, hpa, rights) =>
       jsonObj [
-        ("gpa", jsonNum start),
+        ("gpa", jsonNum hpa),
         ("size", jsonNum size),
         ("rights", jsonStr (toString rights)),
-        ("hpa", jsonNum start),
+        ("hpa", jsonNum hpa),
         ("is_identity_mapped", jsonBool true) ]
     gResultStr.set (jsonArr json)
     pure 0

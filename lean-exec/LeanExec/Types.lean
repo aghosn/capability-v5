@@ -279,6 +279,7 @@ structure PendingMemCap where
   senderHandle : LocalHandle
   capNodeId    : CapNodeId
   attributes   : Attributes
+  gpa          : Option Nat
 deriving Repr
 
 /-- A pending domain capability (channel) transfer. -/
@@ -310,6 +311,9 @@ structure ExecDomain where
   parentDomId   : Option DomainId
   /-- COMM bindings: (target domain, vp_id, memcap uid) -/
   commBindings  : List (DomainId × VpId × CapNodeId)
+  /-- GPA overrides: (memcap uid, gpa_base). When present, the cap's
+      access.start maps to gpa_base instead of identity (GPA = HPA). -/
+  gpaOverrides  : List (CapNodeId × Nat)
 deriving Repr
 
 namespace ExecDomain
@@ -329,7 +333,8 @@ def empty (id : DomainId) (parent : Option DomainId) (policy : DomainPolicy) : E
     nextDomHandle := 1
     nextPendingId := 0
     parentDomId := parent
-    commBindings := [] }
+    commBindings := []
+    gpaOverrides := [] }
 
 def lookupNodeId (d : ExecDomain) (h : LocalHandle) : Option CapNodeId :=
   (d.memCaps.find? (fun p => p.1 == h)).map Prod.snd

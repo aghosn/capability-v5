@@ -69,6 +69,47 @@ private def hasCarveOverlapForAlias (s : ExecState) (parent : ExecMemCap)
 private def findHandle (dom : ExecDomain) (uid : CapNodeId) : Option LocalHandle :=
   (dom.memCaps.find? (fun p => p.2 == uid)).map Prod.fst
 
+/-- Compute GPA-mapped ranges for a domain's visible address space.
+    Returns (gpa_start, size) tuples with GPA offsets applied. -/
+private def getGpaMappedRanges (s : ExecState) (dom : ExecDomain)
+    : List (Nat × Nat) :=
+  dom.memCaps.flatMap fun (_, uid) =>
+    match s.getMemCap uid with
+    | some cap =>
+      if cap.attributes.meta then []
+      else
+        let fragments := visibleFragments s cap
+        let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
+          | some (_, g) => g
+          | none => cap.region.access.start
+        let gpaOffset := gpaBase - cap.region.access.start
+        fragments.map fun (start, size) => (start + gpaOffset, size)
+    | none => []
+
+/-- Compute full GPA ranges for overlap checking. Includes the entire cap
+    range (not just visible fragments) because carved-out gaps are "blocked"
+    entries in Rust's AddressMap and prevent new mappings. -/
+private def getGpaFullRanges (s : ExecState) (dom : ExecDomain)
+    : List (Nat × Nat) :=
+  dom.memCaps.flatMap fun (_, uid) =>
+    match s.getMemCap uid with
+    | some cap =>
+      if cap.attributes.meta then []
+      else
+        let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
+          | some (_, g) => g
+          | none => cap.region.access.start
+        [(gpaBase, cap.region.access.size)]
+    | none => []
+
+/-- Check if range [start, start+size) overlaps any range in the list. -/
+private def rangesOverlap (ranges : List (Nat × Nat)) (start size : Nat)
+    : Bool :=
+  let e := start + size
+  ranges.any fun (rs, rsz) =>
+    let re := rs + rsz
+    start < re && rs < e
+
 -- ════════════════════════════════════════════════════════════════════
 -- § init — Initialize root domain and root memory capability
 -- ════════════════════════════════════════════════════════════════════
@@ -324,6 +365,15 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
   -- Determine GPA for the receiver (use hint or default to access.start)
   let gpa := gpaHint.getD cap.region.access.start
 
+  -- Check for GPA overlap in receiver's address space (Rust: address_map.overlaps).
+  -- Uses full cap ranges including carved-out gaps, which are "blocked" entries
+  -- in Rust's AddressMap and prevent new mappings from landing there.
+  if !attrs.meta then do
+    let s ← CapaM.getState
+    let existingRanges := getGpaFullRanges s receiver
+    if rangesOverlap existingRanges gpa cap.region.access.size then
+      CapaM.throw .regionOverlap
+
   if receiver.isUnsealed then do
     -- Immediate transfer: remove from caller, add to receiver
     CapaM.modifyDomain callerId (·.removeMemCap capHandle)
@@ -334,11 +384,14 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
       attributes := attrs }
     CapaM.setMemCap capUid cap'
 
-    -- Allocate handle in receiver
+    -- Allocate handle in receiver and store GPA override
     let recv ← CapaM.getDomain receiverId
     let (recv', recvHandle) := recv.allocMemHandle
     let recv'' := recv'.addMemCap recvHandle capUid
-    CapaM.setDomain receiverId recv''
+    let recv''' := if gpa != cap.region.access.start then
+      { recv'' with gpaOverrides := recv''.gpaOverrides ++ [(capUid, gpa)] }
+    else recv''
+    CapaM.setDomain receiverId recv'''
 
     -- Generate EPT updates using visible fragments (cap range minus carved children).
     -- This ensures carved children retained by the sender are NOT unmapped.
@@ -374,7 +427,7 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
     -- Freeze sender's handle
     CapaM.modifyDomain callerId (·.freeze capHandle)
 
-    -- Create pending entry in receiver
+    -- Create pending entry in receiver (store GPA for later accept)
     let recv ← CapaM.getDomain receiverId
     let (recv', pendingId) := recv.allocPendingId
     let pending : PendingMemCap :=
@@ -382,7 +435,8 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
         senderDomId := callerId
         senderHandle := capHandle
         capNodeId := capUid
-        attributes := attrs }
+        attributes := attrs
+        gpa := gpaHint }
     let recv'' := { recv' with pendingMem := recv'.pendingMem ++ [pending] }
     CapaM.setDomain receiverId recv''
 
@@ -417,7 +471,16 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
   -- Allocate handle and add cap to receiver
   let (receiver'', recvHandle) := receiver'.allocMemHandle
   let receiver''' := receiver''.addMemCap recvHandle pending.capNodeId
-  CapaM.setDomain receiverId receiver'''
+
+  -- Determine GPA: explicit override > pending's stored GPA > identity
+  let gpa := gpaOverride.orElse (fun _ => pending.gpa)
+    |>.getD cap.region.access.start
+
+  -- Store GPA override if non-identity
+  let receiver'''' := if gpa != cap.region.access.start then
+    { receiver''' with gpaOverrides := receiver'''.gpaOverrides ++ [(pending.capNodeId, gpa)] }
+  else receiver'''
+  CapaM.setDomain receiverId receiver''''
 
   -- Remove cap from sender's memCaps
   CapaM.modifyDomain pending.senderDomId (·.removeMemCap pending.senderHandle)
@@ -429,9 +492,6 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
   let cap' := { cap with capId := { cap.capId with domainId := receiverId } }
   CapaM.setMemCap pending.capNodeId cap'
 
-  -- Determine GPA
-  let gpa := gpaOverride.getD cap.region.access.start
-
   -- Generate EPT updates using visible fragments (cap range minus carved children).
     -- Carved caps: unmap visible fragments from sender + map to receiver
     -- Alias caps: no unmap from sender (alias doesn't affect parent view)
@@ -440,8 +500,7 @@ def accept (receiverId : DomainId) (pendingId : Nat) (gpaOverride : Option Nat)
     let fragments := visibleFragments s cap
     let gpaOffset := gpa - cap.region.access.start
     let senderUnmap : UpdateBatch :=
-      if cap.attributes.meta then []
-      else if cap.region.kind == .carve then
+      if cap.region.kind == .carve then
         fragments.map fun (start, size) =>
           HwUpdate.unmapMemory pending.senderDomId start size
       else []
@@ -509,6 +568,10 @@ partial def revoke (callerId : DomainId) (parentHandle : LocalHandle)
   let s' ← CapaM.getState
   let subtreeUids := s'.collectSubtree childUid
 
+  -- Capture child cap info before subtree processing destroys it.
+  -- Needed for parent re-map after revoke.
+  let childCap ← CapaM.getMemCap childUid
+
   -- Process each cap in subtree: generate updates and clean up
   let mut updates : UpdateBatch := []
   let mut vitalDomains : List DomainId := []
@@ -552,7 +615,27 @@ partial def revoke (callerId : DomainId) (parentHandle : LocalHandle)
     childUids := parentRefresh.childUids.filter (· != childUid) }
   CapaM.setMemCap parentUid parent'
 
-  -- Handle vital domains: revoke the owning domain
+  -- Re-map parent's recovered region (Carved children only).
+  -- When a carved child owned by a DIFFERENT domain is revoked, the parent
+  -- owner regains access to the range blocked by the carve.
+  -- Skip if same owner (parent's view already includes the range).
+  -- Matches Rust: parent_info = None when parent_owner == child_owner.
+  let parentOwner := parentRefresh.capId.domainId
+  let childOwner := childCap.capId.domainId
+  let parentOwnerDom ← CapaM.getDomain parentOwner
+  if childCap.region.kind == .carve
+    && parentOwner != childOwner
+    && !parentOwnerDom.isRevoked then
+    updates := updates ++ [HwUpdate.mapMemory parentOwner
+      childCap.region.access.start  -- GPA = HPA (identity)
+      childCap.region.access.start  -- HPA
+      childCap.region.access.size
+      parentRefresh.region.access.rights]  -- parent's rights
+
+  -- Handle vital domains: revoke the owning domain.
+  -- NOTE: Unlike Rust's revoke_domain (which cascades to memory caps),
+  -- the VITAL trigger only emits RevokeDomain — the platform tears down the
+  -- domain's EPT.  Memory caps remain in the CDT tree as zombie children.
   for domId in vitalDomains do
     let dom ← CapaM.getDomain domId
     if !dom.isRevoked then

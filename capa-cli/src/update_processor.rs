@@ -22,12 +22,13 @@ pub fn process_updates(state: &mut CliState, updates: &[HwUpdate]) {
         for &domain_id in &revoked_domains {
             if let Some(name) = state.domain_id_to_name.remove(&domain_id) {
                 // Remove owned memory capabilities from CLI state
-                let owned_mems: Vec<String> = state
+                let mut owned_mems: Vec<String> = state
                     .mem_names
                     .iter()
                     .filter(|(_, uid)| state.mem_owners.get(uid) == Some(&domain_id))
                     .map(|(n, _)| n.clone())
                     .collect();
+                owned_mems.sort();
                 for mem_name in &owned_mems {
                     if let Some(uid) = state.mem_names.remove(mem_name) {
                         state.mem_owners.remove(&uid);

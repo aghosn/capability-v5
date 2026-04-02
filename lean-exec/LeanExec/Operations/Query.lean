@@ -37,15 +37,20 @@ private def subtractRanges (start : Nat) (size : Nat)
 
 /-- Get the merged address space view for a domain.
 
-    Returns (start, size, rights) tuples representing visible memory.
-    For each memCap owned by the domain, includes its access range
-    minus any carved children. -/
-def computeAddressSpace (domId : DomainId) : CapaM (List (Nat × Nat × Rights)) := do
+    Returns (gpa, size, hpa, rights) tuples representing visible memory.
+    GPA offsets from gpaOverrides are applied so entries reflect the
+    domain's actual address space layout, not raw HPAs. -/
+def computeAddressSpace (domId : DomainId) (excludeMeta : Bool := false)
+    : CapaM (List (Nat × Nat × Nat × Rights)) := do
   let dom ← CapaM.getDomain domId
   let s ← CapaM.getState
   let entries := dom.memCaps.filterMap fun (_, uid) =>
     match s.getMemCap uid with
     | some cap =>
+      -- META caps excluded from the domain's EPT view (used by `view` command)
+      -- but included in the attest GPA section (matching Rust address_map)
+      if excludeMeta && cap.attributes.meta then none
+      else
       let access := cap.region.access
       let carvedRanges := cap.childUids.toList.filterMap fun childUid =>
         match s.getMemCap childUid with
@@ -55,7 +60,12 @@ def computeAddressSpace (domId : DomainId) : CapaM (List (Nat × Nat × Rights))
           else none
         | none => none
       let segments := subtractRanges access.start access.size carvedRanges
-      some (segments.map fun (st, sz) => (st, sz, access.rights))
+      -- Apply GPA offset from domain's overrides
+      let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
+        | some (_, g) => g
+        | none => access.start
+      let gpaOffset := gpaBase - access.start
+      some (segments.map fun (st, sz) => (st + gpaOffset, sz, st, access.rights))
     | none => none
   pure (entries.flatten.mergeSort fun a b => a.1 < b.1)
 
@@ -300,7 +310,13 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         -- GPA line: only show for child domains (which receive memory via send
         -- and thus have GPA mappings); root's memcaps have no GPA mapping.
         let gpaLine := if dom.parentDomId.isSome then
-          s!"    GPA: {toHexR access.start} (identity)\n"
+          let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
+            | some (_, g) => g
+            | none => access.start
+          if gpaBase != access.start then
+            s!"    GPA: {toHexR gpaBase} (HPA {toHexR access.start})\n"
+          else
+            s!"    GPA: {toHexR access.start} (identity)\n"
         else ""
         -- Child carved/aliased lines
         let childLines := cap.childUids.toList.map fun childUid =>
@@ -322,9 +338,12 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
     if addrSpace.isEmpty then
       out := out ++ "  (empty)\n"
     else
-      let gpaLines := addrSpace.map fun (start, size, rights) =>
-        let end_ := start + size
-        s!"  GPA {toHexR start}..{toHexR end_} → HPA {toHexR start} {rights} (identity)\n"
+      let gpaLines := addrSpace.map fun (gpa, size, hpa, rights) =>
+        let end_ := gpa + size
+        if gpa == hpa then
+          s!"  GPA {toHexR gpa}..{toHexR end_} → HPA {toHexR hpa} {rights} (identity)\n"
+        else
+          s!"  GPA {toHexR gpa}..{toHexR end_} → HPA {toHexR hpa} {rights} \n"
       out := out ++ String.join gpaLines
   else
     out := out ++ "\nGPA Address Space:\n"

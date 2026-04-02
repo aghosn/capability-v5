@@ -220,14 +220,14 @@ private def formatList (st : CliState) : String := Id.run do
 -- § formatView — show a single domain's address space
 -- ════════════════════════════════════════════════════════════════════
 
-private def formatView (st : CliState) (domId : DomainId) (addrSpace : List (Nat × Nat × Rights)) : String := Id.run do
+private def formatView (st : CliState) (domId : DomainId) (addrSpace : List (Nat × Nat × Nat × Rights)) : String := Id.run do
   let name := domainName st domId
   let mut out := s!"Address space for {name} (id={domId}):\n"
   if addrSpace.isEmpty then
     out := out ++ "  <empty>\n"
   else
-    for (start, size, rights) in addrSpace do
-      out := out ++ s!"  [0x{toHex start}..0x{toHex (start + size)}) {rights}\n"
+    for (gpa, size, _hpa, rights) in addrSpace do
+      out := out ++ s!"  [0x{toHex gpa}..0x{toHex (gpa + size)}) {rights}\n"
   out
 
 -- ════════════════════════════════════════════════════════════════════
