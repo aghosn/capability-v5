@@ -1018,25 +1018,6 @@ fn do_switch(
 
     let vp_idx = vp_id as usize;
 
-    // ── 0. quantum-sched: drain deferred vector before switching to child ──
-    // If a parent-bound vector was deferred during the child's last quantum,
-    // inject it into the parent (still the active VMCS) and return ERR_RETRY.
-    // thhv.ko will re-issue the SWITCH after the interrupt is handled.
-    #[cfg(feature = "quantum-sched")]
-    {
-        let core_id = platform
-            .get_current_core()
-            .expect("[SWITCH] get_current_core failed");
-        if let Some(vec) = platform.take_deferred(core_id as usize) {
-            let intr_info = (1u64 << 31) | (vec as u64);
-            vcpu.set(
-                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                intr_info,
-            );
-            return Some(HypercallResult::error(errors::ERR_RETRY));
-        }
-    }
-
     // ── 1a. Resolve child domain ID + COMM HPA (before Capability::switch) ──
     // MUST happen before Capability::switch transitions the child VP to Running,
     // because set_register (used to validate the dirty COMM page registers)
@@ -1624,6 +1605,21 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         .try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
         .unwrap_or(3); // VMCALL is 3 bytes
     parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
+
+    // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
+    // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
+    // Injecting here (rather than in do_switch with a stale VMCS) avoids
+    // RCU stalls under nested virtualisation.
+    #[cfg(feature = "quantum-sched")]
+    {
+        if let Some(vec) = platform.take_deferred(core_id as usize) {
+            let intr_info = (1u64 << 31) | (vec as u64);
+            parent_active.set(
+                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                intr_info,
+            );
+        }
+    }
 
     // Replace the monitor loop's ActiveVcpu with the parent's.
     unsafe {
