@@ -139,7 +139,6 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   let caller ← CapaM.getDomain callerId
   -- Preconditions
   CapaM.requireSealed caller
-  CapaM.requireApi caller (·.canCarve)
   CapaM.requireNotFrozen caller parentHandle
 
   let parentUid ← match caller.lookupNodeId parentHandle with
@@ -151,9 +150,15 @@ def carve (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (Access.containedB access parent.region.access)
     .invalidAccess
 
-  -- Parent must not be COMM or META (Rust returns permissionDenied)
+  -- Ownership check: caller must own the parent
+  CapaM.guard (parent.capId.domainId == callerId) .permissionDenied
+
+  -- Parent must not be COMM or META (checked before API — matches Rust order)
   CapaM.guard (!parent.attributes.comm) .permissionDenied
   CapaM.guard (!parent.attributes.meta) .permissionDenied
+
+  -- API check
+  CapaM.requireApi caller (·.canCarve)
 
   -- No overlap with existing carved children (Rust returns invalidAccess, not regionOverlap)
   let s ← CapaM.getState
@@ -215,7 +220,6 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   let caller ← CapaM.getDomain callerId
   -- Preconditions
   CapaM.requireSealed caller
-  CapaM.requireApi caller (·.canAlias)
   CapaM.requireNotFrozen caller parentHandle
 
   let parentUid ← match caller.lookupNodeId parentHandle with
@@ -227,9 +231,15 @@ def «alias» (callerId : DomainId) (parentHandle : LocalHandle)
   CapaM.guard (Access.containedB access parent.region.access)
     .invalidAccess
 
-  -- Parent must not be COMM or META (Rust returns permissionDenied)
+  -- Ownership check: caller must own the parent
+  CapaM.guard (parent.capId.domainId == callerId) .permissionDenied
+
+  -- Parent must not be COMM or META (checked before API — matches Rust order)
   CapaM.guard (!parent.attributes.comm) .permissionDenied
   CapaM.guard (!parent.attributes.meta) .permissionDenied
+
+  -- API check
+  CapaM.requireApi caller (·.canAlias)
 
   -- Aliases can overlap other aliases but NOT carved children (Rust returns invalidAccess)
   let s ← CapaM.getState
