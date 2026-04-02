@@ -439,13 +439,13 @@ def ffiSwitchForward (targetDomId coreId vpId : UInt64) : IO UInt32 := do
   let some (.runningDomain callerId _) := st.getCoreState coreId.toNat
     | returnError (.invalidOperation "no domain on core")
   -- Resolve target: try domCaps first, then chanCaps
-  let targetHandle := match resolveDomHandle st callerId targetDomId.toNat with
-    | some h => h
+  let resolved : Option LocalHandle := match resolveDomHandle st callerId targetDomId.toNat with
+    | some h => some h
     | none => match st.getDomain callerId with
-      | some dom => match (dom.chanCaps.find? (fun p => p.2 == targetDomId.toNat)).map Prod.fst with
-        | some h => h
-        | none => 0  -- will fail in operation
-      | none => 0
+      | some dom => (dom.chanCaps.find? (fun p => p.2 == targetDomId.toNat)).map Prod.fst
+      | none => none
+  let some targetHandle := resolved
+    | returnError .notFound
   let result ← runOp (LeanExec.switchForward callerId targetHandle coreId.toNat vpId.toNat)
   match result with
   | .ok sr => storeSwitchResult sr; storeUpdates []; pure 0
@@ -463,9 +463,9 @@ def ffiSwitchReturn (coreId : UInt64) : IO UInt32 := do
 
 @[export lean_exec_deliver_interrupt]
 def ffiDeliverInterrupt (vector domainId coreId : UInt64) : IO UInt32 := do
-  let result ← runOp (LeanExec.deliverInterrupt vector.toNat domainId.toNat coreId.toNat)
+  let result ← runOp (LeanExec.handleInterrupt vector.toNat domainId.toNat coreId.toNat)
   match result with
-  | .ok _ => storeUpdates []; pure 0
+  | .ok sr => storeSwitchResult sr; storeUpdates []; pure 0
   | .error e => returnError e
 
 -- ════════════════════════════════════════════════════════════════════

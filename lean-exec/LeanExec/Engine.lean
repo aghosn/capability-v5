@@ -468,9 +468,9 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
 
   | .interrupt vector domName core => do
     let st ← stRef.get
-    let some handlerId := st.lookupDomain domName
+    let some startId := st.lookupDomain domName
       | pure s!"Error: unknown domain '{domName}'"
-    let result ← runCapaM stRef (LeanExec.deliverInterrupt vector handlerId core)
+    let result ← runCapaM stRef (LeanExec.handleInterrupt vector startId core)
     match result with
     | .ok sr => pure s!"Interrupt delivered: vector {vector} → {domainName st sr.toDomain}"
     | .error e => pure s!"Error: {e}"

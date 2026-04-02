@@ -190,7 +190,7 @@ def switchForward (callerId : DomainId) (targetHandle : LocalHandle)
     | none => pure ()
     CapaM.setCoreState coreId (.runningDomain targetId targetVpId)
     pure { fromDomain := callerId, toDomain := targetId, fromVpId := some callerVpId, toVpId := some targetVpId, isReturn := false, vector := none }
-  | _ => CapaM.throw (.invalidOperation "target VP not available or suspended")
+  | _ => CapaM.throw (.invalidOperation "target VP is not available")
 
 -- ════════════════════════════════════════════════════════════════════
 -- § switchReturn — Return switch to the caller
@@ -229,6 +229,37 @@ def switchReturn (calleeDomId : DomainId) (coreId : CoreId)
   pure { fromDomain := calleeDomId, toDomain := callerCtx.domainId, fromVpId := some calleeVp.id, toVpId := some callerCtx.vpId, isReturn := true, vector := none }
 
 -- ════════════════════════════════════════════════════════════════════
+-- § routeInterrupt — Walk interrupt policies to find the handler
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Look up the interrupt policy for a specific vector. -/
+private def getVectorPolicy (policy : InterruptPolicy) (vector : Nat) : VectorPolicy :=
+  match policy.perVector.find? (fun p => p.1 == vector) with
+  | some (_, vis) => vis
+  | none => policy.defaultPolicy
+
+/-- Route an interrupt through the domain hierarchy to find the handler.
+    Walks from startDomId up through parentDomId, checking interrupt
+    policies. Returns the ID of the first domain with Deliver policy
+    (VectorPolicy.deliver). Root always delivers if reached. -/
+def routeInterrupt (startDomId : DomainId) (vector : Nat) : CapaM DomainId := do
+  let mut curDomId := startDomId
+  for _ in List.range 100 do
+    let dom ← CapaM.getDomain curDomId
+    let vis := getVectorPolicy dom.policy.interrupts vector
+    match vis with
+    | .deliver => return curDomId
+    | .deliverAndClear => -- REPORT: note, continue to parent
+      match dom.parentDomId with
+      | some pid => curDomId := pid
+      | none => return curDomId
+    | .deny => -- NOTREPORT: skip, continue to parent
+      match dom.parentDomId with
+      | some pid => curDomId := pid
+      | none => return curDomId
+  CapaM.throw (.invalidOperation "interrupt routing exceeded max depth")
+
+-- ════════════════════════════════════════════════════════════════════
 -- § deliverInterrupt — Lazy-unwind interrupt delivery
 -- ════════════════════════════════════════════════════════════════════
 
@@ -241,6 +272,12 @@ partial def deliverInterrupt (vector : Nat) (handlerDomId : DomainId) (coreId : 
   let (leafDomId, leafVpId) ← match s.getCoreState coreId with
     | some (.runningDomain d v) => pure (d, v)
     | _ => CapaM.throw (.invalidOperation "no VP running on core")
+  -- Short-circuit: handler is the leaf itself (self-delivery)
+  if leafDomId == handlerDomId then
+    CapaM.setCoreState coreId (.runningDomain leafDomId leafVpId)
+    return { fromDomain := leafDomId, toDomain := handlerDomId,
+             fromVpId := some leafVpId, toVpId := some leafVpId,
+             isReturn := true, vector := some vector }
   -- Mark leaf VP as Interrupted
   let leafDom ← CapaM.getDomain leafDomId
   let (leafIdx, leafVp) ← match findVpById leafDom leafVpId with
@@ -290,6 +327,13 @@ partial def deliverInterrupt (vector : Nat) (handlerDomId : DomainId) (coreId : 
   if !found then
     CapaM.throw (.invalidOperation "handler domain not found in call chain")
   pure { fromDomain := leafDomId, toDomain := handlerDomId, fromVpId := some leafVpId, toVpId := some curVpId, isReturn := true, vector := some vector }
+
+/-- Combined routing + delivery: route the interrupt through policies,
+    then walk the VP call chain to deliver it. -/
+def handleInterrupt (vector : Nat) (startDomId : DomainId) (coreId : CoreId)
+    : CapaM SwitchResult := do
+  let handlerDomId ← routeInterrupt startDomId vector
+  deliverInterrupt vector handlerDomId coreId
 
 -- ════════════════════════════════════════════════════════════════════
 -- § switch — Unified dispatch

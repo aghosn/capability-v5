@@ -1,0 +1,41 @@
+# Regression test: Interrupt routing + encapsulation + VP recovery
+#
+# Tests three fixes:
+# 1. Interrupt routing walks policy chain (NOTREPORT → root DELIVER)
+# 2. Switch to unreachable domain fails (root cannot see child)
+# 3. VP recovery path: switch to Suspended caller frees Interrupted callee
+#
+# Setup: root → parent → child, NOTREPORT for vector 42.
+
+init root 0x200000
+create-domain root parent 0b1111 GET,ATTEST,SWITCH,SEAL,CREATE,SET
+carve r0 pmem 0x80000 0x60000 RWX
+send pmem parent
+set-interrupt-policy parent 42 NOTREPORT
+seal parent
+create-domain parent child 0b1111 GET,ATTEST,SWITCH
+set-interrupt-policy child 42 NOTREPORT
+seal child
+
+# Build call chain: root → parent → child on core 0
+switch parent 0 0
+switch child 0 0
+
+# Deliver interrupt 42 — should route child(NR) → parent(NR) → root(DELIVER)
+interrupt 42 0
+
+# After interrupt: root should be running on core 0
+list
+
+# Encapsulation: root cannot switch to child (no handle)
+# EXPECT_FAIL
+switch child 0 0
+
+# Recovery: switch to Suspended parent, which frees Interrupted child
+switch parent 0 0
+
+# Now child VP is Available again, parent can switch to it
+switch child 0 0
+
+# Final state: child running on core 0 again
+list

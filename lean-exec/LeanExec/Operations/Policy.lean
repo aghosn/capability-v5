@@ -55,18 +55,21 @@ private def apiToNat (a : MonitorAPI) : Nat :=
   (if a.canGetChan then 2048 else 0) +
   (if a.canReceiveAfterSeal then 4096 else 0)
 
-/-- Convert Nat (0=deny, 1=deliver, 2=deliverAndClear) to VectorPolicy. -/
+/-- Convert Nat to VectorPolicy.
+    Matches Rust InterruptVisibility discriminants:
+    0 = DELIVER, 1 = REPORT, 2 = NOTREPORT.
+    We map: deliver ↔ DELIVER, deliverAndClear ↔ REPORT, deny ↔ NOTREPORT. -/
 private def natToVisibility (n : Nat) : VectorPolicy :=
-  if n == 1 then .deliver
-  else if n == 2 then .deliverAndClear
+  if n == 0 then .deliver
+  else if n == 1 then .deliverAndClear
   else .deny
 
 /-- Convert VectorPolicy to Nat. -/
 private def visibilityToNat (v : VectorPolicy) : Nat :=
   match v with
-  | .deny           => 0
-  | .deliver        => 1
-  | .deliverAndClear => 2
+  | .deliver        => 0
+  | .deliverAndClear => 1
+  | .deny           => 2
 
 /-- Computable CoreMask subset check. -/
 private def coreSubsetB (child parent : CoreMask) : Bool :=
