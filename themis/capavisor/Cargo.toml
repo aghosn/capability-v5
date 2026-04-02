@@ -14,6 +14,10 @@ verbose = []
 # Force-disable posted interrupts even when hardware supports them.
 # Uses the software PIR→VMENTRY_INTR_INFO drain fallback in do_switch.
 no-posted-interrupts = []
+# Defer parent-bound interrupts during child execution to guarantee a
+# minimum execution quantum on nested-virt platforms where VMRESUME
+# overhead is high (~100µs).  Should NOT be enabled on bare-metal.
+quantum-sched = []
 
 [dependencies]
 capa-engine  = { workspace = true }

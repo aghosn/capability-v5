@@ -332,6 +332,10 @@ pub struct CoreContext {
     /// The VMCALL handler's entry point into the capability tree.
     /// `None` only during early boot before dom0 is initialised.
     pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
+    /// (quantum-sched) Parent-bound vector deferred during child execution.
+    /// 0 = no deferred vector; 1–255 = vector number awaiting flush to parent.
+    #[cfg(feature = "quantum-sched")]
+    pub deferred_vector: AtomicU16,
 }
 
 impl CoreContext {
@@ -340,6 +344,8 @@ impl CoreContext {
             domain_id: AtomicU64::new(IDLE_DOMAIN),
             vp_id: AtomicU32::new(IDLE_VP),
             domain_cap: Mutex::new(None),
+            #[cfg(feature = "quantum-sched")]
+            deferred_vector: AtomicU16::new(0),
         }
     }
 }
@@ -1337,6 +1343,25 @@ impl ThemisPlatform {
     #[allow(dead_code)]
     pub fn get_core_vp(&self, core_id: usize) -> u32 {
         self.cores[core_id].vp_id.load(Ordering::Acquire)
+    }
+
+    // ── quantum-sched deferred vector helpers ────────────────────────── //
+
+    /// Store a parent-bound vector to be flushed later (quantum-sched).
+    ///
+    /// The deferred vector is flushed to the parent domain on the next
+    /// preemption timer expiry or before the next SWITCH to a child.
+    #[cfg(feature = "quantum-sched")]
+    pub fn set_deferred(&self, core_id: usize, vector: u8) {
+        self.cores[core_id].deferred_vector.store(vector as u16, Ordering::Release);
+    }
+
+    /// Atomically take the deferred vector for the given core (quantum-sched).
+    /// Returns `Some(vector)` if one was stored, `None` if empty (0).
+    #[cfg(feature = "quantum-sched")]
+    pub fn take_deferred(&self, core_id: usize) -> Option<u8> {
+        let val = self.cores[core_id].deferred_vector.swap(0, Ordering::AcqRel);
+        if val == 0 { None } else { Some(val as u8) }
     }
 
     // ── Per-core update queue ─────────────────────────────────────────── //

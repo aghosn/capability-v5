@@ -292,9 +292,28 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
                             // Physical interrupt fired while child was running.
                             // ACK_INTERRUPT_ON_EXIT consumed the vector.
-                            // A3 lazy-unwind: forward to handler domain immediately.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let vector = (intr_info & 0xFF) as u8;
+                            #[cfg(feature = "quantum-sched")]
+                            {
+                                // Check if vector is parent-bound (not owned by child).
+                                let child_cap = platform.get_core_cap(core_id as usize)
+                                    .expect("[QSCHED] get_core_cap failed");
+                                let vis = child_cap.read().data.policy.interrupts
+                                    .get_policy(vector).visibility;
+                                if vis != capability_engine::InterruptVisibility::Deliver {
+                                    // Parent-bound: defer instead of expensive VMCS swap.
+                                    if let Some(old) = platform.take_deferred(core_id as usize) {
+                                        // Flush old deferred vector to parent first.
+                                        crate::hypercall::forward_interrupt_to_handler(vcpu, old);
+                                        platform.set_deferred(core_id as usize, vector);
+                                        return; // monitor loop re-enters parent (dom0)
+                                    }
+                                    platform.set_deferred(core_id as usize, vector);
+                                    return; // re-enter child (same VMCS, cheap!)
+                                }
+                            }
+                            // A3 lazy-unwind: forward to handler domain immediately.
                             crate::hypercall::forward_interrupt_to_handler(vcpu, vector);
                             return;
                         }
@@ -320,8 +339,16 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         EXIT_REASON_VMX_PREEMPTION_TIMER => {
-                            // Preemption timer expired. Reset for next quantum.
-                            // No yield — interrupts are forwarded immediately (A3).
+                            #[cfg(feature = "quantum-sched")]
+                            {
+                                // Child quantum expired.  If a deferred vector exists,
+                                // flush to parent so dom0 gets its timer tick.
+                                if let Some(vec) = platform.take_deferred(core_id as usize) {
+                                    crate::hypercall::forward_interrupt_to_handler(vcpu, vec);
+                                    return; // monitor loop re-enters parent (dom0)
+                                }
+                            }
+                            // No deferred vector — reset timer, stay in child.
                             vcpu.set(
                                 vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
                                 PREEMPTION_TIMER_TICKS,
