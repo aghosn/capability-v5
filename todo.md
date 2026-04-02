@@ -6,7 +6,7 @@
 
 ---
 
-## Current State (2026-04-01)
+## Current State (2026-04-02)
 
 ### What works
 
@@ -34,23 +34,11 @@
 
 ### Recent commits
 
+- `c33e9bd` — **fix: Lean interrupt routing + visibility mapping + switch encapsulation (Cat E)**
+- `b07697a` — **fix: Lean send/accept uses visible fragments (child subtraction)**
+- `7bfa833` — **fix: Lean META send guards — require exclusive leaf, add regression test**
 - `bc04fe5` — **chore: make CRB the default TPM transport**
 - `9779e4a` — **feat(P20k): CRB transport support for TPM driver**
-- `71390bc` — **fix: domcomm_request_grow nr_pages on partial memremap failure**
-- `090f835` — **feat(P20j-6,7): attestation crypto verification test + ioctl fixes**
-- `8d91531` — **fix: merge overlapping PCI BAR regions + exclude COMM from PA map**
-- `0c8c7ac` — **fix: LocalHandle in attestation + tpm-crb + swtpm ≥ 0.8 docs**
-- `c7c669e` — **fix: safe TPM probe + correct binary size calculation**
-- `c99055e` — **docs: TPM / attested boot section in README**
-- `eaa779f` — **fix: curve25519-dalek fiat backend for no-SSE target**
-- `1931c23` — **feat: make attestation on-demand — driver requests via ATTEST_SELF**
-- `acfaa3b` — **feat: thhv attestation ioctls — ATTEST_SELF + READ_PCR**
-- `46d1358` — **feat: signed attestation hypercall + TPM PCR read**
-- `02145cc` — **feat: attested boot — Ed25519 keygen + SHA-256 measurement + TPM PCR extend**
-- `a468cca` — **feat: add TPM 2.0 TIS driver crate and QEMU swtpm integration**
-- `b19ceb7` — **Ground work for TPM attestation (ABI types)**
-- `fcbc04f` — **fix: interrupt-window exiting delivers deferred device interrupts**
-- `50ae665` — **fix: PIR drain low→high scan eliminates device interrupt starvation**
 
 ### Uncommitted changes
 
@@ -273,7 +261,7 @@ functions to the 83 existing safety theorems.
 ### In progress: lean-exec differential testing
 
 Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
-15 tutorial scenarios. **8/15 tutos now match** (01–04, 06, 11, 13 + index).
+15 tutorial scenarios + 5 regression tests. **12/20 tests now match** (01–06, 11–13 + 3 regression).
 
 | Cat | Issue | Tutos | Status |
 |-----|-------|-------|--------|
@@ -282,21 +270,19 @@ Comparing capa-cli outputs between `--backend rust` and `--backend lean` across
 | C | Source VP index shows "?" | 2 | ✅ Fixed (c4edf0b) |
 | J | UID allocation | — | ✅ Fixed (e9b869a) |
 | L | Error messages differ | several | ✅ Mostly fixed (c4edf0b) |
+| E | Interrupt routing + chain walk + switch encapsulation | 1 | ✅ Fixed (c33e9bd) |
+| G | Attest succeeds on unsealed domain (should reject) | 1 | ✅ Fixed (0464477) |
 | D | Send to sealed domain queued as pending | 3 | ❌ |
 | B | View/attest shows only hash (no full domain info) | 5 | ❌ Biggest remaining blocker |
-| E | Interrupt delivery fails ("chain broken") | 1 | ❌ |
 | F | Revoke doesn't cascade (domain + children not cleaned) | 1 | ❌ |
 | H | Domain owner names wrong in display | 2 | ❌ |
-| G | Attest succeeds on unsealed domain (should reject) | 1 | ❌ |
 | K | GPA overlap check missing in send | 1 | ❌ |
 
 **Remaining tutos by difficulty:**
-- **09** (1 line): cosmetic UID display in address space view
-- **12** (4 lines): Cat G — attest on unsealed domain
-- **05** (16 lines): Cat E — interrupt chain tracking in switch
-- **07, 10** (58, 38 lines): dominated by Cat B (attest output format)
-- **08** (45 lines): Cat B + Cat K (GPA overlap check)
-- **14, 15** (127, 149 lines): Cat B + Cat D + Cat H
+- **09** (1 line): cosmetic — enumerate tree missing `uid:1` line
+- **07, 10** (smaller): dominated by Cat B (attest output format)
+- **08** (smaller): Cat B + Cat K (GPA overlap check)
+- **14, 15** (larger): Cat B + Cat D + Cat H
 
 **⚠ Validation audit needed (discovered via Cat L):** Investigating error message
 differences revealed that `register_comm` was missing 4 validation checks that
