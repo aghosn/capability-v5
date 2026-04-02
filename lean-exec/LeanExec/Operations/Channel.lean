@@ -105,8 +105,9 @@ def acceptChannel (receiverId : DomainId) (pendingId : Nat)
   let (receiver, newHandle) := receiver.allocDomHandle
   let receiver := receiver.addChanCap newHandle pending.targetDomId
   CapaM.setDomain receiverId receiver
-  -- Unfreeze sender's handle
-  CapaM.modifyDomain pending.senderDomId (·.unfreeze pending.senderHandle)
+  -- Unfreeze and remove sender's handle (Rust removes on accept)
+  CapaM.modifyDomain pending.senderDomId
+    (fun d => (d.unfreeze pending.senderHandle).removeChanCap pending.senderHandle)
   pure newHandle
 
 /-- Reject a pending channel capability.

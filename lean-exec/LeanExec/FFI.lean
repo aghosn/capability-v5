@@ -40,9 +40,10 @@ initialize gErrorMsg  : IO.Ref String ← IO.mkRef ""
 -- Update buffer
 initialize gUpdates : IO.Ref (Array HwUpdate) ← IO.mkRef #[]
 
--- Channel UID mapping: synthetic channel UID → (ownerDomId, localHandle)
-initialize gChanMap    : IO.Ref (List (UInt64 × (DomainId × LocalHandle))) ← IO.mkRef []
-initialize gNextChanId : IO.Ref UInt64 ← IO.mkRef 0
+-- Channel UID mapping: synthetic channel UID → (ownerDomId, localHandle, targetDomId)
+initialize gChanMap    : IO.Ref (List (UInt64 × (DomainId × LocalHandle × DomainId))) ← IO.mkRef []
+-- Channel IDs count down from a high value to avoid collision with domain IDs (which count up from 0).
+initialize gNextChanId : IO.Ref UInt64 ← IO.mkRef (UInt64.ofNat 0xFFFFFFFFFFFFFFFF)
 
 -- ════════════════════════════════════════════════════════════════════
 -- § Error mapping
@@ -194,7 +195,7 @@ private def jsonOptNum (v : Option Nat) : String :=
 def ffiInit (memSize numCores : UInt64) : IO UInt32 := do
   gNumCores.set numCores.toNat
   gChanMap.set []
-  gNextChanId.set 0
+  gNextChanId.set (UInt64.ofNat 0xFFFFFFFFFFFFFFFF)
   let result ← runOp (LeanExec.init memSize.toNat numCores.toNat)
   match result with
   | .ok (domId, memUid) =>
@@ -209,7 +210,7 @@ def ffiReset (numCores : UInt64) : IO UInt32 := do
   gState.set (ExecState.empty numCores.toNat)
   gNumCores.set numCores.toNat
   gChanMap.set []
-  gNextChanId.set 0
+  gNextChanId.set (UInt64.ofNat 0xFFFFFFFFFFFFFFFF)
   gUpdates.set #[]
   pure 0
 
@@ -264,7 +265,13 @@ def ffiSend (memUid receiverId attrs gpaVal hasGpa : UInt64) : IO UInt32 := do
     | returnError .notFound
   let gpaHint := if hasGpa.toNat != 0 then some gpaVal.toNat else none
   let leanAttrs := attrsFromBits attrs.toNat
-  let result ← runOp (LeanExec.send callerId capHandle receiverId.toNat leanAttrs gpaHint)
+  -- Channel forwarding: if receiverId is a synthetic channel ID, resolve to
+  -- the channel's target domain (mirrors Rust's channel_target follow).
+  let chanMap ← gChanMap.get
+  let actualReceiver := match chanMap.find? (fun p => p.1 == receiverId) with
+    | some (_, (_, _, targetId)) => targetId
+    | none => receiverId.toNat
+  let result ← runOp (LeanExec.send callerId capHandle actualReceiver leanAttrs gpaHint)
   match result with
   | .ok updates =>
     storeUpdates updates
@@ -351,7 +358,7 @@ def ffiRevokeDomain (parentId childId : UInt64) : IO UInt32 := do
 
 private def allocChanId : IO UInt64 := do
   let id ← gNextChanId.get
-  gNextChanId.set (id + 1)
+  gNextChanId.set (id - 1)
   pure id
 
 @[export lean_exec_get_chan]
@@ -359,11 +366,16 @@ def ffiGetChan (callerId targetId : UInt64) : IO UInt32 := do
   let st ← gState.get
   let some targetHandle := resolveDomHandle st callerId.toNat targetId.toNat
     | returnError .notFound
+  -- Resolve the target domain ID for storage in gChanMap
+  let some caller := st.getDomain callerId.toNat
+    | returnError .notFound
+  let some actualTargetId := caller.lookupDomId targetHandle
+    | returnError .notFound
   let result ← runOp (LeanExec.getChan callerId.toNat targetHandle)
   match result with
   | .ok chanHandle =>
     let chanId ← allocChanId
-    gChanMap.modify (· ++ [(chanId, (callerId.toNat, chanHandle))])
+    gChanMap.modify (· ++ [(chanId, (callerId.toNat, chanHandle, actualTargetId))])
     gResult1.set chanId
     storeUpdates []
     pure 0
@@ -372,7 +384,7 @@ def ffiGetChan (callerId targetId : UInt64) : IO UInt32 := do
 @[export lean_exec_send_channel]
 def ffiSendChannel (callerId chanId receiverId : UInt64) : IO UInt32 := do
   let chanMap ← gChanMap.get
-  let some (_, (_, chanHandle)) := chanMap.find? (fun p => p.1 == chanId)
+  let some (_, (_, chanHandle, _)) := chanMap.find? (fun p => p.1 == chanId)
     | returnError .notFound
   let result ← runOp (LeanExec.sendChannel callerId.toNat chanHandle receiverId.toNat)
   match result with
@@ -384,8 +396,15 @@ def ffiAcceptChannel (receiverId pendingId : UInt64) : IO UInt32 := do
   let result ← runOp (LeanExec.acceptChannel receiverId.toNat pendingId.toNat)
   match result with
   | .ok chanHandle =>
+    -- Look up the target domain ID from the receiver's newly-added chanCap
+    let st ← gState.get
+    let targetDomId := match st.getDomain receiverId.toNat with
+      | some dom => match dom.lookupChanTarget chanHandle with
+        | some tid => tid
+        | none => 0
+      | none => 0
     let chanId ← allocChanId
-    gChanMap.modify (· ++ [(chanId, (receiverId.toNat, chanHandle))])
+    gChanMap.modify (· ++ [(chanId, (receiverId.toNat, chanHandle, targetDomId))])
     gResult1.set chanId
     storeUpdates []
     pure 0
@@ -627,7 +646,19 @@ private def domainInfoToJson (dom : ExecDomain) : String :=
 def ffiListDomains : IO UInt32 := do
   let st ← gState.get
   let domains := st.domains.map fun (_, dom) => domainInfoToJson dom
-  gResultStr.set (jsonArr domains)
+  -- Include channel entries from gChanMap (like Rust's self.domains has channels)
+  let chanMap ← gChanMap.get
+  let chanEntries := chanMap.map fun (chanId, (_, _, targetDomId)) =>
+    jsonObj [
+      ("id", jsonNum chanId.toNat),
+      ("status", jsonStr "Unsealed"),
+      ("is_channel", jsonBool true),
+      ("channel_target", jsonNum targetDomId),
+      ("cores_bitmap", jsonNum 0),
+      ("api_flags", jsonStr ""),
+      ("num_vps", jsonNum 0),
+      ("vp_states", jsonArr []) ]
+  gResultStr.set (jsonArr (domains ++ chanEntries))
   pure 0
 
 private partial def memCapToJson (st : ExecState) (uid : CapNodeId)
@@ -744,10 +775,18 @@ def ffiGetCoreStates : IO UInt32 := do
 
 @[export lean_exec_attest]
 def ffiAttest (domId : UInt64) : IO UInt32 := do
-  let result ← runOp (LeanExec.attestSelf domId.toNat)
+  -- Channel resolution: if domId is a synthetic channel ID, attest the target
+  -- domain and prefix the report with Channel/Target lines.
+  let chanMap ← gChanMap.get
+  let chanInfo : Option (String × Nat) :=
+    (chanMap.find? (fun p => p.1 == domId)).map fun (_, (_, _, targetId)) =>
+      (s!"Channel: true\nTarget Domain ID: {targetId}\n\n", targetId)
+  let chanPrefix := (chanInfo.map Prod.fst).getD ""
+  let actualId := (chanInfo.map Prod.snd).getD domId.toNat
+  let result ← runOp (LeanExec.attestSelf actualId)
   match result with
   | .ok report =>
-    gResultStr.set report
+    gResultStr.set (chanPrefix ++ report)
     pure 0
   | .error e => returnError e
 

@@ -156,6 +156,16 @@ private def AttestCtx.getMemName (ctx : AttestCtx) (uid : CapNodeId) : String :=
   | some (_, n) => n
   | none => "?"
 
+/-- Get or create a channel name (chN) for a target domain. -/
+private def AttestCtx.nameChan (ctx : AttestCtx) (targetId : DomainId) : AttestCtx × String :=
+  ctx.nameDomain targetId (isChan := true)
+
+private def AttestCtx.getChanName (ctx : AttestCtx) (targetId : DomainId) : String :=
+  -- Look for channel name; fall back to "?"
+  match ctx.domNames.find? fun (k, _) => k == targetId with
+  | some (_, n) => n
+  | none => "?"
+
 /-- Pre-name all carved/aliased children of a memory cap (recursive). -/
 private partial def nameMemChildren (s : ExecState) (ctx : AttestCtx)
     (uid : CapNodeId) : AttestCtx :=
@@ -175,6 +185,16 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
   let dom ← CapaM.getDomain domId
   let s ← CapaM.getState
 
+  -- 0. Find channels targeting this domain (like Rust CDT children).
+  --    In Rust, channel caps are CDT children of their target domain.
+  --    In Lean, channels are in their owner's chanCaps, so we scan.
+  let channelsTargetingMe : List (DomainId × LocalHandle) :=
+    s.domains.foldl (fun acc (_, otherDom) =>
+      otherDom.chanCaps.foldl (fun acc2 (handle, targetId) =>
+        if targetId == domId then acc2 ++ [(otherDom.domainId, handle)] else acc2
+      ) acc
+    ) []
+
   -- 1. Name this domain (already named by caller)
   let domName := ctx.getDomainName domId
 
@@ -182,6 +202,13 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
   let ctx := dom.domCaps.foldl (fun acc (_, childId) =>
     let (acc', _) := acc.nameDomain childId
     acc') ctx
+
+  -- 2b. Name channels targeting this domain (get chN names, like Rust CDT children)
+  --    Each channel gets a unique chN name based on the counter.
+  let (ctx, chanTargetNames) := channelsTargetingMe.foldl (fun (acc, names) _ =>
+    let name := s!"ch{acc.chCtr}"
+    ({ acc with chCtr := acc.chCtr + 1 }, names ++ [name])
+  ) (ctx, ([] : List String))
 
   -- 3. Name owned memory caps
   let ctx := dom.memCaps.foldl (fun acc (_, uid) =>
@@ -192,12 +219,14 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
   let ctx := dom.memCaps.foldl (fun acc (_, uid) =>
     nameMemChildren s acc uid) ctx
 
-  -- Summary header: d0 = Sealed domain(d1, m0, m1)
+  -- Summary header: d0 = Sealed domain(d1, ?, m0, m1)
+  --   domain_caps → named children; chanCaps → "?" (unnamed like Rust)
   let domCapSummary := dom.domCaps.map fun (_, childId) =>
     ctx.getDomainName childId
+  let chanCapSummary := dom.chanCaps.map fun _ => "?"
   let memCapSummary := dom.memCaps.map fun (_, uid) =>
     ctx.getMemName uid
-  let summary := domCapSummary ++ memCapSummary
+  let summary := domCapSummary ++ chanCapSummary ++ memCapSummary
   let summaryStr := ", ".intercalate summary
 
   let mut out := ""
@@ -237,20 +266,23 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
     out := out ++ "  Overrides:\n"
     out := out ++ String.join overrideLines
 
-  -- Children + parent
-  out := out ++ s!"Children: {dom.domCaps.length}\n"
+  -- Children + parent (includes CDT children + channels targeting this domain)
+  out := out ++ s!"Children: {dom.domCaps.length + channelsTargetingMe.length}\n"
   out := out ++ (match dom.parentDomId with
     | some pid => s!"Parent Domain ID: {pid}\n"
     | none => "Parent: None (root domain)\n")
 
   -- Owned Domain Capabilities
   out := out ++ "\nOwned Domain Capabilities:\n"
-  if dom.domCaps.isEmpty then
+  if dom.domCaps.isEmpty && dom.chanCaps.isEmpty then
     out := out ++ "  (none)\n"
   else
     let dcLines := dom.domCaps.map fun (handle, childId) =>
       s!"  Handle {handle}: {ctx.getDomainName childId}\n"
+    let chLines := dom.chanCaps.map fun (handle, _targetId) =>
+      s!"  Handle {handle}: ? = Channel → ?\n"
     out := out ++ String.join dcLines
+    out := out ++ String.join chLines
 
   -- Owned Memory Capabilities
   out := out ++ "\nOwned Memory Capabilities:\n"
@@ -308,8 +340,17 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         let childId := entry.2
         let result ← attestWithCtx childId accCtx false
         pure (accOut ++ "\n" ++ result.1, result.2)
-    out := out ++ childSections.1
-    pure (out, childSections.2)
+    -- Channel expansion: channels targeting this domain (like Rust CDT children)
+    -- chanTargetNames[i] pairs with channelsTargetingMe[i]
+    let chanSections ← (channelsTargetingMe.zip chanTargetNames).foldlM (init := childSections)
+      fun acc ((_ownerId, _handle), chanName) => do
+        let accOut := acc.1
+        let accCtx := acc.2
+        -- Name the target domain (this domain) for the channel line
+        let targetName := accCtx.getDomainName domId
+        pure (accOut ++ s!"\n{chanName} = Channel → {targetName}\n", accCtx)
+    out := out ++ chanSections.1
+    pure (out, chanSections.2)
   else
     pure (out, ctx)
 

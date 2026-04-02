@@ -653,10 +653,12 @@ impl Backend for LeanBackend {
             return vec![];
         }
         let json = get_result_str();
-        parse_json_array(&json)
+        let mut result: Vec<DomainInfoDto> = parse_json_array(&json)
             .iter()
             .map(parse_domain_info)
-            .collect()
+            .collect();
+        result.sort_by_key(|d| d.id);
+        result
     }
 
     fn get_domain_mem_caps(&self, id: DomainId) -> Vec<MemCapInfoDto> {
