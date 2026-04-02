@@ -229,12 +229,16 @@ unsafe fn write_control_fields(
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
-        | (1 << 8) // APIC_REGISTER_VIRT
-        | (if child { 1 << 9 } else { 0 }) // VIRTUAL_INTERRUPT_DELIVERY (VID) — requires EXTERNAL_INTERRUPT_EXITING
-        | (if child { 1 << 4 } else { 0 }) // VIRTUALIZE_X2APIC — x2APIC MSR reads (0x800-0x8FF) → VAPIC page; requires APIC_REGISTER_VIRT=1
-        // Intel SDM 26.2.1.1: VIRTUALIZE_X2APIC and VIRTUALIZE_APIC_ACCESSES
-        // cannot both be 1.  When child uses x2APIC virtualisation, skip xAPIC MMIO.
-        | (if !child && apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO
+        | (if !child { 1 << 8 } else { 0 }) // APIC_REGISTER_VIRT — dom0 only; child LAPIC fully emulated via exits
+        // VID (bit 9) requires EXTERNAL_INTERRUPT_EXITING which only child has,
+        // but child needs full LAPIC emulation via exits, so VID is off for both.
+        // Child guests use xAPIC (MMIO-based): VIRTUALIZE_APIC_ACCESSES
+        // (bit 0) intercepts all LAPIC MMIO, giving us full control for
+        // ICR/SIPI handling and LAPIC register emulation.
+        // APIC_REGISTER_VIRT (bit 8) and VID (bit 9) are disabled for
+        // children because the VAPIC page would need full LAPIC state
+        // synchronisation that CHV doesn't yet provide.
+        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };

@@ -444,12 +444,16 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let offset = qual & 0xFFF;
                             let acc_type = (qual >> 12) & 0xF;
                             if offset == 0x300 && acc_type == 1 {
-                                // ICR low write — forward to parent VMM.
+                                // ICR low write — decode instruction to extract
+                                // the source register value (CHV reads RAX).
+                                if let Some(val) = decode_apic_write_value(vcpu, platform) {
+                                    vcpu.set_reg(Reg::Rax, val as u64);
+                                }
                                 crate::hypercall::forward_child_exit(
                                     vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
                             }
-                            handle_apic_access_exit(vcpu);
+                            handle_apic_access_exit(vcpu, platform);
                             return;
                         }
                         EXIT_REASON_XSETBV => {
@@ -1015,7 +1019,13 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_APIC_ACCESS => {
-            handle_apic_access_exit(vcpu);
+            let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
+            if !platform_ptr.is_null() {
+                let platform = unsafe { &*platform_ptr };
+                handle_apic_access_exit(vcpu, platform);
+            } else {
+                next_instruction(vcpu);
+            }
         }
 
         EXIT_REASON_EOI_INDUCED => {
@@ -1054,26 +1064,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 ///   bits[11:0] — access offset within the 4 KB APIC-access page
 ///   bits[15:12] — access type: 0=data-read, 1=data-write, 2=instr-fetch,
 ///                              3=read-during-event-delivery, 10=GPA-read
-fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
+fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisPlatform) {
     let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
     let offset = (qual & 0xFFF) as usize; // byte offset within APIC page
     let acc_type = (qual >> 12) & 0xF;
 
-    // Log LAPIC timer-related register accesses (LVT Timer, Initial Count,
-    // Current Count, Divide Config) to diagnose timer mode selection.
-    const APIC_LVT_TIMER: usize = 0x320;
-    const APIC_TMICT: usize     = 0x380;
-    const APIC_TMCCT: usize     = 0x390;
-    const APIC_TDCR: usize      = 0x3E0;
-    if matches!(offset, APIC_LVT_TIMER | APIC_TMICT | APIC_TMCCT | APIC_TDCR) {
-    }
-
-    let platform_ptr = crate::PLATFORM_PTR.load(core::sync::atomic::Ordering::Acquire);
-    if platform_ptr.is_null() {
-        next_instruction(vcpu);
-        return;
-    }
-    let hhdm = unsafe { (*platform_ptr).hhdm_offset() };
+    let hhdm = platform.hhdm_offset();
 
     let vapic_phys = vcpu.vapic_phys();
     let vapic_virt = (vapic_phys + hhdm) as *mut u32;
@@ -1081,15 +1077,16 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
     match acc_type {
         0 | 3 => {
             // Data read or read during event delivery: return VAPIC page value.
-            // APIC registers are 32-bit aligned; offset / 4 gives the word index.
             let word_idx = offset / 4;
             let val = unsafe { vapic_virt.add(word_idx).read_volatile() };
             vcpu.set_reg(Reg::Rax, val as u64);
         }
         1 => {
-            // Data write: mirror into VAPIC page.
+            // Data write: decode instruction to find source register value,
+            // then mirror into VAPIC page.
             let word_idx = offset / 4;
-            let val = vcpu.reg(Reg::Rax) as u32;
+            let val = decode_apic_write_value(vcpu, platform)
+                .unwrap_or(vcpu.reg(Reg::Rax) as u32);
             unsafe { vapic_virt.add(word_idx).write_volatile(val) };
         }
         _ => {
@@ -1101,6 +1098,95 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu) {
         }
     }
     next_instruction(vcpu);
+}
+
+/// Decode the faulting MOV instruction at guest RIP to extract the 32-bit
+/// value being written for an APIC-access write exit.
+///
+/// Handles the common `mov [mem], reg32` (opcode 0x89) and
+/// `mov [mem], imm32` (opcode 0xC7 /0) patterns emitted by `writel()`.
+/// Returns `None` if the instruction can't be decoded.
+fn decode_apic_write_value(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+) -> Option<u32> {
+    use crate::hypercall::{ept_gpa_to_hpa, guest_gva_to_gpa};
+
+    let hhdm = platform.hhdm_offset();
+    let guest_rip = vcpu.get(vmcs::guest::RIP);
+    let guest_cr3 = vcpu.get(vmcs::guest::CR3);
+    let ept_root = vcpu.get(x86::vmx::vmcs::control::EPTP_FULL);
+
+    let insn_gpa = guest_gva_to_gpa(ept_root, hhdm, guest_cr3, guest_rip)?;
+    let insn_hpa = ept_gpa_to_hpa(ept_root, hhdm, insn_gpa)?;
+    let insn_ptr = (insn_hpa + hhdm) as *const u8;
+    let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
+    let mut buf = [0u8; 16];
+    unsafe { core::ptr::copy_nonoverlapping(insn_ptr, buf.as_mut_ptr(), avail) };
+
+    // Skip prefixes: REX (0x40-0x4F), operand-size (0x66), address-size (0x67)
+    let mut i = 0;
+    let mut rex: u8 = 0;
+    while i < avail {
+        match buf[i] {
+            0x40..=0x4F => { rex = buf[i]; i += 1; }
+            0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x3E | 0x26 | 0x64 | 0x65 | 0x36 => { i += 1; }
+            _ => break,
+        }
+    }
+    if i >= avail { return None; }
+
+    let opcode = buf[i];
+    i += 1;
+    if i >= avail { return None; }
+
+    match opcode {
+        0x89 => {
+            // MOV r/m32, r32: source register in ModRM reg field (bits 5:3)
+            let modrm = buf[i];
+            let reg_idx = ((modrm >> 3) & 0x7) | (if rex & 0x4 != 0 { 0x8 } else { 0 });
+            let val = match reg_idx {
+                0 => vcpu.reg(Reg::Rax),
+                1 => vcpu.reg(Reg::Rcx),
+                2 => vcpu.reg(Reg::Rdx),
+                3 => vcpu.reg(Reg::Rbx),
+                4 => return None, // RSP — not a valid APIC write source
+                5 => vcpu.reg(Reg::Rbp),
+                6 => vcpu.reg(Reg::Rsi),
+                7 => vcpu.reg(Reg::Rdi),
+                8 => vcpu.reg(Reg::R8),
+                9 => vcpu.reg(Reg::R9),
+                10 => vcpu.reg(Reg::R10),
+                11 => vcpu.reg(Reg::R11),
+                12 => vcpu.reg(Reg::R12),
+                13 => vcpu.reg(Reg::R13),
+                14 => vcpu.reg(Reg::R14),
+                15 => vcpu.reg(Reg::R15),
+                _ => return None,
+            };
+            Some(val as u32)
+        }
+        0xC7 => {
+            // MOV r/m32, imm32: immediate follows ModRM (+SIB+disp)
+            let modrm = buf[i];
+            i += 1;
+            let md = modrm >> 6;
+            let rm = modrm & 0x7;
+            // Skip SIB byte if present
+            if md != 3 && rm == 4 { i += 1; }
+            // Skip displacement
+            match md {
+                0 => { if rm == 5 { i += 4; } }
+                1 => { i += 1; }
+                2 => { i += 4; }
+                _ => {}
+            }
+            if i + 4 > avail { return None; }
+            let imm = u32::from_le_bytes([buf[i], buf[i+1], buf[i+2], buf[i+3]]);
+            Some(imm)
+        }
+        _ => None,
+    }
 }
 
 /// Inject a virtual interrupt directly via the VAPIC page (VID path).

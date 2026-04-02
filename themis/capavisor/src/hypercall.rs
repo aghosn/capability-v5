@@ -2552,7 +2552,7 @@ fn do_release_device(
 
 /// Walk a 4-level EPT to translate GPA → HPA.
 /// Returns `None` if the mapping doesn't exist.
-fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
+pub fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
     let mut table_phys = ept_root_phys & !0xFFF;
     for level in (0u64..4).rev() {
         let shift = 12 + level * 9;
@@ -2571,7 +2571,7 @@ fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
 }
 
 /// Walk guest 4-level page tables (via EPT) to translate GVA → GPA.
-fn guest_gva_to_gpa(ept_root_phys: u64, hhdm: u64, guest_cr3: u64, gva: u64) -> Option<u64> {
+pub fn guest_gva_to_gpa(ept_root_phys: u64, hhdm: u64, guest_cr3: u64, gva: u64) -> Option<u64> {
     let mut table_gpa = guest_cr3 & !0xFFF;
     for level in (0u64..4).rev() {
         let shift = 12 + level * 9;
