@@ -153,6 +153,7 @@ Environment knobs for `cargo themis` / `cargo themis-debug`:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
+| `CAPAVISOR_FEATURES` | *(empty)* | Comma-separated cargo features for the capavisor. Set to `quantum-sched` for multi-core dom1 (see below). |
 | `QEMU_MEM` | `4G` | Guest RAM |
 | `QEMU_CPUS` | `4` | vCPU count |
 | `QEMU_ENABLE_KVM` | `1` | Use KVM+VMX acceleration |
@@ -171,6 +172,28 @@ the build script recreates it from the template automatically:
 rm target/ovmf_vars.fd
 cargo themis
 ```
+
+### Running dom1 (nested guest)
+
+Once dom0 is booted, SSH in and launch a nested VM via cloud-hypervisor:
+
+```sh
+# 1. Boot Themis with quantum-sched (required for multi-core dom1)
+cd themis/
+CAPAVISOR_FEATURES=quantum-sched cargo themis 2>&1 | tee /tmp/out.txt
+
+# 2. SSH into dom0
+ssh -p 2222 cloud@localhost
+
+# 3. Launch dom1 with 2 vCPUs
+sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh
+```
+
+**Why quantum-sched?** Without it, dom0's 250 Hz LAPIC timer preempts child
+VPs before they execute any instructions (~100 µs nested VMRESUME overhead).
+`quantum-sched` defers parent-bound interrupts during child execution and
+delivers them on the next child exit (MMIO/EPT), giving each child VP a
+useful quantum capped at ~20 ms by the VMX preemption timer.
 
 ### Debugging
 
