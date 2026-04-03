@@ -6,14 +6,17 @@
 
 ---
 
-## Current State (2026-04-02)
+## Current State (2026-04-03)
 
 ### What works
 
-- **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-101-generic. Stable.
-- **Dom1 (1 CPU, local QEMU)**: **boots to /bin/bash shell** (~204s guest time).
-  virtio-blk: partition table read, ext4 mount. Kernel fully initializes.
-  Uses `init=/bin/bash` (dom1.raw rootfs), not full systemd.
+- **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-107-generic. Stable.
+- **Dom1 (1 CPU, bare-metal Linux/KVM)**: **full systemd boot to login prompt**.
+  Stock Ubuntu 6.8.0-107-generic kernel + initramfs. virtio-blk, virtio-net,
+  ext4 mount, systemd services all complete.
+- **Dom1 (2 CPUs, bare-metal Linux/KVM)**: **full systemd boot to login prompt**.
+  Both CPUs activated (12000 BogoMIPS), SMP bringup succeeds via SIPI through
+  APIC_ACCESS exit interception and IPI routing.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
   N-level isolation, execute protocol, global system invariant, deep revocation cascade.
 - **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
@@ -26,28 +29,28 @@
   **Verified end-to-end**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
   50 PA map entries loaded by thhv driver with zero errors.
 
-### What doesn't work
+### What doesn't work / known issues
 
-- **Dom1 (1 CPU) — bash hang**: kernel fully initializes and drops into
-  `init=/bin/bash`, but the shell is non-functional (`ls` hangs). Likely cause:
-  `init=/bin/bash` doesn't mount `/proc`, `/sys`, or `/dev`, and missing `PATH`.
-  Could also be marginal interrupt delivery for user-space disk I/O. Needs a
-  quick diagnostic (mount filesystems, try commands) before deeper investigation.
-- **Dom1 (2 CPUs)**: AP boots through real→protected→long mode but gets stuck.
-  This is a nested-virtualization scheduling artifact. See "Nested-virt scheduling" below.
-- **Dom1 stock kernel + systemd**: not yet attempted. Currently uses custom
-  instrumented bzImage with `init=/bin/bash`. Goal: full Ubuntu boot with stock
-  6.8.0-101-generic kernel and systemd init.
-- **Dom1 on real hardware**: not yet tested with the interrupt-window fix.
+- **Dom1 bash intermittent hang**: with `init=/bin/bash`, interactive commands
+  sometimes hang (timing-dependent interrupt delivery). Full systemd boot works
+  reliably. The `init=/bin/bash` path lacks `/proc`/`/sys`/`/dev` mounts.
+- **Posted interrupts**: hardware PI is disabled (software PIR drain used instead).
+  The host advertises PI support but L2 delivery is unreliable under nested KVM.
+  Requires `intel_iommu=on` on host kernel cmdline + QEMU IOMMU flags. See
+  `testing-posted.md` for details.
+- **Dom1 on real hardware**: not yet tested.
 
 ### Recent commits
 
-- `ce8da26` — **fix: attest GPA heuristic + regression test (Cat B)**
-- `99fa5aa` — **feat: full attestation report in Lean engine (Cat B)**
-- `c33e9bd` — **fix: Lean interrupt routing + visibility mapping + switch encapsulation (Cat E)**
-- `b07697a` — **fix: Lean send/accept uses visible fragments (child subtraction)**
-- `7bfa833` — **fix: Lean META send guards — require exclusive leaf, add regression test**
-- `bc04fe5` — **chore: make CRB the default TPM transport**
+- `d9720fe` — **chore: bump CHV submodule (code review cleanup)**
+- `788ae02` — **style: cargo fmt capavisor**
+- `fe94852` — **refactor: replace magic numbers with named constants, remove debug prints**
+- `1dc3abd` — **docs: add code review skill file**
+- `5fc31fe` — **feat: dom1 full systemd boot with stock kernel**
+- `dc48a67` — **fix: lost-wakeup race in thhv HLT + irqfd VP routing**
+- `4968b9a` — **fix: 2-vCPU dom1 boot — APIC emulation, EOI, IPI routing**
+- `d21dc82` — **fix: child APIC virtualization for multi-vCPU dom1**
+- `f6eb224` — **fix: disable posted interrupts, always use software PIR drain**
 
 ### Uncommitted changes
 
@@ -151,100 +154,81 @@ dom0 excluded (EPT + ACPI stripping). See P20i below.
 - **COMM PA map duplicate (8d91531)**: COMM cap and underlying carved memory share same
   GPA; both appeared in PA entries. Fixed: exclude COMM-attributed caps from PA map.
 
-### Next: Phase 0 — Quick diagnostic: 1-CPU bash hang
+### Done: Phase 0 — 1-CPU dom1 boot (2026-04-03)
 
-Before tackling multi-core, verify whether the hang is a real I/O bug or just
-`init=/bin/bash` environment limitations. Boot 1-CPU dom1 and try:
+Root cause: hardware posted interrupts broken under nested KVM. Software
+PIR drain was gated on PI bit 7, skipped when PI appeared enabled.
 
-```bash
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
-export PATH=/usr/bin:/usr/sbin:/bin:/sbin
-ls /
-```
+- [x] Disable posted interrupts (never set bit 7 in child pin-based controls)
+- [x] Remove PI guard on software PIR drain in `do_switch` and `drain_pir_on_interrupt_window`
+- [x] Result: 1-vCPU dom1 boots to bash with stock 6.8.0-107 kernel
 
-- [ ] If `ls` works after mounts → hang was missing filesystems (not a bug)
-- [ ] If `ls` still hangs → interrupt delivery issue, must investigate before Phase 1
+### Done: Phase 1 — 2-CPU dom1 boot (2026-04-03, no quantum-sched needed)
 
-### Next: Phase 1 — Quantum scheduling for multi-core dom1 (`quantum-sched`)
+On bare-metal Linux/KVM (not WSL), 2-vCPU boot works without quantum-sched.
+Four bugs fixed:
 
-Design doc: [`capa-engine/docs/design/interrupt-virtualization.md` §Nested Virtualization Scheduling](capa-engine/docs/design/interrupt-virtualization.md)
+- [x] Enable VIRTUALIZE_APIC_ACCESSES (bit 0) for child VMs so LAPIC MMIO
+  writes (ICR for SIPI) cause exits instead of going to memory silently
+- [x] Add instruction decode (`decode_apic_write_value`) for APIC-access write
+  exits — writel() uses arbitrary registers, not just RAX
+- [x] Initialize VAPIC page per-VP (APIC_ID, SVR, masked LVTs)
+- [x] EOI emulation: clear highest ISR bit on EOI write (offset 0xB0)
+- [x] Fix IPI destination routing: capavisor reads ICR_HIGH from VAPIC[0x310],
+  CHV extracts dest APIC ID from MSI address for irqfd vp_index
+- [x] Fix thhv lost-wakeup race: `pending_inject` atomic counter prevents
+  missed wakeups between HLT exit read and halted=1 set
+- [x] Result: 2-vCPU dom1 boots, both CPUs activated (12000 BogoMIPS)
 
-**Problem**: Dom1 AP can't boot in nested virt — dom0's LAPIC timer (0xEC,
-250Hz) preempts the child after ~0 instructions per VMRESUME. The current code
-does VMCLEAR child → VMPTRLD dom0 → inject timer → dom0 runs → thhv retries
-→ VMCLEAR dom0 → VMPTRLD child → VMRESUME child. That's 2 expensive VMCS
-switches (each ~100µs+ on nested virt) for 0 useful child instructions.
+### Done: Phase 2 — Stock kernel + systemd boot (2026-04-03)
 
-**Fix**: Defer parent-bound interrupts and re-enter the child via the same
-VMCS (cheap — no VMCLEAR/VMPTRLD). The child gets ~4ms of real execution
-until the next timer tick. Deferred vectors are delivered via the preemption
-timer or flush-before-store. Gated behind `feature = "quantum-sched"`.
+- [x] Remove `init=/bin/bash` from run-dom1.sh kernel cmdline
+- [x] Add initramfs auto-detection (stock kernel needs it for modules)
+- [x] Result: 1-vCPU and 2-vCPU dom1 boot to login prompt with full systemd
 
-**Why this avoids Approach A's failure**: Approach A consumed vectors (ACK'd
-from LAPIC) but never re-injected them into dom0. This design uses the proven
-`forward_interrupt_to_handler()` path for delivery — just delayed to the
-quantum boundary.
+### Done: Code review cleanup (2026-04-03)
 
-#### Implementation steps
+- [x] Added `skills/code-review.md` with conventions
+- [x] Replaced magic numbers with named constants in vmexit.rs and CHV mod.rs
+- [x] Removed stale TODOs and unconditional debug prints
+- [x] `cargo fmt` for capavisor
+- [x] Identified VMEXIT dispatch unification as next refactor target
 
-- [x] **1.1**: Add `quantum-sched = []` feature to `themis/capavisor/Cargo.toml`
-- [x] **1.2**: Add `deferred_vector: AtomicU16` to `CoreContext` in `platform.rs`
-  (0 = none, 1–255 = vector). Add `set_deferred(core_id, vector)` and
-  `take_deferred(core_id) -> Option<u8>` helpers on `ThemisPlatform`.
-- [x] **1.3**: Visibility check inlined in vmexit.rs EXTERNAL_INTERRUPT handler.
-  Reads child's interrupt policy via `get_core_cap(core_id)` — parent-bound
-  means visibility ≠ `InterruptVisibility::Deliver`.
-- [x] **1.4**: Modified `EXIT_REASON_EXTERNAL_INTERRUPT` handler (vmexit.rs, child path).
-  When `quantum-sched` enabled and vector is parent-bound:
-  - If `deferred_vector` empty → store vector, `return` (re-enter child, same VMCS)
-  - If `deferred_vector` set → flush old via `forward_interrupt_to_handler`
-    (dom0 switch), store new vector as deferred
-  When vector is child-owned → forward immediately (unchanged).
-- [x] **1.5**: Modified `EXIT_REASON_VMX_PREEMPTION_TIMER` handler (vmexit.rs, child path).
-  When `quantum-sched` enabled and deferred vector exists → flush via
-  `forward_interrupt_to_handler` (dom0 switch, child suspended).
-  When no deferred vector → reset timer (unchanged).
-- [x] **1.6**: Drain deferred in `do_switch` — before activating child VMCS,
-  check for leftover deferred vector. If set, inject into dom0 (already active)
-  and return `ERR_RETRY`. Ensures dom0 is caught up before child gets new quantum.
-- [ ] **1.7**: Build and test. Enable `quantum-sched` in build script / ISO.
-  Boot with `CHV_CPUS=2`. **Success criteria**: AP completes SMP init, dom0 stays
-  responsive (SSH works), kernel prints "SMP: Total of 2 processors activated".
+### Next: Phase 3 — VMEXIT dispatch unification
 
-#### Files modified
+**Goal**: Merge the two `match basic_reason` blocks in `handle_vmexit` (child
+vs dom0) into a single dispatch table per `skills/code-review.md`.
 
-| File | Change |
-|------|--------|
-| `themis/capavisor/Cargo.toml` | `quantum-sched = []` feature |
-| `themis/capavisor/src/platform.rs` | `deferred_vector` in CoreContext + helpers |
-| `themis/capavisor/src/vmexit.rs` | Conditional deferral in ext-intr + preemption-timer handlers |
-| `themis/capavisor/src/hypercall.rs` | `is_parent_bound_vector()` helper + optional do_switch drain |
+**Approach** (incremental, avoid the all-at-once rewrite that broke dom0):
+1. Extract dom0-specific local handlers into named functions (`handle_rdmsr_local`,
+   `handle_cr_access_local`, `handle_ept_violation_dom0`, etc.)
+2. Test each extracted function independently (dom0 must still boot)
+3. Add `has_parent` flag and merge the dispatch, calling shared handlers from
+   both paths
+4. Remove the old child block once all handlers are merged
 
-### Next: Phase 2 — Stock kernel + systemd boot
+**Key pitfall** (discovered 2026-04-03): dom0 EPT violation handler has IOAPIC
+MMIO emulation logic. Calling `forward_child_exit` for dom0 deadlocks because
+dom0 has no parent. Must handle locally.
 
-**Goal**: Boot dom1 with unmodified Ubuntu 6.8.0-101-generic kernel and full
-systemd init (no `init=/bin/bash`).
+### Next: Phase 4 — Posted interrupts (hardware PI)
 
-- [ ] **2.1**: Modify `run-dom1.sh`: remove `init=/bin/bash` from kernel cmdline.
-  Stock kernel already has `CONFIG_VIRTIO_BLK=y`, `CONFIG_EXT4_FS=y`,
-  `CONFIG_VIRTIO_NET=y` built-in — no initramfs needed for basic boot.
-  Kernel fallback path in run-dom1.sh already selects `/boot/vmlinuz-*`.
-- [ ] **2.2**: Test 1-CPU stock kernel boot (`CHV_CPUS=1`). Watch for:
-  CPUID panics, module loading issues, systemd startup, cloud-init,
-  network setup (tap-dom1, IP 192.168.100.2/24).
-- [ ] **2.3**: Fix issues as they surface. Likely candidates:
-  - CPUID emulation gaps (CHV owns policy, `cloud-hypervisor/arch/src/x86_64/mod.rs`)
-  - initramfs (extract from dom1.raw boot partition if modules needed)
-  - MMIO emulation (systemd probes more devices)
-- [ ] **2.4**: Test multi-core stock kernel (`CHV_CPUS=2` + `quantum-sched`).
+**Goal**: Enable hardware posted interrupts for child VMs.
 
-### Next: Phase 3 — Stabilization + real hardware
+**Prerequisites** (from `testing-posted.md`):
+- [ ] Add `intel_iommu=on` to host kernel cmdline (requires reboot)
+- [ ] QEMU: `intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,aw-bits=48`
+- [ ] QEMU: `-cpu host,host-phys-bits=on`
+- [ ] QEMU: virtio devices with `iommu_platform=on,ats=on`
+- [ ] Re-enable PI bit 7 in vmcs.rs child pin-based controls
+- [ ] Remove software PIR drain guard (or keep as fallback)
+- [ ] Test 1-vCPU and 2-vCPU dom1 boot with hardware PI
 
-- [ ] Tune quantum size (`PREEMPTION_TIMER_TICKS`) if dom0 responsiveness degrades
+### Next: Phase 5 — Stabilization + real hardware
+
 - [ ] Test with 4 CPUs
-- [ ] Test interrupt-window fix + PIR drain on real hardware (posted interrupts)
+- [ ] Test on real hardware (not nested KVM)
+- [ ] Dom1 networking (ping 192.168.100.2 from dom0)
 - [ ] Document what works on nested vs real hardware
 - [ ] Update `HANDOFF.md`
 
