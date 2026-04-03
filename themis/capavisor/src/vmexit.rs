@@ -93,6 +93,29 @@ pub const EXIT_REASON_INTERRUPT_WINDOW: u32 = 7;
 pub const EXIT_REASON_CPUID: u32 = 10;
 pub const EXIT_REASON_HLT: u32 = 12;
 pub const EXIT_REASON_VMCALL: u32 = 18;
+
+// ── APIC register offsets (Intel SDM Vol 3A §10.4.1) ─────────────────────── //
+
+const APIC_REG_ID: usize = 0x020;
+const APIC_REG_EOI: usize = 0x0B0;
+const APIC_REG_ICR_LOW: usize = 0x300;
+const APIC_REG_ICR_HIGH: usize = 0x310;
+const APIC_REG_ISR_BASE: usize = 0x100; // ISR: 8 × 32-bit words at 0x100–0x170
+
+// ── VMEXIT interruption info field (Intel SDM Vol 3C §24.9.2) ────────────── //
+
+const INTR_INFO_VECTOR_MASK: u64 = 0xFF;
+const INTR_INFO_TYPE_SHIFT: u32 = 8;
+const INTR_INFO_TYPE_MASK: u64 = 0x7;
+const INTR_INFO_VALID: u64 = 1 << 31;
+const INTR_TYPE_NMI: u64 = 2;
+
+// ── APIC-access exit qualification (Intel SDM Vol 3C §27.2.1) ────────────── //
+
+const APIC_ACCESS_OFFSET_MASK: u64 = 0xFFF;
+const APIC_ACCESS_TYPE_SHIFT: u32 = 12;
+const APIC_ACCESS_TYPE_MASK: u64 = 0xF;
+const APIC_ACCESS_TYPE_WRITE: u64 = 1;
 pub const EXIT_REASON_CR_ACCESS: u32 = 28;
 pub const EXIT_REASON_IO_INSTRUCTION: u32 = 30;
 pub const EXIT_REASON_RDMSR: u32 = 31;
@@ -197,11 +220,6 @@ pub fn monitor_loop(vcpu: &mut ActiveVcpu) -> ! {
 unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
     use core::sync::atomic::Ordering;
 
-    //TODO(aghosn): Not sure about this. We have two matches depending on whether we're dom0 or
-    //dom1. This should not really be the case, and dom1 will be able to create dom2 later on too.
-    //We should have a more homogeneous way of handling the exits, that takes into account the
-    //capability state.
-
     // ── Child domain exit forwarding ──
     // If the current core is running a child domain (not dom0), forward the
     // exit to the parent — except for capavisor-internal exits (external
@@ -297,7 +315,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // Physical interrupt fired while child was running.
                             // ACK_INTERRUPT_ON_EXIT consumed the vector.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-                            let vector = (intr_info & 0xFF) as u8;
+                            let vector = (intr_info & INTR_INFO_VECTOR_MASK) as u8;
                             #[cfg(feature = "quantum-sched")]
                             {
                                 // Check if vector is parent-bound (not owned by child).
@@ -338,8 +356,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // NMIs cannot be posted via PIR — forward to dom0 as vector 2.
                             // Child's default Report policy routes it via lazy-unwind to dom0.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-                            let exc_type = ((intr_info >> 8) & 0x7) as u8;
-                            if exc_type == 2 {
+                            let exc_type = ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
+                            if exc_type as u64 == INTR_TYPE_NMI {
                                 // Type 2 = NMI; forward to dom0.
                                 crate::hypercall::forward_interrupt_to_handler(vcpu, 2);
                             } else {
@@ -447,28 +465,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         }
                         EXIT_REASON_APIC_ACCESS => {
                             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-                            let offset = qual & 0xFFF;
-                            let acc_type = (qual >> 12) & 0xF;
+                            let offset = qual & APIC_ACCESS_OFFSET_MASK;
+                            let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
 
-                            // Diagnostic: log AP APIC accesses (first 50 + every 1000th)
-                            {
-                                use core::sync::atomic::{AtomicU64, Ordering as O};
-                                static APIC_COUNT: AtomicU64 = AtomicU64::new(0);
-                                let n = APIC_COUNT.fetch_add(1, O::Relaxed);
-                                if n < 50 || n % 1000 == 0 {
-                                    let rip = vcpu.get(vmcs::guest::RIP);
-                                    serial_println!(
-                                        "[APIC_ACC] #{} dom={} off={:#x} type={} rip={:#x}",
-                                        n,
-                                        domain_id,
-                                        offset,
-                                        acc_type,
-                                        rip
-                                    );
-                                }
-                            }
-
-                            if offset == 0x300 && acc_type == 1 {
+                            if offset == APIC_REG_ICR_LOW as u64 && acc_type == APIC_ACCESS_TYPE_WRITE {
                                 // ICR low write — decode value and include ICR_HIGH
                                 // (destination APIC ID) from VAPIC[0x310].
                                 if let Some(val) = decode_apic_write_value(vcpu, platform) {
@@ -476,7 +476,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 }
                                 let hhdm = platform.hhdm_offset();
                                 let vapic = (vcpu.vapic_phys() + hhdm) as *const u32;
-                                let icr_high = unsafe { vapic.add(0x310 / 4).read_volatile() };
+                                let icr_high = unsafe { vapic.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
                                 vcpu.set_reg(Reg::Rcx, icr_high as u64);
                                 crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
@@ -497,13 +497,13 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // For other registers (LVT, ICR), the value is in VAPIC;
                             // we forward ICR writes to CHV for SIPI handling.
                             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-                            let offset = qual & 0xFFF;
-                            if offset == 0x300 {
+                            let offset = qual & APIC_ACCESS_OFFSET_MASK;
+                            if offset == APIC_REG_ICR_LOW as u64 {
                                 // ICR low write — value already in VAPIC[0x300].
                                 // Read it and put in RAX for CHV.
                                 let hhdm = platform.hhdm_offset();
                                 let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
-                                let icr_val = unsafe { vapic_virt.add(0x300 / 4).read_volatile() };
+                                let icr_val = unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
                                 vcpu.set_reg(Reg::Rax, icr_val as u64);
                                 crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
@@ -977,7 +977,6 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             halt_forever();
         }
 
-        //TODO(aghosn): not sure about this.
         EXIT_REASON_EPT_VIOLATION => {
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
@@ -1017,8 +1016,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
         EXIT_REASON_EXCEPTION_NMI => {
             let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-            let vector = (info & 0xFF) as u8;
-            let exc_type = ((info >> 8) & 0x7) as u8;
+            let vector = (info & INTR_INFO_VECTOR_MASK) as u8;
+            let exc_type = ((info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
             let has_error_code = (info >> 11) & 1;
             let rip = vcpu.get(vmcs::guest::RIP);
 
@@ -1050,7 +1049,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
             // Re-inject the exception into the guest.
             let inject =
-                (1u64 << 31) | ((exc_type as u64) << 8) | (vector as u64) | (has_error_code << 11);
+                INTR_INFO_VALID | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT) | (vector as u64) | (has_error_code << 11);
             vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
             if has_error_code == 1 {
                 let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
@@ -1096,7 +1095,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             // When REPORT-visibility interrupt delivery to child domains is added,
             // set the relevant bitmap bits and implement parent-chain notification here.
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let _vector = (qual & 0xFF) as u8;
+            let _vector = (qual & INTR_INFO_VECTOR_MASK) as u8;
         }
 
         _other => {
@@ -1127,8 +1126,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 ///                              3=read-during-event-delivery, 10=GPA-read
 fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisPlatform) {
     let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-    let offset = (qual & 0xFFF) as usize; // byte offset within APIC page
-    let acc_type = (qual >> 12) & 0xF;
+    let offset = (qual & APIC_ACCESS_OFFSET_MASK) as usize; // byte offset within APIC page
+    let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
 
     let hhdm = platform.hhdm_offset();
 
@@ -1148,13 +1147,12 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
             let val = decode_apic_write_value(vcpu, platform)
                 .unwrap_or(vcpu.reg(Reg::Rax) as u32);
 
-            const APIC_EOI: usize = 0x0B0;
-            if offset == APIC_EOI {
+            if offset == APIC_REG_EOI {
                 // EOI: clear the highest-priority bit in the ISR (In-Service
                 // Register, offsets 0x100-0x170 = 8 × 32-bit words = 256 bits).
                 // Scan from highest word (0x170) down to lowest (0x100).
                 for w in (0..8).rev() {
-                    let isr_idx = (0x100 / 4) + w; // word index in VAPIC page
+                    let isr_idx = (APIC_REG_ISR_BASE / 4) + w; // word index in VAPIC page
                     let isr_val = unsafe { vapic_virt.add(isr_idx).read_volatile() };
                     if isr_val != 0 {
                         let bit = 31 - isr_val.leading_zeros();
@@ -1180,8 +1178,6 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
     next_instruction(vcpu);
 }
 
-//TODO: WHY THE FUCK DO WE HAVE THIS, we have a virtual apic we should get that information
-//directly from the hardware
 /// Decode the faulting MOV instruction at guest RIP to extract the 32-bit
 /// value being written for an APIC-access write exit.
 ///
@@ -1323,7 +1319,7 @@ pub unsafe fn inject_virtual_interrupt(vapic_virt: *mut u32, vector: u8, vcpu: &
 
 /// Inject #GP(0) into the guest.
 fn inject_gp(vcpu: &mut ActiveVcpu) {
-    let info: u64 = (1 << 31) | (3 << 8) | 13 | (1 << 11);
+    let info: u64 = INTR_INFO_VALID | (3 << INTR_INFO_TYPE_SHIFT) | 13 | (1 << 11);
     vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, info);
     vcpu.set(control::VMENTRY_EXCEPTION_ERR_CODE, 0);
     vcpu.set(control::VMENTRY_INSTRUCTION_LEN, 0);

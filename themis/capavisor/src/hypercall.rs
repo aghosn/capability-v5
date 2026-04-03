@@ -1773,7 +1773,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         static FWD_COUNT: AtomicU64 = AtomicU64::new(0);
         let n = FWD_COUNT.fetch_add(1, O::Relaxed);
         if n < 20 || n % 500 == 0 {
-            serial_println!("[INTR_FWD] #{} vec={:#x} vis={:?} core={}", n, vector, child_visibility, core_id);
+            serial_rtdbg!("[INTR_FWD] #{} vec={:#x} vis={:?} core={}", n, vector, child_visibility, core_id);
         }
     }
 
