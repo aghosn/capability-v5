@@ -109,6 +109,10 @@ pub const EXIT_REASON_APIC_ACCESS: u32 = 44;
 /// delivered vector's bit was set in the EOI-exit bitmap.  Used to notify the
 /// capability engine when a REPORT-visibility vector completes.
 pub const EXIT_REASON_EOI_INDUCED: u32 = 45;
+/// APIC-write VM exit (SDM Vol 3C §29.4.3.3): APIC_REGISTER_VIRT wrote to
+/// VAPIC page, processor now exits so VMM can process side-effects.
+/// RIP is already past the faulting instruction.
+pub const EXIT_REASON_APIC_WRITE: u32 = 56;
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
@@ -297,10 +301,16 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             #[cfg(feature = "quantum-sched")]
                             {
                                 // Check if vector is parent-bound (not owned by child).
-                                let child_cap = platform.get_core_cap(core_id as usize)
+                                let child_cap = platform
+                                    .get_core_cap(core_id as usize)
                                     .expect("[QSCHED] get_core_cap failed");
-                                let vis = child_cap.read().data.policy.interrupts
-                                    .get_policy(vector).visibility;
+                                let vis = child_cap
+                                    .read()
+                                    .data
+                                    .policy
+                                    .interrupts
+                                    .get_policy(vector)
+                                    .visibility;
                                 if vis != capability_engine::InterruptVisibility::Deliver {
                                     // Parent-bound: defer instead of expensive VMCS swap.
                                     if let Some(old) = platform.take_deferred(core_id as usize) {
@@ -421,8 +431,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 // TSC freq = crystal * numer / denom.
                                 // 25 MHz crystal × 120 / 1 = 3000 MHz.
                                 0x15 => {
-                                    vcpu.set_reg(Reg::Rax, 1u64);         // denominator
-                                    vcpu.set_reg(Reg::Rbx, 120u64);       // numerator
+                                    vcpu.set_reg(Reg::Rax, 1u64); // denominator
+                                    vcpu.set_reg(Reg::Rbx, 120u64); // numerator
                                     vcpu.set_reg(Reg::Rcx, 25_000_000u64); // crystal Hz
                                     vcpu.set_reg(Reg::Rdx, 0u64);
                                     next_instruction(vcpu);
@@ -436,21 +446,39 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             }
                         }
                         EXIT_REASON_APIC_ACCESS => {
-                            // Handle most LAPIC accesses locally (virtual APIC page).
-                            // ICR writes (offset 0x300) are forwarded to CHV so
-                            // it can detect IPI delivery modes (INIT/SIPI) and
-                            // manage AP lifecycle — capavisor stays boot-agnostic.
                             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
                             let offset = qual & 0xFFF;
                             let acc_type = (qual >> 12) & 0xF;
+
+                            // Diagnostic: log AP APIC accesses (first 50 + every 1000th)
+                            {
+                                use core::sync::atomic::{AtomicU64, Ordering as O};
+                                static APIC_COUNT: AtomicU64 = AtomicU64::new(0);
+                                let n = APIC_COUNT.fetch_add(1, O::Relaxed);
+                                if n < 50 || n % 1000 == 0 {
+                                    let rip = vcpu.get(vmcs::guest::RIP);
+                                    serial_println!(
+                                        "[APIC_ACC] #{} dom={} off={:#x} type={} rip={:#x}",
+                                        n,
+                                        domain_id,
+                                        offset,
+                                        acc_type,
+                                        rip
+                                    );
+                                }
+                            }
+
                             if offset == 0x300 && acc_type == 1 {
-                                // ICR low write — decode instruction to extract
-                                // the source register value (CHV reads RAX).
+                                // ICR low write — decode value and include ICR_HIGH
+                                // (destination APIC ID) from VAPIC[0x310].
                                 if let Some(val) = decode_apic_write_value(vcpu, platform) {
                                     vcpu.set_reg(Reg::Rax, val as u64);
                                 }
-                                crate::hypercall::forward_child_exit(
-                                    vcpu, EXIT_REASON_APIC_ACCESS);
+                                let hhdm = platform.hhdm_offset();
+                                let vapic = (vcpu.vapic_phys() + hhdm) as *const u32;
+                                let icr_high = unsafe { vapic.add(0x310 / 4).read_volatile() };
+                                vcpu.set_reg(Reg::Rcx, icr_high as u64);
+                                crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
                             }
                             handle_apic_access_exit(vcpu, platform);
@@ -460,6 +488,29 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // XSETBV is a host-level operation (sets physical XCR0).
                             // Handle it in the capavisor like dom0 — don't forward.
                             handle_xsetbv(vcpu);
+                            return;
+                        }
+                        EXIT_REASON_APIC_WRITE => {
+                            // APIC-write exit (56): APIC_REGISTER_VIRT already wrote
+                            // the value to the VAPIC page.  With VID enabled, EOI and
+                            // interrupt delivery side-effects are handled by hardware.
+                            // For other registers (LVT, ICR), the value is in VAPIC;
+                            // we forward ICR writes to CHV for SIPI handling.
+                            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+                            let offset = qual & 0xFFF;
+                            if offset == 0x300 {
+                                // ICR low write — value already in VAPIC[0x300].
+                                // Read it and put in RAX for CHV.
+                                let hhdm = platform.hhdm_offset();
+                                let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
+                                let icr_val = unsafe { vapic_virt.add(0x300 / 4).read_volatile() };
+                                vcpu.set_reg(Reg::Rax, icr_val as u64);
+                                crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
+                                return;
+                            }
+                            // All other APIC writes: side-effects handled by hardware
+                            // (VID for EOI/ISR, APIC_REGISTER_VIRT for registers).
+                            // RIP already advanced — just re-enter guest.
                             return;
                         }
                         EXIT_REASON_EPT_VIOLATION => {
@@ -514,7 +565,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, 0x009B);
             vcpu.set(vmcs::guest::RIP, 0);
             // CR0 must satisfy IA32_VMX_CR0_FIXED0 (PE + ET + NE required by VMX).
-            vcpu.set(vmcs::guest::CR0, unsafe { crate::vmcs::vmcs_adjust_cr0(0x30) });
+            vcpu.set(vmcs::guest::CR0, unsafe {
+                crate::vmcs::vmcs_adjust_cr0(0x30)
+            });
             vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
             vcpu.set(
                 vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
@@ -583,7 +636,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     // Restrict XSAVE state to x87 + SSE + AVX only.
                     // Without AVX-512 features, the XSAVE area must not
                     // include opmask/ZMM components or sizes won't match.
-                    eax = 0x7;   // bits 0,1,2 = x87 + SSE + AVX
+                    eax = 0x7; // bits 0,1,2 = x87 + SSE + AVX
                     ebx = 0x340; // 832 bytes (512 legacy + 64 header + 256 AVX)
                     ecx = 0x340;
                     edx = 0;
@@ -598,7 +651,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 }
                 (0xD, sub) if matches!(sub, 5..=7 | 9) => {
                     // AVX-512 XSAVE component sub-leaves: zero them out.
-                    eax = 0; ebx = 0; ecx = 0; edx = 0;
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
                 }
                 // Themis hypervisor identification leaves.
                 // Leaf 0x40000000: vendor string "ThemisCapa" (10 bytes) in
@@ -1028,6 +1084,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             }
         }
 
+        EXIT_REASON_APIC_WRITE => {
+            // APIC-write exit for dom0: value already in VAPIC, RIP advanced.
+            // No side-effect processing needed (dom0 LAPIC is passthrough).
+        }
+
         EXIT_REASON_EOI_INDUCED => {
             // Exit qualification bits[7:0] = vector whose EOI caused the exit.
             // Fires only when VID=1 and the vector's bit is set in the EOI-exit
@@ -1084,10 +1145,29 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
         1 => {
             // Data write: decode instruction to find source register value,
             // then mirror into VAPIC page.
-            let word_idx = offset / 4;
             let val = decode_apic_write_value(vcpu, platform)
                 .unwrap_or(vcpu.reg(Reg::Rax) as u32);
-            unsafe { vapic_virt.add(word_idx).write_volatile(val) };
+
+            const APIC_EOI: usize = 0x0B0;
+            if offset == APIC_EOI {
+                // EOI: clear the highest-priority bit in the ISR (In-Service
+                // Register, offsets 0x100-0x170 = 8 × 32-bit words = 256 bits).
+                // Scan from highest word (0x170) down to lowest (0x100).
+                for w in (0..8).rev() {
+                    let isr_idx = (0x100 / 4) + w; // word index in VAPIC page
+                    let isr_val = unsafe { vapic_virt.add(isr_idx).read_volatile() };
+                    if isr_val != 0 {
+                        let bit = 31 - isr_val.leading_zeros();
+                        unsafe {
+                            vapic_virt.add(isr_idx).write_volatile(isr_val & !(1 << bit));
+                        }
+                        break;
+                    }
+                }
+            } else {
+                let word_idx = offset / 4;
+                unsafe { vapic_virt.add(word_idx).write_volatile(val) };
+            }
         }
         _ => {
             serial_println!(
@@ -1100,6 +1180,8 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
     next_instruction(vcpu);
 }
 
+//TODO: WHY THE FUCK DO WE HAVE THIS, we have a virtual apic we should get that information
+//directly from the hardware
 /// Decode the faulting MOV instruction at guest RIP to extract the 32-bit
 /// value being written for an APIC-access write exit.
 ///
@@ -1129,16 +1211,25 @@ fn decode_apic_write_value(
     let mut rex: u8 = 0;
     while i < avail {
         match buf[i] {
-            0x40..=0x4F => { rex = buf[i]; i += 1; }
-            0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x3E | 0x26 | 0x64 | 0x65 | 0x36 => { i += 1; }
+            0x40..=0x4F => {
+                rex = buf[i];
+                i += 1;
+            }
+            0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x3E | 0x26 | 0x64 | 0x65 | 0x36 => {
+                i += 1;
+            }
             _ => break,
         }
     }
-    if i >= avail { return None; }
+    if i >= avail {
+        return None;
+    }
 
     let opcode = buf[i];
     i += 1;
-    if i >= avail { return None; }
+    if i >= avail {
+        return None;
+    }
 
     match opcode {
         0x89 => {
@@ -1173,16 +1264,28 @@ fn decode_apic_write_value(
             let md = modrm >> 6;
             let rm = modrm & 0x7;
             // Skip SIB byte if present
-            if md != 3 && rm == 4 { i += 1; }
+            if md != 3 && rm == 4 {
+                i += 1;
+            }
             // Skip displacement
             match md {
-                0 => { if rm == 5 { i += 4; } }
-                1 => { i += 1; }
-                2 => { i += 4; }
+                0 => {
+                    if rm == 5 {
+                        i += 4;
+                    }
+                }
+                1 => {
+                    i += 1;
+                }
+                2 => {
+                    i += 4;
+                }
                 _ => {}
             }
-            if i + 4 > avail { return None; }
-            let imm = u32::from_le_bytes([buf[i], buf[i+1], buf[i+2], buf[i+3]]);
+            if i + 4 > avail {
+                return None;
+            }
+            let imm = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
             Some(imm)
         }
         _ => None,
@@ -1353,8 +1456,13 @@ fn handle_ept_doorbell(
 
     let written_value = vcpu.reg(Reg::Rax);
 
-    serial_rtdbg!("[DOORBELL] EPT gpa={:#x} sz={} val={:#x} #db={}",
-        gpa, write_size, written_value, child_pd.doorbells.len());
+    serial_rtdbg!(
+        "[DOORBELL] EPT gpa={:#x} sz={} val={:#x} #db={}",
+        gpa,
+        write_size,
+        written_value,
+        child_pd.doorbells.len()
+    );
 
     let matched: Option<(u32, u64, u64, u32)> = child_pd.doorbells.iter().find_map(|e| {
         if e.gpa != gpa {
@@ -1404,7 +1512,11 @@ fn handle_ept_doorbell(
         )
     };
     let enqueued = parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
-    serial_rtdbg!("[DOORBELL] match db_id={} → parent enq={}", doorbell_id, enqueued);
+    serial_rtdbg!(
+        "[DOORBELL] match db_id={} → parent enq={}",
+        doorbell_id,
+        enqueued
+    );
 
     drop(parent_pd);
 

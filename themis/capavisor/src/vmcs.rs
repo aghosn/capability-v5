@@ -229,16 +229,15 @@ unsafe fn write_control_fields(
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
-        | (if !child { 1 << 8 } else { 0 }) // APIC_REGISTER_VIRT — dom0 only; child LAPIC fully emulated via exits
-        // VID (bit 9) requires EXTERNAL_INTERRUPT_EXITING which only child has,
-        // but child needs full LAPIC emulation via exits, so VID is off for both.
-        // Child guests use xAPIC (MMIO-based): VIRTUALIZE_APIC_ACCESSES
-        // (bit 0) intercepts all LAPIC MMIO, giving us full control for
-        // ICR/SIPI handling and LAPIC register emulation.
-        // APIC_REGISTER_VIRT (bit 8) and VID (bit 9) are disabled for
-        // children because the VAPIC page would need full LAPIC state
-        // synchronisation that CHV doesn't yet provide.
-        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES — xAPIC MMIO
+        | (if !child { 1 << 8 } else { 0 }) // APIC_REGISTER_VIRT — dom0 only
+        // Child: bit 8 off because APIC_REGISTER_VIRT causes the processor to
+        // execute the guest's LAPIC write instruction, hitting INT3 text_poke
+        // sites in native_apic_mem_write.  Without bit 8, the exit happens
+        // BEFORE instruction execution, avoiding the INT3.
+        // VID (bit 9): dom0 doesn't have EXTERNAL_INTERRUPT_EXITING.
+        // Child: off (requires bit 8 for EOI→ISR clearing).
+        // EOI is emulated in software by handle_apic_access_exit.
+        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };

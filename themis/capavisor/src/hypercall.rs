@@ -724,9 +724,10 @@ fn do_add_vp(
     };
 
     let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys,
-         io_bitmap_a_phys, io_bitmap_b_phys, first_vp);
+         io_bitmap_a_phys, io_bitmap_b_phys, first_vp, pd_vp_count);
     {
         let mut pd = arc.lock();
+        pd_vp_count = pd.vps.len(); // VP index for this new VP
         // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
         first_vp = pd.msr_bitmap_phys == 0;
         // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + 2 IO bitmaps if first VP).
@@ -763,6 +764,29 @@ fn do_add_vp(
     let hhdm = platform.hhdm_offset();
     unsafe {
         core::ptr::write_bytes((pid_phys + hhdm) as *mut u8, 0, 64);
+    }
+
+    // Initialize the VAPIC page with sane LAPIC defaults so that
+    // APIC_REGISTER_VIRT + VID reads correct values from the start.
+    unsafe {
+        let vapic = (vapic_phys + hhdm) as *mut u32;
+        // APIC_ID (0x020): physical APIC ID in bits [31:24] (xAPIC format)
+        vapic.add(0x020 / 4).write_volatile((pd_vp_count as u32) << 24);
+        // APIC_VER (0x030): version 0x14 (common), 6 LVT entries (MaxLvt=5)
+        vapic.add(0x030 / 4).write_volatile(0x0005_0014);
+        // DFR (0x0E0): flat model
+        vapic.add(0x0E0 / 4).write_volatile(0xFFFF_FFFF);
+        // SVR (0x0F0): APIC software-enabled, spurious vector 0xFF
+        vapic.add(0x0F0 / 4).write_volatile(0x0000_01FF);
+        // LVT entries: masked by default (bit 16 = mask)
+        vapic.add(0x320 / 4).write_volatile(0x0001_0000); // LVT Timer
+        vapic.add(0x330 / 4).write_volatile(0x0001_0000); // LVT Thermal
+        vapic.add(0x340 / 4).write_volatile(0x0001_0000); // LVT PerfMon
+        vapic.add(0x350 / 4).write_volatile(0x0001_0000); // LVT LINT0
+        vapic.add(0x360 / 4).write_volatile(0x0001_0000); // LVT LINT1
+        vapic.add(0x370 / 4).write_volatile(0x0001_0000); // LVT Error
+        // Timer DCR (0x3E0): divide by 1
+        vapic.add(0x3E0 / 4).write_volatile(0x0000_000B);
     }
 
     // Initialize IO bitmaps: zero (pass-through) then set bits for device ports
