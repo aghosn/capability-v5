@@ -77,9 +77,14 @@ else
     [[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
 fi
 
-# Skip initramfs: our custom kernel has VIRTIO_BLK=y, VIRTIO_PCI=y, EXT4_FS=y
-# built-in, so the kernel can mount root directly without an initramfs.
-INITRAMFS_IMG=""
+# Auto-detect initramfs matching the selected kernel.
+# Stock kernels need initramfs for virtio/ext4 modules.
+if [[ -z "$INITRAMFS_IMG" && -n "$KERNEL_IMG" ]]; then
+    KVER="${KERNEL_IMG##*/vmlinuz-}"
+    if [[ -f "/boot/initrd.img-${KVER}" ]]; then
+        INITRAMFS_IMG="/boot/initrd.img-${KVER}"
+    fi
+fi
 
 if [[ -z "$KERNEL_IMG" ]]; then echo "ERROR: no kernel found in /boot"; exit 1; fi
 echo "  kernel:    $KERNEL_IMG"
@@ -96,7 +101,7 @@ exec "$CHV" \
     -v \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "earlyprintk=serial,ttyS0,115200 keep_bootcon console=ttyS0,115200 console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=7 no_timer_check init=/bin/bash" \
+    --cmdline "earlyprintk=serial,ttyS0,115200 keep_bootcon console=ttyS0,115200 console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=7 no_timer_check" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=34 \
