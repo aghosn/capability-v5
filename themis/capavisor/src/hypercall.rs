@@ -9,15 +9,15 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 
 use capability_engine::{
-    execute, Access, Attributes, Capability, CapabilityRef, CapaError, Domain, DomainId,
+    execute, Access, Attributes, CapaError, Capability, CapabilityRef, Domain, DomainId,
     DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier, Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
 use crate::platform::ThemisPlatform;
-use crate::{serial_println, serial_debug};
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 use crate::vmexit::next_instruction;
+use crate::{serial_debug, serial_println};
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
@@ -31,19 +31,39 @@ pub struct HypercallResult {
 
 impl HypercallResult {
     fn success() -> Self {
-        HypercallResult { rax: errors::SUCCESS, rdi: 0, rsi: 0, rdx: 0 }
+        HypercallResult {
+            rax: errors::SUCCESS,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+        }
     }
 
     fn success_1(rdi: u64) -> Self {
-        HypercallResult { rax: errors::SUCCESS, rdi, rsi: 0, rdx: 0 }
+        HypercallResult {
+            rax: errors::SUCCESS,
+            rdi,
+            rsi: 0,
+            rdx: 0,
+        }
     }
 
     fn success_2(rdi: u64, rsi: u64) -> Self {
-        HypercallResult { rax: errors::SUCCESS, rdi, rsi, rdx: 0 }
+        HypercallResult {
+            rax: errors::SUCCESS,
+            rdi,
+            rsi,
+            rdx: 0,
+        }
     }
 
     fn error(code: u64) -> Self {
-        HypercallResult { rax: code, rdi: 0, rsi: 0, rdx: 0 }
+        HypercallResult {
+            rax: code,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+        }
     }
 
     fn unimpl() -> Self {
@@ -67,16 +87,15 @@ fn map_error(e: &CapaError) -> u64 {
         | CapaError::TreeLocked
         | CapaError::RegisterAccessDenied => errors::ERR_NOPERM,
 
-        CapaError::NotFound
-        | CapaError::ParentRevoked
-        | CapaError::DomainRevoked => errors::ERR_NOTFOUND,
+        CapaError::NotFound | CapaError::ParentRevoked | CapaError::DomainRevoked => {
+            errors::ERR_NOTFOUND
+        }
 
-        CapaError::DomainSealed
-        | CapaError::DomainNotSealed
-        | CapaError::ApiNotAllowed => errors::ERR_BADSTATE,
+        CapaError::DomainSealed | CapaError::DomainNotSealed | CapaError::ApiNotAllowed => {
+            errors::ERR_BADSTATE
+        }
 
-        CapaError::NotSupported
-        | CapaError::RegisterOutOfRange => errors::ERR_UNIMPL,
+        CapaError::NotSupported | CapaError::RegisterOutOfRange => errors::ERR_UNIMPL,
     }
 }
 
@@ -121,34 +140,48 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SEAL => Some(do_seal(platform, &caller, arg0)),
         opcodes::THEMIS_REVOKE_MEM => Some(do_revoke_mem(platform, &caller, arg0, arg1)),
         opcodes::THEMIS_REVOKE_DOMAIN => Some(do_revoke_domain(platform, &caller, arg0)),
-        opcodes::THEMIS_ATTEST_SELF => Some(do_attest_self(platform, &caller, arg0, arg1, arg2, arg3)),
-        opcodes::THEMIS_REGISTER_COMM => Some(do_register_comm(platform, &caller, arg0, arg1, arg2)),
+        opcodes::THEMIS_ATTEST_SELF => {
+            Some(do_attest_self(platform, &caller, arg0, arg1, arg2, arg3))
+        }
+        opcodes::THEMIS_REGISTER_COMM => {
+            Some(do_register_comm(platform, &caller, arg0, arg1, arg2))
+        }
         opcodes::THEMIS_DOMCOMM_NOTIFY => Some(do_domcomm_notify(platform, &caller)),
         opcodes::THEMIS_ADD_VP => Some(do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys())),
         opcodes::THEMIS_SWITCH => do_switch(platform, &caller, arg0, arg1, vcpu),
-        opcodes::THEMIS_SET_INTR_POLICY =>
-            Some(do_set_intr_policy(platform, &caller, arg0, arg1 as u8, arg2)),
-        opcodes::THEMIS_SET_DEF_INTR_POLICY =>
-            Some(do_set_def_intr_policy(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_SET_INTR_POLICY => Some(do_set_intr_policy(
+            platform, &caller, arg0, arg1 as u8, arg2,
+        )),
+        opcodes::THEMIS_SET_DEF_INTR_POLICY => {
+            Some(do_set_def_intr_policy(platform, &caller, arg0, arg1))
+        }
 
-        opcodes::THEMIS_ASSIGN_DEVICE =>
-            Some(do_assign_device(platform, &caller, arg0, arg1)),
-        opcodes::THEMIS_RELEASE_DEVICE =>
-            Some(do_release_device(platform, arg0)),
+        opcodes::THEMIS_ASSIGN_DEVICE => Some(do_assign_device(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_RELEASE_DEVICE => Some(do_release_device(platform, arg0)),
 
-        opcodes::THEMIS_GET_REG =>
-            Some(do_get_reg(platform, &caller, arg0, arg1, arg2)),
-        opcodes::THEMIS_SET_REG =>
-            Some(do_set_reg(platform, &caller, arg0, arg1, arg2, arg3)),
+        opcodes::THEMIS_GET_REG => Some(do_get_reg(platform, &caller, arg0, arg1, arg2)),
+        opcodes::THEMIS_SET_REG => Some(do_set_reg(platform, &caller, arg0, arg1, arg2, arg3)),
 
-        opcodes::THEMIS_REGISTER_DOORBELL =>
-            Some(do_register_doorbell(platform, &caller, arg0, arg1, arg2 as u32, arg3, arg4 as u32)),
-        opcodes::THEMIS_UNREGISTER_DOORBELL =>
-            Some(do_unregister_doorbell(platform, &caller, arg0, arg1 as u32)),
-        opcodes::THEMIS_SET_THEMIC_VECTOR =>
-            Some(do_set_themic_vector(platform, &caller, arg0)),
-        opcodes::THEMIS_INJECT_INTERRUPT =>
-            Some(do_inject_interrupt(platform, &caller, arg0, arg1 as u32, arg2 as u8)),
+        opcodes::THEMIS_REGISTER_DOORBELL => Some(do_register_doorbell(
+            platform,
+            &caller,
+            arg0,
+            arg1,
+            arg2 as u32,
+            arg3,
+            arg4 as u32,
+        )),
+        opcodes::THEMIS_UNREGISTER_DOORBELL => {
+            Some(do_unregister_doorbell(platform, &caller, arg0, arg1 as u32))
+        }
+        opcodes::THEMIS_SET_THEMIC_VECTOR => Some(do_set_themic_vector(platform, &caller, arg0)),
+        opcodes::THEMIS_INJECT_INTERRUPT => Some(do_inject_interrupt(
+            platform,
+            &caller,
+            arg0,
+            arg1 as u32,
+            arg2 as u8,
+        )),
 
         opcodes::THEMIS_DBG_PRINT => {
             // Silenced — each DBG_PRINT is a VMCALL + serial write,
@@ -161,16 +194,19 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_TOGGLE_DEBUG => {
             let enable = arg0 != 0;
             crate::RUNTIME_DEBUG.store(enable, core::sync::atomic::Ordering::Relaxed);
-            serial_println!("[RTDBG] runtime debug {}", if enable { "ENABLED" } else { "DISABLED" });
+            serial_println!(
+                "[RTDBG] runtime debug {}",
+                if enable { "ENABLED" } else { "DISABLED" }
+            );
             Some(HypercallResult::success())
         }
 
         opcodes::THEMIS_READ_PCR => Some(do_read_pcr(arg0 as u32)),
 
         // Stubbed — return ERR_UNIMPL
-        opcodes::THEMIS_GET_CHAN
-        | opcodes::THEMIS_ATTEST
-        | opcodes::THEMIS_ENUMERATE => Some(HypercallResult::unimpl()),
+        opcodes::THEMIS_GET_CHAN | opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
+            Some(HypercallResult::unimpl())
+        }
 
         _ => {
             serial_debug!("[VMCALL] unknown opcode {:#x}", opcode);
@@ -212,7 +248,8 @@ fn do_alias(
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
     let caller = caller.clone();
     match execute(platform, false, || {
-        Capability::alias(&caller, parent_handle, access).map(|(h, s)| ((h, s), UpdateBatch::default()))
+        Capability::alias(&caller, parent_handle, access)
+            .map(|(h, s)| ((h, s), UpdateBatch::default()))
     }) {
         Ok(((handle, sub), _)) => HypercallResult::success_2(handle, sub),
         Err(e) => HypercallResult::error(map_error(&e)),
@@ -232,16 +269,18 @@ fn do_send(
     child_gpa: u64,
 ) -> HypercallResult {
     let attrs = Attributes::from_bits(attrs_bits as u8);
-    let gpa_hint = if child_gpa != u64::MAX { Some(child_gpa) } else { None };
+    let gpa_hint = if child_gpa != u64::MAX {
+        Some(child_gpa)
+    } else {
+        None
+    };
     let caller = caller.clone();
     match execute(platform, false, || {
         Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
             .map(|batch| ((), batch))
     }) {
         Ok(_) => HypercallResult::success(),
-        Err(e) => {
-            HypercallResult::error(map_error(&e))
-        }
+        Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
 
@@ -287,7 +326,9 @@ fn do_create_domain(
     let api = MonitorAPI::from_bits(api_flags as u16 & parent_api.bits());
     let policy = DomainPolicy::new_restricted(cores_bitmask & parent_cores, api);
     let caller = caller.clone();
-    match execute(platform, false, || Capability::create(&caller, policy.clone())) {
+    match execute(platform, false, || {
+        Capability::create(&caller, policy.clone())
+    }) {
         Ok((handle, _)) => HypercallResult::success_1(handle),
         Err(e) => HypercallResult::error(map_error(&e)),
     }
@@ -390,10 +431,7 @@ fn do_attest_self(
 
     fn as_bytes<T: Sized>(val: &T) -> &[u8] {
         unsafe {
-            core::slice::from_raw_parts(
-                val as *const T as *const u8,
-                core::mem::size_of::<T>(),
-            )
+            core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>())
         }
     }
 
@@ -466,7 +504,7 @@ fn do_attest_self(
     };
 
     if is_signed {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let expected_seq = arg1;
 
@@ -497,21 +535,26 @@ fn do_attest_self(
 
         // Defense in depth (A2): verify sequence matches what domain told us.
         if msg_seq != expected_seq {
-            serial_println!("[attest] ATTEST_SELF(signed): sequence mismatch (msg={}, expected={})",
-                msg_seq, expected_seq);
+            serial_println!(
+                "[attest] ATTEST_SELF(signed): sequence mismatch (msg={}, expected={})",
+                msg_seq,
+                expected_seq
+            );
             return HypercallResult::error(errors::ERR_RACE);
         }
 
         if payload_size < core::mem::size_of::<domcomm::AttestRequest>() {
-            serial_println!("[attest] ATTEST_SELF(signed): payload too small ({} < {})",
-                payload_size, core::mem::size_of::<domcomm::AttestRequest>());
+            serial_println!(
+                "[attest] ATTEST_SELF(signed): payload too small ({} < {})",
+                payload_size,
+                core::mem::size_of::<domcomm::AttestRequest>()
+            );
             return HypercallResult::error(errors::ERR_BADSTATE);
         }
 
         // Parse AttestRequest (TOCTOU-safe: tx_buf is a local copy).
-        let attest_req: domcomm::AttestRequest = unsafe {
-            core::ptr::read_unaligned(tx_buf.as_ptr() as *const domcomm::AttestRequest)
-        };
+        let attest_req: domcomm::AttestRequest =
+            unsafe { core::ptr::read_unaligned(tx_buf.as_ptr() as *const domcomm::AttestRequest) };
         let nonce = attest_req.nonce;
         let user_pub_key = attest_req.user_pub_key;
 
@@ -538,12 +581,16 @@ fn do_attest_self(
                     Ok(qr) => {
                         tpm_quote_size = qr.attest_size as u16;
                         tpm_sig_size = qr.sig_size as u16;
-                        tpm_quote_buf[..qr.attest_size].copy_from_slice(&qr.attest_data[..qr.attest_size]);
+                        tpm_quote_buf[..qr.attest_size]
+                            .copy_from_slice(&qr.attest_data[..qr.attest_size]);
                         tpm_sig_buf[..qr.sig_size].copy_from_slice(&qr.signature[..qr.sig_size]);
                         ak_pub_buf = *ak_modulus;
                         ak_pub_size = 256;
-                        serial_println!("[attest] TPM2_Quote OK — attest={} sig={} bytes",
-                            qr.attest_size, qr.sig_size);
+                        serial_println!(
+                            "[attest] TPM2_Quote OK — attest={} sig={} bytes",
+                            qr.attest_size,
+                            qr.sig_size
+                        );
                     }
                     Err(e) => {
                         serial_println!("[attest] TPM2_Quote failed: {:?} (continuing without)", e);
@@ -573,10 +620,7 @@ fn do_attest_self(
             payload.extend_from_slice(&ak_pub_buf[..ak_pub_size as usize]);
         }
 
-        let wrote = pd_locked.domcomm_rx_enqueue(
-            domcomm::msg_types::ATTEST,
-            &payload,
-        );
+        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload);
         if wrote == 0 {
             return HypercallResult::error(errors::ERR_BUSY);
         }
@@ -723,12 +767,21 @@ fn do_add_vp(
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };
 
-    let (vmcs_phys, vapic_phys, pid_phys, msr_bitmap_phys, apic_access_phys,
-         io_bitmap_a_phys, io_bitmap_b_phys, first_vp, pd_vp_count);
+    let (
+        vmcs_phys,
+        vapic_phys,
+        pid_phys,
+        msr_bitmap_phys,
+        apic_access_phys,
+        io_bitmap_a_phys,
+        io_bitmap_b_phys,
+        first_vp,
+        pd_vp_count,
+    );
     {
         let mut pd = arc.lock();
         pd_vp_count = pd.vps.len(); // VP index for this new VP
-        // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
+                                    // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
         first_vp = pd.msr_bitmap_phys == 0;
         // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + 2 IO bitmaps if first VP).
         // apic_access_phys comes from the ChangeRights mapping of GPA 0xFEE00000,
@@ -739,7 +792,8 @@ fn do_add_vp(
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
-                pages_needed, pd.meta.free_pages()
+                pages_needed,
+                pd.meta.free_pages()
             );
             return HypercallResult::error(errors::ERR_NOMEM);
         }
@@ -771,7 +825,9 @@ fn do_add_vp(
     unsafe {
         let vapic = (vapic_phys + hhdm) as *mut u32;
         // APIC_ID (0x020): physical APIC ID in bits [31:24] (xAPIC format)
-        vapic.add(0x020 / 4).write_volatile((pd_vp_count as u32) << 24);
+        vapic
+            .add(0x020 / 4)
+            .write_volatile((pd_vp_count as u32) << 24);
         // APIC_VER (0x030): version 0x14 (common), 6 LVT entries (MaxLvt=5)
         vapic.add(0x030 / 4).write_volatile(0x0005_0014);
         // DFR (0x0E0): flat model
@@ -785,7 +841,7 @@ fn do_add_vp(
         vapic.add(0x350 / 4).write_volatile(0x0001_0000); // LVT LINT0
         vapic.add(0x360 / 4).write_volatile(0x0001_0000); // LVT LINT1
         vapic.add(0x370 / 4).write_volatile(0x0001_0000); // LVT Error
-        // Timer DCR (0x3E0): divide by 1
+                                                          // Timer DCR (0x3E0): divide by 1
         vapic.add(0x3E0 / 4).write_volatile(0x0000_000B);
     }
 
@@ -805,14 +861,16 @@ fn do_add_vp(
             macro_rules! trap_port {
                 ($port:expr) => {
                     let byte = $port / 8;
-                    let bit  = $port % 8;
+                    let bit = $port % 8;
                     let old = bitmap_a.add(byte).read_volatile();
                     bitmap_a.add(byte).write_volatile(old | (1u8 << bit));
                 };
             }
 
             // Serial COM1: 0x3F8-0x3FF (UART emulation for dom1 console)
-            for p in 0x3F8u16..=0x3FF { trap_port!(p as usize); }
+            for p in 0x3F8u16..=0x3FF {
+                trap_port!(p as usize);
+            }
 
             // NOTE: PIT (0x40-0x43), i8042 (0x60,0x64), PM-timer (0x608) intentionally
             // NOT trapped — CHV's emulated PIT can't deliver IRQ0 back to dom1, so
@@ -822,7 +880,8 @@ fn do_add_vp(
         }
         serial_println!(
             "  IO bitmaps: A={:#x} B={:#x} (serial 0x3F8-0x3FF trapped)",
-            io_bitmap_a_phys, io_bitmap_b_phys,
+            io_bitmap_a_phys,
+            io_bitmap_b_phys,
         );
     }
 
@@ -850,10 +909,7 @@ fn do_add_vp(
             let old = bitmap.add(byte_off).read_volatile();
             bitmap.add(byte_off).write_volatile(old | (1u8 << bit));
         }
-        serial_println!(
-            "  MSR bitmap: {:#x} (WRMSR 0x6E0 trapped)",
-            msr_bitmap_phys,
-        );
+        serial_println!("  MSR bitmap: {:#x} (WRMSR 0x6E0 trapped)", msr_bitmap_phys,);
     }
 
     // ── Step 2: call into capa engine ──
@@ -959,11 +1015,15 @@ fn do_switch(
     // thhv.ko will re-issue the SWITCH after the interrupt is handled.
     #[cfg(feature = "quantum-sched")]
     {
-        let core_id = platform.get_current_core()
+        let core_id = platform
+            .get_current_core()
             .expect("[SWITCH] get_current_core failed");
         if let Some(vec) = platform.take_deferred(core_id as usize) {
             let intr_info = (1u64 << 31) | (vec as u64);
-            vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.set(
+                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                intr_info,
+            );
             return Some(HypercallResult::error(errors::ERR_RETRY));
         }
     }
@@ -984,7 +1044,8 @@ fn do_switch(
             None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
         };
         let child_id = child_ref.read().data.id;
-        let hpa = platform.domain_arc(child_id)
+        let hpa = platform
+            .domain_arc(child_id)
             .map(|arc| arc.lock().comm_hpas.get(vp_idx).copied().unwrap_or(0))
             .unwrap_or(0);
         (child_id, hpa)
@@ -1013,8 +1074,13 @@ fn do_switch(
                 // do NOT call set_register which would call set_vp_register and
                 // re-mark the dirty bit, causing infinite replay on every run).
                 let check_ok = Capability::check_register_write(
-                    caller, child_domain_handle, vp_id, *reg as u64, platform,
-                ).is_ok();
+                    caller,
+                    child_domain_handle,
+                    vp_id,
+                    *reg as u64,
+                    platform,
+                )
+                .is_ok();
                 if check_ok {
                     pending.push((*reg, val));
                 }
@@ -1051,7 +1117,11 @@ fn do_switch(
         match d.vps.get(vp_idx).and_then(|s| s.take()) {
             Some(v) => v,
             None => {
-                serial_debug!("[SWITCH] VP slot empty dom={} vp={}", child_domain_id, vp_idx);
+                serial_debug!(
+                    "[SWITCH] VP slot empty dom={} vp={}",
+                    child_domain_id,
+                    vp_idx
+                );
                 let _ = Capability::switch(caller, 0, 0, platform);
                 return Some(HypercallResult::error(errors::ERR_BUSY));
             }
@@ -1073,25 +1143,36 @@ fn do_switch(
     // ActiveVcpu back before returning.  Between read and write, `vcpu`
     // is logically moved-from and must not be used.
     let parent_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let parent_inactive = parent_active.deactivate()
+    let parent_inactive = parent_active
+        .deactivate()
         .expect("[SWITCH] parent deactivate (VMCLEAR) failed");
 
-    let parent_arc = platform.domain_arc(parent_domain_id)
+    let parent_arc = platform
+        .domain_arc(parent_domain_id)
         .expect("[SWITCH] parent PlatformDomain not found");
     parent_arc.lock().vps[parent_vp_id].put(parent_inactive);
 
     // ── 7. Activate child (VMPTRLD) ──
     // activate() consumes child_inactive.  VMPTRLD failure is fatal since
     // the parent is already deactivated and stored.
-    let mut child_active = child_inactive.activate()
+    let mut child_active = child_inactive
+        .activate()
         .expect("[SWITCH] child activate (VMPTRLD) failed — fatal");
     // Update PID.NDST so the software injection path (inject_via_pid) targets
     // this core.  Also update IRTE.NDST so hardware-posted device interrupts
     // for Deliver vectors are routed here by the IOMMU.
     let current_lapic = current_lapic_id();
-    unsafe { pid_set_ndst(child_active.pid_phys(), platform.hhdm_offset(), current_lapic) };
+    unsafe {
+        pid_set_ndst(
+            child_active.pid_phys(),
+            platform.hhdm_offset(),
+            current_lapic,
+        )
+    };
     {
-        let child_ref = caller.read().data
+        let child_ref = caller
+            .read()
+            .data
             .get_domain_capability(child_domain_handle)
             .and_then(|w| w.upgrade());
         if let Some(child_cap) = child_ref {
@@ -1121,10 +1202,10 @@ fn do_switch(
             let mut pir_snapshot = [0u64; 4];
             let mut any_set = false;
             for i in 0..4 {
-                pir_snapshot[i] = unsafe {
-                    (*pir_base.add(i)).swap(0, Ordering::AcqRel)
-                };
-                if pir_snapshot[i] != 0 { any_set = true; }
+                pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
+                if pir_snapshot[i] != 0 {
+                    any_set = true;
+                }
             }
 
             // Clear the ON (Outstanding Notification) bit.
@@ -1165,17 +1246,15 @@ fn do_switch(
                 for i in 0..4usize {
                     if pir_snapshot[i] != 0 {
                         remaining = true;
-                        unsafe {
-                            (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel)
-                        };
+                        unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
                     }
                 }
 
                 // If vectors remain in PIR (IF=0 or multiple pending), enable
                 // interrupt-window exiting so we get a VMEXIT when guest IF
                 // becomes 1 and we can inject then.
-                let primary = child_active.get(
-                    x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+                let primary =
+                    child_active.get(x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
                 if remaining {
                     child_active.set(
                         x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
@@ -1211,7 +1290,9 @@ fn do_switch(
     }
 
     // ── 9. Replace the monitor loop's ActiveVcpu ──
-    unsafe { core::ptr::write(vcpu, child_active); }
+    unsafe {
+        core::ptr::write(vcpu, child_active);
+    }
 
     // Return None: skip result-writeback + RIP-advance.
     // The monitor loop will call vcpu.run() on the child next.
@@ -1236,7 +1317,10 @@ pub fn drain_pir_on_interrupt_window(
     if pid_phys == 0 {
         // No PID — just clear the interrupt-window exiting bit.
         let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
-        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary & !(1 << 2));
+        vcpu.set(
+            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+            primary & !(1 << 2),
+        );
         return;
     }
 
@@ -1248,7 +1332,9 @@ pub fn drain_pir_on_interrupt_window(
     let mut any_set = false;
     for i in 0..4 {
         pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
-        if pir_snapshot[i] != 0 { any_set = true; }
+        if pir_snapshot[i] != 0 {
+            any_set = true;
+        }
     }
 
     // Clear ON bit.
@@ -1285,9 +1371,15 @@ pub fn drain_pir_on_interrupt_window(
     // Clear interrupt-window exiting if no more pending vectors.
     let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
     if remaining {
-        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary | (1 << 2));
+        vcpu.set(
+            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+            primary | (1 << 2),
+        );
     } else {
-        vcpu.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary & !(1 << 2));
+        vcpu.set(
+            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+            primary & !(1 << 2),
+        );
     }
 }
 
@@ -1298,14 +1390,10 @@ pub fn drain_pir_on_interrupt_window(
 /// can read them).  Then swaps back to the parent — to the parent this
 /// looks like a normal return from the SWITCH VMCALL with the exit reason
 /// in rdi.
-pub fn forward_child_exit(
-    vcpu: &mut ActiveVcpu,
-    exit_reason: u32,
-) {
+pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     use themis_abi::regs::{
-        VpCommPage, ALL_VP_REGISTERS,
-        InterceptMessage, ThemicMessageHeader,
-        VP_COMM_INTERCEPT_OFFSET, THEMIC_MSG_VP_INTERCEPT,
+        InterceptMessage, ThemicMessageHeader, VpCommPage, ALL_VP_REGISTERS,
+        THEMIC_MSG_VP_INTERCEPT, VP_COMM_INTERCEPT_OFFSET,
     };
     use x86::vmx::vmcs;
 
@@ -1313,11 +1401,13 @@ pub fn forward_child_exit(
     assert!(!platform_ptr.is_null());
     let platform = unsafe { &*platform_ptr };
 
-    let core_id = platform.get_current_core()
+    let core_id = platform
+        .get_current_core()
         .expect("[CHILD_EXIT] get_current_core failed");
 
     // Get child's cap BEFORE the return switch (core is still assigned to child).
-    let child_cap = platform.get_core_cap(core_id as usize)
+    let child_cap = platform
+        .get_core_cap(core_id as usize)
         .expect("[CHILD_EXIT] get_core_cap failed");
 
     // Look up the interrupt policy for this exit reason.
@@ -1328,8 +1418,8 @@ pub fn forward_child_exit(
     };
 
     // ── Capa engine: return switch (child → parent) ──
-    let return_ctx = Capability::switch(&child_cap, 0, 0, platform)
-        .expect("[CHILD_EXIT] return switch failed");
+    let return_ctx =
+        Capability::switch(&child_cap, 0, 0, platform).expect("[CHILD_EXIT] return switch failed");
 
     let child_domain_id = return_ctx.from_domain;
     let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
@@ -1337,9 +1427,15 @@ pub fn forward_child_exit(
     let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
 
     // ── Copy reported registers + intercept message to child's COMM page ──
-    let child_arc = platform.domain_arc(child_domain_id)
+    let child_arc = platform
+        .domain_arc(child_domain_id)
         .expect("[CHILD_EXIT] child PlatformDomain not found");
-    let comm_hpa = child_arc.lock().comm_hpas.get(child_vp_id).copied().unwrap_or(0);
+    let comm_hpa = child_arc
+        .lock()
+        .comm_hpas
+        .get(child_vp_id)
+        .copied()
+        .unwrap_or(0);
 
     const EXIT_REASON_EPT_VIOLATION: u32 = 48;
     let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
@@ -1367,7 +1463,9 @@ pub fn forward_child_exit(
         let guest_rip = vcpu.get(vmcs::guest::RIP);
         let guest_rflags = vcpu.get(vmcs::guest::RFLAGS);
         let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
-        let guest_phys = vcpu.try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL).unwrap_or(0);
+        let guest_phys = vcpu
+            .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
+            .unwrap_or(0);
 
         // For I/O instruction exits (exit reason 30), extract port/size/direction
         // from the exit qualification (SDM Vol 3C §27.2.1 Table 27-5):
@@ -1377,15 +1475,15 @@ pub fn forward_child_exit(
         //   bits 31:16 = port number if bit 6 = 1
         const IO_EXIT_REASON: u32 = 30;
         let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
-            let size   = ((exit_qual & 0b111) as u8) + 1;
-            let is_in  = (exit_qual >> 3) & 1; // 1=IN(read), 0=OUT(write)
-            let imm    = (exit_qual >> 6) & 1;
-            let port   = if imm != 0 {
+            let size = ((exit_qual & 0b111) as u8) + 1;
+            let is_in = (exit_qual >> 3) & 1; // 1=IN(read), 0=OUT(write)
+            let imm = (exit_qual >> 6) & 1;
+            let port = if imm != 0 {
                 (exit_qual >> 16) as u16
             } else {
                 (vcpu.reg(Reg::Rdx) & 0xFFFF) as u16
             };
-            let write  = if is_in == 0 { 1u8 } else { 0u8 };
+            let write = if is_in == 0 { 1u8 } else { 0u8 };
             (port, size, write)
         } else {
             (0u16, 0u8, 0u8)
@@ -1394,7 +1492,9 @@ pub fn forward_child_exit(
         let msg = InterceptMessage {
             header: ThemicMessageHeader {
                 message_type: THEMIC_MSG_VP_INTERCEPT,
-                payload_size: (core::mem::size_of::<InterceptMessage>() - core::mem::size_of::<ThemicMessageHeader>()) as u32,
+                payload_size: (core::mem::size_of::<InterceptMessage>()
+                    - core::mem::size_of::<ThemicMessageHeader>())
+                    as u32,
                 sequence: 0,
             },
             exit_reason,
@@ -1414,7 +1514,7 @@ pub fn forward_child_exit(
             // Fill MSR fields for RDMSR/WRMSR exits (exit reasons 31/32).
             msr_number: vcpu.reg(Reg::Rcx) as u32,
             msr_value: ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32)
-                      | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF),
+                | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF),
             ..InterceptMessage::default()
         };
 
@@ -1439,7 +1539,11 @@ pub fn forward_child_exit(
                         // Read up to 16 bytes (safe: kernel .text is always resident)
                         let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
                         unsafe {
-                            core::ptr::copy_nonoverlapping(insn_ptr, insn_bytes.as_mut_ptr(), avail);
+                            core::ptr::copy_nonoverlapping(
+                                insn_ptr,
+                                insn_bytes.as_mut_ptr(),
+                                avail,
+                            );
                         }
                         msg.instruction_bytes = insn_bytes;
                         // Instruction decode + RIP advancement is handled by
@@ -1455,7 +1559,9 @@ pub fn forward_child_exit(
         }
 
         let msg_ptr = (comm_hpa + hhdm + VP_COMM_INTERCEPT_OFFSET as u64) as *mut InterceptMessage;
-        unsafe { core::ptr::write_volatile(msg_ptr, msg); }
+        unsafe {
+            core::ptr::write_volatile(msg_ptr, msg);
+        }
     }
 
     // Advance the child's RIP past the faulting instruction while the
@@ -1470,21 +1576,31 @@ pub fn forward_child_exit(
 
     // ── Deactivate child → store in child's VcpuSlot ──
     let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let child_inactive = child_active.deactivate()
+    let child_inactive = child_active
+        .deactivate()
         .expect("[CHILD_EXIT] child deactivate failed");
     child_arc.lock().vps[child_vp_id].put(child_inactive);
 
     // ── Take parent → activate → replace vcpu ──
-    let parent_arc = platform.domain_arc(parent_domain_id)
+    let parent_arc = platform
+        .domain_arc(parent_domain_id)
         .expect("[CHILD_EXIT] parent PlatformDomain not found");
-    let parent_inactive = parent_arc.lock().vps[parent_vp_id].take()
+    let parent_inactive = parent_arc.lock().vps[parent_vp_id]
+        .take()
         .expect("[CHILD_EXIT] parent VcpuSlot empty");
-    let mut parent_active = parent_inactive.activate()
+    let mut parent_active = parent_inactive
+        .activate()
         .expect("[CHILD_EXIT] parent activate failed");
     // Update PID.NDST so remote cores can send notification IPIs to this core.
     // IRTE.NDST sync is not needed here: the parent (dom0) uses remapped IRTEs
     // (not posted), so its interrupts are not routed via posted-interrupt NDST.
-    unsafe { pid_set_ndst(parent_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
+    unsafe {
+        pid_set_ndst(
+            parent_active.pid_phys(),
+            platform.hhdm_offset(),
+            current_lapic_id(),
+        )
+    };
 
     // To the parent, this is a return from SWITCH VMCALL.
     // RAX = SUCCESS, RDI = exit_reason.
@@ -1495,12 +1611,15 @@ pub fn forward_child_exit(
 
     // Advance parent RIP past the SWITCH VMCALL instruction.
     let parent_rip = parent_active.get(vmcs::guest::RIP);
-    let parent_instr_len = parent_active.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
+    let parent_instr_len = parent_active
+        .try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
         .unwrap_or(3); // VMCALL is 3 bytes
     parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
 
     // Replace the monitor loop's ActiveVcpu with the parent's.
-    unsafe { core::ptr::write(vcpu, parent_active); }
+    unsafe {
+        core::ptr::write(vcpu, parent_active);
+    }
 }
 
 // ── Interrupt policy VMCALLs ─────────────────────────────────────────────── //
@@ -1671,9 +1790,7 @@ unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) 
     let on_already_set = unsafe { pid_test_and_set_on(pid_phys, hhdm) };
     if is_remote && !on_already_set {
         // Remote VP: send the notification IPI to wake that core out of guest mode.
-        let ndst = unsafe {
-            core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32)
-        };
+        let ndst = unsafe { core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32) };
         let notify_vec = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
         unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
     }
@@ -1757,15 +1874,23 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     assert!(!platform_ptr.is_null());
     let platform = unsafe { &*platform_ptr };
 
-    let core_id = platform.get_current_core()
+    let core_id = platform
+        .get_current_core()
         .expect("[INTR_FWD] get_current_core failed") as u64;
 
     // Currently-running domain cap (the child that was interrupted).
-    let child_cap = platform.get_core_cap(core_id as usize)
+    let child_cap = platform
+        .get_core_cap(core_id as usize)
         .expect("[INTR_FWD] get_core_cap failed");
 
     // Consult the child's interrupt policy for this vector.
-    let child_visibility = child_cap.read().data.policy.interrupts.get_policy(vector).visibility;
+    let child_visibility = child_cap
+        .read()
+        .data
+        .policy
+        .interrupts
+        .get_policy(vector)
+        .visibility;
 
     // Diagnostic: log first 20 + every 500th call to trace interrupt routing.
     {
@@ -1773,7 +1898,13 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         static FWD_COUNT: AtomicU64 = AtomicU64::new(0);
         let n = FWD_COUNT.fetch_add(1, O::Relaxed);
         if n < 20 || n % 500 == 0 {
-            serial_rtdbg!("[INTR_FWD] #{} vec={:#x} vis={:?} core={}", n, vector, child_visibility, core_id);
+            serial_rtdbg!(
+                "[INTR_FWD] #{} vec={:#x} vis={:?} core={}",
+                n,
+                vector,
+                child_visibility,
+                core_id
+            );
         }
     }
 
@@ -1789,7 +1920,10 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
             return;
         } else {
             let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.set(
+                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                intr_info,
+            );
             return;
         }
     }
@@ -1799,7 +1933,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         Ok((id, _reported)) => {
             serial_rtdbg!("[INTR_FWD] route vec={} → handler_dom={}", vector, id);
             id
-        },
+        }
         Err(e) => {
             serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, e);
             let intr_info = (1u64 << 31) | (vector as u64);
@@ -1818,7 +1952,10 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     ) {
         Ok(ctx) => ctx,
         Err(e) => {
-            serial_debug!("[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child", e);
+            serial_debug!(
+                "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",
+                e
+            );
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1826,21 +1963,32 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     };
 
     // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
-    let child_arc = platform.domain_arc(intr_ctx.interrupted_domain_id)
+    let child_arc = platform
+        .domain_arc(intr_ctx.interrupted_domain_id)
         .expect("[INTR_FWD] child domain not found");
     let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let child_inactive = child_active.deactivate()
+    let child_inactive = child_active
+        .deactivate()
         .expect("[INTR_FWD] child deactivate failed");
     child_arc.lock().vps[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
 
     // Activate handler (VMPTRLD) from handler's VcpuSlot.
-    let handler_arc = platform.domain_arc(intr_ctx.handler_domain_id)
+    let handler_arc = platform
+        .domain_arc(intr_ctx.handler_domain_id)
         .expect("[INTR_FWD] handler domain not found");
-    let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize].take()
+    let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize]
+        .take()
         .expect("[INTR_FWD] handler VcpuSlot empty");
-    let mut handler_active = handler_inactive.activate()
+    let mut handler_active = handler_inactive
+        .activate()
         .expect("[INTR_FWD] handler activate (VMPTRLD) failed");
-    unsafe { pid_set_ndst(handler_active.pid_phys(), platform.hhdm_offset(), current_lapic_id()) };
+    unsafe {
+        pid_set_ndst(
+            handler_active.pid_phys(),
+            platform.hhdm_offset(),
+            current_lapic_id(),
+        )
+    };
 
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
@@ -1857,7 +2005,9 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     handler_active.set_reg(Reg::Rdx, 0);
 
     // Replace the monitor loop's ActiveVcpu with the handler's.
-    unsafe { core::ptr::write(vcpu, handler_active); }
+    unsafe {
+        core::ptr::write(vcpu, handler_active);
+    }
 }
 
 // ── VpRegister ↔ VMCS / GPR mapping (reusable) ──────────────────────────── //
@@ -1870,58 +2020,58 @@ pub(crate) fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<
     use x86::vmx::vmcs::guest;
 
     Some(match reg {
-        VpRegister::Rsp    => guest::RSP,
-        VpRegister::Rip    => guest::RIP,
+        VpRegister::Rsp => guest::RSP,
+        VpRegister::Rip => guest::RIP,
         VpRegister::Rflags => guest::RFLAGS,
-        VpRegister::Cr0    => guest::CR0,
-        VpRegister::Cr3    => guest::CR3,
-        VpRegister::Cr4    => guest::CR4,
-        VpRegister::Efer   => guest::IA32_EFER_FULL,
-        VpRegister::Dr7    => guest::DR7,
-        VpRegister::CsSelector   => guest::CS_SELECTOR,
-        VpRegister::DsSelector   => guest::DS_SELECTOR,
-        VpRegister::EsSelector   => guest::ES_SELECTOR,
-        VpRegister::FsSelector   => guest::FS_SELECTOR,
-        VpRegister::GsSelector   => guest::GS_SELECTOR,
-        VpRegister::SsSelector   => guest::SS_SELECTOR,
-        VpRegister::TrSelector   => guest::TR_SELECTOR,
+        VpRegister::Cr0 => guest::CR0,
+        VpRegister::Cr3 => guest::CR3,
+        VpRegister::Cr4 => guest::CR4,
+        VpRegister::Efer => guest::IA32_EFER_FULL,
+        VpRegister::Dr7 => guest::DR7,
+        VpRegister::CsSelector => guest::CS_SELECTOR,
+        VpRegister::DsSelector => guest::DS_SELECTOR,
+        VpRegister::EsSelector => guest::ES_SELECTOR,
+        VpRegister::FsSelector => guest::FS_SELECTOR,
+        VpRegister::GsSelector => guest::GS_SELECTOR,
+        VpRegister::SsSelector => guest::SS_SELECTOR,
+        VpRegister::TrSelector => guest::TR_SELECTOR,
         VpRegister::LdtrSelector => guest::LDTR_SELECTOR,
-        VpRegister::CsBase   => guest::CS_BASE,
-        VpRegister::DsBase   => guest::DS_BASE,
-        VpRegister::EsBase   => guest::ES_BASE,
-        VpRegister::FsBase   => guest::FS_BASE,
-        VpRegister::GsBase   => guest::GS_BASE,
-        VpRegister::SsBase   => guest::SS_BASE,
-        VpRegister::TrBase   => guest::TR_BASE,
+        VpRegister::CsBase => guest::CS_BASE,
+        VpRegister::DsBase => guest::DS_BASE,
+        VpRegister::EsBase => guest::ES_BASE,
+        VpRegister::FsBase => guest::FS_BASE,
+        VpRegister::GsBase => guest::GS_BASE,
+        VpRegister::SsBase => guest::SS_BASE,
+        VpRegister::TrBase => guest::TR_BASE,
         VpRegister::LdtrBase => guest::LDTR_BASE,
-        VpRegister::CsLimit   => guest::CS_LIMIT,
-        VpRegister::DsLimit   => guest::DS_LIMIT,
-        VpRegister::EsLimit   => guest::ES_LIMIT,
-        VpRegister::FsLimit   => guest::FS_LIMIT,
-        VpRegister::GsLimit   => guest::GS_LIMIT,
-        VpRegister::SsLimit   => guest::SS_LIMIT,
-        VpRegister::TrLimit   => guest::TR_LIMIT,
+        VpRegister::CsLimit => guest::CS_LIMIT,
+        VpRegister::DsLimit => guest::DS_LIMIT,
+        VpRegister::EsLimit => guest::ES_LIMIT,
+        VpRegister::FsLimit => guest::FS_LIMIT,
+        VpRegister::GsLimit => guest::GS_LIMIT,
+        VpRegister::SsLimit => guest::SS_LIMIT,
+        VpRegister::TrLimit => guest::TR_LIMIT,
         VpRegister::LdtrLimit => guest::LDTR_LIMIT,
-        VpRegister::CsAccessRights   => guest::CS_ACCESS_RIGHTS,
-        VpRegister::DsAccessRights   => guest::DS_ACCESS_RIGHTS,
-        VpRegister::EsAccessRights   => guest::ES_ACCESS_RIGHTS,
-        VpRegister::FsAccessRights   => guest::FS_ACCESS_RIGHTS,
-        VpRegister::GsAccessRights   => guest::GS_ACCESS_RIGHTS,
-        VpRegister::SsAccessRights   => guest::SS_ACCESS_RIGHTS,
-        VpRegister::TrAccessRights   => guest::TR_ACCESS_RIGHTS,
+        VpRegister::CsAccessRights => guest::CS_ACCESS_RIGHTS,
+        VpRegister::DsAccessRights => guest::DS_ACCESS_RIGHTS,
+        VpRegister::EsAccessRights => guest::ES_ACCESS_RIGHTS,
+        VpRegister::FsAccessRights => guest::FS_ACCESS_RIGHTS,
+        VpRegister::GsAccessRights => guest::GS_ACCESS_RIGHTS,
+        VpRegister::SsAccessRights => guest::SS_ACCESS_RIGHTS,
+        VpRegister::TrAccessRights => guest::TR_ACCESS_RIGHTS,
         VpRegister::LdtrAccessRights => guest::LDTR_ACCESS_RIGHTS,
-        VpRegister::GdtrBase  => guest::GDTR_BASE,
+        VpRegister::GdtrBase => guest::GDTR_BASE,
         VpRegister::GdtrLimit => guest::GDTR_LIMIT,
-        VpRegister::IdtrBase  => guest::IDTR_BASE,
+        VpRegister::IdtrBase => guest::IDTR_BASE,
         VpRegister::IdtrLimit => guest::IDTR_LIMIT,
-        VpRegister::SysenterCs  => guest::IA32_SYSENTER_CS,
+        VpRegister::SysenterCs => guest::IA32_SYSENTER_CS,
         VpRegister::SysenterEsp => guest::IA32_SYSENTER_ESP,
         VpRegister::SysenterEip => guest::IA32_SYSENTER_EIP,
-        VpRegister::FsBaseMsr   => guest::FS_BASE,
-        VpRegister::GsBaseMsr   => guest::GS_BASE,
-        VpRegister::ActivityState         => guest::ACTIVITY_STATE,
+        VpRegister::FsBaseMsr => guest::FS_BASE,
+        VpRegister::GsBaseMsr => guest::GS_BASE,
+        VpRegister::ActivityState => guest::ACTIVITY_STATE,
         VpRegister::InterruptibilityState => guest::INTERRUPTIBILITY_STATE,
-        VpRegister::Pat                   => guest::IA32_PAT_FULL,
+        VpRegister::Pat => guest::IA32_PAT_FULL,
         // No VMCS mapping.
         _ => return None,
     })
@@ -1939,8 +2089,8 @@ pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
         VpRegister::Rsi => Reg::Rsi,
         VpRegister::Rdi => Reg::Rdi,
         VpRegister::Rbp => Reg::Rbp,
-        VpRegister::R8  => Reg::R8,
-        VpRegister::R9  => Reg::R9,
+        VpRegister::R8 => Reg::R8,
+        VpRegister::R9 => Reg::R9,
         VpRegister::R10 => Reg::R10,
         VpRegister::R11 => Reg::R11,
         VpRegister::R12 => Reg::R12,
@@ -2018,10 +2168,7 @@ fn vmwrite(field: u32, val: u64) {
 ///
 /// The domain enqueues messages (GROW_RX, GROW_TX, ENUM_CAP, etc.) on its
 /// TX ring and then does this VMCALL to trigger the capavisor to process them.
-fn do_domcomm_notify(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-) -> HypercallResult {
+fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRef<Domain>) -> HypercallResult {
     use themis_abi::domcomm;
 
     let domain_id = caller.read().data.id;
@@ -2043,21 +2190,25 @@ fn do_domcomm_notify(
         let result = pd_locked.domcomm_tx_dequeue(&mut buf);
         match result {
             None => break,
-            Some((msg_type, payload_size, _seq)) => {
-                match msg_type {
-                    domcomm::msg_types::GROW_RX | domcomm::msg_types::GROW_TX => {
-                        let is_rx = msg_type == domcomm::msg_types::GROW_RX;
-                        handle_grow(platform, caller, &mut *pd_locked,
-                                    is_rx, &buf[..payload_size]);
-                    }
-                    _ => {
-                        serial_println!(
-                            "[domcomm] unknown TX msg type {:#x} from domain {}",
-                            msg_type, domain_id,
-                        );
-                    }
+            Some((msg_type, payload_size, _seq)) => match msg_type {
+                domcomm::msg_types::GROW_RX | domcomm::msg_types::GROW_TX => {
+                    let is_rx = msg_type == domcomm::msg_types::GROW_RX;
+                    handle_grow(
+                        platform,
+                        caller,
+                        &mut *pd_locked,
+                        is_rx,
+                        &buf[..payload_size],
+                    );
                 }
-            }
+                _ => {
+                    serial_println!(
+                        "[domcomm] unknown TX msg type {:#x} from domain {}",
+                        msg_type,
+                        domain_id,
+                    );
+                }
+            },
         }
     }
 
@@ -2102,7 +2253,9 @@ fn handle_grow(
     serial_println!(
         "[domcomm] GROW_{}: cap_handle={} cap_sub={} nr_pages={}",
         if is_rx { "RX" } else { "TX" },
-        req.cap_handle, req.cap_sub, req.nr_pages,
+        req.cap_handle,
+        req.cap_sub,
+        req.nr_pages,
     );
 
     // Bounds-check nr_pages (prevent OOM from malicious domain).
@@ -2151,7 +2304,8 @@ fn handle_grow(
     if cap_size < expected_size {
         serial_println!(
             "[domcomm] GROW: cap size {:#x} < expected {:#x}",
-            cap_size, expected_size,
+            cap_size,
+            expected_size,
         );
         send_grow_ack(pd, 5);
         return;
@@ -2173,7 +2327,10 @@ fn handle_grow(
             ring_meta.page_count = ring.page_hpas.len() as u32;
         }
 
-        (ring.page_hpas.len() as u32, ring.page_hpas.len() as u32 * 4096)
+        (
+            ring.page_hpas.len() as u32,
+            ring.page_hpas.len() as u32 * 4096,
+        )
     };
 
     // Send GROW_ACK on the RX ring.
@@ -2261,9 +2418,21 @@ fn do_register_doorbell(
 
     let doorbell_id = pd.next_doorbell_id;
     pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
-    pd.doorbells.push(DoorbellEntry { doorbell_id, gpa, datamatch, size, flags });
+    pd.doorbells.push(DoorbellEntry {
+        doorbell_id,
+        gpa,
+        datamatch,
+        size,
+        flags,
+    });
 
-    serial_rtdbg!("[REG_DB] id={} gpa={:#x} sz={} flags={:#x}", doorbell_id, gpa, size, flags);
+    serial_rtdbg!(
+        "[REG_DB] id={} gpa={:#x} sz={} flags={:#x}",
+        doorbell_id,
+        gpa,
+        size,
+        flags
+    );
 
     HypercallResult::success_1(doorbell_id as u64)
 }
@@ -2348,7 +2517,12 @@ fn do_inject_interrupt(
     vp_id: u32,
     vector: u8,
 ) -> HypercallResult {
-    serial_rtdbg!("[INJECT] vec={} vp={} handle={:#x}", vector, vp_id, child_domain_handle);
+    serial_rtdbg!(
+        "[INJECT] vec={} vp={} handle={:#x}",
+        vector,
+        vp_id,
+        child_domain_handle
+    );
     if vector == 0 {
         return HypercallResult::error(errors::ERR_INVALID);
     }
@@ -2418,10 +2592,7 @@ fn do_inject_interrupt(
 /// posted device interrupts would be sent to the wrong core (always core 0).
 /// This path has not been exercised yet; it will need end-to-end testing once
 /// real device assignment is in use.
-fn program_domain_irtes(
-    platform: &ThemisPlatform,
-    child_cap: &CapabilityRef<Domain>,
-) {
+fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>) {
     if platform.drhd_units.is_empty() {
         return;
     }
@@ -2486,11 +2657,7 @@ fn program_domain_irtes(
 /// **Testing note**: this path requires real device assignment (`ASSIGN_DEVICE`)
 /// to exercise end-to-end.  It should be validated once device passthrough is
 /// in use.
-fn sync_irte_ndst(
-    platform: &ThemisPlatform,
-    child_cap: &CapabilityRef<Domain>,
-    new_ndst: u32,
-) {
+fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, new_ndst: u32) {
     if platform.drhd_units.is_empty() {
         return;
     }
@@ -2542,9 +2709,9 @@ fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
 ///      RSI = pci_bdf (u16 — bus[15:8] | device[7:3] | function[2:0])
 fn do_assign_device(
     platform: &ThemisPlatform,
-    caller:   &CapabilityRef<Domain>,
+    caller: &CapabilityRef<Domain>,
     domain_handle: u64,
-    bdf_arg:       u64,
+    bdf_arg: u64,
 ) -> HypercallResult {
     let bdf = bdf_arg as u16;
     // Resolve domain_handle → domain_id via the caller's capability tree.
@@ -2563,10 +2730,7 @@ fn do_assign_device(
 /// RELEASE_DEVICE (0x1a): return a PCI device to dom0 passthrough.
 ///
 /// IN:  RDI = pci_bdf (u16)
-fn do_release_device(
-    platform: &ThemisPlatform,
-    bdf_arg:  u64,
-) -> HypercallResult {
+fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> HypercallResult {
     let bdf = bdf_arg as u16;
     platform.release_device(bdf);
     HypercallResult::success()
@@ -2583,8 +2747,10 @@ pub fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
         let index = ((gpa >> shift) & 0x1FF) as usize;
         let entry_addr = table_phys + (index as u64) * 8;
         let entry: u64 = unsafe { core::ptr::read_volatile((entry_addr + hhdm) as *const u64) };
-        if entry & 0x7 == 0 { return None; } // not present
-        // Check for large page (bit 7) at levels 2 and 1
+        if entry & 0x7 == 0 {
+            return None;
+        } // not present
+          // Check for large page (bit 7) at levels 2 and 1
         if level > 0 && entry & (1 << 7) != 0 {
             let mask = (1u64 << shift) - 1;
             return Some((entry & !mask & 0x000F_FFFF_FFFF_F000) | (gpa & mask));
@@ -2603,8 +2769,10 @@ pub fn guest_gva_to_gpa(ept_root_phys: u64, hhdm: u64, guest_cr3: u64, gva: u64)
         let entry_gpa = table_gpa + (index as u64) * 8;
         let entry_hpa = ept_gpa_to_hpa(ept_root_phys, hhdm, entry_gpa)?;
         let entry: u64 = unsafe { core::ptr::read_volatile((entry_hpa + hhdm) as *const u64) };
-        if entry & 1 == 0 { return None; } // not present
-        // Large page at PDPT (level 2) or PD (level 1)
+        if entry & 1 == 0 {
+            return None;
+        } // not present
+          // Large page at PDPT (level 2) or PD (level 1)
         if level > 0 && entry & (1 << 7) != 0 {
             let mask = (1u64 << shift) - 1;
             return Some((entry & !mask & 0x000F_FFFF_FFFF_F000) | (gva & mask));

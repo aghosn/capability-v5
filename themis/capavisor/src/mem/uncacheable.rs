@@ -14,8 +14,8 @@
 //! After boot the table is frozen and only read.  Internal state is held behind a
 //! `spin::RwLock` so concurrent readers on multiple cores never contend.
 
-use spin::RwLock;
 use super::PhysRegion;
+use spin::RwLock;
 
 /// Maximum number of UC ranges tracked (sufficient for any real hardware).
 const MAX_UC_RANGES: usize = 64;
@@ -23,14 +23,14 @@ const MAX_UC_RANGES: usize = 64;
 /// Mutable inner state — only written during boot initialisation.
 struct Inner {
     ranges: [PhysRegion; MAX_UC_RANGES],
-    count:  usize,
+    count: usize,
 }
 
 impl Inner {
     const fn new() -> Self {
         Self {
             ranges: [PhysRegion { base: 0, length: 0 }; MAX_UC_RANGES],
-            count:  0,
+            count: 0,
         }
     }
 }
@@ -49,7 +49,9 @@ pub struct UncacheableRanges {
 impl UncacheableRanges {
     /// Create an empty registry.
     pub fn new() -> Self {
-        Self { inner: RwLock::new(Inner::new()) }
+        Self {
+            inner: RwLock::new(Inner::new()),
+        }
     }
 
     /// Register `[base, base+length)` as uncacheable.
@@ -75,13 +77,13 @@ impl UncacheableRanges {
 
         // Extend the merge window backward if the preceding range overlaps/touches.
         let mut merged_base = base;
-        let mut merged_end  = end;
+        let mut merged_end = end;
         let mut start = pos;
         if start > 0 {
             let prev = g.ranges[start - 1];
             if prev.base + prev.length >= base {
                 merged_base = prev.base;
-                merged_end  = merged_end.max(prev.base + prev.length);
+                merged_end = merged_end.max(prev.base + prev.length);
                 start -= 1;
             }
         }
@@ -99,14 +101,20 @@ impl UncacheableRanges {
         }
 
         // Compact: replace the absorbed slot(s) with the merged range.
-        let absorbed  = absorb_end - start;
+        let absorbed = absorb_end - start;
         let new_count = g.count - absorbed + 1;
-        assert!(new_count <= MAX_UC_RANGES, "UncacheableRanges: too many disjoint UC regions");
+        assert!(
+            new_count <= MAX_UC_RANGES,
+            "UncacheableRanges: too many disjoint UC regions"
+        );
 
         for i in (start + 1)..new_count {
             g.ranges[i] = g.ranges[i + absorbed - 1];
         }
-        g.ranges[start] = PhysRegion { base: merged_base, length: merged_end - merged_base };
+        g.ranges[start] = PhysRegion {
+            base: merged_base,
+            length: merged_end - merged_base,
+        };
         g.count = new_count;
     }
 
@@ -159,4 +167,3 @@ impl UncacheableRanges {
         self.inner.read().count
     }
 }
-

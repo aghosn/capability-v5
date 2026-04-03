@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use core::ptr;
 
-use pci_types::{ConfigRegionAccess, PciAddress, PciHeader, HeaderType, EndpointHeader, Bar};
+use pci_types::{Bar, ConfigRegionAccess, EndpointHeader, HeaderType, PciAddress, PciHeader};
 
 use crate::acpi::AcpiInfo;
 
@@ -83,7 +83,10 @@ pub struct PciBarRegion {
 /// On success, returns `(devices, bar_regions)` — the BAR regions are the
 /// physical memory ranges of all discovered memory BARs, suitable for EPT
 /// passthrough mapping.
-pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<(Vec<PciDevice>, Vec<PciBarRegion>)> {
+pub fn enumerate(
+    acpi_info: &AcpiInfo,
+    hhdm_offset: u64,
+) -> Option<(Vec<PciDevice>, Vec<PciBarRegion>)> {
     let regions = acpi_info.pci_config_regions.as_ref()?;
     if regions.regions.is_empty() {
         return None;
@@ -125,8 +128,7 @@ pub fn enumerate(acpi_info: &AcpiInfo, hhdm_offset: u64) -> Option<(Vec<PciDevic
                     continue;
                 }
 
-                let (rev, class, subclass, interface) =
-                    header.revision_and_class(&access);
+                let (rev, class, subclass, interface) = header.revision_and_class(&access);
                 let hdr_type = header.header_type(&access);
 
                 devices.push(PciDevice {

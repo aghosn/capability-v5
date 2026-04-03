@@ -189,7 +189,11 @@ impl BootHeader {
 
         Ok(Self {
             version: raw.version,
-            setup_sects: if raw.setup_sects == 0 { 4 } else { raw.setup_sects },
+            setup_sects: if raw.setup_sects == 0 {
+                4
+            } else {
+                raw.setup_sects
+            },
             pref_address: raw.pref_address,
             kernel_alignment: raw.kernel_alignment,
             init_size: raw.init_size,
@@ -239,10 +243,10 @@ pub struct E820Entry {
 }
 
 impl E820Entry {
-    pub const TYPE_RAM:      u32 = 1;
+    pub const TYPE_RAM: u32 = 1;
     pub const TYPE_RESERVED: u32 = 2;
-    pub const TYPE_ACPI:     u32 = 3;
-    pub const TYPE_NVS:      u32 = 4;
+    pub const TYPE_ACPI: u32 = 3;
+    pub const TYPE_NVS: u32 = 4;
 }
 
 // ── boot_params wrapper ───────────────────────────────────────────────────── //
@@ -257,24 +261,24 @@ pub struct BootParams([u8; 4096]);
 impl BootParams {
     // ── Byte offsets ──────────────────────────────────────────────────────── //
     /// Physical address of the ACPI RSDP to expose to dom0.
-    const ACPI_RSDP_OFF:      usize = 0x070;
+    const ACPI_RSDP_OFF: usize = 0x070;
     /// Number of valid e820 entries (u8).
-    const E820_ENTRIES_OFF:   usize = 0x1e8;
+    const E820_ENTRIES_OFF: usize = 0x1e8;
     // setup_header fields — header starts at 0x1f1 in boot_params:
     /// Bootloader type identifier (0xFF = undefined/custom).
     const TYPE_OF_LOADER_OFF: usize = 0x210;
     /// Load flags (bit 0 = LOADED_HIGH: kernel above 1 MiB).
-    const LOADFLAGS_OFF:      usize = 0x211;
+    const LOADFLAGS_OFF: usize = 0x211;
     /// 32-bit physical address of the initrd image.
-    const RAMDISK_IMAGE_OFF:  usize = 0x218;
+    const RAMDISK_IMAGE_OFF: usize = 0x218;
     /// Byte length of the initrd image.
-    const RAMDISK_SIZE_OFF:   usize = 0x21c;
+    const RAMDISK_SIZE_OFF: usize = 0x21c;
     /// 32-bit physical address of the NUL-terminated command-line string.
-    const CMD_LINE_PTR_OFF:   usize = 0x228;
+    const CMD_LINE_PTR_OFF: usize = 0x228;
     /// Start of the e820 table (128 × 20-byte entries).
-    const E820_TABLE_OFF:     usize = 0x2d0;
-    const E820_ENTRY_SIZE:    usize = 20;
-    const E820_MAX:           usize = 128;
+    const E820_TABLE_OFF: usize = 0x2d0;
+    const E820_ENTRY_SIZE: usize = 20;
+    const E820_MAX: usize = 128;
 
     /// Create a zeroed `boot_params` page.
     pub fn new() -> Self {
@@ -351,11 +355,7 @@ impl BootParams {
         // Clamp to 4096 in case the header is very large.
         let copy_end = end.min(4096);
         let copy_len = copy_end - SETUP_HEADER_OFFSET;
-        core::ptr::copy_nonoverlapping(
-            src,
-            self.0[SETUP_HEADER_OFFSET..].as_mut_ptr(),
-            copy_len,
-        );
+        core::ptr::copy_nonoverlapping(src, self.0[SETUP_HEADER_OFFSET..].as_mut_ptr(), copy_len);
     }
 }
 
@@ -387,13 +387,13 @@ pub struct LinuxLoadInfo {
 /// | `0x0_E000`  | DomainComm region (4 pages, 16 KiB) |
 /// | `0x10_0000` | Protected-mode kernel image      |
 /// | after kern  | Initrd, 4-KiB aligned (if any)  |
-pub const BOOT_PARAMS_PHYS: u64  = 0x0_7000;
-pub const CMDLINE_PHYS: u64      = 0x0_8000;
-pub const INITIAL_RSP_PHYS: u64  = 0x0_8FF8;
+pub const BOOT_PARAMS_PHYS: u64 = 0x0_7000;
+pub const CMDLINE_PHYS: u64 = 0x0_8000;
+pub const INITIAL_RSP_PHYS: u64 = 0x0_8FF8;
 /// Destination for the DMAR-stripped RSDP + XSDT copies (4 KiB page).
 /// Layout: RSDP at +0x000, XSDT at +0x100.
-pub const ACPI_COPY_PHYS: u64    = 0x0_9000;
-pub const KERNEL_LOAD_PHYS: u64  = 0x10_0000;
+pub const ACPI_COPY_PHYS: u64 = 0x0_9000;
+pub const KERNEL_LOAD_PHYS: u64 = 0x10_0000;
 
 /// Load a Linux bzImage into dom0 physical memory and write `struct boot_params`.
 ///
@@ -424,24 +424,34 @@ pub fn load_linux(
     cmdline: &str,
 ) -> LinuxLoadInfo {
     // ── Parse bzImage header ─────────────────────────────────────────────── //
-    let hdr = BootHeader::from_module(kernel)
-        .expect("load_linux: invalid bzImage header");
+    let hdr = BootHeader::from_module(kernel).expect("load_linux: invalid bzImage header");
     serial_println!(
         "  Linux boot protocol v{:#06x}  is_64bit={}  init_size={:#x}",
-        hdr.version, hdr.is_64bit(), hdr.init_size,
+        hdr.version,
+        hdr.is_64bit(),
+        hdr.init_size,
     );
 
     // ── Copy protected-mode kernel to code32_start (0x100000) ───────────── //
     let pm_off = hdr.protected_mode_offset();
-    let total  = kernel.size as usize;
-    assert!(pm_off < total, "load_linux: bzImage smaller than protected_mode_offset");
+    let total = kernel.size as usize;
+    assert!(
+        pm_off < total,
+        "load_linux: bzImage smaller than protected_mode_offset"
+    );
     let pm_len = total - pm_off;
 
     // SAFETY: Limine guarantees the module is fully HHDM-mapped and readable.
     let src = unsafe { kernel.base.add(pm_off) };
     let dst = (KERNEL_LOAD_PHYS + hhdm_offset) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(src, dst, pm_len); }
-    serial_println!("  Kernel PM: {:#x} bytes → phys {:#x}", pm_len, KERNEL_LOAD_PHYS);
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, pm_len);
+    }
+    serial_println!(
+        "  Kernel PM: {:#x} bytes → phys {:#x}",
+        pm_len,
+        KERNEL_LOAD_PHYS
+    );
 
     // ── Place initrd at the top of the highest dom0 RAM region ───────────── //
     // Real bootloaders (GRUB, syslinux) place the initrd near the top of RAM,
@@ -461,13 +471,25 @@ pub fn load_linux(
                 best_end = region_end;
             }
         }
-        assert!(best_end > 0, "load_linux: no dom0 region below 4 GiB large enough for initrd");
+        assert!(
+            best_end > 0,
+            "load_linux: no dom0 region below 4 GiB large enough for initrd"
+        );
         // Page-align downward to fit the initrd at the top of the region.
         let start = (best_end - rd_len) & !0xFFF;
-        assert!(start + rd_len <= 0x1_0000_0000, "initrd placement overflows 32-bit address");
+        assert!(
+            start + rd_len <= 0x1_0000_0000,
+            "initrd placement overflows 32-bit address"
+        );
         let rd_dst = (start + hhdm_offset) as *mut u8;
-        unsafe { core::ptr::copy_nonoverlapping(rd.base, rd_dst, rd.size as usize); }
-        serial_println!("  Initrd:    {:#x} bytes → phys {:#x} (top of sub-4G RAM)", rd.size, start);
+        unsafe {
+            core::ptr::copy_nonoverlapping(rd.base, rd_dst, rd.size as usize);
+        }
+        serial_println!(
+            "  Initrd:    {:#x} bytes → phys {:#x} (top of sub-4G RAM)",
+            rd.size,
+            start
+        );
         // Debug: dump first 32 bytes of source and destination to verify integrity
         unsafe {
             let src = core::slice::from_raw_parts(rd.base, 32.min(rd.size as usize));
@@ -497,7 +519,9 @@ pub fn load_linux(
     // Copy the raw setup header from the bzImage so that all fields the
     // kernel reads (kernel_alignment, init_size, xloadflags, etc.) are
     // present.  We then override the fields Themis controls.
-    unsafe { bp.copy_setup_header(kernel); }
+    unsafe {
+        bp.copy_setup_header(kernel);
+    }
 
     bp.set_type_of_loader(0xFF);
     bp.set_loadflags(LOADFLAG_LOADED_HIGH);
@@ -515,20 +539,35 @@ pub fn load_linux(
     let mut count = 0usize;
 
     let push = |buf: &mut [E820Entry; 128], n: &mut usize, e: E820Entry| {
-        if *n < 128 { buf[*n] = e; *n += 1; }
+        if *n < 128 {
+            buf[*n] = e;
+            *n += 1;
+        }
     };
 
     for r in dom0_regions {
-        push(&mut e820_buf, &mut count, E820Entry {
-            addr: r.base, size: r.length, entry_type: E820Entry::TYPE_RAM,
-        });
+        push(
+            &mut e820_buf,
+            &mut count,
+            E820Entry {
+                addr: r.base,
+                size: r.length,
+                entry_type: E820Entry::TYPE_RAM,
+            },
+        );
     }
     // META regions are carved from dom0_owned but owned by the hypervisor — mark reserved.
     for meta in meta_regions {
         if meta.length > 0 {
-            push(&mut e820_buf, &mut count, E820Entry {
-                addr: meta.base, size: meta.length, entry_type: E820Entry::TYPE_RESERVED,
-            });
+            push(
+                &mut e820_buf,
+                &mut count,
+                E820Entry {
+                    addr: meta.base,
+                    size: meta.length,
+                    entry_type: E820Entry::TYPE_RESERVED,
+                },
+            );
         }
     }
     for e in non_ram {
@@ -536,11 +575,15 @@ pub fn load_linux(
     }
     // DomainComm region: reserved so Linux doesn't allocate from it.
     // The thhv driver discovers it via CPUID leaf 0x40000002 and uses memremap().
-    push(&mut e820_buf, &mut count, E820Entry {
-        addr: comm_region.base,
-        size: comm_region.length,
-        entry_type: E820Entry::TYPE_RESERVED,
-    });
+    push(
+        &mut e820_buf,
+        &mut count,
+        E820Entry {
+            addr: comm_region.base,
+            size: comm_region.length,
+            entry_type: E820Entry::TYPE_RESERVED,
+        },
+    );
 
     // Sort entries by base address (insertion sort — small N, no alloc needed).
     let entries = &mut e820_buf[..count];
@@ -556,14 +599,20 @@ pub fn load_linux(
 
     // Copy boot_params into guest physical memory via HHDM.
     let bp_dst = (BOOT_PARAMS_PHYS + hhdm_offset) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(bp.as_bytes().as_ptr(), bp_dst, 4096); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bp.as_bytes().as_ptr(), bp_dst, 4096);
+    }
     serial_println!(
         "  boot_params @ {:#x}  e820_entries={}  (RAM={} META={} non-RAM={})",
-        BOOT_PARAMS_PHYS, count, dom0_regions.len(), meta_regions.len(), non_ram.len(),
+        BOOT_PARAMS_PHYS,
+        count,
+        dom0_regions.len(),
+        meta_regions.len(),
+        non_ram.len(),
     );
 
     LinuxLoadInfo {
         kernel_entry_phys: KERNEL_LOAD_PHYS,
-        boot_params_phys:  BOOT_PARAMS_PHYS,
+        boot_params_phys: BOOT_PARAMS_PHYS,
     }
 }

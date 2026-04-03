@@ -356,7 +356,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // NMIs cannot be posted via PIR — forward to dom0 as vector 2.
                             // Child's default Report policy routes it via lazy-unwind to dom0.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-                            let exc_type = ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
+                            let exc_type =
+                                ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
                             if exc_type as u64 == INTR_TYPE_NMI {
                                 // Type 2 = NMI; forward to dom0.
                                 crate::hypercall::forward_interrupt_to_handler(vcpu, 2);
@@ -468,7 +469,9 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let offset = qual & APIC_ACCESS_OFFSET_MASK;
                             let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
 
-                            if offset == APIC_REG_ICR_LOW as u64 && acc_type == APIC_ACCESS_TYPE_WRITE {
+                            if offset == APIC_REG_ICR_LOW as u64
+                                && acc_type == APIC_ACCESS_TYPE_WRITE
+                            {
                                 // ICR low write — decode value and include ICR_HIGH
                                 // (destination APIC ID) from VAPIC[0x310].
                                 if let Some(val) = decode_apic_write_value(vcpu, platform) {
@@ -476,7 +479,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 }
                                 let hhdm = platform.hhdm_offset();
                                 let vapic = (vcpu.vapic_phys() + hhdm) as *const u32;
-                                let icr_high = unsafe { vapic.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
+                                let icr_high =
+                                    unsafe { vapic.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
                                 vcpu.set_reg(Reg::Rcx, icr_high as u64);
                                 crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
@@ -503,7 +507,8 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                                 // Read it and put in RAX for CHV.
                                 let hhdm = platform.hhdm_offset();
                                 let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
-                                let icr_val = unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
+                                let icr_val =
+                                    unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
                                 vcpu.set_reg(Reg::Rax, icr_val as u64);
                                 crate::hypercall::forward_child_exit(vcpu, EXIT_REASON_APIC_ACCESS);
                                 return;
@@ -1048,8 +1053,10 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             }
 
             // Re-inject the exception into the guest.
-            let inject =
-                INTR_INFO_VALID | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT) | (vector as u64) | (has_error_code << 11);
+            let inject = INTR_INFO_VALID
+                | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT)
+                | (vector as u64)
+                | (has_error_code << 11);
             vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
             if has_error_code == 1 {
                 let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
@@ -1144,8 +1151,7 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
         1 => {
             // Data write: decode instruction to find source register value,
             // then mirror into VAPIC page.
-            let val = decode_apic_write_value(vcpu, platform)
-                .unwrap_or(vcpu.reg(Reg::Rax) as u32);
+            let val = decode_apic_write_value(vcpu, platform).unwrap_or(vcpu.reg(Reg::Rax) as u32);
 
             if offset == APIC_REG_EOI {
                 // EOI: clear the highest-priority bit in the ISR (In-Service
@@ -1157,7 +1163,9 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
                     if isr_val != 0 {
                         let bit = 31 - isr_val.leading_zeros();
                         unsafe {
-                            vapic_virt.add(isr_idx).write_volatile(isr_val & !(1 << bit));
+                            vapic_virt
+                                .add(isr_idx)
+                                .write_volatile(isr_val & !(1 << bit));
                         }
                         break;
                     }

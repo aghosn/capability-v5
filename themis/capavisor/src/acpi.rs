@@ -11,13 +11,13 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use acpi::{
-    AcpiTables, Handler, Handle, PhysicalMapping,
     aml::AmlError,
     platform::PciConfigRegions,
     sdt::{
-        madt::{MadtEntry, Madt},
+        madt::{Madt, MadtEntry},
         mcfg::Mcfg,
     },
+    AcpiTables, Handle, Handler, PhysicalMapping,
 };
 
 // ── HHDM-based ACPI handler ────────────────────────────────────────────── //
@@ -86,36 +86,52 @@ impl Handler for HhdmHandler {
 
     fn read_io_u8(&self, port: u16) -> u8 {
         let val: u8;
-        unsafe { core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack))
+        };
         val
     }
     fn read_io_u16(&self, port: u16) -> u16 {
         let val: u16;
-        unsafe { core::arch::asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack))
+        };
         val
     }
     fn read_io_u32(&self, port: u16) -> u32 {
         let val: u32;
-        unsafe { core::arch::asm!("in eax, dx", out("eax") val, in("dx") port, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("in eax, dx", out("eax") val, in("dx") port, options(nomem, nostack))
+        };
         val
     }
 
     fn write_io_u8(&self, port: u16, value: u8) {
-        unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack))
+        };
     }
     fn write_io_u16(&self, port: u16, value: u16) {
-        unsafe { core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack))
+        };
     }
     fn write_io_u32(&self, port: u16, value: u32) {
-        unsafe { core::arch::asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack)) };
+        unsafe {
+            core::arch::asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack))
+        };
     }
 
     fn read_pci_u8(&self, _address: acpi::PciAddress, _offset: u16) -> u8 {
         // TODO: PCI config space reads via ECAM MMIO (needed for full ACPI parsing).
         0
     }
-    fn read_pci_u16(&self, _address: acpi::PciAddress, _offset: u16) -> u16 { 0 }
-    fn read_pci_u32(&self, _address: acpi::PciAddress, _offset: u16) -> u32 { 0 }
+    fn read_pci_u16(&self, _address: acpi::PciAddress, _offset: u16) -> u16 {
+        0
+    }
+    fn read_pci_u32(&self, _address: acpi::PciAddress, _offset: u16) -> u32 {
+        0
+    }
 
     fn write_pci_u8(&self, _address: acpi::PciAddress, _offset: u16, _value: u8) {}
     fn write_pci_u16(&self, _address: acpi::PciAddress, _offset: u16, _value: u16) {}
@@ -207,9 +223,9 @@ pub struct TpmInfo {
 /// Covers a contiguous range of PCI buses on a single PCI segment.
 #[derive(Debug, Clone)]
 pub struct EcamRegion {
-    pub segment:   u16,
+    pub segment: u16,
     pub start_bus: u8,
-    pub end_bus:   u8,
+    pub end_bus: u8,
     pub base_phys: u64,
 }
 
@@ -348,9 +364,9 @@ impl AcpiInfo {
                     .entries()
                     .iter()
                     .map(|e| EcamRegion {
-                        segment:   e.pci_segment_group,
+                        segment: e.pci_segment_group,
                         start_bus: e.bus_number_start,
-                        end_bus:   e.bus_number_end,
+                        end_bus: e.bus_number_end,
                         base_phys: e.base_address,
                     })
                     .collect()
@@ -397,7 +413,8 @@ impl AcpiInfo {
             // regardless of INCLUDE_PCI_ALL.  A DRHD with flags=0x0 routes DMA
             // for specific devices but we still need passthrough entries for every
             // possible source-id; an absent (P=0) root entry is a DMA fault.
-            ctx_pages += self.ecam_regions
+            ctx_pages += self
+                .ecam_regions
                 .iter()
                 .filter(|r| r.segment == unit.segment)
                 .map(|r| r.bus_count())
@@ -442,28 +459,31 @@ fn parse_tpm2<H: acpi::Handler + Clone>(
     };
 
     let tpm2_virt = (tpm2_phys + hhdm_offset) as *const u8;
-    let table_len = unsafe {
-        (tpm2_virt.add(4) as *const u32).read_unaligned() as usize
-    };
+    let table_len = unsafe { (tpm2_virt.add(4) as *const u32).read_unaligned() as usize };
 
     if table_len < TPM2_MIN_SIZE {
-        serial_println!("ACPI TPM2: table too short ({} bytes) — skipping", table_len);
+        serial_println!(
+            "ACPI TPM2: table too short ({} bytes) — skipping",
+            table_len
+        );
         return None;
     }
 
-    let control_area = unsafe {
-        (tpm2_virt.add(40) as *const u64).read_unaligned()
-    };
-    let start_method = unsafe {
-        (tpm2_virt.add(48) as *const u32).read_unaligned()
-    };
+    let control_area = unsafe { (tpm2_virt.add(40) as *const u64).read_unaligned() };
+    let start_method = unsafe { (tpm2_virt.add(48) as *const u32).read_unaligned() };
 
     serial_println!(
         "ACPI TPM2: control_area={:#x} start_method={} (table at phys {:#x}, {} bytes)",
-        control_area, start_method, tpm2_phys, table_len,
+        control_area,
+        start_method,
+        tpm2_phys,
+        table_len,
     );
 
-    Some(TpmInfo { control_area, start_method })
+    Some(TpmInfo {
+        control_area,
+        start_method,
+    })
 }
 
 // ── DMAR parsing ───────────────────────────────────────────────────────── //
@@ -507,9 +527,7 @@ fn parse_dmar<H: acpi::Handler + Clone>(
 
     // Read DMAR table length from the standard SDT header (offset 4, u32).
     let dmar_virt = (dmar_phys + hhdm_offset) as *const u8;
-    let dmar_len = unsafe {
-        (dmar_virt.add(4) as *const u32).read_unaligned() as usize
-    };
+    let dmar_len = unsafe { (dmar_virt.add(4) as *const u32).read_unaligned() as usize };
 
     if dmar_len < DMAR_HEADER_SIZE {
         serial_println!("ACPI DMAR: table too short ({} bytes) — skipping", dmar_len);
@@ -524,20 +542,28 @@ fn parse_dmar<H: acpi::Handler + Clone>(
         let entry_ptr = unsafe { dmar_virt.add(offset) };
 
         let entry_type = unsafe { (entry_ptr as *const u16).read_unaligned() };
-        let entry_len  = unsafe { (entry_ptr.add(2) as *const u16).read_unaligned() } as usize;
+        let entry_len = unsafe { (entry_ptr.add(2) as *const u16).read_unaligned() } as usize;
 
         if entry_len < 4 || offset + entry_len > dmar_len {
-            serial_println!("ACPI DMAR: malformed entry at offset {} (len {}) — stopping", offset, entry_len);
+            serial_println!(
+                "ACPI DMAR: malformed entry at offset {} (len {}) — stopping",
+                offset,
+                entry_len
+            );
             break;
         }
 
         if entry_type == DRHD_TYPE {
             // DRHD: [type u16][len u16][flags u8][rsvd u8][segment u16][regbase u64]
             if entry_len < 16 {
-                serial_println!("ACPI DMAR: DRHD entry too short ({}) at offset {}", entry_len, offset);
+                serial_println!(
+                    "ACPI DMAR: DRHD entry too short ({}) at offset {}",
+                    entry_len,
+                    offset
+                );
             } else {
-                let drhd_flags    = unsafe { entry_ptr.add(4).read() };
-                let segment       = unsafe { (entry_ptr.add(6) as *const u16).read_unaligned() };
+                let drhd_flags = unsafe { entry_ptr.add(4).read() };
+                let segment = unsafe { (entry_ptr.add(6) as *const u16).read_unaligned() };
                 let register_base = unsafe { (entry_ptr.add(8) as *const u64).read_unaligned() };
 
                 // CAP/ECAP reads deferred to init_themis() after the MMIO region
@@ -545,7 +571,9 @@ fn parse_dmar<H: acpi::Handler + Clone>(
                 // will update it once it can safely access the registers.
                 serial_println!(
                     "ACPI DMAR: DRHD seg={} base={:#x} flags={:#x} (IR check deferred)",
-                    segment, register_base, drhd_flags,
+                    segment,
+                    register_base,
+                    drhd_flags,
                 );
 
                 units.push(DhrdUnit {
@@ -595,13 +623,15 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
 
     // ── Read and validate the RSDP ───────────────────────────────────────── //
     // ACPI 2.0 RSDP is exactly 36 bytes.
-    const RSDP_LEN:  usize = 36;
-    const SDT_HDR:   usize = 36; // SDT header size (same 36 bytes)
-    const XSDT_MAX:  usize = 4096 - 0x100; // max XSDT size we'll handle
+    const RSDP_LEN: usize = 36;
+    const SDT_HDR: usize = 36; // SDT header size (same 36 bytes)
+    const XSDT_MAX: usize = 4096 - 0x100; // max XSDT size we'll handle
 
     let rsdp_virt = (rsdp_phys + hhdm_offset) as *const u8;
     let mut rsdp_buf = [0u8; RSDP_LEN];
-    unsafe { core::ptr::copy_nonoverlapping(rsdp_virt, rsdp_buf.as_mut_ptr(), RSDP_LEN); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(rsdp_virt, rsdp_buf.as_mut_ptr(), RSDP_LEN);
+    }
 
     if &rsdp_buf[..8] != b"RSD PTR " {
         serial_println!("ACPI strip_dmar: bad RSDP signature — skipping");
@@ -615,19 +645,18 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
     }
 
     // ── Read and validate the XSDT ───────────────────────────────────────── //
-    let xsdt_phys = unsafe {
-        (rsdp_virt.add(24) as *const u64).read_unaligned()
-    };
+    let xsdt_phys = unsafe { (rsdp_virt.add(24) as *const u64).read_unaligned() };
     if xsdt_phys == 0 {
         return None;
     }
 
     let xsdt_virt = (xsdt_phys + hhdm_offset) as *const u8;
-    let xsdt_len = unsafe {
-        (xsdt_virt.add(4) as *const u32).read_unaligned() as usize
-    };
+    let xsdt_len = unsafe { (xsdt_virt.add(4) as *const u32).read_unaligned() as usize };
     if xsdt_len < SDT_HDR || xsdt_len > XSDT_MAX {
-        serial_println!("ACPI strip_dmar: XSDT length {} out of range — skipping", xsdt_len);
+        serial_println!(
+            "ACPI strip_dmar: XSDT length {} out of range — skipping",
+            xsdt_len
+        );
         return None;
     }
 
@@ -640,7 +669,9 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
 
     // ── Copy XSDT into a stack buffer and strip DMAR ─────────────────────── //
     let mut xsdt_buf = [0u8; XSDT_MAX];
-    unsafe { core::ptr::copy_nonoverlapping(xsdt_virt, xsdt_buf.as_mut_ptr(), xsdt_len); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(xsdt_virt, xsdt_buf.as_mut_ptr(), xsdt_len);
+    }
 
     let num_entries = (xsdt_len - SDT_HDR) / 8;
     let mut write_idx = 0usize;
@@ -648,9 +679,7 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
 
     for i in 0..num_entries {
         let src_off = SDT_HDR + i * 8;
-        let table_phys = unsafe {
-            (xsdt_buf.as_ptr().add(src_off) as *const u64).read_unaligned()
-        };
+        let table_phys = unsafe { (xsdt_buf.as_ptr().add(src_off) as *const u64).read_unaligned() };
         if table_phys == 0 {
             continue;
         }
@@ -664,8 +693,7 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
         // Keep the entry, compacting the array.
         let dst_off = SDT_HDR + write_idx * 8;
         unsafe {
-            (xsdt_buf.as_mut_ptr().add(dst_off) as *mut u64)
-                .write_unaligned(table_phys);
+            (xsdt_buf.as_mut_ptr().add(dst_off) as *mut u64).write_unaligned(table_phys);
         }
         write_idx += 1;
     }
@@ -677,20 +705,26 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
     // ── Update XSDT length and recompute checksum ────────────────────────── //
     let new_xsdt_len = SDT_HDR + write_idx * 8;
     // Zero the removed tail.
-    for b in &mut xsdt_buf[new_xsdt_len..xsdt_len] { *b = 0; }
+    for b in &mut xsdt_buf[new_xsdt_len..xsdt_len] {
+        *b = 0;
+    }
     // Write new length.
     unsafe {
         (xsdt_buf.as_mut_ptr().add(4) as *mut u32).write_unaligned(new_xsdt_len as u32);
     }
     // Recompute checksum (byte 9): sum of all table bytes must be 0 mod 256.
     xsdt_buf[9] = 0;
-    let sum = xsdt_buf[..new_xsdt_len].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    let sum = xsdt_buf[..new_xsdt_len]
+        .iter()
+        .fold(0u8, |a, &b| a.wrapping_add(b));
     xsdt_buf[9] = sum.wrapping_neg();
 
     // ── Write XSDT copy to dest_phys + 0x100 ────────────────────────────── //
     let xsdt_dest_phys = dest_phys + 0x100;
     let xsdt_dest_virt = (xsdt_dest_phys + hhdm_offset) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(xsdt_buf.as_ptr(), xsdt_dest_virt, new_xsdt_len); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(xsdt_buf.as_ptr(), xsdt_dest_virt, new_xsdt_len);
+    }
 
     // ── Update RSDP copy: new XSDT address + extended checksum ───────────── //
     unsafe {
@@ -703,11 +737,16 @@ pub fn strip_dmar(rsdp_phys: u64, dest_phys: u64, hhdm_offset: u64) -> Option<u6
 
     // Write RSDP copy to dest_phys.
     let rsdp_dest_virt = (dest_phys + hhdm_offset) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(rsdp_buf.as_ptr(), rsdp_dest_virt, RSDP_LEN); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(rsdp_buf.as_ptr(), rsdp_dest_virt, RSDP_LEN);
+    }
 
     serial_println!(
         "ACPI: DMAR stripped — RSDP copy @ {:#x}, XSDT @ {:#x} ({} tables → {})",
-        dest_phys, xsdt_dest_phys, num_entries, write_idx,
+        dest_phys,
+        xsdt_dest_phys,
+        num_entries,
+        write_idx,
     );
 
     Some(dest_phys)

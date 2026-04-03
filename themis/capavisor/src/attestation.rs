@@ -21,7 +21,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use spin::Once;
 use themis_abi::domcomm::{ATTEST_KEY_SIZE, ATTEST_PCR_INDEX};
 use tpm2::Tpm2;
@@ -122,9 +122,17 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64) {
     zeroize_bytes(&mut seed);
 
     serial_println!("[attest] Ed25519 key pair generated");
-    serial_println!("[attest]   pub_key: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
-        pub_key_bytes[0], pub_key_bytes[1], pub_key_bytes[2], pub_key_bytes[3],
-        pub_key_bytes[28], pub_key_bytes[29], pub_key_bytes[30], pub_key_bytes[31]);
+    serial_println!(
+        "[attest]   pub_key: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+        pub_key_bytes[0],
+        pub_key_bytes[1],
+        pub_key_bytes[2],
+        pub_key_bytes[3],
+        pub_key_bytes[28],
+        pub_key_bytes[29],
+        pub_key_bytes[30],
+        pub_key_bytes[31]
+    );
 
     // Step 2: Compute measurement = SHA-256(elf_file ‖ pub_key)
     //
@@ -146,9 +154,17 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64) {
         m
     };
 
-    serial_println!("[attest] measurement: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
-        measurement[0], measurement[1], measurement[2], measurement[3],
-        measurement[28], measurement[29], measurement[30], measurement[31]);
+    serial_println!(
+        "[attest] measurement: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+        measurement[0],
+        measurement[1],
+        measurement[2],
+        measurement[3],
+        measurement[28],
+        measurement[29],
+        measurement[30],
+        measurement[31]
+    );
 
     // Step 3: Store state (TPM probe deferred to try_tpm())
     ATTEST_STATE.call_once(|| AttestationState {
@@ -175,8 +191,11 @@ pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
         6 => {
             let tis_phys = tpm2::TIS_BASE;
             const TIS_SIZE: u64 = 0x5000;
-            serial_println!("[attest] TIS transport: mapping phys {:#x}..{:#x}",
-                tis_phys, tis_phys + TIS_SIZE);
+            serial_println!(
+                "[attest] TIS transport: mapping phys {:#x}..{:#x}",
+                tis_phys,
+                tis_phys + TIS_SIZE
+            );
             crate::mem::map_phys_range(tis_phys, TIS_SIZE, hhdm_offset);
             let va = tis_phys + hhdm_offset;
             TPM_START_METHOD.store(start_method, Ordering::Relaxed);
@@ -188,8 +207,11 @@ pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
             // The ACPI control_area (e.g., 0xFED40040) just confirms CRB mode.
             let crb_phys = tpm2::TIS_BASE;
             const CRB_SIZE: u64 = 0x5000; // same 5-page region as TIS
-            serial_println!("[attest] CRB transport: mapping phys {:#x}..{:#x}",
-                crb_phys, crb_phys + CRB_SIZE);
+            serial_println!(
+                "[attest] CRB transport: mapping phys {:#x}..{:#x}",
+                crb_phys,
+                crb_phys + CRB_SIZE
+            );
             crate::mem::map_phys_range(crb_phys, CRB_SIZE, hhdm_offset);
             let va = crb_phys + hhdm_offset;
             TPM_START_METHOD.store(start_method, Ordering::Relaxed);
@@ -197,7 +219,10 @@ pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
             Tpm2::new_crb(va)
         }
         _ => {
-            serial_println!("[attest] Unsupported TPM start_method={} — skipping", start_method);
+            serial_println!(
+                "[attest] Unsupported TPM start_method={} — skipping",
+                start_method
+            );
             return;
         }
     };
@@ -229,10 +254,18 @@ pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
     // Read back PCR 11 to verify
     match tpm.pcr_read(ATTEST_PCR_INDEX) {
         Ok(pcr_val) => {
-            serial_println!("[attest] PCR[{}] = {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+            serial_println!(
+                "[attest] PCR[{}] = {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
                 ATTEST_PCR_INDEX,
-                pcr_val[0], pcr_val[1], pcr_val[2], pcr_val[3],
-                pcr_val[28], pcr_val[29], pcr_val[30], pcr_val[31]);
+                pcr_val[0],
+                pcr_val[1],
+                pcr_val[2],
+                pcr_val[3],
+                pcr_val[28],
+                pcr_val[29],
+                pcr_val[30],
+                pcr_val[31]
+            );
         }
         Err(e) => {
             serial_println!("[attest] TPM2_PCR_Read failed (non-fatal): {:?}", e);
@@ -244,12 +277,20 @@ pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
         Ok((handle, pub_modulus)) => {
             AK_HANDLE.store(handle, Ordering::Relaxed);
             // Safety: single writer (BSP), before AP_LAUNCH_READY.
-            unsafe { AK_PUB_MODULUS = pub_modulus; }
+            unsafe {
+                AK_PUB_MODULUS = pub_modulus;
+            }
             AK_AVAILABLE.store(true, Ordering::Release);
-            serial_println!("[attest] TPM2_CreatePrimary(RSA-2048) OK — AK handle={:#x}", handle);
+            serial_println!(
+                "[attest] TPM2_CreatePrimary(RSA-2048) OK — AK handle={:#x}",
+                handle
+            );
         }
         Err(e) => {
-            serial_println!("[attest] TPM2_CreatePrimary failed: {:?} (no TPM quote available)", e);
+            serial_println!(
+                "[attest] TPM2_CreatePrimary failed: {:?} (no TPM quote available)",
+                e
+            );
             // Don't return — PCR extend succeeded, just quote won't work.
         }
     }
@@ -321,9 +362,7 @@ pub fn tpm_driver() -> Option<Tpm2> {
 /// Panics if called before `init()`.
 pub fn sign(data: &[u8]) -> [u8; 64] {
     use ed25519_dalek::Signer;
-    let state = ATTEST_STATE
-        .get()
-        .expect("attestation not initialized");
+    let state = ATTEST_STATE.get().expect("attestation not initialized");
     let sig = state.signing_key.sign(data);
     sig.to_bytes()
 }

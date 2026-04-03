@@ -73,7 +73,9 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use spin::{Mutex, RwLock};
 
 use capability_engine::{
@@ -94,7 +96,7 @@ use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
 pub const MAX_CORES: usize = 256;
 
 const IDLE_DOMAIN: u64 = u64::MAX;
-const IDLE_VP:     u32 = u32::MAX;
+const IDLE_VP: u32 = u32::MAX;
 
 // ── Per-core update command ───────────────────────────────────────────────── //
 
@@ -127,8 +129,16 @@ impl core::fmt::Debug for CoreUpdate {
             CoreUpdate::Switch { vp_id, .. } => {
                 write!(f, "Switch {{ vp_id: {} }}", vp_id)
             }
-            CoreUpdate::Revoke { revoked, fallback_vp, .. } => {
-                write!(f, "Revoke {{ revoked: {:?}, fallback_vp: {} }}", revoked, fallback_vp)
+            CoreUpdate::Revoke {
+                revoked,
+                fallback_vp,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Revoke {{ revoked: {:?}, fallback_vp: {} }}",
+                    revoked, fallback_vp
+                )
             }
         }
     }
@@ -143,9 +153,9 @@ impl core::fmt::Debug for CoreUpdate {
 struct Barrier {
     /// Total participants expected; written by the initiating core (participants > 0)
     /// before it begins spinning.  Responding cores use the stored value (pass 0).
-    expected:   AtomicUsize,
+    expected: AtomicUsize,
     /// How many cores have arrived so far in the current generation.
-    arrived:    AtomicUsize,
+    arrived: AtomicUsize,
     /// Incremented when all participants arrive, allowing barrier reuse.
     generation: AtomicUsize,
 }
@@ -153,8 +163,8 @@ struct Barrier {
 impl Barrier {
     const fn new() -> Self {
         Barrier {
-            expected:   AtomicUsize::new(0),
-            arrived:    AtomicUsize::new(0),
+            expected: AtomicUsize::new(0),
+            arrived: AtomicUsize::new(0),
             generation: AtomicUsize::new(0),
         }
     }
@@ -170,11 +180,13 @@ impl Barrier {
         // Spin until the initiating core has stored a non-zero expected count.
         let expected = loop {
             let e = self.expected.load(Ordering::Acquire);
-            if e > 0 { break e; }
+            if e > 0 {
+                break e;
+            }
             core::hint::spin_loop();
         };
         let gen = self.generation.load(Ordering::Acquire);
-        let n   = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
+        let n = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
         if n >= expected {
             // Last to arrive: reset for the next use, then advance generation.
             self.arrived.store(0, Ordering::Release);
@@ -211,7 +223,9 @@ impl SharedGuard {
     }
 }
 impl Drop for SharedGuard {
-    fn drop(&mut self) { unsafe { ManuallyDrop::drop(&mut self.0) }; }
+    fn drop(&mut self) {
+        unsafe { ManuallyDrop::drop(&mut self.0) };
+    }
 }
 impl OpLockGuard for SharedGuard {}
 // SAFETY: tied to a 'static platform; moving a guard across logical "threads"
@@ -229,7 +243,9 @@ impl ExclusiveGuard {
     }
 }
 impl Drop for ExclusiveGuard {
-    fn drop(&mut self) { unsafe { ManuallyDrop::drop(&mut self.0) }; }
+    fn drop(&mut self) {
+        unsafe { ManuallyDrop::drop(&mut self.0) };
+    }
 }
 impl OpLockGuard for ExclusiveGuard {}
 unsafe impl Send for ExclusiveGuard {}
@@ -290,8 +306,13 @@ impl VcpuSlot {
     /// Panics if the slot is not empty (double-return bug).
     pub fn put(&self, vcpu: InactiveVcpu) {
         let pid = vcpu.pid_phys();
-        let old = self.ptr.swap(Box::into_raw(Box::new(vcpu)), Ordering::Release);
-        assert!(old.is_null(), "VcpuSlot::put: slot was not empty (double-return bug)");
+        let old = self
+            .ptr
+            .swap(Box::into_raw(Box::new(vcpu)), Ordering::Release);
+        assert!(
+            old.is_null(),
+            "VcpuSlot::put: slot was not empty (double-return bug)"
+        );
         // Cache pid_phys so callers can read it without taking the VP.
         self.pid_phys.store(pid, Ordering::Relaxed);
     }
@@ -406,8 +427,8 @@ pub struct PlatformDomain {
 pub const THEMIC_MAX_DOORBELLS: usize = 128;
 
 /// Flags for doorbell matching behaviour.
-pub const THEMIC_DOORBELL_FLAG_ANY_VALUE: u32 = 1 << 0;  // ignore datamatch
-pub const THEMIC_DOORBELL_FLAG_ANY_SIZE:  u32 = 1 << 1;  // ignore access size
+pub const THEMIC_DOORBELL_FLAG_ANY_VALUE: u32 = 1 << 0; // ignore datamatch
+pub const THEMIC_DOORBELL_FLAG_ANY_SIZE: u32 = 1 << 1; // ignore access size
 
 /// A single registered doorbell entry (capavisor-internal, not a shared page).
 #[derive(Clone)]
@@ -427,7 +448,9 @@ pub struct DomainCommRing {
 
 impl DomainCommRing {
     fn new() -> Self {
-        DomainCommRing { page_hpas: Vec::new() }
+        DomainCommRing {
+            page_hpas: Vec::new(),
+        }
     }
 
     fn capacity(&self) -> usize {
@@ -480,7 +503,10 @@ impl PlatformDomain {
     fn init_domcomm(&mut self, base_hpa: u64, nr_pages: u32, gpa: u64) -> &DomainCommState {
         use themis_abi::domcomm;
 
-        assert!(nr_pages >= 2, "DomainComm needs at least 2 pages (header + 1 ring)");
+        assert!(
+            nr_pages >= 2,
+            "DomainComm needs at least 2 pages (header + 1 ring)"
+        );
 
         let header_hpa = base_hpa;
 
@@ -496,7 +522,9 @@ impl PlatformDomain {
         }
         let mut tx_ring = DomainCommRing::new();
         for i in 0..tx_page_count {
-            tx_ring.page_hpas.push(base_hpa + (1 + rx_page_count as u64 + i as u64) * 0x1000);
+            tx_ring
+                .page_hpas
+                .push(base_hpa + (1 + rx_page_count as u64 + i as u64) * 0x1000);
         }
 
         unsafe {
@@ -666,8 +694,12 @@ impl PlatformDomain {
             // Sanity: available data.
             let avail = head.wrapping_sub(tail);
             if avail > capacity {
-                serial_println!("[domcomm] TX dequeue: corrupt ring (head={}, tail={}, cap={})",
-                    head, tail, capacity);
+                serial_println!(
+                    "[domcomm] TX dequeue: corrupt ring (head={}, tail={}, cap={})",
+                    head,
+                    tail,
+                    capacity
+                );
                 return None;
             }
 
@@ -677,8 +709,11 @@ impl PlatformDomain {
             let page_off = wrapped_tail % 4096;
 
             if ring_page_idx >= nr_pages {
-                serial_println!("[domcomm] TX dequeue: page_idx {} out of range (nr_pages={})",
-                    ring_page_idx, nr_pages);
+                serial_println!(
+                    "[domcomm] TX dequeue: page_idx {} out of range (nr_pages={})",
+                    ring_page_idx,
+                    nr_pages
+                );
                 return None;
             }
 
@@ -708,14 +743,22 @@ impl PlatformDomain {
             // Bounds-check total_size.
             let total_size = msg_hdr.total_size as usize;
             if total_size < msg_hdr_size || total_size > avail || total_size > 4096 {
-                serial_println!("[domcomm] TX dequeue: invalid total_size {} (avail={}, hdr={})",
-                    total_size, avail, msg_hdr_size);
+                serial_println!(
+                    "[domcomm] TX dequeue: invalid total_size {} (avail={}, hdr={})",
+                    total_size,
+                    avail,
+                    msg_hdr_size
+                );
                 return None;
             }
 
             let payload_size = total_size - msg_hdr_size;
             if payload_size > buf.len() {
-                serial_println!("[domcomm] TX message too large ({} > {})", payload_size, buf.len());
+                serial_println!(
+                    "[domcomm] TX message too large ({} > {})",
+                    payload_size,
+                    buf.len()
+                );
                 return None;
             }
 
@@ -743,7 +786,9 @@ impl PlatformDomain {
             None => return,
         };
         let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
-        unsafe { core::ptr::write_volatile(&mut (*hdr_virt).notify_vector, vector); }
+        unsafe {
+            core::ptr::write_volatile(&mut (*hdr_virt).notify_vector, vector);
+        }
     }
 
     /// Return the notify_vector from the DomainComm header (0 if not initialised).
@@ -789,16 +834,16 @@ impl PlatformDomain {
 /// UC boundaries so that MMIO sub-ranges use [`EptMemoryType::UC`] and all other
 /// sub-ranges use [`EptMemoryType::WB`].
 fn map_range_typed(
-    ept:       &mut EptMapper,
-    meta:      &mut crate::mem::MetaAllocator,
-    gpa:       u64,
-    hpa:       u64,
-    size:      usize,
-    flags:     EptEntryFlags,
+    ept: &mut EptMapper,
+    meta: &mut crate::mem::MetaAllocator,
+    gpa: u64,
+    hpa: u64,
+    size: usize,
+    flags: EptEntryFlags,
     uc_ranges: &UncacheableRanges,
 ) {
-    let mut cur_gpa  = gpa;
-    let mut cur_hpa  = hpa;
+    let mut cur_gpa = gpa;
+    let mut cur_hpa = hpa;
     let mut remaining = size;
 
     while remaining > 0 {
@@ -811,14 +856,14 @@ fn map_range_typed(
                 if ov_start > cur_hpa {
                     let wb_size = (ov_start - cur_hpa) as usize;
                     ept.map_range(meta, cur_gpa, cur_hpa, wb_size, flags, EptMemoryType::WB);
-                    cur_gpa   += wb_size as u64;
-                    cur_hpa   += wb_size as u64;
+                    cur_gpa += wb_size as u64;
+                    cur_hpa += wb_size as u64;
                     remaining -= wb_size;
                 }
                 let uc_size = ((ov_end - cur_hpa) as usize).min(remaining);
                 ept.map_range(meta, cur_gpa, cur_hpa, uc_size, flags, EptMemoryType::UC);
-                cur_gpa   += uc_size as u64;
-                cur_hpa   += uc_size as u64;
+                cur_gpa += uc_size as u64;
+                cur_hpa += uc_size as u64;
                 remaining -= uc_size;
             }
         }
@@ -832,18 +877,26 @@ struct DomainTable {
 }
 
 impl DomainTable {
-    fn new() -> Self { DomainTable { map: RwLock::new(BTreeMap::new()) } }
+    fn new() -> Self {
+        DomainTable {
+            map: RwLock::new(BTreeMap::new()),
+        }
+    }
 
     fn get(&self, id: DomainId) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
         self.map.read().get(&id).cloned()
     }
 
     fn insert(&self, id: DomainId, domain: PlatformDomain) {
-        self.map.write().insert(id, alloc::sync::Arc::new(Mutex::new(domain)));
+        self.map
+            .write()
+            .insert(id, alloc::sync::Arc::new(Mutex::new(domain)));
     }
 
     fn remove(&self, id: DomainId) -> Option<PlatformDomain> {
-        self.map.write().remove(&id)
+        self.map
+            .write()
+            .remove(&id)
             .and_then(|arc| alloc::sync::Arc::try_unwrap(arc).ok())
             .map(|m| m.into_inner())
     }
@@ -901,36 +954,36 @@ impl ept::FrameAllocator for RootMetaProxy<'_> {
 /// The Themis `Platform` implementation.
 pub struct ThemisPlatform {
     // Hot path: no lock needed
-    op_lock:         RwLock<()>,
-    update_lock:     AtomicBool,
-    barriers:        [Barrier; 2],
+    op_lock: RwLock<()>,
+    update_lock: AtomicBool,
+    barriers: [Barrier; 2],
     pub ipi_pending: Box<[AtomicBool]>,
     // Per-core update queue: written by initiating core (under update_lock),
     // drained by the local core in poll_and_respond_cross_core.
-    core_updates:    Box<[Mutex<VecDeque<CoreUpdate>>]>,
+    core_updates: Box<[Mutex<VecDeque<CoreUpdate>>]>,
     // Immutable after bootstrap
-    num_cores:       usize,
-    hhdm_offset:     AtomicU64,
-    uc_ranges:       alloc::sync::Arc<UncacheableRanges>,
+    num_cores: usize,
+    hhdm_offset: AtomicU64,
+    uc_ranges: alloc::sync::Arc<UncacheableRanges>,
     // Tier 1: per-core scheduling state
-    cores:           Box<[CoreContext]>,
+    cores: Box<[CoreContext]>,
     // Tier 2: per-domain hardware state
-    domains:         DomainTable,
+    domains: DomainTable,
     // Tier 3: global routing
-    routing:         RwLock<RoutingMaps>,
+    routing: RwLock<RoutingMaps>,
     // LAPIC IDs: written once at boot, immutable after — no lock needed.
-    lapic_ids:       UnsafeCell<Vec<u32>>,
+    lapic_ids: UnsafeCell<Vec<u32>>,
     // Tree root anchor — keeps dom0's capability tree alive.
-    dom0_cap:        Mutex<Option<CapabilityRef<Domain>>>,
+    dom0_cap: Mutex<Option<CapabilityRef<Domain>>>,
     // Per-core VMXON physical addresses; written once by BSP, read by each AP.
-    vmxon_phys:      Vec<u64>,
+    vmxon_phys: Vec<u64>,
     /// VT-d DRHD units with allocated IRT pages; written once at boot by
     /// `init_themis`, immutable afterwards (entries updated via `program_irte`).
-    pub drhd_units:  Vec<crate::acpi::DhrdUnit>,
+    pub drhd_units: Vec<crate::acpi::DhrdUnit>,
     /// Engine-level switch manager — owns per-core `CoreContext` for
     /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
     /// with the capavisor's own `CoreContext` via `set_core_context()`.
-    switch_mgr:      SwitchManager,
+    switch_mgr: SwitchManager,
 }
 
 // SAFETY: `lapic_ids` uses `UnsafeCell` but is only written once during
@@ -956,22 +1009,22 @@ impl ThemisPlatform {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         ThemisPlatform {
-            op_lock:      RwLock::new(()),
-            update_lock:  AtomicBool::new(false),
-            barriers:     [Barrier::new(), Barrier::new()],
+            op_lock: RwLock::new(()),
+            update_lock: AtomicBool::new(false),
+            barriers: [Barrier::new(), Barrier::new()],
             ipi_pending,
             core_updates,
             num_cores,
-            hhdm_offset:  AtomicU64::new(0),
+            hhdm_offset: AtomicU64::new(0),
             uc_ranges,
             cores,
-            domains:      DomainTable::new(),
-            routing:      RwLock::new(RoutingMaps::new()),
-            lapic_ids:    UnsafeCell::new(Vec::new()),
-            dom0_cap:     Mutex::new(None),
-            vmxon_phys:   Vec::new(),
-            drhd_units:   Vec::new(),
-            switch_mgr:   SwitchManager::new(num_cores),
+            domains: DomainTable::new(),
+            routing: RwLock::new(RoutingMaps::new()),
+            lapic_ids: UnsafeCell::new(Vec::new()),
+            dom0_cap: Mutex::new(None),
+            vmxon_phys: Vec::new(),
+            drhd_units: Vec::new(),
+            switch_mgr: SwitchManager::new(num_cores),
         }
     }
 
@@ -988,7 +1041,8 @@ impl ThemisPlatform {
         interrupted: &CapabilityRef<Domain>,
         core_id: u64,
     ) -> capability_engine::error::Result<(u64, alloc::vec::Vec<u64>)> {
-        self.switch_mgr.route_interrupt(vector, interrupted, core_id)
+        self.switch_mgr
+            .route_interrupt(vector, interrupted, core_id)
     }
 
     /// Store per-core VMXON physical addresses (called once by BSP before
@@ -1004,7 +1058,9 @@ impl ThemisPlatform {
     }
 
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
-        unsafe { *self.lapic_ids.get() = ids; }
+        unsafe {
+            *self.lapic_ids.get() = ids;
+        }
     }
 
     /// Physical LAPIC ID of the BSP (core 0).
@@ -1022,12 +1078,18 @@ impl ThemisPlatform {
     /// DRHD units: AW=1 → `Level::L3` (39-bit), AW=2 → `Level::L4` (48-bit).
     /// Falls back to `Level::L3` if no DRHD units are present.
     pub fn iommu_pt_level(&self) -> Level {
-        let min_aw = self.drhd_units.iter()
+        let min_aw = self
+            .drhd_units
+            .iter()
             .filter(|u| u.aw > 0)
             .map(|u| u.aw)
             .min()
             .unwrap_or(1);
-        if min_aw >= 2 { Level::L4 } else { Level::L3 }
+        if min_aw >= 2 {
+            Level::L4
+        } else {
+            Level::L3
+        }
     }
 
     /// Reprogram a PCI device's IOMMU context entry to use `domain_id`'s
@@ -1040,10 +1102,11 @@ impl ThemisPlatform {
     /// it), or if no DRHD unit covers the bus encoded in `bdf`.
     pub fn assign_device(&self, bdf: u16, domain_id: DomainId) {
         let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-        let bus   = (bdf >> 8) as u8;
+        let bus = (bdf >> 8) as u8;
         let devfn = (bdf & 0xFF) as usize;
 
-        let slptptr = self.domains
+        let slptptr = self
+            .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("assign_device: unknown domain {}", domain_id))
             .lock()
@@ -1055,7 +1118,7 @@ impl ThemisPlatform {
         for unit in &self.drhd_units {
             if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
                 let ctx_virt = (ctx_phys + hhdm) as *mut u64;
-                let entry    = unsafe { ctx_virt.add(devfn * 2) };
+                let entry = unsafe { ctx_virt.add(devfn * 2) };
                 // Write high word first (DID, AW), then low word with P=1 last.
                 // TT=00 (multi-level second-level translation).
                 let ctx_hi = (domain_id << 8) | unit.aw;
@@ -1067,12 +1130,17 @@ impl ThemisPlatform {
                 self.flush_ctx_and_iotlb(unit, bdf, hhdm);
                 serial_println!(
                     "  IOMMU: BDF {:#06x} assigned to domain {} (slptptr={:#x})",
-                    bdf, domain_id, slptptr
+                    bdf,
+                    domain_id,
+                    slptptr
                 );
                 return;
             }
         }
-        panic!("assign_device: no DRHD covers bus {} for BDF {:#06x}", bus, bdf);
+        panic!(
+            "assign_device: no DRHD covers bus {} for BDF {:#06x}",
+            bus, bdf
+        );
     }
 
     /// Restore the passthrough context entry for a PCI device, returning it to
@@ -1080,14 +1148,14 @@ impl ThemisPlatform {
     ///
     /// No-ops silently if no DRHD covers the bus.
     pub fn release_device(&self, bdf: u16) {
-        let hhdm  = self.hhdm_offset.load(Ordering::Relaxed);
-        let bus   = (bdf >> 8) as u8;
+        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+        let bus = (bdf >> 8) as u8;
         let devfn = (bdf & 0xFF) as usize;
 
         for unit in &self.drhd_units {
             if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
                 let ctx_virt = (ctx_phys + hhdm) as *mut u64;
-                let entry    = unsafe { ctx_virt.add(devfn * 2) };
+                let entry = unsafe { ctx_virt.add(devfn * 2) };
                 // Restore dom0 passthrough: high=(DID=1<<8)|AW, low=0x9 (P=1, TT=10b).
                 let ctx_hi = (1u64 << 8) | unit.aw;
                 let ctx_lo = 0x9u64;
@@ -1104,8 +1172,8 @@ impl ThemisPlatform {
 
     /// Flush context-cache (device-selective) and IOTLB (global) for a DRHD unit.
     fn flush_ctx_and_iotlb(&self, unit: &crate::acpi::DhrdUnit, bdf: u16, hhdm: u64) {
-        const CCMD_OFFSET:  u64 = 0x28;
-        const ECAP_OFFSET:  u64 = 0x10;
+        const CCMD_OFFSET: u64 = 0x28;
+        const ECAP_OFFSET: u64 = 0x10;
         const POLL_LIMIT: usize = 100_000;
 
         let base = unit.register_base + hhdm;
@@ -1115,21 +1183,25 @@ impl ThemisPlatform {
         // SID=bdf in bits[47:32], ICC=bit[63].
         let ccmd_val = (1u64 << 63)          // ICC
             | (3u64 << 61)                   // CIRG = device-selective
-            | ((bdf as u64) << 32);          // SID
+            | ((bdf as u64) << 32); // SID
         unsafe { ccmd.write_volatile(ccmd_val) };
         for _ in 0..POLL_LIMIT {
             core::hint::spin_loop();
-            if unsafe { ccmd.read_volatile() } & (1u64 << 63) == 0 { break; }
+            if unsafe { ccmd.read_volatile() } & (1u64 << 63) == 0 {
+                break;
+            }
         }
 
         // IOTLB global invalidation.
         let ecap = unsafe { ((base + ECAP_OFFSET) as *const u64).read_volatile() };
-        let iro  = ((ecap >> 8) & 0x3f) as u64;
+        let iro = ((ecap >> 8) & 0x3f) as u64;
         let iotlb_reg = (base + iro * 16 + 8) as *mut u64;
         unsafe { iotlb_reg.write_volatile((1u64 << 63) | (1u64 << 60)) };
         for _ in 0..POLL_LIMIT {
             core::hint::spin_loop();
-            if unsafe { iotlb_reg.read_volatile() } & (1u64 << 63) == 0 { break; }
+            if unsafe { iotlb_reg.read_volatile() } & (1u64 << 63) == 0 {
+                break;
+            }
         }
     }
 
@@ -1160,7 +1232,8 @@ impl ThemisPlatform {
         gpa: u64,
         nr_pages: u32,
     ) -> (u64, u32) {
-        let arc = self.domains
+        let arc = self
+            .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_init_domcomm: domain not registered"));
         let mut d = arc.lock();
@@ -1192,16 +1265,25 @@ impl ThemisPlatform {
     ) {
         self.hhdm_offset.store(hhdm_offset, Ordering::Relaxed);
         if !self.domains.contains(domain_id) {
-            self.domains.insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
+            self.domains
+                .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
         }
     }
 
     pub fn eptp(&self, domain_id: DomainId) -> Option<u64> {
-        self.domains.get(domain_id)?.lock().ept.as_ref().map(|e| e.eptp())
+        self.domains
+            .get(domain_id)?
+            .lock()
+            .ept
+            .as_ref()
+            .map(|e| e.eptp())
     }
 
     /// Get a cloned Arc reference to a PlatformDomain (for use outside apply_update).
-    pub fn domain_arc(&self, domain_id: DomainId) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
+    pub fn domain_arc(
+        &self,
+        domain_id: DomainId,
+    ) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
         self.domains.get(domain_id)
     }
 
@@ -1233,7 +1315,8 @@ impl ThemisPlatform {
     /// `vp_id` is the domain-local VP index (0, 1, 2, ...).
     /// Extends the VP vector if needed.
     pub fn bootstrap_store_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
-        let arc = self.domains
+        let arc = self
+            .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_store_vcpu: domain not registered"));
         let mut d = arc.lock();
@@ -1255,7 +1338,8 @@ impl ThemisPlatform {
     /// Return an InactiveVcpu to a domain's VP slot after deactivation.
     #[allow(dead_code)]
     pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
-        let arc = self.domains
+        let arc = self
+            .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("return_vcpu: domain not registered"));
         let d = arc.lock();
@@ -1302,7 +1386,9 @@ impl ThemisPlatform {
     /// Called during bootstrap (BSP and AP init) and on domain switch.
     pub fn set_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
         let dom_id = cap.read().data.id;
-        self.cores[core_id].domain_id.store(dom_id, Ordering::Release);
+        self.cores[core_id]
+            .domain_id
+            .store(dom_id, Ordering::Release);
         self.cores[core_id].vp_id.store(vp_id, Ordering::Release);
         *self.cores[core_id].domain_cap.lock() = Some(cap);
         // Also keep the routing maps consistent so that execute() sends IPIs
@@ -1317,7 +1403,11 @@ impl ThemisPlatform {
             }
         }
         routing.core_to_domain.insert(core_id as CoreId, dom_id);
-        routing.domain_to_cores.entry(dom_id).or_default().insert(core_id as CoreId);
+        routing
+            .domain_to_cores
+            .entry(dom_id)
+            .or_default()
+            .insert(core_id as CoreId);
     }
 
     /// Get the `CapabilityRef<Domain>` for the domain running on `core_id`.
@@ -1333,9 +1423,10 @@ impl ThemisPlatform {
     }
 
     /// Get the `PlatformDomain` for a given domain ID.
-    pub fn get_platform_domain(&self, id: DomainId)
-        -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>>
-    {
+    pub fn get_platform_domain(
+        &self,
+        id: DomainId,
+    ) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
         self.domains.get(id)
     }
 
@@ -1353,15 +1444,23 @@ impl ThemisPlatform {
     /// preemption timer expiry or before the next SWITCH to a child.
     #[cfg(feature = "quantum-sched")]
     pub fn set_deferred(&self, core_id: usize, vector: u8) {
-        self.cores[core_id].deferred_vector.store(vector as u16, Ordering::Release);
+        self.cores[core_id]
+            .deferred_vector
+            .store(vector as u16, Ordering::Release);
     }
 
     /// Atomically take the deferred vector for the given core (quantum-sched).
     /// Returns `Some(vector)` if one was stored, `None` if empty (0).
     #[cfg(feature = "quantum-sched")]
     pub fn take_deferred(&self, core_id: usize) -> Option<u8> {
-        let val = self.cores[core_id].deferred_vector.swap(0, Ordering::AcqRel);
-        if val == 0 { None } else { Some(val as u8) }
+        let val = self.cores[core_id]
+            .deferred_vector
+            .swap(0, Ordering::AcqRel);
+        if val == 0 {
+            None
+        } else {
+            Some(val as u8)
+        }
     }
 
     // ── Per-core update queue ─────────────────────────────────────────── //
@@ -1456,8 +1555,12 @@ impl Platform for ThemisPlatform {
     }
 
     fn poll_and_respond_cross_core(&self) {
-        let Some(core_id) = self.get_current_core() else { return };
-        if core_id as usize >= self.num_cores { return; }
+        let Some(core_id) = self.get_current_core() else {
+            return;
+        };
+        if core_id as usize >= self.num_cores {
+            return;
+        }
         if self.ipi_pending[core_id as usize]
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
@@ -1474,28 +1577,46 @@ impl Platform for ThemisPlatform {
 
     fn apply_update(&self, update: &Update) {
         match update {
-            Update::CreateDomain { domain_id, parent_id } => {
+            Update::CreateDomain {
+                domain_id,
+                parent_id,
+            } => {
                 self.register_domain(*domain_id, *parent_id);
             }
 
-            Update::GiveMetaMem { domain_id, start, size } => {
+            Update::GiveMetaMem {
+                domain_id,
+                start,
+                size,
+            } => {
                 self.domains
                     .get(*domain_id)
                     .expect("GiveMetaMem: unknown domain")
                     .lock()
                     .meta
-                    .add_range(PhysRegion { base: *start, length: *size });
+                    .add_range(PhysRegion {
+                        base: *start,
+                        length: *size,
+                    });
                 // META pages are hypervisor-internal (EPT tables, VMCS) and are
                 // not DMA targets — no IOMMU PT mapping needed here.
             }
 
-            Update::ChangeRights { domain, address, size, physical, rights, .. } => {
+            Update::ChangeRights {
+                domain,
+                address,
+                size,
+                physical,
+                rights,
+                ..
+            } => {
                 let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
                 let iommu_level = self.iommu_pt_level();
                 // Only child domains (domain != ROOT_DOMAIN_ID) get a SLPT.
                 // dom0 uses passthrough context entries and needs no IOMMU PT.
                 let is_child = *domain != ROOT_DOMAIN_ID;
-                let arc = self.domains
+                let arc = self
+                    .domains
                     .get(*domain)
                     .expect("ChangeRights: unknown domain");
                 let mut d = arc.lock();
@@ -1513,7 +1634,8 @@ impl Platform for ThemisPlatform {
                     // (bit 0 of IA32_VMX_PROCBASED_CTLS2 allowed-1 field),
                     // skip the EPT mapping so LAPIC MMIO accesses cause EPT
                     // violations that are forwarded to CHV for emulation.
-                    let secondary_msr = unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
+                    let secondary_msr =
+                        unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
                     let virt_apic_supported = ((secondary_msr >> 32) & 1) != 0;
                     if !virt_apic_supported {
                         serial_println!(
@@ -1547,14 +1669,26 @@ impl Platform for ThemisPlatform {
                     let flags = rights_to_ept_flags(rights);
                     // SAFETY: ept and meta are disjoint fields of PlatformDomain.
                     let ept = d.ept.as_mut().unwrap();
-                    map_range_typed(ept, unsafe { &mut *meta_ptr },
-                        *address, *physical, *size as usize, flags, &uc_ranges);
+                    map_range_typed(
+                        ept,
+                        unsafe { &mut *meta_ptr },
+                        *address,
+                        *physical,
+                        *size as usize,
+                        flags,
+                        &uc_ranges,
+                    );
                     if is_child {
                         if let Some(slpt) = d.iommu_pt.as_mut() {
                             // VT-d SLPT: same GPA→HPA mapping; no memory-type bits needed.
-                            slpt.map_range(&mut RootMetaProxy(self),
-                                *address, *physical, *size as usize,
-                                flags, ept::EptMemoryType::WB);
+                            slpt.map_range(
+                                &mut RootMetaProxy(self),
+                                *address,
+                                *physical,
+                                *size as usize,
+                                flags,
+                                ept::EptMemoryType::WB,
+                            );
                         }
                     }
                 }
@@ -1582,7 +1716,13 @@ impl Platform for ThemisPlatform {
                 self.invept_for_domain(*domain);
             }
 
-            Update::CommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
+            Update::CommRegion {
+                domain_id,
+                target_domain_id,
+                vp_id,
+                phys,
+                size,
+            } => {
                 if *domain_id != *target_domain_id {
                     // VP-level COMM: store HPA for child VP.
                     if let Some(arc) = self.domains.get(*target_domain_id) {
@@ -1596,7 +1736,13 @@ impl Platform for ThemisPlatform {
                 }
                 let _ = (domain_id, phys, size);
             }
-            Update::UncommRegion { domain_id, target_domain_id, vp_id, phys, size } => {
+            Update::UncommRegion {
+                domain_id,
+                target_domain_id,
+                vp_id,
+                phys,
+                size,
+            } => {
                 let _ = (domain_id, target_domain_id, vp_id, phys, size);
                 // TODO(P7): unmap COMM page.
             }
@@ -1606,7 +1752,8 @@ impl Platform for ThemisPlatform {
     fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
         if !self.domains.contains(domain_id) {
             let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-            self.domains.insert(domain_id, PlatformDomain::new(hhdm, parent_id));
+            self.domains
+                .insert(domain_id, PlatformDomain::new(hhdm, parent_id));
         }
     }
 
@@ -1615,30 +1762,32 @@ impl Platform for ThemisPlatform {
         if let Some(cores) = routing.domain_to_cores.remove(&domain_id) {
             for core_id in cores {
                 routing.core_to_domain.remove(&core_id);
-                self.cores[core_id as usize].domain_id.store(
-                    fallback.unwrap_or(IDLE_DOMAIN),
-                    Ordering::Release,
-                );
+                self.cores[core_id as usize]
+                    .domain_id
+                    .store(fallback.unwrap_or(IDLE_DOMAIN), Ordering::Release);
                 // TODO(Phase 9): also update CoreContext.domain_cap to the fallback's
                 // CapabilityRef once on_domain_revoked carries it (switch-based unification).
                 if let Some(fb) = fallback {
                     routing.core_to_domain.insert(core_id, fb);
-                    routing.domain_to_cores.entry(fb).or_default().insert(core_id);
+                    routing
+                        .domain_to_cores
+                        .entry(fb)
+                        .or_default()
+                        .insert(core_id);
                 }
             }
         }
     }
 
-    fn set_core_context(
-        &self,
-        core_id: CoreId,
-        domain_cap: &CapabilityRef<Domain>,
-        vp_id: u64,
-    ) {
+    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
         let domain_id = domain_cap.read().data.id;
         // Tier 1: capavisor's lock-free per-core state
-        self.cores[core_id as usize].domain_id.store(domain_id, Ordering::Release);
-        self.cores[core_id as usize].vp_id.store(vp_id as u32, Ordering::Release);
+        self.cores[core_id as usize]
+            .domain_id
+            .store(domain_id, Ordering::Release);
+        self.cores[core_id as usize]
+            .vp_id
+            .store(vp_id as u32, Ordering::Release);
         *self.cores[core_id as usize].domain_cap.lock() = Some(domain_cap.clone());
         // Engine's SwitchManager CoreContext (for route_interrupt et al.)
         if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
@@ -1656,12 +1805,20 @@ impl Platform for ThemisPlatform {
             }
         }
         routing.core_to_domain.insert(core_id, domain_id);
-        routing.domain_to_cores.entry(domain_id).or_default().insert(core_id);
+        routing
+            .domain_to_cores
+            .entry(domain_id)
+            .or_default()
+            .insert(core_id);
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
-        self.cores[core_id as usize].domain_id.store(IDLE_DOMAIN, Ordering::Release);
-        self.cores[core_id as usize].vp_id.store(IDLE_VP, Ordering::Release);
+        self.cores[core_id as usize]
+            .domain_id
+            .store(IDLE_DOMAIN, Ordering::Release);
+        self.cores[core_id as usize]
+            .vp_id
+            .store(IDLE_VP, Ordering::Release);
         *self.cores[core_id as usize].domain_cap.lock() = None;
         // Engine's SwitchManager CoreContext
         if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
@@ -1680,7 +1837,9 @@ impl Platform for ThemisPlatform {
     }
 
     fn domain_cores(&self, domain_id: DomainId) -> alloc::vec::Vec<CoreId> {
-        self.routing.read().domain_to_cores
+        self.routing
+            .read()
+            .domain_to_cores
             .get(&domain_id)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default()
@@ -1707,9 +1866,15 @@ impl Platform for ThemisPlatform {
         let reg = VpRegister::from_discriminant(reg_id)
             .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
 
-        let arc = self.domain_arc(domain_id)
+        let arc = self
+            .domain_arc(domain_id)
             .ok_or_else(|| CapaError::InvalidOperation("domain not found".into()))?;
-        let comm_hpa = arc.lock().comm_hpas.get(vp_id as usize).copied().unwrap_or(0);
+        let comm_hpa = arc
+            .lock()
+            .comm_hpas
+            .get(vp_id as usize)
+            .copied()
+            .unwrap_or(0);
 
         if comm_hpa == 0 {
             return Err(CapaError::InvalidOperation("VP has no COMM page".into()));
@@ -1734,9 +1899,15 @@ impl Platform for ThemisPlatform {
         let reg = VpRegister::from_discriminant(reg_id)
             .ok_or_else(|| CapaError::InvalidOperation("unknown reg_id".into()))?;
 
-        let arc = self.domain_arc(domain_id)
+        let arc = self
+            .domain_arc(domain_id)
             .ok_or_else(|| CapaError::InvalidOperation("domain not found".into()))?;
-        let comm_hpa = arc.lock().comm_hpas.get(vp_id as usize).copied().unwrap_or(0);
+        let comm_hpa = arc
+            .lock()
+            .comm_hpas
+            .get(vp_id as usize)
+            .copied()
+            .unwrap_or(0);
 
         if comm_hpa == 0 {
             return Err(CapaError::InvalidOperation("VP has no COMM page".into()));

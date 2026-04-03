@@ -45,7 +45,10 @@ impl MetaAllocator {
     /// Add all 4 KiB-aligned pages of `[region.base, region.base + region.length)` to the pool.
     pub fn add_range(&mut self, region: PhysRegion) {
         assert!(region.base % PAGE_SIZE == 0, "META pool not page-aligned");
-        assert!(region.length % PAGE_SIZE == 0, "META pool size not page-aligned");
+        assert!(
+            region.length % PAGE_SIZE == 0,
+            "META pool size not page-aligned"
+        );
         let pages = region.length / PAGE_SIZE;
         for i in 0..pages {
             self.free_stack.push(region.base + i * PAGE_SIZE);

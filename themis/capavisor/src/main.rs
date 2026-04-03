@@ -10,7 +10,10 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use limine::request::{ExecutableAddressRequest, ExecutableFileRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RsdpRequest};
+use limine::request::{
+    ExecutableAddressRequest, ExecutableFileRequest, HhdmRequest, MemoryMapRequest, ModuleRequest,
+    MpRequest, RsdpRequest,
+};
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
@@ -116,14 +119,22 @@ macro_rules! serial_debug {
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
-#[used] static BASE_REVISION:       BaseRevision            = BaseRevision::new();
-#[used] static MEMMAP_REQUEST:      MemoryMapRequest        = MemoryMapRequest::new();
-#[used] static HHDM_REQUEST:        HhdmRequest             = HhdmRequest::new();
-#[used] static RSDP_REQUEST:        RsdpRequest             = RsdpRequest::new();
-#[used] static MP_REQUEST:          MpRequest               = MpRequest::new();
-#[used] static MODULE_REQUEST:      ModuleRequest           = ModuleRequest::new();
-#[used] static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
-#[used] static KERNEL_FILE_REQUEST: ExecutableFileRequest    = ExecutableFileRequest::new();
+#[used]
+static BASE_REVISION: BaseRevision = BaseRevision::new();
+#[used]
+static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+#[used]
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+#[used]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+#[used]
+static MP_REQUEST: MpRequest = MpRequest::new();
+#[used]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+#[used]
+static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+#[used]
+static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
 
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
@@ -166,7 +177,11 @@ pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPl
 pub extern "C" fn _start() -> ! {
     // SAFETY: HEAP is only mutated here (once, BSP-only, before any AP runs).
     // We use addr_of_mut! to get a raw pointer without creating a Rust reference.
-    unsafe { ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE); }
+    unsafe {
+        ALLOCATOR
+            .lock()
+            .init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
+    }
 
     // Store kernel phys/virt base so paging::ensure_table can correctly
     // translate kernel-space heap VAs to physical addresses.
@@ -192,7 +207,8 @@ pub extern "C" fn _start() -> ! {
     {
         // Get the raw ELF file bytes from Limine.  This is the pristine binary
         // as loaded from the boot medium — deterministic and excludes .bss.
-        let elf_file = KERNEL_FILE_REQUEST.get_response()
+        let elf_file = KERNEL_FILE_REQUEST
+            .get_response()
             .expect("no ExecutableFileRequest response")
             .file();
         let elf_addr = elf_file.addr() as u64;
@@ -205,20 +221,31 @@ pub extern "C" fn _start() -> ! {
             (0, 0)
         };
 
-        serial_println!("[attest] capavisor: phys={:#x} virt={:#x} elf_file={:#x} elf_size={:#x} ({} KiB)",
-            phys_base, virt_base, elf_addr, elf_size, elf_size / 1024);
+        serial_println!(
+            "[attest] capavisor: phys={:#x} virt={:#x} elf_file={:#x} elf_size={:#x} ({} KiB)",
+            phys_base,
+            virt_base,
+            elf_addr,
+            elf_size,
+            elf_size / 1024
+        );
         attestation::init(elf_addr, elf_size);
     }
 
     // Unpack Limine responses.
-    let hhdm_offset = HHDM_REQUEST.get_response()
-        .expect("no HHDM response").offset();
-    let entries = MEMMAP_REQUEST.get_response()
-        .expect("no memory map response").entries();
-    let rsdp_phys = RSDP_REQUEST.get_response()
-        .expect("no RSDP response").address() as u64;
-    let mp = MP_REQUEST.get_response()
-        .expect("no MP response");
+    let hhdm_offset = HHDM_REQUEST
+        .get_response()
+        .expect("no HHDM response")
+        .offset();
+    let entries = MEMMAP_REQUEST
+        .get_response()
+        .expect("no memory map response")
+        .entries();
+    let rsdp_phys = RSDP_REQUEST
+        .get_response()
+        .expect("no RSDP response")
+        .address() as u64;
+    let mp = MP_REQUEST.get_response().expect("no MP response");
     let cpus = mp.cpus();
     let bsp_lapic_id = mp.bsp_lapic_id();
 
@@ -227,8 +254,13 @@ pub extern "C" fn _start() -> ! {
         serial_println!("Limine modules: {}", r.modules().len());
         for (i, m) in r.modules().iter().enumerate() {
             let info = guest::ModuleInfo::from_limine_file(m);
-            serial_println!("  [{}] {:?}  {:#x}  {} KiB",
-                i, info.cmdline, info.base as usize, info.size / 1024);
+            serial_println!(
+                "  [{}] {:?}  {:#x}  {} KiB",
+                i,
+                info.cmdline,
+                info.base as usize,
+                info.size / 1024
+            );
         }
         serial_println!();
     }
@@ -240,8 +272,11 @@ pub extern "C" fn _start() -> ! {
     // The ACPI TPM2 table tells us if a TPM is present.  If so, map its MMIO
     // region (not in Limine's HHDM) and probe + extend PCR 11.
     if let Some(ref tpm_info) = platform.acpi.tpm {
-        serial_println!("[attest] ACPI TPM2 found (start_method={}, control_area={:#x})",
-            tpm_info.start_method, tpm_info.control_area);
+        serial_println!(
+            "[attest] ACPI TPM2 found (start_method={}, control_area={:#x})",
+            tpm_info.start_method,
+            tpm_info.control_area
+        );
         attestation::try_tpm(tpm_info.start_method, tpm_info.control_area, hhdm_offset);
     } else {
         serial_println!("[attest] No ACPI TPM2 table — TPM not available");
@@ -275,7 +310,12 @@ pub extern "C" fn _start() -> ! {
     // ── Collect Limine modules for P7f ────────────────────────────────────── //
     let modules: alloc::vec::Vec<guest::ModuleInfo> = MODULE_REQUEST
         .get_response()
-        .map(|r| r.modules().iter().map(|m| guest::ModuleInfo::from_limine_file(m)).collect())
+        .map(|r| {
+            r.modules()
+                .iter()
+                .map(|m| guest::ModuleInfo::from_limine_file(m))
+                .collect()
+        })
         .unwrap_or_default();
 
     // ── Phase 7f: Linux kernel loading + boot_params ──────────────────────── //
@@ -291,7 +331,8 @@ pub extern "C" fn _start() -> ! {
     capa.platform.set_dom0_cap(capa.root_domain.clone());
     let num_cores = cpus.len();
     for core_id in 0..num_cores {
-        capa.platform.set_core_context(core_id, capa.root_domain.clone(), core_id as u32);
+        capa.platform
+            .set_core_context(core_id, capa.root_domain.clone(), core_id as u32);
     }
 
     // Initialize dom0 VP run states to Running so that the capability engine's
@@ -343,8 +384,7 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     let vmxon_phys = platform.vmxon_phys(id);
 
     // Enable VMX on this AP.
-    crate::vmx::enable_vmx_on_core(vmxon_phys)
-        .expect("AP VMXON failed");
+    crate::vmx::enable_vmx_on_core(vmxon_phys).expect("AP VMXON failed");
 
     // Set XCR0 to full feature set before VMLAUNCH.
     {
@@ -362,7 +402,8 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
         );
     }
 
-    let inactive = platform.take_vcpu(0, id)
+    let inactive = platform
+        .take_vcpu(0, id)
         .unwrap_or_else(|| panic!("AP{}: no InactiveVcpu in PlatformDomain", id));
 
     let mut active = inactive.activate().expect("AP activate failed");
@@ -380,4 +421,3 @@ fn panic(info: &PanicInfo) -> ! {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
 }
-

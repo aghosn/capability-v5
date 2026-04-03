@@ -34,11 +34,11 @@ use x86::msr;
 /// Keep sorted by start address for readability.
 const TRAPPED_RANGES: &[(u32, u32)] = &[
     // Architectural perf-monitoring counters (IA32_PMC0–7)
-    (msr::IA32_PMC0,         msr::IA32_PMC7),
+    (msr::IA32_PMC0, msr::IA32_PMC7),
     // Perf event selectors (IA32_PERFEVTSEL0–7)
-    (msr::IA32_PERFEVTSEL0,  msr::IA32_PERFEVTSEL7),
+    (msr::IA32_PERFEVTSEL0, msr::IA32_PERFEVTSEL7),
     // Fixed-function counters (IA32_FIXED_CTR0–2)
-    (msr::IA32_FIXED_CTR0,   msr::IA32_FIXED_CTR2),
+    (msr::IA32_FIXED_CTR0, msr::IA32_FIXED_CTR2),
     // Perf capabilities
     (msr::IA32_PERF_CAPABILITIES, msr::IA32_PERF_CAPABILITIES),
     // Fixed CTR ctrl + global perf status/ctrl/ovf (0x38D–0x396)
@@ -46,7 +46,7 @@ const TRAPPED_RANGES: &[(u32, u32)] = &[
     // Uncore counters & ARB perfevtsel (0x3B0–0x3C7)
     (0x3B0, 0x3C7),
     // Full-width architectural counters (IA32_A_PMC0–7)
-    (msr::IA32_A_PMC0,       msr::IA32_A_PMC7),
+    (msr::IA32_A_PMC0, msr::IA32_A_PMC7),
     // CBO uncore PMU (0x700–0x73F)
     (0x700, 0x73F),
     // Extended uncore PMU — Rocket Lake / Tiger Lake (0xE00–0xE7F)
@@ -55,7 +55,9 @@ const TRAPPED_RANGES: &[(u32, u32)] = &[
 
 /// Returns `true` if `msr` falls within any [`TRAPPED_RANGES`] entry.
 fn is_trapped(msr: u32) -> bool {
-    TRAPPED_RANGES.iter().any(|&(lo, hi)| msr >= lo && msr <= hi)
+    TRAPPED_RANGES
+        .iter()
+        .any(|&(lo, hi)| msr >= lo && msr <= hi)
 }
 
 // ── Handler return type ─────────────────────────────────────────────────── //

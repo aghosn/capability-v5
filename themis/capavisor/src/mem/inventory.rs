@@ -69,7 +69,9 @@ pub struct MetaBreakdown {
 }
 
 impl MetaBreakdown {
-    pub fn total_bytes(&self) -> u64 { self.total_pages * PAGE_SIZE }
+    pub fn total_bytes(&self) -> u64 {
+        self.total_pages * PAGE_SIZE
+    }
 }
 
 impl PhysicalInventory {
@@ -91,12 +93,19 @@ impl PhysicalInventory {
             if entry.entry_type == EntryType::USABLE {
                 total_usable += entry.length;
                 assert!(count < Self::MAX_REGIONS, "too many usable memory regions");
-                regions[count] = PhysRegion { base: entry.base, length: entry.length };
+                regions[count] = PhysRegion {
+                    base: entry.base,
+                    length: entry.length,
+                };
                 count += 1;
             }
         }
 
-        Self { regions, count, total_usable }
+        Self {
+            regions,
+            count,
+            total_usable,
+        }
     }
 
     /// Usable regions (all of them, pre-META partitioning).
@@ -124,12 +133,12 @@ impl PhysicalInventory {
         let num_vps = num_cores;
 
         let vmxon_pages = num_cores;
-        let vmcs_pages  = num_vps;
+        let vmcs_pages = num_vps;
         let vapic_pages = num_vps;
-        let irt_pages   = MAX_DRHD_UNITS as u64;
+        let irt_pages = MAX_DRHD_UNITS as u64;
         let (iommu_root_pages, iommu_ctx_pages) = iommu_counts;
-        let fixed_pages = vmxon_pages + vmcs_pages + vapic_pages + irt_pages
-            + iommu_root_pages + iommu_ctx_pages;
+        let fixed_pages =
+            vmxon_pages + vmcs_pages + vapic_pages + irt_pages + iommu_root_pages + iommu_ctx_pages;
 
         // Include COMM pages in the total reservation budget so META + COMM
         // are carved together from the top of usable memory.
@@ -143,32 +152,36 @@ impl PhysicalInventory {
             let dom0_pages = dom0_bytes / PAGE_SIZE;
             let l1 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE);
             let l2 = div_ceil(dom0_pages, EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE);
-            let l3 = div_ceil(dom0_pages,
-                EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE);
+            let l3 = div_ceil(
+                dom0_pages,
+                EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE * EPT_ENTRIES_PER_TABLE,
+            );
             let l4 = 1u64;
             meta_pages = fixed_pages + l1 + l2 + l3 + l4;
         }
-        let ept_pages  = meta_pages - fixed_pages;
+        let ept_pages = meta_pages - fixed_pages;
 
         // Total reserved = META + COMM, carved together from the top.
         let total_reserved = (meta_pages + comm_pages) * PAGE_SIZE;
 
         // dom0_owned starts as a copy of all regions; we'll trim/remove entries
         // consumed by the combined META + COMM reservation.
-        let mut dom0_owned       = self.regions;
+        let mut dom0_owned = self.regions;
         let mut dom0_owned_count = self.count;
 
         // Collect reserved pages from the TOP of usable physical memory.
         // These will be split into META and COMM afterwards.
         let mut reserved_regions = [PhysRegion { base: 0, length: 0 }; MAX_META_REGIONS];
-        let mut reserved_count   = 0usize;
-        let mut reserved_needed  = total_reserved;
+        let mut reserved_count = 0usize;
+        let mut reserved_needed = total_reserved;
 
         let mut ri = self.count;
         while reserved_needed > 0 && ri > 0 {
             ri -= 1;
             let region = self.regions[ri];
-            if region.length == 0 { continue; }
+            if region.length == 0 {
+                continue;
+            }
 
             let take = region.length.min(reserved_needed);
             let take_base = region.base + region.length - take;
@@ -176,8 +189,14 @@ impl PhysicalInventory {
             // Record fragment (prepend to keep ascending order).
             if reserved_count < MAX_META_REGIONS {
                 let mut i = reserved_count;
-                while i > 0 { reserved_regions[i] = reserved_regions[i-1]; i -= 1; }
-                reserved_regions[0] = PhysRegion { base: take_base, length: take };
+                while i > 0 {
+                    reserved_regions[i] = reserved_regions[i - 1];
+                    i -= 1;
+                }
+                reserved_regions[0] = PhysRegion {
+                    base: take_base,
+                    length: take,
+                };
                 reserved_count += 1;
             }
             reserved_needed -= take;
@@ -188,7 +207,7 @@ impl PhysicalInventory {
                     if take == region.length {
                         let mut j = d;
                         while j + 1 < dom0_owned_count {
-                            dom0_owned[j] = dom0_owned[j+1];
+                            dom0_owned[j] = dom0_owned[j + 1];
                             j += 1;
                         }
                         dom0_owned_count -= 1;
@@ -200,9 +219,11 @@ impl PhysicalInventory {
             }
         }
 
-        assert!(reserved_needed == 0,
+        assert!(
+            reserved_needed == 0,
             "not enough usable memory for META + COMM pool ({} KiB needed)",
-            total_reserved / 1024);
+            total_reserved / 1024
+        );
 
         // ── Split reserved into COMM (bottom 4 pages) and META (rest) ─────── //
         //
@@ -210,9 +231,12 @@ impl PhysicalInventory {
         // DOMCOMM_NR_PAGES pages from the first (lowest) fragment as the
         // contiguous COMM region; everything else is META.
         let comm_size = comm_pages * PAGE_SIZE;
-        assert!(reserved_regions[0].length >= comm_size,
+        assert!(
+            reserved_regions[0].length >= comm_size,
             "first reserved fragment too small for COMM ({} KiB, need {} KiB)",
-            reserved_regions[0].length / 1024, comm_size / 1024);
+            reserved_regions[0].length / 1024,
+            comm_size / 1024
+        );
 
         let comm_region = PhysRegion {
             base: reserved_regions[0].base,

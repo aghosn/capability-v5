@@ -80,8 +80,8 @@ const VMCS_POSTED_INTR_DESCRIPTOR_ADDR: u32 = 0x2016;
 /// `low32` = bits that MUST be 1 (OR'd in).
 /// `high32` = bits that MAY be 1 (AND'd in).
 fn adjust(desired: u64, msr_value: u64) -> u64 {
-    let must_be_1 = msr_value & 0xFFFF_FFFF;         // allowed-0 → must be 1
-    let may_be_1  = (msr_value >> 32) & 0xFFFF_FFFF; // allowed-1 → may be 1
+    let must_be_1 = msr_value & 0xFFFF_FFFF; // allowed-0 → must be 1
+    let may_be_1 = (msr_value >> 32) & 0xFFFF_FFFF; // allowed-1 → may be 1
     (desired | must_be_1) & may_be_1
 }
 
@@ -123,13 +123,27 @@ pub unsafe fn setup_vmcs_for_vp(
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
     // dom0 keeps its xAPIC MMIO EPT passthrough — no APIC access page.
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, 0, 0, 0, 0, (vp_index + 1) as u16, false);
+    write_control_fields(
+        eptp,
+        vapic_phys,
+        msr_bitmap_phys,
+        0,
+        0,
+        0,
+        0,
+        (vp_index + 1) as u16,
+        false,
+    );
     write_host_state();
     write_guest_state();
 
     serial_println!(
         "  VMCS VP{}: phys={:#x} VAPIC={:#x} EPTP={:#x} VPID={}",
-        vp_index, vmcs_phys, vapic_phys, eptp, vp_index + 1,
+        vp_index,
+        vmcs_phys,
+        vapic_phys,
+        eptp,
+        vp_index + 1,
     );
 }
 
@@ -156,13 +170,28 @@ pub unsafe fn setup_child_vmcs(
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
-    write_control_fields(eptp, vapic_phys, msr_bitmap_phys, pid_phys, apic_access_phys, io_bitmap_a_phys, io_bitmap_b_phys, vpid, true);
+    write_control_fields(
+        eptp,
+        vapic_phys,
+        msr_bitmap_phys,
+        pid_phys,
+        apic_access_phys,
+        io_bitmap_a_phys,
+        io_bitmap_b_phys,
+        vpid,
+        true,
+    );
     write_host_state();
     write_guest_state();
 
     serial_println!(
         "  child VMCS: phys={:#x} VAPIC={:#x} PID={:#x} APIC_ACC={:#x} EPTP={:#x} VPID={}",
-        vmcs_phys, vapic_phys, pid_phys, apic_access_phys, eptp, vpid,
+        vmcs_phys,
+        vapic_phys,
+        pid_phys,
+        apic_access_phys,
+        eptp,
+        vpid,
     );
 }
 
@@ -184,30 +213,34 @@ unsafe fn write_control_fields(
     if child {
         pin_desired |= 1 << 0; // EXTERNAL_INTERRUPT_EXITING
         pin_desired |= 1 << 3; // NMI_EXITING — NMIs from child VM always exit to capavisor
-        // PROCESS_POSTED_INTERRUPTS (bit 7) intentionally NOT set.
-        // Under nested virtualisation (QEMU/KVM) the host advertises PI
-        // support but L2 posted-interrupt delivery is unreliable.  We use
-        // the software PIR drain in do_switch() instead — it works on both
-        // nested and bare-metal.
+                               // PROCESS_POSTED_INTERRUPTS (bit 7) intentionally NOT set.
+                               // Under nested virtualisation (QEMU/KVM) the host advertises PI
+                               // support but L2 posted-interrupt delivery is unreliable.  We use
+                               // the software PIR drain in do_switch() instead — it works on both
+                               // nested and bare-metal.
     }
-    let pin_msr = vmx_ctrl_msr(msr::IA32_VMX_PINBASED_CTLS, msr::IA32_VMX_TRUE_PINBASED_CTLS);
+    let pin_msr = vmx_ctrl_msr(
+        msr::IA32_VMX_PINBASED_CTLS,
+        msr::IA32_VMX_TRUE_PINBASED_CTLS,
+    );
     let pin_val = adjust(pin_desired, pin_msr);
-    vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val)
-        .expect("vmwrite pin-based");
+    vmx::vmwrite(control::PINBASED_EXEC_CONTROLS, pin_val).expect("vmwrite pin-based");
 
     // ── Primary proc-based ────────────────────────────────────────────── //
     // USE_TPR_SHADOW (bit 21): required prerequisite for APIC_REGISTER_VIRT
     // and VID.  With TPR_THRESHOLD=0 it causes no threshold exits; CR8 writes
     // in the guest land in VAPIC.vTPR (benign for dom0 since TPR_THRESHOLD=0).
-    let mut primary_desired: u64 =
-        (1 << 21)  // USE_TPR_SHADOW
+    let mut primary_desired: u64 = (1 << 21)  // USE_TPR_SHADOW
         | (1 << 28) // USE_MSR_BITMAPS
         | (1 << 31); // ACTIVATE_SECONDARY_CONTROLS
     if child {
-        primary_desired |= 1 << 7;  // HLT_EXITING
+        primary_desired |= 1 << 7; // HLT_EXITING
         primary_desired |= 1 << 24; // USE_IO_BITMAPS — selective I/O port trapping (serial UART etc.)
     }
-    let primary_msr = vmx_ctrl_msr(msr::IA32_VMX_PROCBASED_CTLS, msr::IA32_VMX_TRUE_PROCBASED_CTLS);
+    let primary_msr = vmx_ctrl_msr(
+        msr::IA32_VMX_PROCBASED_CTLS,
+        msr::IA32_VMX_TRUE_PROCBASED_CTLS,
+    );
     let primary_val = adjust(primary_desired, primary_msr);
     vmx::vmwrite(control::PRIMARY_PROCBASED_EXEC_CONTROLS, primary_val)
         .expect("vmwrite primary proc-based");
@@ -224,8 +257,7 @@ unsafe fn write_control_fields(
     //   (Intel SDM Vol 3C §26.2.1.1).  Only set for child VMs, which already
     //   have EXTERNAL_INTERRUPT_EXITING enabled.  For dom0, VID is omitted:
     //   dom0 handles interrupts natively and vIRR is always 0.
-    let secondary_desired: u64 =
-        (1 << 1)   // ENABLE_EPT
+    let secondary_desired: u64 = (1 << 1)   // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
@@ -242,11 +274,8 @@ unsafe fn write_control_fields(
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
     let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
     let secondary_val = adjust(secondary_desired, secondary_msr);
-    vmx::vmwrite(
-        control::SECONDARY_PROCBASED_EXEC_CONTROLS,
-        secondary_val,
-    )
-    .expect("vmwrite secondary proc-based");
+    vmx::vmwrite(control::SECONDARY_PROCBASED_EXEC_CONTROLS, secondary_val)
+        .expect("vmwrite secondary proc-based");
 
     if apic_access_phys != 0 && (secondary_val & 1) == 0 {
         serial_println!(
@@ -258,8 +287,7 @@ unsafe fn write_control_fields(
     // XSS-exiting bitmap: only valid when ENABLE_XSAVES (bit 20) is active.
     if secondary_val & (1 << 20) != 0 {
         // 0 = no XSAVES/XRSTORS cause VM exits; all execute natively.
-        vmx::vmwrite(control::XSS_EXITING_BITMAP_FULL, 0)
-            .expect("vmwrite XSS-exiting bitmap");
+        vmx::vmwrite(control::XSS_EXITING_BITMAP_FULL, 0).expect("vmwrite XSS-exiting bitmap");
     }
 
     // ── VM-exit controls ──────────────────────────────────────────────── //
@@ -271,8 +299,7 @@ unsafe fn write_control_fields(
     // the interrupt pending and it fires again on every VMRESUME, causing an
     // infinite external-interrupt exit loop that prevents the child from ever
     // executing its first instruction.
-    let exit_desired: u64 =
-        (1 << 9)   // HOST_ADDRESS_SPACE_SIZE
+    let exit_desired: u64 = (1 << 9)   // HOST_ADDRESS_SPACE_SIZE
         | (if child { 1 << 15 } else { 0 }) // ACKNOWLEDGE_INTERRUPT_ON_EXIT
         | (1 << 18) // SAVE_IA32_PAT
         | (1 << 19) // LOAD_IA32_PAT
@@ -281,8 +308,7 @@ unsafe fn write_control_fields(
         | (1 << 22); // SAVE_VMX_PREEMPTION_TIMER
     let exit_msr = vmx_ctrl_msr(msr::IA32_VMX_EXIT_CTLS, msr::IA32_VMX_TRUE_EXIT_CTLS);
     let exit_val = adjust(exit_desired, exit_msr);
-    vmx::vmwrite(control::VMEXIT_CONTROLS, exit_val)
-        .expect("vmwrite vm-exit controls");
+    vmx::vmwrite(control::VMEXIT_CONTROLS, exit_val).expect("vmwrite vm-exit controls");
 
     // ── VM-entry controls ─────────────────────────────────────────────── //
     // No IA32E_MODE_GUEST (bit 9): guest starts in 32-bit protected mode.
@@ -290,13 +316,11 @@ unsafe fn write_control_fields(
     // so the guest doesn't inherit the host's EFER (which has LMA=1).
     // Without this, the guest runs in an architecturally undefined state
     // (LMA=1 + CR0.PG=0).
-    let entry_desired: u64 =
-        (1 << 14)  // LOAD_IA32_PAT
+    let entry_desired: u64 = (1 << 14)  // LOAD_IA32_PAT
         | (1 << 15); // LOAD_IA32_EFER
     let entry_msr = vmx_ctrl_msr(msr::IA32_VMX_ENTRY_CTLS, msr::IA32_VMX_TRUE_ENTRY_CTLS);
     let entry_val = adjust(entry_desired, entry_msr);
-    vmx::vmwrite(control::VMENTRY_CONTROLS, entry_val)
-        .expect("vmwrite vm-entry controls");
+    vmx::vmwrite(control::VMENTRY_CONTROLS, entry_val).expect("vmwrite vm-entry controls");
 
     // ── EPT pointer ───────────────────────────────────────────────────── //
     vmx::vmwrite(control::EPTP_FULL, eptp).expect("vmwrite EPTP");
@@ -333,8 +357,7 @@ unsafe fn write_control_fields(
     vmx::vmwrite(control::CR4_READ_SHADOW, 0).expect("vmwrite CR4 shadow");
 
     // ── VAPIC page ────────────────────────────────────────────────────── //
-    vmx::vmwrite(control::VIRT_APIC_ADDR_FULL as u32, vapic_phys)
-        .expect("vmwrite VAPIC addr");
+    vmx::vmwrite(control::VIRT_APIC_ADDR_FULL as u32, vapic_phys).expect("vmwrite VAPIC addr");
 
     // ── APIC access page (child VPs only) ─────────────────────────────── //
     // When VIRTUALIZE_APIC_ACCESSES (bit 0) is set in secondary controls,
@@ -383,21 +406,35 @@ unsafe fn write_control_fields(
         .expect("vmwrite vmentry msr load count");
     vmx::vmwrite(control::VMEXIT_MSR_STORE_COUNT as u32, 0)
         .expect("vmwrite vmexit msr store count");
-    vmx::vmwrite(control::VMEXIT_MSR_LOAD_COUNT as u32, 0)
-        .expect("vmwrite vmexit msr load count");
+    vmx::vmwrite(control::VMEXIT_MSR_LOAD_COUNT as u32, 0).expect("vmwrite vmexit msr load count");
 
     // ── VMX preemption timer ──────────────────────────────────────────── //
     // Diagnostic heartbeat: fires every ~2s to sample guest RIP/RSP.
-    vmx::vmwrite(guest::VMX_PREEMPTION_TIMER_VALUE, crate::vmexit::PREEMPTION_TIMER_TICKS)
-        .expect("vmwrite preemption timer");
+    vmx::vmwrite(
+        guest::VMX_PREEMPTION_TIMER_VALUE,
+        crate::vmexit::PREEMPTION_TIMER_TICKS,
+    )
+    .expect("vmwrite preemption timer");
 
     // ── Debug: print MSR raw values and adjusted controls ─────────────── //
     serial_println!("  VMCS controls (VPID={}):", vpid);
     serial_println!("    pin_msr={:#018x}  pin={:#010x}", pin_msr, pin_val);
-    serial_println!("    primary_msr={:#018x}  primary={:#010x}", primary_msr, primary_val);
-    serial_println!("    secondary_msr={:#018x}  secondary={:#010x}", secondary_msr, secondary_val);
+    serial_println!(
+        "    primary_msr={:#018x}  primary={:#010x}",
+        primary_msr,
+        primary_val
+    );
+    serial_println!(
+        "    secondary_msr={:#018x}  secondary={:#010x}",
+        secondary_msr,
+        secondary_val
+    );
     serial_println!("    exit_msr={:#018x}  exit={:#010x}", exit_msr, exit_val);
-    serial_println!("    entry_msr={:#018x}  entry={:#010x}", entry_msr, entry_val);
+    serial_println!(
+        "    entry_msr={:#018x}  entry={:#010x}",
+        entry_msr,
+        entry_val
+    );
     serial_println!("    EPTP={:#018x}  VPID={}", eptp, vpid);
 
     // ── Posted Interrupt fields (child VPs only) ─────────────────────── //
@@ -407,8 +444,11 @@ unsafe fn write_control_fields(
     // are unsupported and vmwrite would return VM_FAIL_INVALID.
     if child && (pin_val & (1 << 7)) != 0 {
         // Notification vector: sent as IPI to the VP's core for cross-core injection.
-        vmx::vmwrite(VMCS_POSTED_INTR_NOTIFICATION_VECTOR, POSTED_INTR_NOTIFY_VEC as u64)
-            .expect("vmwrite posted-intr notification vector");
+        vmx::vmwrite(
+            VMCS_POSTED_INTR_NOTIFICATION_VECTOR,
+            POSTED_INTR_NOTIFY_VEC as u64,
+        )
+        .expect("vmwrite posted-intr notification vector");
         // Physical address of the 64-byte aligned Posted-Interrupt Descriptor.
         vmx::vmwrite(VMCS_POSTED_INTR_DESCRIPTOR_ADDR, pid_phys)
             .expect("vmwrite posted-intr descriptor addr");
@@ -528,31 +568,40 @@ unsafe fn write_host_state() {
 unsafe fn write_guest_state() {
     // ── Segment selectors (all 0 — real or flat protected mode) ─────── //
     for sel_field in [
-        guest::ES_SELECTOR, guest::CS_SELECTOR, guest::SS_SELECTOR,
-        guest::DS_SELECTOR, guest::FS_SELECTOR, guest::GS_SELECTOR,
-        guest::TR_SELECTOR, guest::LDTR_SELECTOR,
+        guest::ES_SELECTOR,
+        guest::CS_SELECTOR,
+        guest::SS_SELECTOR,
+        guest::DS_SELECTOR,
+        guest::FS_SELECTOR,
+        guest::GS_SELECTOR,
+        guest::TR_SELECTOR,
+        guest::LDTR_SELECTOR,
     ] {
         vmx::vmwrite(sel_field, 0).expect("vmwrite guest selector");
     }
 
     // ── Segment access rights (UNRESTRICTED_GUEST — protected mode) ─── //
     // CS: code, 32-bit, present, DPL=0 (type 0x1B = execute/read/accessed)
-    vmx::vmwrite(guest::CS_ACCESS_RIGHTS,  0xC09B).expect("vmwrite guest CS AR");
+    vmx::vmwrite(guest::CS_ACCESS_RIGHTS, 0xC09B).expect("vmwrite guest CS AR");
     // DS/ES: data, 32-bit, present, DPL=0
-    vmx::vmwrite(guest::DS_ACCESS_RIGHTS,  0xC093).expect("vmwrite guest DS AR");
-    vmx::vmwrite(guest::ES_ACCESS_RIGHTS,  0xC093).expect("vmwrite guest ES AR");
-    vmx::vmwrite(guest::SS_ACCESS_RIGHTS,  0xC093).expect("vmwrite guest SS AR");
+    vmx::vmwrite(guest::DS_ACCESS_RIGHTS, 0xC093).expect("vmwrite guest DS AR");
+    vmx::vmwrite(guest::ES_ACCESS_RIGHTS, 0xC093).expect("vmwrite guest ES AR");
+    vmx::vmwrite(guest::SS_ACCESS_RIGHTS, 0xC093).expect("vmwrite guest SS AR");
     // FS/GS/LDTR: unusable
-    vmx::vmwrite(guest::FS_ACCESS_RIGHTS,  0x10000).expect("vmwrite guest FS AR");
-    vmx::vmwrite(guest::GS_ACCESS_RIGHTS,  0x10000).expect("vmwrite guest GS AR");
-    vmx::vmwrite(guest::LDTR_ACCESS_RIGHTS,0x10000).expect("vmwrite guest LDTR AR");
+    vmx::vmwrite(guest::FS_ACCESS_RIGHTS, 0x10000).expect("vmwrite guest FS AR");
+    vmx::vmwrite(guest::GS_ACCESS_RIGHTS, 0x10000).expect("vmwrite guest GS AR");
+    vmx::vmwrite(guest::LDTR_ACCESS_RIGHTS, 0x10000).expect("vmwrite guest LDTR AR");
     // TR: busy TSS, present (type 0x8B = TSS32 busy)
-    vmx::vmwrite(guest::TR_ACCESS_RIGHTS,  0x8B).expect("vmwrite guest TR AR");
+    vmx::vmwrite(guest::TR_ACCESS_RIGHTS, 0x8B).expect("vmwrite guest TR AR");
 
     // ── Segment limits ────────────────────────────────────────────────── //
     for lim_field in [
-        guest::ES_LIMIT, guest::CS_LIMIT, guest::SS_LIMIT,
-        guest::DS_LIMIT, guest::FS_LIMIT, guest::GS_LIMIT,
+        guest::ES_LIMIT,
+        guest::CS_LIMIT,
+        guest::SS_LIMIT,
+        guest::DS_LIMIT,
+        guest::FS_LIMIT,
+        guest::GS_LIMIT,
         guest::LDTR_LIMIT,
     ] {
         vmx::vmwrite(lim_field, 0xFFFF_FFFF).expect("vmwrite guest seg limit");
@@ -563,10 +612,16 @@ unsafe fn write_guest_state() {
 
     // ── Segment bases (all 0) ─────────────────────────────────────────── //
     for base_field in [
-        guest::ES_BASE,    guest::CS_BASE,    guest::SS_BASE,
-        guest::DS_BASE,    guest::FS_BASE,    guest::GS_BASE,
-        guest::TR_BASE,    guest::LDTR_BASE,
-        guest::GDTR_BASE,  guest::IDTR_BASE,
+        guest::ES_BASE,
+        guest::CS_BASE,
+        guest::SS_BASE,
+        guest::DS_BASE,
+        guest::FS_BASE,
+        guest::GS_BASE,
+        guest::TR_BASE,
+        guest::LDTR_BASE,
+        guest::GDTR_BASE,
+        guest::IDTR_BASE,
     ] {
         vmx::vmwrite(base_field, 0).expect("vmwrite guest seg base");
     }
@@ -583,8 +638,7 @@ unsafe fn write_guest_state() {
     // ── EFER: 0 (no long mode in the stub; P7f sets LME+LMA for Linux) ── //
     vmx::vmwrite(guest::IA32_EFER_FULL, 0).expect("vmwrite guest EFER");
     // ── PAT: default value (same as vmxvmm) ─────────────────────────── //
-    vmx::vmwrite(guest::IA32_PAT_FULL, 0x0007_0406_0007_0406u64)
-        .expect("vmwrite guest PAT");
+    vmx::vmwrite(guest::IA32_PAT_FULL, 0x0007_0406_0007_0406u64).expect("vmwrite guest PAT");
 
     // ── General purpose / misc ────────────────────────────────────────── //
     vmx::vmwrite(guest::RIP, 0).expect("vmwrite guest RIP");
@@ -605,8 +659,11 @@ unsafe fn write_guest_state() {
     // Preemption timer: initialise to a non-zero value so the first VMENTRY
     // does not fire an immediate timer exit (a timer value of 0 fires on the
     // first cycle).  The monitor loop resets it on every timer exit anyway.
-    vmx::vmwrite(guest::VMX_PREEMPTION_TIMER_VALUE, crate::vmexit::PREEMPTION_TIMER_TICKS)
-        .expect("vmwrite guest preemption timer");
+    vmx::vmwrite(
+        guest::VMX_PREEMPTION_TIMER_VALUE,
+        crate::vmexit::PREEMPTION_TIMER_TICKS,
+    )
+    .expect("vmwrite guest preemption timer");
 
     // ── SYSENTER MSRs ─────────────────────────────────────────────────── //
     vmx::vmwrite(guest::IA32_SYSENTER_CS, 0).expect("vmwrite guest SYSENTER_CS");

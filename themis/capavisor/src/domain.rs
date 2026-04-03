@@ -85,10 +85,7 @@ impl Domain {
     /// ports that trigger machine reset/shutdown so the VMEXIT handler
     /// can log them instead of letting QEMU silently exit.
     #[allow(dead_code)]
-    pub fn alloc_io_bitmaps(
-        &mut self,
-        platform: &crate::platform::ThemisPlatform,
-    ) {
+    pub fn alloc_io_bitmaps(&mut self, platform: &crate::platform::ThemisPlatform) {
         self.io_bitmap_a = platform.alloc_meta_frame(self.id);
         self.io_bitmap_b = platform.alloc_meta_frame(self.id);
 
@@ -112,16 +109,19 @@ impl Domain {
     ///
     /// See [`crate::msr_virt`] for the list of trapped ranges and the
     /// VMEXIT emulation handlers.
-    pub fn alloc_msr_bitmap(
-        &mut self,
-        platform: &crate::platform::ThemisPlatform,
-    ) {
+    pub fn alloc_msr_bitmap(&mut self, platform: &crate::platform::ThemisPlatform) {
         self.msr_bitmap = platform.alloc_meta_frame(self.id);
         let virt = (self.msr_bitmap + self.hhdm_offset) as *mut u8;
         crate::msr_virt::init_bitmap(virt);
     }
 
-    pub fn vmcs_phys(&self, vp_index: usize)   -> u64 { self.vmcs_regions[vp_index] }
-    pub fn vapic_phys(&self, vp_index: usize)  -> u64 { self.vapic_regions[vp_index] }
-    pub fn msr_bitmap_phys(&self)              -> u64 { self.msr_bitmap }
+    pub fn vmcs_phys(&self, vp_index: usize) -> u64 {
+        self.vmcs_regions[vp_index]
+    }
+    pub fn vapic_phys(&self, vp_index: usize) -> u64 {
+        self.vapic_regions[vp_index]
+    }
+    pub fn msr_bitmap_phys(&self) -> u64 {
+        self.msr_bitmap
+    }
 }

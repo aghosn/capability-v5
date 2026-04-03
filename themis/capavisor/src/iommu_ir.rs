@@ -64,9 +64,7 @@ pub(crate) unsafe fn irte_program_remapped(
     //   [7:5]   DLM = 0 (fixed delivery)
     //   [23:16] Vector
     //   [63:32] Destination ID (physical APIC ID in low 8 bits = bits[39:32])
-    let low  = 1u64
-        | ((vector   as u64) << 16)
-        | ((lapic_id as u64) << 32);
+    let low = 1u64 | ((vector as u64) << 16) | ((lapic_id as u64) << 32);
     let high = 0u64;
     unsafe { irte_write(irt_phys, hhdm, index, low, high) };
 }
@@ -101,11 +99,11 @@ pub(crate) unsafe fn irte_program_posted(
     //
     // High 64-bit word:
     //   [63:0]  PDA = pid_phys >> 6  (PID is 64-byte aligned; lower 6 bits = 0)
-    let low  = 1u64
+    let low = 1u64
         | (1u64   << 15)            // IM = 1 (posted mode)
         | ((NV    as u64) << 16)    // Notification Vector
-        | ((ndst  as u64) << 32);   // NDST
-    let high = pid_phys >> 6;       // PDA (Posted Interrupt Descriptor Address)
+        | ((ndst  as u64) << 32); // NDST
+    let high = pid_phys >> 6; // PDA (Posted Interrupt Descriptor Address)
     unsafe { irte_write(irt_phys, hhdm, index, low, high) };
 }
 
@@ -116,14 +114,9 @@ pub(crate) unsafe fn irte_program_posted(
 ///
 /// # Safety
 /// `irt_phys` must be a valid IRT page accessible via HHDM.  `index` < 256.
-pub(crate) unsafe fn irte_update_ndst(
-    irt_phys: u64,
-    hhdm: u64,
-    index: u8,
-    ndst: u32,
-) {
+pub(crate) unsafe fn irte_update_ndst(irt_phys: u64, hhdm: u64, index: u8, ndst: u32) {
     let low_ptr = irte_virt(irt_phys, hhdm, index) as *mut u64;
-    let low     = unsafe { low_ptr.read_volatile() };
+    let low = unsafe { low_ptr.read_volatile() };
     // Replace bits [63:32] (NDST) with the new LAPIC ID.
     let new_low = (low & 0x0000_0000_FFFF_FFFF) | ((ndst as u64) << 32);
     unsafe { low_ptr.write_volatile(new_low) };
@@ -158,13 +151,13 @@ fn irte_virt(irt_phys: u64, hhdm: u64, index: u8) -> u64 {
 /// # Safety
 /// Caller must ensure `irt_phys` is valid and `index` < 256.
 unsafe fn irte_write(irt_phys: u64, hhdm: u64, index: u8, low: u64, high: u64) {
-    let base     = irte_virt(irt_phys, hhdm, index);
-    let low_ptr  = base       as *mut u64;
+    let base = irte_virt(irt_phys, hhdm, index);
+    let low_ptr = base as *mut u64;
     let high_ptr = (base + 8) as *mut u64;
 
     unsafe {
-        low_ptr .write_volatile(low & !1u64);   // step 1: P=0
-        high_ptr.write_volatile(high);           // step 2: high word
-        low_ptr .write_volatile(low);            // step 3: final low (P may be 1)
+        low_ptr.write_volatile(low & !1u64); // step 1: P=0
+        high_ptr.write_volatile(high); // step 2: high word
+        low_ptr.write_volatile(low); // step 3: final low (P may be 1)
     }
 }

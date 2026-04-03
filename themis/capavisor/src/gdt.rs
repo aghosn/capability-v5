@@ -112,13 +112,13 @@ pub fn init() {
     unsafe {
         let gdt = core::ptr::addr_of_mut!(GDT);
         let tss = core::ptr::addr_of!(TSS_ARRAY);
-        (*gdt)[0] = 0;       // null
-        (*gdt)[1] = CODE64;  // selector 0x08 — code64
-        (*gdt)[2] = DATA64;  // selector 0x10 — data
+        (*gdt)[0] = 0; // null
+        (*gdt)[1] = CODE64; // selector 0x08 — code64
+        (*gdt)[2] = DATA64; // selector 0x10 — data
 
         for i in 0..MAX_CORES {
             let (lo, hi) = make_tss_descriptor(&(*tss)[i]);
-            (*gdt)[GDT_FIXED + 2 * i]     = lo;
+            (*gdt)[GDT_FIXED + 2 * i] = lo;
             (*gdt)[GDT_FIXED + 2 * i + 1] = hi;
         }
     }
@@ -131,11 +131,14 @@ pub fn init() {
 /// # Safety
 /// [`init`] must have been called first.
 pub fn load_for_core(cpu_id: usize) {
-    assert!(cpu_id < MAX_CORES, "gdt::load_for_core: cpu_id out of range");
+    assert!(
+        cpu_id < MAX_CORES,
+        "gdt::load_for_core: cpu_id out of range"
+    );
 
-    let gdt_base  = core::ptr::addr_of!(GDT) as u64;
+    let gdt_base = core::ptr::addr_of!(GDT) as u64;
     let gdt_limit = (core::mem::size_of::<[u64; GDT_SIZE]>() - 1) as u16;
-    let tss_sel   = tss_selector(cpu_id);
+    let tss_sel = tss_selector(cpu_id);
 
     // 10-byte pseudo-descriptor: 2-byte limit followed by 8-byte base.
     let gdtr: [u8; 10] = {
@@ -205,7 +208,7 @@ pub fn gdtr_base() -> u64 {
 /// bits[63:32] = 0  (reserved)
 /// ```
 fn make_tss_descriptor(tss: &Tss64) -> (u64, u64) {
-    let base  = tss as *const Tss64 as u64;
+    let base = tss as *const Tss64 as u64;
     let limit = (core::mem::size_of::<Tss64>() - 1) as u64; // 0x67
 
     let access: u64 = 0x89; // P=1, DPL=0, S=0, type=9 (64-bit TSS available)
@@ -214,7 +217,7 @@ fn make_tss_descriptor(tss: &Tss64) -> (u64, u64) {
         | ((base & 0xFF_FFFF) << 16)       // base[23:0]
         | (access << 40)                   // access byte
         | (((limit >> 16) & 0xF) << 48)   // limit[19:16]
-        | (((base >> 24) & 0xFF) << 56);  // base[31:24]
+        | (((base >> 24) & 0xFF) << 56); // base[31:24]
 
     let hi = (base >> 32) & 0xFFFF_FFFF; // base[63:32]
 

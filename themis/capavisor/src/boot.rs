@@ -641,7 +641,9 @@ pub fn platform(
         if removed > 0 {
             serial_println!(
                 "TPM exclusion:     removed {} passthrough region(s) overlapping {:#x}..{:#x}",
-                removed, tpm_base, tpm_end,
+                removed,
+                tpm_base,
+                tpm_end,
             );
         }
     }
@@ -753,7 +755,8 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
     const ROOT_ID: DomainId = 0;
 
-    let mut platform = ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
+    let mut platform =
+        ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
     platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
 
@@ -808,13 +811,13 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         //   bits[11]     Extended Interrupt Mode (X2APIC); 0 for now
         //   bits[3:0]    Size = log2(entries) - 1; 0 = 256 entries (minimum)
         const IRTA_REG_OFFSET: usize = 0xB8;
-        const IRTA_SIZE_256:   u64   = 0;
+        const IRTA_SIZE_256: u64 = 0;
         // CAP register (offset 0x08): bit 16 = IR capable.
-        const CAP_OFFSET:  usize = 0x08;
-        const CAP_IR_BIT:  u64   = 1 << 16;
+        const CAP_OFFSET: usize = 0x08;
+        const CAP_IR_BIT: u64 = 1 << 16;
         // ECAP register (offset 0x10): bit 3 = IR.
         const ECAP_OFFSET: usize = 0x10;
-        const ECAP_IR_BIT: u64   = 1 << 3;
+        const ECAP_IR_BIT: u64 = 1 << 3;
 
         let mut units = info.acpi.drhd_units.clone();
         for unit in units.iter_mut() {
@@ -823,14 +826,17 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
             // Read CAP/ECAP now that the page is mapped.
             let reg_virt = (unit.register_base + info.hhdm_offset) as *const u64;
-            let cap  = unsafe { reg_virt.add(CAP_OFFSET  / 8).read_volatile() };
+            let cap = unsafe { reg_virt.add(CAP_OFFSET / 8).read_volatile() };
             let ecap = unsafe { reg_virt.add(ECAP_OFFSET / 8).read_volatile() };
             unit.ir_supported = (cap & CAP_IR_BIT != 0) || (ecap & ECAP_IR_BIT != 0);
 
             if !unit.ir_supported {
                 serial_println!(
                     "  DRHD seg={} base={:#x}: IR not supported (cap={:#x} ecap={:#x}) — skipping",
-                    unit.segment, unit.register_base, cap, ecap,
+                    unit.segment,
+                    unit.register_base,
+                    cap,
+                    ecap,
                 );
                 continue;
             }
@@ -839,13 +845,17 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             unit.irt_phys = irt_phys;
 
             // Write IRTA_REG: base | size_encoding (EIM=0, 256 entries).
-            let irta_virt = (unit.register_base + info.hhdm_offset + IRTA_REG_OFFSET as u64)
-                as *mut u64;
+            let irta_virt =
+                (unit.register_base + info.hhdm_offset + IRTA_REG_OFFSET as u64) as *mut u64;
             unsafe { core::ptr::write_volatile(irta_virt, irt_phys | IRTA_SIZE_256) };
 
             serial_println!(
                 "  DRHD seg={} base={:#x}: cap={:#x} ecap={:#x} IRT @ {:#x} IRTA_REG written",
-                unit.segment, unit.register_base, cap, ecap, irt_phys,
+                unit.segment,
+                unit.register_base,
+                cap,
+                ecap,
+                irt_phys,
             );
         }
         platform.drhd_units = units;
@@ -870,16 +880,18 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     // Note: each GCMD bit is a one-shot command; write one bit at a time and
     // wait for the corresponding GSTS status bit before proceeding.
     for unit in platform.drhd_units.iter() {
-        if unit.irt_phys == 0 { continue; }
+        if unit.irt_phys == 0 {
+            continue;
+        }
 
         const GCMD_OFFSET: u64 = 0x18;
         const GSTS_OFFSET: u64 = 0x1C;
         const SIRTP: u32 = 1 << 24;
-        const CFI:   u32 = 1 << 23;
-        const IRE:   u32 = 1 << 25;
+        const CFI: u32 = 1 << 23;
+        const IRE: u32 = 1 << 25;
         const IRTPS: u32 = 1 << 24;
-        const CFIS:  u32 = 1 << 23;
-        const IRES:  u32 = 1 << 25;
+        const CFIS: u32 = 1 << 23;
+        const IRES: u32 = 1 << 25;
         const POLL_LIMIT: usize = 100_000;
 
         let base = unit.register_base + info.hhdm_offset;
@@ -893,7 +905,10 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             (unsafe { gsts.read_volatile() } & IRTPS) != 0
         });
         if !ok {
-            serial_println!("WARN: VT-d DRHD {:#x}: IRTPS timeout — skipping IRE", unit.register_base);
+            serial_println!(
+                "WARN: VT-d DRHD {:#x}: IRTPS timeout — skipping IRE",
+                unit.register_base
+            );
             continue;
         }
 
@@ -914,9 +929,15 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             (unsafe { gsts.read_volatile() } & IRES) != 0
         });
         if !ok {
-            serial_println!("WARN: VT-d DRHD {:#x}: IRES timeout — IR may not be active", unit.register_base);
+            serial_println!(
+                "WARN: VT-d DRHD {:#x}: IRES timeout — IR may not be active",
+                unit.register_base
+            );
         } else {
-            serial_println!("  DRHD {:#x}: IR enabled (CFI=1, all IRTEs P=0)", unit.register_base);
+            serial_println!(
+                "  DRHD {:#x}: IR enabled (CFI=1, all IRTEs P=0)",
+                unit.register_base
+            );
         }
     }
 
@@ -941,11 +962,11 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     //   High u64: 0 (reserved)
     {
         const RTADDR_REG_OFFSET: u64 = 0x20;
-        const CAP_OFFSET:        u64 = 0x08;
-        const ECAP_OFFSET:       u64 = 0x10;
-        const CCMD_OFFSET:       u64 = 0x28;
-        const GCMD_OFFSET:       u64 = 0x18;
-        const GSTS_OFFSET:       u64 = 0x1C;
+        const CAP_OFFSET: u64 = 0x08;
+        const ECAP_OFFSET: u64 = 0x10;
+        const CCMD_OFFSET: u64 = 0x28;
+        const GCMD_OFFSET: u64 = 0x18;
+        const GSTS_OFFSET: u64 = 0x1C;
         const GCMD_SRTP: u32 = 1 << 30;
         const GSTS_RTPS: u32 = 1 << 30;
         const POLL_LIMIT: usize = 100_000;
@@ -954,7 +975,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         // CTX_HIGH is computed per-DRHD from CAP.SAGAW (bits[12:8]).
         const CTX_LOW: u64 = 0x9;
 
-        let hhdm  = info.hhdm_offset;
+        let hhdm = info.hhdm_offset;
 
         for i in 0..platform.drhd_units.len() {
             let (segment, _flags, reg_base) = {
@@ -966,9 +987,9 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
             // Read CAP.SAGAW (bits[12:8]) to pick the highest supported AW.
             // AW=1 → 39-bit/3-level; AW=2 → 48-bit/4-level.
-            let cap   = unsafe { ((base + CAP_OFFSET) as *const u64).read_volatile() };
+            let cap = unsafe { ((base + CAP_OFFSET) as *const u64).read_volatile() };
             let sagaw = (cap >> 8) & 0x1f;
-            let aw    = (u64::BITS - 1 - sagaw.leading_zeros()) as u64;
+            let aw = (u64::BITS - 1 - sagaw.leading_zeros()) as u64;
             let ctx_high: u64 = (1u64 << 8) | aw; // DID=1, AW
 
             // Allocate root table page and zero it (256 entries × 16 bytes = 4 KiB).
@@ -978,7 +999,9 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
             // Find ECAM regions for this unit's segment (all buses, regardless
             // of INCLUDE_PCI_ALL — an absent root entry causes a DMA fault).
-            let ecam_regions: Vec<crate::acpi::EcamRegion> = info.acpi.ecam_regions
+            let ecam_regions: Vec<crate::acpi::EcamRegion> = info
+                .acpi
+                .ecam_regions
                 .iter()
                 .filter(|r| r.segment == segment)
                 .cloned()
@@ -998,14 +1021,14 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
                         for j in 0usize..256 {
                             let entry = ctx_virt.add(j * 2); // each entry = 2 × u64
                             entry.add(1).write_volatile(ctx_high); // high first
-                            entry.write_volatile(CTX_LOW);          // low + P=1 last
+                            entry.write_volatile(CTX_LOW); // low + P=1 last
                         }
                     }
 
                     // Point root table entry for this bus at the context table.
                     unsafe {
                         let root_entry = root_virt.add(bus as usize * 2);
-                        root_entry.add(1).write_volatile(0);       // high = reserved
+                        root_entry.add(1).write_volatile(0); // high = reserved
                         root_entry.write_volatile(ctx_phys | 0x1); // P=1, CTP
                     }
 
@@ -1014,9 +1037,9 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             }
 
             let rtaddr = (base + RTADDR_REG_OFFSET) as *mut u64;
-            let gcmd   = (base + GCMD_OFFSET)       as *mut u32;
-            let gsts   = (base + GSTS_OFFSET)       as *const u32;
-            let ccmd   = (base + CCMD_OFFSET)       as *mut u64;
+            let gcmd = (base + GCMD_OFFSET) as *mut u32;
+            let gsts = (base + GSTS_OFFSET) as *const u32;
+            let ccmd = (base + CCMD_OFFSET) as *mut u64;
 
             // RTADDR_REG: bits[63:12] = root_phys, bits[11:10] = 00 (legacy mode)
             unsafe { rtaddr.write_volatile(root_phys) };
@@ -1050,10 +1073,12 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             // VT-d spec §10.2.2: global IOTLB invalidation.
             // IOTLB_REG is at ECAP.IRO*16 + 8; ECAP bits[9:8] = IRO.
             let ecap = unsafe { ((base + ECAP_OFFSET) as *const u64).read_volatile() };
-            let iro  = ((ecap >> 8) & 0x3f) as u64; // bits[13:8] per spec
+            let iro = ((ecap >> 8) & 0x3f) as u64; // bits[13:8] per spec
             let iotlb_reg = (base + iro * 16 + 8) as *mut u64;
             // IVA_REG: bit[63]=IVT, bits[61:60]=IIRG: 01=global, bit[4]=DR, bit[3]=DW.
-            unsafe { iotlb_reg.write_volatile((1u64 << 63) | (1u64 << 60) | (1u64 << 4) | (1u64 << 3)) };
+            unsafe {
+                iotlb_reg.write_volatile((1u64 << 63) | (1u64 << 60) | (1u64 << 4) | (1u64 << 3))
+            };
             let ok = (0..POLL_LIMIT).any(|_| {
                 core::hint::spin_loop();
                 (unsafe { iotlb_reg.read_volatile() } & (1u64 << 63)) == 0
@@ -1074,7 +1099,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
                 aw
             );
             platform.drhd_units[i].root_phys = root_phys;
-            platform.drhd_units[i].aw        = aw;
+            platform.drhd_units[i].aw = aw;
             platform.drhd_units[i].ctx_tables = ctx_tables;
         }
     }
@@ -1087,13 +1112,15 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     {
         const GCMD_OFFSET: u64 = 0x18;
         const GSTS_OFFSET: u64 = 0x1C;
-        const GCMD_TE:  u32 = 1 << 31;
+        const GCMD_TE: u32 = 1 << 31;
         const GSTS_TES: u32 = 1 << 31;
         const POLL_LIMIT: usize = 100_000;
         let hhdm = info.hhdm_offset;
 
         for unit in platform.drhd_units.iter() {
-            if unit.root_phys == 0 { continue; }
+            if unit.root_phys == 0 {
+                continue;
+            }
             let base = unit.register_base + hhdm;
             let gcmd = (base + GCMD_OFFSET) as *mut u32;
             let gsts = (base + GSTS_OFFSET) as *const u32;
@@ -1139,7 +1166,8 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
         serial_println!(
             "  DomainComm: {} pages at {:#x} (e820 reserved, CPUID 0x40000002)",
-            nr_pages, cr.base,
+            nr_pages,
+            cr.base,
         );
     }
 
@@ -1304,17 +1332,17 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         // We create a root capability as the tree anchor; the actual COMM
         // capability will be obtained by carving from this root (see below).
         let cr = &info.partition.comm_region;
-        let comm_root = Capability::new_root(
-            ROOT_ID,
-            sub,
-            MemoryRegion::new_root(cr.base, cr.length),
-        );
+        let comm_root =
+            Capability::new_root(ROOT_ID, sub, MemoryRegion::new_root(cr.base, cr.length));
         comm_root_handle = sub;
         dom.data
             .add_memory_capability(sub, Arc::downgrade(&comm_root));
         serial_println!(
             "  comm root cap #{}: {:#x}+{:#x} ({} KiB)",
-            sub, cr.base, cr.length, cr.length / 1024,
+            sub,
+            cr.base,
+            cr.length,
+            cr.length / 1024,
         );
         // Keep the Arc alive past this block so CARVE can find it.
         mem_caps.push(comm_root);
@@ -1326,10 +1354,8 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         // register_comm() can resolve the child_domain_handle.  For dom0's
         // DomainComm, target_domain_id == owner_id (self-referential).
         self_domain_cap_handle = sub;
-        dom.data.add_domain_capability(
-            self_domain_cap_handle,
-            Arc::downgrade(&root_domain),
-        );
+        dom.data
+            .add_domain_capability(self_domain_cap_handle, Arc::downgrade(&root_domain));
         serial_println!("  self domain cap #{}: dom0 → dom0", sub);
         // sub += 1; // not needed — last handle allocation in this block
     }
@@ -1418,17 +1444,17 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         let cr = &info.partition.comm_region;
         let access = Access::new(cr.base, cr.length, Rights::RW);
 
-        let ((child_handle, _sub_handle), carve_batch) = capability_engine::execute(
-            &platform, false, || {
+        let ((child_handle, _sub_handle), carve_batch) =
+            capability_engine::execute(&platform, false, || {
                 Capability::carve(&root_domain, comm_root_handle, access)
                     .map(|(h, s, batch)| ((h, s), batch))
-            },
-        )
-        .expect("P2c: COMM carve failed");
+            })
+            .expect("P2c: COMM carve failed");
 
         serial_println!(
             "  COMM carve: child handle {} from root {}",
-            child_handle, comm_root_handle,
+            child_handle,
+            comm_root_handle,
         );
 
         let _ = carve_batch; // EPT already mapped in the RAM batch above.
@@ -1447,7 +1473,8 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 
         serial_println!(
             "  COMM registered: handle {} → dom0 DomainComm at {:#x}",
-            child_handle, cr.base,
+            child_handle,
+            cr.base,
         );
         child_handle
     };
@@ -1690,9 +1717,9 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 ///
 /// This function never returns.
 pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::ThemisPlatform) -> ! {
-    use crate::AP_LAUNCH_READY;
     use crate::vcpu::{InactiveVcpu, Reg};
     use crate::vmexit::monitor_loop;
+    use crate::AP_LAUNCH_READY;
     use core::sync::atomic::Ordering;
 
     serial_println!();
@@ -1731,7 +1758,13 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
         x86::bits64::vmx::vmclear(bsp_vmcs_phys).expect("BSP vmclear for vcpu");
     }
 
-    let mut inactive = InactiveVcpu::new(bsp_vmcs_phys, bsp_vapic_phys, bsp_msr_bitmap_phys, 0, bsp_vpid);
+    let mut inactive = InactiveVcpu::new(
+        bsp_vmcs_phys,
+        bsp_vapic_phys,
+        bsp_msr_bitmap_phys,
+        0,
+        bsp_vpid,
+    );
 
     // Set RSI = boot_params_phys (Linux boot protocol requirement).
     inactive.set_reg(Reg::Rsi, linux.boot_params_phys);
@@ -1740,7 +1773,8 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
     // This ensures the PlatformDomain has a complete VP table (all VP IDs
     // are registered) even though the BSP VP is immediately active.
     platform.bootstrap_store_vcpu(0, vmx.bsp_index, inactive);
-    let inactive = platform.take_vcpu(0, vmx.bsp_index)
+    let inactive = platform
+        .take_vcpu(0, vmx.bsp_index)
         .expect("BSP: failed to take vcpu from PlatformDomain");
 
     serial_println!("  BSP: RSI={:#x} → monitor_loop", linux.boot_params_phys);
