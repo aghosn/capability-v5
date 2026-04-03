@@ -115,6 +115,14 @@ retry_switch:
 				(struct themic_intercept_message *)msg_buf;
 			if (msg->exit_reason == 12 /* EXIT_REASON_HLT */) {
 				vp->halted = 1;
+				smp_mb(); /* pair with smp_mb in thhv_wake_vp */
+				/* Check if an inject arrived during the race
+				 * window between reading HLT and setting halted. */
+				if (atomic_read(&vp->pending_inject) > 0) {
+					vp->halted = 0;
+					atomic_set(&vp->pending_inject, 0);
+					goto retry_switch;
+				}
 				thhv_drain_domcomm_rx(part);
 				ret = wait_event_interruptible(vp->halt_wq,
 					!vp->halted || signal_pending(current));
@@ -123,6 +131,7 @@ retry_switch:
 					mutex_unlock(&vp->run_lock);
 					return -EINTR;
 				}
+				atomic_set(&vp->pending_inject, 0);
 				goto retry_switch;
 			}
 		}
@@ -171,6 +180,10 @@ void thhv_wake_vp(struct thhv_partition *part, u32 vp_index)
 	vp = part->vps[vp_index];
 	if (!vp)
 		return;
+	/* Increment pending counter so the HLT path can detect injects
+	 * that arrived between reading EXIT_REASON_HLT and blocking. */
+	atomic_inc(&vp->pending_inject);
+	smp_mb(); /* ensure pending_inject is visible before checking halted */
 	if (vp->halted) {
 		vp->halted = 0;
 		wake_up_interruptible(&vp->halt_wq);

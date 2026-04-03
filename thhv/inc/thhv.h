@@ -1084,6 +1084,7 @@ struct thhv_vp {
 	 * on halt_wq until an interrupt is injected (via irqfd or IPI).
 	 * This prevents busy-spinning in the CHV vCPU run loop. */
 	int halted;
+	atomic_t pending_inject; /* counts injects since last SWITCH */
 	wait_queue_head_t halt_wq;
 
 	/* Exit info buffer for userspace. */
