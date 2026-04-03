@@ -109,6 +109,35 @@ all domains. Concretely:
   same code path for all child domains.
 - New hypercalls must work for any domain, not just dom0's children.
 
+### VMEXIT dispatch: single table, not dom0-vs-child split
+
+**Current problem**: `handle_vmexit` has two separate `match basic_reason`
+blocks — one for "child" domains (gated on `domain_id != 0`) and one for
+dom0. This duplicates handlers for VMCALL, CPUID, XSETBV, INIT_SIGNAL,
+APIC_ACCESS, EPT_VIOLATION, etc. The duplication makes it easy to fix a
+bug in one path and miss the other.
+
+**Target architecture**: one dispatch table. Each handler receives a
+context that includes:
+
+- Whether the domain has a parent (i.e., exits can be forwarded).
+  This replaces the `domain_id != 0` check with a capability-driven
+  query: "does this domain have a parent switch context?"
+- The domain's interrupt policy (from the capability engine).
+- The domain's VAPIC/PID/EPT configuration.
+
+Exits that behave identically for all domains (VMCALL, XSETBV,
+INIT_SIGNAL, PREEMPTION_TIMER reset, TRIPLE_FAULT) should be handled
+once. Exits that need parent-forwarding (HLT, IO, RDMSR, WRMSR,
+CR_ACCESS, EPT_VIOLATION for MMIO) check "has parent?" and forward;
+if no parent, they're handled locally (dom0 passthrough behaviour).
+
+**What to check during review**:
+- Any new exit handler must be added to ONE dispatch table, not two.
+- Duplicated match arms across child/dom0 blocks are a review failure.
+- The `domain_id != 0` guard should eventually become
+  `platform.domain_has_parent(core_id)` or similar capability-driven check.
+
 ### CHV ↔ Capavisor interface
 
 The intercept message (`ThemicInterceptMessage`) is the only data channel
