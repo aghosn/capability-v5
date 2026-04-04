@@ -916,6 +916,74 @@ No code change is needed for the PIR-level coalescing; it's inherent in the
 Posted Interrupt hardware design. DomainComm-level coalescing requires a
 "pending notification" bitmap per doorbell_id (future optimization).
 
+### Optimization O4: Paravirtualized Interrupt Delivery via DomainComm (Research)
+
+*(Added 2026-04-04)*
+
+**Observation**: The current interrupt delivery path for child domains is:
+
+```
+device completion → MSI → irqfd → VMCALL inject → PIR → do_switch drain
+    → VMENTRY_INTR_INFO → guest IDT → handler → EOI
+```
+
+This involves at minimum 2 mode transitions (VMCALL for inject, VMENTRY for
+delivery) plus the interrupt-window exiting overhead when IF=0. Without
+hardware posted interrupts (currently disabled under nested KVM), every
+device interrupt costs a full VMCS switch round-trip.
+
+**Proposal**: For enlightened guest kernels, replace the hardware interrupt
+injection path entirely with shared-memory signaling via DomainComm:
+
+```
+device completion → VMM writes completion record to shared page
+    → doorbell write (EPT fast-path or PV VMCALL) → guest polls shared page
+```
+
+This is analogous to Hyper-V's SynIC (Synthetic Interrupt Controller) model,
+where VMBus devices use shared-memory message/event pages instead of LAPIC
+interrupts. The guest driver checks a per-queue completion ring rather than
+waiting for an IDT-dispatched interrupt.
+
+**Why this fits Themis**: DomainComm already provides the shared-memory
+channel (TX/RX rings) and the doorbell mechanism (`handle_ept_doorbell`
+fast-path). The missing piece is a guest-side paravirt driver that:
+
+1. Registers a DomainComm region for device completions (via capability)
+2. Uses NAPI-style polling on the shared page instead of interrupt-driven I/O
+3. Falls back to doorbell-triggered notification only when the poll budget
+   is exhausted (hybrid polling/interrupt model, like Linux NAPI)
+
+**Advantages**:
+
+- **Zero VMENTRY injection overhead**: No PIR, no VMENTRY_INTR_INFO, no
+  interrupt-window exiting. Completions are visible as soon as the VMM writes
+  to the shared page.
+- **Core-gapping friendly**: With LAPIC-based interrupts, the guest must be
+  running (VMRESUME'd) to receive them — the hypervisor needs to schedule the
+  VP onto a physical core. With shared-memory signaling, completions
+  accumulate in the shared page while the VP is descheduled. When the VP
+  eventually runs, it finds all pending completions in one batch. This makes
+  core-gapping (running more VPs than physical cores, time-slicing) much more
+  efficient — no interrupt delivery is lost during gaps, and batching amortises
+  the scheduling overhead.
+- **Capability-mediated**: Each DomainComm channel is backed by a capability.
+  The guest can only see completions for devices it has been granted access to.
+  This preserves the isolation model (A1, A9).
+
+**Scope**: This is a research direction, not an immediate implementation target.
+Prerequisites:
+- Stable DomainComm (done)
+- Guest PV driver framework (needs design)
+- Modified virtio transport or custom Themis device model
+- Performance comparison: PV shared-memory vs hardware PI (once PI is enabled)
+
+**Relationship to SynIC**: Hyper-V's SynIC provides 16 SINT lines per vCPU,
+message pages (256-byte messages), and event flag pages (2048 bits). Our
+DomainComm is more flexible (arbitrary ring sizes, capability-mediated) but
+less mature. The SINT model's fixed 16 lines are a limitation that we avoid
+by using capability-addressed channels.
+
 ---
 
 ## Phase 4 — Correct Routing + Deliver Fast-Path (`intr-p4-*`)
