@@ -40,11 +40,19 @@ int themis_alias(u64 parent, u64 start, u64 size, u64 rights,
 	return __themis_to_errno(status);
 }
 
+/**
+ * themis_send - Send a memory capability to a child domain.
+ * @cap:           Capability to send
+ * @receiver:      Child domain handle
+ * @attrs:         Send attributes / rights
+ *
+ * Uses THEMIS_SEND_IDENTITY_MAP as the GPA hint (identity mapping).
+ */
 int themis_send(u64 cap, u64 receiver, u64 attrs)
 {
-	/* Use (u64)-1 as the "no GPA hint" sentinel (identity-map / META pages). */
 	u64 status = __themis_vmcall(THEMIS_OP_SEND,
-				     cap, receiver, attrs, (u64)-1, 0,
+				     cap, receiver, attrs,
+				     THEMIS_SEND_IDENTITY_MAP, 0,
 				     NULL, NULL, NULL);
 	return __themis_to_errno(status);
 }

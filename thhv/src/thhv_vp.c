@@ -23,10 +23,10 @@
  * Read the ThemIC intercept message from the message page slot 0.
  * The capavisor writes a themic_intercept_message there on VP exit.
  *
- * TODO: The ThemIC message page is not yet allocated / registered
- * as a separate page.  For now this reads from the COMM page padding
- * area (offset 512+) as a transitional measure.  Once ThemIC pages
- * are wired, this reads from the actual message page slot 0.
+ * ThemIC message page: not yet implemented (see todo.md §Future work).
+ * For now this reads from the COMM page padding area (offset 512+)
+ * as a transitional measure.  Once ThemIC pages are wired, this
+ * reads from the actual message page slot 0.
  */
 static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
 {
@@ -36,6 +36,17 @@ static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
 
 /* ── THHV_RUN_VP handler ──────────────────────────────────────────────────── */
 
+/**
+ * thhv_run_vp - Execute a child VP via the capavisor SWITCH hypercall.
+ * @vp:   VP to run
+ * @uarg: Userspace pointer to intercept message buffer (THEMIC_MSG_SLOT_SIZE bytes)
+ *
+ * Sync mode: blocks in themis_switch() until the child exits.  On HLT exit,
+ * blocks on halt_wq until an interrupt is injected, then retries SWITCH.
+ * Async mode: waits on exit_wq for the capavisor to signal exit_pending.
+ *
+ * Returns 0 on success (intercept message copied to @uarg), negative errno on error.
+ */
 static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 {
 	struct thhv_partition *part = vp->partition;
@@ -147,8 +158,8 @@ retry_switch:
 		 * RX ring (capavisor enqueues DOMCOMM_MSG_VP_EXIT and
 		 * sends an IPI; the handler sets exit_pending and wakes us).
 		 *
-		 * TODO: Wire the DomainComm RX ring → IPI handler →
-		 * exit_pending path.  For now, park on the waitqueue.
+		 * DomainComm RX → IPI: not yet implemented (see todo.md §Future work).
+		 * For now, park on the waitqueue.
 		 */
 		ret = wait_event_interruptible(vp->exit_wq,
 					       atomic_read(&vp->exit_pending));
@@ -171,6 +182,15 @@ retry_switch:
 
 /* ── Wake a halted VP after interrupt injection ────────────────────────────── */
 
+/**
+ * thhv_wake_vp - Wake a halted VP after interrupt injection.
+ * @part:     Partition containing the VP
+ * @vp_index: VP index within the partition
+ *
+ * Called from irqfd work handler and THHV_INJECT_INTERRUPT ioctl.
+ * Uses atomic pending_inject counter to prevent lost-wakeup race
+ * with the HLT exit handler in thhv_run_vp().
+ */
 void thhv_wake_vp(struct thhv_partition *part, u32 vp_index)
 {
 	struct thhv_vp *vp;
@@ -192,9 +212,14 @@ void thhv_wake_vp(struct thhv_partition *part, u32 vp_index)
 
 /* ── COMM page register write helper ────────────────────────────────────────── */
 
-/*
- * Write a register value into the COMM page and mark its dirty bit.
- * Values are zero-extended to the natural field width by the capavisor.
+/**
+ * thhv_comm_set_reg - Write a VP register to the COMM page.
+ * @comm:  Kernel-mapped COMM page
+ * @reg:   Register identifier (THHV_VP_REG_*)
+ * @value: Value to write
+ *
+ * Stages register updates in the COMM page for the capavisor to apply
+ * to the VMCS at the next SWITCH.  Sets the corresponding dirty bit.
  */
 void thhv_comm_set_reg(struct thhv_vp_comm_page *comm, unsigned int reg, __u64 val)
 {
@@ -439,7 +464,7 @@ static long thhv_vp_ioctl(struct file *file, unsigned int cmd,
 
 static int thhv_vp_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	/* TODO(P15h): remap_pfn_range for META VP-state page */
+	/* META VP-state page mmap: not yet implemented (see todo.md §Future work) */
 	return -ENOSYS;
 }
 
@@ -543,7 +568,7 @@ static int thhv_vp_release(struct inode *inode, struct file *file)
 	struct thhv_vp *vp = file->private_data;
 	struct thhv_partition *part = vp->partition;
 
-	/* TODO: Stop VP if running (async mode). */
+	/* Async VP stop: not yet implemented (see todo.md §Future work) */
 
 	thhv_vp_unpin_pages(vp);
 
@@ -561,6 +586,18 @@ const struct file_operations thhv_vp_fops = {
 
 /* ── THHV_CREATE_VP handler (called from partition ioctl) ──────────────────── */
 
+/**
+ * thhv_vp_create - Create a new VP in a partition.
+ * @part:  Target partition (must not be sealed)
+ * @uarg:  Userspace pointer to thhv_create_vp struct
+ *
+ * Pins the COMM page from userspace, allocates META pages, then issues
+ * CARVE + SEND + ADD_VP hypercalls to register the VP with the capavisor.
+ * The VP starts in RUNNABLE state (mp_state = 0); CHV sets WAIT_FOR_SIPI
+ * for APs via SET_VP_STATE after creation.
+ *
+ * Returns 0 on success, negative errno on error.
+ */
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 {
 	struct thhv_create_vp cv;

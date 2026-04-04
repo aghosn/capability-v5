@@ -21,6 +21,11 @@ static DEFINE_MUTEX(attest_lock);
 
 /* ── CPUID detection ───────────────────────────────────────────────────────── */
 
+/**
+ * thhv_detect - Detect Themis capavisor via CPUID leaf 0x40000000.
+ *
+ * Returns true if the "ThemisCapa" vendor string is present.
+ */
 static bool thhv_detect(void)
 {
 	u32 eax, ebx, ecx, edx;

@@ -25,6 +25,13 @@
 
 /* ── Work handler ────────────────────────────────────────────────────────── */
 
+/**
+ * thhv_irqfd_inject - Work handler for eventfd-triggered interrupts.
+ *
+ * Invoked from kernel workqueue when the eventfd signals (device
+ * completion).  Issues INJECT_INTERRUPT VMCALL then wakes the target
+ * VP if halted.
+ */
 static void thhv_irqfd_inject(struct work_struct *work)
 {
 struct thhv_irqfd_entry *entry =
@@ -46,6 +53,12 @@ thhv_wake_vp(entry->partition, entry->vp_index);
 
 /* ── Poll waitqueue wakeup (interrupt/softirq context) ───────────────────── */
 
+/**
+ * thhv_irqfd_wakeup - Poll callback for eventfd subscription.
+ *
+ * Called in interrupt context when the eventfd becomes readable.
+ * Schedules the inject work handler on the default workqueue.
+ */
 static int thhv_irqfd_wakeup(wait_queue_entry_t *wait, unsigned int mode,
      int sync, void *key)
 {

@@ -84,6 +84,7 @@
 #define THEMIS_OP_CARVE               0x01
 #define THEMIS_OP_ALIAS               0x02
 #define THEMIS_OP_SEND                0x03
+#define THEMIS_SEND_IDENTITY_MAP      ((u64)-1)
 #define THEMIS_OP_ACCEPT              0x04
 #define THEMIS_OP_REJECT              0x05
 #define THEMIS_OP_CREATE_DOMAIN       0x06
