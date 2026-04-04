@@ -19,6 +19,15 @@ use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 use crate::vmexit::next_instruction;
 use crate::{serial_debug, serial_println};
 
+// ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
+
+/// RFLAGS bit 9: Interrupt Flag. Guest can accept interrupts when set.
+const RFLAGS_IF: u64 = 1 << 9;
+/// Interruptibility-state bits [1:0]: blocking by STI (bit 0) or MOV SS (bit 1).
+const INTERRUPTIBILITY_STI_MOV_SS: u64 = 0x3;
+/// PRIMARY_PROCBASED_EXEC_CONTROLS bit 2: interrupt-window exiting (Intel SDM §24.6.2).
+const PRIMARY_INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
+
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
 /// Return values written back to guest registers after a hypercall.
@@ -1216,8 +1225,8 @@ fn do_switch(
                 let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
                 let interruptibility =
                     child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
-                let if_set = rflags & (1 << 9) != 0;
-                let sti_mov_ss_block = interruptibility & 0x3 != 0;
+                let if_set = rflags & RFLAGS_IF != 0;
+                let sti_mov_ss_block = interruptibility & INTERRUPTIBILITY_STI_MOV_SS != 0;
 
                 if if_set && !sti_mov_ss_block {
                     // Guest can accept interrupts — find the LOWEST pending
@@ -1258,13 +1267,13 @@ fn do_switch(
                 if remaining {
                     child_active.set(
                         x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                        primary | (1 << 2),
+                        primary | PRIMARY_INTERRUPT_WINDOW_EXITING,
                     );
                 } else {
                     // No more pending — clear interrupt-window exiting.
                     child_active.set(
                         x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                        primary & !(1 << 2),
+                        primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
                     );
                 }
             }
@@ -1319,7 +1328,7 @@ pub fn drain_pir_on_interrupt_window(
         let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
         vcpu.set(
             vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary & !(1 << 2),
+            primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
         );
         return;
     }
@@ -1373,12 +1382,12 @@ pub fn drain_pir_on_interrupt_window(
     if remaining {
         vcpu.set(
             vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary | (1 << 2),
+            primary | PRIMARY_INTERRUPT_WINDOW_EXITING,
         );
     } else {
         vcpu.set(
             vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary & !(1 << 2),
+            primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
         );
     }
 }
