@@ -116,6 +116,37 @@ const APIC_ACCESS_OFFSET_MASK: u64 = 0xFFF;
 const APIC_ACCESS_TYPE_SHIFT: u32 = 12;
 const APIC_ACCESS_TYPE_MASK: u64 = 0xF;
 const APIC_ACCESS_TYPE_WRITE: u64 = 1;
+
+// ── Themis CPUID hypervisor leaves (§ custom ABI) ─────────────────────────── //
+
+const CPUID_THEMIS_BASE: u32 = 0x40000000;
+const CPUID_THEMIS_MAX: u32 = 0x40000003;
+const CPUID_THEMIS_FEATURES: u32 = 0x40000001;
+const CPUID_THEMIS_DOMCOMM: u32 = 0x40000002;
+const CPUID_THEMIS_LIMITS: u32 = 0x40000003;
+const CPUID_THEMIS_TSC: u32 = 0x40000010;
+const CPUID_HV_RANGE_END: u32 = 0x4FFFFFFF;
+const CPUID_DEBUG_RANGE_START: u32 = 0xDEAD0000;
+const CPUID_DEBUG_RANGE_END: u32 = 0xDEADFFFF;
+
+// Themis capacity limits (exposed via CPUID_THEMIS_LIMITS)
+const THEMIS_MAX_VPS: u32 = 256;
+const THEMIS_MAX_PARTITIONS: u32 = 1024;
+const THEMIS_MAX_MEM_REGIONS: u32 = 4096;
+
+// ── SIPI constants (Intel SDM Vol 3A §8.4.4) ─────────────────────────────── //
+
+/// Real-mode CS access rights: P=1, S=1, type=B (code, exec/read, accessed).
+const SIPI_CS_ACCESS_RIGHTS: u64 = 0x009B;
+/// CR0 initial value for VMX real-mode: PE + NE (required by IA32_VMX_CR0_FIXED0).
+const SIPI_CR0_INITIAL: u64 = 0x30;
+/// Real-mode segment limit (64 KiB).
+const REALMODE_SEG_LIMIT: u64 = 0xFFFF;
+
+// ── MSR value split (Intel SDM Vol 2B §RDMSR/WRMSR) ──────────────────────── //
+
+const MSR_LOW_MASK: u64 = 0xFFFF_FFFF;
+
 pub const EXIT_REASON_CR_ACCESS: u32 = 28;
 pub const EXIT_REASON_IO_INSTRUCTION: u32 = 30;
 pub const EXIT_REASON_RDMSR: u32 = 31;
@@ -145,7 +176,7 @@ pub const EXIT_REASON_APIC_WRITE: u32 = 56;
 /// always sets bit 0 (x87 FPU).  Used for both dom0 and child domain exits.
 fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
     let xcr = vcpu.reg(Reg::Rcx) as u32;
-    let val = (vcpu.reg(Reg::Rdx) << 32) | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
+    let val = (vcpu.reg(Reg::Rdx) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
     if xcr == 0 {
         let lo: u32;
         let hi: u32;
@@ -421,20 +452,25 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             // to CHV via the normal child-exit path.
                             let leaf = vcpu.reg(Reg::Rax) as u32;
                             match leaf {
-                                0x40000000..=0x4FFFFFFF => {
+                                CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END => {
                                     let (eax, ebx, ecx, edx) = match leaf {
-                                        0x40000000 => (
-                                            0x40000003u32,
+                                        CPUID_THEMIS_BASE => (
+                                            CPUID_THEMIS_MAX,
                                             u32::from_le_bytes(*b"Them"),
                                             u32::from_le_bytes(*b"isCa"),
                                             u32::from_le_bytes(*b"pa  "),
                                         ),
-                                        0x40000001 => (0b00001, 0, 0, 0),
-                                        0x40000003 => (256, 1024, 4096, 0),
+                                        CPUID_THEMIS_FEATURES => (0b00001, 0, 0, 0),
+                                        CPUID_THEMIS_LIMITS => (
+                                            THEMIS_MAX_VPS,
+                                            THEMIS_MAX_PARTITIONS,
+                                            THEMIS_MAX_MEM_REGIONS,
+                                            0,
+                                        ),
                                         // Leaf 0x40000010: Hyper-V TSC frequency
                                         // ECX = TSC freq in kHz — Linux reads this
                                         // via hv_get_tsc_khz() when running on Hyper-V.
-                                        0x40000010 => (0, 0, 3000000u32, 0),
+                                        CPUID_THEMIS_TSC => (0, 0, 3000000u32, 0),
                                         _ => (0, 0, 0, 0),
                                     };
                                     vcpu.set_reg(Reg::Rax, eax as u64);
@@ -566,12 +602,12 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
 
             vcpu.set(vmcs::guest::CS_SELECTOR, cs_selector);
             vcpu.set(vmcs::guest::CS_BASE, cs_base);
-            vcpu.set(vmcs::guest::CS_LIMIT, 0xFFFF);
-            vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, 0x009B);
+            vcpu.set(vmcs::guest::CS_LIMIT, REALMODE_SEG_LIMIT);
+            vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, SIPI_CS_ACCESS_RIGHTS);
             vcpu.set(vmcs::guest::RIP, 0);
             // CR0 must satisfy IA32_VMX_CR0_FIXED0 (PE + ET + NE required by VMX).
             vcpu.set(vmcs::guest::CR0, unsafe {
-                crate::vmcs::vmcs_adjust_cr0(0x30)
+                crate::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
             });
             vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
             vcpu.set(
@@ -679,20 +715,20 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                 //   ECX = max memory regions.
                 //
                 // All other leaves in the range: zero.
-                (0x40000000, _) => {
+                (CPUID_THEMIS_BASE, _) => {
                     // "Them" "isCa" "pa  "  (each chunk is little-endian u32)
-                    eax = 0x40000003;
+                    eax = CPUID_THEMIS_MAX;
                     ebx = u32::from_le_bytes(*b"Them");
                     ecx = u32::from_le_bytes(*b"isCa");
                     edx = u32::from_le_bytes(*b"pa  ");
                 }
-                (0x40000001, _) => {
+                (CPUID_THEMIS_FEATURES, _) => {
                     eax = 0b00001; // bit 0: sync scheduling supported
                     ebx = 0;
                     ecx = 0;
                     edx = 0;
                 }
-                (0x40000002, _) => {
+                (CPUID_THEMIS_DOMCOMM, _) => {
                     // DomainComm discovery: GPA and page count.
                     // Set by init_themis → bootstrap_init_domcomm.
                     let gpa = DOMCOMM_GPA.load(Ordering::Relaxed);
@@ -702,19 +738,19 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                     ecx = pages; // region size in pages
                     edx = 0;
                 }
-                (0x40000003, _) => {
-                    eax = 256; // max VPs per partition
-                    ebx = 1024; // max partitions
-                    ecx = 4096; // max memory regions
+                (CPUID_THEMIS_LIMITS, _) => {
+                    eax = THEMIS_MAX_VPS; // max VPs per partition
+                    ebx = THEMIS_MAX_PARTITIONS; // max partitions
+                    ecx = THEMIS_MAX_MEM_REGIONS; // max memory regions
                     edx = 0;
                 }
-                (0x40000000..=0x4FFFFFFF, _) => {
+                (CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END, _) => {
                     eax = 0;
                     ebx = 0;
                     ecx = 0;
                     edx = 0;
                 }
-                (0xDEAD0000..=0xDEADFFFF, _) => {
+                (CPUID_DEBUG_RANGE_START..=CPUID_DEBUG_RANGE_END, _) => {
                     eax = 0;
                     ebx = 0;
                     ecx = 0;
@@ -738,21 +774,21 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             let ecx = vcpu.reg(Reg::Rcx) as u32;
             if ecx == msr::IA32_EFER {
                 let value = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-                vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
-                vcpu.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
+                vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
+                vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
                 next_instruction(vcpu);
             } else {
                 match crate::msr_virt::handle_rdmsr(ecx) {
                     crate::msr_virt::MsrResult::Emulated(v) => {
-                        vcpu.set_reg(Reg::Rax, v & 0xFFFF_FFFF);
-                        vcpu.set_reg(Reg::Rdx, (v >> 32) & 0xFFFF_FFFF);
+                        vcpu.set_reg(Reg::Rax, v & MSR_LOW_MASK);
+                        vcpu.set_reg(Reg::Rdx, (v >> 32) & MSR_LOW_MASK);
                         next_instruction(vcpu);
                     }
                     crate::msr_virt::MsrResult::Passthrough => {
                         if crate::msr_virt::in_bitmap_range(ecx) {
                             let value = msr::rdmsr(ecx);
-                            vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
-                            vcpu.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
+                            vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
+                            vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
                             next_instruction(vcpu);
                         } else {
                             inject_gp(vcpu);
@@ -768,7 +804,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         EXIT_REASON_WRMSR => {
             let ecx = vcpu.reg(Reg::Rcx) as u32;
             let value =
-                ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32) | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF);
+                ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
             if ecx == msr::IA32_EFER {
                 vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
                 next_instruction(vcpu);

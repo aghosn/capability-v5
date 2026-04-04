@@ -14,19 +14,39 @@ Use this skill when:
 
 ### Constants over magic numbers
 
-Never embed numeric literals in logic. Define named constants at module level
-or in a shared constants block. Prefer `const` items or enums.
+**Every numeric literal in a match arm, comparison, or bitfield operation
+must be a named constant.** No exceptions. This includes:
+
+- VMCS field encodings and bit positions
+- APIC register offsets
+- CPUID leaf numbers (hypervisor leaves, extended leaves, feature leaves)
+- MSR numbers and value masks
+- Segment access rights and descriptor fields
+- Interrupt vector numbers and delivery modes
+- Capacity limits, sizes, and thresholds
+
+Define named constants at module level or in a shared constants block.
+Prefer `const` items or enums. Group related constants with a section
+comment citing the relevant Intel SDM section.
 
 ```rust
 // BAD
 if pin_val & (1 << 7) == 0 { ... }
 if offset == 0x300 { ... }
+(0x40000000, _) => { eax = 0x40000003; }
+vcpu.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
 
 // GOOD
 const PROCESS_POSTED_INTERRUPTS: u64 = 1 << 7;
 const APIC_ICR_LOW: usize = 0x300;
+const CPUID_THEMIS_BASE: u32 = 0x40000000;
+const CPUID_THEMIS_MAX: u32 = 0x40000003;
+const MSR_LOW_MASK: u64 = 0xFFFF_FFFF;
+
 if pin_val & PROCESS_POSTED_INTERRUPTS == 0 { ... }
 if offset == APIC_ICR_LOW { ... }
+(CPUID_THEMIS_BASE, _) => { eax = CPUID_THEMIS_MAX; }
+vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
 ```
 
 VMCS field encodings, APIC register offsets, exit reasons, MSR numbers,
