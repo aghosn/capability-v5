@@ -192,6 +192,19 @@ struct thhv_create_vp {
  */
 #define THHV_LAPIC_GPA	0xFEE00000ULL
 
+/* ── VM exit reasons (Intel SDM Vol 3C §27.9.1, Appendix C) ──────────── */
+#define THHV_EXIT_REASON_HLT		12
+#define THHV_EXIT_REASON_WRMSR		32
+
+/* ── VP activity / MP state (Intel SDM Vol 3C §24.4.2) ───────────────── */
+#define THHV_MP_STATE_RUNNABLE		0
+#define THHV_MP_STATE_WAIT_FOR_SIPI	3
+
+/* ── EPT page table level shifts (Intel SDM Vol 3D §28.5) ────────────── */
+#define EPT_LEVEL_SHIFT_PML4		39  /* 512 GiB */
+#define EPT_LEVEL_SHIFT_PDPT		30  /* 1 GiB */
+#define EPT_LEVEL_SHIFT_PD		21  /* 2 MiB */
+
 struct thhv_initialize_partition {
 	__u64 meta_uaddr;          /* Userspace VA of shared META pages */
 	__u64 meta_size;           /* Size in bytes (must be PAGE_SIZE * META_PAGES_SHARED) */
@@ -1082,8 +1095,12 @@ struct thhv_vp {
 
 	/* HLT blocking: when the guest executes HLT, the VP thread blocks
 	 * on halt_wq until an interrupt is injected (via irqfd or IPI).
-	 * This prevents busy-spinning in the CHV vCPU run loop. */
-	int halted;
+	 * This prevents busy-spinning in the CHV vCPU run loop.
+	 *
+	 * `halted` is atomic because it is written by the VP thread (HLT
+	 * exit handler) and read/cleared by the irqfd work handler
+	 * (thhv_wake_vp) which runs on a different CPU. */
+	atomic_t halted;
 	atomic_t pending_inject; /* counts injects since last SWITCH */
 	wait_queue_head_t halt_wq;
 

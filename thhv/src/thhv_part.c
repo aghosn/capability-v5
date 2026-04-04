@@ -173,11 +173,11 @@ static unsigned int thhv_ept_meta_needed(u64 gpa, u64 size)
 	/* EPT root (PML4): 1 page, first-time only but safe to over-allocate. */
 	n += 1;
 	/* PDPT pages (512 GB granularity). */
-	n += (unsigned int)((end >> 39) - (gpa >> 39)) + 1;
+	n += (unsigned int)((end >> EPT_LEVEL_SHIFT_PML4) - (gpa >> EPT_LEVEL_SHIFT_PML4)) + 1;
 	/* PD pages (1 GB granularity). */
-	n += (unsigned int)((end >> 30) - (gpa >> 30)) + 1;
+	n += (unsigned int)((end >> EPT_LEVEL_SHIFT_PDPT) - (gpa >> EPT_LEVEL_SHIFT_PDPT)) + 1;
 	/* PT pages (2 MB granularity). */
-	n += (unsigned int)((end >> 21) - (gpa >> 21)) + 1;
+	n += (unsigned int)((end >> EPT_LEVEL_SHIFT_PD) - (gpa >> EPT_LEVEL_SHIFT_PD)) + 1;
 
 	return n;
 }

@@ -50,11 +50,11 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 	if (!mutex_trylock(&vp->run_lock))
 		return -EBUSY;
 
-	/* Block if this VP is in wait-for-SIPI state (mp_state == 3).
+	/* Block if this VP is in wait-for-SIPI state (mp_state == THHV_MP_STATE_WAIT_FOR_SIPI).
 	 * The BSP will send INIT+SIPI via CHV → SET_VP_STATE(ACTIVITY_STATE=0)
 	 * which transitions mp_state to 0 and wakes us. */
-	if (vp->mp_state == 3) {
-		ret = wait_event_interruptible(vp->sipi_wq, vp->mp_state != 3);
+	if (vp->mp_state == THHV_MP_STATE_WAIT_FOR_SIPI) {
+		ret = wait_event_interruptible(vp->sipi_wq, vp->mp_state != THHV_MP_STATE_WAIT_FOR_SIPI);
 		if (ret) {
 			mutex_unlock(&vp->run_lock);
 			return ret;
@@ -113,20 +113,20 @@ retry_switch:
 		{
 			struct themic_intercept_message *msg =
 				(struct themic_intercept_message *)msg_buf;
-			if (msg->exit_reason == 12 /* EXIT_REASON_HLT */) {
-				vp->halted = 1;
+			if (msg->exit_reason == THHV_EXIT_REASON_HLT /* EXIT_REASON_HLT */) {
+				atomic_set(&vp->halted, 1);
 				smp_mb(); /* pair with smp_mb in thhv_wake_vp */
 				/* Check if an inject arrived during the race
 				 * window between reading HLT and setting halted. */
 				if (atomic_read(&vp->pending_inject) > 0) {
-					vp->halted = 0;
+					atomic_set(&vp->halted, 0);
 					atomic_set(&vp->pending_inject, 0);
 					goto retry_switch;
 				}
 				thhv_drain_domcomm_rx(part);
 				ret = wait_event_interruptible(vp->halt_wq,
-					!vp->halted || signal_pending(current));
-				vp->halted = 0;
+					!atomic_read(&vp->halted) || signal_pending(current));
+				atomic_set(&vp->halted, 0);
 				if (signal_pending(current)) {
 					mutex_unlock(&vp->run_lock);
 					return -EINTR;
@@ -184,8 +184,8 @@ void thhv_wake_vp(struct thhv_partition *part, u32 vp_index)
 	 * that arrived between reading EXIT_REASON_HLT and blocking. */
 	atomic_inc(&vp->pending_inject);
 	smp_mb(); /* ensure pending_inject is visible before checking halted */
-	if (vp->halted) {
-		vp->halted = 0;
+	if (atomic_read(&vp->halted)) {
+		atomic_set(&vp->halted, 0);
 		wake_up_interruptible(&vp->halt_wq);
 	}
 }
@@ -376,7 +376,7 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	/* Pre-scan for ACTIVITY_STATE=0 on an already-running VP. */
 	for (i = 0; i < hdr.count; i++) {
 		if (regs[i].name == THHV_VP_REG_ACTIVITY_STATE &&
-		    regs[i].value == 0 && vp->mp_state != 3) {
+		    regs[i].value == 0 && vp->mp_state != THHV_MP_STATE_WAIT_FOR_SIPI) {
 			pr_debug("thhv: vp %u: ignoring duplicate SIPI "
 				 "(mp_state=%d, already running)\n",
 				 vp->vp_index, vp->mp_state);
@@ -388,14 +388,14 @@ static long thhv_vp_set_state(struct thhv_vp *vp, void __user *uarg)
 	comm = (struct thhv_vp_comm_page *)vp->comm_kaddr;
 	for (i = 0; i < hdr.count; i++) {
 		if (regs[i].name == THHV_VP_REG_ACTIVITY_STATE) {
-			if (regs[i].value == 3) {
-				vp->mp_state = 3;
+			if (regs[i].value == THHV_MP_STATE_WAIT_FOR_SIPI) {
+				vp->mp_state = THHV_MP_STATE_WAIT_FOR_SIPI;
 				/* Don't write to COMM page — we handle
 				 * the wait in thhv_vp_run(), not in the
 				 * capavisor VMCS. */
 			} else {
-				if (vp->mp_state == 3) {
-					vp->mp_state = 0;
+				if (vp->mp_state == THHV_MP_STATE_WAIT_FOR_SIPI) {
+					vp->mp_state = THHV_MP_STATE_RUNNABLE;
 					wake_up_interruptible(&vp->sipi_wq);
 				}
 				/* Write ACTIVITY_STATE=0 to COMM page so
@@ -595,9 +595,9 @@ long thhv_vp_create(struct thhv_partition *part, void __user *uarg)
 	mutex_init(&vp->run_lock);
 	init_waitqueue_head(&vp->exit_wq);
 	atomic_set(&vp->exit_pending, 0);
-	vp->mp_state = 0; /* runnable */
+	vp->mp_state = THHV_MP_STATE_RUNNABLE;
 	init_waitqueue_head(&vp->sipi_wq);
-	vp->halted = 0;
+	atomic_set(&vp->halted, 0);
 	init_waitqueue_head(&vp->halt_wq);
 
 	/* Pin META + COMM pages from userspace. */
