@@ -89,6 +89,7 @@ Phase 1: Pre-boot (CHV writes into guest memory while dom0 still owns it)
 ──────────────────────────────────────────────────────────────────────────
   dom0: CARVE(root, guest_ram, size, RWX)
   dom0: [writes firmware, ACPI tables, kernel, initramfs into guest_ram]
+  dom0: CREATE_CHANNEL(dom0, dom1) → dom0_endpoint, dom1_endpoint
   dom0: SEND(guest_ram, dom1)         ← dom0 loses ALL access
   dom0: SEAL(dom1)
 
@@ -96,82 +97,106 @@ Phase 2: Early guest boot (all in private memory, no I/O needed)
 ──────────────────────────────────────────────────────────────────────────
   dom1 kernel: early init, memory init, page tables
   dom1 kernel: detects CC_VENDOR_THEMIS via CPUID 0x4000_0100
-  dom1 kernel: allocates swiotlb bounce buffer pool (e.g., 64 MB)
+  dom1 kernel: allocates swiotlb bounce buffer pool (e.g., 64 MB at 0x200_0000)
 
-Phase 3: Share-back (guest grants VMM access to bounce buffer region)
+Phase 3: Share-back (two aliases: one for self VTOM mapping, one for parent)
 ──────────────────────────────────────────────────────────────────────────
-  dom1 kernel: ALIAS(guest_ram, shared_region, swiotlb_size, RW)
-  dom1 kernel: SEND_TO_PARENT(shared_alias)    ← via channel or new hypercall
-  dom0/CHV:   receives alias → maps shared_region into its address space
+  dom1: ALIAS(guest_ram, swiotlb_offset, swiotlb_size, RW) → alias_self
+  dom1: ALIAS(guest_ram, swiotlb_offset, swiotlb_size, RW) → alias_parent
+  dom1: MAP_SELF(alias_self, 0x80_0200_0000)  ← maps at GPA|VTOM in own EPT
+  dom1: CHANNEL_SEND(dom1_endpoint, alias_parent) → dom0 receives it
+  dom0/CHV: CHANNEL_RECV(dom0_endpoint) → alias_parent
+  dom0/CHV: maps alias_parent into its address space
 
 Phase 4: Normal operation
 ──────────────────────────────────────────────────────────────────────────
-  dom1: virtio uses DMA API → swiotlb bounces through shared_region
-  dom0: CHV reads/writes virtio rings and data in shared_region only
+  dom1: set_memory_decrypted() flips VTOM bit → DMA goes to 0x80_0200_0000
+  dom1: virtio uses DMA API → swiotlb bounces through shared window
+  dom0: CHV reads/writes virtio rings and data via alias_parent only
   dom1: private memory (kernel, user pages) remains inaccessible to dom0
 ```
+
+Every EPT mapping corresponds 1:1 with a capability. No implicit dual mappings.
 
 #### Capability tree after share-back
 
 ```
-dom0 (root)
-  └─ dom1 [sealed, confidential]
-       ├─ guest_ram [0x0 .. 0x3FFF_FFFF]     ← private, dom0 has NO access
-       │    └─ shared_alias [0x200_0000 .. 0x23FF_FFFF]  ← aliased back to dom0
-       └─ ...
+dom1 owns:
+  ├─ guest_ram [GPA 0x0 .. 0x3FFF_FFFF]              ← private, in dom1 EPT
+  │    ├─ alias_self [GPA 0x80_0200_0000 .. +64MB]    ← VTOM view, in dom1 EPT
+  │    └─ alias_parent [sent to dom0]                  ← same HPAs
+  └─ dom1_endpoint (channel)
+
 dom0 holds:
-  └─ shared_alias (received from dom1 via channel)  ← RW access to bounce buffer
+  ├─ dom0_endpoint (channel)                           ← revocation root
+  └─ alias_parent (received via channel)               ← RW to bounce buffer
 ```
 
-#### Child-to-parent capability transfer
+#### New hypercall: MAP_SELF
 
-The capability engine's `send` operation sends from parent to child. For the
-reverse direction (dom1 sharing back to dom0), we have two options:
+`MAP_SELF(cap_handle, gpa)` — requests the capavisor to map a capability the
+calling domain owns at a specific GPA in that domain's own EPT.
 
-**Option A: Channel-based sharing** (works today)
-1. Before sealing dom1, dom0 creates a channel between itself and dom1
-2. Dom1 accepts the channel during boot
-3. Dom1 sends the shared_alias through the channel to dom0
-4. Dom0 receives and maps it
+This is needed because currently GPA assignment is done by the parent (CHV
+calls `THHV_SET_GUEST_MEMORY` with a `guest_pfn`). For confidential mode, the
+guest must control its own address space layout — the parent has no access to
+do it.
 
-**Option B: New `GRANT_PARENT` hypercall** (cleaner, new capability operation)
-1. New operation: `grant_parent(cap_handle, rights)` — creates an alias and
-   sends it to the calling domain's parent
-2. Simpler than channels for this specific use case
-3. The parent receives the alias as a pending capability and accepts it
+Capavisor validation:
+- The capability must be owned by the calling domain
+- The GPA range must not overlap existing mappings (or we allow re-mapping)
+- The capability's rights determine the EPT permissions
+- A1 still holds: `execute() → apply_update()` validates before EPT changes
 
-Option A requires no engine changes. Option B is more ergonomic but adds a new
-operation to the capability engine. Both preserve the invariant that **the guest
-controls what is shared**.
+#### Child-to-parent transfer via channels
 
-#### Bootstrapping consideration
+Channels are the mechanism for dom1 to send capabilities back to dom0:
 
-The share-back happens during kernel init, **before** virtio devices are probed.
-This works because:
-- Kernel early init (memory, page tables, CoCo detection) needs no I/O
-- swiotlb pool allocation is a simple memory reservation (no device access)
-- The share-back hypercall is a VMCALL (no device I/O needed)
-- Only after dom0 maps the shared region does virtio probe begin
+1. **Pre-seal**: dom0 creates a channel and sends one endpoint to dom1
+2. **Dom1 boot**: dom1 discovers the channel endpoint in its capability set
+3. **Share-back**: dom1 creates alias_parent and sends it through the channel
+4. **Dom0 receives**: CHV polls/accepts the capability from its endpoint
 
-If the share-back fails (dom0 doesn't accept, or channel not set up), the guest
-falls back to non-confidential mode or panics with a clear error.
+**Revocation**: dom0 holds dom0_endpoint. When dom0 revokes the channel (or
+destroys dom1), all capabilities that flowed through the channel — including
+alias_parent — are revoked. dom0_endpoint is the **revocation root** for all
+shared memory. This gives dom0 clean teardown without needing to track individual
+aliases.
+
+**Open question**: Does the channel currently support revoking all capabilities
+sent through it? If not, this needs to be added — the channel endpoint must
+track capabilities that transited through it so that revoking the endpoint
+cascades to them.
+
+#### Bootstrapping sequence
+
+The share-back happens during kernel init, **before** virtio devices are probed:
+
+1. Kernel early init (memory, page tables, CoCo detection) — no I/O needed
+2. swiotlb pool allocation — simple memory reservation, no device access
+3. Themis-specific init: ALIAS + MAP_SELF + CHANNEL_SEND — all are VMCALLs
+4. Dom0/CHV accepts the shared alias
+5. Only now does virtio probe begin (bounce buffers are accessible to CHV)
+
+If the share-back fails, the guest panics with a clear error.
 
 ### 3.4 VTOM address mapping
 
-Once the shared region is established, the guest kernel uses the VTOM bit to
-direct I/O through it. The `set_memory_decrypted()` call flips the VTOM bit
-in the page table entry, causing accesses to route through the shared-window
-GPA range:
+The VTOM bit controls routing in the guest's page tables. `set_memory_decrypted()`
+flips the VTOM bit → accesses go to the VTOM-offset GPA → hits alias_self's EPT
+mapping:
 
 ```
 Guest virtual address → Guest page table (PTE with VTOM bit) → GPA
 
-  Private access:  GPA = 0x0200_0000                → dom1 EPT → HPA (exclusive)
-  Shared access:   GPA = 0x80_0200_0000 (VTOM set)  → dom1 EPT → same HPA (aliased)
+  Private access:  GPA = 0x0200_0000                → dom1 EPT (guest_ram cap)  → HPA
+  Shared access:   GPA = 0x80_0200_0000 (VTOM set)  → dom1 EPT (alias_self cap) → same HPA
 ```
 
-The capavisor maps both GPA ranges in dom1's EPT to the same HPA. But only the
-shared-window GPA's HPA is also present in dom0's EPT (via the alias dom1 sent back).
+Each GPA range has its own capability backing:
+- `0x0200_0000` mapped by `guest_ram` (the original SEND from dom0)
+- `0x80_0200_0000` mapped by `alias_self` (dom1's MAP_SELF)
+- Dom0 accesses the same HPAs via `alias_parent` (received through channel)
 
 ---
 
@@ -330,20 +355,28 @@ This requires the capavisor to:
 - Walk dom0's EPT and remove all mappings to those HPAs
 - Re-map when the exclusive capability is revoked (parent regains access)
 
-### 5.3 Shared-window EPT setup
+### 5.3 MAP_SELF implementation
 
-When the capavisor processes dom1's ALIAS + SEND-to-parent (the share-back),
-it maps the aliased region in dom1's EPT at the VTOM-offset GPA, and restores
-the corresponding HPAs in dom0's EPT:
+New hypercall: dom1 requests mapping of an owned capability at a specific GPA.
 
 ```rust
-// Dom1 aliases a sub-region and sends it back to dom0:
-// 1. dom1's EPT: map shared HPAs at VTOM-offset GPA too
-map_range(dom1_ept, gpa | vtom, hpa, size, EPT_RW);  // shared view
-
-// 2. dom0's EPT: restore access to shared HPAs (via alias received from dom1)
-map_range(dom0_ept, alias_gpa, hpa, size, EPT_RW);   // dom0 can access again
+fn do_map_self(domain: &Domain, cap_handle: Handle, gpa: u64) -> Result<()> {
+    // Validate: cap_handle must be owned by calling domain
+    // Validate: GPA range must not overlap existing mappings
+    // execute() validates through capability engine
+    // apply_update() creates the EPT mapping: gpa → cap's HPA
+    let update = Update::MapSelf { domain_id, cap_handle, gpa };
+    apply_update(domain, update);
+}
 ```
+
+This is the mechanism dom1 uses to create the VTOM-offset mapping for alias_self.
+
+### 5.4 Shared-window: processing the channel transfer
+
+When dom1 sends alias_parent through the channel, the capavisor processes it as
+a standard channel send. When dom0/CHV accepts it, `apply_update()` maps the
+alias's HPAs into dom0's EPT at the GPA CHV specifies.
 
 Private HPAs (not aliased back) remain absent from dom0's EPT.
 
@@ -440,14 +473,15 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 5. At this point virtio will break (bounce buffers allocated in private memory
    that dom0 can't access) — that's expected, confirms the detection works
 
-### Phase B: Share-back protocol
+### Phase B: MAP_SELF + channel share-back protocol
 
-1. Decide: channel-based (Option A) vs GRANT_PARENT hypercall (Option B)
-2. If Option B: add `grant_parent` operation to capa-engine + tests
-3. Implement kernel-side share-back: Themis-specific early init that allocates
-   swiotlb pool, aliases it, and sends alias to parent
-4. Implement CHV-side accept: receive alias, map shared region
-5. Test: dom1 boots, shares back bounce buffer, CHV maps it
+1. Add MAP_SELF hypercall to capavisor (domain maps own capability at chosen GPA)
+2. Verify channel revocation cascade in capa-engine — revoking dom0_endpoint
+   must cascade to all capabilities sent through the channel. Add if missing.
+3. Implement kernel-side share-back: Themis-specific early init creates two
+   aliases of swiotlb pool, MAP_SELFs one at VTOM GPA, sends the other via channel
+4. Implement CHV-side: accept alias from channel, map shared region
+5. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
 
 ### Phase C: EPT enforcement + full confidential boot
 
@@ -502,26 +536,24 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 
 ## 10. Remaining Open Questions
 
-1. **Option A vs Option B for share-back**: Channel-based sharing (Option A, no
-   engine changes) vs new `GRANT_PARENT` hypercall (Option B, new cap operation).
-   See §3.3 for details. Decision needed before Phase B implementation.
+1. **Channel revocation cascade**: Does the capability engine currently support
+   revoking all capabilities that were sent through a channel when the channel
+   endpoint is revoked? If not, this is required — dom0_endpoint must be a
+   revocation root that cascades to alias_parent (and any other caps sent through
+   the channel). This is the key engine work needed for confidential mode.
 
-2. **Opt-in mechanism details**: Is `themis_confidential=1` on the kernel cmdline
-   sufficient, or should the CPUID detection itself be gated (e.g., capavisor only
-   synthesizes the CPUID leaf if the domain was created with `confidential: true`)?
-   If the latter, the kernel doesn't need a cmdline flag at all — detection is
-   implicit.
+2. **MAP_SELF semantics**: Should MAP_SELF allow re-mapping (moving a capability
+   to a different GPA)? Should it support UNMAP_SELF too? What happens if the
+   domain tries to MAP_SELF over an existing mapping?
 
-3. **Multi-region sharing**: Can dom1 share back multiple disjoint regions (e.g.,
-   swiotlb pool + a separate virtio-fs shared buffer)? The capability model
-   supports this naturally (multiple ALIASes), but CHV needs a way to discover
-   and map each one. Protocol design needed.
+3. **Channel discovery at boot**: Dom1 needs to find its channel endpoint during
+   early kernel init. How does dom1 know the handle? Options: (a) fixed well-known
+   handle, (b) capavisor provides it via a CPUID sub-leaf, (c) dom1 enumerates
+   its capability set.
 
-4. **VTOM and dom1's initial EPT**: When dom1 first boots, its EPT only has
-   the private-window mappings (below VTOM). The shared-window mappings (above
-   VTOM) get added when dom1 issues the ALIAS. But: who sets up the VTOM-offset
-   EPT mapping — dom1 via hypercall, or does the capavisor infer it from the
-   ALIAS operation? (The ALIAS target GPA tells the capavisor where to map.)
+4. **Multi-region sharing**: Dom1 can send multiple aliases through the channel
+   (e.g., swiotlb + a separate shared buffer). The capability model handles this
+   naturally — each alias is a separate channel send. No special protocol needed.
 
 ---
 
