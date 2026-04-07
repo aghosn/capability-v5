@@ -232,8 +232,14 @@ void __init themis_cc_platform_init(void)
     if (ebx != THEMIS_CPUID_SIGNATURE)  /* e.g., "ThCA" */
         return;
 
-    /* eax = VTOM bit position (e.g., 39) */
+    /*
+     * Opt-in: capavisor only synthesizes this CPUID leaf for domains
+     * created with confidential=true. No kernel cmdline needed — if the
+     * leaf is present, the domain is confidential. But we could add
+     * themis_confidential=0 as an escape hatch for debugging.
+     */
     cc_vendor = CC_VENDOR_THEMIS;
+    /* eax = VTOM bit position (e.g., 39), set by CHV at domain creation */
     cc_mask = 1ULL << eax;
 
     pr_info("Themis confidential mode: VTOM bit %u, mask %#llx\n",
@@ -463,31 +469,63 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 
 ---
 
-## 9. Open Questions
+## 9. Resolved Design Decisions
 
-1. **VTOM bit position**: 39 (512 GB boundary) seems reasonable for QEMU testing.
-   Real hardware may want a different value. Should this be configurable per-domain?
+1. **VTOM bit position**: Orthogonal to capavisor/Themis — the capavisor only sees
+   capabilities, not GPA layout. VTOM is a Linux + CHV concern. The capavisor
+   reports the VTOM bit via CPUID leaf `0x4000_0100`, and CHV must have a path
+   to configure it at domain creation time (passed through thhv ioctl). Default
+   bit 39 for testing; CHV can set a different value per domain.
 
-2. **Shared region size**: How much shared memory does dom1 need? swiotlb default
-   is 64 MB. Configurable via kernel cmdline `swiotlb=N`.
+2. **Shared region size**: Handled entirely by the guest kernel via capabilities.
+   Linux default swiotlb is 64 MB; the guest can allocate more with `swiotlb=N`.
+   The capability engine imposes no limit — dom1 can alias as much of its own
+   memory as it wants. Start with 64 MB default for initial implementation.
 
-3. **MMIO regions**: Device MMIO (PCI BARs, IOAPIC) should be in the shared window.
-   Currently mapped at fixed GPAs. Need to ensure they fall above VTOM or are
-   handled separately.
+3. **MMIO regions**: Handled via capabilities. MMIO regions (PCI BARs, IOAPIC) are
+   already intercepted by the capavisor as EPT violations. They don't need to be
+   in the VTOM shared window — they go through hypercall-based device emulation.
 
-4. **Firmware tables**: ACPI tables are written by CHV before SEND. Once private,
-   the guest can read them but CHV can't update them. This is fine for static
-   tables but may affect hotplug.
+4. **Firmware tables**: ACPI tables are written by CHV before SEND and become private
+   to dom1 after boot. If CHV needs ongoing read access to tables (e.g., for
+   hotplug), dom1 can share them back as **read-only** aliases. The capability
+   engine already supports `R` (read-only) rights on aliases.
 
-5. **Debug/fallback**: Should there be a `themis_confidential=0` kernel cmdline to
-   disable CoCo even when the CPUID leaf is present? Useful for debugging.
+5. **Debug/fallback**: Use **opt-in** rather than opt-out. The kernel does NOT
+   enable CoCo by default when detecting the CPUID leaf. Instead, boot with
+   `themis_confidential=1` (or equivalent) to explicitly enable confidential mode.
+   This makes non-confidential the safe default for debugging.
 
-6. **Upstream potential**: The CC vendor framework is designed for extensibility.
-   A well-structured patch could be proposed upstream once the model is proven.
+6. **Upstream potential**: Acknowledged. The CC vendor framework is designed for
+   extensibility. A well-structured patch can be proposed upstream once the model
+   is proven and stabilized.
+
+## 10. Remaining Open Questions
+
+1. **Option A vs Option B for share-back**: Channel-based sharing (Option A, no
+   engine changes) vs new `GRANT_PARENT` hypercall (Option B, new cap operation).
+   See §3.3 for details. Decision needed before Phase B implementation.
+
+2. **Opt-in mechanism details**: Is `themis_confidential=1` on the kernel cmdline
+   sufficient, or should the CPUID detection itself be gated (e.g., capavisor only
+   synthesizes the CPUID leaf if the domain was created with `confidential: true`)?
+   If the latter, the kernel doesn't need a cmdline flag at all — detection is
+   implicit.
+
+3. **Multi-region sharing**: Can dom1 share back multiple disjoint regions (e.g.,
+   swiotlb pool + a separate virtio-fs shared buffer)? The capability model
+   supports this naturally (multiple ALIASes), but CHV needs a way to discover
+   and map each one. Protocol design needed.
+
+4. **VTOM and dom1's initial EPT**: When dom1 first boots, its EPT only has
+   the private-window mappings (below VTOM). The shared-window mappings (above
+   VTOM) get added when dom1 issues the ALIAS. But: who sets up the VTOM-offset
+   EPT mapping — dom1 via hypercall, or does the capavisor infer it from the
+   ALIAS operation? (The ALIAS target GPA tells the capavisor where to map.)
 
 ---
 
-## 10. References
+## 11. References
 
 - Linux CoCo framework: `arch/x86/coco/core.c`, `include/linux/cc_platform.h`
 - VTOM in Hyper-V: [LKML patch series](https://lkml.org/lkml/2022/10/20/1008)
