@@ -64,18 +64,13 @@ echo "→ Booting dom1 — ${CHV_CPUS} CPUs, ${CHV_MEM} RAM"
 echo "  Login: cloud / cloud123"
 echo ""
 
-# Auto-detect kernel and initramfs — prefer versioned files, fall back to unversioned.
-# If a debug/instrumented kernel was packed into bins.img, prefer it.
+# Auto-detect kernel and initramfs from dom0's /boot.
+# Uses the highest-versioned vmlinuz and its matching initrd.
 KERNEL_IMG=""
 INITRAMFS_IMG=""
 
-if [[ -f "$BINS/nested/bzImage" ]]; then
-    echo "  → Using instrumented nested kernel: $BINS/nested/bzImage"
-    KERNEL_IMG="$BINS/nested/bzImage"
-else
-    for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
-    [[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
-fi
+for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
+[[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
 
 # Auto-detect initramfs matching the selected kernel.
 # Stock kernels need initramfs for virtio/ext4 modules.
