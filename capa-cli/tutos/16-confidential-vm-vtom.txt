@@ -1,0 +1,171 @@
+# Tutorial 16: Confidential VM with VTOM Share-Back
+# ===================================================
+# Demonstrates the capability-correct confidential VM model:
+# the hypervisor loses ALL access to guest memory after SEND,
+# and the guest explicitly shares back a bounce buffer region
+# for virtio I/O through a self-channel.
+
+@msg ━━━ Tutorial 16: Confidential VM with VTOM Share-Back ━━━
+@msg
+@msg In the confidential VM model, the hypervisor (dom0) cannot retain
+@msg any access to guest memory.  The guest decides what is shared.
+@msg
+@msg   1. Hypervisor sends ALL memory to the CVM → loses access
+@msg   2. CVM boots privately (no I/O needed yet)
+@msg   3. CVM aliases its bounce buffer and shares it back
+@msg   4. Hypervisor accepts → virtio I/O can now work
+@msg
+@msg Compare with tutorial 10 (non-confidential) where the hypervisor
+@msg pre-installs a shared buffer that it retains access to.
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1: Initialise the hypervisor
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 1: Initialise the hypervisor with a memory pool
+init hypervisor 0x100000
+
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2: Create the CVM domain
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 2: Create a confidential VM domain with full API permissions
+@msg
+@msg The CVM needs RECEIVE_AFTER_SEAL so it can accept the self-channel
+@msg after being sealed, and GETCHAN + SEND to forward capabilities.
+create-domain hypervisor cvm 0b0011 ALL
+
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3: Carve exclusive memory for the CVM
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 3: Carve ALL guest memory as exclusive (carved, not aliased)
+@msg
+@msg Unlike tutorial 10, we do NOT create any aliased regions.
+@msg The hypervisor will lose ALL access after sending.
+carve r0 guest_ram 0x0 0x80000 RWX
+
+@msg
+@msg ✓ Carved 512KB guest memory — currently owned by hypervisor
+@msg   Hypervisor writes kernel, initramfs, ACPI tables here (pre-boot)
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4: Send ALL memory to the CVM
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 4: Send guest memory to the CVM (hypervisor loses ALL access)
+send guest_ram cvm VITAL,CLEAN
+
+@msg
+@msg ✓ CVM now owns ALL its memory exclusively
+@msg   Hypervisor has NO access to any guest page
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 5: Seal the CVM
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 5: Seal the CVM — configuration is locked
+seal cvm
+
+@msg
+@msg ✓ CVM sealed — it can now receive pending capabilities
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 6: Create a self-channel and send it to the CVM
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 6: Create a self-channel (hypervisor → hypervisor)
+@msg
+@msg get-chan-self creates a channel whose target is the hypervisor itself.
+@msg When the CVM sends capabilities through this channel, they arrive at
+@msg the hypervisor's pending queue.
+get-chan-self hypervisor ch_back
+send ch_back cvm
+
+@msg
+@msg ✓ Self-channel created and sent to the sealed CVM (pending)
+@msg   The CVM must accept it explicitly
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 7: CVM accepts the self-channel
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 7: CVM accepts the pending channel
+@msg
+@msg The CVM now has a direct path to send capabilities to the hypervisor.
+enumerate-pending cvm
+accept-channel cvm 0 cvm_ch
+
+@msg
+@msg ✓ CVM accepted channel as 'cvm_ch' — can now share back to hypervisor
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 8: CVM aliases its bounce buffer and shares it back
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 8: CVM creates alias of bounce buffer region and sends it back
+@msg
+@msg In a real system, the CVM kernel:
+@msg   • Detects CC_VENDOR_THEMIS via CPUID
+@msg   • Allocates swiotlb bounce buffer pool (e.g., 64 MB)
+@msg   • Aliases the bounce buffer region (RW only, no execute)
+@msg   • Sends the alias back to the hypervisor via the channel
+@msg
+@msg This happens before virtio device probing — all via VMCALLs.
+alias guest_ram shared_buf 0x40000 0x10000 RW
+send shared_buf cvm_ch
+
+@msg
+@msg ✓ Bounce buffer alias sent to hypervisor (pending)
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 9: Hypervisor accepts the shared bounce buffer
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 9: Hypervisor accepts the shared memory from the CVM
+@msg
+@msg CHV (cloud-hypervisor) receives this alias and maps it for
+@msg virtio ring/data access.  Virtio DMA goes through this buffer.
+enumerate-pending hypervisor
+accept-capability hypervisor 0
+
+@msg
+@msg ✓ Hypervisor now has RW access to the bounce buffer only
+@msg
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 10: View the final state
+# ══════════════════════════════════════════════════════════════════════════════
+@msg 📋 Step 10: View the complete system layout
+list
+
+@msg
+view cvm
+
+@msg
+@msg 📖 Key Takeaways:
+@msg   • The CVM controls what is shared — not the hypervisor
+@msg   • get-chan-self lets the hypervisor receive capabilities from children
+@msg   • The channel goes through the pending queue (sealed → explicit accept)
+@msg   • shared_buf is an ALIAS of guest_ram — same physical pages
+@msg   • Hypervisor can only access the bounce buffer, nothing else
+@msg
+@msg 💡 Capability Tree:
+@msg
+@msg   hypervisor (root, sealed)
+@msg    ├── cvm (sealed, confidential)
+@msg    │    ├── guest_ram [private, 0x0..0x80000)
+@msg    │    │    └── shared_buf [alias, 0x40000..0x50000)
+@msg    │    └── cvm_ch (channel → hypervisor)
+@msg    └── shared_buf (received via channel, RW)
+@msg
+@msg 🔒 Revocation:
+@msg   • Revoking CVM cascades: guest_ram → shared_buf → hypervisor loses alias
+@msg   • Hypervisor can revoke just its alias (stops I/O, keeps CVM alive)
+@msg
+@msg 🆚 vs Tutorial 10 (non-confidential):
+@msg   Tutorial 10: hypervisor creates alias, retains access by design
+@msg   Tutorial 16: CVM creates alias, shares back only what it chooses
+@msg

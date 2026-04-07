@@ -20,3 +20,4 @@
 13-encapsulation.txt|Domain Encapsulation and Communication|Understand domain isolation and communication patterns
 14-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels
 15-driver-channels.txt|Channels — Driver Isolation with CVM|Hypervisor creates driver and CVM, CVM attests and shares memory via channel
+16-confidential-vm-vtom.txt|Confidential VM with VTOM Share-Back|Guest-initiated sharing: CVM sends ALL memory privately, shares back bounce buffer via self-channel
