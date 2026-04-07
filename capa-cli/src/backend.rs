@@ -274,6 +274,9 @@ pub trait Backend {
     /// Create a channel capability from caller to target.
     fn get_chan(&mut self, caller: DomainId, target: DomainId) -> Result<DomainId>;
 
+    /// Create a channel capability pointing back to the caller itself.
+    fn get_chan_self(&mut self, caller: DomainId) -> Result<DomainId>;
+
     /// Send a channel capability to a receiver.
     fn send_channel(
         &mut self,

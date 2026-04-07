@@ -456,6 +456,13 @@ impl Backend for LeanBackend {
         Ok(get_result1())
     }
 
+    fn get_chan_self(&mut self, caller: DomainId) -> Result<DomainId> {
+        // Lean FFI: get_chan with caller == target implements self-channel.
+        let code = unsafe { lean_ffi_get_chan(caller, caller) };
+        check(code)?;
+        Ok(get_result1())
+    }
+
     fn send_channel(
         &mut self,
         caller: DomainId,

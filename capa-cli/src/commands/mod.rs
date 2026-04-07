@@ -27,6 +27,7 @@ pub fn dispatch(state: &mut CliState, cmd: &str, args: &[&str]) -> std::result::
         "accept-capability" => domain::cmd_accept_capability(state, args),
         "reject-capability" => domain::cmd_reject_capability(state, args),
         "get-chan"          => domain::cmd_get_chan(state, args),
+        "get-chan-self"     => domain::cmd_get_chan_self(state, args),
         "accept-channel"    => domain::cmd_accept_channel(state, args),
         "reject-channel"    => domain::cmd_reject_channel(state, args),
 

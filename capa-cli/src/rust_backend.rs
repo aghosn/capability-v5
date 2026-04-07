@@ -525,6 +525,22 @@ impl Backend for RustBackend {
         Ok(chan_id)
     }
 
+    fn get_chan_self(&mut self, caller: DomainId) -> Result<DomainId> {
+        let caller_arc = self.get_domain(caller)?;
+
+        let chan_handle = Capability::get_chan_self(&caller_arc)
+            .map_err(convert_error)?;
+
+        let chan_ref = caller_arc.read().data.domain_capabilities[&chan_handle]
+            .upgrade()
+            .ok_or(BackendError::NotFound)?;
+
+        let chan_id = self.alloc_chan_id();
+        self.domains.insert(chan_id, chan_ref);
+
+        Ok(chan_id)
+    }
+
     fn send_channel(
         &mut self,
         caller: DomainId,

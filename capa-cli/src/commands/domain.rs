@@ -624,6 +624,43 @@ pub fn cmd_get_chan(state: &mut CliState, args: &[&str]) -> std::result::Result<
     Ok(())
 }
 
+/// Create a self-channel: get-chan-self <domain> <chan_name>
+/// The domain gets a channel pointing back to itself.
+pub fn cmd_get_chan_self(state: &mut CliState, args: &[&str]) -> std::result::Result<(), String> {
+    if args.len() != 2 {
+        return Err("Usage: get-chan-self <domain> <chan_name>".to_string());
+    }
+    let domain_name = args[0];
+    let chan_name = args[1];
+
+    let domain_id = *state
+        .domain_names
+        .get(domain_name)
+        .ok_or_else(|| format!("Domain '{}' not found", domain_name))?;
+
+    let chan_id = state
+        .backend
+        .get_chan_self(domain_id)
+        .map_err(|e| format!("get-chan-self failed: {}", e))?;
+
+    state.register_domain_name(chan_id, chan_name.to_string());
+    state.domain_parents.insert(chan_id, domain_id);
+
+    state.session.add_command(Command::GetChanSelf {
+        domain: domain_name.to_string(),
+        chan_name: chan_name.to_string(),
+    });
+
+    println!(
+        "{} Created self-channel '{}' → '{}' (owned by '{}')",
+        "✓".bright_green().bold(),
+        chan_name.bright_white(),
+        domain_name.bright_white(),
+        domain_name.bright_white(),
+    );
+    Ok(())
+}
+
 /// Accept a pending channel: accept-channel <receiver> <pending_id> <chan_name>
 pub fn cmd_accept_channel(
     state: &mut CliState,

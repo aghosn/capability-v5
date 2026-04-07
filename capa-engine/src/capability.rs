@@ -2368,6 +2368,67 @@ impl Capability<Domain> {
     /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::GETCHAN`.
     /// - [`CapaError::NotFound`] — `target_handle` not found in caller.
     /// - [`CapaError::DomainNotSealed`] — target domain is not yet sealed.
+    /// Create a channel pointing back to the caller itself.
+    ///
+    /// This is used when a domain wants to receive capabilities from its
+    /// children.  The caller gets a channel that, when sent to a child,
+    /// lets the child send capabilities back to the caller via the channel.
+    ///
+    /// Same semantics as [`get_chan`] but the caller IS the target.
+    pub fn get_chan_self(
+        caller: &CapabilityRef<Domain>,
+    ) -> Result<LocalHandle> {
+        let caller_id = caller.read().data.id;
+
+        // 1. Caller must be sealed.
+        if !caller.read().data.is_sealed() {
+            return Err(CapaError::DomainNotSealed);
+        }
+
+        // 2. Check GETCHAN permission on the caller's policy directly.
+        if !caller.read().data.policy.api.has(MonitorAPI::GETCHAN) {
+            return Err(CapaError::ApiNotAllowed);
+        }
+
+        // 3. Allocate a SubHandle and depth from the caller's CDT node.
+        let (sub_handle, chan_depth) = {
+            let mut c = caller.write();
+            let s = c.next_child_sub;
+            c.next_child_sub += 1;
+            (s, c.depth + 1)
+        };
+
+        // 4. Build the channel capability (target = caller).
+        let chan_domain = Domain::new_sentinel();
+        let chan_ref: CapabilityRef<Domain> = Arc::new(crate::sync::RwLock::new(Capability {
+            owned: {
+                let mut o = Ownership::new(caller_id);
+                o.owner_domain = Some(Arc::downgrade(caller));
+                o
+            },
+            sub_handle,
+            depth: chan_depth,
+            data: chan_domain,
+            channel_target: Some(Arc::downgrade(caller)),
+            parent: Arc::downgrade(caller),
+            children: Vec::new(),
+            next_child_sub: 1,
+        }));
+
+        // 5. Register channel as a child of caller in the CDT.
+        caller.write().add_child(chan_ref.clone());
+
+        // 6. Register in caller's domain capability table and return handle.
+        let chan_handle = {
+            let mut cw = caller.write();
+            let h = cw.data.allocate_domain_handle();
+            cw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
+            h
+        };
+
+        Ok(chan_handle)
+    }
+
     pub fn get_chan(
         caller: &CapabilityRef<Domain>,
         target_handle: LocalHandle,

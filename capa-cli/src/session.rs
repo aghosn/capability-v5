@@ -74,6 +74,10 @@ pub enum Command {
         target: String,
         chan_name: String,
     },
+    GetChanSelf {
+        domain: String,
+        chan_name: String,
+    },
     SendChannel {
         caller: String,
         chan_name: String,
@@ -177,6 +181,9 @@ impl Session {
                 }
                 Command::GetChan { caller: _, target, chan_name } => {
                     format!("get-chan {} {}", target, chan_name)
+                }
+                Command::GetChanSelf { domain, chan_name } => {
+                    format!("get-chan-self {} {}", domain, chan_name)
                 }
                 Command::SendChannel { caller: _, chan_name, receiver } => {
                     format!("send {} {}", chan_name, receiver)
@@ -475,6 +482,24 @@ impl Session {
                     arc_map.insert(chan_name.clone(), chan_var);
                     handle_map.insert(chan_name.clone(), chan_handle_var);
                     owner_map.insert(chan_name.clone(), caller.clone());
+                    is_domain.insert(chan_name.clone());
+                }
+
+                Command::GetChanSelf { domain, chan_name } => {
+                    let domain_arc = arc_map.get(domain)
+                        .cloned().unwrap_or_else(|| sanitize_name(domain));
+                    let chan_var = format!("{}_cap", sanitize_name(chan_name));
+                    let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
+
+                    writeln!(file, "    // get-chan-self: create self-channel for {domain} as {chan_name}")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan_self(&{domain_arc}).unwrap();")?;
+                    writeln!(file, "    let {chan_var} = {domain_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
+                    writeln!(file)?;
+
+                    arc_map.insert(chan_name.clone(), chan_var);
+                    handle_map.insert(chan_name.clone(), chan_handle_var);
+                    owner_map.insert(chan_name.clone(), domain.clone());
                     is_domain.insert(chan_name.clone());
                 }
 
