@@ -1613,11 +1613,20 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     #[cfg(feature = "quantum-sched")]
     {
         if let Some(vec) = platform.take_deferred(core_id as usize) {
-            let intr_info = (1u64 << 31) | (vec as u64);
-            parent_active.set(
-                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                intr_info,
-            );
+            // Check that parent can accept an external interrupt injection.
+            // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
+            let rflags = parent_active.get(x86::vmx::vmcs::guest::RFLAGS);
+            let interruptibility = parent_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
+            let if_set = (rflags & (1 << 9)) != 0;
+            let blocking = (interruptibility & 0x3) != 0; // STI or MOV-SS blocking
+            if if_set && !blocking {
+                let intr_info = (1u64 << 31) | (vec as u64);
+                parent_active.set(
+                    x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                    intr_info,
+                );
+            }
+            // If IF=0 or blocking, silently drop — dom0 gets its own timers anyway.
         }
     }
 
@@ -1997,8 +2006,17 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
-    let intr_info = (1u64 << 31) | (vector as u64);
-    handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+    // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
+    {
+        let rflags = handler_active.get(vmcs::guest::RFLAGS);
+        let interruptibility = handler_active.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+        let if_set = (rflags & (1 << 9)) != 0;
+        let blocking = (interruptibility & 0x3) != 0;
+        if if_set && !blocking {
+            let intr_info = (1u64 << 31) | (vector as u64);
+            handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+        }
+    }
 
     // Advance handler's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY
     // with the preempting vector in RDI (per A3 contract).

@@ -228,6 +228,11 @@ pub fn monitor_loop(vcpu: &mut ActiveVcpu) -> ! {
                     if let Ok(err) = vcpu.try_get(vmcs::ro::VM_INSTRUCTION_ERROR) {
                         serial_println!("  VM_INSTRUCTION_ERROR={}", err);
                     }
+                    let intr_info = vcpu.try_get(control::VMENTRY_INTERRUPTION_INFO_FIELD).unwrap_or(0);
+                    let rflags = vcpu.try_get(vmcs::guest::RFLAGS).unwrap_or(0);
+                    let interruptibility = vcpu.try_get(vmcs::guest::INTERRUPTIBILITY_STATE).unwrap_or(0);
+                    serial_println!("  VMENTRY_INTR_INFO={:#x} RFLAGS={:#x} INTERRUPTIBILITY={:#x}",
+                        intr_info, rflags, interruptibility);
                 }
                 halt_forever();
             }
