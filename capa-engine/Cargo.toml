@@ -91,6 +91,10 @@ name = "integration_vital_revoke"
 path = "tests/integration/vital_revoke.rs"
 
 [[test]]
+name = "integration_vital_cascade"
+path = "tests/integration/vital_cascade.rs"
+
+[[test]]
 name = "integration_translation"
 path = "tests/integration/translation.rs"
 required-features = ["address_translation"]

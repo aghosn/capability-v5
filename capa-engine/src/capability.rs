@@ -408,6 +408,18 @@ impl Capability<MemoryRegion> {
                     .map_or(false, |r| r.data.is_revoked())
             });
 
+        // Capture the domain ref for VITAL cascade (before dropping the lock).
+        // If this cap has vital=true and the owning domain isn't already revoked,
+        // we'll need the CapabilityRef<Domain> to call revoke_domain_subtree.
+        let vital_domain_ref = if vital && !child_revoked {
+            capa.owned
+                .owner_domain
+                .as_ref()
+                .and_then(|w| w.upgrade())
+        } else {
+            None
+        };
+
         #[cfg(feature = "address_translation")]
         let child_domain_weak = capa.owned.owner_domain.clone();
 
@@ -551,8 +563,25 @@ impl Capability<MemoryRegion> {
 
         // Only emit RevokeDomain if the domain wasn't already marked revoked
         // (which means revoke_domain_subtree already emitted it).
+        //
+        // VITAL cascade: call revoke_domain_subtree to fully clean up the dead
+        // domain — revoke its root memory caps (restoring parent ranges),
+        // recursively revoke child domains, and clean up channels/COMM bindings.
+        //
+        // Safety: revoke_child (our caller) already removed this cap from
+        // the parent's children list before calling revoke_subtree.  So the
+        // cascade's attempt to re-revoke this cap via revoke_child will get
+        // NotFound and skip it — no duplicate updates.
         if vital && !child_revoked {
-            updates.add_revoke_domain_with_fallback(child_owner, None);
+            if let Some(ref domain_ref) = vital_domain_ref {
+                let cascade =
+                    Capability::<Domain>::revoke_domain_subtree(domain_ref, None)?;
+                updates.merge(cascade);
+            } else {
+                // Fallback: domain ref unavailable (e.g. root cap without
+                // owner_domain set).  Emit the update without cascade.
+                updates.add_revoke_domain_with_fallback(child_owner, None);
+            }
         }
 
         Ok(updates)
@@ -692,7 +721,7 @@ impl Capability<Domain> {
     /// Lock discipline: the domain write lock is dropped before touching memory
     /// capabilities (only memory locks are acquired), then re-acquired for final
     /// domain processing.
-    fn revoke_domain_subtree(
+    pub(crate) fn revoke_domain_subtree(
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
     ) -> Result<UpdateBatch> {
