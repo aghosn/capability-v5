@@ -6,6 +6,7 @@
   simplicity (this is a model, not real address translation).
 -/
 import LeanExec.Monad
+import LeanExec.Operations.Domain
 
 namespace LeanExec
 
@@ -632,16 +633,14 @@ partial def revoke (callerId : DomainId) (parentHandle : LocalHandle)
       childCap.region.access.size
       parentRefresh.region.access.rights]  -- parent's rights
 
-  -- Handle vital domains: revoke the owning domain.
-  -- NOTE: Unlike Rust's revoke_domain (which cascades to memory caps),
-  -- the VITAL trigger only emits RevokeDomain — the platform tears down the
-  -- domain's EPT.  Memory caps remain in the CDT tree as zombie children.
+  -- Handle vital domains: fully cascade domain revocation.
+  -- Matches Rust's revoke_domain_subtree: tears down the domain's memory caps,
+  -- removes them from parent trees, generates recovery maps, and emits RevokeDomain.
   for domId in vitalDomains do
     let dom ← CapaM.getDomain domId
     if !dom.isRevoked then
-      let fallback := (← CapaM.getState).findFallback domId
-      CapaM.modifyDomain domId (fun d => { d with status := .revoked })
-      updates := updates ++ [HwUpdate.revokeDomain domId fallback]
+      let cascadeUpdates ← revokeOneDomain domId
+      updates := updates ++ cascadeUpdates
 
   pure updates
 

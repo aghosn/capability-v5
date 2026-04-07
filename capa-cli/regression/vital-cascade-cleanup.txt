@@ -1,0 +1,22 @@
+# Regression: VITAL cascade cleans up domain memory caps and parent tree
+# When revoking a META cap with VITAL, the owning domain is cascade-revoked.
+# That cascade must: (1) remove the domain's other memory caps from the CDT,
+# (2) generate recovery maps for parent owners, (3) not emit redundant unmaps
+# for the dying domain (RevokeDomain handles EPT teardown).
+
+# Setup: root with 256 KB, sealed app with code + META region
+init root 0x40000
+create-domain root app 0b1111 GET,ATTEST,REVOKE,SWITCH,RECEIVE_AFTER_SEAL
+carve r0 app_code 0x0 0x10000 RWX
+send app_code app
+seal app
+carve r0 scratch 0x20000 0x4000 RW
+send scratch app META
+enumerate-pending app
+accept-capability app 0
+
+# Revoke the META cap — triggers VITAL cascade on app
+revoke r0 scratch
+
+# Final state: app revoked, r0 should have exactly 1 child (not 2)
+list
