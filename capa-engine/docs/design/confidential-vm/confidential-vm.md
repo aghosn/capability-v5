@@ -534,31 +534,36 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
    extensibility. A well-structured patch can be proposed upstream once the model
    is proven and stabilized.
 
+7. **Share-back mechanism**: Resolved as **self-channel** (not GRANT_PARENT).
+   `get_chan_self(caller)` creates a channel whose target is the calling domain
+   itself. Dom0 creates a self-channel, sends it to the sealed CVM, CVM accepts
+   and uses it to send aliases back. Implemented and validated in tutorial 16.
+   See `capa-cli/tutos/16-confidential-vm-vtom.txt` for the full working example.
+
+8. **Channel revocation**: Already works through CDT — no new engine work needed.
+   The alias sent through the channel is a CDT child of `guest_ram`. Revoking the
+   CVM cascades: CVM → guest_ram → shared_buf (alias) → hypervisor loses it.
+   Hypervisor can also revoke just its received alias (surgical teardown).
+
+9. **Multi-region sharing**: Works naturally. CVM sends multiple aliases through the
+   channel. Each is a separate `send` + `accept-capability` pair. No protocol needed.
+
 ## 10. Remaining Open Questions
 
-1. **Channel revocation cascade**: Does the capability engine currently support
-   revoking all capabilities that were sent through a channel when the channel
-   endpoint is revoked? If not, this is required — dom0_endpoint must be a
-   revocation root that cascades to alias_parent (and any other caps sent through
-   the channel). This is the key engine work needed for confidential mode.
+1. **MAP_SELF semantics**: New hypercall for dom1 to map its own capability at a
+   chosen GPA (needed for VTOM-offset mapping). Should it allow re-mapping? What
+   about overlap with existing mappings?
 
-2. **MAP_SELF semantics**: Should MAP_SELF allow re-mapping (moving a capability
-   to a different GPA)? Should it support UNMAP_SELF too? What happens if the
-   domain tries to MAP_SELF over an existing mapping?
-
-3. **Channel discovery at boot**: Dom1 needs to find its channel endpoint during
+2. **Channel discovery at boot**: Dom1 needs to find its channel endpoint during
    early kernel init. How does dom1 know the handle? Options: (a) fixed well-known
    handle, (b) capavisor provides it via a CPUID sub-leaf, (c) dom1 enumerates
-   its capability set.
-
-4. **Multi-region sharing**: Dom1 can send multiple aliases through the channel
-   (e.g., swiotlb + a separate shared buffer). The capability model handles this
-   naturally — each alias is a separate channel send. No special protocol needed.
+   its capability set. Decision: likely a well-known default handle.
 
 ---
 
 ## 11. References
 
+- **Tutorial 16** (working CLI demo): [`capa-cli/tutos/16-confidential-vm-vtom.txt`](../../../../capa-cli/tutos/16-confidential-vm-vtom.txt)
 - Linux CoCo framework: `arch/x86/coco/core.c`, `include/linux/cc_platform.h`
 - VTOM in Hyper-V: [LKML patch series](https://lkml.org/lkml/2022/10/20/1008)
 - mshv-themis driver design: [`capa-engine/docs/design/mshv_themis/mshv_themis.md`](../mshv_themis/mshv_themis.md)
