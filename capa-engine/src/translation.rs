@@ -116,15 +116,31 @@ impl MapEntry {
 
 // ── AddressMap ──────────────────────────────────────────────────────
 
+/// Per-segment refcount metadata, stored alongside MapEntry.
+///
+/// This tracks the true per-right reference counts that the MapEntry
+/// representation (which only stores effective rights) cannot capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentMeta {
+    pub refcounts: RightsRefCount,
+    pub blocked: bool,
+}
+
 /// Per-domain address translation bookkeeping.
 ///
 /// Tracks all GPA ranges (mapped and blocked) for a single domain.
 /// Free GPA ranges are derived as gaps between entries — no explicit
 /// free-list is maintained.
+///
+/// The `segment_meta` map tracks per-right reference counts for the
+/// contribution API (add_contribution / remove_contribution).  It is
+/// keyed by the same GPA-start as `entries`.
 #[derive(Clone, Debug)]
 pub struct AddressMap {
     /// GPA-start → entry, sorted for efficient lookup.
     entries: BTreeMap<u64, MapEntry>,
+    /// Per-segment refcount metadata (used by contribution API).
+    segment_meta: BTreeMap<u64, SegmentMeta>,
 }
 
 impl AddressMap {
@@ -132,6 +148,7 @@ impl AddressMap {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            segment_meta: BTreeMap::new(),
         }
     }
 
@@ -176,6 +193,10 @@ impl AddressMap {
             #[cfg(feature = "cache_coloring")]
             color_bitmap,
         }));
+        self.segment_meta.insert(gpa, SegmentMeta {
+            refcounts: RightsRefCount::from_rights(rights),
+            blocked: false,
+        });
 
         Ok(gpa)
     }
@@ -217,8 +238,12 @@ impl AddressMap {
             return Ok(());
         }
 
+        // Read parent's metadata (preserves true refcounts).
+        let parent_meta = self.get_or_init_meta(parent_gpa);
+
         // Remove the parent entry.
         self.entries.remove(&parent_gpa);
+        self.segment_meta.remove(&parent_gpa);
 
         // HPA offset from parent start to sub-range start.
         let hpa_offset = sub_gpa - parent.gpa_start;
@@ -234,6 +259,7 @@ impl AddressMap {
                 #[cfg(feature = "cache_coloring")]
                 color_bitmap: parent.color_bitmap.clone(),
             }));
+            self.segment_meta.insert(parent.gpa_start, parent_meta.clone());
         }
 
         // Middle: [sub_gpa, sub_end) with new_rights
@@ -245,6 +271,10 @@ impl AddressMap {
             #[cfg(feature = "cache_coloring")]
             color_bitmap: parent.color_bitmap.clone(),
         }));
+        self.segment_meta.insert(sub_gpa, SegmentMeta {
+            refcounts: RightsRefCount::from_rights(new_rights),
+            blocked: false,
+        });
 
         // Right fragment: [sub_end, parent_end)
         if sub_end < parent_end {
@@ -258,6 +288,7 @@ impl AddressMap {
                 #[cfg(feature = "cache_coloring")]
                 color_bitmap: parent.color_bitmap,
             }));
+            self.segment_meta.insert(sub_end, parent_meta);
         }
 
         Ok(())
@@ -273,6 +304,11 @@ impl AddressMap {
     ) -> core::result::Result<MappingEntry, &'static str> {
         match self.entries.remove(&gpa) {
             Some(MapEntry::Mapped(m)) => {
+                // Preserve refcounts underneath the blocked flag.
+                let mut meta = self.get_or_init_meta(gpa);
+                meta.blocked = true;
+                self.segment_meta.insert(gpa, meta);
+
                 self.entries.insert(gpa, MapEntry::Blocked {
                     hpa_start: m.hpa_start,
                     size: m.size,
@@ -312,6 +348,10 @@ impl AddressMap {
             #[cfg(feature = "cache_coloring")]
             color_bitmap: None,
         }));
+        self.segment_meta.insert(gpa, SegmentMeta {
+            refcounts: RightsRefCount::from_rights(rights),
+            blocked: false,
+        });
 
         self.try_coalesce(gpa);
         Ok(())
@@ -324,6 +364,7 @@ impl AddressMap {
         &mut self,
         gpa: u64,
     ) -> core::result::Result<MapEntry, &'static str> {
+        self.segment_meta.remove(&gpa);
         self.entries.remove(&gpa).ok_or("no entry at GPA")
     }
 
@@ -351,6 +392,7 @@ impl AddressMap {
             .collect();
         for gpa in to_remove {
             self.entries.remove(&gpa);
+            self.segment_meta.remove(&gpa);
         }
     }
 
@@ -374,6 +416,7 @@ impl AddressMap {
     /// Drop all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.segment_meta.clear();
     }
 
     /// Translate an HPA range to GPA.
@@ -426,14 +469,17 @@ impl AddressMap {
             Some(MapEntry::Mapped(m)) => m.clone(),
             _ => return,
         };
+        let entry_meta = self.get_or_init_meta(gpa);
         let entry_end = gpa + entry.size;
         if let Some(MapEntry::Mapped(right)) = self.entries.get(&entry_end) {
+            let right_meta = self.get_or_init_meta(entry_end);
             let right_hpa_expected = entry.hpa_start + entry.size;
-            if right.rights == entry.rights
-                && right.hpa_start == right_hpa_expected
+            if right.hpa_start == right_hpa_expected
+                && entry_meta == right_meta
             {
                 let right_size = right.size;
                 self.entries.remove(&entry_end);
+                self.segment_meta.remove(&entry_end);
                 if let Some(MapEntry::Mapped(m)) = self.entries.get_mut(&gpa) {
                     m.size += right_size;
                 }
@@ -445,18 +491,21 @@ impl AddressMap {
             Some(MapEntry::Mapped(m)) => m.clone(),
             _ => return,
         };
+        let entry_meta = self.get_or_init_meta(gpa);
         if let Some((&left_gpa, _)) = self.entries.range(..gpa).next_back() {
             let left = match self.entries.get(&left_gpa) {
                 Some(MapEntry::Mapped(m)) => m.clone(),
                 _ => return,
             };
+            let left_meta = self.get_or_init_meta(left_gpa);
             let left_end = left_gpa + left.size;
             let left_hpa_end = left.hpa_start + left.size;
             if left_end == gpa
-                && left.rights == entry.rights
                 && left_hpa_end == entry.hpa_start
+                && left_meta == entry_meta
             {
                 self.entries.remove(&gpa);
+                self.segment_meta.remove(&gpa);
                 if let Some(MapEntry::Mapped(m)) =
                     self.entries.get_mut(&left_gpa)
                 {
@@ -465,4 +514,522 @@ impl AddressMap {
             }
         }
     }
+}
+
+// ── Refcounted projection model ─────────────────────────────────────
+//
+// See docs/design/address_translation.md §13 for full design.
+//
+// The AddressMap is a projection of all capabilities' contributions
+// onto GPA space.  Each GPA segment stores per-right reference counts
+// so that overlapping contributions (e.g. parent + alias) are tracked
+// independently and can be added/removed without affecting each other.
+
+/// Per-right reference counts for a GPA segment.
+///
+/// Tracks how many capabilities contribute each access right (R, W, X)
+/// to this segment.  Effective rights = union of all non-zero counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RightsRefCount {
+    pub read: u32,
+    pub write: u32,
+    pub execute: u32,
+}
+
+impl RightsRefCount {
+    /// All-zero refcounts.
+    pub const ZERO: Self = Self {
+        read: 0,
+        write: 0,
+        execute: 0,
+    };
+
+    /// Create from a Rights value (each set bit → count of 1).
+    pub fn from_rights(rights: Rights) -> Self {
+        Self {
+            read: if rights.has(Rights::READ) { 1 } else { 0 },
+            write: if rights.has(Rights::WRITE) { 1 } else { 0 },
+            execute: if rights.has(Rights::EXECUTE) { 1 } else { 0 },
+        }
+    }
+
+    /// Compute effective rights: any count > 0 → right is active.
+    pub fn effective_rights(&self) -> Rights {
+        let mut bits: u8 = 0;
+        if self.read > 0 {
+            bits |= Rights::READ;
+        }
+        if self.write > 0 {
+            bits |= Rights::WRITE;
+        }
+        if self.execute > 0 {
+            bits |= Rights::EXECUTE;
+        }
+        Rights::from_bits(bits)
+    }
+
+    /// True if all counts are zero (no contributors).
+    pub fn is_empty(&self) -> bool {
+        self.read == 0 && self.write == 0 && self.execute == 0
+    }
+
+    /// Increment counts for each right present in `rights`.
+    pub fn add(&mut self, rights: Rights) {
+        if rights.has(Rights::READ) {
+            self.read += 1;
+        }
+        if rights.has(Rights::WRITE) {
+            self.write += 1;
+        }
+        if rights.has(Rights::EXECUTE) {
+            self.execute += 1;
+        }
+    }
+
+    /// Decrement counts for each right present in `rights`.
+    ///
+    /// Saturates at zero (never underflows).
+    pub fn sub(&mut self, rights: Rights) {
+        if rights.has(Rights::READ) {
+            self.read = self.read.saturating_sub(1);
+        }
+        if rights.has(Rights::WRITE) {
+            self.write = self.write.saturating_sub(1);
+        }
+        if rights.has(Rights::EXECUTE) {
+            self.execute = self.execute.saturating_sub(1);
+        }
+    }
+}
+
+/// A segment in the refcounted projected address map.
+///
+/// Represents a contiguous GPA range with uniform HPA mapping,
+/// reference counts, and blocked status.
+#[derive(Clone, Debug)]
+pub struct Segment {
+    /// HPA corresponding to the start of this GPA segment.
+    pub hpa_start: u64,
+    /// Segment size in bytes.
+    pub size: u64,
+    /// Per-right contributor counts.
+    pub refcounts: RightsRefCount,
+    /// If true, this range is reserved for a carved-away child.
+    /// Refcounts should be zero (or at least not contribute visible rights).
+    pub blocked: bool,
+}
+
+impl Segment {
+    /// Effective rights for this segment.
+    pub fn effective_rights(&self) -> Rights {
+        if self.blocked {
+            Rights::NONE
+        } else {
+            self.refcounts.effective_rights()
+        }
+    }
+}
+
+impl AddressMap {
+    // ── Refcounted contribution API ────────────────────────────────
+
+    /// Add a capability's contribution to GPA range `[gpa, gpa+size)`.
+    ///
+    /// If `blocked` is true, marks the range as blocked (carved hole).
+    /// If `blocked` is false, increments per-right refcounts for `rights`.
+    ///
+    /// **HPA consistency**: if an existing segment at a given GPA has a
+    /// different HPA, returns an error.
+    ///
+    /// Splits existing segments at the boundaries and coalesces afterward.
+    pub fn add_contribution(
+        &mut self,
+        gpa: u64,
+        hpa: u64,
+        size: u64,
+        rights: Rights,
+        blocked: bool,
+    ) -> core::result::Result<(), &'static str> {
+        if size == 0 {
+            return Ok(());
+        }
+        let end = gpa + size;
+
+        // 1. Split any segment that straddles the boundaries.
+        self.split_segment_at(gpa);
+        self.split_segment_at(end);
+
+        // 2. Collect existing segments in [gpa, end).
+        let existing: alloc::vec::Vec<(u64, u64, u64)> = self
+            .entries
+            .range(gpa..end)
+            .map(|(&g, e)| {
+                let (e_hpa, e_size) = match e {
+                    MapEntry::Mapped(m) => (m.hpa_start, m.size),
+                    MapEntry::Blocked { hpa_start, size } => (*hpa_start, *size),
+                };
+                (g, e_hpa, e_size)
+            })
+            .collect();
+
+        // 3. Walk the range, filling gaps and incrementing existing segments.
+        let mut cursor = gpa;
+        let mut existing_iter = existing.iter().peekable();
+
+        while cursor < end {
+            if let Some(&&(seg_gpa, seg_hpa, seg_size)) = existing_iter.peek() {
+                if cursor < seg_gpa {
+                    // Gap: [cursor, seg_gpa) — create new segment.
+                    let gap_size = seg_gpa - cursor;
+                    let gap_hpa = hpa + (cursor - gpa);
+                    let meta = if blocked {
+                        SegmentMeta {
+                            refcounts: RightsRefCount::ZERO,
+                            blocked: true,
+                        }
+                    } else {
+                        SegmentMeta {
+                            refcounts: RightsRefCount::from_rights(rights),
+                            blocked: false,
+                        }
+                    };
+                    self.insert_from_meta(cursor, gap_hpa, gap_size, &meta);
+                    cursor = seg_gpa;
+                } else {
+                    // Existing segment at cursor — verify HPA and increment.
+                    let expected_hpa = hpa + (cursor - gpa);
+                    if seg_hpa != expected_hpa {
+                        return Err("HPA conflict: existing segment has different HPA");
+                    }
+
+                    // Read true refcounts from segment_meta.
+                    let mut meta = self.get_or_init_meta(cursor);
+                    if blocked {
+                        meta.blocked = true;
+                    } else {
+                        meta.refcounts.add(rights);
+                    }
+                    self.insert_from_meta(cursor, seg_hpa, seg_size, &meta);
+
+                    cursor += seg_size;
+                    existing_iter.next();
+                }
+            } else {
+                // No more existing segments — fill remaining gap.
+                let gap_size = end - cursor;
+                let gap_hpa = hpa + (cursor - gpa);
+                let meta = if blocked {
+                    SegmentMeta {
+                        refcounts: RightsRefCount::ZERO,
+                        blocked: true,
+                    }
+                } else {
+                    SegmentMeta {
+                        refcounts: RightsRefCount::from_rights(rights),
+                        blocked: false,
+                    }
+                };
+                self.insert_from_meta(cursor, gap_hpa, gap_size, &meta);
+                cursor = end;
+            }
+        }
+
+        // 4. Coalesce neighbors in [gpa, end) and at boundaries.
+        self.coalesce_range(gpa, end);
+
+        Ok(())
+    }
+
+    /// Remove a capability's contribution from GPA range `[gpa, gpa+size)`.
+    ///
+    /// If `blocked` is true, clears the blocked flag.
+    /// If `blocked` is false, decrements per-right refcounts for `rights`.
+    ///
+    /// Segments whose refcounts reach zero and are not blocked are removed.
+    /// Splits at boundaries and coalesces afterward.
+    pub fn remove_contribution(
+        &mut self,
+        gpa: u64,
+        hpa: u64,
+        size: u64,
+        rights: Rights,
+        blocked: bool,
+    ) -> core::result::Result<(), &'static str> {
+        if size == 0 {
+            return Ok(());
+        }
+        let end = gpa + size;
+
+        // 1. Split at boundaries.
+        self.split_segment_at(gpa);
+        self.split_segment_at(end);
+
+        // 2. Collect segments in range.
+        let in_range: alloc::vec::Vec<(u64, u64, u64)> = self
+            .entries
+            .range(gpa..end)
+            .map(|(&g, e)| {
+                let (e_hpa, e_size) = match e {
+                    MapEntry::Mapped(m) => (m.hpa_start, m.size),
+                    MapEntry::Blocked { hpa_start, size } => (*hpa_start, *size),
+                };
+                (g, e_hpa, e_size)
+            })
+            .collect();
+
+        // 3. Decrement/clear and remove empty segments.
+        for (seg_gpa, seg_hpa, seg_size) in in_range {
+            // Verify HPA consistency.
+            let expected_hpa = hpa + (seg_gpa - gpa);
+            if seg_hpa != expected_hpa {
+                return Err("HPA mismatch during remove_contribution");
+            }
+
+            let mut meta = self.get_or_init_meta(seg_gpa);
+
+            if blocked {
+                meta.blocked = false;
+            } else {
+                meta.refcounts.sub(rights);
+            }
+
+            if meta.refcounts.is_empty() && !meta.blocked {
+                // No contributors left — remove segment entirely.
+                self.entries.remove(&seg_gpa);
+                self.segment_meta.remove(&seg_gpa);
+            } else {
+                self.insert_from_meta(seg_gpa, seg_hpa, seg_size, &meta);
+            }
+        }
+
+        // 4. Coalesce neighbors.
+        self.coalesce_range(gpa, end);
+
+        Ok(())
+    }
+
+    // ── Internal helpers for contribution API ──────────────────────
+
+    /// Get the SegmentMeta for a GPA, or initialize it from the
+    /// existing MapEntry if not yet tracked.
+    fn get_or_init_meta(&self, gpa: u64) -> SegmentMeta {
+        if let Some(meta) = self.segment_meta.get(&gpa) {
+            return meta.clone();
+        }
+        // Derive from MapEntry.
+        match self.entries.get(&gpa) {
+            Some(MapEntry::Mapped(m)) => SegmentMeta {
+                refcounts: RightsRefCount::from_rights(m.rights),
+                blocked: false,
+            },
+            Some(MapEntry::Blocked { .. }) => SegmentMeta {
+                refcounts: RightsRefCount::ZERO,
+                blocked: true,
+            },
+            None => SegmentMeta {
+                refcounts: RightsRefCount::ZERO,
+                blocked: false,
+            },
+        }
+    }
+
+    /// Write both entries and segment_meta from a SegmentMeta.
+    fn insert_from_meta(&mut self, gpa: u64, hpa: u64, size: u64, meta: &SegmentMeta) {
+        let entry = if meta.blocked {
+            MapEntry::Blocked {
+                hpa_start: hpa,
+                size,
+            }
+        } else {
+            MapEntry::Mapped(MappingEntry {
+                hpa_start: hpa,
+                gpa_start: gpa,
+                size,
+                rights: meta.refcounts.effective_rights(),
+                #[cfg(feature = "cache_coloring")]
+                color_bitmap: None,
+            })
+        };
+        self.entries.insert(gpa, entry);
+        self.segment_meta.insert(gpa, meta.clone());
+    }
+
+    // ── Segment splitting and coalescing ───────────────────────────
+
+    /// Split the segment that contains `at` into two segments, one
+    /// ending at `at` and one starting at `at`.
+    ///
+    /// If `at` falls exactly on a segment boundary (or in a gap),
+    /// this is a no-op.
+    fn split_segment_at(&mut self, at: u64) {
+        // Find the segment whose range contains `at` (if any).
+        let (&seg_gpa, _) = match self.entries.range(..at).next_back() {
+            Some(pair) => pair,
+            None => return,
+        };
+
+        let (seg_hpa, seg_size) = match self.entries.get(&seg_gpa) {
+            Some(MapEntry::Mapped(m)) => (m.hpa_start, m.size),
+            Some(MapEntry::Blocked { hpa_start, size }) => (*hpa_start, *size),
+            None => return,
+        };
+
+        let seg_end = seg_gpa + seg_size;
+        if at <= seg_gpa || at >= seg_end {
+            return;
+        }
+
+        // Read true metadata.
+        let meta = self.get_or_init_meta(seg_gpa);
+
+        let left_size = at - seg_gpa;
+        let right_size = seg_end - at;
+        let right_hpa = seg_hpa + left_size;
+
+        // Left half.
+        self.insert_from_meta(seg_gpa, seg_hpa, left_size, &meta);
+        // Right half.
+        self.insert_from_meta(at, right_hpa, right_size, &meta);
+    }
+
+    /// Coalesce adjacent segments in and around the range [start, end).
+    ///
+    /// Two adjacent segments can merge if they have the same refcounts,
+    /// contiguous HPA, and same blocked status.
+    fn coalesce_range(&mut self, start: u64, end: u64) {
+        let mut candidates: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+        if let Some((&g, _)) = self.entries.range(..start).next_back() {
+            candidates.push(g);
+        }
+        for (&g, _) in self.entries.range(start..end) {
+            candidates.push(g);
+        }
+        if let Some((&g, _)) = self.entries.range(end..).next() {
+            candidates.push(g);
+        }
+
+        let mut i = 0;
+        while i + 1 < candidates.len() {
+            let left_gpa = candidates[i];
+            let right_gpa = candidates[i + 1];
+
+            if self.try_coalesce_pair(left_gpa, right_gpa) {
+                candidates.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Try to merge two adjacent segments.  Returns true if merged.
+    fn try_coalesce_pair(&mut self, left_gpa: u64, right_gpa: u64) -> bool {
+        let (left_hpa, left_size) = match self.entries.get(&left_gpa) {
+            Some(MapEntry::Mapped(m)) => (m.hpa_start, m.size),
+            Some(MapEntry::Blocked { hpa_start, size }) => (*hpa_start, *size),
+            None => return false,
+        };
+        let (right_hpa, right_size) = match self.entries.get(&right_gpa) {
+            Some(MapEntry::Mapped(m)) => (m.hpa_start, m.size),
+            Some(MapEntry::Blocked { hpa_start, size }) => (*hpa_start, *size),
+            None => return false,
+        };
+
+        // Must be adjacent in GPA.
+        if left_gpa + left_size != right_gpa {
+            return false;
+        }
+        // Must have contiguous HPA.
+        if left_hpa + left_size != right_hpa {
+            return false;
+        }
+
+        // Compare metadata (refcounts + blocked).
+        let left_meta = self.get_or_init_meta(left_gpa);
+        let right_meta = self.get_or_init_meta(right_gpa);
+
+        if left_meta != right_meta {
+            return false;
+        }
+
+        // Merge: extend left, remove right.
+        let new_size = left_size + right_size;
+        self.insert_from_meta(left_gpa, left_hpa, new_size, &left_meta);
+        self.entries.remove(&right_gpa);
+        self.segment_meta.remove(&right_gpa);
+        true
+    }
+}
+
+// ── AddressMap diff ─────────────────────────────────────────────────
+
+/// A snapshot of an AddressMap's Mapped entries for diffing.
+///
+/// Each element is `(gpa_start, hpa_start, size, rights)`.
+pub type MappedSnapshot = alloc::vec::Vec<(u64, u64, u64, Rights)>;
+
+impl AddressMap {
+    /// Snapshot all `Mapped` entries for later diffing.
+    pub fn mapped_snapshot(&self) -> MappedSnapshot {
+        self.entries
+            .iter()
+            .filter_map(|(&gpa, entry)| match entry {
+                MapEntry::Mapped(m) => Some((gpa, m.hpa_start, m.size, m.rights)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Diff two AddressMap snapshots and produce an [`UpdateBatch`].
+///
+/// Entries present in `before` but not `after` become `ChangeRights(NONE, shootdown=true)`.
+/// Entries present in `after` but not `before` become `ChangeRights(rights, shootdown=false)`.
+/// Entries present in both with different rights get the appropriate shootdown flag.
+///
+/// Comparison is by `gpa_start` — if an entry moves GPA, it appears as
+/// a removal at the old GPA and an addition at the new GPA.
+pub fn address_map_diff(
+    domain_id: crate::update::DomainId,
+    before: &MappedSnapshot,
+    after: &MappedSnapshot,
+) -> crate::update::UpdateBatch {
+    use crate::update::UpdateBatch;
+    use alloc::collections::BTreeMap;
+
+    // Index both snapshots by gpa_start.
+    let before_map: BTreeMap<u64, (u64, u64, Rights)> = before
+        .iter()
+        .map(|&(gpa, hpa, size, rights)| (gpa, (hpa, size, rights)))
+        .collect();
+    let after_map: BTreeMap<u64, (u64, u64, Rights)> = after
+        .iter()
+        .map(|&(gpa, hpa, size, rights)| (gpa, (hpa, size, rights)))
+        .collect();
+
+    let mut updates = UpdateBatch::new();
+
+    // Removed or changed entries.
+    for (&gpa, &(hpa, size, before_rights)) in &before_map {
+        match after_map.get(&gpa) {
+            None => {
+                // Entry removed: unmap.
+                updates.add_change_rights(domain_id, gpa, size, hpa, Rights::NONE, true);
+            }
+            Some(&(_, _, after_rights)) if after_rights != before_rights => {
+                let shootdown = after_rights.is_subset_of(&before_rights);
+                updates.add_change_rights(domain_id, gpa, size, hpa, after_rights, shootdown);
+            }
+            _ => {} // unchanged
+        }
+    }
+
+    // New entries.
+    for (&gpa, &(hpa, size, rights)) in &after_map {
+        if !before_map.contains_key(&gpa) {
+            updates.add_change_rights(domain_id, gpa, size, hpa, rights, false);
+        }
+    }
+
+    updates
 }

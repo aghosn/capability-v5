@@ -57,9 +57,14 @@ impl MonitorAPI {
     pub const REVOKE: u16 = 1 << 10;
     pub const GETCHAN: u16 = 1 << 11;
     pub const RECEIVE_AFTER_SEAL: u16 = 1 << 12;
+    #[cfg(feature = "address_translation")]
+    pub const MAP_SELF: u16 = 1 << 13;
 
     /// All operations allowed (including receive_after_seal)
+    #[cfg(not(feature = "address_translation"))]
     pub const ALL: Self = MonitorAPI { bits: 0x1FFF };
+    #[cfg(feature = "address_translation")]
+    pub const ALL: Self = MonitorAPI { bits: 0x3FFF };
 
     /// No operations allowed
     pub const NONE: Self = MonitorAPI { bits: 0 };
@@ -71,8 +76,12 @@ impl MonitorAPI {
 
     /// Create from raw bits
     pub const fn from_bits(bits: u16) -> Self {
+        #[cfg(not(feature = "address_translation"))]
+        let mask = 0x1FFF;
+        #[cfg(feature = "address_translation")]
+        let mask = 0x3FFF;
         MonitorAPI {
-            bits: bits & 0x1FFF,
+            bits: bits & mask,
         }
     }
 
@@ -130,6 +139,10 @@ impl MonitorAPI {
     }
     pub const fn receive_after_seal(&self) -> bool {
         self.has(Self::RECEIVE_AFTER_SEAL)
+    }
+    #[cfg(feature = "address_translation")]
+    pub const fn map_self(&self) -> bool {
+        self.has(Self::MAP_SELF)
     }
 }
 
@@ -532,6 +545,13 @@ pub struct Domain {
     #[cfg(feature = "address_translation")]
     pub address_map: crate::translation::AddressMap,
 
+    /// Per-handle GPA base: tracks where each memory capability's
+    /// footprint is currently placed in this domain's GPA space.
+    /// Updated by accept_at / map_self.  Used by map_self to know
+    /// where to remove_footprint from before re-adding at new GPA.
+    #[cfg(feature = "address_translation")]
+    pub mapped_gpas: BTreeMap<LocalHandle, u64>,
+
     /// Next pending capability ID
     next_pending_id: u64,
 }
@@ -553,6 +573,8 @@ impl Domain {
             cached_view: AddressSpaceView::new(id),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
+            #[cfg(feature = "address_translation")]
+            mapped_gpas: BTreeMap::new(),
             next_pending_id: 0,
         }
         // VPs are NOT auto-created.  They are added one at a time via
@@ -574,6 +596,8 @@ impl Domain {
             cached_view: AddressSpaceView::new(0),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
+            #[cfg(feature = "address_translation")]
+            mapped_gpas: BTreeMap::new(),
             next_pending_id: 0,
         };
         d.create_vprocessors();
@@ -599,6 +623,8 @@ impl Domain {
             cached_view: AddressSpaceView::new(u64::MAX),
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
+            #[cfg(feature = "address_translation")]
+            mapped_gpas: BTreeMap::new(),
             next_pending_id: 0,
         }
     }
@@ -682,6 +708,8 @@ impl Domain {
         self.status = DomainStatus::Revoked;
         #[cfg(feature = "address_translation")]
         self.address_map.clear();
+        #[cfg(feature = "address_translation")]
+        self.mapped_gpas.clear();
     }
 
     /// Register a memory capability owned by this domain

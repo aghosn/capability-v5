@@ -925,3 +925,208 @@ This ensures the receiver cannot fill a carved-away gap with another
 capability (the `Blocked` entry causes an overlap check to fail).
 When the carved child is later revoked, the `unblock` path restores
 the parent entry in the receiver's map.
+
+---
+
+## 13. Refcounted Projection Model
+
+> **Status**: In progress (2025-04)
+> **Motivation**: MAP_SELF + multi-contributor correctness
+
+### 13.1 Problem: Flat Map Cannot Handle MAP_SELF
+
+The original `AddressMap` (§5.3) stores a flat `BTreeMap<gpa, MapEntry>` where
+each GPA segment has exactly one owner.  This works for the `insert → split →
+block → unblock` lifecycle but fundamentally breaks when a single GPA range
+has **multiple capability contributors**.
+
+The motivating operation is `MAP_SELF(cap_handle, gpa)`: a sealed domain
+remaps one of its own capabilities at a new GPA (needed for VTOM-offset
+mapping in confidential VMs — see `confidential-vm.md` §3.3).  The naïve
+approach — `remove_by_hpa_range(old)` + `insert(new)` — is wrong because
+`remove_by_hpa_range` deletes ALL entries whose HPA falls within a range,
+including entries from other capabilities (parent, siblings).
+
+**Example of the bug:** Parent R0 at GPA 0 covers HPA [0x0..0x5000].  A
+full alias R1 also covers HPA [0x0..0x5000] at GPA 0.  `MAP_SELF(R1, 0x8000)`
+calls `remove_by_hpa_range(0x0, 0x5000)` which deletes R0's entry too — the
+parent disappears from the address space.
+
+More generally, aliases create GPA ranges where multiple capabilities
+contribute different rights to the same physical memory.  The flat map
+cannot represent this.
+
+### 13.2 Design: Per-Right Reference Counting
+
+The `AddressMap` becomes a **projection** of all capabilities' contributions
+onto GPA space.  Each capability contributes its full **footprint**:
+
+- **Mapped segments**: visible ranges with rights (R, W, X)
+- **Blocked segments**: carved-away holes (reserved, zero rights)
+
+The footprint is positioned at the capability's assigned GPA.  When MAP_SELF
+moves a capability, its entire footprint (mapped + blocked) shifts.
+
+#### Per-right refcounts
+
+Multiple capabilities may contribute to the same GPA segment.  Instead of
+storing a single `Rights` value, each segment stores **per-right reference
+counts**:
+
+```rust
+struct RightsRefCount {
+    read: u32,
+    write: u32,
+    execute: u32,
+}
+```
+
+- `add(Rights::RW)` → increments `read` and `write` by 1
+- `sub(Rights::RW)` → decrements `read` and `write` by 1
+- `effective_rights()` → `R` if `read > 0`, `W` if `write > 0`, `X` if `execute > 0`
+- `is_empty()` → all counts are zero
+
+**Example:**
+```
+R0 [HPA 0x0..0x10000] RW  at GPA 0x0
+R1 [HPA 0x5000..0x6000] RX at GPA 0x5000 (alias of sub-range of R0)
+
+Projection:
+[GPA 0x0..0x5000]:     R(1) W(1) X(0) → effective RW   (R0 only)
+[GPA 0x5000..0x6000]:  R(2) W(1) X(1) → effective RWX  (R0 + R1)
+[GPA 0x6000..0x10000]: R(1) W(1) X(0) → effective RW   (R0 only)
+```
+
+When R1 is MAP_SELF'd to GPA 0x20000:
+```
+remove_contribution(R1 @ GPA 0x5000, size 0x1000, RX)
+add_contribution(R1 @ GPA 0x20000, size 0x1000, RX)
+
+After:
+[GPA 0x0..0x10000]:    R(1) W(1) X(0) → RW      (R0, now uniform again)
+[GPA 0x20000..0x21000]: R(1) W(0) X(1) → RX     (R1 at new GPA)
+```
+
+R0's entry is correctly preserved — only R1's contribution was removed.
+
+#### HPA consistency
+
+All contributors at a given GPA must agree on HPA (since EPT maps one GPA
+to one HPA).  If a new contribution would introduce a different HPA at an
+already-mapped GPA, the operation is rejected with an error.
+
+#### Blocked segments are part of the footprint
+
+A blocked segment is NOT independent of capabilities — it is tied to the
+parent capability that was carved.  When R0 has a carved-away hole at
+[HPA 0x1000..0x2000], R0's footprint includes:
+
+```
+R0 [HPA 0x0..0x5000] at GPA 0x0, carved [0x1000..0x2000]:
+  [GPA 0x0..0x1000]:  Mapped RWX
+  [GPA 0x1000..0x2000]: Blocked
+  [GPA 0x2000..0x5000]: Mapped RWX
+```
+
+If R0 is MAP_SELF'd to GPA 0x8000, the entire footprint moves:
+```
+  [GPA 0x8000..0x9000]:  Mapped RWX
+  [GPA 0x9000..0xA000]:  Blocked
+  [GPA 0xA000..0xD000]:  Mapped RWX
+```
+
+### 13.3 Data Structures
+
+```rust
+/// Per-right reference counts for a GPA segment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RightsRefCount {
+    read: u32,
+    write: u32,
+    execute: u32,
+}
+
+/// A segment in the projected address map.
+#[derive(Clone, Debug)]
+struct Segment {
+    hpa_start: u64,     // HPA corresponding to this GPA start
+    size: u64,          // segment size in bytes
+    refcounts: RightsRefCount,  // per-right contributor counts (all-zero when blocked)
+    blocked: bool,      // true = carved-away hole, reserved
+}
+
+/// The AddressMap: non-overlapping, GPA-sorted segments.
+struct AddressMap {
+    segments: BTreeMap<u64, Segment>,   // gpa_start → Segment
+}
+```
+
+The existing `MappingEntry`/`MapEntry` types are retained as a compatibility
+layer — the `Segment` type is the internal representation, and public-facing
+APIs (`translate`, `mapped_snapshot`) convert as needed.
+
+### 13.4 Core Algorithms
+
+#### `add_contribution(gpa, hpa, size, rights, blocked)`
+
+Adds a capability's contribution to the GPA range `[gpa, gpa+size)`:
+
+1. Walk existing segments overlapping `[gpa, gpa+size)`.
+2. **Split** any segment that straddles a boundary (at `gpa` or `gpa+size`).
+3. For each sub-segment in the range:
+   - **Existing segment**: verify HPA matches (else error), then increment
+     refcounts for the given rights (or set blocked flag).
+   - **Gap**: create a new segment with refcounts = 1 for each right.
+4. **Coalesce** adjacent segments with identical (refcounts, contiguous HPA, blocked).
+
+#### `remove_contribution(gpa, hpa, size, rights, blocked)`
+
+Inverse of `add_contribution`:
+
+1. Walk existing segments overlapping `[gpa, gpa+size)`.
+2. **Split** at boundaries if needed.
+3. Decrement refcounts for the given rights (or clear blocked flag).
+4. **Remove** segments where `refcounts.is_empty() && !blocked`.
+5. **Coalesce** neighbors.
+
+#### `add_footprint` / `remove_footprint`
+
+Higher-level wrappers that compute a capability's full footprint (mapped +
+blocked using `compute_view()`) and call `add_contribution` for each piece:
+
+```
+add_footprint(gpa_base, hpa_base, size, view, rights):
+  for each visible range in view:
+    add_contribution(gpa_base + offset, hpa + offset, range_size, rights, blocked=false)
+  for each carved gap:
+    add_contribution(gpa_base + offset, hpa + offset, gap_size, Rights::NONE, blocked=true)
+```
+
+### 13.5 Migration of Existing Operations
+
+| Operation | Before (§5.3) | After (refcounted) |
+|-----------|---------------|---------------------|
+| Bootstrap / accept | `insert()` | `add_footprint()` |
+| Carve (same domain) | `split()` | `remove_contribution(parent_rights)` + `add_contribution(carve_rights)` |
+| Alias (same domain) | no-op | `add_contribution(alias_rights)` |
+| Send (block range) | `block()` | `remove_contribution(cap_rights)` + `add_contribution(blocked)` |
+| Revoke (unblock) | `unblock()` | `remove_contribution(blocked)` + `add_contribution(parent_rights)` |
+| MAP_SELF | ~~`remove_by_hpa_range`~~ | `remove_footprint(old)` + `add_footprint(new)` |
+
+### 13.6 Design Decisions
+
+11. **Flat map → refcounted projection?** → **Refcounted.**
+    The flat map cannot represent overlapping contributions from aliases.
+    Per-right reference counting is the minimal extension that correctly
+    handles MAP_SELF without destroying sibling/parent entries.  Decided
+    after discovering the `remove_by_hpa_range` bug with full aliases.
+
+12. **Per-right or per-entry refcount?** → **Per-right.**
+    A parent with RW and an alias with RX at the same GPA produce RWX.
+    Removing the alias must restore RW, not NONE.  A single refcount per
+    entry cannot distinguish which rights come from which contributor.
+
+13. **Blocked as separate concept or part of footprint?** → **Part of footprint.**
+    A blocked segment is tied to the parent capability that was carved and
+    moves with it during MAP_SELF.  Treating it as independent would lose
+    the association between a carved hole and its parent's GPA position.

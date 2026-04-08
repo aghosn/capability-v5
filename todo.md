@@ -66,7 +66,19 @@
 
 ### Uncommitted changes
 
-None — all changes committed.
+- `capa-engine/src/translation.rs` — Refcounted projection model: `RightsRefCount`,
+  `SegmentMeta`, `add_contribution`/`remove_contribution`, all legacy methods
+  updated to maintain `segment_meta`.
+- `capa-engine/src/capability.rs` — `add_footprint`/`remove_footprint` helpers,
+  `map_self` rewrite using contribution model, `mapped_gpas` tracking on accept paths.
+  Removed `restore_snapshot` (no longer needed).
+- `capa-engine/src/domain.rs` — Added `mapped_gpas: BTreeMap<LocalHandle, u64>`
+  field to Domain (behind `address_translation` feature).
+- `capa-engine/tests/unit/translation.rs` — 21 new refcounted projection unit tests.
+- `capa-engine/tests/integration/translation.rs` — 12 new MAP_SELF integration tests.
+- `capa-engine/docs/design/address_translation/address_translation.md` — §13 Refcounted
+  Projection Model design doc.
+- `capa-engine/docs/design/confidential-vm/confidential-vm.md` — Phase B step 1 marked done.
 
 ---
 
@@ -92,6 +104,12 @@ split:
 - Same kernel binary for dom0 (no CoCo) and dom1 (CoCo enabled via CPUID)
 - Key design decisions pending: VTOM bit position, CPUID leaf number, capavisor
   EPT enforcement
+
+**MAP_SELF engine operation**: ✅ **Implemented.** Refcounted projection model
+(`add_footprint`/`remove_footprint`), per-cap GPA tracking (`mapped_gpas`),
+snapshot-diff → UpdateBatch. 12 integration tests + 21 unit tests pass.
+Files: `translation.rs`, `capability.rs`, `domain.rs`.
+Next: wire MAP_SELF to capavisor hypercall (Phase B step 2).
 
 ### Phase 3: VMEXIT dispatch unification
 

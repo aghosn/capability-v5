@@ -262,3 +262,534 @@ mod color_tests {
         assert!(!all.is_subset_of(&sub));
     }
 }
+
+// ── RightsRefCount ──────────────────────────────────────────────
+
+mod refcount_tests {
+    use capability_engine::memory::Rights;
+    use capability_engine::translation::{AddressMap, MapEntry, RightsRefCount};
+
+    #[cfg(feature = "cache_coloring")]
+    use capability_engine::translation::ColorBitmap;
+
+    /// Helper: insert without color bitmap.
+    fn ins(
+        map: &mut AddressMap,
+        hpa: u64,
+        size: u64,
+        rights: Rights,
+        hint: Option<u64>,
+    ) -> core::result::Result<u64, &'static str> {
+        map.insert(
+            hpa,
+            size,
+            rights,
+            #[cfg(feature = "cache_coloring")]
+            None,
+            hint,
+        )
+    }
+
+    // ── RightsRefCount unit tests ──────────────────────────────
+
+    #[test]
+    fn refcount_from_rights_rw() {
+        let rc = RightsRefCount::from_rights(Rights::RW);
+        assert_eq!(rc.read, 1);
+        assert_eq!(rc.write, 1);
+        assert_eq!(rc.execute, 0);
+        assert_eq!(rc.effective_rights(), Rights::RW);
+        assert!(!rc.is_empty());
+    }
+
+    #[test]
+    fn refcount_from_rights_none() {
+        let rc = RightsRefCount::from_rights(Rights::NONE);
+        assert_eq!(rc.read, 0);
+        assert_eq!(rc.write, 0);
+        assert_eq!(rc.execute, 0);
+        assert!(rc.is_empty());
+        assert_eq!(rc.effective_rights(), Rights::NONE);
+    }
+
+    #[test]
+    fn refcount_add_sub() {
+        let mut rc = RightsRefCount::from_rights(Rights::RW);
+        rc.add(Rights::RX);
+        // R(2), W(1), X(1)
+        assert_eq!(rc.read, 2);
+        assert_eq!(rc.write, 1);
+        assert_eq!(rc.execute, 1);
+        assert_eq!(rc.effective_rights(), Rights::RWX);
+
+        rc.sub(Rights::RW);
+        // R(1), W(0), X(1)
+        assert_eq!(rc.read, 1);
+        assert_eq!(rc.write, 0);
+        assert_eq!(rc.execute, 1);
+        assert_eq!(rc.effective_rights(), Rights::RX);
+    }
+
+    #[test]
+    fn refcount_sub_saturates() {
+        let mut rc = RightsRefCount::ZERO;
+        rc.sub(Rights::RWX);
+        assert!(rc.is_empty());
+    }
+
+    // ── add_contribution tests ─────────────────────────────────
+
+    #[test]
+    fn add_contribution_to_empty_map() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+
+        assert_eq!(map.entries().len(), 1);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.hpa_start, 0x0);
+                assert_eq!(m.size, 0x4000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    #[test]
+    fn add_contribution_overlapping_same_hpa() {
+        let mut map = AddressMap::new();
+        // R0: [GPA 0x0..0x10000] RW
+        map.add_contribution(0x0, 0x0, 0x10000, Rights::RW, false).unwrap();
+        // R1: [GPA 0x5000..0x6000] RX (same HPA, alias)
+        map.add_contribution(0x5000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+
+        // Should have 3 segments: [0..5000] RW, [5000..6000] RWX, [6000..10000] RW
+        assert_eq!(map.entries().len(), 3);
+
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x5000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+        match map.entries().get(&0x5000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x1000);
+                assert_eq!(m.rights, Rights::RWX);
+            }
+            _ => panic!("expected Mapped"),
+        }
+        match map.entries().get(&0x6000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0xA000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    #[test]
+    fn add_contribution_hpa_conflict_rejected() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+        // Different HPA at same GPA → error.
+        let err = map.add_contribution(0x1000, 0x9000, 0x1000, Rights::R, false);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn add_contribution_blocked() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x1000, 0x1000, 0x2000, Rights::NONE, true).unwrap();
+
+        assert_eq!(map.entries().len(), 1);
+        match map.entries().get(&0x1000).unwrap() {
+            MapEntry::Blocked { hpa_start, size } => {
+                assert_eq!(*hpa_start, 0x1000);
+                assert_eq!(*size, 0x2000);
+            }
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    #[test]
+    fn add_contribution_adjacent_coalesces() {
+        let mut map = AddressMap::new();
+        // Two adjacent contributions with same rights and contiguous HPA.
+        map.add_contribution(0x0, 0x0, 0x2000, Rights::RW, false).unwrap();
+        map.add_contribution(0x2000, 0x2000, 0x2000, Rights::RW, false).unwrap();
+
+        // Should coalesce into one segment.
+        assert_eq!(map.entries().len(), 1);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x4000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    #[test]
+    fn add_contribution_no_coalesce_different_rights() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0x2000, Rights::RW, false).unwrap();
+        map.add_contribution(0x2000, 0x2000, 0x2000, Rights::RX, false).unwrap();
+
+        // Different rights → no coalescing.
+        assert_eq!(map.entries().len(), 2);
+    }
+
+    #[test]
+    fn no_coalesce_different_refcounts_same_effective_rights() {
+        let mut map = AddressMap::new();
+        // [0x0..0x2000] with RW from one contributor → R(1)W(1)
+        map.add_contribution(0x0, 0x0, 0x2000, Rights::RW, false).unwrap();
+        // [0x2000..0x4000] with RW from two contributors → R(2)W(2)
+        map.add_contribution(0x2000, 0x2000, 0x2000, Rights::RW, false).unwrap();
+        map.add_contribution(0x2000, 0x2000, 0x2000, Rights::RW, false).unwrap();
+
+        // Both have effective rights RW, but different refcounts → must NOT coalesce.
+        assert_eq!(map.entries().len(), 2);
+        // Verify both show RW
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RW),
+            _ => panic!(),
+        }
+        match map.entries().get(&0x2000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RW),
+            _ => panic!(),
+        }
+    }
+
+    // ── remove_contribution tests ──────────────────────────────
+
+    #[test]
+    fn remove_contribution_single_contributor() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+        map.remove_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+
+        // Should be empty — last contributor removed.
+        assert!(map.entries().is_empty());
+    }
+
+    #[test]
+    fn remove_contribution_one_of_two() {
+        let mut map = AddressMap::new();
+        // R0: [0..0x10000] RW
+        map.add_contribution(0x0, 0x0, 0x10000, Rights::RW, false).unwrap();
+        // R1: [0x5000..0x6000] RX (overlapping alias)
+        map.add_contribution(0x5000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+
+        // Remove R1's contribution.
+        map.remove_contribution(0x5000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+
+        // R0 should be uniform RW again, coalesced back to 1 entry.
+        assert_eq!(map.entries().len(), 1);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x10000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    #[test]
+    fn remove_contribution_partial_range() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+
+        // Remove only [0x1000..0x2000).
+        map.remove_contribution(0x1000, 0x1000, 0x1000, Rights::RW, false).unwrap();
+
+        // Should have 2 entries: [0..0x1000] RW, [0x2000..0x4000] RW.
+        assert_eq!(map.entries().len(), 2);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.size, 0x1000),
+            _ => panic!("expected Mapped"),
+        }
+        match map.entries().get(&0x2000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.size, 0x2000),
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    #[test]
+    fn remove_contribution_blocked() {
+        let mut map = AddressMap::new();
+        // Add mapped, then blocked on top.
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::RW, false).unwrap();
+        map.add_contribution(0x1000, 0x1000, 0x1000, Rights::NONE, true).unwrap();
+
+        // Should have 3 entries: [0..1000] RW, [1000..2000] Blocked, [2000..4000] RW
+        assert_eq!(map.entries().len(), 3);
+        match map.entries().get(&0x1000).unwrap() {
+            MapEntry::Blocked { .. } => {}
+            _ => panic!("expected Blocked"),
+        }
+
+        // Remove the blocked flag.
+        map.remove_contribution(0x1000, 0x1000, 0x1000, Rights::NONE, true).unwrap();
+
+        // Should coalesce back to a single [0..4000] RW entry.
+        assert_eq!(map.entries().len(), 1);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x4000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped after unblock"),
+        }
+    }
+
+    // ── The user's key scenario ────────────────────────────────
+    //
+    // R0 [HPA 0x0..0x10000] RW at GPA 0x0
+    // R1 [HPA 0x5000..0x6000] RX at GPA 0x5000 (alias)
+    // Projection: [0..5000] RW, [5000..6000] RWX, [6000..10000] RW
+    //
+    // MAP_SELF(R1, GPA 0x20000):
+    //   remove R1 @ 0x5000
+    //   add R1 @ 0x20000
+    //
+    // After: [0..10000] RW (coalesced), [20000..21000] RX
+
+    #[test]
+    fn scenario_map_self_alias_move() {
+        let mut map = AddressMap::new();
+
+        // R0: full range RW
+        map.add_contribution(0x0, 0x0, 0x10000, Rights::RW, false).unwrap();
+        // R1: alias sub-range RX
+        map.add_contribution(0x5000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+        assert_eq!(map.entries().len(), 3);
+
+        // Simulate MAP_SELF: remove old, add new.
+        map.remove_contribution(0x5000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+        map.add_contribution(0x20000, 0x5000, 0x1000, Rights::RX, false).unwrap();
+
+        // R0 should be uniform again.
+        assert_eq!(map.entries().len(), 2);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x10000);
+                assert_eq!(m.rights, Rights::RW);
+            }
+            _ => panic!("expected Mapped"),
+        }
+        // R1 at new GPA.
+        match map.entries().get(&0x20000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.hpa_start, 0x5000);
+                assert_eq!(m.size, 0x1000);
+                assert_eq!(m.rights, Rights::RX);
+            }
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    // ── Full alias scenario (the bug that motivated this) ──────
+    //
+    // R0 [0..0x5000] RWX at GPA 0
+    // R1 [0..0x5000] RWX at GPA 0 (full alias, same HPA)
+    // MAP_SELF(R1, 0x8000): R0 must survive at GPA 0
+
+    #[test]
+    fn scenario_full_alias_no_clobber() {
+        let mut map = AddressMap::new();
+
+        // R0
+        map.add_contribution(0x0, 0x0, 0x5000, Rights::RWX, false).unwrap();
+        // R1 (full alias, same HPA)
+        map.add_contribution(0x0, 0x0, 0x5000, Rights::RWX, false).unwrap();
+
+        // MAP_SELF R1 to 0x8000.
+        map.remove_contribution(0x0, 0x0, 0x5000, Rights::RWX, false).unwrap();
+        map.add_contribution(0x8000, 0x0, 0x5000, Rights::RWX, false).unwrap();
+
+        // R0 still at GPA 0.
+        assert_eq!(map.entries().len(), 2);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x5000);
+                assert_eq!(m.rights, Rights::RWX);
+            }
+            _ => panic!("R0 must survive"),
+        }
+        // R1 at new GPA.
+        match map.entries().get(&0x8000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.hpa_start, 0x0);
+                assert_eq!(m.size, 0x5000);
+                assert_eq!(m.rights, Rights::RWX);
+            }
+            _ => panic!("expected Mapped at new GPA"),
+        }
+    }
+
+    // ── User's scenario: R0 + partial alias R1, MAP_SELF R1 ───
+    //
+    // R0 [0x0..0x5000] at GPA 0
+    // R1 [0x0..0x1000] (alias) at GPA 0
+    // MAP_SELF(R1, 0x6000)
+    // Result: R0 [0x0..0x5000], R1 [0x6000..0x7000]
+
+    #[test]
+    fn scenario_partial_alias_map_self() {
+        let mut map = AddressMap::new();
+
+        map.add_contribution(0x0, 0x0, 0x5000, Rights::RWX, false).unwrap();
+        map.add_contribution(0x0, 0x0, 0x1000, Rights::RWX, false).unwrap();
+
+        // MAP_SELF R1.
+        map.remove_contribution(0x0, 0x0, 0x1000, Rights::RWX, false).unwrap();
+        map.add_contribution(0x6000, 0x0, 0x1000, Rights::RWX, false).unwrap();
+
+        // R0 still spans full range.
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x5000);
+                assert_eq!(m.rights, Rights::RWX);
+            }
+            _ => panic!("R0 must survive"),
+        }
+        // R1 at new GPA.
+        match map.entries().get(&0x6000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.hpa_start, 0x0);
+                assert_eq!(m.size, 0x1000);
+            }
+            _ => panic!("expected R1 at 0x6000"),
+        }
+    }
+
+    // ── Carve with blocked hole, MAP_SELF moves the hole ───────
+
+    #[test]
+    fn scenario_blocked_moves_with_parent() {
+        let mut map = AddressMap::new();
+
+        // R0 footprint: mapped [0..0x1000], blocked [0x1000..0x2000], mapped [0x2000..0x5000]
+        map.add_contribution(0x0, 0x0, 0x1000, Rights::RWX, false).unwrap();
+        map.add_contribution(0x1000, 0x1000, 0x1000, Rights::NONE, true).unwrap();
+        map.add_contribution(0x2000, 0x2000, 0x3000, Rights::RWX, false).unwrap();
+
+        assert_eq!(map.entries().len(), 3);
+
+        // MAP_SELF R0 to GPA 0x8000: remove old footprint, add at new GPA.
+        map.remove_contribution(0x0, 0x0, 0x1000, Rights::RWX, false).unwrap();
+        map.remove_contribution(0x1000, 0x1000, 0x1000, Rights::NONE, true).unwrap();
+        map.remove_contribution(0x2000, 0x2000, 0x3000, Rights::RWX, false).unwrap();
+
+        assert!(map.entries().is_empty());
+
+        map.add_contribution(0x8000, 0x0, 0x1000, Rights::RWX, false).unwrap();
+        map.add_contribution(0x9000, 0x1000, 0x1000, Rights::NONE, true).unwrap();
+        map.add_contribution(0xA000, 0x2000, 0x3000, Rights::RWX, false).unwrap();
+
+        assert_eq!(map.entries().len(), 3);
+        match map.entries().get(&0x8000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.size, 0x1000),
+            _ => panic!("expected Mapped"),
+        }
+        match map.entries().get(&0x9000).unwrap() {
+            MapEntry::Blocked { size, .. } => assert_eq!(*size, 0x1000),
+            _ => panic!("expected Blocked"),
+        }
+        match map.entries().get(&0xA000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.size, 0x3000),
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    // ── Triple overlap: 3 caps contributing different rights ───
+
+    #[test]
+    fn triple_overlap_rights_accumulate() {
+        let mut map = AddressMap::new();
+
+        // R0: [0..0x4000] R
+        map.add_contribution(0x0, 0x0, 0x4000, Rights::R, false).unwrap();
+        // R1: [0x1000..0x3000] W (overlaps middle)
+        map.add_contribution(0x1000, 0x1000, 0x2000,
+            Rights::from_bits(Rights::WRITE), false).unwrap();
+        // R2: [0x2000..0x4000] X (overlaps right portion)
+        map.add_contribution(0x2000, 0x2000, 0x2000,
+            Rights::from_bits(Rights::EXECUTE), false).unwrap();
+
+        // [0x0..0x1000]: R only
+        // [0x1000..0x2000]: R + W = RW
+        // [0x2000..0x3000]: R + W + X = RWX
+        // [0x3000..0x4000]: R + X = RX
+        assert_eq!(map.entries().len(), 4);
+
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::R),
+            _ => panic!(),
+        }
+        match map.entries().get(&0x1000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RW),
+            _ => panic!(),
+        }
+        match map.entries().get(&0x2000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+            _ => panic!(),
+        }
+        match map.entries().get(&0x3000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RX),
+            _ => panic!(),
+        }
+
+        // Remove R1's contribution → middle becomes R only, right becomes R+X.
+        map.remove_contribution(0x1000, 0x1000, 0x2000,
+            Rights::from_bits(Rights::WRITE), false).unwrap();
+
+        // [0x0..0x2000]: R (coalesced)
+        // [0x2000..0x4000]: R + X = RX (coalesced)
+        assert_eq!(map.entries().len(), 2);
+        match map.entries().get(&0x0).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x2000);
+                assert_eq!(m.rights, Rights::R);
+            }
+            _ => panic!(),
+        }
+        match map.entries().get(&0x2000).unwrap() {
+            MapEntry::Mapped(m) => {
+                assert_eq!(m.size, 0x2000);
+                assert_eq!(m.rights, Rights::RX);
+            }
+            _ => panic!(),
+        }
+    }
+
+    // ── Zero-size contribution is a no-op ──────────────────────
+
+    #[test]
+    fn zero_size_contribution_noop() {
+        let mut map = AddressMap::new();
+        map.add_contribution(0x0, 0x0, 0, Rights::RW, false).unwrap();
+        assert!(map.entries().is_empty());
+    }
+
+    // ── Existing insert() API still works ──────────────────────
+    // (Compatibility: legacy insert adds a single segment.)
+
+    #[test]
+    fn legacy_insert_then_add_contribution() {
+        let mut map = AddressMap::new();
+        ins(&mut map, 0x0, 0x4000, Rights::RW, None).unwrap();
+
+        // Now overlay with add_contribution for an alias.
+        map.add_contribution(0x1000, 0x1000, 0x1000, Rights::RX, false).unwrap();
+
+        assert_eq!(map.entries().len(), 3);
+        match map.entries().get(&0x1000).unwrap() {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+            _ => panic!(),
+        }
+    }
+}

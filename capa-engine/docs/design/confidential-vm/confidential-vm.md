@@ -475,13 +475,16 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 
 ### Phase B: MAP_SELF + channel share-back protocol
 
-1. Add MAP_SELF hypercall to capavisor (domain maps own capability at chosen GPA)
-2. Verify channel revocation cascade in capa-engine — revoking dom0_endpoint
+1. ✅ **MAP_SELF engine operation implemented** — refcounted projection model with
+   `add_footprint`/`remove_footprint`, per-cap GPA tracking (`mapped_gpas`),
+   snapshot-diff → UpdateBatch. Comprehensive integration tests pass.
+2. Add MAP_SELF hypercall to capavisor (bridge engine operation to VMX)
+3. Verify channel revocation cascade in capa-engine — revoking dom0_endpoint
    must cascade to all capabilities sent through the channel. Add if missing.
-3. Implement kernel-side share-back: Themis-specific early init creates two
+4. Implement kernel-side share-back: Themis-specific early init creates two
    aliases of swiotlb pool, MAP_SELFs one at VTOM GPA, sends the other via channel
-4. Implement CHV-side: accept alias from channel, map shared region
-5. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
+5. Implement CHV-side: accept alias from channel, map shared region
+6. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
 
 ### Phase C: EPT enforcement + full confidential boot
 
@@ -550,9 +553,12 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 
 ## 10. Remaining Open Questions
 
-1. **MAP_SELF semantics**: New hypercall for dom1 to map its own capability at a
-   chosen GPA (needed for VTOM-offset mapping). Should it allow re-mapping? What
-   about overlap with existing mappings?
+1. **MAP_SELF semantics**: ✅ **Resolved.** MAP_SELF allows a sealed domain to
+   remap one of its own capabilities at a chosen GPA. No overlap with existing
+   mappings (after removing old footprint). No re-mapping into blocked ranges.
+   Implemented using the refcounted projection model — see
+   `address_translation.md` §13 for full design.  Per-right reference counts
+   ensure removing one capability's contribution does not affect siblings/parent.
 
 2. **Channel discovery at boot**: Dom1 needs to find its channel endpoint during
    early kernel init. How does dom1 know the handle? Options: (a) fixed well-known

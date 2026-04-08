@@ -110,12 +110,23 @@ fn test_carve_same_rights_no_split() {
     let access = Access::new(0x1000, 0x1000, Rights::RWX);
     let (_h, _sub, updates) = Capability::carve(&root, r0_h, access).unwrap();
 
+    // With refcounting, the carved child adds a contribution to the overlapping
+    // sub-range, splitting into 3 segments with different refcounts.
+    // But effective rights are identical everywhere → no view_diff updates.
     let r = root.read();
     assert_eq!(
         r.data.address_map.entries().len(),
-        1,
-        "same rights → no split"
+        3,
+        "refcounted: 3 segments (different contributor counts)"
     );
+    // All segments should have the same effective rights (RWX).
+    for (_, entry) in r.data.address_map.entries() {
+        match entry {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+            _ => panic!("expected Mapped"),
+        }
+    }
+    drop(r);
     assert!(updates.is_empty(), "same rights → no view_diff updates");
 }
 
@@ -890,4 +901,825 @@ fn test_view_aware_insert_shows_blocked_gap() {
         matches!(result, Err(CapaError::RegionOverlap)),
         "insert at blocked gap must fail"
     );
+}
+
+// ── MAP_SELF tests ──────────────────────────────────────────────────────────
+//
+// MAP_SELF operates on a domain's OWN address map.  All interesting scenarios
+// involve multiple capabilities within the SAME domain's map, NOT cross-domain
+// parent/child relationships.
+
+/// Helper: create a child domain with all permissions (incl. MAP_SELF).
+fn make_child_with_map_self(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
+    let api = MonitorAPI::ALL;
+    let policy = DomainPolicy::new_restricted(0b1111, api);
+    let h = Capability::create(root, policy).unwrap().0;
+    let dom = root
+        .read()
+        .data
+        .domain_capabilities[&h]
+        .upgrade()
+        .unwrap();
+    (h, dom)
+}
+
+/// Get the first memory handle in a domain.
+fn first_mem_handle(dom: &CapabilityRef<Domain>) -> LocalHandle {
+    let r = dom.read();
+    *r.data.memory_capabilities.keys().next().expect("no memory caps")
+}
+
+/// Find the memory handle whose mapped_gpas entry equals `gpa`.
+fn handle_at_gpa(dom: &CapabilityRef<Domain>, gpa: u64) -> LocalHandle {
+    let r = dom.read();
+    *r.data
+        .mapped_gpas
+        .iter()
+        .find(|(_, &g)| g == gpa)
+        .expect("no handle at that GPA")
+        .0
+}
+
+// ── basic ───────────────────────────────────────────────────────────────────
+
+/// Basic: carve + send to child + seal + MAP_SELF to new GPA.
+#[test]
+fn test_map_self_basic_remap() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let cap_h = first_mem_handle(&dom);
+    {
+        let d = dom.read();
+        assert!(d.data.address_map.entries().contains_key(&0x1000));
+    }
+
+    let updates = Capability::map_self(&dom, cap_h, 0x5_0000).unwrap();
+
+    let d = dom.read();
+    assert!(!d.data.address_map.entries().contains_key(&0x1000));
+    match d.data.address_map.entries().get(&0x5_0000).expect("new GPA") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x1000);
+            assert_eq!(m.size, 0x1000);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("expected Mapped"),
+    }
+    drop(d);
+    assert!(!updates.is_empty(), "MAP_SELF should produce updates");
+}
+
+/// MAP_SELF from a non-identity initial GPA (send_at with hint).
+#[test]
+fn test_map_self_from_nonidentity_gpa() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let cap_h = first_mem_handle(&dom);
+    let _updates = Capability::map_self(&dom, cap_h, 0xB_0000).unwrap();
+
+    let d = dom.read();
+    assert!(!d.data.address_map.entries().contains_key(&0xA_0000));
+    match d.data.address_map.entries().get(&0xB_0000).expect("new") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x2000);
+            assert_eq!(m.size, 0x1000);
+        }
+        _ => panic!("expected Mapped"),
+    }
+}
+
+/// Re-MAP_SELF: remap the same cap twice in succession.
+#[test]
+fn test_map_self_twice() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let cap_h = first_mem_handle(&dom);
+
+    Capability::map_self(&dom, cap_h, 0x20_0000).unwrap();
+    {
+        let d = dom.read();
+        assert!(d.data.address_map.entries().contains_key(&0x20_0000));
+        assert!(!d.data.address_map.entries().contains_key(&0x10_0000));
+    }
+
+    Capability::map_self(&dom, cap_h, 0x30_0000).unwrap();
+    let d = dom.read();
+    assert!(d.data.address_map.entries().contains_key(&0x30_0000));
+    assert!(!d.data.address_map.entries().contains_key(&0x20_0000));
+}
+
+/// MAP_SELF a cap with a carved-away child: blocked gap moves with it.
+#[test]
+fn test_map_self_with_carved_hole() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    // Carve c1 = [0x1000..0x5000).
+    let (c1_h, _c1, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x4000, Rights::RW)).unwrap();
+    // Carve c2 = [0x2000..0x3000) from c1 (hole in c1).
+    let (_c2_h, _c2, _) =
+        Capability::carve(&root, c1_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+
+    // Send c1 to child at GPA 0xA_0000.
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let c1_child_h = first_mem_handle(&dom);
+
+    // Before: mapped + blocked + mapped.
+    {
+        let d = dom.read();
+        assert!(matches!(d.data.address_map.entries().get(&0xA_1000),
+            Some(MapEntry::Blocked { .. })));
+    }
+
+    // MAP_SELF c1 to GPA 0xB_0000.
+    let _updates = Capability::map_self(&dom, c1_child_h, 0xB_0000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // Old entries gone.
+    assert!(!e.contains_key(&0xA_0000));
+
+    // Mapped [0xB_0000, 0x1000) = HPA 0x1000.
+    match e.get(&0xB_0000).expect("first mapped") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x1000);
+            assert_eq!(m.size, 0x1000);
+        }
+        _ => panic!("expected Mapped"),
+    }
+    // Blocked [0xB_1000, 0x1000) = HPA 0x2000.
+    match e.get(&0xB_1000).expect("blocked") {
+        MapEntry::Blocked { hpa_start, size } => {
+            assert_eq!(*hpa_start, 0x2000);
+            assert_eq!(*size, 0x1000);
+        }
+        _ => panic!("expected Blocked"),
+    }
+    // Mapped [0xB_2000, 0x2000) = HPA 0x3000.
+    match e.get(&0xB_2000).expect("second mapped") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x3000);
+            assert_eq!(m.size, 0x2000);
+        }
+        _ => panic!("expected Mapped"),
+    }
+}
+
+// ── alias within same domain + MAP_SELF ─────────────────────────────────────
+
+/// The real scenario: child receives R1, aliases a sub-range, MAP_SELFs the
+/// alias elsewhere.  R1's contribution to the overlapping region survives.
+#[test]
+fn test_map_self_alias_within_domain() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    // Send a big region to child at GPA 0x0.
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let r1_h = first_mem_handle(&dom);
+
+    // Child aliases [0x0..0x1000) RW from its own R1.
+    let (alias_h, _alias_sub) = Capability::alias(&dom, r1_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // Before MAP_SELF: the [0x0..0x1000) region has refcount 2 (R1 + alias).
+    // MAP_SELF alias to GPA 0x6000.
+    let _updates = Capability::map_self(&dom, alias_h, 0x6000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // R1's entry at [0x0..0x5000) should still cover 0x0.
+    // (The [0x0..0x1000) sub-range had refcount 2, now back to 1 after alias left.)
+    let entry_0 = e.get(&0x0).expect("R1 still at GPA 0x0");
+    match entry_0 {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("R1 at 0x0 should still be Mapped"),
+    }
+
+    // Alias at [0x6000..0x7000).
+    match e.get(&0x6000).expect("alias at new GPA") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.size, 0x1000);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("alias should be Mapped at 0x6000"),
+    }
+}
+
+/// Full alias of entire region, then MAP_SELF it elsewhere.
+/// R1 = [0x0..0x5000) RW.  Alias = [0x0..0x5000) RW (full).
+/// MAP_SELF alias to 0x10000.
+/// R1's entries must survive (refcount drops from 2→1, not destroyed).
+#[test]
+fn test_map_self_full_alias_same_domain() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let r1_h = first_mem_handle(&dom);
+
+    // Full alias.
+    let (alias_h, _) =
+        Capability::alias(&dom, r1_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+
+    // MAP_SELF alias to 0x1_0000.
+    let _updates = Capability::map_self(&dom, alias_h, 0x1_0000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // R1 still at GPA 0x0.
+    let r1_entry = e.get(&0x0).expect("R1 at 0x0 must survive");
+    match r1_entry {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("expected Mapped"),
+    }
+
+    // Alias at 0x1_0000.
+    match e.get(&0x1_0000).expect("alias at 0x1_0000") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.size, 0x5000);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("expected Mapped"),
+    }
+}
+
+/// Overlapping rights via alias within same domain.
+///
+/// Parent RWX [0..0x5000], child aliases sub-range [0..0x1000] with RX.
+/// At [0..0x1000]: R(2)W(1)X(2) = effective RWX (parent + alias both contribute).
+/// After MAP_SELF alias to 0x10000:
+///   [0..0x1000]: R(1)W(1)X(1) = still RWX (parent alone).
+///   [0x10000..0x11000]: R(1)W(0)X(1) = RX (alias alone).
+///
+/// Note: visible rights change at the source is impossible because alias rights
+/// are always ⊆ parent rights. The refcount change is verified structurally.
+#[test]
+fn test_map_self_alias_different_rights() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RWX)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let r1_h = first_mem_handle(&dom);
+
+    // Alias sub-range [0x0..0x1000) with RX (subset of parent's RWX).
+    let (alias_h, _) =
+        Capability::alias(&dom, r1_h, Access::new(0x0, 0x1000, Rights::RX)).unwrap();
+
+    // Before MAP_SELF: [0x0..0x1000) has R(2)W(1)X(2) = RWX.
+    {
+        let d = dom.read();
+        match d.data.address_map.entries().get(&0x0).expect("entry at 0") {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX,
+                "R(2)W(1)X(2) → RWX"),
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    // MAP_SELF alias to 0x10000.
+    let _updates = Capability::map_self(&dom, alias_h, 0x10000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // [0x0..0x1000): parent alone → R(1)W(1)X(1) = RWX (no visible change).
+    match e.get(&0x0).expect("parent at 0x0") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.rights, Rights::RWX,
+                "parent alone still RWX — alias rights were subset");
+        }
+        _ => panic!("expected Mapped"),
+    }
+
+    // [0x10000..0x11000): alias (RX).
+    match e.get(&0x10000).expect("alias at 0x10000") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.size, 0x1000);
+            assert_eq!(m.rights, Rights::RX);
+        }
+        _ => panic!("expected Mapped"),
+    }
+}
+
+/// Two caps in child's map.  MAP_SELF one onto the other → overlap rejected,
+/// both remain at original GPAs (rollback).
+#[test]
+fn test_map_self_overlap_rejected() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1, _s1, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (c2, _s2, _) =
+        Capability::carve(&root, r0_h, Access::new(0x3000, 0x1000, Rights::RW)).unwrap();
+
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, c1, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&root, c2, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let c1_h = handle_at_gpa(&dom, 0x10_0000);
+
+    let result = Capability::map_self(&dom, c1_h, 0x20_0000);
+    assert!(
+        matches!(result, Err(CapaError::RegionOverlap)),
+        "MAP_SELF onto existing cap must fail: {:?}", result
+    );
+
+    // Rollback: both still at original GPAs.
+    let d = dom.read();
+    assert!(d.data.address_map.entries().contains_key(&0x10_0000));
+    assert!(d.data.address_map.entries().contains_key(&0x20_0000));
+}
+
+// ── error cases ─────────────────────────────────────────────────────────────
+
+/// MAP_SELF without MAP_SELF permission → ApiNotAllowed.
+#[test]
+fn test_map_self_permission_denied_no_api() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child(&root);
+    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let cap_h = first_mem_handle(&dom);
+    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    assert!(
+        matches!(result, Err(CapaError::ApiNotAllowed)),
+        "MAP_SELF without permission: {:?}", result
+    );
+}
+
+/// MAP_SELF on unsealed domain → DomainNotSealed.
+#[test]
+fn test_map_self_requires_sealed() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    // NOT sealed.
+
+    let cap_h = first_mem_handle(&dom);
+    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    assert!(
+        matches!(result, Err(CapaError::DomainNotSealed)),
+        "unsealed: {:?}", result
+    );
+}
+
+/// MAP_SELF with nonexistent handle → NotFound.
+#[test]
+fn test_map_self_not_found() {
+    let (root, _r0, _r0_h) = bootstrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::seal(&root, dom_h).unwrap();
+
+    let result = Capability::map_self(&dom, 999, 0x5_0000);
+    assert!(matches!(result, Err(CapaError::NotFound)), "{:?}", result);
+}
+
+/// MAP_SELF on a frozen handle → PermissionDenied.
+#[test]
+fn test_map_self_frozen_handle_rejected() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    let cap_h = first_mem_handle(&dom);
+    dom.write().data.frozen_handles.insert(cap_h);
+    Capability::seal(&root, dom_h).unwrap();
+
+    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    assert!(
+        matches!(result, Err(CapaError::PermissionDenied)),
+        "frozen: {:?}", result
+    );
+}
+
+// ── corner cases ────────────────────────────────────────────────────────────
+
+/// MAP_SELF to the same GPA is a no-op: entry should survive unchanged.
+#[test]
+fn test_map_self_same_gpa_noop() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let cap_h = first_mem_handle(&dom);
+
+    // Snapshot before.
+    let before_keys = {
+        let d = dom.read();
+        d.data.address_map.entries().keys().copied().collect::<Vec<_>>()
+    };
+
+    // MAP_SELF to the same GPA it already occupies.
+    let updates = Capability::map_self(&dom, cap_h, 0x10_0000).unwrap();
+
+    // Should produce no updates (nothing changed).
+    assert!(updates.updates().is_empty(),
+        "same-GPA remap should produce 0 updates, got {}", updates.updates().len());
+
+    // Entries should be identical (same keys, same count).
+    let after = {
+        let d = dom.read();
+        d.data.address_map.entries().keys().copied().collect::<Vec<_>>()
+    };
+    assert_eq!(before_keys, after, "map keys should be unchanged");
+}
+
+/// MAP_SELF a cap to GPA immediately adjacent to another cap (no gap, no overlap).
+#[test]
+fn test_map_self_adjacent_to_existing() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _s1, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (c2_h, _s2, _) =
+        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&root, c2_h, dom_h, Attributes::NONE, Some(0x30_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let c2_child_h = handle_at_gpa(&dom, 0x30_0000);
+
+    // Move c2 immediately after c1: [0x10_0000..0x11_000) + [0x11_000..0x12_000).
+    let _updates = Capability::map_self(&dom, c2_child_h, 0x10_1000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+    assert!(e.contains_key(&0x10_0000), "c1 still at original GPA");
+    assert!(e.contains_key(&0x10_1000), "c2 now adjacent");
+    assert!(!e.contains_key(&0x30_0000), "c2 no longer at old GPA");
+}
+
+/// MAP_SELF overlap rejection rolls back: the cap stays at its old GPA.
+#[test]
+fn test_map_self_overlap_rollback_preserves_state() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _s1, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
+    let (c2_h, _s2, _) =
+        Capability::carve(&root, r0_h, Access::new(0x4000, 0x2000, Rights::RW)).unwrap();
+
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&root, c2_h, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let c1_child_h = handle_at_gpa(&dom, 0x10_0000);
+
+    // Snapshot before attempted overlap.
+    let before_keys = {
+        let d = dom.read();
+        d.data.address_map.entries().keys().copied().collect::<Vec<_>>()
+    };
+
+    // Attempt overlap: c1 [0x2000 size] at 0x1F_F000 → [0x1FF000..0x201000)
+    // overlaps c2 at [0x200000..0x202000).
+    let result = Capability::map_self(&dom, c1_child_h, 0x1F_F000);
+    assert!(matches!(result, Err(CapaError::RegionOverlap)),
+        "expected RegionOverlap, got {:?}", result);
+
+    // State must be exactly the same as before the failed attempt.
+    let after_keys = {
+        let d = dom.read();
+        d.data.address_map.entries().keys().copied().collect::<Vec<_>>()
+    };
+    assert_eq!(before_keys, after_keys, "rollback must restore exact state");
+
+    // mapped_gpas should still show old GPA.
+    let tracked_gpa = dom.read().data.mapped_gpas[&c1_child_h];
+    assert_eq!(tracked_gpa, 0x10_0000, "tracked GPA must be unchanged");
+}
+
+/// MAP_SELF a small alias multiple times across the address space.
+#[test]
+fn test_map_self_alias_bouncing() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let parent_h = first_mem_handle(&dom);
+
+    // Create alias of sub-range [0x0..0x1000).
+    let (alias_h, _) =
+        Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // Bounce alias through several GPAs.
+    let gpas = [0x10_0000, 0x20_0000, 0x30_0000, 0x10_0000];
+    for &gpa in &gpas {
+        Capability::map_self(&dom, alias_h, gpa).unwrap();
+        let d = dom.read();
+        let e = d.data.address_map.entries();
+        assert!(e.contains_key(&gpa), "alias must be at GPA {:#x}", gpa);
+        // Parent always survives at its original GPA.
+        assert!(e.contains_key(&0x0), "parent must survive at 0x0");
+        drop(d);
+    }
+
+    // Final check: alias at last GPA, parent intact.
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+    assert!(e.contains_key(&0x10_0000));
+    match e.get(&0x0).expect("parent at 0") {
+        MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+        _ => panic!("expected Mapped"),
+    }
+}
+
+/// MAP_SELF a cap with carved hole to a non-page-aligned offset from root's
+/// region.  Verifies blocked gap's GPA moves correctly with arbitrary base.
+#[test]
+fn test_map_self_carved_hole_nonaligned_base() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    // c1 = [0x0..0x4000), hole c2 = [0x1000..0x2000).
+    let (c1_h, _c1, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RW)).unwrap();
+    let (_c2_h, _c2, _) =
+        Capability::carve(&root, c1_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x5_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let c1_child = first_mem_handle(&dom);
+
+    // Move to 0x7_3000 (arbitrary non-zero-low-bits base).
+    let _updates = Capability::map_self(&dom, c1_child, 0x7_3000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // [0x7_3000, 0x1000) mapped (HPA 0x0).
+    match e.get(&0x7_3000).expect("first segment") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.size, 0x1000);
+        }
+        _ => panic!("expected Mapped"),
+    }
+    // [0x7_4000, 0x1000) blocked (HPA 0x1000 — carved child).
+    match e.get(&0x7_4000).expect("blocked gap") {
+        MapEntry::Blocked { hpa_start, size } => {
+            assert_eq!(*hpa_start, 0x1000);
+            assert_eq!(*size, 0x1000);
+        }
+        _ => panic!("expected Blocked"),
+    }
+    // [0x7_5000, 0x2000) mapped (HPA 0x2000).
+    match e.get(&0x7_5000).expect("second segment") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x2000);
+            assert_eq!(m.size, 0x2000);
+        }
+        _ => panic!("expected Mapped"),
+    }
+    // Old GPA cleaned up.
+    assert!(!e.contains_key(&0x5_0000));
+}
+
+/// Multiple aliases of same parent sub-range: MAP_SELF one, others stay.
+/// All aliases contribute to the same GPA region; removing one only decrements.
+#[test]
+fn test_map_self_multiple_aliases_same_range() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let parent_h = first_mem_handle(&dom);
+
+    // Create 3 aliases of the same sub-range [0x0..0x1000).
+    let (a1, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (a2, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (a3, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // At [0x0..0x1000): parent(RWX) + a1(RW) + a2(RW) + a3(RW) = R(4)W(4)X(1).
+    // Effective rights = RWX.
+
+    // Move a1 away.
+    Capability::map_self(&dom, a1, 0x10_0000).unwrap();
+
+    // [0x0..0x1000): parent(RWX) + a2(RW) + a3(RW) = R(3)W(3)X(1) = RWX.
+    {
+        let d = dom.read();
+        match d.data.address_map.entries().get(&0x0).expect("at 0") {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    // Move a2 away.
+    Capability::map_self(&dom, a2, 0x20_0000).unwrap();
+
+    // [0x0..0x1000): parent(RWX) + a3(RW) = R(2)W(2)X(1) = RWX.
+    {
+        let d = dom.read();
+        match d.data.address_map.entries().get(&0x0).expect("at 0") {
+            MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+            _ => panic!("expected Mapped"),
+        }
+    }
+
+    // Move a3 away.
+    Capability::map_self(&dom, a3, 0x30_0000).unwrap();
+
+    // [0x0..0x1000): parent alone → R(1)W(1)X(1) = RWX.
+    let d = dom.read();
+    match d.data.address_map.entries().get(&0x0).expect("parent at 0") {
+        MapEntry::Mapped(m) => assert_eq!(m.rights, Rights::RWX),
+        _ => panic!("expected Mapped"),
+    }
+
+    // All 3 aliases at their new GPAs.
+    assert!(d.data.address_map.entries().contains_key(&0x10_0000));
+    assert!(d.data.address_map.entries().contains_key(&0x20_0000));
+    assert!(d.data.address_map.entries().contains_key(&0x30_0000));
+}
+
+/// MAP_SELF produces correct UpdateBatch entries (GPA + HPA).
+#[test]
+fn test_map_self_update_batch_correctness() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (ch, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let child_id = dom_id(&dom);
+    let cap_h = first_mem_handle(&dom);
+
+    let updates = Capability::map_self(&dom, cap_h, 0x50_0000).unwrap();
+
+    // Should have updates for the child domain:
+    // - Remove at old GPA (0x10_0000, size 0x2000)
+    // - Add at new GPA (0x50_0000, size 0x2000)
+    let child_updates: Vec<_> = updates
+        .updates()
+        .iter()
+        .filter(|u| match u {
+            Update::ChangeRights { domain, .. } => *domain == child_id,
+            _ => false,
+        })
+        .collect();
+
+    assert!(!child_updates.is_empty(), "must have updates for child domain");
+
+    // Verify GPAs are in the expected range (not HPAs).
+    for u in &child_updates {
+        if let Update::ChangeRights { address, physical, .. } = u {
+            // Addresses should be GPAs (our test puts them at 0x10_0000+ or 0x50_0000+).
+            assert!(
+                *address >= 0x10_0000 || *address >= 0x50_0000,
+                "address should be GPA, got {:#x}", address
+            );
+            // Physicals should be HPAs (< 0x10000 for our test).
+            assert!(
+                *physical < 0x10000,
+                "physical should be HPA, got {:#x}", physical
+            );
+        }
+    }
+}
+
+/// MAP_SELF the parent cap itself (not just an alias) to a different GPA.
+#[test]
+fn test_map_self_parent_cap_with_alias_staying() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (c1_h, _sub, _) =
+        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+    let (dom_h, dom) = make_child_with_map_self(&root);
+    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&root, dom_h).unwrap();
+
+    let parent_h = first_mem_handle(&dom);
+
+    // Alias [0x0..0x1000) at same GPA → adds refcount.
+    let (alias_h, _) =
+        Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // MAP_SELF the PARENT to a new GPA. Alias stays behind.
+    let _updates = Capability::map_self(&dom, parent_h, 0x10_0000).unwrap();
+
+    let d = dom.read();
+    let e = d.data.address_map.entries();
+
+    // Alias sub-range [0x0..0x1000) should survive at its original GPA.
+    match e.get(&0x0).expect("alias at 0") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.size, 0x1000);
+            assert_eq!(m.rights, Rights::RW, "alias alone has RW");
+        }
+        _ => panic!("expected Mapped"),
+    }
+
+    // Parent should be at new GPA with its full range.
+    // Parent's view = [0x0..0x4000) minus carved children. No carve here, so full.
+    // But wait — the alias doesn't carve, so parent's view is [0x0..0x4000).
+    // At [0x10_0000..0x14_000): parent's footprint → RWX.
+    match e.get(&0x10_0000).expect("parent at new GPA") {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x0);
+            assert_eq!(m.rights, Rights::RWX);
+        }
+        _ => panic!("expected Mapped"),
+    }
+
+    // [0x1000..0x4000) at old GPA should be gone (parent left).
+    assert!(!e.contains_key(&0x1000),
+        "parent's non-alias region should be gone from old GPA");
+
+    // Verify alias handle tracking is correct.
+    drop(d);
+    let alias_gpa = dom.read().data.mapped_gpas[&alias_h];
+    assert_eq!(alias_gpa, 0x0, "alias GPA unchanged");
 }

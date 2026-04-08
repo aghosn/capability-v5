@@ -3,11 +3,11 @@
 use crate::attest::{self, AttestationReport};
 use crate::domain::{
     effective_vector, Domain, DomainPolicy, InterruptVisibility, MonitorAPI, PendingCapability,
-    PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef, VectorPolicy, VpCallContext,
-    VpRunState, VECTOR_AVAILABLE,
+    PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef, VectorPolicy,
+    VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
-use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
+use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus, Rights};
 use crate::platform::Platform;
 use crate::switch::{SwitchContext, VpInterruptContext};
 use crate::sync::RwLock;
@@ -403,19 +403,14 @@ impl Capability<MemoryRegion> {
             .as_ref()
             .and_then(|w| w.upgrade())
             .map_or(false, |dom_ref| {
-                dom_ref
-                    .try_read()
-                    .map_or(false, |r| r.data.is_revoked())
+                dom_ref.try_read().map_or(false, |r| r.data.is_revoked())
             });
 
         // Capture the domain ref for VITAL cascade (before dropping the lock).
         // If this cap has vital=true and the owning domain isn't already revoked,
         // we'll need the CapabilityRef<Domain> to call revoke_domain_subtree.
         let vital_domain_ref = if vital && !child_revoked {
-            capa.owned
-                .owner_domain
-                .as_ref()
-                .and_then(|w| w.upgrade())
+            capa.owned.owner_domain.as_ref().and_then(|w| w.upgrade())
         } else {
             None
         };
@@ -440,9 +435,7 @@ impl Capability<MemoryRegion> {
                         .as_ref()
                         .and_then(|w| w.upgrade())
                         .map_or(false, |dom_ref| {
-                            dom_ref
-                                .try_read()
-                                .map_or(false, |r| r.data.is_revoked())
+                            dom_ref.try_read().map_or(false, |r| r.data.is_revoked())
                         });
                     Some((parent_owner, parent.data.access.rights, parent_revoked))
                 } else {
@@ -574,8 +567,7 @@ impl Capability<MemoryRegion> {
         // NotFound and skip it — no duplicate updates.
         if vital && !child_revoked {
             if let Some(ref domain_ref) = vital_domain_ref {
-                let cascade =
-                    Capability::<Domain>::revoke_domain_subtree(domain_ref, None)?;
+                let cascade = Capability::<Domain>::revoke_domain_subtree(domain_ref, None)?;
                 updates.merge(cascade);
             } else {
                 // Fallback: domain ref unavailable (e.g. root cap without
@@ -928,6 +920,109 @@ fn insert_view_aware(
     }
 }
 
+/// Add a capability's full footprint to the address map using the refcounted
+/// contribution model.  Walks `view` (visible ranges) and inserts:
+/// - **Mapped** segments for each visible range (with the cap's `rights`)
+/// - **Blocked** segments for gaps (carved-away holes)
+///
+/// `hpa_start` / `size` define the capability's HPA extent.
+/// `gpa_base` is where the footprint is placed in GPA space.
+/// `view` comes from `compute_view()`.
+/// `rights` are the capability's own access rights.
+#[cfg(feature = "address_translation")]
+fn add_footprint(
+    map: &mut crate::translation::AddressMap,
+    hpa_start: u64,
+    size: u64,
+    gpa_base: u64,
+    view: &[Access],
+    rights: crate::memory::Rights,
+) -> core::result::Result<(), &'static str> {
+    let hpa_end = hpa_start + size;
+    let mut cursor = hpa_start;
+
+    for v in view {
+        let v_start = v.start;
+        let v_end = v.start + v.size;
+
+        // Gap before this visible range → Blocked contribution.
+        if cursor < v_start {
+            let gap_size = v_start - cursor;
+            let gap_gpa = gpa_base + (cursor - hpa_start);
+            let gap_hpa = cursor;
+            map.add_contribution(gap_gpa, gap_hpa, gap_size, crate::memory::Rights::NONE, true)?;
+            cursor = v_start;
+        }
+
+        // Visible range → Mapped contribution.
+        if cursor < v_end {
+            let mapped_size = v_end - cursor;
+            let mapped_gpa = gpa_base + (cursor - hpa_start);
+            let mapped_hpa = cursor;
+            map.add_contribution(mapped_gpa, mapped_hpa, mapped_size, rights, false)?;
+            cursor = v_end;
+        }
+    }
+
+    // Trailing gap → Blocked.
+    if cursor < hpa_end {
+        let gap_size = hpa_end - cursor;
+        let gap_gpa = gpa_base + (cursor - hpa_start);
+        let gap_hpa = cursor;
+        map.add_contribution(gap_gpa, gap_hpa, gap_size, crate::memory::Rights::NONE, true)?;
+    }
+
+    Ok(())
+}
+
+/// Remove a capability's full footprint from the address map (inverse of
+/// [`add_footprint`]).
+#[cfg(feature = "address_translation")]
+fn remove_footprint(
+    map: &mut crate::translation::AddressMap,
+    hpa_start: u64,
+    size: u64,
+    gpa_base: u64,
+    view: &[Access],
+    rights: crate::memory::Rights,
+) -> core::result::Result<(), &'static str> {
+    let hpa_end = hpa_start + size;
+    let mut cursor = hpa_start;
+
+    for v in view {
+        let v_start = v.start;
+        let v_end = v.start + v.size;
+
+        // Gap → remove blocked contribution.
+        if cursor < v_start {
+            let gap_size = v_start - cursor;
+            let gap_gpa = gpa_base + (cursor - hpa_start);
+            let gap_hpa = cursor;
+            map.remove_contribution(gap_gpa, gap_hpa, gap_size, crate::memory::Rights::NONE, true)?;
+            cursor = v_start;
+        }
+
+        // Visible range → remove mapped contribution.
+        if cursor < v_end {
+            let mapped_size = v_end - cursor;
+            let mapped_gpa = gpa_base + (cursor - hpa_start);
+            let mapped_hpa = cursor;
+            map.remove_contribution(mapped_gpa, mapped_hpa, mapped_size, rights, false)?;
+            cursor = v_end;
+        }
+    }
+
+    // Trailing gap → remove blocked.
+    if cursor < hpa_end {
+        let gap_size = hpa_end - cursor;
+        let gap_gpa = gpa_base + (cursor - hpa_start);
+        let gap_hpa = cursor;
+        map.remove_contribution(gap_gpa, gap_hpa, gap_size, crate::memory::Rights::NONE, true)?;
+    }
+
+    Ok(())
+}
+
 fn refresh_domain_view(cap: &mut Capability<Domain>) {
     let domain_id = cap.data.id;
     let cap_arcs: alloc::vec::Vec<Arc<RwLock<Capability<MemoryRegion>>>> = cap
@@ -1015,13 +1110,51 @@ impl Capability<Domain> {
         let view_before = w.data.cached_view.clone();
 
         let child_ref = Capability::carve_child(&parent_ref, access, owner_id)?;
-        let child_sub = child_ref.read().sub_handle;
+
+        // Single write lock on child_ref: extract sub_handle, set owner, grab
+        // footprint data.  Avoids 2 extra read-lock sync points that blow up
+        // loom's interleaving space.
+        let child_sub;
+        #[cfg(feature = "address_translation")]
+        let footprint: (u64, u64, Vec<Access>, Rights);
+        {
+            let mut cw = child_ref.write();
+            child_sub = cw.sub_handle;
+            cw.owned.owner_domain = Some(Arc::downgrade(caller));
+            #[cfg(feature = "address_translation")]
+            {
+                footprint = (
+                    cw.data.access.start,
+                    cw.data.access.size,
+                    cw.compute_view(),
+                    cw.data.access.rights,
+                );
+            }
+        }
 
         let new_handle = w.data.allocate_memory_handle();
-        child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
         w.data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
         refresh_domain_view(&mut *w);
+
+        // Record the carved child's GPA and add its footprint (bumps refcounts
+        // in the overlapping region with the parent).
+        #[cfg(feature = "address_translation")]
+        {
+            let (child_hpa, child_size, child_view, child_rights) = footprint;
+            let child_gpa = w.data.address_map.translate(child_hpa, child_size)
+                .map(|(gpa, _, _)| gpa)
+                .unwrap_or(child_hpa);
+            let _ = add_footprint(
+                &mut w.data.address_map,
+                child_hpa,
+                child_size,
+                child_gpa,
+                &child_view,
+                child_rights,
+            );
+            w.data.mapped_gpas.insert(new_handle, child_gpa);
+        }
 
         let updates = if same_rights {
             UpdateBatch::new()
@@ -1068,6 +1201,8 @@ impl Capability<Domain> {
         // Pre-flight: read-only validation (same rationale as carve).
         let owner_id;
         let parent_ref: CapabilityRef<MemoryRegion>;
+        #[cfg(feature = "address_translation")]
+        let parent_hpa_start: u64;
         {
             let r = caller.read();
             if r.data.is_memory_handle_frozen(parent) {
@@ -1090,6 +1225,10 @@ impl Capability<Domain> {
                 if p.owned.attributes.meta() || p.owned.attributes.comm() {
                     return Err(CapaError::PermissionDenied);
                 }
+                #[cfg(feature = "address_translation")]
+                {
+                    parent_hpa_start = p.data.access.start;
+                }
                 p.owned.clone()
                 // p (parent_ref.read()) dropped here
             };
@@ -1100,13 +1239,51 @@ impl Capability<Domain> {
         // Mutation: hold write lock for the atomic mutation.
         let mut w = caller.write();
         let child_ref = Capability::alias_child(&parent_ref, access, owner_id)?;
-        let child_sub = child_ref.read().sub_handle;
+
+        // Single write lock on child_ref: extract sub_handle, set owner, grab
+        // footprint data.  Same loom optimisation as carve().
+        let child_sub;
+        #[cfg(feature = "address_translation")]
+        let footprint: (u64, u64, Vec<Access>, Rights);
+        {
+            let mut cw = child_ref.write();
+            child_sub = cw.sub_handle;
+            cw.owned.owner_domain = Some(Arc::downgrade(caller));
+            #[cfg(feature = "address_translation")]
+            {
+                footprint = (
+                    cw.data.access.start,
+                    cw.data.access.size,
+                    cw.compute_view(),
+                    cw.data.access.rights,
+                );
+            }
+        }
 
         let new_handle = w.data.allocate_memory_handle();
-        child_ref.write().owned.owner_domain = Some(Arc::downgrade(caller));
         w.data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
         refresh_domain_view(&mut *w);
+
+        // Add the alias's footprint to the address map (bumps refcounts in
+        // the overlapping region) and record its GPA for future MAP_SELF.
+        #[cfg(feature = "address_translation")]
+        {
+            let (alias_hpa, alias_size, alias_view, alias_rights) = footprint;
+            // Alias's initial GPA = parent's GPA + offset within parent.
+            let parent_gpa = w.data.mapped_gpas.get(&parent).copied()
+                .unwrap_or(parent_hpa_start);
+            let alias_gpa = parent_gpa + (alias_hpa - parent_hpa_start);
+            let _ = add_footprint(
+                &mut w.data.address_map,
+                alias_hpa,
+                alias_size,
+                alias_gpa,
+                &alias_view,
+                alias_rights,
+            );
+            w.data.mapped_gpas.insert(new_handle, alias_gpa);
+        }
 
         Ok((new_handle, child_sub))
     }
@@ -1429,6 +1606,7 @@ impl Capability<Domain> {
                 gpa_base,
                 &cap_view,
             );
+            recv_w.data.mapped_gpas.insert(new_handle, gpa_base);
         }
 
         let view_caller_after = caller_w.data.cached_view.clone();
@@ -1553,14 +1731,17 @@ impl Capability<Domain> {
             let gpa_base = pending_gpa_hint.unwrap_or(cap_hpa);
             if recv_w.data.address_map.overlaps(gpa_base, cap_size) {
                 // Roll back: re-insert the pending entry.
-                recv_w.data.pending_capabilities.insert(pending_id, PendingCapability {
-                    cap: Arc::downgrade(&cap_ref),
-                    sender_domain_id,
-                    sender_handle,
-                    sender_domain: Arc::downgrade(&sender_ref),
-                    #[cfg(feature = "address_translation")]
-                    gpa_hint: orig_gpa_hint,
-                });
+                recv_w.data.pending_capabilities.insert(
+                    pending_id,
+                    PendingCapability {
+                        cap: Arc::downgrade(&cap_ref),
+                        sender_domain_id,
+                        sender_handle,
+                        sender_domain: Arc::downgrade(&sender_ref),
+                        #[cfg(feature = "address_translation")]
+                        gpa_hint: orig_gpa_hint,
+                    },
+                );
                 return Err(CapaError::RegionOverlap);
             }
         }
@@ -1619,6 +1800,7 @@ impl Capability<Domain> {
                 gpa_base,
                 &cap_view,
             );
+            recv_w.data.mapped_gpas.insert(new_handle, gpa_base);
         }
 
         // Snapshot views AFTER mutation.
@@ -1671,6 +1853,154 @@ impl Capability<Domain> {
         }
 
         Ok(())
+    }
+
+    // ── MAP_SELF (address_translation only) ─────────────────────────────────
+
+    /// Remap a memory capability at a chosen GPA in the caller's own AddressMap.
+    ///
+    /// If the capability already has a dedicated AddressMap entry (e.g. a carved
+    /// region with its own split entry, or a cap received via `accept`), that
+    /// entry is removed and re-inserted at `new_gpa`.  If the capability has no
+    /// dedicated entry (e.g. an alias whose HPA range is covered by the parent's
+    /// mapping), a *new* entry is added without removing anything.
+    ///
+    /// The resulting [`UpdateBatch`] is computed by diffing the AddressMap
+    /// before and after the remap.
+    ///
+    /// # Rules
+    /// - Caller must be sealed and have [`MonitorAPI::MAP_SELF`] permission.
+    /// - Handle must not be frozen.
+    /// - META and COMM capabilities are rejected.
+    /// Remap a sealed domain's own memory capability at a new GPA.
+    ///
+    /// Uses the refcounted contribution model:
+    /// 1. `remove_footprint` at old GPA (decrements refcounts, preserving
+    ///    parent/sibling contributions)
+    /// 2. Overlap check at new GPA (after removal)
+    /// 3. `add_footprint` at new GPA
+    /// 4. Snapshot diff → UpdateBatch
+    ///
+    /// # Requirements
+    /// - Caller must be sealed with `MAP_SELF` permission.
+    /// - Handle must not be frozen, META, or COMM.
+    /// - `new_gpa` must not overlap existing mapped/blocked segments (after
+    ///   removing the cap's old footprint).
+    ///
+    /// # Errors
+    /// - [`CapaError::DomainNotSealed`] — caller is not sealed.
+    /// - [`CapaError::ApiNotAllowed`] — caller lacks `MAP_SELF` permission.
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, META/COMM cap,
+    ///   or caller doesn't own the capability.
+    /// - [`CapaError::NotFound`] — `cap_handle` not found or no recorded GPA.
+    /// - [`CapaError::RegionOverlap`] — `new_gpa` overlaps remaining segments.
+    #[cfg(feature = "address_translation")]
+    pub fn map_self(
+        caller: &CapabilityRef<Domain>,
+        cap_handle: LocalHandle,
+        new_gpa: u64,
+    ) -> Result<UpdateBatch> {
+        use crate::translation::address_map_diff;
+
+        // ── Pre-flight (read lock) ──────────────────────────────────────
+        let owner_id;
+        let cap_ref: CapabilityRef<MemoryRegion>;
+        {
+            let r = caller.read();
+            if r.data.is_memory_handle_frozen(cap_handle) {
+                return Err(CapaError::PermissionDenied);
+            }
+            owner_id = r.data.id;
+            let cap_weak = r
+                .data
+                .get_memory_capability(cap_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            drop(r);
+            cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            {
+                let c = cap_ref.read();
+                if c.owned.owner != owner_id {
+                    return Err(CapaError::PermissionDenied);
+                }
+                if c.owned.attributes.meta() || c.owned.attributes.comm() {
+                    return Err(CapaError::PermissionDenied);
+                }
+                let owned = c.owned.clone();
+                drop(c);
+                owned.validate_operation(MonitorAPI::MAP_SELF)?;
+            }
+        }
+
+        // ── Read cap address info + rights ──────────────────────────────
+        let (cap_hpa, cap_size, cap_view, cap_rights) = {
+            let c = cap_ref.read();
+            (
+                c.data.access.start,
+                c.data.access.size,
+                c.compute_view(),
+                c.data.access.rights,
+            )
+        };
+
+        // ── Mutation (write lock) ───────────────────────────────────────
+        let mut w = caller.write();
+
+        // Look up where this cap's footprint currently lives.
+        let old_gpa = *w
+            .data
+            .mapped_gpas
+            .get(&cap_handle)
+            .ok_or(CapaError::NotFound)?;
+
+        // Snapshot AddressMap before.
+        let snapshot_before = w.data.address_map.mapped_snapshot();
+
+        // 1. Remove the cap's footprint at old GPA (refcounted — won't nuke
+        //    parent/sibling contributions).
+        remove_footprint(
+            &mut w.data.address_map,
+            cap_hpa,
+            cap_size,
+            old_gpa,
+            &cap_view,
+            cap_rights,
+        )
+        .map_err(|e| CapaError::InvalidOperation(alloc::string::String::from(e)))?;
+
+        // 2. Check new_gpa doesn't overlap remaining segments.
+        if w.data.address_map.overlaps(new_gpa, cap_size) {
+            // Rollback: re-add at old position.
+            let _ = add_footprint(
+                &mut w.data.address_map,
+                cap_hpa,
+                cap_size,
+                old_gpa,
+                &cap_view,
+                cap_rights,
+            );
+            return Err(CapaError::RegionOverlap);
+        }
+
+        // 3. Add the cap's footprint at new GPA.
+        add_footprint(
+            &mut w.data.address_map,
+            cap_hpa,
+            cap_size,
+            new_gpa,
+            &cap_view,
+            cap_rights,
+        )
+        .map_err(|e| CapaError::InvalidOperation(alloc::string::String::from(e)))?;
+
+        // 4. Update tracked GPA for this handle.
+        w.data.mapped_gpas.insert(cap_handle, new_gpa);
+
+        // 5. Snapshot after → diff → UpdateBatch.
+        let snapshot_after = w.data.address_map.mapped_snapshot();
+        let updates = address_map_diff(owner_id, &snapshot_before, &snapshot_after);
+
+        Ok(updates)
     }
 
     // ── Channel transfer (send_channel / accept_channel / reject_channel) ────
@@ -1994,7 +2324,10 @@ impl Capability<Domain> {
     /// - [`CapaError::DomainNotSealed`] — `parent` is not yet sealed.
     /// - [`CapaError::ApiNotAllowed`] — `CREATE` API not allowed on `parent`.
     /// - [`CapaError::InvalidPolicy`] — `policy` violates monotonicity relative to parent.
-    pub fn create(parent: &CapabilityRef<Domain>, policy: DomainPolicy) -> Result<(LocalHandle, UpdateBatch)> {
+    pub fn create(
+        parent: &CapabilityRef<Domain>,
+        policy: DomainPolicy,
+    ) -> Result<(LocalHandle, UpdateBatch)> {
         let owner_id = parent.read().data.id;
 
         // 1. Auto-allocate handle (domain table key)
@@ -2375,9 +2708,7 @@ impl Capability<Domain> {
     /// lets the child send capabilities back to the caller via the channel.
     ///
     /// Same semantics as [`get_chan`] but the caller IS the target.
-    pub fn get_chan_self(
-        caller: &CapabilityRef<Domain>,
-    ) -> Result<LocalHandle> {
+    pub fn get_chan_self(caller: &CapabilityRef<Domain>) -> Result<LocalHandle> {
         let caller_id = caller.read().data.id;
 
         // 1. Caller must be sealed.
@@ -3165,12 +3496,20 @@ impl Capability<Domain> {
             PolicyIdentifier::VectorVisibility(vec) => {
                 visibility_to_u64(child_r.data.policy.interrupts.get_policy(vec).visibility)
             }
-            PolicyIdentifier::VectorRegReadSet(vec, word) => {
-                child_r.data.policy.interrupts.get_policy(vec).read_set.word(word as usize)
-            }
-            PolicyIdentifier::VectorRegWriteSet(vec, word) => {
-                child_r.data.policy.interrupts.get_policy(vec).write_set.word(word as usize)
-            }
+            PolicyIdentifier::VectorRegReadSet(vec, word) => child_r
+                .data
+                .policy
+                .interrupts
+                .get_policy(vec)
+                .read_set
+                .word(word as usize),
+            PolicyIdentifier::VectorRegWriteSet(vec, word) => child_r
+                .data
+                .policy
+                .interrupts
+                .get_policy(vec)
+                .write_set
+                .word(word as usize),
         };
 
         Ok(value)
