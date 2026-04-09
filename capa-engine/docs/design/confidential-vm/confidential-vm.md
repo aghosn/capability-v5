@@ -478,13 +478,17 @@ relays flags to the capavisor and provides ioctls for CHV to accept shared regio
 1. ✅ **MAP_SELF engine operation implemented** — refcounted projection model with
    `add_footprint`/`remove_footprint`, per-cap GPA tracking (`mapped_gpas`),
    snapshot-diff → UpdateBatch. Comprehensive integration tests pass.
-2. Add MAP_SELF hypercall to capavisor (bridge engine operation to VMX)
-3. Verify channel revocation cascade in capa-engine — revoking dom0_endpoint
-   must cascade to all capabilities sent through the channel. Add if missing.
-4. Implement kernel-side share-back: Themis-specific early init creates two
+2. ✅ **MAP_SELF hypercall wired** — `THEMIS_MAP_SELF` (0x1f) across themis-abi,
+   capavisor handler, thhv defines + wrapper.
+3. Implement kernel-side share-back: Themis-specific early init creates two
    aliases of swiotlb pool, MAP_SELFs one at VTOM GPA, sends the other via channel
-5. Implement CHV-side: accept alias from channel, map shared region
-6. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
+4. Implement CHV-side: accept alias from channel, map shared region
+5. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
+
+Note: revocation of shared aliases is handled by the standard capability tree
+model — the parent capability holder (dom1) can revoke any alias it created,
+regardless of which domain currently holds it. Channels are only a transport
+mechanism; they play no role in revocation semantics.
 
 ### Phase C: EPT enforcement + full confidential boot
 
