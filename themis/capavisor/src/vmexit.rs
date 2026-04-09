@@ -346,6 +346,16 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                         );
                     }
 
+                    // ── Read child's exit policy once ──────────────────────
+                    // The policy determines whether a given VMEXIT reason
+                    // is forwarded to the parent (trap=true) or handled
+                    // locally by the capavisor (trap=false).
+                    let child_exit_trap = {
+                        let cap = platform.get_core_cap(core_id as usize);
+                        cap.map(|c| c.read().data.policy.exits.get_action(basic_reason).trap)
+                            .unwrap_or(true) // no cap → trap (safe default)
+                    };
+
                     match basic_reason {
                         EXIT_REASON_EXTERNAL_INTERRUPT => {
                             // Physical interrupt fired while child was running.
@@ -388,18 +398,18 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         EXIT_REASON_EXCEPTION_NMI => {
-                            // NMI fired while child was running (NMI_EXITING=1 for child VPs).
-                            // NMIs cannot be posted via PIR — forward to dom0 as vector 2.
-                            // Child's default Report policy routes it via lazy-unwind to dom0.
                             let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
                             let exc_type =
                                 ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
                             if exc_type as u64 == INTR_TYPE_NMI {
-                                // Type 2 = NMI; forward to dom0.
+                                // NMI: always forward via interrupt routing (separate policy).
                                 crate::hypercall::forward_interrupt_to_handler(vcpu, 2);
-                            } else {
-                                // Exception from child VM (not NMI) — forward via general path.
+                            } else if child_exit_trap {
+                                // Exception: policy says trap → forward to parent.
                                 crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            } else {
+                                // Exception: policy says local → re-inject into guest.
+                                reinject_exception(vcpu);
                             }
                             return;
                         }
@@ -458,59 +468,20 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             return;
                         }
                         EXIT_REASON_CPUID => {
-                            // Intercept hypervisor-identification leaves so child
-                            // domains see "ThemisCapa" (same as dom0) regardless of
-                            // what CHV would return.  All other leaves are forwarded
-                            // to CHV via the normal child-exit path.
+                            // Themis hypervisor leaves + TSC calibration: always
+                            // handled locally (capavisor identity, not parent concern).
                             let leaf = vcpu.reg(Reg::Rax) as u32;
-                            match leaf {
-                                CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END => {
-                                    let (eax, ebx, ecx, edx) = match leaf {
-                                        CPUID_THEMIS_BASE => (
-                                            CPUID_THEMIS_MAX,
-                                            u32::from_le_bytes(*b"Them"),
-                                            u32::from_le_bytes(*b"isCa"),
-                                            u32::from_le_bytes(*b"pa  "),
-                                        ),
-                                        CPUID_THEMIS_FEATURES => (0b00001, 0, 0, 0),
-                                        CPUID_THEMIS_LIMITS => (
-                                            THEMIS_MAX_VPS,
-                                            THEMIS_MAX_PARTITIONS,
-                                            THEMIS_MAX_MEM_REGIONS,
-                                            0,
-                                        ),
-                                        // Leaf 0x40000010: Hyper-V TSC frequency
-                                        // ECX = TSC freq in kHz — Linux reads this
-                                        // via hv_get_tsc_khz() when running on Hyper-V.
-                                        CPUID_THEMIS_TSC => (0, 0, 3000000u32, 0),
-                                        _ => (0, 0, 0, 0),
-                                    };
-                                    vcpu.set_reg(Reg::Rax, eax as u64);
-                                    vcpu.set_reg(Reg::Rbx, ebx as u64);
-                                    vcpu.set_reg(Reg::Rcx, ecx as u64);
-                                    vcpu.set_reg(Reg::Rdx, edx as u64);
-                                    next_instruction(vcpu);
-                                    return;
-                                }
-                                // Leaf 0x15: Time Stamp Counter / Core Crystal Clock
-                                // Linux uses this for fast TSC calibration.
-                                // EAX=denom, EBX=numer, ECX=crystal Hz.
-                                // TSC freq = crystal * numer / denom.
-                                // 25 MHz crystal × 120 / 1 = 3000 MHz.
-                                0x15 => {
-                                    vcpu.set_reg(Reg::Rax, 1u64); // denominator
-                                    vcpu.set_reg(Reg::Rbx, 120u64); // numerator
-                                    vcpu.set_reg(Reg::Rcx, 25_000_000u64); // crystal Hz
-                                    vcpu.set_reg(Reg::Rdx, 0u64);
-                                    next_instruction(vcpu);
-                                    return;
-                                }
-                                _ => {
-                                    // Non-hypervisor leaf: forward to CHV.
-                                    crate::hypercall::forward_child_exit(vcpu, basic_reason);
-                                    return;
-                                }
+                            if matches!(leaf, CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END) || leaf == 0x15 {
+                                handle_cpuid_local(vcpu);
+                                return;
                             }
+                            // Other leaves: policy-driven.
+                            if child_exit_trap {
+                                crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            } else {
+                                handle_cpuid_local(vcpu);
+                            }
+                            return;
                         }
                         EXIT_REASON_APIC_ACCESS => {
                             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
@@ -570,18 +541,40 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
                             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
                             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
 
-                            // Doorbell fast-path: match GPA against child's doorbell table.
+                            // Doorbell fast-path: always local.
                             if let Some(true) = handle_ept_doorbell(platform, vcpu, gpa, qual) {
                                 return;
                             }
 
-                            // No match — forward to parent for MMIO emulation.
-                            crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            // Non-doorbell: policy-driven.
+                            if child_exit_trap {
+                                crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            }
+                            // trap=false: no local MMIO emulation for children —
+                            // just re-enter guest. Platform validation should reject
+                            // trap=false for EPT_VIOLATION.
                             return;
                         }
                         _ => {
-                            // All other exits: forward to parent.
-                            crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            // All other exits: policy-driven.
+                            if child_exit_trap {
+                                crate::hypercall::forward_child_exit(vcpu, basic_reason);
+                            } else {
+                                // Handle locally using shared handlers where available.
+                                match basic_reason {
+                                    EXIT_REASON_RDMSR => handle_rdmsr_local(vcpu),
+                                    EXIT_REASON_WRMSR => handle_wrmsr_local(vcpu),
+                                    EXIT_REASON_HLT | EXIT_REASON_IO_INSTRUCTION => {
+                                        next_instruction(vcpu);
+                                    }
+                                    _ => {
+                                        // No specific local handler — advance RIP
+                                        // and re-enter. Platform validation should
+                                        // prevent trap=false for unsupported exits.
+                                        next_instruction(vcpu);
+                                    }
+                                }
+                            }
                             return;
                         }
                     }
@@ -643,139 +636,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_CPUID => {
-            let leaf = vcpu.reg(Reg::Rax) as u32;
-            let sub_leaf = vcpu.reg(Reg::Rcx) as u32;
-            let result = core::arch::x86_64::__cpuid_count(leaf, sub_leaf);
-            let mut eax = result.eax;
-            let mut ebx = result.ebx;
-            let mut ecx = result.ecx;
-            let mut edx = result.edx;
-
-            match (leaf, sub_leaf) {
-                (0x1, _) => {
-                    ecx &= !(1u32 << 31); // hide hypervisor-present bit
-                }
-                (0x7, 0) => {
-                    // Hide WAITPKG (ECX bit 5) and all AVX-512 sub-features.
-                    // AVX-512 is advertised by the host but child VMs may not
-                    // have matching XSAVE state configuration, causing
-                    // paranoid_xstate_size_valid failures and userspace #UD
-                    // on XGETBV (BUG-12).  Masking here cascades to CHV's
-                    // CPUID policy so child domains never see AVX-512 either.
-                    const AVX512_EBX: u32 = (1 << 16) // AVX512F
-                        | (1 << 17) // AVX512DQ
-                        | (1 << 21) // AVX512_IFMA
-                        | (1 << 26) // AVX512PF
-                        | (1 << 27) // AVX512ER
-                        | (1 << 28) // AVX512CD
-                        | (1 << 30) // AVX512BW
-                        | (1 << 31); // AVX512VL
-                    const AVX512_ECX: u32 = (1 << 1) // AVX512_VBMI
-                        | (1 << 4)  // PKU/OSPKE
-                        | (1 << 5)  // WAITPKG
-                        | (1 << 6)  // AVX512_VBMI2
-                        | (1 << 11) // AVX512_VNNI
-                        | (1 << 12) // AVX512_BITALG
-                        | (1 << 14); // AVX512_VPOPCNTDQ
-                    const AVX512_EDX: u32 = (1 << 2) // AVX512_4VNNIW
-                        | (1 << 3)  // AVX512_4FMAPS
-                        | (1 << 8)  // AVX512_VP2INTERSECT
-                        | (1 << 23); // AVX512_FP16
-                    ebx &= !AVX512_EBX;
-                    ecx &= !AVX512_ECX;
-                    edx &= !AVX512_EDX;
-                }
-                (0xD, 0) => {
-                    // Restrict XSAVE state to x87 + SSE + AVX only.
-                    // Without AVX-512 features, the XSAVE area must not
-                    // include opmask/ZMM components or sizes won't match.
-                    eax = 0x7; // bits 0,1,2 = x87 + SSE + AVX
-                    ebx = 0x340; // 832 bytes (512 legacy + 64 header + 256 AVX)
-                    ecx = 0x340;
-                    edx = 0;
-                }
-                (0xD, 1) => {
-                    // XSAVES (bit 3): passed through — ENABLE_XSAVES is
-                    // set in secondary proc-based controls.
-                    // Fix compact size to match reduced feature set.
-                    ebx = 0x340;
-                    ecx = 0;
-                    edx = 0;
-                }
-                (0xD, sub) if matches!(sub, 5..=7 | 9) => {
-                    // AVX-512 XSAVE component sub-leaves: zero them out.
-                    eax = 0;
-                    ebx = 0;
-                    ecx = 0;
-                    edx = 0;
-                }
-                // Themis hypervisor identification leaves.
-                // Leaf 0x40000000: vendor string "ThemisCapa" (10 bytes) in
-                //   EBX:ECX:EDX, matching Hyper-V convention for 12-byte strings
-                //   (we pad the last 2 bytes with spaces).
-                //   EAX = max hypervisor leaf (0x40000003).
-                //
-                // Leaf 0x40000001: feature flags.
-                //   EAX[0] = sync scheduling (VMCALL_SWITCH) supported.
-                //   EAX[1] = async scheduling (START_VP/RESUME_VP) supported.
-                //   EAX[2] = META VP-state pages available (Phase 10).
-                //   EAX[3] = ThemIC (event flags + doorbell) available.
-                //   EAX[4] = device assignment (VT-d) available.
-                //
-                // Leaf 0x40000003: capacity limits.
-                //   EAX = max VPs per partition, EBX = max partitions,
-                //   ECX = max memory regions.
-                //
-                // All other leaves in the range: zero.
-                (CPUID_THEMIS_BASE, _) => {
-                    // "Them" "isCa" "pa  "  (each chunk is little-endian u32)
-                    eax = CPUID_THEMIS_MAX;
-                    ebx = u32::from_le_bytes(*b"Them");
-                    ecx = u32::from_le_bytes(*b"isCa");
-                    edx = u32::from_le_bytes(*b"pa  ");
-                }
-                (CPUID_THEMIS_FEATURES, _) => {
-                    eax = 0b00001; // bit 0: sync scheduling supported
-                    ebx = 0;
-                    ecx = 0;
-                    edx = 0;
-                }
-                (CPUID_THEMIS_DOMCOMM, _) => {
-                    // DomainComm discovery: GPA and page count.
-                    // Set by init_themis → bootstrap_init_domcomm.
-                    let gpa = DOMCOMM_GPA.load(Ordering::Relaxed);
-                    let pages = DOMCOMM_PAGES.load(Ordering::Relaxed);
-                    eax = gpa as u32; // GPA low 32 bits
-                    ebx = (gpa >> 32) as u32; // GPA high 32 bits
-                    ecx = pages; // region size in pages
-                    edx = 0;
-                }
-                (CPUID_THEMIS_LIMITS, _) => {
-                    eax = THEMIS_MAX_VPS; // max VPs per partition
-                    ebx = THEMIS_MAX_PARTITIONS; // max partitions
-                    ecx = THEMIS_MAX_MEM_REGIONS; // max memory regions
-                    edx = 0;
-                }
-                (CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END, _) => {
-                    eax = 0;
-                    ebx = 0;
-                    ecx = 0;
-                    edx = 0;
-                }
-                (CPUID_DEBUG_RANGE_START..=CPUID_DEBUG_RANGE_END, _) => {
-                    eax = 0;
-                    ebx = 0;
-                    ecx = 0;
-                    edx = 0;
-                }
-                _ => {}
-            }
-
-            vcpu.set_reg(Reg::Rax, eax as u64);
-            vcpu.set_reg(Reg::Rbx, ebx as u64);
-            vcpu.set_reg(Reg::Rcx, ecx as u64);
-            vcpu.set_reg(Reg::Rdx, edx as u64);
-            next_instruction(vcpu);
+            handle_cpuid_local(vcpu);
         }
 
         EXIT_REASON_HLT => {
@@ -783,61 +644,11 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_RDMSR => {
-            let ecx = vcpu.reg(Reg::Rcx) as u32;
-            if ecx == msr::IA32_EFER {
-                let value = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-                vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
-                vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
-                next_instruction(vcpu);
-            } else {
-                match crate::msr_virt::handle_rdmsr(ecx) {
-                    crate::msr_virt::MsrResult::Emulated(v) => {
-                        vcpu.set_reg(Reg::Rax, v & MSR_LOW_MASK);
-                        vcpu.set_reg(Reg::Rdx, (v >> 32) & MSR_LOW_MASK);
-                        next_instruction(vcpu);
-                    }
-                    crate::msr_virt::MsrResult::Passthrough => {
-                        if crate::msr_virt::in_bitmap_range(ecx) {
-                            let value = msr::rdmsr(ecx);
-                            vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
-                            vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
-                            next_instruction(vcpu);
-                        } else {
-                            inject_gp(vcpu);
-                        }
-                    }
-                    crate::msr_virt::MsrResult::GpFault => {
-                        inject_gp(vcpu);
-                    }
-                }
-            }
+            handle_rdmsr_local(vcpu);
         }
 
         EXIT_REASON_WRMSR => {
-            let ecx = vcpu.reg(Reg::Rcx) as u32;
-            let value =
-                ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
-            if ecx == msr::IA32_EFER {
-                vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
-                next_instruction(vcpu);
-            } else {
-                match crate::msr_virt::handle_wrmsr(ecx, value) {
-                    crate::msr_virt::MsrResult::Emulated(_) => {
-                        next_instruction(vcpu);
-                    }
-                    crate::msr_virt::MsrResult::Passthrough => {
-                        if crate::msr_virt::in_bitmap_range(ecx) {
-                            msr::wrmsr(ecx, value);
-                            next_instruction(vcpu);
-                        } else {
-                            inject_gp(vcpu);
-                        }
-                    }
-                    crate::msr_virt::MsrResult::GpFault => {
-                        inject_gp(vcpu);
-                    }
-                }
-            }
+            handle_wrmsr_local(vcpu);
         }
 
         EXIT_REASON_IO_INSTRUCTION => {
@@ -1068,49 +879,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
         }
 
         EXIT_REASON_EXCEPTION_NMI => {
-            let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-            let vector = (info & INTR_INFO_VECTOR_MASK) as u8;
-            let exc_type = ((info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
-            let has_error_code = (info >> 11) & 1;
-            let rip = vcpu.get(vmcs::guest::RIP);
-
-            let name = match vector {
-                0 => "#DE",
-                1 => "#DB",
-                2 => "NMI",
-                3 => "#BP",
-                6 => "#UD",
-                8 => "#DF",
-                13 => "#GP",
-                14 => "#PF",
-                _ => "??",
-            };
-
-            if vector == 6 || vector == 8 {
-                serial_println!("[VMEXIT] exception {} at RIP={:#018x}", name, rip);
-                let rsp = vcpu.get(vmcs::guest::RSP);
-                let cr3 = vcpu.get(vmcs::guest::CR3);
-                let cr4 = vcpu.get(vmcs::guest::CR4);
-                serial_println!("  RSP={:#018x}  CR3={:#010x}  CR4={:#010x}", rsp, cr3, cr4);
-                serial_println!(
-                    "  RAX={:#018x}  RCX={:#018x}  RDX={:#018x}",
-                    vcpu.reg(Reg::Rax),
-                    vcpu.reg(Reg::Rcx),
-                    vcpu.reg(Reg::Rdx)
-                );
-            }
-
-            // Re-inject the exception into the guest.
-            let inject = INTR_INFO_VALID
-                | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT)
-                | (vector as u64)
-                | (has_error_code << 11);
-            vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
-            if has_error_code == 1 {
-                let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
-                vcpu.set(control::VMENTRY_EXCEPTION_ERR_CODE, err);
-            }
-            vcpu.set(control::VMENTRY_INSTRUCTION_LEN, 0);
+            reinject_exception(vcpu);
         }
 
         EXIT_REASON_VMX_PREEMPTION_TIMER => {
@@ -1159,6 +928,217 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
     }
 
     sync_ia32e_mode_guest(vcpu);
+}
+
+// ── Shared local handlers ─────────────────────────────────────────────────── //
+// These are used by BOTH the dom0 path and the policy-driven child path
+// (when ExitPolicy has trap=false for the exit reason).
+
+/// Re-inject a guest exception/NMI back into the vCPU (exit reason 0).
+///
+/// Reads the VM-exit interruption info, reconstructs the VM-entry injection
+/// field, and copies the error code if present.  Used by both the dom0 path
+/// and child domains with `trap=false` for EXCEPTION_NMI.
+fn reinject_exception(vcpu: &mut ActiveVcpu) {
+    let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+    let vector = (info & INTR_INFO_VECTOR_MASK) as u8;
+    let exc_type = ((info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
+    let has_error_code = (info >> 11) & 1;
+
+    if vector == 6 || vector == 8 {
+        let rip = vcpu.get(vmcs::guest::RIP);
+        let name = match vector {
+            6 => "#UD",
+            8 => "#DF",
+            _ => "??",
+        };
+        serial_println!("[VMEXIT] exception {} at RIP={:#018x}", name, rip);
+    }
+
+    let inject = INTR_INFO_VALID
+        | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT)
+        | (vector as u64)
+        | (has_error_code << 11);
+    vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
+    if has_error_code == 1 {
+        let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
+        vcpu.set(control::VMENTRY_EXCEPTION_ERR_CODE, err);
+    }
+    vcpu.set(control::VMENTRY_INSTRUCTION_LEN, 0);
+}
+
+/// Handle CPUID locally: native cpuid + masking (exit reason 10).
+///
+/// Executes `cpuid` on the physical CPU, applies security masks (AVX-512,
+/// XSAVE area), and intercepts Themis hypervisor leaves.
+/// Used by both the dom0 path and child domains with `trap=false` for CPUID.
+fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
+    let leaf = vcpu.reg(Reg::Rax) as u32;
+    let sub_leaf = vcpu.reg(Reg::Rcx) as u32;
+    let result = core::arch::x86_64::__cpuid_count(leaf, sub_leaf);
+    let mut eax = result.eax;
+    let mut ebx = result.ebx;
+    let mut ecx = result.ecx;
+    let mut edx = result.edx;
+
+    match (leaf, sub_leaf) {
+        (0x1, _) => {
+            ecx &= !(1u32 << 31); // hide hypervisor-present bit
+        }
+        (0x7, 0) => {
+            const AVX512_EBX: u32 = (1 << 16)
+                | (1 << 17)
+                | (1 << 21)
+                | (1 << 26)
+                | (1 << 27)
+                | (1 << 28)
+                | (1 << 30)
+                | (1 << 31);
+            const AVX512_ECX: u32 = (1 << 1)
+                | (1 << 4)
+                | (1 << 5)
+                | (1 << 6)
+                | (1 << 11)
+                | (1 << 12)
+                | (1 << 14);
+            const AVX512_EDX: u32 = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 23);
+            ebx &= !AVX512_EBX;
+            ecx &= !AVX512_ECX;
+            edx &= !AVX512_EDX;
+        }
+        (0xD, 0) => {
+            eax = 0x7; // x87 + SSE + AVX
+            ebx = 0x340;
+            ecx = 0x340;
+            edx = 0;
+        }
+        (0xD, 1) => {
+            ebx = 0x340;
+            ecx = 0;
+            edx = 0;
+        }
+        (0xD, sub) if matches!(sub, 5..=7 | 9) => {
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
+        }
+        (CPUID_THEMIS_BASE, _) => {
+            eax = CPUID_THEMIS_MAX;
+            ebx = u32::from_le_bytes(*b"Them");
+            ecx = u32::from_le_bytes(*b"isCa");
+            edx = u32::from_le_bytes(*b"pa  ");
+        }
+        (CPUID_THEMIS_FEATURES, _) => {
+            eax = 0b00001;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
+        }
+        (CPUID_THEMIS_DOMCOMM, _) => {
+            let gpa = DOMCOMM_GPA.load(core::sync::atomic::Ordering::Relaxed);
+            let pages = DOMCOMM_PAGES.load(core::sync::atomic::Ordering::Relaxed);
+            eax = gpa as u32;
+            ebx = (gpa >> 32) as u32;
+            ecx = pages;
+            edx = 0;
+        }
+        (CPUID_THEMIS_LIMITS, _) => {
+            eax = THEMIS_MAX_VPS;
+            ebx = THEMIS_MAX_PARTITIONS;
+            ecx = THEMIS_MAX_MEM_REGIONS;
+            edx = 0;
+        }
+        (CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END, _) => {
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
+        }
+        (CPUID_DEBUG_RANGE_START..=CPUID_DEBUG_RANGE_END, _) => {
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
+        }
+        // Leaf 0x15: TSC / Core Crystal Clock
+        (0x15, _) => {
+            eax = 1;    // denominator
+            ebx = 120;  // numerator
+            ecx = 25_000_000; // crystal Hz
+            edx = 0;
+        }
+        _ => {}
+    }
+
+    vcpu.set_reg(Reg::Rax, eax as u64);
+    vcpu.set_reg(Reg::Rbx, ebx as u64);
+    vcpu.set_reg(Reg::Rcx, ecx as u64);
+    vcpu.set_reg(Reg::Rdx, edx as u64);
+    next_instruction(vcpu);
+}
+
+/// Handle RDMSR locally (exit reason 31).
+///
+/// Reads MSR via msr_virt virtualisation layer, passes through safe MSRs,
+/// injects #GP for blocked ones.
+fn handle_rdmsr_local(vcpu: &mut ActiveVcpu) {
+    let ecx = vcpu.reg(Reg::Rcx) as u32;
+    if ecx == msr::IA32_EFER {
+        let value = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+        vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
+        vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
+        next_instruction(vcpu);
+    } else {
+        match crate::msr_virt::handle_rdmsr(ecx) {
+            crate::msr_virt::MsrResult::Emulated(v) => {
+                vcpu.set_reg(Reg::Rax, v & MSR_LOW_MASK);
+                vcpu.set_reg(Reg::Rdx, (v >> 32) & MSR_LOW_MASK);
+                next_instruction(vcpu);
+            }
+            crate::msr_virt::MsrResult::Passthrough => {
+                if crate::msr_virt::in_bitmap_range(ecx) {
+                    let value = unsafe { msr::rdmsr(ecx) };
+                    vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
+                    vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
+                    next_instruction(vcpu);
+                } else {
+                    inject_gp(vcpu);
+                }
+            }
+            crate::msr_virt::MsrResult::GpFault => {
+                inject_gp(vcpu);
+            }
+        }
+    }
+}
+
+/// Handle WRMSR locally (exit reason 32).
+fn handle_wrmsr_local(vcpu: &mut ActiveVcpu) {
+    let ecx = vcpu.reg(Reg::Rcx) as u32;
+    let value =
+        ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
+    if ecx == msr::IA32_EFER {
+        vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
+        next_instruction(vcpu);
+    } else {
+        match crate::msr_virt::handle_wrmsr(ecx, value) {
+            crate::msr_virt::MsrResult::Emulated(_) => {
+                next_instruction(vcpu);
+            }
+            crate::msr_virt::MsrResult::Passthrough => {
+                if crate::msr_virt::in_bitmap_range(ecx) {
+                    unsafe { msr::wrmsr(ecx, value) };
+                    next_instruction(vcpu);
+                } else {
+                    inject_gp(vcpu);
+                }
+            }
+            crate::msr_virt::MsrResult::GpFault => {
+                inject_gp(vcpu);
+            }
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //

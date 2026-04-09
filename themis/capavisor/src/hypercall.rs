@@ -1427,11 +1427,11 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         .get_core_cap(core_id as usize)
         .expect("[CHILD_EXIT] get_core_cap failed");
 
-    // Look up the interrupt policy for this exit reason.
+    // Look up the exit policy for the forwarded exit reason.
     let read_set = {
         let c = child_cap.read();
-        let policy = c.data.policy.interrupts.get_policy(exit_reason as u8);
-        policy.read_set
+        let action = c.data.policy.exits.get_action(exit_reason);
+        action.read_set
     };
 
     // ── Capa engine: return switch (child → parent) ──
