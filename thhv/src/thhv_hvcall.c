@@ -169,6 +169,22 @@ int themis_map_self(u64 cap_handle, u64 new_gpa)
 	return __themis_to_errno(status);
 }
 
+int themis_set_exit_policy(u64 child_domain, u64 exit_reason, u64 trap)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_SET_EXIT_POLICY,
+				     child_domain, exit_reason, trap, 0, 0,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
+int themis_set_def_exit_policy(u64 child_domain, u64 trap)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_SET_DEF_EXIT_POLICY,
+				     child_domain, trap, 0, 0, 0,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ATTEST,

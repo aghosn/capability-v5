@@ -264,6 +264,65 @@ impl InterruptPolicy {
     }
 }
 
+// ── VMEXIT exit policy ──────────────────────────────────────────────────── //
+
+/// Action for a specific VMEXIT reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitAction {
+    /// true = forward to parent via COMM page, false = handle locally in capavisor
+    pub trap: bool,
+    /// Registers parent can read on COMM page (only meaningful when trap=true)
+    pub read_set: RegBitmap,
+    /// Registers parent can write back (only meaningful when trap=true)
+    pub write_set: RegBitmap,
+}
+
+impl ExitAction {
+    /// Default for child domains: trap to parent with full register access.
+    pub fn default_trap() -> Self {
+        ExitAction {
+            trap: true,
+            read_set: RegBitmap::ALL,
+            write_set: RegBitmap::ALL,
+        }
+    }
+
+    /// Default for root domain: handle locally (no parent).
+    pub fn default_local() -> Self {
+        ExitAction {
+            trap: false,
+            read_set: RegBitmap::NONE,
+            write_set: RegBitmap::NONE,
+        }
+    }
+}
+
+/// VMEXIT routing policy: default action + per-exit-reason overrides.
+#[derive(Debug, Clone)]
+pub struct ExitPolicy {
+    /// Default action for all exit reasons not explicitly overridden
+    pub default: ExitAction,
+    /// Per-exit-reason overrides (exit reason number -> action)
+    pub overrides: BTreeMap<u32, ExitAction>,
+}
+
+impl ExitPolicy {
+    pub fn new_default(default: ExitAction) -> Self {
+        ExitPolicy {
+            default,
+            overrides: BTreeMap::new(),
+        }
+    }
+
+    pub fn get_action(&self, exit_reason: u32) -> &ExitAction {
+        self.overrides.get(&exit_reason).unwrap_or(&self.default)
+    }
+
+    pub fn set_action(&mut self, exit_reason: u32, action: ExitAction) {
+        self.overrides.insert(exit_reason, action);
+    }
+}
+
 /// Call-chain context saved when a VP does a switch call.
 #[derive(Debug, Clone)]
 pub struct VpCallContext {
@@ -361,9 +420,20 @@ pub enum PolicyIdentifier {
     /// Per-vector register write-access bitmap (one word at a time).
     /// First `u8` is the vector, second is the word index (0..3).
     VectorRegWriteSet(u8, u8),
-}
 
-/// Virtual processor state (platform-specific)
+    // ── VMEXIT exit policy identifiers ──
+
+    /// Default exit trap policy. Value: 0 = handle locally, 1 = trap to parent.
+    DefaultExitTrap,
+    /// Per-exit-reason trap policy. Value: 0 = handle locally, 1 = trap to parent.
+    ExitReasonTrap(u32),
+    /// Per-exit-reason register read bitmap (one word at a time).
+    /// `u32` is the exit reason, `u8` is the word index (0..2).
+    ExitReasonRegReadSet(u32, u8),
+    /// Per-exit-reason register write bitmap (one word at a time).
+    /// `u32` is the exit reason, `u8` is the word index (0..2).
+    ExitReasonRegWriteSet(u32, u8),
+}
 pub struct VProcessorState {
     pub id: u64,
     /// Platform-specific state (e.g. saved register file; managed by the platform)
@@ -406,6 +476,9 @@ pub struct DomainPolicy {
     /// Interrupt routing policy
     pub interrupts: InterruptPolicy,
 
+    /// VMEXIT exit routing policy
+    pub exits: ExitPolicy,
+
     /// List of valid virtual processor states
     pub vprocessor_states: Vec<VProcessorRef>,
 
@@ -429,6 +502,7 @@ impl DomainPolicy {
             cores,
             api: MonitorAPI::ALL,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
+            exits: ExitPolicy::new_default(ExitAction::default_local()),
             vprocessor_states: Vec::new(),
             num_vprocessors: num_cores,
         }
@@ -442,6 +516,7 @@ impl DomainPolicy {
             cores,
             api,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
+            exits: ExitPolicy::new_default(ExitAction::default_trap()),
             vprocessor_states: Vec::new(),
             num_vprocessors: cores.count_ones() as usize,
         }

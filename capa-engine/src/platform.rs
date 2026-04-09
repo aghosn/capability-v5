@@ -165,6 +165,23 @@ pub trait Platform: Send + Sync {
     // Hardware state
     // -----------------------------------------------------------------------
 
+    /// Validate an exit policy change before it is applied.
+    ///
+    /// Called by `set_policy` for exit-related [`PolicyIdentifier`] variants.
+    /// The platform can reject:
+    /// - Invalid exit reason numbers for this architecture
+    /// - `trap=false` for exits the platform cannot emulate locally
+    /// - `trap=true` for exits that are internal mechanisms (timer, interrupt window)
+    ///
+    /// **Default implementation** accepts everything.
+    fn validate_exit_policy(
+        &self,
+        _exit_reason: u32,
+        _action: &crate::domain::ExitAction,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Apply a single hardware-level update (map/unmap/zero memory/TLB flush…).
     ///
     /// Called by the initiating core **between** the two barriers, while all

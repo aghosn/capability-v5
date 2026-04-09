@@ -2,9 +2,9 @@
 
 use crate::attest::{self, AttestationReport};
 use crate::domain::{
-    effective_vector, Domain, DomainPolicy, InterruptVisibility, MonitorAPI, PendingCapability,
-    PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef, VectorPolicy,
-    VpCallContext, VpRunState, VECTOR_AVAILABLE,
+    effective_vector, Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI,
+    PendingCapability, PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef,
+    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus, Rights};
@@ -3458,6 +3458,65 @@ impl Capability<Domain> {
                     .or_insert_with(VectorPolicy::default_report);
                 entry.write_set.set_word(word as usize, value);
             }
+            PolicyIdentifier::DefaultExitTrap => {
+                let trap = value != 0;
+                // Monotonicity: child cannot un-trap if parent traps by default.
+                if !trap && parent_policy.exits.default.trap {
+                    return Err(CapaError::MonotonicityViolation);
+                }
+                child_w.data.policy.exits.default.trap = trap;
+            }
+            PolicyIdentifier::ExitReasonTrap(reason) => {
+                let trap = value != 0;
+                // Monotonicity: child cannot un-trap an exit that the parent traps.
+                let parent_effective = parent_policy.exits.get_action(reason);
+                if !trap && parent_effective.trap {
+                    return Err(CapaError::MonotonicityViolation);
+                }
+                let default_trap = child_w.data.policy.exits.default.trap;
+                let entry = child_w
+                    .data
+                    .policy
+                    .exits
+                    .overrides
+                    .entry(reason)
+                    .or_insert_with(|| ExitAction {
+                        trap: default_trap,
+                        read_set: RegBitmap::ALL,
+                        write_set: RegBitmap::ALL,
+                    });
+                entry.trap = trap;
+            }
+            PolicyIdentifier::ExitReasonRegReadSet(reason, word) => {
+                let default_trap = child_w.data.policy.exits.default.trap;
+                let entry = child_w
+                    .data
+                    .policy
+                    .exits
+                    .overrides
+                    .entry(reason)
+                    .or_insert_with(|| ExitAction {
+                        trap: default_trap,
+                        read_set: RegBitmap::ALL,
+                        write_set: RegBitmap::ALL,
+                    });
+                entry.read_set.set_word(word as usize, value);
+            }
+            PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => {
+                let default_trap = child_w.data.policy.exits.default.trap;
+                let entry = child_w
+                    .data
+                    .policy
+                    .exits
+                    .overrides
+                    .entry(reason)
+                    .or_insert_with(|| ExitAction {
+                        trap: default_trap,
+                        read_set: RegBitmap::ALL,
+                        write_set: RegBitmap::ALL,
+                    });
+                entry.write_set.set_word(word as usize, value);
+            }
         }
 
         Ok(())
@@ -3508,6 +3567,26 @@ impl Capability<Domain> {
                 .policy
                 .interrupts
                 .get_policy(vec)
+                .write_set
+                .word(word as usize),
+            PolicyIdentifier::DefaultExitTrap => {
+                if child_r.data.policy.exits.default.trap { 1 } else { 0 }
+            }
+            PolicyIdentifier::ExitReasonTrap(reason) => {
+                if child_r.data.policy.exits.get_action(reason).trap { 1 } else { 0 }
+            }
+            PolicyIdentifier::ExitReasonRegReadSet(reason, word) => child_r
+                .data
+                .policy
+                .exits
+                .get_action(reason)
+                .read_set
+                .word(word as usize),
+            PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => child_r
+                .data
+                .policy
+                .exits
+                .get_action(reason)
                 .write_set
                 .word(word as usize),
         };

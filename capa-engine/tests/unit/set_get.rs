@@ -811,3 +811,152 @@ fn test_seal_domain_allowed_with_seal_permission() {
     // parent has SEAL (root has ALL), so sealing should succeed.
     Capability::seal(&parent, h).unwrap();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExitPolicy — set_policy / get_policy
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_set_get_default_exit_trap() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Default for restricted child is trap=true (1).
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    assert_eq!(v, 1);
+
+    // Root has trap=false, so child can set trap=false (less restrictive parent).
+    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    assert_eq!(v, 0);
+
+    // Set back to trap=true.
+    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    assert_eq!(v, 1);
+}
+
+#[test]
+fn test_set_get_exit_reason_trap() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Default is trap=true; override exit reason 10 (CPUID) to local.
+    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap();
+    assert_eq!(v, 0);
+
+    // Unoverridden exit reason still returns default.
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap();
+    assert_eq!(v, 1);
+}
+
+#[test]
+fn test_set_get_exit_reason_reg_bitmaps() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Set read bitmap for exit reason 48 (EPT violation), word 0.
+    Capability::set_policy(
+        &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0), 0b1010,
+    ).unwrap();
+    let v = Capability::get_policy(
+        &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0),
+    ).unwrap();
+    assert_eq!(v, 0b1010);
+
+    // Write bitmap.
+    Capability::set_policy(
+        &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0), 0b0101,
+    ).unwrap();
+    let v = Capability::get_policy(
+        &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0),
+    ).unwrap();
+    assert_eq!(v, 0b0101);
+}
+
+#[test]
+fn test_exit_monotonicity_child_cannot_untrap() {
+    let parent = root();
+    // Create intermediate with trap=true default (restricted).
+    let (mid, mid_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    Capability::seal(&parent, mid_h).unwrap();
+
+    // Create grandchild under mid.
+    let (_, gc_h) = make_child(&mid, DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL));
+
+    // mid has trap=true default. Grandchild cannot set trap=false.
+    let err = Capability::set_policy(
+        &mid, gc_h, PolicyIdentifier::DefaultExitTrap, 0,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::MonotonicityViolation);
+
+    // Per-exit-reason: mid traps everything (default=true), so gc can't un-trap reason 10.
+    let err = Capability::set_policy(
+        &mid, gc_h, PolicyIdentifier::ExitReasonTrap(10), 0,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::MonotonicityViolation);
+}
+
+#[test]
+fn test_exit_monotonicity_parent_local_child_can_choose() {
+    let parent = root();
+    // Root has trap=false (local). Child can set either trap=true or trap=false.
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Set to local (same as parent) — allowed.
+    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
+
+    // Set back to trap — always allowed (more restrictive).
+    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
+}
+
+#[test]
+fn test_exit_policy_blocked_after_seal() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    Capability::seal(&parent, h).unwrap();
+
+    // set_policy should fail on sealed domain.
+    let err = Capability::set_policy(
+        &parent, h, PolicyIdentifier::DefaultExitTrap, 0,
+    ).unwrap_err();
+    assert_eq!(err, CapaError::DomainSealed);
+}
+
+#[test]
+fn test_exit_get_policy_works_after_seal() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Set some policy before seal.
+    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    Capability::seal(&parent, h).unwrap();
+
+    // get_policy should still work on sealed domain.
+    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap();
+    assert_eq!(v, 0);
+}
+
+#[test]
+fn test_exit_per_reason_override_independent() {
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Override two different exit reasons.
+    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48), 0).unwrap();
+
+    // Both read back correctly.
+    assert_eq!(
+        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap(), 0
+    );
+    assert_eq!(
+        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap(), 0
+    );
+
+    // Non-overridden reason still default.
+    assert_eq!(
+        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(12)).unwrap(), 1
+    );
+}

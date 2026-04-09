@@ -152,6 +152,15 @@ pub mod opcodes {
     ///      RSI = new_gpa (target GPA; must not overlap other mapped regions)
     /// OUT: RAX = error code (0 on success)
     pub const THEMIS_MAP_SELF:            u64 = 0x1f;
+
+    /// Set per-exit-reason trap policy on a child domain (before seal).
+    /// IN:  RDI = child_domain_handle, RSI = exit_reason (u32),
+    ///      RDX = trap (0 = handle locally, 1 = trap to parent)
+    pub const THEMIS_SET_EXIT_POLICY:     u64 = 0x20;
+
+    /// Set the default exit trap policy on a child domain (before seal).
+    /// IN:  RDI = child_domain_handle, RSI = trap (0 = handle locally, 1 = trap to parent)
+    pub const THEMIS_SET_DEF_EXIT_POLICY: u64 = 0x21;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

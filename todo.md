@@ -84,12 +84,7 @@
 
 ## Active Work
 
-### TODO: Implement VITAL cascade in Lean
-
-Short summary: The Lean model needs `revokeDomainCascade` to match the Rust fix.
-Three changes needed: (1) add cascade in Memory.lean, (2) remove DTO workaround
-filter in FFI.lean, (3) review list_domains filter.
-Full details in archive: [`themis/docs/archive/07_04_2026.md`](themis/docs/archive/07_04_2026.md)
+### ~~TODO: Implement VITAL cascade in Lean~~ ✅ Done (2f2df4af6)
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
@@ -181,12 +176,12 @@ binding to prevent cross-user attestation replay.
 - RSA-2048 AK under Owner hierarchy
 - Graceful degradation: no TPM → Ed25519-only (tpm_quote_size=0)
 
-**Todos**:
-- [ ] P20j-1: TPM driver — `TPM2_CreatePrimary` (RSA-2048) + `TPM2_Quote` commands
-- [ ] P20j-2: Capavisor — AK creation at boot after PCR_Extend in `try_tpm()`
-- [ ] P20j-3: ABI — extend `SignedAttestReport` with user_pub_key + TPM quote fields
-- [ ] P20j-4: Hypercall — `do_attest_self` reads `AttestRequest` from TX ring, sequence verify
-- [ ] P20j-5: thhv — mutex + TX enqueue + RX dequeue for signed attestation ioctl
+**Todos**: All complete.
+- [x] P20j-1: TPM driver — `TPM2_CreatePrimary` (RSA-2048) + `TPM2_Quote` commands
+- [x] P20j-2: Capavisor — AK creation at boot after PCR_Extend in `try_tpm()`
+- [x] P20j-3: ABI — extend `SignedAttestReport` with user_pub_key + TPM quote fields
+- [x] P20j-4: Hypercall — `do_attest_self` reads `AttestRequest` from TX ring, sequence verify
+- [x] P20j-5: thhv — mutex + TX enqueue + RX dequeue for signed attestation ioctl
 - [x] P20j-6: Userspace test — Ed25519 + RSA-2048 crypto verification (test_attestation.c)
 - [x] P20j-7: Documentation — attestation.md + todo.md updated
 
