@@ -146,6 +146,12 @@ pub mod opcodes {
     /// OUT: signed attestation report delivered via DomainComm RX ring;
     ///      RDI = report size in bytes (0 if TPM not available)
     pub const THEMIS_READ_PCR:            u64 = 0x1e;
+
+    /// Remap a memory capability at a new GPA within the caller's address space.
+    /// IN:  RDI = cap_handle (local handle of the capability to remap)
+    ///      RSI = new_gpa (target GPA; must not overlap other mapped regions)
+    /// OUT: RAX = error code (0 on success)
+    pub const THEMIS_MAP_SELF:            u64 = 0x1f;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

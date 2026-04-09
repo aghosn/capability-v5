@@ -78,6 +78,7 @@
 #define THEMIS_HC_REGISTER_COMM      0x18
 #define THEMIS_HC_INJECT_INTERRUPT   0x1b
 #define THEMIS_HC_READ_PCR           0x1e
+#define THEMIS_HC_MAP_SELF           0x1f
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
 
@@ -110,6 +111,7 @@
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
 #define THEMIS_OP_READ_PCR          0x1e
+#define THEMIS_OP_MAP_SELF          0x1f
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -1182,6 +1184,7 @@ int themis_set_def_intr_policy(u64 domain, u64 policy);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
+int themis_map_self(u64 cap_handle, u64 new_gpa);
 int themis_domcomm_notify(void);
 int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
 			     u64 datamatch, u64 flags, u64 *out_doorbell_id);

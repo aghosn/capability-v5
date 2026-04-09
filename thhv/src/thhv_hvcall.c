@@ -161,6 +161,14 @@ int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2)
 	return __themis_to_errno(status);
 }
 
+int themis_map_self(u64 cap_handle, u64 new_gpa)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_MAP_SELF,
+				     cap_handle, new_gpa, 0, 0, 0,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ATTEST,

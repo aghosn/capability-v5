@@ -212,6 +212,8 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
 
         opcodes::THEMIS_READ_PCR => Some(do_read_pcr(arg0 as u32)),
 
+        opcodes::THEMIS_MAP_SELF => Some(do_map_self(platform, &caller, arg0, arg1)),
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_GET_CHAN | opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
             Some(HypercallResult::unimpl())
@@ -693,6 +695,24 @@ fn do_read_pcr(pcr_index: u32) -> HypercallResult {
             }
         }
         Err(_) => HypercallResult::error(errors::ERR_INVALID),
+    }
+}
+
+/// MAP_SELF (0x1f): remap a memory capability at a new GPA within the caller's space.
+///
+/// IN:  RDI = cap_handle, RSI = new_gpa
+fn do_map_self(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    cap_handle: u64,
+    new_gpa: u64,
+) -> HypercallResult {
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::map_self(&caller, cap_handle, new_gpa).map(|batch| ((), batch))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
 
