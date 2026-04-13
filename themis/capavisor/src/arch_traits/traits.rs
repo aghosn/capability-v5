@@ -27,7 +27,7 @@ pub trait ArchVpOps {
     /// [`SemanticExit`]. Arch-internal exits (x86 XSETBV, INIT signal,
     /// interrupt-window drain) are handled inside this call and return
     /// `SemanticExit::ArchHandled`.
-    fn enter_and_decode(&mut self, vp: &mut Self::VpHandle) -> SemanticExit;
+    fn run(&mut self, vp: &mut Self::VpHandle) -> SemanticExit;
 
     /// Handle a local (non-trapped) exit. Called by the generic monitor loop
     /// when ExitPolicy says `trap=false` for a `PolicyDriven` exit.

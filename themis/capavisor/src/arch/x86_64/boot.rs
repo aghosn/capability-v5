@@ -1718,7 +1718,6 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 /// This function never returns.
 pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::ThemisPlatform) -> ! {
     use crate::vcpu::{InactiveVcpu, Reg};
-    use crate::arch::vmexit::monitor_loop;
     use crate::AP_LAUNCH_READY;
     use core::sync::atomic::Ordering;
 
@@ -1782,5 +1781,5 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
     let mut vcpu = inactive.activate().expect("BSP activate failed");
 
     // Enter the monitor loop — never returns.
-    monitor_loop(&mut vcpu);
+    crate::monitor::monitor_loop(&mut vcpu);
 }

@@ -77,7 +77,7 @@ impl ArchVpOps for X86Platform {
         unimplemented!("destroy_vp: wire up in Phase A7")
     }
 
-    fn enter_and_decode(&mut self, vp: &mut Self::VpHandle) -> SemanticExit {
+    fn run(&mut self, vp: &mut Self::VpHandle) -> SemanticExit {
         let exit_reason = match unsafe { vp.run() } {
             Ok(reason) => reason,
             Err(e) => {

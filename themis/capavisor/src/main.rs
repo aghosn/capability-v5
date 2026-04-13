@@ -405,7 +405,7 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     let mut active = inactive.activate().expect("AP activate failed");
 
     // Enter the monitor loop — never returns.
-    arch::vmexit::monitor_loop(&mut active);
+    monitor::monitor_loop(&mut active);
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

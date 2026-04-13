@@ -73,13 +73,13 @@ impl HypercallResult {
 
 // ── Semantic exit events ─────────────────────────────────────────────────── //
 
-/// Architecture-neutral exit events produced by `ArchVpOps::enter_and_decode`.
+/// Architecture-neutral exit events produced by `ArchVpOps::run`.
 ///
 /// Arch code fully decodes raw hardware exits (VMX exit reasons, ARM ESR_EL2.EC)
 /// into this enum. The generic monitor loop pattern-matches on it for dispatch.
 ///
 /// Events that are purely arch-internal (x86 XSETBV, ARM WFE trap) are handled
-/// inside `enter_and_decode` and surfaced as `ArchHandled`.
+/// inside `run` and surfaced as `ArchHandled`.
 pub enum SemanticExit {
     /// Arch code handled the exit internally (XSETBV, INIT signal,
     /// interrupt-window drain, etc.). Generic loop just re-enters the guest.

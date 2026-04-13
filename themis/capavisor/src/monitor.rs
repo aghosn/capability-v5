@@ -3,13 +3,13 @@
 //! This module contains the main run loop that all domains (dom0 and children)
 //! execute on each core. The loop:
 //!
-//! 1. Enters the guest via `ArchVpOps::enter_and_decode` (arch-specific).
+//! 1. Enters the guest via `ArchVpOps::run` (arch-specific).
 //! 2. Pattern-matches on `SemanticExit` (platform-agnostic policy logic).
 //! 3. Delegates back to arch code for local handling or forwards to parent
 //!    via the capability engine.
 //!
 //! Arch-internal exits (XSETBV, INIT, interrupt-window) never reach this
-//! loop — they are handled inside `enter_and_decode` and return `ArchHandled`.
+//! loop — they are handled inside `run` and return `ArchHandled`.
 //!
 //! Phase F2: The loop is structurally generic but uses concrete x86 types
 //! (`ActiveVcpu`, `ThemisPlatform`). Full trait generification is Phase A7.
