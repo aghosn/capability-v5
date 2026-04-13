@@ -106,10 +106,15 @@ ARM EL2/Stage-2/GIC). Enables multi-ISA support without duplicating policy code.
   without real validation target.
 
 **Phase B: ArchExit translation** (subsumes VMEXIT dispatch unification):
-- [ ] B1: vmexit.rs → SemanticExit translation layer
-- [ ] B2: Merge dom0/child dispatch via SemanticExit
+- [x] B1: classify_exit() in vmexit.rs — VMX exit reason → ArchExit translation
+- [x] B2: Merge dom0/child dispatch — **deferred**. Dom0 (machine control) and
+  child (policy-mediated forwarding) have genuinely different ownership models.
+  classify_exit() seam is sufficient; full merge deferred until ARM port.
 
-**Phase C: File reorganization**: Move generic → `core/`, x86 → `arch/x86_64/`
+**Phase C: File reorganization**:
+- [x] C1–C4: Moved 9 x86-specific files to `arch/x86_64/` (vmcs, vmexit, gdt,
+  msr_virt, acpi, pci, iommu_ir, boot, x86_platform). arch/mod.rs with cfg-gated
+  re-exports. Generic code stays at src/ root.
 
 **Phase D: ARM skeleton** (future, after x86 stable)
 
