@@ -116,6 +116,20 @@
 #define THEMIS_OP_MAP_SELF          0x1f
 #define THEMIS_OP_SET_EXIT_POLICY  0x20
 #define THEMIS_OP_SET_DEF_EXIT_POLICY 0x21
+#define THEMIS_OP_SET_POLICY      0x22
+
+/* ── Policy-kind discriminants for THEMIS_OP_SET_POLICY ────────────────────── */
+
+#define THEMIS_POLICY_CORES                    0
+#define THEMIS_POLICY_API_MONITOR              1
+#define THEMIS_POLICY_DEFAULT_INTR_VISIBILITY  2
+#define THEMIS_POLICY_VECTOR_VISIBILITY        3
+#define THEMIS_POLICY_VECTOR_REG_READ_SET      4
+#define THEMIS_POLICY_VECTOR_REG_WRITE_SET     5
+#define THEMIS_POLICY_DEFAULT_EXIT_TRAP        6
+#define THEMIS_POLICY_EXIT_REASON_TRAP         7
+#define THEMIS_POLICY_EXIT_REASON_REG_READ_SET 8
+#define THEMIS_POLICY_EXIT_REASON_REG_WRITE_SET 9
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 
@@ -926,10 +940,26 @@ struct thhv_inject_interrupt {
 	_IO(THHV_IOCTL_MAGIC, 0x16)
 #define THHV_SEND_SHARED_META \
 	_IOW(THHV_IOCTL_MAGIC, 0x17, struct thhv_initialize_partition)
+/*
+ * Unified policy-setting ioctl — maps directly to THEMIS_OP_SET_POLICY.
+ * kind: THEMIS_POLICY_* discriminant.
+ * key:  vector (interrupt variants) or exit_reason (exit variants), 0 otherwise.
+ * sub_key: word_index for register bitmap variants, 0 otherwise.
+ * value: the policy value to set.
+ */
+struct thhv_set_policy {
+	__u64 kind;
+	__u64 key;
+	__u64 sub_key;
+	__u64 value;
+};
+
 #define THHV_SET_INTR_POLICY \
 	_IOW(THHV_IOCTL_MAGIC, 0x18, struct thhv_set_intr_policy)
 #define THHV_INJECT_INTERRUPT \
 	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
+#define THHV_SET_POLICY \
+	_IOW(THHV_IOCTL_MAGIC, 0x1a, struct thhv_set_policy)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -1191,6 +1221,7 @@ int themis_add_vp(u64 child_domain, u64 comm_cap);
 int themis_map_self(u64 cap_handle, u64 new_gpa);
 int themis_set_exit_policy(u64 child_domain, u64 exit_reason, u64 trap);
 int themis_set_def_exit_policy(u64 child_domain, u64 trap);
+int themis_set_policy(u64 domain, u64 kind, u64 key, u64 sub_key, u64 value);
 int themis_domcomm_notify(void);
 int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
 			     u64 datamatch, u64 flags, u64 *out_doorbell_id);

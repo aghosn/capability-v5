@@ -229,6 +229,14 @@ int themis_set_def_intr_policy(u64 domain, u64 policy)
 	return __themis_to_errno(status);
 }
 
+int themis_set_policy(u64 domain, u64 kind, u64 key, u64 sub_key, u64 value)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_SET_POLICY,
+				     domain, kind, key, sub_key, value,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 int themis_assign_device(u64 domain, u64 pci_bdf)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ASSIGN_DEVICE,

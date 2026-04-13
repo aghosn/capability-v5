@@ -846,6 +846,17 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 					      ip.vector, ip.visibility);
 	}
 
+	case THHV_SET_POLICY: {
+		struct thhv_set_policy sp;
+
+		if (part->sealed)
+			return -EBUSY;
+		if (copy_from_user(&sp, uarg, sizeof(sp)))
+			return -EFAULT;
+		return themis_set_policy(part->domain_handle,
+					sp.kind, sp.key, sp.sub_key, sp.value);
+	}
+
 	case THHV_INITIALIZE_PARTITION: {
 		if (part->sealed)
 			return -EBUSY;
