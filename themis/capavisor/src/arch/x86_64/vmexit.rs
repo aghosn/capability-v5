@@ -1634,6 +1634,16 @@ fn sync_ia32e_mode_guest(vcpu: &mut ActiveVcpu) {
 ///
 /// Returns `Some(false)` if no doorbell matches (caller should forward_child_exit).
 /// Returns `None` if the platform state is not ready for doorbell lookup.
+/// Public doorbell check for the generic monitor loop.
+pub(crate) fn check_ept_doorbell(
+    platform: &crate::platform::ThemisPlatform,
+    vcpu: &mut ActiveVcpu,
+    gpa: u64,
+    qual: u64,
+) -> Option<bool> {
+    handle_ept_doorbell(platform, vcpu, gpa, qual)
+}
+
 fn handle_ept_doorbell(
     platform: &crate::platform::ThemisPlatform,
     vcpu: &mut ActiveVcpu,

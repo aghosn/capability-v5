@@ -52,6 +52,7 @@ mod domain;
 mod guest;
 mod hypercall;
 mod mem;
+mod monitor;
 mod platform;
 mod vmx {
     pub use ::vmx::features::*;
