@@ -105,11 +105,11 @@ ARM EL2/Stage-2/GIC). Enables multi-ISA support without duplicating policy code.
   (ARM). Current trait boundary doesn't match apply_update complexity; premature
   without real validation target.
 
-**Phase B: ArchExit translation** (subsumes VMEXIT dispatch unification):
+**Phase B: ArchExit translation + unified dispatch**:
 - [x] B1: classify_exit() in vmexit.rs — VMX exit reason → ArchExit translation
-- [x] B2: Merge dom0/child dispatch — **deferred**. Dom0 (machine control) and
-  child (policy-mediated forwarding) have genuinely different ownership models.
-  classify_exit() seam is sufficient; full merge deferred until ARM port.
+- [x] B2: Unified dom0/child dispatch via ExitPolicy. No `domain_id != 0`
+  special-casing. Four exit classes: fatal, capavisor-internal, specialized
+  (EXTERNAL_INTERRUPT/APIC with own sub-dispatch), policy-driven. Net -96 lines.
 
 **Phase C: File reorganization**:
 - [x] C1–C4: Moved 9 x86-specific files to `arch/x86_64/` (vmcs, vmexit, gdt,
