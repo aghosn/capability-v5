@@ -161,6 +161,32 @@ pub mod opcodes {
     /// Set the default exit trap policy on a child domain (before seal).
     /// IN:  RDI = child_domain_handle, RSI = trap (0 = handle locally, 1 = trap to parent)
     pub const THEMIS_SET_DEF_EXIT_POLICY: u64 = 0x21;
+
+    /// Unified policy-setting hypercall — maps directly to
+    /// `Capability::set_policy(&caller, child_handle, PolicyIdentifier, value)`.
+    ///
+    /// IN:  RDI = child_domain_handle
+    ///      RSI = policy_kind (see `policy_kind::*` constants)
+    ///      RDX = key (vector for interrupt variants, exit_reason for exit variants, 0 otherwise)
+    ///      RCX = sub_key (word_index for register bitmap variants, 0 otherwise)
+    ///      R8  = value
+    pub const THEMIS_SET_POLICY:          u64 = 0x22;
+}
+
+/// Policy-kind discriminants for `THEMIS_SET_POLICY`.
+///
+/// Each constant maps 1:1 to a `PolicyIdentifier` variant in the capability engine.
+pub mod policy_kind {
+    pub const CORES:                      u64 = 0;
+    pub const API_MONITOR:                u64 = 1;
+    pub const DEFAULT_INTR_VISIBILITY:    u64 = 2;
+    pub const VECTOR_VISIBILITY:          u64 = 3;
+    pub const VECTOR_REG_READ_SET:        u64 = 4;
+    pub const VECTOR_REG_WRITE_SET:       u64 = 5;
+    pub const DEFAULT_EXIT_TRAP:          u64 = 6;
+    pub const EXIT_REASON_TRAP:           u64 = 7;
+    pub const EXIT_REASON_REG_READ_SET:   u64 = 8;
+    pub const EXIT_REASON_REG_WRITE_SET:  u64 = 9;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

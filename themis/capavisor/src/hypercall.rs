@@ -171,6 +171,9 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SET_DEF_EXIT_POLICY => {
             Some(do_set_def_exit_policy(platform, &caller, arg0, arg1))
         }
+        opcodes::THEMIS_SET_POLICY => Some(do_set_policy(
+            platform, &caller, arg0, arg1, arg2, arg3, arg4,
+        )),
 
         opcodes::THEMIS_ASSIGN_DEVICE => Some(do_assign_device(platform, &caller, arg0, arg1)),
         opcodes::THEMIS_RELEASE_DEVICE => Some(do_release_device(platform, arg0)),
@@ -1770,6 +1773,54 @@ fn do_set_def_exit_policy(
             trap,
         )
         .map(|()| ((), UpdateBatch::new()))
+    }) {
+        Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// THEMIS_SET_POLICY (0x22): unified policy-setting hypercall.
+///
+/// Maps directly to `Capability::set_policy(&caller, child_handle, id, value)`.
+///
+/// arg0 = child_handle, arg1 = policy_kind, arg2 = key, arg3 = sub_key, arg4 = value.
+fn do_set_policy(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_handle: u64,
+    kind: u64,
+    key: u64,
+    sub_key: u64,
+    value: u64,
+) -> HypercallResult {
+    use themis_abi::policy_kind;
+
+    let id = match kind {
+        policy_kind::CORES => PolicyIdentifier::Cores,
+        policy_kind::API_MONITOR => PolicyIdentifier::ApiMonitor,
+        policy_kind::DEFAULT_INTR_VISIBILITY => PolicyIdentifier::DefaultInterruptVisibility,
+        policy_kind::VECTOR_VISIBILITY => PolicyIdentifier::VectorVisibility(key as u8),
+        policy_kind::VECTOR_REG_READ_SET => {
+            PolicyIdentifier::VectorRegReadSet(key as u8, sub_key as u8)
+        }
+        policy_kind::VECTOR_REG_WRITE_SET => {
+            PolicyIdentifier::VectorRegWriteSet(key as u8, sub_key as u8)
+        }
+        policy_kind::DEFAULT_EXIT_TRAP => PolicyIdentifier::DefaultExitTrap,
+        policy_kind::EXIT_REASON_TRAP => PolicyIdentifier::ExitReasonTrap(key as u32),
+        policy_kind::EXIT_REASON_REG_READ_SET => {
+            PolicyIdentifier::ExitReasonRegReadSet(key as u32, sub_key as u8)
+        }
+        policy_kind::EXIT_REASON_REG_WRITE_SET => {
+            PolicyIdentifier::ExitReasonRegWriteSet(key as u32, sub_key as u8)
+        }
+        _ => return HypercallResult::error(errors::ERR_INVALID),
+    };
+
+    let caller = caller.clone();
+    match execute(platform, false, || {
+        Capability::set_policy(&caller, child_handle, id.clone(), value)
+            .map(|()| ((), UpdateBatch::new()))
     }) {
         Ok(_) => HypercallResult::success(),
         Err(e) => HypercallResult::error(map_error(&e)),
