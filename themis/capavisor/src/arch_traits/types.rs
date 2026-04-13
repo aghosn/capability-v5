@@ -176,3 +176,63 @@ pub struct DeviceId {
     pub device: u8,
     pub function: u8,
 }
+
+// ── Platform-agnostic VP wrapper ─────────────────────────────────────────── //
+
+use super::traits::ArchVpOps;
+
+/// Platform-agnostic virtual processor.
+///
+/// Wraps an arch backend (`A`) and its VP handle together into a single
+/// value that the generic monitor loop can pass around. The monitor loop
+/// calls methods on `Vp<A>` which delegate to `ArchVpOps` methods,
+/// keeping the loop free of arch-specific types.
+///
+/// On x86 this wraps `X86Platform` + `ActiveVcpu`.
+/// On ARM it would wrap `ArmPlatform` + `ArmVpState`.
+pub struct Vp<A: ArchVpOps> {
+    pub(crate) arch: A,
+    pub(crate) handle: A::VpHandle,
+}
+
+impl<A: ArchVpOps> Vp<A> {
+    /// Create a new platform-agnostic VP from an arch backend and handle.
+    pub fn new(arch: A, handle: A::VpHandle) -> Self {
+        Self { arch, handle }
+    }
+
+    /// Enter the guest and decode the exit.
+    pub fn run(&mut self) -> SemanticExit {
+        self.arch.run(&mut self.handle)
+    }
+
+    /// Handle a non-trapped (local) exit.
+    pub fn handle_local(&mut self, reason: u32, info: &ExitInfo) {
+        self.arch.handle_local(&mut self.handle, reason, info);
+    }
+
+    /// Dispatch a hypercall through the capability engine.
+    pub fn dispatch_hypercall(&mut self) {
+        self.arch.dispatch_hypercall(&mut self.handle);
+    }
+
+    /// Forward an exit to the parent domain.
+    pub fn forward_exit(&mut self, reason: u32) {
+        self.arch.forward_exit(&mut self.handle, reason);
+    }
+
+    /// Forward an interrupt to the handler domain.
+    pub fn forward_interrupt(&mut self, vector: u8) {
+        self.arch.forward_interrupt(&mut self.handle, vector);
+    }
+
+    /// Check if a memory fault is a doorbell event.
+    pub fn check_doorbell(&mut self, gpa: u64, qualification: u64) -> bool {
+        self.arch.check_doorbell(&mut self.handle, gpa, qualification)
+    }
+
+    /// Reset the preemption timer.
+    pub fn reset_timer(&mut self) {
+        self.arch.reset_timer(&mut self.handle);
+    }
+}

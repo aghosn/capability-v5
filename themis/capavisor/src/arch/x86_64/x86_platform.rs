@@ -132,6 +132,36 @@ impl ArchVpOps for X86Platform {
         vp.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, info);
         Ok(())
     }
+
+    // ── Monitor-level operations ─────────────────────────────────────────── //
+
+    fn dispatch_hypercall(&mut self, vp: &mut Self::VpHandle) {
+        if let Some(result) = crate::hypercall::handle_vmcall(vp) {
+            vp.set_reg(Reg::Rax, result.rax);
+            vp.set_reg(Reg::Rdi, result.rdi);
+            vp.set_reg(Reg::Rsi, result.rsi);
+            vp.set_reg(Reg::Rdx, result.rdx);
+            vmexit::next_instruction(vp);
+        }
+        // None → SWITCH swapped the VP handle in-place; no writeback needed.
+    }
+
+    fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32) {
+        crate::hypercall::forward_child_exit(vp, reason);
+    }
+
+    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u8) {
+        crate::hypercall::forward_interrupt_to_handler(vp, vector);
+    }
+
+    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, gpa: u64, qualification: u64) -> bool {
+        vmexit::check_ept_doorbell(self.platform(), vp, gpa, qualification)
+            .unwrap_or(false)
+    }
+
+    fn reset_timer(&mut self, vp: &mut Self::VpHandle) {
+        vp.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, vmexit::PREEMPTION_TIMER_TICKS);
+    }
 }
 
 // ── ArchGuestPhysMap ─────────────────────────────────────────────────────── //

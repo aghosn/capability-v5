@@ -347,7 +347,11 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    arch::boot::launch(&linux, &vmx_state, &capa.platform);
+    // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
+    // launch() returns a platform-agnostic Vp; the monitor loop runs here
+    // (generic code), not inside arch::boot (fixes the layering).
+    let mut vp = arch::boot::launch(&linux, &vmx_state, &capa.platform);
+    monitor::monitor_loop(&mut vp);
 }
 
 // ── AP entry point ───────────────────────────────────────────────────────── //
@@ -402,10 +406,12 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
         .take_vcpu(0, id)
         .unwrap_or_else(|| panic!("AP{}: no InactiveVcpu in PlatformDomain", id));
 
-    let mut active = inactive.activate().expect("AP activate failed");
+    let active = inactive.activate().expect("AP activate failed");
 
-    // Enter the monitor loop — never returns.
-    monitor::monitor_loop(&mut active);
+    // Wrap in platform-agnostic Vp and enter the generic monitor loop.
+    let arch = crate::arch::x86_64::x86_platform::X86Platform::new(platform as *const _);
+    let mut vp = crate::arch_traits::types::Vp::new(arch, active);
+    monitor::monitor_loop(&mut vp);
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

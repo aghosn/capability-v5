@@ -1716,7 +1716,11 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 ///    `boot_params_phys`, and enters the monitor loop.
 ///
 /// This function never returns.
-pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::ThemisPlatform) -> ! {
+pub fn launch(
+    linux: &LinuxState,
+    vmx: &VmxState,
+    platform: &crate::platform::ThemisPlatform,
+) -> crate::arch_traits::types::Vp<super::x86_platform::X86Platform> {
     use crate::vcpu::{InactiveVcpu, Reg};
     use crate::AP_LAUNCH_READY;
     use core::sync::atomic::Ordering;
@@ -1778,8 +1782,10 @@ pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::Th
 
     serial_println!("  BSP: RSI={:#x} → monitor_loop", linux.boot_params_phys);
 
-    let mut vcpu = inactive.activate().expect("BSP activate failed");
+    let vcpu = inactive.activate().expect("BSP activate failed");
 
-    // Enter the monitor loop — never returns.
-    crate::monitor::monitor_loop(&mut vcpu);
+    // Return the platform-agnostic VP. The caller (main.rs) enters the
+    // monitor loop — this fixes the layering: arch code returns to generic.
+    let arch = unsafe { super::x86_platform::X86Platform::new(platform as *const _) };
+    crate::arch_traits::types::Vp::new(arch, vcpu)
 }

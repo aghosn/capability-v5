@@ -13,6 +13,10 @@ use super::types::{DeviceId, ExitInfo, HypercallArgs, HypercallResult, MapPermis
 // ── VP lifecycle and guest entry/exit ────────────────────────────────────── //
 
 /// Virtual processor operations: create, destroy, enter guest, inject interrupts.
+///
+/// This trait covers both low-level VP state access (for `apply_update`) and
+/// monitor-level operations (for the generic run loop). The monitor loop uses
+/// the `Vp<A>` wrapper which delegates to these methods.
 pub trait ArchVpOps {
     /// Opaque handle to a VP's arch-specific state (VMCS on x86, saved regs on ARM).
     type VpHandle;
@@ -44,6 +48,30 @@ pub trait ArchVpOps {
 
     /// Inject an interrupt into the VP (posted interrupt on x86, LR on ARM).
     fn inject_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32) -> Result<(), CapaError>;
+
+    // ── Monitor-level operations ─────────────────────────────────────────── //
+    //
+    // These methods are used by the generic monitor loop (via the `Vp<A>`
+    // wrapper). They combine arch-specific VP access with capability-engine
+    // calls.
+
+    /// Full hypercall dispatch: decode args, execute via capability engine,
+    /// write result back, advance IP. On a SWITCH hypercall, the VP handle
+    /// is swapped to the new domain's VP internally.
+    fn dispatch_hypercall(&mut self, vp: &mut Self::VpHandle);
+
+    /// Forward an exit to the parent domain via the capability engine.
+    fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32);
+
+    /// Forward an interrupt to the handler domain via the capability engine.
+    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u8);
+
+    /// Check if a memory fault (EPT violation / Stage-2 fault) is a
+    /// doorbell-triggered event. Returns `true` if handled (loop continues).
+    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, gpa: u64, qualification: u64) -> bool;
+
+    /// Reset the preemption / scheduling timer for the current VP.
+    fn reset_timer(&mut self, vp: &mut Self::VpHandle);
 }
 
 // ── Guest physical address space (EPT / Stage-2) ─────────────────────────── //
