@@ -83,6 +83,7 @@ use capability_engine::{
     SwitchManager, Update,
 };
 
+use crate::arch::{ArchDomainState, ArchPlatformState};
 use crate::serial_println;
 use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 
@@ -377,12 +378,9 @@ impl CoreContext {
 
 /// Hardware state owned by a single domain.
 pub struct PlatformDomain {
-    /// EPT root mapper, allocated lazily on first `ChangeRights` or `GiveMetaMem`.
-    pub ept: Option<EptMapper>,
-    /// IOMMU second-level page table (SLPT), mirrors EPT for DMA isolation.
-    /// Allocated lazily on the first `ChangeRights` mapping for this domain.
-    /// Uses the same EptMapper type (VT-d SLPT format is bit-compatible with EPT).
-    pub iommu_pt: Option<EptMapper>,
+    /// Architecture-specific hardware state (EPT, IOMMU SLPT, VP slots,
+    /// bitmap pages on x86; Stage-2, GIC state on ARM).
+    pub arch: ArchDomainState,
     /// META page allocator — populated via `GiveMetaMem` updates.
     pub meta: MetaAllocator,
     /// Parent domain ID, stored for vital-memory revocation fallback.
@@ -390,29 +388,9 @@ pub struct PlatformDomain {
     pub parent: Option<DomainId>,
     /// HHDM offset, cached here so EPT root allocation can use it.
     hhdm_offset: u64,
-    /// Per-VP slots.  Index = domain-local VP ID (0, 1, 2, ...).
-    /// Each slot holds an InactiveVcpu when the VP is not running.
-    pub vps: Vec<VcpuSlot>,
     /// Per-VP COMM page physical addresses.  Index = VP ID.
     /// Set when CommRegion update is applied (or during do_add_vp).
     pub comm_hpas: Vec<u64>,
-    /// Physical address of the MSR bitmap page for this domain's VPs.
-    /// Allocated from META pool at seal time; 0 until then.
-    pub msr_bitmap_phys: u64,
-
-    /// Physical addresses of the I/O bitmap pages (A: ports 0x0000-0x7FFF,
-    /// B: ports 0x8000-0xFFFF).  Used with USE_IO_BITMAPS for child VPs.
-    /// A set bit traps the corresponding port's IN/OUT to the hypervisor.
-    /// Allocated from META pool on first ADD_VP; 0 until then.
-    pub io_bitmap_a_phys: u64,
-    pub io_bitmap_b_phys: u64,
-
-    /// Physical address of the APIC access page (one per domain, 4 KB).
-    /// Used with VIRTUALIZE_APIC_ACCESSES (secondary proc-based bit 0) for
-    /// child VPs — xAPIC MMIO accesses to 0xFEE00000 fault to this page
-    /// instead of an EPT violation.  Allocated from META on first ADD_VP.
-    /// 0 until then.
-    pub apic_access_phys: u64,
 
     /// DomainComm region: per-domain message ring with the capavisor.
     /// `None` until `init_domcomm()` allocates it.
@@ -475,17 +453,11 @@ pub struct DomainCommState {
 impl PlatformDomain {
     fn new(hhdm_offset: u64, parent: Option<DomainId>) -> Self {
         PlatformDomain {
-            ept: None,
-            iommu_pt: None,
+            arch: ArchDomainState::new(),
             meta: MetaAllocator::new(hhdm_offset),
             parent,
             hhdm_offset,
-            vps: Vec::new(),
             comm_hpas: Vec::new(),
-            msr_bitmap_phys: 0,
-            io_bitmap_a_phys: 0,
-            io_bitmap_b_phys: 0,
-            apic_access_phys: 0,
             domcomm: None,
             doorbells: Vec::new(),
             next_doorbell_id: 1,
@@ -796,9 +768,7 @@ impl PlatformDomain {
     ///
     /// Panics if the META pool is empty (no `GiveMetaMem` update received yet).
     pub fn ensure_ept(&mut self) {
-        if self.ept.is_none() {
-            self.ept = Some(EptMapper::alloc_root(&mut self.meta, self.hhdm_offset));
-        }
+        self.arch.ensure_ept(&mut self.meta, self.hhdm_offset);
     }
 
     /// Ensure an IOMMU second-level page table (SLPT) root exists for this domain.
@@ -806,13 +776,7 @@ impl PlatformDomain {
     /// `alloc` should be backed by the **root domain's** META pool so that child
     /// domain META budgets are not consumed by hypervisor page-table pages.
     fn ensure_iommu_pt(&mut self, level: Level, alloc: &mut impl ept::FrameAllocator) {
-        if self.iommu_pt.is_none() {
-            self.iommu_pt = Some(EptMapper::alloc_root_at_level(
-                alloc,
-                self.hhdm_offset,
-                level,
-            ));
-        }
+        self.arch.ensure_iommu_pt(level, alloc, self.hhdm_offset);
     }
 }
 
@@ -963,11 +927,8 @@ pub struct ThemisPlatform {
     lapic_ids: UnsafeCell<Vec<u32>>,
     // Tree root anchor — keeps dom0's capability tree alive.
     dom0_cap: Mutex<Option<CapabilityRef<Domain>>>,
-    // Per-core VMXON physical addresses; written once by BSP, read by each AP.
-    vmxon_phys: Vec<u64>,
-    /// VT-d DRHD units with allocated IRT pages; written once at boot by
-    /// `init_themis`, immutable afterwards (entries updated via `program_irte`).
-    pub drhd_units: Vec<crate::arch::acpi::DhrdUnit>,
+    /// Architecture-specific platform state (VMXON, DRHD on x86; GIC on ARM).
+    pub arch: ArchPlatformState,
     /// Engine-level switch manager — owns per-core `CoreContext` for
     /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
     /// with the capavisor's own `CoreContext` via `set_core_context()`.
@@ -1010,8 +971,7 @@ impl ThemisPlatform {
             routing: RwLock::new(RoutingMaps::new()),
             lapic_ids: UnsafeCell::new(Vec::new()),
             dom0_cap: Mutex::new(None),
-            vmxon_phys: Vec::new(),
-            drhd_units: Vec::new(),
+            arch: ArchPlatformState::new(),
             switch_mgr: SwitchManager::new(num_cores),
         }
     }
@@ -1036,13 +996,13 @@ impl ThemisPlatform {
     /// Store per-core VMXON physical addresses (called once by BSP before
     /// AP_LAUNCH_READY).
     pub fn bootstrap_set_vmxon_phys(&mut self, phys: Vec<u64>) {
-        self.vmxon_phys = phys;
+        self.arch.set_vmxon_phys(phys);
     }
 
     /// Get VMXON physical address for a core (called by APs after Acquire
     /// on AP_LAUNCH_READY).
     pub fn vmxon_phys(&self, core_index: usize) -> u64 {
-        self.vmxon_phys[core_index]
+        self.arch.vmxon_phys(core_index)
     }
 
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
@@ -1067,7 +1027,8 @@ impl ThemisPlatform {
     /// Falls back to `Level::L3` if no DRHD units are present.
     pub fn iommu_pt_level(&self) -> Level {
         let min_aw = self
-            .drhd_units
+            .arch
+            .drhd_units()
             .iter()
             .filter(|u| u.aw > 0)
             .map(|u| u.aw)
@@ -1098,12 +1059,12 @@ impl ThemisPlatform {
             .get(domain_id)
             .unwrap_or_else(|| panic!("assign_device: unknown domain {}", domain_id))
             .lock()
-            .iommu_pt
-            .as_ref()
+            .arch
+            .iommu_pt()
             .unwrap_or_else(|| panic!("assign_device: domain {} has no IOMMU PT", domain_id))
             .root_phys();
 
-        for unit in &self.drhd_units {
+        for unit in self.arch.drhd_units() {
             if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
                 let ctx_virt = (ctx_phys + hhdm) as *mut u64;
                 let entry = unsafe { ctx_virt.add(devfn * 2) };
@@ -1140,7 +1101,7 @@ impl ThemisPlatform {
         let bus = (bdf >> 8) as u8;
         let devfn = (bdf & 0xFF) as usize;
 
-        for unit in &self.drhd_units {
+        for unit in self.arch.drhd_units() {
             if let Some(&(_, ctx_phys)) = unit.ctx_tables.iter().find(|(b, _)| *b == bus) {
                 let ctx_virt = (ctx_phys + hhdm) as *mut u64;
                 let entry = unsafe { ctx_virt.add(devfn * 2) };
@@ -1253,8 +1214,8 @@ impl ThemisPlatform {
         self.domains
             .get(domain_id)?
             .lock()
-            .ept
-            .as_ref()
+            .arch
+            .ept()
             .map(|e| e.eptp())
     }
 
@@ -1299,10 +1260,10 @@ impl ThemisPlatform {
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_store_vcpu: domain not registered"));
         let mut d = arc.lock();
-        if d.vps.len() <= vp_id {
-            d.vps.resize_with(vp_id + 1, VcpuSlot::empty);
+        if d.arch.vps().len() <= vp_id {
+            d.arch.vps_mut().resize_with(vp_id + 1, VcpuSlot::empty);
         }
-        d.vps[vp_id].put(vcpu);
+        d.arch.vps_mut()[vp_id].put(vcpu);
     }
 
     /// Atomically take an InactiveVcpu from a domain's VP slot.
@@ -1311,7 +1272,7 @@ impl ThemisPlatform {
     pub fn take_vcpu(&self, domain_id: DomainId, vp_id: usize) -> Option<InactiveVcpu> {
         let arc = self.domains.get(domain_id)?;
         let d = arc.lock();
-        d.vps.get(vp_id).and_then(|slot| slot.take())
+        d.arch.vps().get(vp_id).and_then(|slot| slot.take())
     }
 
     /// Return an InactiveVcpu to a domain's VP slot after deactivation.
@@ -1321,9 +1282,12 @@ impl ThemisPlatform {
             .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("return_vcpu: domain not registered"));
-        let d = arc.lock();
-        assert!(vp_id < d.vps.len(), "return_vcpu: vp_id out of range");
-        d.vps[vp_id].put(vcpu);
+        let mut d = arc.lock();
+        assert!(
+            vp_id < d.arch.vps().len(),
+            "return_vcpu: vp_id out of range"
+        );
+        d.arch.vps_mut()[vp_id].put(vcpu);
     }
 
     /// Execute INVEPT(single-context) for the given domain's EPTP on the
@@ -1332,7 +1296,7 @@ impl ThemisPlatform {
     pub(crate) fn invept_for_domain(&self, domain_id: DomainId) {
         if let Some(arc) = self.domains.get(domain_id) {
             let d = arc.lock();
-            if let Some(ept) = d.ept.as_ref() {
+            if let Some(ept) = d.arch.ept() {
                 unsafe {
                     crate::vmx::invept(crate::vmx::INVEPT_SINGLE_CONTEXT, ept.eptp());
                 }
@@ -1621,7 +1585,7 @@ impl Platform for ThemisPlatform {
                 // so ADD_VP can set APIC_ACCESS_ADDR in the child VMCS, enabling
                 // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
                 if is_child && *address == 0xFEE0_0000 && *size == 0x1000 {
-                    d.apic_access_phys = *physical;
+                    d.arch.set_apic_access_phys(*physical);
 
                     // When hardware does not support VIRTUALIZE_APIC_ACCESSES
                     // (bit 0 of IA32_VMX_PROCBASED_CTLS2 allowed-1 field),
@@ -1641,12 +1605,12 @@ impl Platform for ThemisPlatform {
                 }
 
                 if rights.bits() == 0 {
-                    if let Some(ept) = d.ept.as_mut() {
+                    if let Some(ept) = d.arch.ept_mut() {
                         // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
                         ept.unmap_range(unsafe { &mut *meta_ptr }, *address, *size as usize);
                     }
                     if is_child {
-                        if let Some(slpt) = d.iommu_pt.as_mut() {
+                        if let Some(slpt) = d.arch.iommu_pt_mut() {
                             // SLPT pages are owned by root's META; use RootMetaProxy.
                             slpt.unmap_range(&mut RootMetaProxy(self), *address, *size as usize);
                         }
@@ -1661,7 +1625,7 @@ impl Platform for ThemisPlatform {
                     }
                     let flags = rights_to_ept_flags(rights);
                     // SAFETY: ept and meta are disjoint fields of PlatformDomain.
-                    let ept = d.ept.as_mut().unwrap();
+                    let ept = d.arch.ept_mut().unwrap();
                     map_range_typed(
                         ept,
                         unsafe { &mut *meta_ptr },
@@ -1672,7 +1636,7 @@ impl Platform for ThemisPlatform {
                         &uc_ranges,
                     );
                     if is_child {
-                        if let Some(slpt) = d.iommu_pt.as_mut() {
+                        if let Some(slpt) = d.arch.iommu_pt_mut() {
                             // VT-d SLPT: same GPA→HPA mapping; no memory-type bits needed.
                             slpt.map_range(
                                 &mut RootMetaProxy(self),
@@ -1689,10 +1653,10 @@ impl Platform for ThemisPlatform {
 
             Update::RevokeDomain { domain, .. } => {
                 if let Some(mut d) = self.domains.remove(*domain) {
-                    if let Some(ept) = d.ept.take() {
+                    if let Some(ept) = d.arch.take_ept() {
                         ept.free_all(&mut d.meta);
                     }
-                    if let Some(slpt) = d.iommu_pt.take() {
+                    if let Some(slpt) = d.arch.take_iommu_pt() {
                         // SLPT pages were allocated from root's META; return them there.
                         slpt.free_all(&mut RootMetaProxy(self));
                     }

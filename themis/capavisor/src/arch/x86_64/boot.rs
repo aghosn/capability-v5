@@ -858,7 +858,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
                 irt_phys,
             );
         }
-        platform.drhd_units = units;
+        *platform.arch.drhd_units_mut() = units;
     }
 
     // ── Enable VT-d interrupt remapping (intr-p3c) ───────────────────────── //
@@ -879,7 +879,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
     //
     // Note: each GCMD bit is a one-shot command; write one bit at a time and
     // wait for the corresponding GSTS status bit before proceeding.
-    for unit in platform.drhd_units.iter() {
+    for unit in platform.arch.drhd_units().iter() {
         if unit.irt_phys == 0 {
             continue;
         }
@@ -977,9 +977,9 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
         let hhdm = info.hhdm_offset;
 
-        for i in 0..platform.drhd_units.len() {
+        for i in 0..platform.arch.drhd_units().len() {
             let (segment, _flags, reg_base) = {
-                let u = &platform.drhd_units[i];
+                let u = &platform.arch.drhd_units()[i];
                 (u.segment, u.flags, u.register_base)
             };
 
@@ -1051,7 +1051,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             if !ok {
                 serial_println!(
                     "WARN: VT-d DRHD {:#x}: RTPS timeout",
-                    platform.drhd_units[i].register_base
+                    platform.arch.drhd_units()[i].register_base
                 );
             }
 
@@ -1066,7 +1066,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             if !ok {
                 serial_println!(
                     "WARN: VT-d DRHD {:#x}: context-cache invalidation timeout",
-                    platform.drhd_units[i].register_base
+                    platform.arch.drhd_units()[i].register_base
                 );
             }
 
@@ -1086,21 +1086,21 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
             if !ok {
                 serial_println!(
                     "WARN: VT-d DRHD {:#x}: IOTLB invalidation timeout",
-                    platform.drhd_units[i].register_base
+                    platform.arch.drhd_units()[i].register_base
                 );
             }
 
             serial_println!(
                 "  DRHD seg={} base={:#x}: root @ {:#x}, {} ctx tables, AW={}, cache flushed",
                 segment,
-                platform.drhd_units[i].register_base,
+                platform.arch.drhd_units()[i].register_base,
                 root_phys,
                 ctx_tables.len(),
                 aw
             );
-            platform.drhd_units[i].root_phys = root_phys;
-            platform.drhd_units[i].aw = aw;
-            platform.drhd_units[i].ctx_tables = ctx_tables;
+            platform.arch.drhd_units_mut()[i].root_phys = root_phys;
+            platform.arch.drhd_units_mut()[i].aw = aw;
+            platform.arch.drhd_units_mut()[i].ctx_tables = ctx_tables;
         }
     }
 
@@ -1117,7 +1117,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         const POLL_LIMIT: usize = 100_000;
         let hhdm = info.hhdm_offset;
 
-        for unit in platform.drhd_units.iter() {
+        for unit in platform.arch.drhd_units().iter() {
             if unit.root_phys == 0 {
                 continue;
             }

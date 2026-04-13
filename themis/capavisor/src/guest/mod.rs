@@ -5,6 +5,7 @@
 //! extracts the information Themis needs from each module and offers a
 //! name-based lookup via the `module_cmdline` tag set in `limine.conf`.
 
+#[cfg(target_arch = "x86_64")]
 pub mod linux;
 mod modules;
 

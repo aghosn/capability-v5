@@ -9,3 +9,7 @@
 //! Stage-2 translation tables (VTTBR_EL2), and GICv3 for interrupts.
 
 pub mod aarch64_platform;
+pub mod arch_state;
+
+// Re-export arch-opaque types for uniform access via `crate::arch::*`.
+pub use arch_state::{ArchDomainState, ArchPlatformState};

@@ -806,9 +806,9 @@ fn do_add_vp(
     );
     {
         let mut pd = arc.lock();
-        pd_vp_count = pd.vps.len(); // VP index for this new VP
-                                    // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
-        first_vp = pd.msr_bitmap_phys == 0;
+        pd_vp_count = pd.arch.vps().len(); // VP index for this new VP
+                                           // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
+        first_vp = pd.arch.msr_bitmap_phys() == 0;
         // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + 2 IO bitmaps if first VP).
         // apic_access_phys comes from the ChangeRights mapping of GPA 0xFEE00000,
         // established during THHV_SEND_SHARED_META — not allocated from META.
@@ -827,16 +827,19 @@ fn do_add_vp(
         vapic_phys = pd.meta.alloc_frame();
         pid_phys = pd.meta.alloc_frame();
         if first_vp {
-            pd.msr_bitmap_phys = pd.meta.alloc_frame();
-            pd.io_bitmap_a_phys = pd.meta.alloc_frame();
-            pd.io_bitmap_b_phys = pd.meta.alloc_frame();
+            let msr_phys = pd.meta.alloc_frame();
+            pd.arch.set_msr_bitmap_phys(msr_phys);
+            let io_a_phys = pd.meta.alloc_frame();
+            pd.arch.set_io_bitmap_a_phys(io_a_phys);
+            let io_b_phys = pd.meta.alloc_frame();
+            pd.arch.set_io_bitmap_b_phys(io_b_phys);
         }
-        msr_bitmap_phys = pd.msr_bitmap_phys;
-        io_bitmap_a_phys = pd.io_bitmap_a_phys;
-        io_bitmap_b_phys = pd.io_bitmap_b_phys;
+        msr_bitmap_phys = pd.arch.msr_bitmap_phys();
+        io_bitmap_a_phys = pd.arch.io_bitmap_a_phys();
+        io_bitmap_b_phys = pd.arch.io_bitmap_b_phys();
         // apic_access_phys was recorded by apply_update when thhv mapped the
         // APIC-access sentinel page at GPA 0xFEE00000 via THHV_SEND_SHARED_META.
-        apic_access_phys = pd.apic_access_phys;
+        apic_access_phys = pd.arch.apic_access_phys();
     }
 
     // Zero the PID (64 bytes at offset 0 of the PID page; must be clean before VMENTRY).
@@ -954,11 +957,11 @@ fn do_add_vp(
             pd.meta.free_frame(pid_phys);
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
-                pd.msr_bitmap_phys = 0;
+                pd.arch.set_msr_bitmap_phys(0);
                 pd.meta.free_frame(io_bitmap_a_phys);
                 pd.meta.free_frame(io_bitmap_b_phys);
-                pd.io_bitmap_a_phys = 0;
-                pd.io_bitmap_b_phys = 0;
+                pd.arch.set_io_bitmap_a_phys(0);
+                pd.arch.set_io_bitmap_b_phys(0);
                 // apic_access_phys is not from META — do not free it.
             }
             serial_println!("[ADD_VP] capa engine error, META rolled back");
@@ -978,7 +981,7 @@ fn do_add_vp(
             let eptp = {
                 let mut pd = arc.lock();
                 pd.ensure_ept();
-                pd.ept.as_ref().unwrap().eptp()
+                pd.arch.ept().unwrap().eptp()
             };
 
             // Allocate a unique VPID.
@@ -1121,7 +1124,7 @@ fn do_switch(
     // ── 4. Take child InactiveVcpu from its slot ──
     let mut child_inactive = {
         let d = child_arc.lock();
-        match d.vps.get(vp_idx).and_then(|s| s.take()) {
+        match d.arch.vps().get(vp_idx).and_then(|s| s.take()) {
             Some(v) => v,
             None => {
                 serial_debug!(
@@ -1157,7 +1160,7 @@ fn do_switch(
     let parent_arc = platform
         .domain_arc(parent_domain_id)
         .expect("[SWITCH] parent PlatformDomain not found");
-    parent_arc.lock().vps[parent_vp_id].put(parent_inactive);
+    parent_arc.lock().arch.vps_mut()[parent_vp_id].put(parent_inactive);
 
     // ── 7. Activate child (VMPTRLD) ──
     // activate() consumes child_inactive.  VMPTRLD failure is fatal since
@@ -1537,7 +1540,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             // Try to decode the instruction at guest RIP.
             let ept_root = {
                 let cd = child_arc.lock();
-                cd.ept.as_ref().map(|e| e.root_phys())
+                cd.arch.ept().map(|e| e.root_phys())
             };
             if let Some(ept_root) = ept_root {
                 let guest_cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
@@ -1588,13 +1591,13 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     let child_inactive = child_active
         .deactivate()
         .expect("[CHILD_EXIT] child deactivate failed");
-    child_arc.lock().vps[child_vp_id].put(child_inactive);
+    child_arc.lock().arch.vps_mut()[child_vp_id].put(child_inactive);
 
     // ── Take parent → activate → replace vcpu ──
     let parent_arc = platform
         .domain_arc(parent_domain_id)
         .expect("[CHILD_EXIT] parent PlatformDomain not found");
-    let parent_inactive = parent_arc.lock().vps[parent_vp_id]
+    let parent_inactive = parent_arc.lock().arch.vps()[parent_vp_id]
         .take()
         .expect("[CHILD_EXIT] parent VcpuSlot empty");
     let mut parent_active = parent_inactive
@@ -2038,13 +2041,13 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     let child_inactive = child_active
         .deactivate()
         .expect("[INTR_FWD] child deactivate failed");
-    child_arc.lock().vps[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
+    child_arc.lock().arch.vps_mut()[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
 
     // Activate handler (VMPTRLD) from handler's VcpuSlot.
     let handler_arc = platform
         .domain_arc(intr_ctx.handler_domain_id)
         .expect("[INTR_FWD] handler domain not found");
-    let handler_inactive = handler_arc.lock().vps[intr_ctx.handler_vp_id as usize]
+    let handler_inactive = handler_arc.lock().arch.vps()[intr_ctx.handler_vp_id as usize]
         .take()
         .expect("[INTR_FWD] handler VcpuSlot empty");
     let mut handler_active = handler_inactive
@@ -2627,10 +2630,10 @@ fn do_inject_interrupt(
 
     let pid_phys = {
         let pd = child_arc.lock();
-        if vp_id as usize >= pd.vps.len() {
+        if vp_id as usize >= pd.arch.vps().len() {
             return HypercallResult::error(errors::ERR_INVALID);
         }
-        pd.vps[vp_id as usize].peek_pid_phys()
+        pd.arch.vps()[vp_id as usize].peek_pid_phys()
     };
 
     if pid_phys == 0 {
@@ -2670,7 +2673,7 @@ fn do_inject_interrupt(
 /// This path has not been exercised yet; it will need end-to-end testing once
 /// real device assignment is in use.
 fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>) {
-    if platform.drhd_units.is_empty() {
+    if platform.arch.drhd_units().is_empty() {
         return;
     }
 
@@ -2685,10 +2688,16 @@ fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Dom
     // Peek at VP[0]'s pid_phys without taking the VP.
     let primary_pid_phys: u64 = platform
         .domain_arc(child_id)
-        .map(|arc| arc.lock().vps.first().map_or(0, |s| s.peek_pid_phys()))
+        .map(|arc| {
+            arc.lock()
+                .arch
+                .vps()
+                .first()
+                .map_or(0, |s| s.peek_pid_phys())
+        })
         .unwrap_or(0);
 
-    for unit in platform.drhd_units.iter() {
+    for unit in platform.arch.drhd_units().iter() {
         if unit.irt_phys == 0 {
             continue;
         }
@@ -2735,12 +2744,12 @@ fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Dom
 /// to exercise end-to-end.  It should be validated once device passthrough is
 /// in use.
 fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, new_ndst: u32) {
-    if platform.drhd_units.is_empty() {
+    if platform.arch.drhd_units().is_empty() {
         return;
     }
     let intr_policy = child_cap.read().data.policy.interrupts.clone();
     let hhdm = platform.hhdm_offset();
-    for unit in platform.drhd_units.iter() {
+    for unit in platform.arch.drhd_units().iter() {
         if unit.irt_phys == 0 {
             continue;
         }
@@ -2759,11 +2768,11 @@ fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, 
 /// Called from `do_revoke_domain` after the capability engine removes the
 /// domain.  Clears all 256 entries for every IR-capable DRHD unit.
 fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
-    if platform.drhd_units.is_empty() {
+    if platform.arch.drhd_units().is_empty() {
         return;
     }
     let hhdm = platform.hhdm_offset();
-    for unit in platform.drhd_units.iter() {
+    for unit in platform.arch.drhd_units().iter() {
         if unit.irt_phys == 0 {
             continue;
         }

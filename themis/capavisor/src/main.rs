@@ -48,15 +48,18 @@ mod arch;
 mod arch_traits;
 
 mod attestation;
+#[cfg(target_arch = "x86_64")]
 mod domain;
 mod guest;
 mod hypercall;
 mod mem;
 mod monitor;
 mod platform;
+#[cfg(target_arch = "x86_64")]
 mod vmx {
     pub use ::vmx::features::*;
 }
+#[cfg(target_arch = "x86_64")]
 pub mod vcpu {
     pub use ::vmx::vcpu::*;
 }

@@ -806,7 +806,25 @@ Full stack: CHV -> THHV ioctl -> vmcall -> capavisor -> Capability::set_policy()
 
 ### Remaining work
 
-- **A7**: Genericize ThemisPlatform - make monitor_loop generic over
-  ArchVpOps, fix layering so main.rs calls monitor_loop directly
-  (not through arch::boot::launch).
-- **D**: ARM skeleton - stub impls of all arch traits for AArch64.
+- **D** ✅ (2025-06-27): ARM skeleton created + trait boundary fixes:
+  - `arch/aarch64/aarch64_platform.rs`: `Aarch64Platform` with all 5 trait impls (stubs)
+  - `forward_interrupt`: u8→u32 (GIC IDs exceed 255)
+  - `check_doorbell`: `(gpa, qualification)` → `&ExitInfo` (arch extracts fault info)
+  - `EXTERNAL_INTERRUPT_EXIT_REASON` associated const on ArchVpOps
+  - ExitInfo: added ARM variants (Stage2Fault, SystemRegTrap, Smc, Wfi)
+  - `halt_forever()`: cfg-gated asm (cli;hlt vs wfi)
+  - x86 deps cfg-gated in Cargo.toml
+  - aarch64-unknown-none target installed; trait modules + skeleton compile
+
+- **A7** (next): Full platform generification via cfg-gating.
+  Strategy: cfg-gate x86 blocks in-place (not file moves) for minimal churn.
+  Sub-steps:
+  1. A7.1: cfg-gate domain.rs (all x86: VMCS, VAPIC, IO/MSR bitmaps)
+  2. A7.2: cfg-gate guest/linux.rs (x86 bzImage loader)
+  3. A7.3: cfg-gate platform.rs x86 parts (EptMapper, VcpuSlot, invept, VT-d)
+  4. A7.4: cfg-gate hypercall.rs x86 parts (ActiveVcpu, VMCS fields, VT-d IRTE)
+  5. A7.5: cfg-gate main.rs (serial I/O, boot body, AP entry)
+  6. A7.6: cfg-gate attestation.rs (TPM MMIO)
+  7. A7.7: Verify cross-compilation (aarch64 + x86)
+
+- **ARM testbed**: QEMU virt machine with EL2 (`-machine virt,virtualization=on`)
