@@ -80,7 +80,7 @@ impl ArchVpOps for X86Platform {
     fn enter_guest(&mut self, vp: &mut Self::VpHandle) -> ArchExit {
         let exit_reason = unsafe { vp.run() };
         match exit_reason {
-            Ok(reason) => translate_exit_reason(reason, vp),
+            Ok(reason) => vmexit::classify_exit(reason, vp),
             Err(_) => ArchExit::Shutdown,
         }
     }
@@ -118,61 +118,6 @@ impl ArchVpOps for X86Platform {
         let info = (vector as u64) | (1u64 << 31);
         vp.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, info);
         Ok(())
-    }
-}
-
-/// Translate a raw VMX exit reason to an `ArchExit`.
-///
-/// Only exits that the shared core needs to see are translated.  Arch-internal
-/// exits (XSETBV, CR access, MSR access, APIC access) are handled by the x86
-/// backend before reaching shared code.
-fn translate_exit_reason(reason: u32, vcpu: &ActiveVcpu) -> ArchExit {
-    match reason {
-        vmexit::EXIT_REASON_VMCALL => ArchExit::Hypercall,
-
-        vmexit::EXIT_REASON_EXTERNAL_INTERRUPT => {
-            let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-            let vector = (info & 0xFF) as u32;
-            ArchExit::ExternalInterrupt { vector }
-        }
-
-        vmexit::EXIT_REASON_VMX_PREEMPTION_TIMER => ArchExit::TimerExpired,
-
-        vmexit::EXIT_REASON_EPT_VIOLATION => {
-            let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let write = (qual & 0x2) != 0;
-            ArchExit::GuestMemoryFault { gpa, write }
-        }
-
-        vmexit::EXIT_REASON_IO_INSTRUCTION => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let port = ((qual >> 16) & 0xFFFF) as u16;
-            let size = ((qual & 0x7) + 1) as u8;
-            let is_write = (qual & 0x8) == 0; // bit 3: 0 = OUT, 1 = IN
-            let value = vcpu.reg(Reg::Rax) as u32;
-            ArchExit::IoInstruction {
-                port,
-                size,
-                is_write,
-                value,
-            }
-        }
-
-        vmexit::EXIT_REASON_HLT => ArchExit::Halt,
-
-        vmexit::EXIT_REASON_SIPI => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let vector_page = (qual & 0xFF) as u32;
-            ArchExit::StartupEvent {
-                target_cpu: 0, // SIPI target is the core that received it
-                entry_addr: (vector_page as u64) << 12,
-            }
-        }
-
-        vmexit::EXIT_REASON_TRIPLE_FAULT => ArchExit::Shutdown,
-
-        _ => ArchExit::ForwardToParent,
     }
 }
 

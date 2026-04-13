@@ -168,6 +168,74 @@ pub const EXIT_REASON_EOI_INDUCED: u32 = 45;
 /// RIP is already past the faulting instruction.
 pub const EXIT_REASON_APIC_WRITE: u32 = 56;
 
+// ── Exit classification ───────────────────────────────────────────────────── //
+
+use crate::arch_traits::types::ArchExit;
+
+/// Classify a raw VMX exit reason into an architecture-neutral `ArchExit`.
+///
+/// This is the translation layer between Intel-specific exit reason codes
+/// and the platform-agnostic exit model.  Exits that are purely x86-internal
+/// (XSETBV, CR access, MSR access, APIC virtualization, INIT signal) are
+/// classified as `ArchExit::ArchInternal` and handled entirely within x86
+/// backend code — they never reach the shared dispatch.
+///
+/// Used by `X86Platform::enter_guest` (via `ArchVpOps` trait) and can be
+/// used to progressively migrate `handle_vmexit` toward the unified dispatch.
+pub(crate) fn classify_exit(reason: u32, vcpu: &ActiveVcpu) -> ArchExit {
+    match reason {
+        EXIT_REASON_VMCALL => ArchExit::Hypercall,
+
+        EXIT_REASON_EXTERNAL_INTERRUPT => {
+            let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+            let vector = (info & INTR_INFO_VECTOR_MASK) as u32;
+            ArchExit::ExternalInterrupt { vector }
+        }
+
+        EXIT_REASON_VMX_PREEMPTION_TIMER => ArchExit::TimerExpired,
+
+        EXIT_REASON_EPT_VIOLATION => {
+            let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let write = (qual & 0x2) != 0;
+            ArchExit::GuestMemoryFault { gpa, write }
+        }
+
+        EXIT_REASON_IO_INSTRUCTION => {
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let port = ((qual >> 16) & 0xFFFF) as u16;
+            let size = ((qual & 0x7) + 1) as u8;
+            let is_write = (qual & 0x8) == 0; // bit 3: 0 = OUT, 1 = IN
+            let value = vcpu.reg(Reg::Rax) as u32;
+            ArchExit::IoInstruction {
+                port,
+                size,
+                is_write,
+                value,
+            }
+        }
+
+        EXIT_REASON_HLT => ArchExit::Halt,
+
+        EXIT_REASON_SIPI => {
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let vector_page = (qual & 0xFF) as u32;
+            ArchExit::StartupEvent {
+                target_cpu: 0,
+                entry_addr: (vector_page as u64) << 12,
+            }
+        }
+
+        EXIT_REASON_TRIPLE_FAULT | EXIT_REASON_VMENTRY_INVALID_GUEST => ArchExit::Shutdown,
+
+        // Exits handled entirely by x86 backend code (never reach shared dispatch).
+        // INIT_SIGNAL, XSETBV, CR_ACCESS, RDMSR, WRMSR, APIC_ACCESS,
+        // APIC_WRITE, EOI_INDUCED, CPUID, EXCEPTION_NMI, INTERRUPT_WINDOW,
+        // EPT_MISCONFIG
+        _ => ArchExit::ForwardToParent,
+    }
+}
+
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //
 
 /// Handle XSETBV (exit reason 55): guest wants to set XCR0.
