@@ -20,22 +20,23 @@ no-posted-interrupts = []
 quantum-sched = []
 
 [dependencies]
-capa-engine  = { workspace = true }
-x86                   = { workspace = true }
-x2apic                = { workspace = true }
+capa-engine           = { workspace = true }
+spin                  = { workspace = true }
+linked_list_allocator = { workspace = true }
+themis-abi            = { workspace = true }
+ed25519-dalek         = { workspace = true }
+sha2                  = { workspace = true }
+zeroize               = { workspace = true }
+# Limine and ACPI are used on both x86 and aarch64
+limine                = { workspace = true }
 acpi                  = { workspace = true }
 pci_types             = { workspace = true }
-spin                  = { workspace = true }
-limine                = { workspace = true }
-linked_list_allocator = { workspace = true }
 
-vtd          = { workspace = true }
-tpm2         = { workspace = true }
-themis-abi   = { workspace = true }
-ept          = { workspace = true }
-capavisor-pt = { workspace = true }
-vmx          = { workspace = true }
-
-ed25519-dalek = { workspace = true }
-sha2          = { workspace = true }
-zeroize       = { workspace = true }
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86                   = { workspace = true }
+x2apic                = { workspace = true }
+vtd                   = { workspace = true }
+tpm2                  = { workspace = true }
+ept                   = { workspace = true }
+capavisor-pt          = { workspace = true }
+vmx                   = { workspace = true }

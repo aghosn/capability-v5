@@ -63,6 +63,8 @@ unsafe impl Sync for X86Platform {}
 impl ArchVpOps for X86Platform {
     type VpHandle = ActiveVcpu;
 
+    const EXTERNAL_INTERRUPT_EXIT_REASON: u32 = 1; // VMX basic exit reason 1
+
     fn create_vp(&mut self, _domain_id: u64, _cpu: u32) -> Result<Self::VpHandle, CapaError> {
         // VP creation involves META allocation (VMCS, VAPIC, PID pages),
         // VMCS field setup (vmcs::setup_vmcs_for_vp), and VMPTRLD.
@@ -152,12 +154,19 @@ impl ArchVpOps for X86Platform {
         crate::hypercall::forward_child_exit(vp, reason);
     }
 
-    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u8) {
-        crate::hypercall::forward_interrupt_to_handler(vp, vector);
+    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32) {
+        crate::hypercall::forward_interrupt_to_handler(vp, vector as u8);
     }
 
-    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, gpa: u64, qualification: u64) -> bool {
-        vmexit::check_ept_doorbell(self.platform(), vp, gpa, qualification).unwrap_or(false)
+    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, exit_info: &ExitInfo) -> bool {
+        if let ExitInfo::EptViolation {
+            gpa, qualification, ..
+        } = exit_info
+        {
+            vmexit::check_ept_doorbell(self.platform(), vp, *gpa, *qualification).unwrap_or(false)
+        } else {
+            false
+        }
     }
 
     fn reset_timer(&mut self, vp: &mut Self::VpHandle) {

@@ -150,6 +150,24 @@ pub enum ExitInfo {
     Sipi {
         vector_page: u8,
     },
+    /// AArch64: Stage-2 translation fault (IPA fault, analogous to EPT violation).
+    Stage2Fault {
+        ipa: u64,
+        is_write: bool,
+        fsc: u32,
+    },
+    /// AArch64: Trapped system register access (MRS/MSR to EL1 sysreg).
+    SystemRegTrap {
+        reg_encoding: u32,
+        is_write: bool,
+        value: u64,
+    },
+    /// AArch64: SMC (Secure Monitor Call) from guest.
+    Smc {
+        imm: u16,
+    },
+    /// AArch64: WFI/WFE trapped at EL2.
+    Wfi,
     Halt,
     Other,
 }
@@ -249,14 +267,13 @@ impl<A: ArchVpOps> Vp<A> {
     }
 
     /// Forward an interrupt to the handler domain.
-    pub fn forward_interrupt(&mut self, vector: u8) {
+    pub fn forward_interrupt(&mut self, vector: u32) {
         self.arch.forward_interrupt(&mut self.handle, vector);
     }
 
     /// Check if a memory fault is a doorbell event.
-    pub fn check_doorbell(&mut self, gpa: u64, qualification: u64) -> bool {
-        self.arch
-            .check_doorbell(&mut self.handle, gpa, qualification)
+    pub fn check_doorbell(&mut self, exit_info: &ExitInfo) -> bool {
+        self.arch.check_doorbell(&mut self.handle, exit_info)
     }
 
     /// Reset the preemption timer.

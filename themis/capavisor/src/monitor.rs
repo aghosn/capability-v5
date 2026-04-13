@@ -58,9 +58,12 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
             }
 
             SemanticExit::PolicyDriven { reason, ref info } => {
-                // EPT violation doorbell fast-path: always checked before policy.
-                if let ExitInfo::EptViolation { gpa, qualification } = info {
-                    if vp.check_doorbell(*gpa, *qualification) {
+                // Memory-fault doorbell fast-path: always checked before policy.
+                if matches!(
+                    info,
+                    ExitInfo::EptViolation { .. } | ExitInfo::Stage2Fault { .. }
+                ) {
+                    if vp.check_doorbell(info) {
                         continue;
                     }
                 }
@@ -110,8 +113,6 @@ fn lookup_exit_trap(platform: &ThemisPlatform, reason: u32) -> bool {
 /// register copy + context switch.
 #[allow(unused_variables)]
 fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform, vector: u32) {
-    use crate::arch::vmexit::EXIT_REASON_EXTERNAL_INTERRUPT;
-
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
     let exit_trap = platform
         .get_core_cap(core_id)
@@ -120,7 +121,7 @@ fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlat
                 .data
                 .policy
                 .exits
-                .get_action(EXIT_REASON_EXTERNAL_INTERRUPT)
+                .get_action(A::EXTERNAL_INTERRUPT_EXIT_REASON)
                 .trap
         })
         .unwrap_or(true);
@@ -142,7 +143,7 @@ fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlat
                 .visibility;
             if vis != InterruptVisibility::Deliver {
                 if let Some(old) = platform.take_deferred(core_id) {
-                    vp.forward_interrupt(old);
+                    vp.forward_interrupt(old as u32);
                     platform.set_deferred(core_id, vector as u8);
                     return;
                 }
@@ -152,7 +153,7 @@ fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlat
         }
     }
 
-    vp.forward_interrupt(vector as u8);
+    vp.forward_interrupt(vector);
 }
 
 /// Handle preemption timer exit.
@@ -166,7 +167,7 @@ fn handle_preemption_timer<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatfo
         let core_id = platform.get_current_core().unwrap_or(0) as usize;
         if let Some(vec) = platform.take_deferred(core_id) {
             vp.reset_timer();
-            vp.forward_interrupt(vec);
+            vp.forward_interrupt(vec as u32);
             return;
         }
     }
@@ -178,6 +179,13 @@ fn handle_preemption_timer<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatfo
 
 fn halt_forever() -> ! {
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
     }
 }

@@ -27,6 +27,11 @@ pub trait ArchVpOps {
     /// Opaque handle to a VP's arch-specific state (VMCS on x86, saved regs on ARM).
     type VpHandle;
 
+    /// Arch-specific exit reason code for external interrupts.
+    /// Used by the generic monitor to look up exit policy for interrupt exits.
+    /// On x86 this is VMX exit reason 1; on ARM it would be the ESR_EL2 EC value.
+    const EXTERNAL_INTERRUPT_EXIT_REASON: u32;
+
     /// Allocate and initialize a VP for `domain_id` on logical CPU `cpu`.
     fn create_vp(&mut self, domain_id: u64, cpu: u32) -> Result<Self::VpHandle, CapaError>;
 
@@ -70,11 +75,12 @@ pub trait ArchVpOps {
     fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32);
 
     /// Forward an interrupt to the handler domain via the capability engine.
-    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u8);
+    fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32);
 
     /// Check if a memory fault (EPT violation / Stage-2 fault) is a
     /// doorbell-triggered event. Returns `true` if handled (loop continues).
-    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, gpa: u64, qualification: u64) -> bool;
+    /// The arch code extracts GPA and fault info from `exit_info`.
+    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, exit_info: &ExitInfo) -> bool;
 
     /// Reset the preemption / scheduling timer for the current VP.
     fn reset_timer(&mut self, vp: &mut Self::VpHandle);
