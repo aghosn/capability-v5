@@ -95,16 +95,17 @@ capability-engine bridge) from arch-specific backends (x86 VMX/EPT/APIC, future
 ARM EL2/Stage-2/GIC). Enables multi-ISA support without duplicating policy code.
 
 **Phase A: Introduce trait seams** (in-place, no file moves):
-- [x] A1: Define `arch_traits::traits` + `arch_traits::types` modules (SemanticExit,
+- [x] A1: Define `arch_traits::traits` + `arch_traits::types` modules (ArchExit,
   HypercallArgs, ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot)
-- [ ] A2: impl ArchVpOps for X86Platform (wrap vmcs.rs/vmexit.rs)
-- [ ] A3: impl ArchGuestPhysMap for X86Platform (wrap EPT)
-- [ ] A4: impl ArchCoreSignaling for X86Platform (wrap x2APIC IPI)
-- [ ] A5: impl ArchIommu for X86Platform (wrap VT-d)
-- [ ] A6: impl ArchBoot for X86Platform (wrap boot/main)
-- [ ] A7: ThemisPlatform<T> generic over traits
+- [x] A2–A6: X86Platform implements all 5 traits (x86_platform.rs). Functional:
+  enter_guest, hypercall args, inject_interrupt, IPI, INVEPT flush, device assign.
+  Deferred to Phase A7 wiring: create_vp, destroy_vp, map, unmap (currently in
+  apply_update's ChangeRights handler).
+- [ ] A7: ThemisPlatform<T> generic over traits — **deferred** until second ISA
+  (ARM). Current trait boundary doesn't match apply_update complexity; premature
+  without real validation target.
 
-**Phase B: Semantic exit translation** (subsumes VMEXIT dispatch unification):
+**Phase B: ArchExit translation** (subsumes VMEXIT dispatch unification):
 - [ ] B1: vmexit.rs → SemanticExit translation layer
 - [ ] B2: Merge dom0/child dispatch via SemanticExit
 
