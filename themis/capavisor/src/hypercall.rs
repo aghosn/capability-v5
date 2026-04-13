@@ -17,7 +17,7 @@ use themis_abi::{errors, opcodes};
 
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
-use crate::vmexit::next_instruction;
+use crate::arch::vmexit::next_instruction;
 use crate::{serial_debug, serial_println};
 
 // ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
@@ -997,7 +997,7 @@ fn do_add_vp(
             // Set up child VMCS with intercept-heavy controls + Posted Interrupts.
             // Clobbers VMPTRLD — restored below.
             unsafe {
-                crate::vmcs::setup_child_vmcs(
+                crate::arch::vmcs::setup_child_vmcs(
                     vmcs_phys,
                     vapic_phys,
                     msr_bitmap_phys,
@@ -1891,7 +1891,7 @@ unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) 
     if is_remote && !on_already_set {
         // Remote VP: send the notification IPI to wake that core out of guest mode.
         let ndst = unsafe { core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32) };
-        let notify_vec = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
+        let notify_vec = crate::arch::vmcs::POSTED_INTR_NOTIFY_VEC;
         unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
     }
 }
@@ -2214,8 +2214,8 @@ pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
 fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
     use themis_abi::regs::VpRegister;
     let adjusted = match reg {
-        VpRegister::Cr0 => unsafe { crate::vmcs::vmcs_adjust_cr0(val) },
-        VpRegister::Cr4 => crate::vmcs::vmcs_adjust_cr4(val),
+        VpRegister::Cr0 => unsafe { crate::arch::vmcs::vmcs_adjust_cr0(val) },
+        VpRegister::Cr4 => crate::arch::vmcs::vmcs_adjust_cr4(val),
         // VMCS LDTR AR: if usable (bit 16=0), type must be 2 (LDT).
         // KVM/CHV represents a null LDTR as AR=0 (usable + type=0), which
         // violates SDM 26.3.1.2. Force to unusable.
@@ -2728,7 +2728,7 @@ fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Dom
             let vis = intr_policy.get_policy(vector).visibility;
             match vis {
                 InterruptVisibility::Deliver if primary_pid_phys != 0 => unsafe {
-                    crate::iommu_ir::irte_program_posted(
+                    crate::arch::iommu_ir::irte_program_posted(
                         unit.irt_phys,
                         hhdm,
                         vector,
@@ -2737,7 +2737,7 @@ fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Dom
                     );
                 },
                 _ => unsafe {
-                    crate::iommu_ir::irte_program_remapped(
+                    crate::arch::iommu_ir::irte_program_remapped(
                         unit.irt_phys,
                         hhdm,
                         vector,
@@ -2779,7 +2779,7 @@ fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, 
         for vector in 0u8..=254 {
             if intr_policy.get_policy(vector).visibility == InterruptVisibility::Deliver {
                 unsafe {
-                    crate::iommu_ir::irte_update_ndst(unit.irt_phys, hhdm, vector, new_ndst);
+                    crate::arch::iommu_ir::irte_update_ndst(unit.irt_phys, hhdm, vector, new_ndst);
                 }
             }
         }
@@ -2801,7 +2801,7 @@ fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
         }
         for vector in 0u8..=255 {
             unsafe {
-                crate::iommu_ir::irte_invalidate(unit.irt_phys, hhdm, vector);
+                crate::arch::iommu_ir::irte_invalidate(unit.irt_phys, hhdm, vector);
             }
         }
     }

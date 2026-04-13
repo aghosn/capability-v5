@@ -33,7 +33,7 @@
 
 /// Notification vector sent to a core when a posted interrupt is signalled
 /// via IPI (same constant as `vmcs::POSTED_INTR_NOTIFY_VEC`).
-const NV: u8 = crate::vmcs::POSTED_INTR_NOTIFY_VEC;
+const NV: u8 = crate::arch::vmcs::POSTED_INTR_NOTIFY_VEC;
 
 // ── Public API ─────────────────────────────────────────────────────────── //
 

@@ -680,7 +680,7 @@ unsafe fn handle_vmexit(vcpu: &mut ActiveVcpu, basic_reason: u32) {
             vcpu.set(vmcs::guest::RIP, 0);
             // CR0 must satisfy IA32_VMX_CR0_FIXED0 (PE + ET + NE required by VMX).
             vcpu.set(vmcs::guest::CR0, unsafe {
-                crate::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
+                crate::arch::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
             });
             vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
             vcpu.set(
@@ -1158,14 +1158,14 @@ fn handle_rdmsr_local(vcpu: &mut ActiveVcpu) {
         vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
         next_instruction(vcpu);
     } else {
-        match crate::msr_virt::handle_rdmsr(ecx) {
-            crate::msr_virt::MsrResult::Emulated(v) => {
+        match crate::arch::msr_virt::handle_rdmsr(ecx) {
+            crate::arch::msr_virt::MsrResult::Emulated(v) => {
                 vcpu.set_reg(Reg::Rax, v & MSR_LOW_MASK);
                 vcpu.set_reg(Reg::Rdx, (v >> 32) & MSR_LOW_MASK);
                 next_instruction(vcpu);
             }
-            crate::msr_virt::MsrResult::Passthrough => {
-                if crate::msr_virt::in_bitmap_range(ecx) {
+            crate::arch::msr_virt::MsrResult::Passthrough => {
+                if crate::arch::msr_virt::in_bitmap_range(ecx) {
                     let value = unsafe { msr::rdmsr(ecx) };
                     vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
                     vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
@@ -1174,7 +1174,7 @@ fn handle_rdmsr_local(vcpu: &mut ActiveVcpu) {
                     inject_gp(vcpu);
                 }
             }
-            crate::msr_virt::MsrResult::GpFault => {
+            crate::arch::msr_virt::MsrResult::GpFault => {
                 inject_gp(vcpu);
             }
         }
@@ -1190,19 +1190,19 @@ fn handle_wrmsr_local(vcpu: &mut ActiveVcpu) {
         vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
         next_instruction(vcpu);
     } else {
-        match crate::msr_virt::handle_wrmsr(ecx, value) {
-            crate::msr_virt::MsrResult::Emulated(_) => {
+        match crate::arch::msr_virt::handle_wrmsr(ecx, value) {
+            crate::arch::msr_virt::MsrResult::Emulated(_) => {
                 next_instruction(vcpu);
             }
-            crate::msr_virt::MsrResult::Passthrough => {
-                if crate::msr_virt::in_bitmap_range(ecx) {
+            crate::arch::msr_virt::MsrResult::Passthrough => {
+                if crate::arch::msr_virt::in_bitmap_range(ecx) {
                     unsafe { msr::wrmsr(ecx, value) };
                     next_instruction(vcpu);
                 } else {
                     inject_gp(vcpu);
                 }
             }
-            crate::msr_virt::MsrResult::GpFault => {
+            crate::arch::msr_virt::MsrResult::GpFault => {
                 inject_gp(vcpu);
             }
         }

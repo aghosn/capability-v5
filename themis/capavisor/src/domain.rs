@@ -112,7 +112,7 @@ impl Domain {
     pub fn alloc_msr_bitmap(&mut self, platform: &crate::platform::ThemisPlatform) {
         self.msr_bitmap = platform.alloc_meta_frame(self.id);
         let virt = (self.msr_bitmap + self.hhdm_offset) as *mut u8;
-        crate::msr_virt::init_bitmap(virt);
+        crate::arch::msr_virt::init_bitmap(virt);
     }
 
     pub fn vmcs_phys(&self, vp_index: usize) -> u64 {

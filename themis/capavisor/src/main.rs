@@ -44,23 +44,15 @@ macro_rules! serial_rtdbg {
     };
 }
 
+mod arch;
 mod arch_traits;
-mod x86_platform;
 
-mod acpi;
 mod attestation;
-mod boot;
 mod domain;
-mod gdt;
 mod guest;
 mod hypercall;
-mod iommu_ir;
 mod mem;
-mod msr_virt;
-mod pci;
 mod platform;
-mod vmcs;
-mod vmexit;
 mod vmx {
     pub use ::vmx::features::*;
 }
@@ -269,7 +261,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase 1: Platform discovery ──────────────────────────────────────── //
-    let platform = boot::platform(entries, hhdm_offset, rsdp_phys, cpus, bsp_lapic_id);
+    let platform = arch::boot::platform(entries, hhdm_offset, rsdp_phys, cpus, bsp_lapic_id);
 
     // ── TPM probe (after ACPI discovery) ─────────────────────────────────── //
     // The ACPI TPM2 table tells us if a TPM is present.  If so, map its MMIO
@@ -288,14 +280,14 @@ pub extern "C" fn _start() -> ! {
     // ── ThemisPlatform init: register dom0, hand it the full META pool ──────── //
     // Must happen before boot::vmx() so that VMXON pages can be allocated from
     // ThemisPlatform's MetaAllocator.
-    let mut themis = boot::init_themis(&platform);
+    let mut themis = arch::boot::init_themis(&platform);
 
     // ── Phase 2a–b: VMX feature detection + VMXON on BSP ─────────────────── //
-    let mut vmx_state = boot::vmx(&platform, &mut themis);
+    let mut vmx_state = arch::boot::vmx(&platform, &mut themis);
 
     // ── Phase 2c: Capability engine + EPT build ───────────────────────────── //
     // `themis` is consumed here; further access via `capa.platform`.
-    let capa = boot::capa(&platform, themis);
+    let capa = arch::boot::capa(&platform, themis);
 
     // ── Phase 2c attestation: dump dom0 capability state ─────────────────── //
     {
@@ -308,7 +300,7 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 2d: VMCS allocation + setup ────────────────────────────────── //
     // Vcpus are stored directly in the PlatformDomain (dom0).
-    boot::vmcs(&platform, &mut vmx_state, &capa);
+    arch::boot::vmcs(&platform, &mut vmx_state, &capa);
 
     // ── Collect Limine modules for P7f ────────────────────────────────────── //
     let modules: alloc::vec::Vec<guest::ModuleInfo> = MODULE_REQUEST
@@ -322,7 +314,7 @@ pub extern "C" fn _start() -> ! {
         .unwrap_or_default();
 
     // ── Phase 7f: Linux kernel loading + boot_params ──────────────────────── //
-    let linux = boot::linux(&platform, &modules);
+    let linux = arch::boot::linux(&platform, &modules);
 
     // ── Phase 7g: VMLAUNCH ────────────────────────────────────────────────── //
     PLATFORM_PTR.store(&capa.platform as *const _ as *mut _, Ordering::Relaxed);
@@ -354,7 +346,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    boot::launch(&linux, &vmx_state, &capa.platform);
+    arch::boot::launch(&linux, &vmx_state, &capa.platform);
 }
 
 // ── AP entry point ───────────────────────────────────────────────────────── //
@@ -412,7 +404,7 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     let mut active = inactive.activate().expect("AP activate failed");
 
     // Enter the monitor loop — never returns.
-    vmexit::monitor_loop(&mut active);
+    arch::vmexit::monitor_loop(&mut active);
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

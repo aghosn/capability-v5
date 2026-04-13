@@ -16,11 +16,11 @@ use alloc::vec::Vec;
 use limine::memory_map::Entry;
 use limine::mp::Cpu;
 
-use crate::acpi::AcpiInfo;
+use crate::arch::acpi::AcpiInfo;
 use crate::domain::Domain;
 use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
-use crate::pci::PciDevice;
+use crate::arch::pci::PciDevice;
 use crate::vmx::CpuFeatures;
 use crate::{serial_println, AP_READY_COUNT};
 
@@ -314,7 +314,7 @@ pub fn platform(
     // ── Phase 1e: PCI enumeration ─────────────────────────────────────────── //
 
     serial_println!();
-    let pci_result = crate::pci::enumerate(&acpi, hhdm_offset);
+    let pci_result = crate::arch::pci::enumerate(&acpi, hhdm_offset);
     let pci_devices;
     let _pci_bar_regions;
     if let Some((devices, bars)) = pci_result {
@@ -999,7 +999,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
             // Find ECAM regions for this unit's segment (all buses, regardless
             // of INCLUDE_PCI_ALL — an absent root entry causes a DMA fault).
-            let ecam_regions: Vec<crate::acpi::EcamRegion> = info
+            let ecam_regions: Vec<crate::arch::acpi::EcamRegion> = info
                 .acpi
                 .ecam_regions
                 .iter()
@@ -1161,8 +1161,8 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         platform.bootstrap_init_domcomm(ROOT_ID, cr.base, cr.base, nr_pages);
 
         // Set CPUID statics for the vmexit handler.
-        crate::vmexit::DOMCOMM_GPA.store(cr.base, core::sync::atomic::Ordering::Relaxed);
-        crate::vmexit::DOMCOMM_PAGES.store(nr_pages, core::sync::atomic::Ordering::Relaxed);
+        crate::arch::vmexit::DOMCOMM_GPA.store(cr.base, core::sync::atomic::Ordering::Relaxed);
+        crate::arch::vmexit::DOMCOMM_PAGES.store(nr_pages, core::sync::atomic::Ordering::Relaxed);
 
         serial_println!(
             "  DomainComm: {} pages at {:#x} (e820 reserved, CPUID 0x40000002)",
@@ -1504,7 +1504,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
 /// - After return, BSP VMCS is the current VMCS on this core (P7f will patch RIP/RSP).
 /// - HOST_RSP is not set here — `vcpu.run()` sets it dynamically to the caller's stack.
 pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
-    use crate::vmcs::setup_vmcs_for_vp;
+    use crate::arch::vmcs::setup_vmcs_for_vp;
     use x86::bits64::vmx;
     use x86::vmx::vmcs;
 
@@ -1514,13 +1514,13 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     // Set up our own GDT (null + code64 + data + per-core TSS) and load TR.
     // Limine does not set TR, so `str` would return 0 without this step,
     // causing VMLAUNCH error 8 ("VM entry with invalid host-state field(s)").
-    crate::gdt::init();
-    crate::gdt::load_for_core(0); // BSP = core 0
+    crate::arch::gdt::init();
+    crate::arch::gdt::load_for_core(0); // BSP = core 0
     serial_println!(
         "  GDT loaded: base={:#x}  TR selector={:#06x}  TR base={:#x}",
-        crate::gdt::gdtr_base(),
-        crate::gdt::tss_selector(0),
-        crate::gdt::tss_base(0)
+        crate::arch::gdt::gdtr_base(),
+        crate::arch::gdt::tss_selector(0),
+        crate::arch::gdt::tss_base(0)
     );
 
     let num_vps = info.num_cores;
@@ -1662,7 +1662,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
     // Falls back to 0 (Linux scans for RSDP) if there are no tables to
     // strip or the platform uses ACPI 1.0.
     let acpi_rsdp_addr =
-        crate::acpi::strip_dmar(info.acpi.rsdp_phys, lx::ACPI_COPY_PHYS, info.hhdm_offset)
+        crate::arch::acpi::strip_dmar(info.acpi.rsdp_phys, lx::ACPI_COPY_PHYS, info.hhdm_offset)
             .unwrap_or(0);
 
     // ── Load kernel + initrd, write boot_params ──────────────────────────── //
@@ -1718,7 +1718,7 @@ pub fn linux(info: &PlatformInfo, modules: &[crate::guest::ModuleInfo]) -> Linux
 /// This function never returns.
 pub fn launch(linux: &LinuxState, vmx: &VmxState, platform: &crate::platform::ThemisPlatform) -> ! {
     use crate::vcpu::{InactiveVcpu, Reg};
-    use crate::vmexit::monitor_loop;
+    use crate::arch::vmexit::monitor_loop;
     use crate::AP_LAUNCH_READY;
     use core::sync::atomic::Ordering;
 

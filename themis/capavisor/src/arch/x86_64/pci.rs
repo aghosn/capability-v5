@@ -9,7 +9,7 @@ use core::ptr;
 
 use pci_types::{Bar, ConfigRegionAccess, EndpointHeader, HeaderType, PciAddress, PciHeader};
 
-use crate::acpi::AcpiInfo;
+use crate::arch::acpi::AcpiInfo;
 
 // ── ECAM config-space accessor ──────────────────────────────────────────── //
 

@@ -979,7 +979,7 @@ pub struct ThemisPlatform {
     vmxon_phys: Vec<u64>,
     /// VT-d DRHD units with allocated IRT pages; written once at boot by
     /// `init_themis`, immutable afterwards (entries updated via `program_irte`).
-    pub drhd_units: Vec<crate::acpi::DhrdUnit>,
+    pub drhd_units: Vec<crate::arch::acpi::DhrdUnit>,
     /// Engine-level switch manager — owns per-core `CoreContext` for
     /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
     /// with the capavisor's own `CoreContext` via `set_core_context()`.
@@ -1171,7 +1171,7 @@ impl ThemisPlatform {
     }
 
     /// Flush context-cache (device-selective) and IOTLB (global) for a DRHD unit.
-    fn flush_ctx_and_iotlb(&self, unit: &crate::acpi::DhrdUnit, bdf: u16, hhdm: u64) {
+    fn flush_ctx_and_iotlb(&self, unit: &crate::arch::acpi::DhrdUnit, bdf: u16, hhdm: u64) {
         const CCMD_OFFSET: u64 = 0x28;
         const ECAP_OFFSET: u64 = 0x10;
         const POLL_LIMIT: usize = 100_000;

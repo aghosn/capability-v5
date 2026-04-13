@@ -22,7 +22,7 @@ use crate::arch_traits::types::{
 };
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, Reg};
-use crate::vmexit;
+use crate::arch::vmexit;
 
 // ── X86Platform ──────────────────────────────────────────────────────────── //
 

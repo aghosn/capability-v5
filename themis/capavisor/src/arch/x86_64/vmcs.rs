@@ -50,7 +50,7 @@ pub fn vmcs_adjust_cr4(val: u64) -> u64 {
 }
 
 use crate::serial_println;
-use crate::vmexit::host_rip_stub;
+use crate::arch::vmexit::host_rip_stub;
 
 // ── Posted Interrupt constants ───────────────────────────────────────────── //
 
@@ -412,7 +412,7 @@ unsafe fn write_control_fields(
     // Diagnostic heartbeat: fires every ~2s to sample guest RIP/RSP.
     vmx::vmwrite(
         guest::VMX_PREEMPTION_TIMER_VALUE,
-        crate::vmexit::PREEMPTION_TIMER_TICKS,
+        crate::arch::vmexit::PREEMPTION_TIMER_TICKS,
     )
     .expect("vmwrite preemption timer");
 
@@ -495,7 +495,7 @@ unsafe fn write_host_state() {
     // Segment selectors (TI and RPL bits cleared — VMX requirement).
     // CS/SS/DS/ES/FS/GS come from the actual registers; TR uses the known
     // selector from the GDT we loaded with gdt::load_for_core() — never 0.
-    let tr_sel = crate::gdt::tss_selector(0); // BSP is always core 0
+    let tr_sel = crate::arch::gdt::tss_selector(0); // BSP is always core 0
     vmx::vmwrite(host::CS_SELECTOR as u32, (cs & !7) as u64).expect("vmwrite host CS");
     vmx::vmwrite(host::SS_SELECTOR as u32, (ss & !7) as u64).expect("vmwrite host SS");
     vmx::vmwrite(host::DS_SELECTOR as u32, (ds & !7) as u64).expect("vmwrite host DS");
@@ -534,7 +534,7 @@ unsafe fn write_host_state() {
 
     // GDTR base: use the GDT we loaded (authoritative, no sgdt ambiguity).
     // IDTR base: read from the processor (Limine set this up).
-    let gdtr = crate::gdt::gdtr_base();
+    let gdtr = crate::arch::gdt::gdtr_base();
     let idtr = read_descriptor_table_base("sidt");
     vmx::vmwrite(host::GDTR_BASE, gdtr).expect("vmwrite host GDTR base");
     vmx::vmwrite(host::IDTR_BASE, idtr).expect("vmwrite host IDTR base");
@@ -548,7 +548,7 @@ unsafe fn write_host_state() {
     // TR base: taken directly from our known TSS for core 0 (BSP).
     // gdt_system_segment_base is kept as a fallback but we use the direct
     // address to avoid any GDT parse ambiguity.
-    let tr_base = crate::gdt::tss_base(0);
+    let tr_base = crate::arch::gdt::tss_base(0);
     vmx::vmwrite(host::TR_BASE, tr_base).expect("vmwrite host TR base");
 
     // SYSENTER CS/ESP/EIP (set to zero — Limine / our monitor does not use SYSENTER).
@@ -661,7 +661,7 @@ unsafe fn write_guest_state() {
     // first cycle).  The monitor loop resets it on every timer exit anyway.
     vmx::vmwrite(
         guest::VMX_PREEMPTION_TIMER_VALUE,
-        crate::vmexit::PREEMPTION_TIMER_TICKS,
+        crate::arch::vmexit::PREEMPTION_TIMER_TICKS,
     )
     .expect("vmwrite guest preemption timer");
 
