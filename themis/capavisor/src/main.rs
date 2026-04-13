@@ -44,6 +44,8 @@ macro_rules! serial_rtdbg {
     };
 }
 
+mod arch_traits;
+
 mod acpi;
 mod attestation;
 mod boot;

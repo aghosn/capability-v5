@@ -86,6 +86,32 @@
 
 ### ~~TODO: Implement VITAL cascade in Lean~~ ✅ Done (2f2df4af6)
 
+### TODO: Platform modularization (multi-ISA support)
+
+Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modularization.md)
+
+**Goal**: Separate platform-agnostic core (domain lifecycle, hypercall dispatch,
+capability-engine bridge) from arch-specific backends (x86 VMX/EPT/APIC, future
+ARM EL2/Stage-2/GIC). Enables multi-ISA support without duplicating policy code.
+
+**Phase A: Introduce trait seams** (in-place, no file moves):
+- [x] A1: Define `arch_traits::traits` + `arch_traits::types` modules (SemanticExit,
+  HypercallArgs, ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot)
+- [ ] A2: impl ArchVpOps for X86Platform (wrap vmcs.rs/vmexit.rs)
+- [ ] A3: impl ArchGuestPhysMap for X86Platform (wrap EPT)
+- [ ] A4: impl ArchCoreSignaling for X86Platform (wrap x2APIC IPI)
+- [ ] A5: impl ArchIommu for X86Platform (wrap VT-d)
+- [ ] A6: impl ArchBoot for X86Platform (wrap boot/main)
+- [ ] A7: ThemisPlatform<T> generic over traits
+
+**Phase B: Semantic exit translation** (subsumes VMEXIT dispatch unification):
+- [ ] B1: vmexit.rs → SemanticExit translation layer
+- [ ] B2: Merge dom0/child dispatch via SemanticExit
+
+**Phase C: File reorganization**: Move generic → `core/`, x86 → `arch/x86_64/`
+
+**Phase D: ARM skeleton** (future, after x86 stable)
+
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
 New item — design phase. Goal: dom1 runs with most memory exclusive to it
