@@ -1350,7 +1350,7 @@ impl ThemisPlatform {
     /// Execute INVEPT(single-context) for the given domain's EPTP on the
     /// current core.  If the domain has no EPT (not yet mapped), this is a
     /// no-op since there can be no cached translations.
-    fn invept_for_domain(&self, domain_id: DomainId) {
+    pub(crate) fn invept_for_domain(&self, domain_id: DomainId) {
         if let Some(arc) = self.domains.get(domain_id) {
             let d = arc.lock();
             if let Some(ept) = d.ept.as_ref() {
@@ -1499,6 +1499,20 @@ impl ThemisPlatform {
         }
     }
 } //
+
+impl ThemisPlatform {
+    /// Public wrapper around the Platform trait's get_current_core for
+    /// crate-internal use (e.g., by x86_platform.rs).
+    pub(crate) fn current_core_id(&self) -> Option<capability_engine::CoreId> {
+        // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
+        let cpuid = core::arch::x86_64::__cpuid(1);
+        let lapic_id = (cpuid.ebx >> 24) as u32;
+        let ids = unsafe { &*self.lapic_ids.get() };
+        ids.iter()
+            .position(|&id| id == lapic_id)
+            .map(|i| i as capability_engine::CoreId)
+    }
+}
 
 impl Platform for ThemisPlatform {
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
