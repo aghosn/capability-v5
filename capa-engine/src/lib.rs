@@ -38,10 +38,10 @@ pub use capability::{
     SubHandle,
 };
 pub use domain::{
-    effective_vector, Domain, DomainPolicy, DomainStatus, ExitAction, ExitPolicy,
+    Domain, DomainPolicy, DomainStatus, ExitAction, ExitPolicy,
     InterruptPolicy, InterruptVisibility, MonitorAPI, PendingDomainCapability, PolicyIdentifier,
     RegBitmap, VProcessorRef, VProcessorState, VectorPolicy, VpCallContext, VpRunState,
-    EXIT_REASON_NONE, VECTOR_AVAILABLE,
+    VECTOR_AVAILABLE,
 };
 pub use error::{CapaError, Result};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};

@@ -2,9 +2,9 @@
 
 use crate::attest::{self, AttestationReport};
 use crate::domain::{
-    effective_vector, Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI,
+    Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI,
     PendingCapability, PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef,
-    VectorPolicy, VpCallContext, VpRunState, EXIT_REASON_NONE, VECTOR_AVAILABLE,
+    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus, Rights};
@@ -2885,7 +2885,7 @@ impl Capability<Domain> {
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
 
         if to_handle == 0 {
-            Self::switch_domain_return(caller, core_id, platform, EXIT_REASON_NONE)
+            Self::switch_domain_return(caller, core_id, platform, None)
         } else {
             Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)
         }
@@ -2904,7 +2904,7 @@ impl Capability<Domain> {
         let core_id = platform
             .get_current_core()
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
-        Self::switch_domain_return(caller, core_id, platform, exit_reason)
+        Self::switch_domain_return(caller, core_id, platform, Some(exit_reason))
     }
 
     /// Return path: unwind the VP call chain one step.
@@ -2916,7 +2916,7 @@ impl Capability<Domain> {
         caller: &CapabilityRef<Domain>,
         core_id: CoreId,
         platform: &dyn Platform,
-        exit_reason: u32,
+        exit_reason: Option<u32>,
     ) -> Result<SwitchContext> {
         let (caller_id, caller_vp_arc) = {
             let c = caller.read();
@@ -3142,7 +3142,7 @@ impl Capability<Domain> {
                     let mut s = vp.run_state.write();
                     if matches!(*s, VpRunState::Interrupted { .. }) {
                         *s = VpRunState::Available {
-                            last_exit_reason: EXIT_REASON_NONE,
+                            last_exit_reason: None,
                         };
                     }
                 }
@@ -3315,7 +3315,7 @@ impl Capability<Domain> {
             *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
         } else {
             *chain[0].2.run_state.write() = VpRunState::Available {
-                last_exit_reason: EXIT_REASON_NONE,
+                last_exit_reason: None,
             };
         }
 
@@ -3832,8 +3832,8 @@ fn register_access_check(
             let policy = child_r.data.policy.interrupts.get_policy(*vector);
             if want_read { policy.read_set } else { policy.write_set }
         }
-        VpRunState::Available { last_exit_reason } if *last_exit_reason != EXIT_REASON_NONE => {
-            let action = child_r.data.policy.exits.get_action(*last_exit_reason);
+        VpRunState::Available { last_exit_reason: Some(reason) } => {
+            let action = child_r.data.policy.exits.get_action(*reason);
             if want_read { action.read_set } else { action.write_set }
         }
         _ => {
@@ -3845,7 +3845,3 @@ fn register_access_check(
 
     Ok((child_domain_id, bitmap))
 }
-
-// Suppress the unused-import warning for VECTOR_AVAILABLE when it's only
-// referenced indirectly through effective_vector.
-const _: u8 = VECTOR_AVAILABLE;

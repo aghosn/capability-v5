@@ -411,7 +411,7 @@ fn test_vp_return_no_vp_on_core() {
         let vp0 = c.data.policy.vprocessor_states[0].clone();
         drop(c);
         // VP[0] is Running{core:0}, change core to something else so find_vp_on_core fails
-        *vp0.run_state.write() = VpRunState::Available { last_exit_reason: EXIT_REASON_NONE };
+        *vp0.run_state.write() = VpRunState::Available { last_exit_reason: None };
     }
 
     let result = Capability::switch(&child, 0, 0, &platform);

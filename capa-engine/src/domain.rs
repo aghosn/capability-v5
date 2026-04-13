@@ -334,10 +334,6 @@ pub struct VpCallContext {
     pub vp_id: u64,
 }
 
-/// Sentinel value for `VpRunState::Available::last_exit_reason` meaning
-/// "no non-interrupt exit recorded" (fresh VP or interrupt-caused exit).
-pub const EXIT_REASON_NONE: u32 = u32::MAX;
-
 /// Scheduling state of a virtual processor.
 #[derive(Debug, Clone)]
 pub enum VpRunState {
@@ -346,9 +342,9 @@ pub enum VpRunState {
     /// `last_exit_reason`: if this VP was most recently forwarded to its parent
     /// via a non-interrupt exit, this holds the exit reason (u32) so that
     /// `register_access_check` can look up the correct `ExitPolicy` write_set.
-    /// Set to [`EXIT_REASON_NONE`] for fresh VPs or interrupt-caused exits.
+    /// `None` for fresh VPs or interrupt-caused exits.
     Available {
-        last_exit_reason: u32,
+        last_exit_reason: Option<u32>,
     },
     /// VP is currently executing on the given core.
     Running {
@@ -395,20 +391,6 @@ pub enum VpRunState {
 /// Using a uniform lookup means there is no special-casing: a parent configures
 /// register visibility for the normal state the same way it does for a real vector.
 pub const VECTOR_AVAILABLE: u8 = 0xFF;
-
-/// Return the effective interrupt vector to use for register-access policy lookups.
-///
-/// - `Available / Running / Locked`  → [`VECTOR_AVAILABLE`] (0xFF)
-/// - `Interrupted { vector }`        → `vector`
-/// - `Suspended   { vector, .. }`    → `vector` (callee's interrupt vector)
-pub fn effective_vector(run_state: &VpRunState) -> u8 {
-    match run_state {
-        VpRunState::Available { .. } | VpRunState::Running { .. } | VpRunState::Locked { .. } => {
-            VECTOR_AVAILABLE
-        }
-        VpRunState::Interrupted { vector } | VpRunState::Suspended { vector, .. } => *vector,
-    }
-}
 
 /// Identifier for a domain-wide policy field, used by `set_policy` / `get_policy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,7 +449,7 @@ impl VProcessorState {
         VProcessorState {
             id,
             platform_data: Vec::new(),
-            run_state: RwLock::new(VpRunState::Available { last_exit_reason: EXIT_REASON_NONE }),
+            run_state: RwLock::new(VpRunState::Available { last_exit_reason: None }),
         }
     }
 }
