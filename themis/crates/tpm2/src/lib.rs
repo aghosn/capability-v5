@@ -25,10 +25,11 @@
 //!    META pool is capavisor-only, never in any domain's EPT).
 
 #![no_std]
+#![allow(dead_code)] // Driver crate: spec constants/methods used selectively.
 
-mod tis;
-mod crb;
 mod commands;
+mod crb;
+mod tis;
 
 pub use commands::QuoteResult;
 pub use tis::{Tpm2Error, TIS_BASE};

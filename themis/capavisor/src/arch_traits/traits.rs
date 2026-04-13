@@ -5,10 +5,16 @@
 //! small to avoid forcing one ISA's shape onto another.
 //!
 //! Implementations live under `crate::arch::<isa>/`.
+//!
+//! Many traits and methods are not yet called — they define the API boundary
+//! for future arch backends (e.g., ARM AArch64).
+#![allow(dead_code)]
 
 use capability_engine::CapaError;
 
-use super::types::{DeviceId, ExitInfo, HypercallArgs, HypercallResult, MapPermissions, PageSize, SemanticExit};
+use super::types::{
+    DeviceId, ExitInfo, HypercallArgs, HypercallResult, MapPermissions, PageSize, SemanticExit,
+};
 
 // ── VP lifecycle and guest entry/exit ────────────────────────────────────── //
 

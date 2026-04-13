@@ -226,6 +226,8 @@ pub struct EcamRegion {
     pub segment: u16,
     pub start_bus: u8,
     pub end_bus: u8,
+    /// ECAM base address (used when PCI passthrough is wired).
+    #[allow(dead_code)]
     pub base_phys: u64,
 }
 

@@ -17,10 +17,10 @@ use limine::memory_map::Entry;
 use limine::mp::Cpu;
 
 use crate::arch::acpi::AcpiInfo;
+use crate::arch::pci::PciDevice;
 use crate::domain::Domain;
 use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
-use crate::arch::pci::PciDevice;
 use crate::vmx::CpuFeatures;
 use crate::{serial_println, AP_READY_COUNT};
 

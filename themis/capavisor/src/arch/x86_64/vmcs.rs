@@ -49,8 +49,8 @@ pub fn vmcs_adjust_cr4(val: u64) -> u64 {
     val | (1u64 << 13) // VMXE
 }
 
-use crate::serial_println;
 use crate::arch::vmexit::host_rip_stub;
+use crate::serial_println;
 
 // ── Posted Interrupt constants ───────────────────────────────────────────── //
 

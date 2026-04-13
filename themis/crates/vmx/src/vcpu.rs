@@ -47,7 +47,9 @@ pub struct XsaveArea {
 
 impl XsaveArea {
     pub const fn new() -> Self {
-        Self { data: [0u8; XSAVE_AREA_SIZE] }
+        Self {
+            data: [0u8; XSAVE_AREA_SIZE],
+        }
     }
 }
 
@@ -158,7 +160,13 @@ unsafe impl Send for InactiveVcpu {}
 impl InactiveVcpu {
     /// Create a new inactive VCPU from freshly-allocated VMCS/VAPIC pages.
     /// The VMCS must have been vmclear'd by the caller.
-    pub fn new(vmcs_phys: u64, vapic_phys: u64, msr_bitmap_phys: u64, pid_phys: u64, vpid: u16) -> Self {
+    pub fn new(
+        vmcs_phys: u64,
+        vapic_phys: u64,
+        msr_bitmap_phys: u64,
+        pid_phys: u64,
+        vpid: u16,
+    ) -> Self {
         Self {
             vmcs_phys,
             vapic_phys,
@@ -176,8 +184,7 @@ impl InactiveVcpu {
     /// an `ActiveVcpu` that can vmread/vmwrite and run the guest.
     pub fn activate(self) -> Result<ActiveVcpu, VmxError> {
         unsafe {
-            vmx::vmptrld(self.vmcs_phys)
-                .map_err(|_| VmxError::VmcsOperationFailed("vmptrld"))?;
+            vmx::vmptrld(self.vmcs_phys).map_err(|_| VmxError::VmcsOperationFailed("vmptrld"))?;
             // Restore guest MSRs that the VMCS does not handle automatically.
             for (i, &msr) in SYSCALL_MSRS.iter().enumerate() {
                 x86::msr::wrmsr(msr, self.syscall_msrs[i]);
@@ -199,11 +206,21 @@ impl InactiveVcpu {
         })
     }
 
-    pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
-    pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
-    pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
-    pub fn pid_phys(&self) -> u64 { self.pid_phys }
-    pub fn vpid(&self) -> u16 { self.vpid }
+    pub fn vmcs_phys(&self) -> u64 {
+        self.vmcs_phys
+    }
+    pub fn vapic_phys(&self) -> u64 {
+        self.vapic_phys
+    }
+    pub fn msr_bitmap_phys(&self) -> u64 {
+        self.msr_bitmap_phys
+    }
+    pub fn pid_phys(&self) -> u64 {
+        self.pid_phys
+    }
+    pub fn vpid(&self) -> u16 {
+        self.vpid
+    }
 
     /// Read a guest GPR value.
     pub fn reg(&self, r: Reg) -> u64 {
@@ -231,6 +248,8 @@ pub struct ActiveVcpu {
     vpid: u16,
     launched: bool,
     regs: [u64; REGFILE_SIZE],
+    // Saved/restored during VP activate/deactivate — compiler can't see asm usage.
+    #[allow(dead_code)]
     syscall_msrs: [u64; NUM_SYSCALL_MSRS],
     xsave_area: XsaveArea,
     _not_send: PhantomData<*const ()>,
@@ -251,17 +270,12 @@ impl ActiveVcpu {
 
     /// Read a VMCS field (fallible).
     pub fn try_get(&self, field: u32) -> Result<u64, VmxError> {
-        unsafe {
-            vmx::vmread(field).map_err(|_| VmxError::VmcsOperationFailed("vmread"))
-        }
+        unsafe { vmx::vmread(field).map_err(|_| VmxError::VmcsOperationFailed("vmread")) }
     }
 
     /// Write a VMCS field (fallible).
     pub fn try_set(&mut self, field: u32, value: u64) -> Result<(), VmxError> {
-        unsafe {
-            vmx::vmwrite(field, value)
-                .map_err(|_| VmxError::VmcsOperationFailed("vmwrite"))
-        }
+        unsafe { vmx::vmwrite(field, value).map_err(|_| VmxError::VmcsOperationFailed("vmwrite")) }
     }
 
     // ── Guest GPR access ─────────────────────────────────────────────── //
@@ -283,11 +297,21 @@ impl ActiveVcpu {
 
     // ── VCPU identity ────────────────────────────────────────────────── //
 
-    pub fn vmcs_phys(&self) -> u64 { self.vmcs_phys }
-    pub fn vapic_phys(&self) -> u64 { self.vapic_phys }
-    pub fn msr_bitmap_phys(&self) -> u64 { self.msr_bitmap_phys }
-    pub fn pid_phys(&self) -> u64 { self.pid_phys }
-    pub fn vpid(&self) -> u16 { self.vpid }
+    pub fn vmcs_phys(&self) -> u64 {
+        self.vmcs_phys
+    }
+    pub fn vapic_phys(&self) -> u64 {
+        self.vapic_phys
+    }
+    pub fn msr_bitmap_phys(&self) -> u64 {
+        self.msr_bitmap_phys
+    }
+    pub fn pid_phys(&self) -> u64 {
+        self.pid_phys
+    }
+    pub fn vpid(&self) -> u16 {
+        self.vpid
+    }
 
     // ── Lifecycle ────────────────────────────────────────────────────── //
 
@@ -303,10 +327,11 @@ impl ActiveVcpu {
             saved_msrs[i] = unsafe { x86::msr::rdmsr(msr) };
         }
         // Save guest FPU/SSE/AVX state before VMCLEAR.
-        unsafe { xsave(&mut self.xsave_area); }
         unsafe {
-            vmx::vmclear(self.vmcs_phys)
-                .map_err(|_| VmxError::VmcsOperationFailed("vmclear"))?;
+            xsave(&mut self.xsave_area);
+        }
+        unsafe {
+            vmx::vmclear(self.vmcs_phys).map_err(|_| VmxError::VmcsOperationFailed("vmclear"))?;
         }
         Ok(InactiveVcpu {
             vmcs_phys: self.vmcs_phys,
@@ -341,7 +366,8 @@ impl ActiveVcpu {
         }
         let reason = vmx::vmread(vmcs::ro::EXIT_REASON)
             .map_err(|_| VmxError::VmcsOperationFailed("vmread EXIT_REASON"))?
-            as u32 & 0xFFFF;
+            as u32
+            & 0xFFFF;
         Ok(reason)
     }
 
@@ -521,20 +547,12 @@ naked_vm_enter!(vmresume_with_regs, "vmresume");
 
 impl ActiveVcpu {
     unsafe fn vmlaunch_asm(regs: &mut [u64; REGFILE_SIZE]) -> Result<(), VmxError> {
-        let flags = vmlaunch_with_regs(
-            regs.as_mut_ptr(),
-            HOST_RSP_ENCODING,
-            HOST_RIP_ENCODING,
-        );
+        let flags = vmlaunch_with_regs(regs.as_mut_ptr(), HOST_RSP_ENCODING, HOST_RIP_ENCODING);
         check_vm_flags(flags)
     }
 
     unsafe fn vmresume_asm(regs: &mut [u64; REGFILE_SIZE]) -> Result<(), VmxError> {
-        let flags = vmresume_with_regs(
-            regs.as_mut_ptr(),
-            HOST_RSP_ENCODING,
-            HOST_RIP_ENCODING,
-        );
+        let flags = vmresume_with_regs(regs.as_mut_ptr(), HOST_RSP_ENCODING, HOST_RIP_ENCODING);
         check_vm_flags(flags)
     }
 }

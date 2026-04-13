@@ -199,11 +199,11 @@ pub const THEMIC_INTERCEPT_MSG_SIZE: usize = 120;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DoorbellNotify {
-    pub doorbell_id: u32,  // matches the id returned by REGISTER_DOORBELL
+    pub doorbell_id: u32, // matches the id returned by REGISTER_DOORBELL
     pub reserved: u32,
-    pub gpa: u64,          // guest physical address that was written
-    pub value: u64,        // data value written by the guest
-    pub size: u32,         // write size in bytes (1/2/4/8)
+    pub gpa: u64,   // guest physical address that was written
+    pub value: u64, // data value written by the guest
+    pub size: u32,  // write size in bytes (1/2/4/8)
     pub reserved2: u32,
 }
 

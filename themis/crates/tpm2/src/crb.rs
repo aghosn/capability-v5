@@ -66,7 +66,9 @@ pub(crate) struct CrbTransport {
 
 impl CrbTransport {
     pub const fn new(locality_base_va: u64) -> Self {
-        CrbTransport { base: locality_base_va }
+        CrbTransport {
+            base: locality_base_va,
+        }
     }
 
     // ── Low-level MMIO ───────────────────────────────────────────────────

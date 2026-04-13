@@ -44,9 +44,9 @@ impl CpuFeatures {
 pub fn detect_features(has_dmar: bool) -> CpuFeatures {
     // CPUID.01H: ECX
     let cpuid1 = core::arch::x86_64::__cpuid(1);
-    let vmx = (cpuid1.ecx >> 5) & 1 != 0;     // ECX[5] = VMX
-    let x2apic = (cpuid1.ecx >> 21) & 1 != 0;  // ECX[21] = x2APIC
-    // Physical address width from CPUID.80000008H
+    let vmx = (cpuid1.ecx >> 5) & 1 != 0; // ECX[5] = VMX
+    let x2apic = (cpuid1.ecx >> 21) & 1 != 0; // ECX[21] = x2APIC
+                                              // Physical address width from CPUID.80000008H
     let cpuid_pa = core::arch::x86_64::__cpuid(0x80000008);
     let phys_addr_bits = (cpuid_pa.eax & 0xFF) as u8;
 
@@ -131,10 +131,7 @@ pub fn enable_vmx_on_core(vmxon_region_phys: u64) -> Result<(), &'static str> {
     adjust_control_registers();
 
     // Execute VMXON.
-    unsafe {
-        x86::bits64::vmx::vmxon(vmxon_region_phys)
-            .map_err(|_| "VMXON failed")
-    }
+    unsafe { x86::bits64::vmx::vmxon(vmxon_region_phys).map_err(|_| "VMXON failed") }
 }
 
 // ── INVEPT / INVVPID ────────────────────────────────────────────────────── //
@@ -191,8 +188,8 @@ fn adjust_control_registers() {
         let cr0_fixed0 = msr::rdmsr(msr::IA32_VMX_CR0_FIXED0);
         let cr0_fixed1 = msr::rdmsr(msr::IA32_VMX_CR0_FIXED1);
         let mut cr0 = controlregs::cr0().bits() as u64;
-        cr0 |= cr0_fixed0;     // Set required bits
-        cr0 &= cr0_fixed1;     // Clear disallowed bits
+        cr0 |= cr0_fixed0; // Set required bits
+        cr0 &= cr0_fixed1; // Clear disallowed bits
         controlregs::cr0_write(controlregs::Cr0::from_bits_truncate(cr0 as usize));
 
         // CR4: same treatment.

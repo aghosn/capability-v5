@@ -9,7 +9,7 @@ use x86::msr;
 use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 
-use crate::vcpu::{ActiveVcpu, Reg, VmxError};
+use crate::vcpu::{ActiveVcpu, Reg};
 use crate::{serial_debug, serial_println};
 
 use capability_engine::Platform;
@@ -96,7 +96,6 @@ pub const EXIT_REASON_VMCALL: u32 = 18;
 
 // ── APIC register offsets (Intel SDM Vol 3A §10.4.1) ─────────────────────── //
 
-const APIC_REG_ID: usize = 0x020;
 const APIC_REG_EOI: usize = 0x0B0;
 const APIC_REG_ICR_LOW: usize = 0x300;
 const APIC_REG_ICR_HIGH: usize = 0x310;
@@ -124,7 +123,6 @@ const CPUID_THEMIS_MAX: u32 = 0x40000003;
 const CPUID_THEMIS_FEATURES: u32 = 0x40000001;
 const CPUID_THEMIS_DOMCOMM: u32 = 0x40000002;
 const CPUID_THEMIS_LIMITS: u32 = 0x40000003;
-const CPUID_THEMIS_TSC: u32 = 0x40000010;
 const CPUID_HV_RANGE_END: u32 = 0x4FFFFFFF;
 const CPUID_DEBUG_RANGE_START: u32 = 0xDEAD0000;
 const CPUID_DEBUG_RANGE_END: u32 = 0xDEADFFFF;
@@ -170,7 +168,7 @@ pub const EXIT_REASON_APIC_WRITE: u32 = 56;
 
 // ── Exit classification ───────────────────────────────────────────────────── //
 
-use crate::arch_traits::types::{SemanticExit, ExitInfo};
+use crate::arch_traits::types::{ExitInfo, SemanticExit};
 
 /// Classify a raw VMX exit reason into a [`SemanticExit`], handling
 /// arch-internal exits (INIT, XSETBV, interrupt-window, EOI-induced)
@@ -192,8 +190,14 @@ pub(crate) fn classify_and_handle_internal(
         EXIT_REASON_VMENTRY_INVALID_GUEST => {
             use core::sync::atomic::Ordering;
             let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
-            let p = if !platform_ptr.is_null() { Some(unsafe { &*platform_ptr }) } else { None };
-            let cid = p.map(|p| p.get_current_core().unwrap_or(0) as usize).unwrap_or(0);
+            let p = if !platform_ptr.is_null() {
+                Some(unsafe { &*platform_ptr })
+            } else {
+                None
+            };
+            let cid = p
+                .map(|p| p.get_current_core().unwrap_or(0) as usize)
+                .unwrap_or(0);
             dump_vmentry_failure(vcpu, p, cid);
             SemanticExit::Shutdown { reason }
         }
@@ -252,7 +256,11 @@ pub(crate) fn classify_and_handle_internal(
                 };
                 SemanticExit::PolicyDriven {
                     reason,
-                    info: ExitInfo::Exception { vector, error_code, is_nmi: false },
+                    info: ExitInfo::Exception {
+                        vector,
+                        error_code,
+                        is_nmi: false,
+                    },
                 }
             }
         }
@@ -279,8 +287,8 @@ pub(crate) fn classify_and_handle_internal(
             let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
             if offset == APIC_REG_ICR_LOW as u64 && acc_type == APIC_ACCESS_TYPE_WRITE {
                 // ICR write — decode value for parent.
-                let icr_low = decode_apic_write_value(vcpu, platform)
-                    .unwrap_or(vcpu.reg(Reg::Rax) as u32);
+                let icr_low =
+                    decode_apic_write_value(vcpu, platform).unwrap_or(vcpu.reg(Reg::Rax) as u32);
                 let hhdm = platform.hhdm_offset();
                 let vapic = (vcpu.vapic_phys() + hhdm) as *const u32;
                 let icr_high = unsafe { vapic.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
@@ -305,7 +313,10 @@ pub(crate) fn classify_and_handle_internal(
                 vcpu.set_reg(Reg::Rax, icr_low as u64);
                 SemanticExit::PolicyDriven {
                     reason: EXIT_REASON_APIC_ACCESS, // normalize to APIC_ACCESS for parent
-                    info: ExitInfo::ApicIcr { icr_low, icr_high: 0 },
+                    info: ExitInfo::ApicIcr {
+                        icr_low,
+                        icr_high: 0,
+                    },
                 }
             } else {
                 // Non-ICR APIC write: hardware handled (VID for EOI, etc.)
@@ -319,7 +330,10 @@ pub(crate) fn classify_and_handle_internal(
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             SemanticExit::PolicyDriven {
                 reason,
-                info: ExitInfo::EptViolation { gpa, qualification: qual },
+                info: ExitInfo::EptViolation {
+                    gpa,
+                    qualification: qual,
+                },
             }
         }
 
@@ -331,7 +345,12 @@ pub(crate) fn classify_and_handle_internal(
             let value = vcpu.reg(Reg::Rax) as u32;
             SemanticExit::PolicyDriven {
                 reason,
-                info: ExitInfo::IoInstruction { port, size, is_write, value },
+                info: ExitInfo::IoInstruction {
+                    port,
+                    size,
+                    is_write,
+                    value,
+                },
             }
         }
 
@@ -339,7 +358,9 @@ pub(crate) fn classify_and_handle_internal(
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             SemanticExit::PolicyDriven {
                 reason,
-                info: ExitInfo::CrAccess { qualification: qual },
+                info: ExitInfo::CrAccess {
+                    qualification: qual,
+                },
             }
         }
 
@@ -347,17 +368,25 @@ pub(crate) fn classify_and_handle_internal(
             let ecx = vcpu.reg(Reg::Rcx) as u32;
             SemanticExit::PolicyDriven {
                 reason,
-                info: ExitInfo::Msr { number: ecx, is_write: false, value: 0 },
+                info: ExitInfo::Msr {
+                    number: ecx,
+                    is_write: false,
+                    value: 0,
+                },
             }
         }
 
         EXIT_REASON_WRMSR => {
             let ecx = vcpu.reg(Reg::Rcx) as u32;
-            let value = ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32)
-                | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
+            let value =
+                ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
             SemanticExit::PolicyDriven {
                 reason,
-                info: ExitInfo::Msr { number: ecx, is_write: true, value },
+                info: ExitInfo::Msr {
+                    number: ecx,
+                    is_write: true,
+                    value,
+                },
             }
         }
 
@@ -370,20 +399,16 @@ pub(crate) fn classify_and_handle_internal(
             }
         }
 
-        EXIT_REASON_HLT => {
-            SemanticExit::PolicyDriven {
-                reason,
-                info: ExitInfo::Halt,
-            }
-        }
+        EXIT_REASON_HLT => SemanticExit::PolicyDriven {
+            reason,
+            info: ExitInfo::Halt,
+        },
 
         // ── Fallback: generic policy-driven ──
-        _ => {
-            SemanticExit::PolicyDriven {
-                reason,
-                info: ExitInfo::Other,
-            }
-        }
+        _ => SemanticExit::PolicyDriven {
+            reason,
+            info: ExitInfo::Other,
+        },
     }
 }
 
@@ -428,10 +453,14 @@ pub(crate) fn handle_local_exit(
                     crate::arch::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
                 });
                 vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
-                vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS);
+                vcpu.set(
+                    vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+                    PREEMPTION_TIMER_TICKS,
+                );
                 crate::serial_println!(
                     "[VMEXIT] SIPI vector={:#x} startup={:#x} — AP activated",
-                    vector_page, cs_base,
+                    vector_page,
+                    cs_base,
                 );
             }
         }
@@ -655,20 +684,31 @@ fn dump_triple_fault(vcpu: &ActiveVcpu) {
     serial_println!("===== TRIPLE FAULT (vpid={}) =====", vcpu.vpid());
     serial_println!(
         "  RIP={:#018x}  RSP={:#018x}  RFLAGS={:#010x}",
-        rip, rsp, rflags
+        rip,
+        rsp,
+        rflags
     );
     serial_println!(
         "  CR0={:#010x}  CR3={:#010x}  CR4={:#010x}  EFER={:#010x}",
-        cr0, cr3, cr4, efer
+        cr0,
+        cr3,
+        cr4,
+        efer
     );
     serial_println!(
         "  CS: sel={:#06x} base={:#010x} ar={:#06x}  SS: sel={:#06x} ar={:#06x}",
-        cs_sel, cs_base, cs_ar, ss_sel, ss_ar
+        cs_sel,
+        cs_base,
+        cs_ar,
+        ss_sel,
+        ss_ar
     );
     serial_println!("  IDTR: base={:#018x} limit={:#06x}", idtr_base, idtr_limit);
     serial_println!(
         "  entry_ctl={:#010x}  activity={} interruptibility={:#x}",
-        entry_ctl, act, interruptibility
+        entry_ctl,
+        act,
+        interruptibility
     );
     serial_println!(
         "  RAX={:#018x}  RBX={:#018x}  RCX={:#018x}",
@@ -777,13 +817,8 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
                 | (1 << 28)
                 | (1 << 30)
                 | (1 << 31);
-            const AVX512_ECX: u32 = (1 << 1)
-                | (1 << 4)
-                | (1 << 5)
-                | (1 << 6)
-                | (1 << 11)
-                | (1 << 12)
-                | (1 << 14);
+            const AVX512_ECX: u32 =
+                (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 11) | (1 << 12) | (1 << 14);
             const AVX512_EDX: u32 = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 23);
             ebx &= !AVX512_EBX;
             ecx &= !AVX512_ECX;
@@ -846,8 +881,8 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
         }
         // Leaf 0x15: TSC / Core Crystal Clock
         (0x15, _) => {
-            eax = 1;    // denominator
-            ebx = 120;  // numerator
+            eax = 1; // denominator
+            ebx = 120; // numerator
             ecx = 25_000_000; // crystal Hz
             edx = 0;
         }
@@ -899,8 +934,7 @@ fn handle_rdmsr_local(vcpu: &mut ActiveVcpu) {
 /// Handle WRMSR locally (exit reason 32).
 fn handle_wrmsr_local(vcpu: &mut ActiveVcpu) {
     let ecx = vcpu.reg(Reg::Rcx) as u32;
-    let value =
-        ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
+    let value = ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
     if ecx == msr::IA32_EFER {
         vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
         next_instruction(vcpu);
@@ -1118,24 +1152,6 @@ fn decode_apic_write_value(
 /// physical address was written to VMCS `VIRTUAL_APIC_PAGE_ADDR`.  The VMCS
 /// for `vcpu` must be current (VMPTRLD'd) when this function is called.
 /// Caller must hold the VP lock.
-pub unsafe fn inject_virtual_interrupt(vapic_virt: *mut u32, vector: u8, vcpu: &mut ActiveVcpu) {
-    // VAPIC VIRR layout mirrors xAPIC IRR: 8 × 32-bit words starting at 0x200.
-    // Byte offset for this vector:  0x200 + (vector / 32) * 4
-    // Bit position within the word: vector % 32
-    let word_idx = (vector / 32) as usize; // 0..7
-    let bit = vector % 32;
-    let virr_ptr = unsafe { vapic_virt.add(0x200 / 4 + word_idx) };
-    unsafe { virr_ptr.write_volatile(virr_ptr.read_volatile() | (1u32 << bit)) };
-
-    // Update RVI (bits[7:0] of guest interrupt-status) if this vector is higher.
-    let status = vcpu.get(vmcs::guest::INTERRUPT_STATUS);
-    let rvi = (status & 0xFF) as u8;
-    if vector > rvi {
-        let new_status = (status & !0xFF) | (vector as u64);
-        vcpu.set(vmcs::guest::INTERRUPT_STATUS, new_status);
-    }
-}
-
 /// Inject #GP(0) into the guest.
 fn inject_gp(vcpu: &mut ActiveVcpu) {
     let info: u64 = INTR_INFO_VALID | (3 << INTR_INFO_TYPE_SHIFT) | 13 | (1 << 11);

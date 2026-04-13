@@ -22,9 +22,15 @@ use bitflags::bitflags;
 pub struct PhysAddr(u64);
 
 impl PhysAddr {
-    pub const fn new(addr: u64) -> Self { Self(addr) }
-    pub const fn as_u64(self)   -> u64  { self.0 }
-    pub const fn as_usize(self) -> usize { self.0 as usize }
+    pub const fn new(addr: u64) -> Self {
+        Self(addr)
+    }
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// A host virtual address.
@@ -33,8 +39,12 @@ impl PhysAddr {
 pub struct VirtAddr(usize);
 
 impl VirtAddr {
-    pub const fn new(addr: usize) -> Self { Self(addr) }
-    pub const fn as_usize(self)  -> usize  { self.0 }
+    pub const fn new(addr: usize) -> Self {
+        Self(addr)
+    }
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
 }
 
 // ── Frame allocator trait ────────────────────────────────────────────────── //
@@ -68,7 +78,7 @@ pub trait FrameAllocator {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct DeviceId {
-    pub bus:     u8,
+    pub bus: u8,
     pub dev_fun: u8,
 }
 
@@ -77,7 +87,7 @@ pub struct DeviceId {
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct RootEntry {
-    pub entry:    u64,
+    pub entry: u64,
     pub reserved: u64,
 }
 
@@ -142,11 +152,17 @@ impl Iommu {
     /// `addr` must be the MMIO virtual address of a VT-d DRHD unit, valid
     /// for the lifetime of this `Iommu` instance.
     pub const unsafe fn new(addr: VirtAddr) -> Self {
-        Self { addr: addr.as_usize() as *mut u8 }
+        Self {
+            addr: addr.as_usize() as *mut u8,
+        }
     }
 
-    pub fn set_addr(&mut self, addr: usize) { self.addr = addr as *mut u8; }
-    pub fn get_addr(&self) -> *mut u8 { self.addr }
+    pub fn set_addr(&mut self, addr: usize) {
+        self.addr = addr as *mut u8;
+    }
+    pub fn get_addr(&self) -> *mut u8 {
+        self.addr
+    }
 
     pub fn update_root_table_addr(&mut self) {
         self.execute_oneshoot_command(Command::SET_ROOT_PTR);
@@ -197,8 +213,12 @@ impl Iommu {
     fn wait_on_global_status(&self, cmd: Command, set: bool) {
         loop {
             let status = self.get_global_status();
-            if set && status.contains(cmd)    { return; }
-            if !set && !status.intersects(cmd) { return; }
+            if set && status.contains(cmd) {
+                return;
+            }
+            if !set && !status.intersects(cmd) {
+                return;
+            }
             core::arch::x86_64::_mm_pause();
         }
     }
@@ -214,28 +234,63 @@ impl Iommu {
     rw_reg!(u32, 0x038, get_fault_event_control, set_fault_event_control);
     rw_reg!(u32, 0x03C, get_fault_event_data, set_fault_event_data);
     rw_reg!(u32, 0x040, get_fault_event_addr, set_fault_event_addr);
-    rw_reg!(u32, 0x044, get_fault_event_upper_addr, set_fault_event_upper_addr);
-    rw_reg!(u32, 0x064, get_protect_memory_enable, set_protect_memory_enable);
-    rw_reg!(u32, 0x068, get_protect_low_memory_base, set_protect_low_memory_base);
-    rw_reg!(u32, 0x06C, get_protect_low_memory_limit, set_protect_low_memory_limit);
-    rw_reg!(u64, 0x070, get_protect_high_memory_base, set_protect_high_memory_base);
-    rw_reg!(u64, 0x078, get_protect_high_memory_limit, set_protect_high_memory_limit);
-    rw_reg!(u64, 0x0B8, get_interrupt_remapping_table_addr, set_interrupt_remapping_table_addr);
+    rw_reg!(
+        u32,
+        0x044,
+        get_fault_event_upper_addr,
+        set_fault_event_upper_addr
+    );
+    rw_reg!(
+        u32,
+        0x064,
+        get_protect_memory_enable,
+        set_protect_memory_enable
+    );
+    rw_reg!(
+        u32,
+        0x068,
+        get_protect_low_memory_base,
+        set_protect_low_memory_base
+    );
+    rw_reg!(
+        u32,
+        0x06C,
+        get_protect_low_memory_limit,
+        set_protect_low_memory_limit
+    );
+    rw_reg!(
+        u64,
+        0x070,
+        get_protect_high_memory_base,
+        set_protect_high_memory_base
+    );
+    rw_reg!(
+        u64,
+        0x078,
+        get_protect_high_memory_limit,
+        set_protect_high_memory_limit
+    );
+    rw_reg!(
+        u64,
+        0x0B8,
+        get_interrupt_remapping_table_addr,
+        set_interrupt_remapping_table_addr
+    );
     ro_reg!(u64, 0x100, get_mttr_capability);
 }
 
 // ── Fault iterator ───────────────────────────────────────────────────────── //
 
 pub struct FaultInfo {
-    pub addr:   u64,
+    pub addr: u64,
     pub record: FaultRecording,
 }
 
 pub struct FaultIterator<'iommu> {
     fault_reg_start: *mut u8,
-    nb_regs:         usize,
-    idx:             usize,
-    iommu:           &'iommu mut Iommu,
+    nb_regs: usize,
+    idx: usize,
+    iommu: &'iommu mut Iommu,
 }
 
 impl<'iommu> Iterator for FaultIterator<'iommu> {
@@ -243,10 +298,10 @@ impl<'iommu> Iterator for FaultIterator<'iommu> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (low, high) = unsafe {
-            let ptr_low  = self.fault_reg_start.offset((self.idx * 16) as isize) as *mut u64;
+            let ptr_low = self.fault_reg_start.offset((self.idx * 16) as isize) as *mut u64;
             let ptr_high = ptr_low.offset(1);
 
-            let low  = ptr::read_volatile(ptr_low);
+            let low = ptr::read_volatile(ptr_low);
             let high = FaultRecording::from_bits_retain(ptr::read_volatile(ptr_high));
 
             if high.contains(FaultRecording::FAULT) {
@@ -260,9 +315,14 @@ impl<'iommu> Iterator for FaultIterator<'iommu> {
         };
 
         self.idx += 1;
-        if self.idx >= self.nb_regs { self.idx = 0; }
+        if self.idx >= self.nb_regs {
+            self.idx = 0;
+        }
 
-        Some(FaultInfo { addr: low, record: high })
+        Some(FaultInfo {
+            addr: low,
+            record: high,
+        })
     }
 }
 
@@ -273,16 +333,19 @@ impl<'iommu> Iterator for FaultIterator<'iommu> {
 ///
 /// Returns the physical address of the root table (write to VT-d Root Table
 /// Address Register).
-pub fn setup_iommu_context(
-    iopt_root: PhysAddr,
-    allocator: &impl FrameAllocator,
-) -> PhysAddr {
-    let ctx_frame  = allocator.allocate_frame().expect("VT-d context frame").zeroed();
-    let root_frame = allocator.allocate_frame().expect("VT-d root frame").zeroed();
+pub fn setup_iommu_context(iopt_root: PhysAddr, allocator: &impl FrameAllocator) -> PhysAddr {
+    let ctx_frame = allocator
+        .allocate_frame()
+        .expect("VT-d context frame")
+        .zeroed();
+    let root_frame = allocator
+        .allocate_frame()
+        .expect("VT-d root frame")
+        .zeroed();
 
     let ctx_entry = ContextEntry {
-        upper: 0b010,                          // 4-level second-stage PT
-        lower: iopt_root.as_u64() | 0b0001,   // present
+        upper: 0b010,                       // 4-level second-stage PT
+        lower: iopt_root.as_u64() | 0b0001, // present
     };
     let root_entry = RootEntry {
         reserved: 0,
@@ -290,10 +353,14 @@ pub fn setup_iommu_context(
     };
 
     unsafe {
-        let ctx_array  = slice::from_raw_parts_mut(ctx_frame.virt_addr  as *mut ContextEntry, 256);
-        let root_array = slice::from_raw_parts_mut(root_frame.virt_addr as *mut RootEntry,    256);
-        for e in ctx_array  { *e = ctx_entry;  }
-        for e in root_array { *e = root_entry; }
+        let ctx_array = slice::from_raw_parts_mut(ctx_frame.virt_addr as *mut ContextEntry, 256);
+        let root_array = slice::from_raw_parts_mut(root_frame.virt_addr as *mut RootEntry, 256);
+        for e in ctx_array {
+            *e = ctx_entry;
+        }
+        for e in root_array {
+            *e = root_entry;
+        }
     }
 
     root_frame.phys_addr

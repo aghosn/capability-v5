@@ -95,7 +95,11 @@ unsafe fn vmcall4(op: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (u64, u64, u64
 /// Check RAX; return `Ok(())` on SUCCESS or `Err(code)`.
 #[inline(always)]
 fn check(rax: u64) -> Result<(), u64> {
-    if rax == errors::SUCCESS { Ok(()) } else { Err(rax) }
+    if rax == errors::SUCCESS {
+        Ok(())
+    } else {
+        Err(rax)
+    }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────── //
@@ -104,8 +108,7 @@ fn check(rax: u64) -> Result<(), u64> {
 ///
 /// Returns `(new_handle, sub_handle)`.
 pub fn carve(parent: u64, start: u64, size: u64, rights: u64) -> Result<(u64, u64), u64> {
-    let (rax, rdi, rsi, _) =
-        unsafe { vmcall4(opcodes::THEMIS_CARVE, parent, start, size, rights) };
+    let (rax, rdi, rsi, _) = unsafe { vmcall4(opcodes::THEMIS_CARVE, parent, start, size, rights) };
     check(rax)?;
     Ok((rdi, rsi))
 }
@@ -114,16 +117,14 @@ pub fn carve(parent: u64, start: u64, size: u64, rights: u64) -> Result<(u64, u6
 ///
 /// Returns `(new_handle, sub_handle)`.
 pub fn alias(parent: u64, start: u64, size: u64, rights: u64) -> Result<(u64, u64), u64> {
-    let (rax, rdi, rsi, _) =
-        unsafe { vmcall4(opcodes::THEMIS_ALIAS, parent, start, size, rights) };
+    let (rax, rdi, rsi, _) = unsafe { vmcall4(opcodes::THEMIS_ALIAS, parent, start, size, rights) };
     check(rax)?;
     Ok((rdi, rsi))
 }
 
 /// Send a memory capability to a receiver domain.
 pub fn send(cap: u64, receiver: u64, attrs: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_SEND, cap, receiver, attrs) };
+    let (rax, _, _, _) = unsafe { vmcall3(opcodes::THEMIS_SEND, cap, receiver, attrs) };
     check(rax)
 }
 
@@ -132,8 +133,7 @@ pub fn send(cap: u64, receiver: u64, attrs: u64) -> Result<(), u64> {
 /// `child_gpa` specifies where the region appears in the receiver's guest
 /// address space.  If 0, the capavisor uses identity mapping (GPA = HPA).
 pub fn send_at(cap: u64, receiver: u64, attrs: u64, child_gpa: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall4(opcodes::THEMIS_SEND, cap, receiver, attrs, child_gpa) };
+    let (rax, _, _, _) = unsafe { vmcall4(opcodes::THEMIS_SEND, cap, receiver, attrs, child_gpa) };
     check(rax)
 }
 
@@ -156,8 +156,14 @@ pub fn reject(pending_id: u64) -> Result<(), u64> {
 ///
 /// Returns the domain handle.
 pub fn create_domain(cores_mask: u64, api_flags: u64, num_vps: u64) -> Result<u64, u64> {
-    let (rax, rdi, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_CREATE_DOMAIN, cores_mask, api_flags, num_vps) };
+    let (rax, rdi, _, _) = unsafe {
+        vmcall3(
+            opcodes::THEMIS_CREATE_DOMAIN,
+            cores_mask,
+            api_flags,
+            num_vps,
+        )
+    };
     check(rax)?;
     Ok(rdi)
 }
@@ -170,8 +176,7 @@ pub fn seal(domain: u64) -> Result<(), u64> {
 
 /// Revoke a child of a memory capability.
 pub fn revoke_mem(parent: u64, child_sub: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_REVOKE_MEM, parent, child_sub) };
+    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_REVOKE_MEM, parent, child_sub) };
     check(rax)
 }
 
@@ -183,8 +188,7 @@ pub fn revoke_domain(domain: u64) -> Result<(), u64> {
 
 /// Switch to a target domain's VP (RDI=0 to return to caller).
 pub fn switch(target_domain: u64, vp_id: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_SWITCH, target_domain, vp_id) };
+    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_SWITCH, target_domain, vp_id) };
     check(rax)
 }
 
@@ -215,8 +219,7 @@ pub fn attest(domain: u64) -> Result<(u64, u64), u64> {
 
 /// Read a VP register from a child domain.
 pub fn get_reg(domain: u64, vp_id: u64, reg: themis_abi::VpRegister) -> Result<u64, u64> {
-    let (rax, rdi, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_GET_REG, domain, vp_id, reg as u64) };
+    let (rax, rdi, _, _) = unsafe { vmcall3(opcodes::THEMIS_GET_REG, domain, vp_id, reg as u64) };
     check(rax)?;
     Ok(rdi)
 }
@@ -237,15 +240,22 @@ pub fn set_reg(
 ///
 /// Maps to `Capability::set_policy` via THEMIS_SET_POLICY opcode.
 pub fn set_policy(domain: u64, kind: u64, key: u64, sub_key: u64, value: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall5(opcodes::THEMIS_SET_POLICY, domain, kind, key, sub_key, value) };
+    let (rax, _, _, _) = unsafe {
+        vmcall5(
+            opcodes::THEMIS_SET_POLICY,
+            domain,
+            kind,
+            key,
+            sub_key,
+            value,
+        )
+    };
     check(rax)
 }
 
 /// Assign a PCI device to a domain.
 pub fn assign_device(domain: u64, pci_bdf: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_ASSIGN_DEVICE, domain, pci_bdf) };
+    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_ASSIGN_DEVICE, domain, pci_bdf) };
     check(rax)
 }
 
@@ -254,32 +264,49 @@ pub fn assign_device(domain: u64, pci_bdf: u64) -> Result<(), u64> {
 /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle
 /// OUT: RDI = vp_id on success
 pub fn add_vp(child_domain: u64, comm_cap: u64) -> Result<u64, u64> {
-    let (rax, rdi, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_ADD_VP, child_domain, comm_cap) };
+    let (rax, rdi, _, _) = unsafe { vmcall2(opcodes::THEMIS_ADD_VP, child_domain, comm_cap) };
     check(rax)?;
     Ok(rdi)
 }
 
 /// Register a doorbell entry for a child domain.
 /// Returns the assigned doorbell_id on success.
-pub fn register_doorbell(child_domain: u64, gpa: u64, size: u64, datamatch: u64, flags: u64) -> Result<u64, u64> {
-    let (rax, rdi, _, _) =
-        unsafe { vmcall5(opcodes::THEMIS_REGISTER_DOORBELL, child_domain, gpa, size, datamatch, flags) };
+pub fn register_doorbell(
+    child_domain: u64,
+    gpa: u64,
+    size: u64,
+    datamatch: u64,
+    flags: u64,
+) -> Result<u64, u64> {
+    let (rax, rdi, _, _) = unsafe {
+        vmcall5(
+            opcodes::THEMIS_REGISTER_DOORBELL,
+            child_domain,
+            gpa,
+            size,
+            datamatch,
+            flags,
+        )
+    };
     check(rax)?;
     Ok(rdi)
 }
 
 /// Unregister a previously registered doorbell entry.
 pub fn unregister_doorbell(child_domain: u64, doorbell_id: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_UNREGISTER_DOORBELL, child_domain, doorbell_id) };
+    let (rax, _, _, _) = unsafe {
+        vmcall2(
+            opcodes::THEMIS_UNREGISTER_DOORBELL,
+            child_domain,
+            doorbell_id,
+        )
+    };
     check(rax)
 }
 
 /// Configure the notify_vector for DomainComm doorbell IPIs from the capavisor.
 pub fn set_themic_vector(vector: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall1(opcodes::THEMIS_SET_THEMIC_VECTOR, vector) };
+    let (rax, _, _, _) = unsafe { vmcall1(opcodes::THEMIS_SET_THEMIC_VECTOR, vector) };
     check(rax)
 }
 

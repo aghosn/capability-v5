@@ -10,14 +10,13 @@ use core::sync::atomic::Ordering;
 
 use capability_engine::{
     execute, Access, Attributes, CapaError, Capability, CapabilityRef, Domain, DomainId,
-    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier,
-    Rights, UpdateBatch,
+    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier, Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
+use crate::arch::vmexit::next_instruction;
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
-use crate::arch::vmexit::next_instruction;
 use crate::{serial_debug, serial_println};
 
 // ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
@@ -1040,7 +1039,7 @@ fn do_switch(
     // MUST happen before Capability::switch transitions the child VP to Running,
     // because set_register (used to validate the dirty COMM page registers)
     // rejects writes to a VP that is already in Running state.
-    let (child_domain_id_pre, comm_hpa) = {
+    let (_child_domain_id_pre, comm_hpa) = {
         let c = caller.read();
         let child_weak = match c.data.get_domain_capability(child_domain_handle) {
             Some(w) => w.clone(),
@@ -1533,8 +1532,8 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         // iced-x86 emulator can decode and emulate the faulting instruction.
         let mut msg = msg; // make mutable
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
-            let exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
+            let _exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let _gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             // Try to decode the instruction at guest RIP.
             let ept_root = {
                 let cd = child_arc.lock();
@@ -1801,7 +1800,7 @@ unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
 
 /// Return the physical LAPIC ID of the calling CPU via CPUID leaf 1.
 fn current_lapic_id() -> u32 {
-    let cpuid = unsafe { core::arch::x86_64::__cpuid(1) };
+    let cpuid = core::arch::x86_64::__cpuid(1);
     (cpuid.ebx >> 24) as u32
 }
 
@@ -1966,8 +1965,8 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
             serial_rtdbg!("[INTR_FWD] route vec={} → handler_dom={}", vector, id);
             id
         }
-        Err(e) => {
-            serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, e);
+        Err(_e) => {
+            serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, _e);
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
             return;
@@ -1992,10 +1991,10 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         platform,
     ) {
         Ok(ctx) => ctx,
-        Err(e) => {
+        Err(_e) => {
             serial_debug!(
                 "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",
-                e
+                _e
             );
             let intr_info = (1u64 << 31) | (vector as u64);
             vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);

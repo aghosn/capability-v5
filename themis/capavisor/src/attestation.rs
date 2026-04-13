@@ -184,7 +184,7 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64) {
 /// Transport selection based on ACPI `StartMethod`:
 /// - `6` → TIS (FIFO) at `0xFED4_0000`
 /// - `7` → CRB at `control_area` address
-pub fn try_tpm(start_method: u32, control_area: u64, hhdm_offset: u64) {
+pub fn try_tpm(start_method: u32, _control_area: u64, hhdm_offset: u64) {
     let state = ATTEST_STATE.get().expect("attestation not initialized");
 
     let tpm = match start_method {
@@ -310,14 +310,6 @@ pub fn public_key() -> [u8; ATTEST_KEY_SIZE] {
         .expect("attestation not initialized")
         .verifying_key
         .to_bytes()
-}
-
-/// Returns the boot measurement hash (32 bytes).
-pub fn measurement() -> [u8; 32] {
-    ATTEST_STATE
-        .get()
-        .expect("attestation not initialized")
-        .measurement
 }
 
 /// Returns whether a TPM was detected and the PCR extend succeeded.

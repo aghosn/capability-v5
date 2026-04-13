@@ -110,11 +110,13 @@ pub enum CoreUpdate {
     /// Flush EPT TLB (INVEPT single-context) for the domain on this core.
     TlbShootdown,
     /// Switch this core to a different domain/VP (Phase 9).
+    #[allow(dead_code)]
     Switch {
         domain_cap: CapabilityRef<Domain>,
         vp_id: u32,
     },
     /// Domain was revoked; switch to fallback (Phase 9).
+    #[allow(dead_code)]
     Revoke {
         revoked: DomainId,
         fallback_cap: CapabilityRef<Domain>,
@@ -466,8 +468,6 @@ pub struct DomainCommState {
     pub rx: DomainCommRing,
     /// TX ring pages (domain→capavisor, capavisor is consumer).
     pub tx: DomainCommRing,
-    /// GPA at which this region is visible to the domain.
-    pub gpa: u64,
     /// HHDM offset, cached for ring access.
     pub hhdm_offset: u64,
 }
@@ -500,7 +500,7 @@ impl PlatformDomain {
     /// is needed because the pages are ordinary DRAM already EPT-mapped.
     ///
     /// For child domains the caller will CARVE pages and pass their HPAs.
-    fn init_domcomm(&mut self, base_hpa: u64, nr_pages: u32, gpa: u64) -> &DomainCommState {
+    fn init_domcomm(&mut self, base_hpa: u64, nr_pages: u32, _gpa: u64) -> &DomainCommState {
         use themis_abi::domcomm;
 
         assert!(
@@ -557,7 +557,6 @@ impl PlatformDomain {
             header_hpa,
             rx: rx_ring,
             tx: tx_ring,
-            gpa,
             hhdm_offset: self.hhdm_offset,
         });
         self.domcomm.as_ref().unwrap()
@@ -789,17 +788,6 @@ impl PlatformDomain {
         unsafe {
             core::ptr::write_volatile(&mut (*hdr_virt).notify_vector, vector);
         }
-    }
-
-    /// Return the notify_vector from the DomainComm header (0 if not initialised).
-    pub fn get_notify_vector(&self) -> u32 {
-        use themis_abi::domcomm;
-        let dc = match self.domcomm.as_ref() {
-            Some(d) => d,
-            None => return 0,
-        };
-        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *const domcomm::Header;
-        unsafe { core::ptr::read_volatile(&(*hdr_virt).notify_vector) }
     }
 
     /// Ensure an EPT root page exists, allocating from `self.meta` if needed.
@@ -1247,15 +1235,6 @@ impl ThemisPlatform {
     /// packed arrays of mem_cap, dom_cap, and pa_map entries.
     ///
     /// Must be called after `bootstrap_init_domcomm`.
-    /// Get the DomainComm GPA and page count for a domain (for CPUID / e820).
-    pub fn domcomm_info(&self, domain_id: DomainId) -> Option<(u64, u32)> {
-        let arc = self.domains.get(domain_id)?;
-        let d = arc.lock();
-        d.domcomm.as_ref().map(|dc| {
-            let total = 1 + dc.rx.page_hpas.len() as u32 + dc.tx.page_hpas.len() as u32;
-            (dc.gpa, total)
-        })
-    }
 
     pub fn bootstrap_register_domain(
         &self,

@@ -133,7 +133,11 @@ impl EptMapper {
         let root = allocator
             .allocate_frame()
             .expect("EptMapper::alloc_root_at_level: out of frames");
-        Self { hhdm_offset, root, level }
+        Self {
+            hhdm_offset,
+            root,
+            level,
+        }
     }
 
     /// Return the raw root physical address.
@@ -168,61 +172,51 @@ impl EptMapper {
         let gpa_end = GuestPhysAddr(gpa + size as u64);
 
         unsafe {
-            self.walk_range(
-                gpa_start,
-                gpa_end,
-                &mut |addr, entry, level| {
-                    // Already mapped — descend into non-leaf, or skip an existing huge leaf.
-                    if (*entry & EptEntryFlags::READ.bits()) != 0 {
-                        if (level == Level::L3 || level == Level::L2)
-                            && (*entry & EptEntryFlags::PAGE.bits()) != 0
-                        {
-                            return WalkNext::Leaf;
-                        }
-                        return WalkNext::Continue;
-                    }
-
-                    let end = gpa + size as u64;
-                    let hphys = hpa + (addr.as_u64() - gpa);
-
-                    if level == Level::L3 {
-                        if addr.as_u64() % GIANT_PAGE_SIZE as u64 == 0
-                            && addr.as_u64() + GIANT_PAGE_SIZE as u64 <= end
-                            && hphys % GIANT_PAGE_SIZE as u64 == 0
-                        {
-                            *entry = hphys
-                                | EptEntryFlags::PAGE.bits()
-                                | prot.bits()
-                                | mem_type.bits();
-                            return WalkNext::Leaf;
-                        }
-                    }
-                    if level == Level::L2 {
-                        if addr.as_u64() % HUGE_PAGE_SIZE as u64 == 0
-                            && addr.as_u64() + HUGE_PAGE_SIZE as u64 <= end
-                            && hphys % HUGE_PAGE_SIZE as u64 == 0
-                        {
-                            *entry = hphys
-                                | EptEntryFlags::PAGE.bits()
-                                | prot.bits()
-                                | mem_type.bits();
-                            return WalkNext::Leaf;
-                        }
-                    }
-                    if level == Level::L1 {
-                        *entry = hphys | prot.bits() | mem_type.bits();
+            self.walk_range(gpa_start, gpa_end, &mut |addr, entry, level| {
+                // Already mapped — descend into non-leaf, or skip an existing huge leaf.
+                if (*entry & EptEntryFlags::READ.bits()) != 0 {
+                    if (level == Level::L3 || level == Level::L2)
+                        && (*entry & EptEntryFlags::PAGE.bits()) != 0
+                    {
                         return WalkNext::Leaf;
                     }
+                    return WalkNext::Continue;
+                }
 
-                    // Non-leaf: allocate an intermediate page-table page.
-                    // SDM: intermediate entries must not set USER_EXECUTE (bit 10).
-                    let frame = allocator
-                        .allocate_frame()
-                        .expect("map_range: out of frames for intermediate EPT page");
-                    *entry = frame | EPT_INTERMEDIATE.bits();
-                    WalkNext::Continue
-                },
-            )
+                let end = gpa + size as u64;
+                let hphys = hpa + (addr.as_u64() - gpa);
+
+                if level == Level::L3 {
+                    if addr.as_u64() % GIANT_PAGE_SIZE as u64 == 0
+                        && addr.as_u64() + GIANT_PAGE_SIZE as u64 <= end
+                        && hphys % GIANT_PAGE_SIZE as u64 == 0
+                    {
+                        *entry = hphys | EptEntryFlags::PAGE.bits() | prot.bits() | mem_type.bits();
+                        return WalkNext::Leaf;
+                    }
+                }
+                if level == Level::L2 {
+                    if addr.as_u64() % HUGE_PAGE_SIZE as u64 == 0
+                        && addr.as_u64() + HUGE_PAGE_SIZE as u64 <= end
+                        && hphys % HUGE_PAGE_SIZE as u64 == 0
+                    {
+                        *entry = hphys | EptEntryFlags::PAGE.bits() | prot.bits() | mem_type.bits();
+                        return WalkNext::Leaf;
+                    }
+                }
+                if level == Level::L1 {
+                    *entry = hphys | prot.bits() | mem_type.bits();
+                    return WalkNext::Leaf;
+                }
+
+                // Non-leaf: allocate an intermediate page-table page.
+                // SDM: intermediate entries must not set USER_EXECUTE (bit 10).
+                let frame = allocator
+                    .allocate_frame()
+                    .expect("map_range: out of frames for intermediate EPT page");
+                *entry = frame | EPT_INTERMEDIATE.bits();
+                WalkNext::Continue
+            })
             .expect("map_range: walk failed");
         }
     }
@@ -231,12 +225,7 @@ impl EptMapper {
     /// that become entirely empty.  Huge/giant pages that partially overlap the
     /// range are split: the portions outside the range are re-mapped using the
     /// original HPA, permissions, and memory type of the huge-page entry.
-    pub fn unmap_range(
-        &mut self,
-        allocator: &mut impl FrameAllocator,
-        gpa: u64,
-        size: usize,
-    ) {
+    pub fn unmap_range(&mut self, allocator: &mut impl FrameAllocator, gpa: u64, size: usize) {
         let gpa_addr = GuestPhysAddr(gpa);
         let gpa_end = GuestPhysAddr(gpa + size as u64);
         let hhdm = self.hhdm_offset;

@@ -5,6 +5,9 @@
 //! capability-engine integration) to be independent of the underlying ISA.
 //!
 //! Architecture-specific implementations live under `crate::arch::`.
+//!
+//! Many types and trait methods here define the API boundary for future
+//! arch backends (e.g., ARM AArch64) and are not yet fully wired.
 
 pub mod traits;
 pub mod types;

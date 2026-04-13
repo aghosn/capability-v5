@@ -14,6 +14,7 @@ extern crate alloc;
 use capability_engine::CapaError;
 use x86::vmx::vmcs;
 
+use crate::arch::vmexit;
 use crate::arch_traits::traits::{
     ArchBoot, ArchCoreSignaling, ArchGuestPhysMap, ArchIommu, ArchVpOps,
 };
@@ -22,7 +23,6 @@ use crate::arch_traits::types::{
 };
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, Reg};
-use crate::arch::vmexit;
 
 // ── X86Platform ──────────────────────────────────────────────────────────── //
 
@@ -87,7 +87,9 @@ impl ArchVpOps for X86Platform {
                         crate::serial_println!("  VM_INSTRUCTION_ERROR={}", err);
                     }
                 }
-                return SemanticExit::Shutdown { reason: 0xFFFF_FFFF };
+                return SemanticExit::Shutdown {
+                    reason: 0xFFFF_FFFF,
+                };
             }
         };
 
@@ -155,12 +157,14 @@ impl ArchVpOps for X86Platform {
     }
 
     fn check_doorbell(&mut self, vp: &mut Self::VpHandle, gpa: u64, qualification: u64) -> bool {
-        vmexit::check_ept_doorbell(self.platform(), vp, gpa, qualification)
-            .unwrap_or(false)
+        vmexit::check_ept_doorbell(self.platform(), vp, gpa, qualification).unwrap_or(false)
     }
 
     fn reset_timer(&mut self, vp: &mut Self::VpHandle) {
-        vp.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, vmexit::PREEMPTION_TIMER_TICKS);
+        vp.set(
+            vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,
+            vmexit::PREEMPTION_TIMER_TICKS,
+        );
     }
 }
 
@@ -219,7 +223,8 @@ impl ArchCoreSignaling for X86Platform {
         // That method pushes CoreUpdate::TlbShootdown and sends INIT IPI
         // via xAPIC ICR.
         use capability_engine::Platform;
-        self.platform().send_ipi(target_core as capability_engine::CoreId);
+        self.platform()
+            .send_ipi(target_core as capability_engine::CoreId);
     }
 
     fn broadcast_flush(&self, domain_id: u64) {
@@ -227,9 +232,7 @@ impl ArchCoreSignaling for X86Platform {
     }
 
     fn logical_core_id(&self) -> u32 {
-        self.platform()
-            .current_core_id()
-            .unwrap_or(0) as u32
+        self.platform().current_core_id().unwrap_or(0) as u32
     }
 
     fn max_cores(&self) -> u32 {
@@ -240,32 +243,20 @@ impl ArchCoreSignaling for X86Platform {
 // ── ArchIommu ────────────────────────────────────────────────────────────── //
 
 impl ArchIommu for X86Platform {
-    fn assign_device(
-        &mut self,
-        domain_id: u64,
-        device: DeviceId,
-    ) -> Result<(), CapaError> {
-        let bdf = ((device.bus as u16) << 8)
-            | ((device.device as u16) << 3)
-            | (device.function as u16);
+    fn assign_device(&mut self, domain_id: u64, device: DeviceId) -> Result<(), CapaError> {
+        let bdf =
+            ((device.bus as u16) << 8) | ((device.device as u16) << 3) | (device.function as u16);
         self.platform().assign_device(bdf, domain_id);
         Ok(())
     }
 
     fn release_device(&mut self, device: DeviceId) {
-        let bdf = ((device.bus as u16) << 8)
-            | ((device.device as u16) << 3)
-            | (device.function as u16);
+        let bdf =
+            ((device.bus as u16) << 8) | ((device.device as u16) << 3) | (device.function as u16);
         self.platform().release_device(bdf);
     }
 
-    fn map_dma(
-        &mut self,
-        _domain_id: u64,
-        _iova: u64,
-        _hpa: u64,
-        _perms: MapPermissions,
-    ) {
+    fn map_dma(&mut self, _domain_id: u64, _iova: u64, _hpa: u64, _perms: MapPermissions) {
         // SLPT mapping is currently done inline in apply_update ChangeRights
         // handler (mirrors EPT mapping into iommu_pt).
         // Will be separated in Phase A7.
@@ -286,6 +277,8 @@ impl ArchIommu for X86Platform {
 
 /// Boot info collected from Limine + ACPI + PCI discovery.
 /// Currently assembled in boot.rs::init_themis().
+/// Reserved for ArchBoot trait (Phase A7).
+#[allow(dead_code)]
 pub struct X86BootInfo {
     pub hhdm_offset: u64,
     pub num_cores: usize,

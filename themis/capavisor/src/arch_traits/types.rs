@@ -4,6 +4,10 @@
 //! (hypercall dispatch, domain lifecycle) and architecture-specific backends.
 //! They use concrete values — not arch-specific handles — so that shared code
 //! can inspect and route without knowing the underlying ISA.
+//!
+//! Many types are not yet constructed — they define the API boundary for
+//! future arch backends.
+#![allow(dead_code)]
 
 use capability_engine::Rights;
 
@@ -100,10 +104,7 @@ pub enum SemanticExit {
     /// `reason` is the raw exit reason code (passed through to ExitPolicy lookup
     /// and forwarded to parent). `info` carries arch-decoded details for the
     /// local handler if policy says trap=false.
-    PolicyDriven {
-        reason: u32,
-        info: ExitInfo,
-    },
+    PolicyDriven { reason: u32, info: ExitInfo },
 
     /// Fatal exit — log and halt.
     Shutdown { reason: u32 },
@@ -115,14 +116,40 @@ pub enum SemanticExit {
 /// `ArchVpOps::handle_local` when `ExitPolicy` says `trap=false`, and to
 /// `forward_to_parent` for comm-page population when `trap=true`.
 pub enum ExitInfo {
-    Cpuid { leaf: u32, subleaf: u32 },
-    Exception { vector: u8, error_code: Option<u32>, is_nmi: bool },
-    EptViolation { gpa: u64, qualification: u64 },
-    IoInstruction { port: u16, size: u8, is_write: bool, value: u32 },
-    CrAccess { qualification: u64 },
-    Msr { number: u32, is_write: bool, value: u64 },
-    ApicIcr { icr_low: u32, icr_high: u32 },
-    Sipi { vector_page: u8 },
+    Cpuid {
+        leaf: u32,
+        subleaf: u32,
+    },
+    Exception {
+        vector: u8,
+        error_code: Option<u32>,
+        is_nmi: bool,
+    },
+    EptViolation {
+        gpa: u64,
+        qualification: u64,
+    },
+    IoInstruction {
+        port: u16,
+        size: u8,
+        is_write: bool,
+        value: u32,
+    },
+    CrAccess {
+        qualification: u64,
+    },
+    Msr {
+        number: u32,
+        is_write: bool,
+        value: u64,
+    },
+    ApicIcr {
+        icr_low: u32,
+        icr_high: u32,
+    },
+    Sipi {
+        vector_page: u8,
+    },
     Halt,
     Other,
 }
@@ -228,7 +255,8 @@ impl<A: ArchVpOps> Vp<A> {
 
     /// Check if a memory fault is a doorbell event.
     pub fn check_doorbell(&mut self, gpa: u64, qualification: u64) -> bool {
-        self.arch.check_doorbell(&mut self.handle, gpa, qualification)
+        self.arch
+            .check_doorbell(&mut self.handle, gpa, qualification)
     }
 
     /// Reset the preemption timer.

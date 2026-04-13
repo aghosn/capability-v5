@@ -17,11 +17,11 @@
 
 use core::sync::atomic::Ordering;
 
-use capability_engine::Platform as _;
 use crate::arch_traits::traits::ArchVpOps;
 use crate::arch_traits::types::{ExitInfo, SemanticExit, Vp};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
+use capability_engine::Platform as _;
 
 // ── Generic monitor loop ──────────────────────────────────────────────────── //
 
@@ -109,18 +109,20 @@ fn lookup_exit_trap(platform: &ThemisPlatform, reason: u32) -> bool {
 /// then delegates to `Vp::forward_interrupt` for the arch-specific
 /// register copy + context switch.
 #[allow(unused_variables)]
-fn handle_external_interrupt<A: ArchVpOps>(
-    vp: &mut Vp<A>,
-    platform: &ThemisPlatform,
-    vector: u32,
-) {
+fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform, vector: u32) {
     use crate::arch::vmexit::EXIT_REASON_EXTERNAL_INTERRUPT;
 
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
     let exit_trap = platform
         .get_core_cap(core_id)
-        .map(|c| c.read().data.policy.exits.get_action(
-            EXIT_REASON_EXTERNAL_INTERRUPT).trap)
+        .map(|c| {
+            c.read()
+                .data
+                .policy
+                .exits
+                .get_action(EXIT_REASON_EXTERNAL_INTERRUPT)
+                .trap
+        })
         .unwrap_or(true);
 
     if !exit_trap {
