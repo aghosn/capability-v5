@@ -1,6 +1,6 @@
 # Capavisor Platform Modularization Design
 
-**Status**: Active — Phase E (policy fixes, E1-E2 done) + Phase F (monitor loop restructuring, planned)
+**Status**: Phases A–C done. Phase E (policy fixes) done. Phase F (generic monitor loop) done. Phase A7 (full generification) next.
 **Scope**: Restructure the capavisor into a platform-agnostic core and
 pluggable architecture backends, enabling multi-ISA support (x86-64, AArch64,
 future targets) without duplicating policy logic.
@@ -745,5 +745,68 @@ arch code in `vmexit.rs` shrinks to: `enter_and_decode` (classify), `handle_loca
   file and starts the core/arch split. Phase C completes it by moving
   remaining files.
 - **Phase D** (ARM skeleton): After Phase F, adding ARM means implementing
-  `enter_and_decode` (ESR_EL2 decode) and `handle_local` (SCTLR/TTBR/GIC).
+  `run` (ESR_EL2 decode) and `handle_local` (SCTLR/TTBR/GIC).
   The generic loop, hypercall dispatch, and policy logic work unchanged.
+
+---
+
+## 10. Completion Summary (2026-04-13)
+
+### Phases completed
+
+| Phase | Description | Key commits |
+|-------|-------------|-------------|
+| A1-A6 | Trait seams + X86Platform impls | Earlier session |
+| B1-B2 | ArchExit translation, unified dispatch | Earlier session |
+| C1-C4 | File reorganization (arch/x86_64/) | Earlier session |
+| E1-E2 | Store exit reason in VP metadata, fix register_access_check | 730756ce5, a41ca1328 |
+| E3 | Fix forward_interrupt_to_handler register filtering | 45285a774 |
+| E4 | Unified THEMIS_SET_POLICY hypercall (0x22) | fd1964d19 |
+| E5-E6 | THHV ioctl + CHV support for unified SET_POLICY | 5e5acdbcf |
+| F1 | SemanticExit types + ArchVpOps::run/handle_local | 4c028a175 |
+| F2 | Generic monitor loop (monitor.rs) | 5f5f9d215 |
+| F3 | Wire generic loop, remove old dispatch (-405 lines) | 111453574 |
+| Cleanup | Remove old per-type policy paths (-245 lines) | 097f59d23 |
+
+### Architecture after refactoring
+
+```
+main.rs::_start()              [generic boot orchestration]
+  -> arch::boot::platform()     [arch: hardware discovery]
+  -> arch::boot::init_themis()  [generic: create ThemisPlatform]
+  -> arch::boot::vmx/capa/vmcs  [arch: VMX/EPT/VMCS setup]
+  -> arch::boot::launch()       [arch: VMLAUNCH -> monitor_loop]
+
+monitor::monitor_loop()        [GENERIC - the core run loop]
+  -> ArchVpOps::run()           [arch: enter guest, decode exit -> SemanticExit]
+  -> match SemanticExit          [generic: policy dispatch]
+    -> Hypercall -> handle_vmcall [generic: capability engine]
+    -> ExternalInterrupt         [generic: InterruptPolicy routing]
+    -> PolicyDriven              [generic: ExitPolicy lookup -> forward or local]
+    -> handle_local_exit()       [arch: CPUID, MSR, CR emulation]
+```
+
+### Key types
+
+- **SemanticExit**: ArchHandled, Hypercall, ExternalInterrupt(vector),
+  TimerExpired, PolicyDriven(reason, ExitInfo), Shutdown(reason)
+- **ExitInfo**: Cpuid, Exception, EptViolation, IoInstruction, CrAccess,
+  Msr, ApicIcr, Sipi, Halt, Other
+- **ArchVpOps::run()**: enter guest, return SemanticExit
+- **ArchVpOps::handle_local()**: arch-specific local exit handling
+
+### Unified policy interface
+
+One opcode (THEMIS_SET_POLICY / 0x22) covers all 10 PolicyIdentifier
+variants: Cores, ApiMonitor, DefaultInterruptVisibility, VectorVisibility,
+VectorRegReadSet, VectorRegWriteSet, DefaultExitTrap, ExitReasonTrap,
+ExitReasonRegReadSet, ExitReasonRegWriteSet.
+
+Full stack: CHV -> THHV ioctl -> vmcall -> capavisor -> Capability::set_policy().
+
+### Remaining work
+
+- **A7**: Genericize ThemisPlatform - make monitor_loop generic over
+  ArchVpOps, fix layering so main.rs calls monitor_loop directly
+  (not through arch::boot::launch).
+- **D**: ARM skeleton - stub impls of all arch traits for AArch64.

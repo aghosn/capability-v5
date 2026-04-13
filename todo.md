@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-04-07)
+## Current State (2026-04-13)
 
 ### What works
 
@@ -18,22 +18,15 @@
 - **Dom1 (2 CPUs, bare-metal Linux/KVM)**: **full systemd boot to login prompt**.
   Both CPUs activated (12000 BogoMIPS), SMP bringup succeeds via SIPI through
   APIC_ACCESS exit interception and IPI routing.
-  *Note*: emergency mode on local QEMU machine (fstab references missing /boot,
-  /boot/efi partitions) — needs verification on remote.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
-- **Lean formal spec**: 83 proved theorems, zero `sorry`. Covers CDT preservation,
-  N-level isolation, execute protocol, global system invariant, deep revocation cascade.
-- **TPM attested boot (P20)**: Ed25519 keygen + SHA-256 measurement + TPM PCR extend
-  at capavisor _start(). Signed attestation hypercall (ATTEST_SELF with nonce).
-  On-demand domain config via ATTEST_SELF(nonce=0). TPM driver supports both
-  **CRB** (default) and **TIS** transports, auto-selected via ACPI StartMethod.
-  QEMU swtpm integration (CRB default, `QEMU_TIS=1` for TIS). thhv ioctls for
-  ATTEST_SELF + READ_PCR. Full crypto verification test (Ed25519 + TPM RSA-2048
-  via OpenSSL EVP).
-  **Verified end-to-end**: boot + ATTEST_SELF → 52 mem_caps + 1 dom_cap +
-  50 PA map entries loaded by thhv driver with zero errors.
+- **Lean formal spec**: 83 proved theorems, zero `sorry`.
+- **TPM attested boot (P20)**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
+  End-to-end verified.
+- **Platform modularization**: Phases A-C, E, F done. Generic monitor loop with
+  SemanticExit dispatch. Unified SET_POLICY (single opcode 0x22 across full stack).
+  See `themis/docs/platform-modularization.md` §10.
 
 ### What doesn't work / known issues
 
@@ -50,19 +43,16 @@
 
 ### Recent commits
 
-- `2f2df4a` — **fix: Lean VITAL cascade fully revokes domain memory caps and cleans parent tree**
-- `a268a40` — **docs: thhv function documentation, stale TODOs, sentinel constant**
-- `9a3f056` — **Bumping cloud hypervisor**
-- `d07600a` — **chore: remove nested bzImage override from run-dom1.sh**
-- `afca232` — **fix: guard interrupt injection against IF=0 and STI/MOV-SS blocking**
-- `5830fda` — **fix: VITAL memory revocation now cascades domain cleanup**
-- `4b95cf9` — **docs: TODO — implement VITAL cascade in Lean, revert workarounds**
-- `9967ee1` — **docs: update todo.md — 21/21 differential tests passing**
-- `302f38d` — **fix: Lean META revoke, GPA mapping, overlap check — 21/21 tests pass**
-- `5fc31fe` — **feat: dom1 full systemd boot with stock kernel**
-- `dc48a67` — **fix: lost-wakeup race in thhv HLT + irqfd VP routing**
-- `4968b9a` — **fix: 2-vCPU dom1 boot — APIC emulation, EOI, IPI routing**
-- `440bafe` — **fix: Lean channel attest, forwarding, accept-removes-sender (19/21)**
+- `0d03948` — **chore: update cloud-hypervisor submodule (unified SET_POLICY)**
+- `097f59d` — **cleanup: remove old per-type policy opcodes, unified SET_POLICY only (-245 lines)**
+- `5e5acdb` — **feat: THHV ioctl + CHV support for unified SET_POLICY**
+- `fd1964d` — **feat: unified THEMIS_SET_POLICY hypercall (0x22)**
+- `45285a7` — **fix: copy registers via InterruptPolicy.read_set on interrupt forward**
+- `1114535` — **refactor: wire generic monitor loop, remove old dispatch (-405 lines)**
+- `5f5f9d2` — **feat: generic monitor_loop with SemanticExit dispatch**
+- `4c028a1` — **feat: SemanticExit types + ArchVpOps::run/handle_local**
+- `a41ca13` — **fix: register_access_check branches on interrupt vs non-interrupt exit**
+- `730756c` — **feat: store exit reason in VP metadata for policy lookup**
 
 ### Uncommitted changes
 
@@ -86,37 +76,22 @@
 
 ### ~~TODO: Implement VITAL cascade in Lean~~ ✅ Done (2f2df4af6)
 
-### TODO: Platform modularization (multi-ISA support)
+### ~~TODO: Platform modularization (multi-ISA support)~~ ✅ Phases A-C, E, F Done
 
 Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modularization.md)
 
-**Goal**: Separate platform-agnostic core (domain lifecycle, hypercall dispatch,
-capability-engine bridge) from arch-specific backends (x86 VMX/EPT/APIC, future
-ARM EL2/Stage-2/GIC). Enables multi-ISA support without duplicating policy code.
+**Completed**:
+- Phases A1-A6: Trait seams (ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot) + X86Platform impls
+- Phases B1-B2: ArchExit translation, unified dom0/child dispatch via ExitPolicy
+- Phases C1-C4: File reorganization (9 x86-specific files to `arch/x86_64/`)
+- Phases E1-E6: Policy enforcement fixes + unified SET_POLICY (0x22) across full stack
+- Phases F1-F3: Generic monitor loop with SemanticExit dispatch (-405 lines)
+- Cleanup: Removed all old per-type policy paths (-245 lines)
 
-**Phase A: Introduce trait seams** (in-place, no file moves):
-- [x] A1: Define `arch_traits::traits` + `arch_traits::types` modules (ArchExit,
-  HypercallArgs, ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot)
-- [x] A2–A6: X86Platform implements all 5 traits (x86_platform.rs). Functional:
-  enter_guest, hypercall args, inject_interrupt, IPI, INVEPT flush, device assign.
-  Deferred to Phase A7 wiring: create_vp, destroy_vp, map, unmap (currently in
-  apply_update's ChangeRights handler).
-- [ ] A7: ThemisPlatform<T> generic over traits — **deferred** until second ISA
-  (ARM). Current trait boundary doesn't match apply_update complexity; premature
-  without real validation target.
-
-**Phase B: ArchExit translation + unified dispatch**:
-- [x] B1: classify_exit() in vmexit.rs — VMX exit reason → ArchExit translation
-- [x] B2: Unified dom0/child dispatch via ExitPolicy. No `domain_id != 0`
-  special-casing. Four exit classes: fatal, capavisor-internal, specialized
-  (EXTERNAL_INTERRUPT/APIC with own sub-dispatch), policy-driven. Net -96 lines.
-
-**Phase C: File reorganization**:
-- [x] C1–C4: Moved 9 x86-specific files to `arch/x86_64/` (vmcs, vmexit, gdt,
-  msr_virt, acpi, pci, iommu_ir, boot, x86_platform). arch/mod.rs with cfg-gated
-  re-exports. Generic code stays at src/ root.
-
-**Phase D: ARM skeleton** (future, after x86 stable)
+**Remaining**:
+- [ ] A7: Genericize ThemisPlatform — make monitor_loop generic over ArchVpOps,
+  fix layering (main.rs calls monitor_loop directly, boot returns VP handle)
+- [ ] D: ARM skeleton — stub impls of all arch traits for AArch64
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
@@ -138,22 +113,11 @@ snapshot-diff → UpdateBatch. 12 integration tests + 21 unit tests pass.
 Files: `translation.rs`, `capability.rs`, `domain.rs`.
 Next: wire MAP_SELF to capavisor hypercall (Phase B step 2).
 
-### Phase 3: VMEXIT dispatch unification
+### ~~Phase 3: VMEXIT dispatch unification~~ ✅ Subsumed by modularization (Phases B+F)
 
-**Goal**: Merge the two `match basic_reason` blocks in `handle_vmexit` (child
-vs dom0) into a single dispatch table per `skills/code-review.md`.
-
-**Approach** (incremental, avoid the all-at-once rewrite that broke dom0):
-1. Extract dom0-specific local handlers into named functions (`handle_rdmsr_local`,
-   `handle_cr_access_local`, `handle_ept_violation_dom0`, etc.)
-2. Test each extracted function independently (dom0 must still boot)
-3. Add `has_parent` flag and merge the dispatch, calling shared handlers from
-   both paths
-4. Remove the old child block once all handlers are merged
-
-**Key pitfall** (discovered 2026-04-03): dom0 EPT violation handler has IOAPIC
-MMIO emulation logic. Calling `forward_child_exit` for dom0 deadlocks because
-dom0 has no parent. Must handle locally.
+Merged dom0/child dispatch into unified ExitPolicy-based dispatch (Phase B2),
+then restructured into generic monitor loop with SemanticExit (Phase F1-F3).
+No more `domain_id != 0` special-casing.
 
 ### Phase 4: Posted interrupts (hardware PI)
 
