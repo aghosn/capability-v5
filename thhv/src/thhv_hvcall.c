@@ -169,22 +169,6 @@ int themis_map_self(u64 cap_handle, u64 new_gpa)
 	return __themis_to_errno(status);
 }
 
-int themis_set_exit_policy(u64 child_domain, u64 exit_reason, u64 trap)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_SET_EXIT_POLICY,
-				     child_domain, exit_reason, trap, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
-int themis_set_def_exit_policy(u64 child_domain, u64 trap)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_SET_DEF_EXIT_POLICY,
-				     child_domain, trap, 0, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ATTEST,
@@ -211,23 +195,7 @@ int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value)
 	return __themis_to_errno(status);
 }
 
-/* ── Interrupt / device assignment ─────────────────────────────────────── */
-
-int themis_set_intr_policy(u64 domain, u64 vector, u64 policy)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_SET_INTR_POLICY,
-				     domain, vector, policy, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
-int themis_set_def_intr_policy(u64 domain, u64 policy)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_SET_DEF_INTR_POLICY,
-				     domain, policy, 0, 0, 0,
-				     NULL, NULL, NULL);
-	return __themis_to_errno(status);
-}
+/* ── Unified policy + device assignment ─────────────────────────────────── */
 
 int themis_set_policy(u64 domain, u64 kind, u64 key, u64 sub_key, u64 value)
 {

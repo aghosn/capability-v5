@@ -233,17 +233,12 @@ pub fn set_reg(
     check(rax)
 }
 
-/// Set per-vector interrupt policy for a domain.
-pub fn set_intr_policy(domain: u64, vector: u64, policy: u64) -> Result<(), u64> {
+/// Unified policy-setting hypercall.
+///
+/// Maps to `Capability::set_policy` via THEMIS_SET_POLICY opcode.
+pub fn set_policy(domain: u64, kind: u64, key: u64, sub_key: u64, value: u64) -> Result<(), u64> {
     let (rax, _, _, _) =
-        unsafe { vmcall3(opcodes::THEMIS_SET_INTR_POLICY, domain, vector, policy) };
-    check(rax)
-}
-
-/// Set default interrupt policy for a domain.
-pub fn set_def_intr_policy(domain: u64, policy: u64) -> Result<(), u64> {
-    let (rax, _, _, _) =
-        unsafe { vmcall2(opcodes::THEMIS_SET_DEF_INTR_POLICY, domain, policy) };
+        unsafe { vmcall5(opcodes::THEMIS_SET_POLICY, domain, kind, key, sub_key, value) };
     check(rax)
 }
 

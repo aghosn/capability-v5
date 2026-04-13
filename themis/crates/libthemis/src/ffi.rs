@@ -181,16 +181,14 @@ pub extern "C" fn themis_set_reg(
 }
 
 #[no_mangle]
-pub extern "C" fn themis_set_intr_policy(domain: u64, vector: u64, policy: u64) -> i32 {
-    match set_intr_policy(domain, vector, policy) {
-        Ok(()) => 0,
-        Err(e) => to_errno(e),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn themis_set_def_intr_policy(domain: u64, policy: u64) -> i32 {
-    match set_def_intr_policy(domain, policy) {
+pub extern "C" fn themis_set_policy_wrapper(
+    domain: u64,
+    kind: u64,
+    key: u64,
+    sub_key: u64,
+    value: u64,
+) -> i32 {
+    match set_policy(domain, kind, key, sub_key, value) {
         Ok(()) => 0,
         Err(e) => to_errno(e),
     }

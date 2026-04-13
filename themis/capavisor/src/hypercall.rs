@@ -10,8 +10,8 @@ use core::sync::atomic::Ordering;
 
 use capability_engine::{
     execute, Access, Attributes, CapaError, Capability, CapabilityRef, Domain, DomainId,
-    DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier,
-    RegBitmap, Rights, UpdateBatch,
+    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier,
+    Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
@@ -159,18 +159,6 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_DOMCOMM_NOTIFY => Some(do_domcomm_notify(platform, &caller)),
         opcodes::THEMIS_ADD_VP => Some(do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys())),
         opcodes::THEMIS_SWITCH => do_switch(platform, &caller, arg0, arg1, vcpu),
-        opcodes::THEMIS_SET_INTR_POLICY => Some(do_set_intr_policy(
-            platform, &caller, arg0, arg1 as u8, arg2,
-        )),
-        opcodes::THEMIS_SET_DEF_INTR_POLICY => {
-            Some(do_set_def_intr_policy(platform, &caller, arg0, arg1))
-        }
-        opcodes::THEMIS_SET_EXIT_POLICY => Some(do_set_exit_policy(
-            platform, &caller, arg0, arg1 as u32, arg2,
-        )),
-        opcodes::THEMIS_SET_DEF_EXIT_POLICY => {
-            Some(do_set_def_exit_policy(platform, &caller, arg0, arg1))
-        }
         opcodes::THEMIS_SET_POLICY => Some(do_set_policy(
             platform, &caller, arg0, arg1, arg2, arg3, arg4,
         )),
@@ -1669,115 +1657,6 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
 }
 
 // ── Interrupt policy VMCALLs ─────────────────────────────────────────────── //
-
-/// SET_INTR_POLICY (0x10): set per-vector interrupt visibility on a child domain.
-///
-/// arg0 = child_domain_handle, arg1 = vector (0–254), arg2 = visibility
-/// (0=Deliver, 1=Report, 2=NotReport).
-fn do_set_intr_policy(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    child_handle: u64,
-    vector: u8,
-    visibility: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    match execute(platform, false, || {
-        Capability::set_policy(
-            &caller,
-            child_handle,
-            PolicyIdentifier::VectorVisibility(vector),
-            visibility,
-        )
-        .map(|()| ((), UpdateBatch::new()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
-}
-
-/// SET_DEF_INTR_POLICY (0x11): set the default interrupt visibility for a child domain.
-///
-/// arg0 = child_domain_handle, arg1 = visibility (0=Deliver, 1=Report, 2=NotReport).
-fn do_set_def_intr_policy(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    child_handle: u64,
-    visibility: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    match execute(platform, false, || {
-        Capability::set_policy(
-            &caller,
-            child_handle,
-            PolicyIdentifier::DefaultInterruptVisibility,
-            visibility,
-        )
-        .map(|()| ((), UpdateBatch::new()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
-}
-
-/// SET_EXIT_POLICY (0x20): set per-exit-reason trap policy on a child domain.
-///
-/// arg0 = child_domain_handle, arg1 = exit_reason (u32), arg2 = trap (0 or 1).
-fn do_set_exit_policy(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    child_handle: u64,
-    exit_reason: u32,
-    trap: u64,
-) -> HypercallResult {
-    // Platform validation: check exit reason is valid for this architecture.
-    let action = ExitAction {
-        trap: trap != 0,
-        read_set: RegBitmap::ALL,
-        write_set: RegBitmap::ALL,
-    };
-    if let Err(e) = platform.validate_exit_policy(exit_reason, &action) {
-        return HypercallResult::error(map_error(&e));
-    }
-
-    let caller = caller.clone();
-    match execute(platform, false, || {
-        Capability::set_policy(
-            &caller,
-            child_handle,
-            PolicyIdentifier::ExitReasonTrap(exit_reason),
-            trap,
-        )
-        .map(|()| ((), UpdateBatch::new()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
-}
-
-/// SET_DEF_EXIT_POLICY (0x21): set the default exit trap policy for a child domain.
-///
-/// arg0 = child_domain_handle, arg1 = trap (0 = handle locally, 1 = trap to parent).
-fn do_set_def_exit_policy(
-    platform: &ThemisPlatform,
-    caller: &CapabilityRef<Domain>,
-    child_handle: u64,
-    trap: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    match execute(platform, false, || {
-        Capability::set_policy(
-            &caller,
-            child_handle,
-            PolicyIdentifier::DefaultExitTrap,
-            trap,
-        )
-        .map(|()| ((), UpdateBatch::new()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
-}
 
 /// THEMIS_SET_POLICY (0x22): unified policy-setting hypercall.
 ///

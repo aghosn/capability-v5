@@ -830,22 +830,6 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		return 0;
 	}
 
-	case THHV_SET_INTR_POLICY: {
-		struct thhv_set_intr_policy ip;
-
-		if (part->sealed)
-			return -EBUSY;
-		if (copy_from_user(&ip, uarg, sizeof(ip)))
-			return -EFAULT;
-		if (ip.visibility > THHV_INTR_VISIBILITY_NOT_REPORT)
-			return -EINVAL;
-		if (ip.vector == THHV_INTR_POLICY_VEC_DEFAULT)
-			return themis_set_def_intr_policy(part->domain_handle,
-							  ip.visibility);
-		return themis_set_intr_policy(part->domain_handle,
-					      ip.vector, ip.visibility);
-	}
-
 	case THHV_SET_POLICY: {
 		struct thhv_set_policy sp;
 

@@ -85,14 +85,6 @@ pub mod opcodes {
     /// IN:  RDI = domain_handle, RSI = vp_id, RDX = register_id, RCX = value
     pub const THEMIS_SET_REG:             u64 = 0x0F;
 
-    /// Set per-vector interrupt policy for a domain.
-    /// IN:  RDI = domain_handle, RSI = vector, RDX = policy
-    pub const THEMIS_SET_INTR_POLICY:     u64 = 0x10;
-
-    /// Set default interrupt policy for a domain.
-    /// IN:  RDI = domain_handle, RSI = policy
-    pub const THEMIS_SET_DEF_INTR_POLICY: u64 = 0x11;
-
     /// Assign a PCI device to a domain.
     /// IN:  RDI = domain_handle, RSI = pci_bdf
     pub const THEMIS_ASSIGN_DEVICE:       u64 = 0x12;
@@ -152,15 +144,6 @@ pub mod opcodes {
     ///      RSI = new_gpa (target GPA; must not overlap other mapped regions)
     /// OUT: RAX = error code (0 on success)
     pub const THEMIS_MAP_SELF:            u64 = 0x1f;
-
-    /// Set per-exit-reason trap policy on a child domain (before seal).
-    /// IN:  RDI = child_domain_handle, RSI = exit_reason (u32),
-    ///      RDX = trap (0 = handle locally, 1 = trap to parent)
-    pub const THEMIS_SET_EXIT_POLICY:     u64 = 0x20;
-
-    /// Set the default exit trap policy on a child domain (before seal).
-    /// IN:  RDI = child_domain_handle, RSI = trap (0 = handle locally, 1 = trap to parent)
-    pub const THEMIS_SET_DEF_EXIT_POLICY: u64 = 0x21;
 
     /// Unified policy-setting hypercall — maps directly to
     /// `Capability::set_policy(&caller, child_handle, PolicyIdentifier, value)`.

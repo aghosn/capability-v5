@@ -67,8 +67,6 @@
 #define THEMIS_HC_ATTEST             0x0D
 #define THEMIS_HC_GET_REG            0x0E
 #define THEMIS_HC_SET_REG            0x0F
-#define THEMIS_HC_SET_INTR_POLICY    0x10
-#define THEMIS_HC_SET_DEF_INTR_POLICY 0x11
 #define THEMIS_HC_ASSIGN_DEVICE      0x12
 #define THEMIS_HC_ENUMERATE          0x13
 #define THEMIS_HC_ADD_VP             0x14
@@ -79,8 +77,7 @@
 #define THEMIS_HC_INJECT_INTERRUPT   0x1b
 #define THEMIS_HC_READ_PCR           0x1e
 #define THEMIS_HC_MAP_SELF           0x1f
-#define THEMIS_HC_SET_EXIT_POLICY   0x20
-#define THEMIS_HC_SET_DEF_EXIT_POLICY 0x21
+#define THEMIS_HC_SET_POLICY        0x22
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
 
@@ -100,8 +97,6 @@
 #define THEMIS_OP_ATTEST              0x0D
 #define THEMIS_OP_GET_REG             0x0E
 #define THEMIS_OP_SET_REG             0x0F
-#define THEMIS_OP_SET_INTR_POLICY     0x10
-#define THEMIS_OP_SET_DEF_INTR_POLICY 0x11
 #define THEMIS_OP_ASSIGN_DEVICE       0x12
 #define THEMIS_OP_ENUMERATE           0x13
 #define THEMIS_OP_ADD_VP              0x14
@@ -114,8 +109,6 @@
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
 #define THEMIS_OP_READ_PCR          0x1e
 #define THEMIS_OP_MAP_SELF          0x1f
-#define THEMIS_OP_SET_EXIT_POLICY  0x20
-#define THEMIS_OP_SET_DEF_EXIT_POLICY 0x21
 #define THEMIS_OP_SET_POLICY      0x22
 
 /* ── Policy-kind discriminants for THEMIS_OP_SET_POLICY ────────────────────── */
@@ -893,27 +886,6 @@ struct thhv_read_pcr {
 #define THHV_READ_PCR \
 	_IOWR(THHV_IOCTL_MAGIC, 0x06, struct thhv_read_pcr)
 
-/* ── Interrupt policy visibility values ────────────────────────────────────── */
-
-#define THHV_INTR_VISIBILITY_DELIVER     0  /* Domain receives the interrupt directly */
-#define THHV_INTR_VISIBILITY_REPORT      1  /* Interrupt forwarded up; domain notified on return */
-#define THHV_INTR_VISIBILITY_NOT_REPORT  2  /* Interrupt forwarded up; domain not notified */
-
-/* ── Interrupt policy ioctl struct ─────────────────────────────────────────── */
-
-/*
- * Set interrupt visibility for a child domain before sealing.
- * vector: 0–254 for a specific vector, 0xFF to set the domain default.
- * visibility: THHV_INTR_VISIBILITY_*.
- */
-#define THHV_INTR_POLICY_VEC_DEFAULT  0xFF
-
-struct thhv_set_intr_policy {
-	__u8 vector;      /* 0–254 for specific vector; 0xFF for domain default */
-	__u8 visibility;  /* THHV_INTR_VISIBILITY_* */
-	__u8 pad[6];
-};
-
 /* Inject a virtual interrupt into a child VP's PIR (Pending Interrupt Request).
  * If the VP is halted (guest executed HLT), it is woken to process the vector. */
 struct thhv_inject_interrupt {
@@ -954,8 +926,6 @@ struct thhv_set_policy {
 	__u64 value;
 };
 
-#define THHV_SET_INTR_POLICY \
-	_IOW(THHV_IOCTL_MAGIC, 0x18, struct thhv_set_intr_policy)
 #define THHV_INJECT_INTERRUPT \
 	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
 #define THHV_SET_POLICY \
@@ -1213,15 +1183,11 @@ int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2);
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
 int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);
 int themis_set_reg(u64 domain, u64 vp_id, u64 reg, u64 value);
-int themis_set_intr_policy(u64 domain, u64 vector, u64 policy);
-int themis_set_def_intr_policy(u64 domain, u64 policy);
+int themis_set_policy(u64 domain, u64 kind, u64 key, u64 sub_key, u64 value);
 int themis_assign_device(u64 domain, u64 pci_bdf);
 int themis_register_comm(u64 cap, u64 child_domain, u64 vp_id);
 int themis_add_vp(u64 child_domain, u64 comm_cap);
 int themis_map_self(u64 cap_handle, u64 new_gpa);
-int themis_set_exit_policy(u64 child_domain, u64 exit_reason, u64 trap);
-int themis_set_def_exit_policy(u64 child_domain, u64 trap);
-int themis_set_policy(u64 domain, u64 kind, u64 key, u64 sub_key, u64 value);
 int themis_domcomm_notify(void);
 int themis_register_doorbell(u64 child_domain, u64 gpa, u64 size,
 			     u64 datamatch, u64 flags, u64 *out_doorbell_id);
