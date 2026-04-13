@@ -644,7 +644,7 @@ fn vp_two_cores_race_suspended_vp() {
             let vp = d.data.policy.vprocessor_states[0].clone();
             drop(d);
             assert!(
-                matches!(*vp.run_state.read(), VpRunState::Available),
+                matches!(*vp.run_state.read(), VpRunState::Available { .. }),
                 "dom2.vp0 must be Available after its Suspended parent was claimed"
             );
         }

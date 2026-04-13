@@ -4,7 +4,7 @@ use crate::attest::{self, AttestationReport};
 use crate::domain::{
     effective_vector, Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI,
     PendingCapability, PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef,
-    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
+    VectorPolicy, VpCallContext, VpRunState, EXIT_REASON_NONE, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus, Rights};
@@ -2885,21 +2885,38 @@ impl Capability<Domain> {
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
 
         if to_handle == 0 {
-            Self::switch_domain_return(caller, core_id, platform)
+            Self::switch_domain_return(caller, core_id, platform, EXIT_REASON_NONE)
         } else {
             Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)
         }
     }
 
+    /// Return switch that records a non-interrupt exit reason on the caller VP.
+    ///
+    /// Used by the capavisor's `forward_child_exit` path: the child VP transitions
+    /// to `Available { last_exit_reason }` so that the subsequent `register_access_check`
+    /// on the resume path can look up the correct `ExitPolicy` write_set.
+    pub fn switch_return_with_exit(
+        caller: &CapabilityRef<Domain>,
+        exit_reason: u32,
+        platform: &dyn Platform,
+    ) -> Result<SwitchContext> {
+        let core_id = platform
+            .get_current_core()
+            .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
+        Self::switch_domain_return(caller, core_id, platform, exit_reason)
+    }
+
     /// Return path: unwind the VP call chain one step.
     ///
     /// Transitions:
-    /// - Caller VP: `Running → Available`
+    /// - Caller VP: `Running → Available { last_exit_reason }`
     /// - Previous (Locked) VP: `Locked → Running { core, caller: prev_prev_caller }`
     fn switch_domain_return(
         caller: &CapabilityRef<Domain>,
         core_id: CoreId,
         platform: &dyn Platform,
+        exit_reason: u32,
     ) -> Result<SwitchContext> {
         let (caller_id, caller_vp_arc) = {
             let c = caller.read();
@@ -2971,7 +2988,9 @@ impl Capability<Domain> {
             core: core_id,
             caller: prev_prev_caller,
         };
-        *caller_vp_arc.run_state.write() = VpRunState::Available;
+        *caller_vp_arc.run_state.write() = VpRunState::Available {
+            last_exit_reason: exit_reason,
+        };
 
         platform.set_core_context(core_id, &prev_domain_ref, prev_vp_id);
 
@@ -3086,7 +3105,7 @@ impl Capability<Domain> {
             };
 
             match &*state {
-                VpRunState::Available | VpRunState::Suspended { .. } => {}
+                VpRunState::Available { .. } | VpRunState::Suspended { .. } => {}
                 _ => {
                     return Err(CapaError::InvalidOperation(
                         "target VP is not available".to_string(),
@@ -3122,7 +3141,9 @@ impl Capability<Domain> {
                 if let Some(vp) = vp_opt {
                     let mut s = vp.run_state.write();
                     if matches!(*s, VpRunState::Interrupted { .. }) {
-                        *s = VpRunState::Available;
+                        *s = VpRunState::Available {
+                            last_exit_reason: EXIT_REASON_NONE,
+                        };
                     }
                 }
             }
@@ -3293,7 +3314,9 @@ impl Capability<Domain> {
         if n > 2 {
             *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
         } else {
-            *chain[0].2.run_state.write() = VpRunState::Available;
+            *chain[0].2.run_state.write() = VpRunState::Available {
+                last_exit_reason: EXIT_REASON_NONE,
+            };
         }
 
         // Intermediate VPs: Locked → Suspended.
@@ -3791,19 +3814,33 @@ fn register_access_check(
         .clone();
 
     // A VP that is actively executing cannot have its registers safely accessed.
-    if matches!(*vp.run_state.read(), VpRunState::Running { .. }) {
+    let run_state = vp.run_state.read();
+    if matches!(*run_state, VpRunState::Running { .. }) {
         return Err(CapaError::RegisterAccessDenied);
     }
 
-    // Determine effective interrupt vector from VP run state.
-    let vec = effective_vector(&vp.run_state.read());
-
-    // Retrieve the effective VectorPolicy (override or domain default).
-    let policy = child_r.data.policy.interrupts.get_policy(vec);
-    let bitmap = if want_read {
-        policy.read_set
-    } else {
-        policy.write_set
+    // Select the correct policy source based on why the VP stopped.
+    //
+    // - Interrupted / Suspended: interrupt-caused exit → use InterruptPolicy
+    //   for the vector that caused the preemption.
+    // - Available with last_exit_reason: non-interrupt exit forwarded to parent
+    //   → use ExitPolicy for that exit reason.
+    // - Available without exit reason (fresh VP) or Locked: use InterruptPolicy
+    //   default (VECTOR_AVAILABLE).
+    let bitmap = match &*run_state {
+        VpRunState::Interrupted { vector } | VpRunState::Suspended { vector, .. } => {
+            let policy = child_r.data.policy.interrupts.get_policy(*vector);
+            if want_read { policy.read_set } else { policy.write_set }
+        }
+        VpRunState::Available { last_exit_reason } if *last_exit_reason != EXIT_REASON_NONE => {
+            let action = child_r.data.policy.exits.get_action(*last_exit_reason);
+            if want_read { action.read_set } else { action.write_set }
+        }
+        _ => {
+            // Fresh VP (no exit yet), or Locked VP — use VECTOR_AVAILABLE default.
+            let policy = child_r.data.policy.interrupts.get_policy(VECTOR_AVAILABLE);
+            if want_read { policy.read_set } else { policy.write_set }
+        }
     };
 
     Ok((child_domain_id, bitmap))

@@ -411,7 +411,7 @@ fn test_vp_return_no_vp_on_core() {
         let vp0 = c.data.policy.vprocessor_states[0].clone();
         drop(c);
         // VP[0] is Running{core:0}, change core to something else so find_vp_on_core fails
-        *vp0.run_state.write() = VpRunState::Available;
+        *vp0.run_state.write() = VpRunState::Available { last_exit_reason: EXIT_REASON_NONE };
     }
 
     let result = Capability::switch(&child, 0, 0, &platform);
@@ -625,7 +625,7 @@ fn test_deliver_interrupt_vp_2domain() {
     // child.vp0 must be Available (handler is direct caller, unlock is immediate)
     let child_vp0 = child.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*child_vp0.run_state.read(), VpRunState::Available),
+        matches!(*child_vp0.run_state.read(), VpRunState::Available { .. }),
         "child VP[0] should be Available after 2-domain interrupt delivery"
     );
 
@@ -738,7 +738,7 @@ fn test_interrupt_resume_frees_interrupted_callee() {
     // dom2.vp0 should be Available (freed when dom1's Suspended was claimed)
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Available),
+        matches!(*dom2_vp0.run_state.read(), VpRunState::Available { .. }),
         "dom2 VP[0] should be Available after dom1 was resumed"
     );
 }
@@ -998,7 +998,7 @@ fn test_4domain_transitive_suspended_chain_cleanup() {
     // dom3.vp0 → Available (freed because dom2's callee dom3 was Interrupted)
     let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom3_vp0.run_state.read(), VpRunState::Available),
+        matches!(*dom3_vp0.run_state.read(), VpRunState::Available { .. }),
         "dom3 VP[0] must be freed to Available when dom2 (its Suspended parent) is claimed"
     );
 }

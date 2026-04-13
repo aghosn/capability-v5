@@ -1435,8 +1435,10 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     };
 
     // ── Capa engine: return switch (child → parent) ──
-    let return_ctx =
-        Capability::switch(&child_cap, 0, 0, platform).expect("[CHILD_EXIT] return switch failed");
+    // Records exit_reason in the child VP's Available state so that the resume
+    // path (register_access_check) uses the correct ExitPolicy write_set.
+    let return_ctx = Capability::switch_return_with_exit(&child_cap, exit_reason, platform)
+        .expect("[CHILD_EXIT] return switch failed");
 
     let child_domain_id = return_ctx.from_domain;
     let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;

@@ -302,11 +302,156 @@ behind a trait boundary.
 
 ## 7. What This Does NOT Change
 
-- **`capa-engine/`**: Untouched. Already platform-agnostic.
-- **`themis-abi/`**: Untouched. Opcodes are arch-neutral.
+- **`capa-engine/`**: Mostly untouched. Already platform-agnostic. (Exception:
+  `register_access_check` fix in §8.)
+- **`themis-abi/`**: Minor additions (unified SET_POLICY opcode, §8.2).
 - **`crates/vmx/`, `crates/ept/`, `crates/vtd/`**: Stay as-is. They become
   dependencies of `arch/x86_64/`, not of `core/`.
 - **`thhv/`**: Dom0 kernel module. x86-specific by nature. A different driver
-  would be needed for ARM dom0.
-- **`cloud-hypervisor/`**: VMM. Separate concern.
+  would be needed for ARM dom0. (Exception: unified THHV_SET_POLICY ioctl, §8.5.)
+- **`cloud-hypervisor/`**: VMM. Separate concern. (Exception: update to new
+  SET_POLICY ioctl, §8.5.)
 - **`lean-exec/`**, **`capa-cli/`**: Model and CLI. Unaffected.
+
+---
+
+## 8. Policy Enforcement Fixes
+
+### 8.1 Problem Statement
+
+The capability engine defines two symmetric policy types that control register
+visibility when a child domain exits to its parent:
+
+- **ExitPolicy** (`u32` exit reason → `ExitAction { trap, read_set, write_set }`):
+  for non-interrupt exits (CPUID, EPT violation, IO, MSR, etc.)
+- **InterruptPolicy** (`u8` vector → `VectorPolicy { visibility, read_set, write_set }`):
+  for interrupt-caused exits
+
+Both define `read_set` (what the parent sees on the comm page when the child
+exits) and `write_set` (what the parent can modify on the comm page before
+resuming the child). The model is simple and symmetric:
+
+1. Child exits → capavisor looks up the right policy entry → uses `read_set`
+   to filter registers copied to the comm page.
+2. Parent handles exit → writes to comm page → on resume, capavisor uses
+   `write_set` from the **same policy entry** to filter what gets applied.
+
+The difference between the two types:
+- **Exits** go to the **direct parent** via `forward_child_exit`.
+- **Interrupts** walk the **CDT upward** via `route_interrupt` to find the
+  first domain with `Deliver` visibility. Intermediate domains with `Report`
+  are notified.
+
+#### Current bugs
+
+1. **Forward path for interrupts**: `forward_interrupt_to_handler` does NOT
+   copy registers to the comm page using `InterruptPolicy.read_set`. It does
+   a raw context switch with no register filtering.
+
+2. **Resume path always uses InterruptPolicy**: `register_access_check` in
+   the engine always looks up `InterruptPolicy.get_policy(effective_vector)`
+   for the write_set. For non-interrupt exits, `effective_vector` =
+   `VECTOR_AVAILABLE` (0xFF), so it falls back to the default VectorPolicy
+   instead of the ExitPolicy entry that actually caused the forward.
+
+3. **Exit reason not stored securely**: The resume path needs to know which
+   policy entry caused the exit. This must be stored in **capavisor-private
+   VP metadata** (not the comm page, which is parent-writable and untrusted).
+
+4. **THHV missing ioctls**: `THHV_SET_EXIT_POLICY` / `THHV_SET_DEF_EXIT_POLICY`
+   ioctls are missing from `thhv_part.c`. The vmcall wrappers exist in
+   `thhv_hvcall.c` but userspace (cloud-hypervisor) cannot reach them.
+
+5. **No hypercall for reg bitmaps**: The engine supports `ExitReasonRegReadSet`,
+   `ExitReasonRegWriteSet`, `VectorRegReadSet`, `VectorRegWriteSet` via
+   `Capability::set_policy(PolicyIdentifier)`, but there are no capavisor
+   hypercalls or THHV paths to set them.
+
+### 8.2 Design: Unified SET_POLICY Hypercall
+
+The engine already has a single generic dispatch:
+
+```rust
+Capability::set_policy(caller, child_handle, PolicyIdentifier, value) -> Result<()>
+```
+
+where `PolicyIdentifier` is an enum with variants for all policy fields (cores,
+API, interrupt visibility, exit trap, reg bitmaps, etc.).
+
+Rather than adding separate hypercalls for each bitmap variant, we introduce
+**one unified hypercall** `THEMIS_SET_POLICY` that mirrors this interface:
+
+```
+THEMIS_SET_POLICY(child_handle, policy_tag, policy_key, value)
+```
+
+- `policy_tag`: discriminant of `PolicyIdentifier` (u8)
+- `policy_key`: variant-specific parameter(s) packed into u64
+  (e.g., vector + word_index, or exit_reason + word_index)
+- `value`: the u64 value to set
+
+This replaces (or subsumes) the existing per-type hypercalls:
+- `THEMIS_SET_INTR_POLICY` → tag=VectorVisibility, key=vector
+- `THEMIS_SET_DEF_INTR_POLICY` → tag=DefaultInterruptVisibility
+- `THEMIS_SET_EXIT_POLICY` → tag=ExitReasonTrap, key=reason
+- `THEMIS_SET_DEF_EXIT_POLICY` → tag=DefaultExitTrap
+
+And naturally supports the new bitmap operations:
+- tag=VectorRegReadSet, key=(vector, word_index)
+- tag=VectorRegWriteSet, key=(vector, word_index)
+- tag=ExitReasonRegReadSet, key=(reason, word_index)
+- tag=ExitReasonRegWriteSet, key=(reason, word_index)
+
+On the THHV side, one ioctl `THHV_SET_POLICY` with a struct encoding the
+tag + key + value, replacing the current per-type ioctls.
+
+### 8.3 Design: Correct read_set / write_set Enforcement
+
+#### Storing the exit reason
+
+When a child exits with a non-interrupt exit (forwarded via `forward_child_exit`),
+the capavisor stores the exit reason in **VP metadata** owned by the capavisor
+(the `PlatformDomain` / `VcpuSlot` structure — not the comm page). This is
+tamper-proof since the parent never sees capavisor memory (A5).
+
+For interrupt exits, the vector is already stored in `VpRunState::Interrupted { vector }`
+inside the capability engine itself.
+
+#### Forward path (child → parent)
+
+- **Non-interrupt exits** (`forward_child_exit`): Already correct — uses
+  `ExitPolicy.get_action(reason).read_set` to filter registers. ✓
+- **Interrupt exits** (`forward_interrupt_to_handler`): Must be fixed to copy
+  registers to the comm page using `InterruptPolicy.get_policy(vector).read_set`,
+  similar to how `forward_child_exit` does it.
+
+#### Resume path (parent → child)
+
+`register_access_check` in the engine must be updated:
+
+1. Determine whether the VP's last exit was an interrupt or a non-interrupt exit.
+2. If interrupt: use `InterruptPolicy.get_policy(vector).write_set` (current
+   behavior, already correct for this case).
+3. If non-interrupt exit: use `ExitPolicy.get_action(saved_reason).write_set`.
+
+The VP run state already distinguishes `Interrupted { vector }` from `Available`
+(non-interrupt exit returns the VP to Available). The saved exit reason
+(from capavisor VP metadata) must be made accessible to the engine's
+`register_access_check`, either by:
+- (a) Adding an `exit_reason` field to a VpRunState variant or a side field, or
+- (b) Having the platform store it and the engine query it via a Platform
+  trait method.
+
+Option (a) is simpler and keeps the information in the engine where the access
+check happens.
+
+### 8.4 Implementation Plan
+
+| Step | What | Files | Verification |
+|------|------|-------|---|
+| E1 | Store exit reason in VP metadata | `capa-engine/src/domain.rs`, `capability.rs`, capavisor `hypercall.rs` | `cargo test` |
+| E2 | Fix `register_access_check` to branch on exit vs interrupt | `capa-engine/src/capability.rs` | `cargo test` |
+| E3 | Fix `forward_interrupt_to_handler` to copy registers via read_set | capavisor `hypercall.rs` | build succeeds |
+| E4 | Unified `THEMIS_SET_POLICY` hypercall | `themis-abi`, capavisor `hypercall.rs` | build succeeds |
+| E5 | THHV: unified `THHV_SET_POLICY` ioctl + deprecate per-type ioctls | `thhv/inc/thhv.h`, `thhv/src/thhv_part.c`, `thhv/src/thhv_hvcall.c` | kernel module builds |
+| E6 | Cloud-hypervisor: update callers to use new ioctl | `cloud-hypervisor/` | CHV builds |
