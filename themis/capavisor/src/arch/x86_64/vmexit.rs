@@ -170,70 +170,275 @@ pub const EXIT_REASON_APIC_WRITE: u32 = 56;
 
 // ── Exit classification ───────────────────────────────────────────────────── //
 
-use crate::arch_traits::types::ArchExit;
+use crate::arch_traits::types::{SemanticExit, ExitInfo};
 
-/// Classify a raw VMX exit reason into an architecture-neutral `ArchExit`.
+/// Classify a raw VMX exit reason into a [`SemanticExit`], handling
+/// arch-internal exits (INIT, XSETBV, interrupt-window, EOI-induced)
+/// directly and returning `SemanticExit::ArchHandled` for them.
 ///
-/// This is the translation layer between Intel-specific exit reason codes
-/// and the platform-agnostic exit model.  Exits that are purely x86-internal
-/// (XSETBV, CR access, MSR access, APIC virtualization, INIT signal) are
-/// classified as `ArchExit::ArchInternal` and handled entirely within x86
-/// backend code — they never reach the shared dispatch.
+/// This is the x86 implementation of `ArchVpOps::enter_and_decode`'s
+/// decode + internal-handling phase. Called after `vcpu.run()` succeeds.
 ///
-/// Used by `X86Platform::enter_guest` (via `ArchVpOps` trait) and can be
-/// used to progressively migrate `handle_vmexit` toward the unified dispatch.
-pub(crate) fn classify_exit(reason: u32, vcpu: &ActiveVcpu) -> ArchExit {
+/// Exits that need the generic monitor loop's attention are returned as
+/// `Hypercall`, `ExternalInterrupt`, `TimerExpired`, `PolicyDriven`, or
+/// `Shutdown`.
+pub(crate) fn classify_and_handle_internal(
+    vcpu: &mut ActiveVcpu,
+    reason: u32,
+    platform: &crate::platform::ThemisPlatform,
+) -> SemanticExit {
     match reason {
-        EXIT_REASON_VMCALL => ArchExit::Hypercall,
+        // ── Fatal exits ──
+        EXIT_REASON_VMENTRY_INVALID_GUEST => {
+            use core::sync::atomic::Ordering;
+            let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+            let p = if !platform_ptr.is_null() { Some(unsafe { &*platform_ptr }) } else { None };
+            let cid = p.map(|p| p.get_current_core().unwrap_or(0) as usize).unwrap_or(0);
+            dump_vmentry_failure(vcpu, p, cid);
+            SemanticExit::Shutdown { reason }
+        }
+        EXIT_REASON_TRIPLE_FAULT => {
+            dump_triple_fault(vcpu);
+            SemanticExit::Shutdown { reason }
+        }
+        EXIT_REASON_EPT_MISCONFIG => {
+            dump_ept_misconfig(vcpu);
+            SemanticExit::Shutdown { reason }
+        }
+
+        // ── Arch-internal exits (handled here, never reach generic loop) ──
+        EXIT_REASON_INIT_SIGNAL => {
+            platform.poll_and_respond_cross_core();
+            SemanticExit::ArchHandled
+        }
+        EXIT_REASON_XSETBV => {
+            handle_xsetbv(vcpu);
+            SemanticExit::ArchHandled
+        }
+        EXIT_REASON_INTERRUPT_WINDOW => {
+            crate::hypercall::drain_pir_on_interrupt_window(vcpu, platform);
+            SemanticExit::ArchHandled
+        }
+        EXIT_REASON_EOI_INDUCED => {
+            // A3: EOI-exit bitmap is all-zero → should never fire.
+            SemanticExit::ArchHandled
+        }
+
+        // ── Always-generic exits ──
+        EXIT_REASON_VMCALL => SemanticExit::Hypercall,
 
         EXIT_REASON_EXTERNAL_INTERRUPT => {
             let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
             let vector = (info & INTR_INFO_VECTOR_MASK) as u32;
-            ArchExit::ExternalInterrupt { vector }
+            SemanticExit::ExternalInterrupt { vector }
         }
 
-        EXIT_REASON_VMX_PREEMPTION_TIMER => ArchExit::TimerExpired,
+        EXIT_REASON_VMX_PREEMPTION_TIMER => SemanticExit::TimerExpired,
 
+        // ── EXCEPTION_NMI: split NMI (→ interrupt routing) vs exception (→ policy) ──
+        EXIT_REASON_EXCEPTION_NMI => {
+            let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
+            let exc_type = ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
+            if exc_type as u64 == INTR_TYPE_NMI {
+                // NMI → route like an interrupt (vector 2).
+                SemanticExit::ExternalInterrupt { vector: 2 }
+            } else {
+                let vector = (intr_info & INTR_INFO_VECTOR_MASK) as u8;
+                let has_error = (intr_info >> 11) & 1;
+                let error_code = if has_error == 1 {
+                    Some(vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE) as u32)
+                } else {
+                    None
+                };
+                SemanticExit::PolicyDriven {
+                    reason,
+                    info: ExitInfo::Exception { vector, error_code, is_nmi: false },
+                }
+            }
+        }
+
+        // ── CPUID: Themis leaves always local, others → policy ──
+        EXIT_REASON_CPUID => {
+            let leaf = vcpu.reg(Reg::Rax) as u32;
+            if matches!(leaf, CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END) || leaf == 0x15 {
+                handle_cpuid_local(vcpu);
+                SemanticExit::ArchHandled
+            } else {
+                let subleaf = vcpu.reg(Reg::Rcx) as u32;
+                SemanticExit::PolicyDriven {
+                    reason,
+                    info: ExitInfo::Cpuid { leaf, subleaf },
+                }
+            }
+        }
+
+        // ── APIC access/write: ICR writes → policy (parent needs for SIPI), others → local ──
+        EXIT_REASON_APIC_ACCESS => {
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let offset = qual & APIC_ACCESS_OFFSET_MASK;
+            let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
+            if offset == APIC_REG_ICR_LOW as u64 && acc_type == APIC_ACCESS_TYPE_WRITE {
+                // ICR write — decode value for parent.
+                let icr_low = decode_apic_write_value(vcpu, platform)
+                    .unwrap_or(vcpu.reg(Reg::Rax) as u32);
+                let hhdm = platform.hhdm_offset();
+                let vapic = (vcpu.vapic_phys() + hhdm) as *const u32;
+                let icr_high = unsafe { vapic.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
+                vcpu.set_reg(Reg::Rax, icr_low as u64);
+                vcpu.set_reg(Reg::Rcx, icr_high as u64);
+                SemanticExit::PolicyDriven {
+                    reason,
+                    info: ExitInfo::ApicIcr { icr_low, icr_high },
+                }
+            } else {
+                handle_apic_access_exit(vcpu, platform);
+                SemanticExit::ArchHandled
+            }
+        }
+        EXIT_REASON_APIC_WRITE => {
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            let offset = qual & APIC_ACCESS_OFFSET_MASK;
+            if offset == APIC_REG_ICR_LOW as u64 {
+                let hhdm = platform.hhdm_offset();
+                let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
+                let icr_low = unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
+                vcpu.set_reg(Reg::Rax, icr_low as u64);
+                SemanticExit::PolicyDriven {
+                    reason: EXIT_REASON_APIC_ACCESS, // normalize to APIC_ACCESS for parent
+                    info: ExitInfo::ApicIcr { icr_low, icr_high: 0 },
+                }
+            } else {
+                // Non-ICR APIC write: hardware handled (VID for EOI, etc.)
+                SemanticExit::ArchHandled
+            }
+        }
+
+        // ── Policy-driven exits with decoded info ──
         EXIT_REASON_EPT_VIOLATION => {
             let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let write = (qual & 0x2) != 0;
-            ArchExit::GuestMemoryFault { gpa, write }
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::EptViolation { gpa, qualification: qual },
+            }
         }
 
         EXIT_REASON_IO_INSTRUCTION => {
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
             let port = ((qual >> 16) & 0xFFFF) as u16;
             let size = ((qual & 0x7) + 1) as u8;
-            let is_write = (qual & 0x8) == 0; // bit 3: 0 = OUT, 1 = IN
+            let is_write = (qual & 0x8) == 0;
             let value = vcpu.reg(Reg::Rax) as u32;
-            ArchExit::IoInstruction {
-                port,
-                size,
-                is_write,
-                value,
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::IoInstruction { port, size, is_write, value },
             }
         }
 
-        EXIT_REASON_HLT => ArchExit::Halt,
+        EXIT_REASON_CR_ACCESS => {
+            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::CrAccess { qualification: qual },
+            }
+        }
+
+        EXIT_REASON_RDMSR => {
+            let ecx = vcpu.reg(Reg::Rcx) as u32;
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Msr { number: ecx, is_write: false, value: 0 },
+            }
+        }
+
+        EXIT_REASON_WRMSR => {
+            let ecx = vcpu.reg(Reg::Rcx) as u32;
+            let value = ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32)
+                | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Msr { number: ecx, is_write: true, value },
+            }
+        }
 
         EXIT_REASON_SIPI => {
             let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let vector_page = (qual & 0xFF) as u32;
-            ArchExit::StartupEvent {
-                target_cpu: 0,
-                entry_addr: (vector_page as u64) << 12,
+            let vector_page = (qual & 0xFF) as u8;
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Sipi { vector_page },
             }
         }
 
-        EXIT_REASON_TRIPLE_FAULT | EXIT_REASON_VMENTRY_INVALID_GUEST => ArchExit::Shutdown,
+        EXIT_REASON_HLT => {
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Halt,
+            }
+        }
 
-        // Exits handled entirely by x86 backend code (never reach shared dispatch).
-        // INIT_SIGNAL, XSETBV, CR_ACCESS, RDMSR, WRMSR, APIC_ACCESS,
-        // APIC_WRITE, EOI_INDUCED, CPUID, EXCEPTION_NMI, INTERRUPT_WINDOW,
-        // EPT_MISCONFIG
-        _ => ArchExit::ForwardToParent,
+        // ── Fallback: generic policy-driven ──
+        _ => {
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Other,
+            }
+        }
     }
+}
+
+/// Handle a local (non-trapped) exit for x86.
+///
+/// Called by the generic monitor loop when `ExitPolicy` says `trap=false`.
+/// Dispatches to the appropriate x86-specific local handler based on the
+/// exit reason and decoded info.
+pub(crate) fn handle_local_exit(
+    vcpu: &mut ActiveVcpu,
+    reason: u32,
+    info: &ExitInfo,
+    platform: &crate::platform::ThemisPlatform,
+) {
+    match reason {
+        EXIT_REASON_CPUID => handle_cpuid_local(vcpu),
+        EXIT_REASON_RDMSR => handle_rdmsr_local(vcpu),
+        EXIT_REASON_WRMSR => handle_wrmsr_local(vcpu),
+        EXIT_REASON_CR_ACCESS => handle_cr_access(vcpu),
+        EXIT_REASON_EXCEPTION_NMI => reinject_exception(vcpu),
+        EXIT_REASON_EPT_VIOLATION => {
+            // Doorbell fast-path: check first.
+            if let ExitInfo::EptViolation { gpa, qualification } = info {
+                if let Some(true) = handle_ept_doorbell(platform, vcpu, *gpa, *qualification) {
+                    return;
+                }
+            }
+            // No doorbell match: for local handling, just advance RIP.
+            next_instruction(vcpu);
+        }
+        EXIT_REASON_SIPI => {
+            // AP bootstrap — only fires for dom0 (children use virtual LAPIC).
+            if let ExitInfo::Sipi { vector_page } = info {
+                let cs_base = (*vector_page as u64) << 12;
+                let cs_selector = (*vector_page as u64) << 8;
+                vcpu.set(vmcs::guest::CS_SELECTOR, cs_selector);
+                vcpu.set(vmcs::guest::CS_BASE, cs_base);
+                vcpu.set(vmcs::guest::CS_LIMIT, REALMODE_SEG_LIMIT);
+                vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, SIPI_CS_ACCESS_RIGHTS);
+                vcpu.set(vmcs::guest::RIP, 0);
+                vcpu.set(vmcs::guest::CR0, unsafe {
+                    crate::arch::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
+                });
+                vcpu.set(vmcs::guest::ACTIVITY_STATE, 0);
+                vcpu.set(vmcs::guest::VMX_PREEMPTION_TIMER_VALUE, PREEMPTION_TIMER_TICKS);
+                crate::serial_println!(
+                    "[VMEXIT] SIPI vector={:#x} startup={:#x} — AP activated",
+                    vector_page, cs_base,
+                );
+            }
+        }
+        EXIT_REASON_HLT | EXIT_REASON_IO_INSTRUCTION => next_instruction(vcpu),
+        _ => next_instruction(vcpu),
+    }
+    sync_ia32e_mode_guest(vcpu);
 }
 
 // ── HOST_RIP stub ─────────────────────────────────────────────────────────── //

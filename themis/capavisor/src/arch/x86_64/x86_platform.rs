@@ -18,7 +18,7 @@ use crate::arch_traits::traits::{
     ArchBoot, ArchCoreSignaling, ArchGuestPhysMap, ArchIommu, ArchVpOps,
 };
 use crate::arch_traits::types::{
-    ArchExit, DeviceId, HypercallArgs, HypercallResult, MapPermissions, PageSize,
+    DeviceId, ExitInfo, HypercallArgs, HypercallResult, MapPermissions, PageSize, SemanticExit,
 };
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, Reg};
@@ -77,12 +77,25 @@ impl ArchVpOps for X86Platform {
         unimplemented!("destroy_vp: wire up in Phase A7")
     }
 
-    fn enter_guest(&mut self, vp: &mut Self::VpHandle) -> ArchExit {
-        let exit_reason = unsafe { vp.run() };
-        match exit_reason {
-            Ok(reason) => vmexit::classify_exit(reason, vp),
-            Err(_) => ArchExit::Shutdown,
-        }
+    fn enter_and_decode(&mut self, vp: &mut Self::VpHandle) -> SemanticExit {
+        let exit_reason = match unsafe { vp.run() } {
+            Ok(reason) => reason,
+            Err(e) => {
+                crate::serial_println!("[FATAL] VM entry failed: {:?}", e);
+                if matches!(e, crate::vcpu::VmxError::VmFailValid) {
+                    if let Ok(err) = vp.try_get(vmcs::ro::VM_INSTRUCTION_ERROR) {
+                        crate::serial_println!("  VM_INSTRUCTION_ERROR={}", err);
+                    }
+                }
+                return SemanticExit::Shutdown { reason: 0xFFFF_FFFF };
+            }
+        };
+
+        vmexit::classify_and_handle_internal(vp, exit_reason, self.platform())
+    }
+
+    fn handle_local(&mut self, vp: &mut Self::VpHandle, reason: u32, info: &ExitInfo) {
+        vmexit::handle_local_exit(vp, reason, info, self.platform());
     }
 
     fn advance_ip(&mut self, vp: &mut Self::VpHandle, _len: u32) {

@@ -8,7 +8,7 @@
 
 use capability_engine::CapaError;
 
-use super::types::{DeviceId, HypercallArgs, HypercallResult, MapPermissions, PageSize, ArchExit};
+use super::types::{DeviceId, ExitInfo, HypercallArgs, HypercallResult, MapPermissions, PageSize, SemanticExit};
 
 // ── VP lifecycle and guest entry/exit ────────────────────────────────────── //
 
@@ -23,8 +23,15 @@ pub trait ArchVpOps {
     /// Tear down a VP and free its arch resources.
     fn destroy_vp(&mut self, vp: &mut Self::VpHandle);
 
-    /// Enter the guest and block until the next exit.  Returns an arch exit event.
-    fn enter_guest(&mut self, vp: &mut Self::VpHandle) -> ArchExit;
+    /// Enter the guest, wait for an exit, and fully decode it into a
+    /// [`SemanticExit`]. Arch-internal exits (x86 XSETBV, INIT signal,
+    /// interrupt-window drain) are handled inside this call and return
+    /// `SemanticExit::ArchHandled`.
+    fn enter_and_decode(&mut self, vp: &mut Self::VpHandle) -> SemanticExit;
+
+    /// Handle a local (non-trapped) exit. Called by the generic monitor loop
+    /// when ExitPolicy says `trap=false` for a `PolicyDriven` exit.
+    fn handle_local(&mut self, vp: &mut Self::VpHandle, reason: u32, info: &ExitInfo);
 
     /// Advance the guest instruction pointer past the current instruction.
     fn advance_ip(&mut self, vp: &mut Self::VpHandle, len: u32);

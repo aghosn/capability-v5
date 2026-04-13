@@ -1,6 +1,6 @@
 # Capavisor Platform Modularization Design
 
-**Status**: Active — Phase A (introduce trait seams)
+**Status**: Active — Phase E (policy fixes, E1-E2 done) + Phase F (monitor loop restructuring, planned)
 **Scope**: Restructure the capavisor into a platform-agnostic core and
 pluggable architecture backends, enabling multi-ISA support (x86-64, AArch64,
 future targets) without duplicating policy logic.
@@ -455,3 +455,295 @@ check happens.
 | E4 | Unified `THEMIS_SET_POLICY` hypercall | `themis-abi`, capavisor `hypercall.rs` | build succeeds |
 | E5 | THHV: unified `THHV_SET_POLICY` ioctl + deprecate per-type ioctls | `thhv/inc/thhv.h`, `thhv/src/thhv_part.c`, `thhv/src/thhv_hvcall.c` | kernel module builds |
 | E6 | Cloud-hypervisor: update callers to use new ioctl | `cloud-hypervisor/` | CHV builds |
+
+---
+
+## 9. Generic Monitor Loop Restructuring (Phase F)
+
+### 9.1 Problem
+
+The monitor loop (`monitor_loop` + `handle_vmexit` in `arch/x86_64/vmexit.rs`)
+is ~530 lines of x86-specific code that **intermixes** three concerns:
+
+1. **Raw exit decoding** — reading VMX exit reason, EXIT_QUALIFICATION, INTR_INFO
+   fields → pure x86 mechanism.
+2. **Policy lookup** — consulting ExitPolicy/InterruptPolicy to decide
+   trap-vs-local → pure generic logic.
+3. **Handling** — forwarding to parent (generic: engine switch + comm page copy)
+   or local emulation (x86: CPUID, MSR, CR access, XSETBV, APIC).
+
+Similarly, `hypercall.rs` (~2200 lines) mixes generic opcode dispatch with x86
+VMCS manipulation (register read/write, VMCLEAR/VMPTRLD for context switches,
+PIR injection, interrupt-window management).
+
+This makes it impossible to reuse the dispatch logic for a different ISA.
+
+### 9.2 Target Architecture
+
+The agreed design is **approach A**: the generic loop owns the policy decision;
+arch code only does raw decoding (before the loop) and local emulation (when
+the loop delegates back).
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Generic monitor loop (core/monitor.rs)                 │
+│                                                         │
+│  loop {                                                 │
+│      exit = arch.enter_and_decode(vp)  ─────► arch code │
+│                                                         │
+│      match exit {                                       │
+│          ArchHandled => continue,      // arch ate it   │
+│          Hypercall   => generic_hypercall_dispatch(),    │
+│          ExternalInterrupt { vector } =>                │
+│              generic_interrupt_route(vector),            │
+│          PolicyDriven { reason, .. } =>                 │
+│              if policy.trap(reason):                    │
+│                  generic_forward_to_parent(reason)      │
+│              else:                                      │
+│                  arch.handle_local(vp, exit)  ► arch    │
+│          TimerExpired => generic_timer_handler(),        │
+│          Shutdown     => halt(),                         │
+│      }                                                  │
+│  }                                                      │
+└─────────────────────────────────────────────────────────┘
+```
+
+Key principle: **arch code fully decodes raw exits into semantic events**. The
+generic loop never reads VMX-specific fields (EXIT_QUALIFICATION, INTR_INFO,
+etc.). It only pattern-matches on `SemanticExit` variants.
+
+### 9.3 Revised SemanticExit Enum
+
+The current `ArchExit` enum needs refinement. In particular, exits that are
+purely arch-internal (handled before reaching the generic loop) get a dedicated
+variant so the loop can skip them. And EXCEPTION_NMI is split by the arch
+decoder into NMI (→ interrupt routing) vs Exception (→ exit policy).
+
+```rust
+/// Produced by arch code after enter_and_decode().
+pub enum SemanticExit {
+    // ── Arch already handled — generic loop just continues ──
+    ArchHandled,
+
+    // ── Always generic dispatch (no policy lookup needed) ──
+    Hypercall,
+    ExternalInterrupt { vector: u32 },
+    TimerExpired,
+
+    // ── Policy-driven exits (generic loop consults ExitPolicy) ──
+    PolicyDriven {
+        reason: u32,              // raw exit reason (opaque to generic code
+                                  // but passed through to ExitPolicy lookup
+                                  // and forwarded to parent)
+        info: ExitInfo,           // arch-decoded details for local handling
+    },
+
+    // ── Fatal — log and halt ──
+    Shutdown { message: &'static str },
+}
+
+/// Arch-decoded exit details. Generic code does NOT inspect this —
+/// it's passed through to arch.handle_local() if policy says trap=false.
+/// Also carried to forward_to_parent for comm page population.
+pub enum ExitInfo {
+    Cpuid { leaf: u32, subleaf: u32 },
+    Msr { number: u32, is_write: bool, value: u64 },
+    CrAccess { cr: u8, is_write: bool, gpr_index: u8, value: u64 },
+    IoInstruction { port: u16, size: u8, is_write: bool, value: u32 },
+    EptViolation { gpa: u64, is_write: bool },
+    Exception { vector: u8, error_code: Option<u32> },
+    ApicIcr { icr_low: u32, icr_high: u32 },
+    Sipi { vector_page: u8 },
+    Halt,
+    Other,  // fallback for unrecognized exit reasons
+}
+```
+
+The arch decoder (x86: `classify_exit`) handles these **internally** and returns
+`ArchHandled`:
+- INIT_SIGNAL → cross-core notification (poll_and_respond)
+- XSETBV → XCR0 write
+- INTERRUPT_WINDOW → drain PIR
+- EOI_INDUCED → A3 (currently no-op)
+- EXCEPTION_NMI where type=NMI → returns `ExternalInterrupt { vector: 2 }`
+  (NMI is routed like an interrupt)
+
+The arch decoder returns `PolicyDriven` for everything else that's not
+Hypercall, ExternalInterrupt, or fatal.
+
+### 9.4 Arch Backend Entry Point
+
+The `ArchVpOps` trait gets a refined entry method:
+
+```rust
+pub trait ArchVpOps {
+    type VpHandle;
+
+    /// Enter the guest, wait for an exit, decode it fully.
+    /// Arch-internal exits (XSETBV, INIT, interrupt-window) are handled
+    /// inside this call and return SemanticExit::ArchHandled.
+    fn enter_and_decode(&mut self, vp: &mut Self::VpHandle,
+                        platform: &ThemisPlatform) -> SemanticExit;
+
+    /// Handle a local (non-trapped) exit. Called when ExitPolicy says
+    /// trap=false for a PolicyDriven exit.
+    fn handle_local(&mut self, vp: &mut Self::VpHandle,
+                    info: &ExitInfo, platform: &ThemisPlatform);
+
+    /// Advance the instruction pointer past the current instruction.
+    fn advance_ip(&mut self, vp: &mut Self::VpHandle);
+
+    // ... existing methods: get_hypercall_args, set_hypercall_result, etc.
+}
+```
+
+On x86, `enter_and_decode` wraps: `vcpu.run()` → read basic_reason →
+handle arch-internal exits (INIT, XSETBV, interrupt-window) internally →
+if not internal, call `classify_exit()` to produce SemanticExit.
+
+`handle_local` wraps the existing local handlers: `handle_cpuid_local`,
+`handle_rdmsr_local`, `handle_wrmsr_local`, `handle_cr_access`,
+`reinject_exception`, `next_instruction` for HLT/IO, etc.
+
+### 9.5 Generic Monitor Loop (core/monitor.rs)
+
+```rust
+pub fn monitor_loop<A: ArchVpOps>(arch: &mut A, vp: &mut A::VpHandle,
+                                   platform: &ThemisPlatform) -> ! {
+    loop {
+        let exit = arch.enter_and_decode(vp, platform);
+
+        match exit {
+            SemanticExit::ArchHandled => continue,
+
+            SemanticExit::Shutdown { message } => {
+                serial_println!("[FATAL] {}", message);
+                halt_forever();
+            }
+
+            SemanticExit::Hypercall => {
+                // Generic dispatch: read args, route opcode, write result.
+                let args = arch.get_hypercall_args(vp);
+                if let Some(result) = dispatch_hypercall(args, vp, arch, platform) {
+                    arch.set_hypercall_result(vp, result);
+                    arch.advance_ip(vp);
+                }
+                // None → SWITCH swapped the VP; no writeback.
+            }
+
+            SemanticExit::ExternalInterrupt { vector } => {
+                // Generic: consult InterruptPolicy, route via engine.
+                handle_interrupt(arch, vp, platform, vector);
+            }
+
+            SemanticExit::TimerExpired => {
+                // Generic: check deferred vectors, reset timer.
+                handle_timer(arch, vp, platform);
+            }
+
+            SemanticExit::PolicyDriven { reason, ref info } => {
+                let trap = lookup_exit_policy(platform, reason);
+                if trap {
+                    // Generic: engine switch + comm page + VMCS swap.
+                    forward_to_parent(arch, vp, platform, reason, info);
+                } else {
+                    // Arch-specific local emulation.
+                    arch.handle_local(vp, info, platform);
+                }
+            }
+        }
+    }
+}
+```
+
+The functions `dispatch_hypercall`, `handle_interrupt`, `forward_to_parent`
+contain the **existing generic logic** currently in `hypercall.rs`:
+- `dispatch_hypercall` → current `handle_vmcall` opcode match
+- `handle_interrupt` → current `forward_interrupt_to_handler` (policy check +
+  engine deliver_interrupt_vp + VMCS swap)
+- `forward_to_parent` → current `forward_child_exit` (engine switch_return +
+  comm page register copy + VMCS swap)
+
+The VMCS swap parts of those functions (VMCLEAR/VMPTRLD, reading/writing VMCS
+fields) get extracted into `ArchVpOps` methods:
+- `deactivate_vp(vp) -> SavedVp` (VMCLEAR)
+- `activate_vp(saved) -> VpHandle` (VMPTRLD)
+- `read_reg(vp, VpRegister) -> u64`
+- `write_reg(vp, VpRegister, u64)`
+
+### 9.6 What Stays in Arch Code
+
+These remain in `arch/x86_64/` and are NOT touched by the generic loop:
+
+| Handler | Why arch-only |
+|---------|---------------|
+| `handle_xsetbv` | XCR0 is x86-specific (ARM uses CPACR_EL1) |
+| `handle_cpuid_local` | CPUID is x86; ARM uses HVC-based feature query |
+| `handle_rdmsr_local` / `handle_wrmsr_local` | MSRs are x86 |
+| `handle_cr_access` | CR0/CR3/CR4 are x86; ARM uses SCTLR/TTBR/TCR |
+| `reinject_exception` | VMENTRY_INTERRUPTION_INFO is VMX-specific |
+| `handle_apic_access` / `handle_apic_write` | VAPIC / APIC-access page is x86 |
+| SIPI setup (CS/RIP/CR0/activity) | Real-mode bootstrap is x86 only |
+| `sync_ia32e_mode_guest` | IA-32e mode bit is x86 |
+| Dump helpers (vmentry failure, triple fault, EPT misconfig) | VMX fields |
+
+### 9.7 CPUID / APIC ICR Special Cases
+
+Two exits need special handling in the policy-driven path:
+
+**CPUID**: Certain leaves (Themis hypervisor leaves `0x40000000–0x40000003`,
+TSC calibration `0x15`) are always handled locally regardless of policy.
+Solution: the arch decoder checks the leaf and for those specific leaves
+returns `ArchHandled` (handling them directly). For all other leaves, it
+returns `PolicyDriven { reason: 10, info: Cpuid { leaf, subleaf } }`.
+
+**APIC ICR write** (exit reasons 44/56): When a child writes ICR, the parent
+needs to see it for SIPI handling. The arch decoder detects ICR writes
+(checking the APIC offset in EXIT_QUALIFICATION) and returns
+`PolicyDriven { reason: APIC_ACCESS, info: ApicIcr { icr_low, icr_high } }`.
+Non-ICR APIC accesses return `ArchHandled` (handled locally by VAPIC
+emulation).
+
+### 9.8 Migration Strategy
+
+The restructuring is done in 4 steps. **Builds and boots at every step.**
+
+| Step | What | Verification |
+|------|------|---|
+| F1 | Create `SemanticExit` + `ExitInfo` types. Extend `ArchVpOps` with `enter_and_decode`, `handle_local`, VP save/restore, reg read/write methods. Implement for X86Platform (wrapping existing code). | `cargo build` passes |
+| F2 | Create `core/monitor.rs` with generic `monitor_loop`. Port `forward_child_exit` and `forward_interrupt_to_handler` to be generic (using trait methods instead of direct VMCS access). Keep old `vmexit.rs::monitor_loop` as fallback. | `cargo build` passes |
+| F3 | Wire new generic `monitor_loop` as the entry point. Remove old `handle_vmexit`. Move generic parts of `hypercall.rs` to `core/hypercall.rs`. | full boot test |
+| F4 | Clean up: remove dead code, update module structure, verify all paths. | full boot matrix: dom0 4-CPU, dom1 1-CPU, dom1 2-CPU |
+
+### 9.9 Lines-of-Code Impact
+
+| Change | Lines |
+|--------|-------|
+| `SemanticExit` + `ExitInfo` types | ~80 new |
+| `ArchVpOps` trait extensions | ~40 new |
+| `X86Platform` impl (wrapping existing) | ~200 new (thin wrappers) |
+| `core/monitor.rs` (generic loop) | ~150 new (extracted from vmexit.rs) |
+| Removed from `vmexit.rs` | ~300 removed (handle_vmexit + duplicate dispatch) |
+| Removed from `hypercall.rs` | ~100 removed (x86-specific parts move to arch) |
+| **Net** | **~70 new lines** (mostly type definitions) |
+
+The goal is net-neutral or slightly positive. The generic loop + types add
+~470 lines but removing the interleaved dispatch saves ~400. The remaining
+arch code in `vmexit.rs` shrinks to: `enter_and_decode` (classify), `handle_local`
+(dispatch to existing handlers), and dump helpers.
+
+### 9.10 Relationship to Other Phases
+
+- **Phase E (policy fixes)**: E3 (interrupt register filtering) will be
+  implemented as part of the generic `handle_interrupt` in F2. The generic
+  path naturally handles both interrupt and exit register filtering symmetrically.
+  E4-E6 (unified SET_POLICY) are independent and can proceed in parallel.
+- **Phase A7** (ThemisPlatform generic over traits): F1-F4 provide the
+  `ArchVpOps` methods that A7 needs. After Phase F, making ThemisPlatform
+  fully generic is a natural next step.
+- **Phase C** (file reorganization): Phase F creates the `core/monitor.rs`
+  file and starts the core/arch split. Phase C completes it by moving
+  remaining files.
+- **Phase D** (ARM skeleton): After Phase F, adding ARM means implementing
+  `enter_and_decode` (ESR_EL2 decode) and `handle_local` (SCTLR/TTBR/GIC).
+  The generic loop, hypercall dispatch, and policy logic work unchanged.

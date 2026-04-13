@@ -73,44 +73,58 @@ impl HypercallResult {
 
 // ── Semantic exit events ─────────────────────────────────────────────────── //
 
-/// Architecture-neutral exit events.
+/// Architecture-neutral exit events produced by `ArchVpOps::enter_and_decode`.
 ///
-/// Arch code decodes raw hardware exits (VMX exit reasons, ARM ESR_EL2.EC)
-/// into this enum. Shared code pattern-matches on it for dispatch.
+/// Arch code fully decodes raw hardware exits (VMX exit reasons, ARM ESR_EL2.EC)
+/// into this enum. The generic monitor loop pattern-matches on it for dispatch.
 ///
-/// Events that are purely arch-internal (x86 XSETBV, ARM WFE trap) are
-/// handled inside the arch backend and never reach this enum.
-pub enum ArchExit {
-    /// Guest executed a hypercall (VMCALL / HVC).
+/// Events that are purely arch-internal (x86 XSETBV, ARM WFE trap) are handled
+/// inside `enter_and_decode` and surfaced as `ArchHandled`.
+pub enum SemanticExit {
+    /// Arch code handled the exit internally (XSETBV, INIT signal,
+    /// interrupt-window drain, etc.). Generic loop just re-enters the guest.
+    ArchHandled,
+
+    /// Guest executed a hypercall (VMCALL / HVC). Always dispatched generically.
     Hypercall,
-    /// External interrupt delivered to the hypervisor.
+
+    /// External interrupt delivered to the hypervisor. Routed via InterruptPolicy.
     ExternalInterrupt { vector: u32 },
+
     /// Preemption / scheduling timer fired.
     TimerExpired,
-    /// Guest accessed an unmapped or protected GPA.
-    GuestMemoryFault { gpa: u64, write: bool },
-    /// Guest executed a port I/O instruction.
-    IoInstruction {
-        port: u16,
-        size: u8,
-        is_write: bool,
-        value: u32,
+
+    /// Exit governed by ExitPolicy. Generic loop consults
+    /// `ExitPolicy.get_action(reason).trap` to decide forward-vs-local.
+    ///
+    /// `reason` is the raw exit reason code (passed through to ExitPolicy lookup
+    /// and forwarded to parent). `info` carries arch-decoded details for the
+    /// local handler if policy says trap=false.
+    PolicyDriven {
+        reason: u32,
+        info: ExitInfo,
     },
-    /// Guest accessed an MMIO region (e.g., IOAPIC, virtio).
-    MmioAccess {
-        gpa: u64,
-        is_write: bool,
-        len: u8,
-    },
-    /// Exit that must be forwarded to the parent domain's VMM.
-    /// The opaque `exit_info` carries arch-specific context for the parent.
-    ForwardToParent,
-    /// Secondary CPU startup event (SIPI on x86, PSCI CPU_ON on ARM).
-    StartupEvent { target_cpu: u32, entry_addr: u64 },
-    /// Guest halted (HLT / WFI).
+
+    /// Fatal exit — log and halt.
+    Shutdown { reason: u32 },
+}
+
+/// Arch-decoded exit details carried inside `SemanticExit::PolicyDriven`.
+///
+/// Generic code does NOT inspect these variants — they are passed through to
+/// `ArchVpOps::handle_local` when `ExitPolicy` says `trap=false`, and to
+/// `forward_to_parent` for comm-page population when `trap=true`.
+pub enum ExitInfo {
+    Cpuid { leaf: u32, subleaf: u32 },
+    Exception { vector: u8, error_code: Option<u32>, is_nmi: bool },
+    EptViolation { gpa: u64, qualification: u64 },
+    IoInstruction { port: u16, size: u8, is_write: bool, value: u32 },
+    CrAccess { qualification: u64 },
+    Msr { number: u32, is_write: bool, value: u64 },
+    ApicIcr { icr_low: u32, icr_high: u32 },
+    Sipi { vector_page: u8 },
     Halt,
-    /// Guest shutdown / triple fault.
-    Shutdown,
+    Other,
 }
 
 // ── Memory / permission types ────────────────────────────────────────────── //
