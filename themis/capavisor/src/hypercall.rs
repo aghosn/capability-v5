@@ -2044,6 +2044,15 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     };
 
+    // Look up the interrupt policy read_set for register filtering.
+    let read_set = child_cap
+        .read()
+        .data
+        .policy
+        .interrupts
+        .get_policy(vector)
+        .read_set;
+
     // Lazy-unwind: child VP → Interrupted, handler VP → Running.
     let intr_ctx = match Capability::deliver_interrupt_vp(
         &child_cap,
@@ -2064,10 +2073,38 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     };
 
-    // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
+    // Copy child registers allowed by InterruptPolicy.read_set into comm page.
     let child_arc = platform
         .domain_arc(intr_ctx.interrupted_domain_id)
         .expect("[INTR_FWD] child domain not found");
+    {
+        use themis_abi::regs::{VpCommPage, ALL_VP_REGISTERS};
+        let comm_hpa = child_arc
+            .lock()
+            .comm_hpas
+            .get(intr_ctx.interrupted_vp_id as usize)
+            .copied()
+            .unwrap_or(0);
+        if comm_hpa != 0 {
+            let hhdm = platform.hhdm_offset();
+            let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+            for reg in ALL_VP_REGISTERS {
+                if !read_set.is_set(*reg as u64) {
+                    continue;
+                }
+                let val = if let Some(gpr) = vp_reg_to_gpr(*reg) {
+                    vcpu.reg(gpr)
+                } else if let Some(field) = vp_reg_to_vmcs_field(*reg) {
+                    vcpu.try_get(field).unwrap_or(0)
+                } else {
+                    continue;
+                };
+                comm.write_reg(*reg, val);
+            }
+        }
+    }
+
+    // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
     let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
     let child_inactive = child_active
         .deactivate()
