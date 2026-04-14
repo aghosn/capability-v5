@@ -7,39 +7,38 @@
 
 ---
 
-## Current State (2026-04-13)
+## Current State (2026-04-14)
 
 ### What works
 
 - **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-107-generic. Stable.
-- **Dom1 (1 CPU, bare-metal Linux/KVM)**: **full systemd boot to login prompt**.
-  Stock Ubuntu 6.8.0-107-generic kernel + initramfs. virtio-blk, virtio-net,
-  ext4 mount, systemd services all complete.
-- **Dom1 (2 CPUs, bare-metal Linux/KVM)**: **full systemd boot to login prompt**.
-  Both CPUs activated (12000 BogoMIPS), SMP bringup succeeds via SIPI through
-  APIC_ACCESS exit interception and IPI routing.
+- **Dom1 (1 CPU)**: full systemd boot (reaches emergency.target on local QEMU due
+  to missing fstab partitions — known issue, not a regression).
+- **Dom1 (2 CPUs)**: **full systemd boot to login prompt** (`multi-user.target`,
+  `graphical.target`). Verified 2026-04-14 after full modularization.
+- **Platform modularization complete**: Phase A7 done. Opaque ArchDomainState/
+  ArchPlatformState types, aarch64 cross-check passes with 0 errors.
+  See `themis/docs/platform-modularization.md`.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`.
 - **TPM attested boot (P20)**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
-  End-to-end verified.
-- **Platform modularization**: Phases A-C, E, F done. Generic monitor loop with
-  SemanticExit dispatch. Unified SET_POLICY (single opcode 0x22 across full stack).
-  See `themis/docs/platform-modularization.md` §10.
 
 ### What doesn't work / known issues
 
 - **Dom1 emergency mode on local QEMU machine**: fstab references missing /boot,
-  /boot/efi partitions → systemd enters emergency mode. Needs investigation on
-  remote machine.
-- **Dom1 2-vCPU hangs after virtio_blk on local machine**: needs investigation on
-  remote.
+  /boot/efi partitions → systemd enters emergency mode. Confirmed on both 1-CPU
+  and 2-CPU dom1 (2026-04-14). Networking not configured in dom1 image.
+- **Unguarded interrupt injection paths**: `forward_interrupt_to_handler` has 2
+  fallback paths (Deliver + route-error) that write VMENTRY_INTERRUPTION_INFO
+  without checking RFLAGS.IF. Saw transient exit-33 crash on 2-CPU run (did not
+  reproduce on retry). Should add IF guard to all injection paths.
 - **Posted interrupts**: hardware PI is disabled (software PIR drain used instead).
-  The host advertises PI support but L2 delivery is unreliable under nested KVM.
-  Requires `intel_iommu=on` on host kernel cmdline + QEMU IOMMU flags. See
-  `testing-posted.md` for details.
 - **Dom1 on real hardware**: not yet tested.
+- **thhv kernel headers**: must match dom0 kernel exactly. After image upgrade:
+  `rm -rf themis/target/kheaders && bash themis/scripts/fetch-kheaders.sh`
+  then clean rebuild `rm thhv/*.o thhv/*.ko thhv/src/*.o && cargo build-bins`.
 
 ### Recent commits
 
