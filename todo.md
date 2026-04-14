@@ -43,6 +43,10 @@
 
 ### Recent commits
 
+- `0b03cfd` — **cfg-gate x86 code in platform.rs, main.rs, attestation.rs for multi-ISA**
+- `5f1a188` — **cfg-gate x86-specific code in hypercall.rs for multi-ISA support**
+- `b9da854` — **refactor: extract ArchDomainState and ArchPlatformState opaque types**
+- `6f81c14` — **feat: ARM AArch64 skeleton + arch-neutral trait fixes**
 - `0d03948` — **chore: update cloud-hypervisor submodule (unified SET_POLICY)**
 - `097f59d` — **cleanup: remove old per-type policy opcodes, unified SET_POLICY only (-245 lines)**
 - `5e5acdb` — **feat: THHV ioctl + CHV support for unified SET_POLICY**
@@ -87,11 +91,16 @@ Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modu
 - Phases E1-E6: Policy enforcement fixes + unified SET_POLICY (0x22) across full stack
 - Phases F1-F3: Generic monitor loop with SemanticExit dispatch (-405 lines)
 - Cleanup: Removed all old per-type policy paths (-245 lines)
+- Phase A7: Full platform generification — opaque ArchDomainState/ArchPlatformState types,
+  cfg-gated x86 code across platform.rs, hypercall.rs, main.rs, attestation.rs.
+  **aarch64 cross-check: 0 errors.** x86 build clean.
+- Phase D: ARM skeleton — aarch64 arch module with stub types (arch_state.rs)
 
 **Remaining**:
-- [ ] A7: Genericize ThemisPlatform — make monitor_loop generic over ArchVpOps,
-  fix layering (main.rs calls monitor_loop directly, boot returns VP handle)
-- [ ] D: ARM skeleton — stub impls of all arch traits for AArch64
+- [ ] Implement aarch64 serial console (PL011 UART)
+- [ ] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables)
+- [ ] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR)
+- [ ] QEMU aarch64 testbed setup
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
