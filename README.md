@@ -39,7 +39,8 @@ is documented in [`CONTEXT.md`](CONTEXT.md) and the design docs under
 
 ## What it is
 
-Themis is a bare-metal capability hypervisor for x86_64.  It runs as the first OS layer
+Themis is a bare-metal capability hypervisor targeting x86_64 (production) and
+AArch64 (in progress).  It runs as the first OS layer
 on the machine (loaded by Limine) and manages hardware resources as first-class capabilities
 (memory regions, CPUs, I/O) handed out to guest domains.  **Dom0** is the first and
  guest domain, running a full Linux image (Ubuntu Noble) inside a VM managed
@@ -218,6 +219,71 @@ To load the Themis driver:
 sudo insmod /opt/bins/thhv/thhv.ko
 ls /dev/thhv   # should appear
 ```
+
+---
+
+## Multi-ISA build (x86_64 / AArch64)
+
+The capavisor and capability engine are structured for multi-ISA support.
+Platform-specific code is behind `#[cfg(target_arch = "...")]` gates so that
+architecture-agnostic logic compiles on any target.
+
+### x86_64 (full build + run)
+
+This is the primary development target. All binaries (capavisor, thhv.ko,
+cloud-hypervisor) build and run on x86_64:
+
+```bash
+# Ensure the x86_64 bare-metal target is installed
+rustup target add x86_64-unknown-none
+
+# Build everything (capavisor, thhv.ko, cloud-hypervisor, bins.img)
+cargo build-bins
+
+# Run engine unit tests
+cd capa-engine && cargo test
+
+# Boot capavisor + dom0 under QEMU
+cd themis && cargo themis
+```
+
+### AArch64 (cross-check — type-checks only)
+
+The AArch64 backend is under development. You can cross-check that the
+capavisor compiles for `aarch64-unknown-none` (no linker output yet):
+
+```bash
+# Install the AArch64 bare-metal target
+rustup target add aarch64-unknown-none
+
+# Type-check the capavisor (cargo check skips linking)
+cd themis/capavisor && cargo check --target aarch64-unknown-none -p capavisor
+
+# Type-check the capability engine library
+cd capa-engine && cargo check --target aarch64-unknown-none --no-default-features --lib
+```
+
+> **Note:** `cargo build` for aarch64 fails at the link stage because there is
+> no AArch64 linker script yet.  Use `cargo check` to verify compilation.
+> The engine binary (`capa-engine` bin target) pulls in `parking_lot` which
+> doesn't support `aarch64-unknown-none`; use `--lib` to check the library only.
+
+### What compiles where
+
+| Component | x86_64 | aarch64 | Notes |
+|---|---|---|---|
+| `capa-engine` (lib) | ✅ build + test | ✅ check | Platform-agnostic capability engine |
+| `capa-engine` (bin) | ✅ build + test | ❌ | Binary pulls in std-dependent deps |
+| `capavisor` | ✅ build + run | ✅ check | aarch64 has stubs, no linker script yet |
+| `thhv.ko` | ✅ build | ❌ | Linux x86_64 kernel module |
+| `cloud-hypervisor` | ✅ build | ❌ | x86_64 VMM (git submodule) |
+
+### Architecture design docs
+
+- [`themis/docs/platform-modularization.md`](themis/docs/platform-modularization.md) —
+  trait-based platform abstraction, cfg-gating strategy, phase tracker
+- [`themis/docs/arm-porting-design.md`](themis/docs/arm-porting-design.md) —
+  AArch64 EL2 porting plan, GICv3, Stage-2 page tables, QEMU testbed
 
 ---
 
