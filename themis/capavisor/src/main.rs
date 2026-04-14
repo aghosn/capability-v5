@@ -68,6 +68,7 @@ pub mod vcpu {
 
 pub struct SerialPort;
 
+#[cfg(target_arch = "x86_64")]
 impl SerialPort {
     /// Standard COM1 UART initialization (8N1, 115200 baud).
     fn init() {
@@ -83,6 +84,14 @@ impl SerialPort {
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+impl SerialPort {
+    fn init() {
+        // TODO: PL011 UART on aarch64
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
@@ -91,6 +100,14 @@ impl fmt::Write for SerialPort {
                 x86::io::outb(0x3F8, b);
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, _s: &str) -> fmt::Result {
+        // TODO: PL011 UART output on aarch64
         Ok(())
     }
 }
@@ -173,6 +190,7 @@ pub(crate) static PLATFORM_PTR: core::sync::atomic::AtomicPtr<platform::ThemisPl
 
 /// BSP entry point called by the Limine bootloader.
 #[no_mangle]
+#[cfg(target_arch = "x86_64")]
 pub extern "C" fn _start() -> ! {
     // SAFETY: HEAP is only mutated here (once, BSP-only, before any AP runs).
     // We use addr_of_mut! to get a raw pointer without creating a Rust reference.
@@ -357,9 +375,27 @@ pub extern "C" fn _start() -> ! {
     monitor::monitor_loop(&mut vp);
 }
 
+#[no_mangle]
+#[cfg(not(target_arch = "x86_64"))]
+pub extern "C" fn _start() -> ! {
+    // SAFETY: HEAP is only mutated here (once, BSP-only, before any AP runs).
+    unsafe {
+        ALLOCATOR
+            .lock()
+            .init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
+    }
+    SerialPort::init();
+    assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
+    serial_println!("Themis capavisor — aarch64 stub (not yet implemented)");
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 // ── AP entry point ───────────────────────────────────────────────────────── //
 
 /// Application processor entry point — called by Limine for each AP.
+#[cfg(target_arch = "x86_64")]
 pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     while SERIAL_LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -423,6 +459,11 @@ pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     serial_println!("!!! PANIC: {}", info);
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        core::hint::spin_loop();
     }
 }

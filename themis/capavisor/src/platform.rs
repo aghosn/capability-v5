@@ -85,6 +85,7 @@ use capability_engine::{
 
 use crate::arch::{ArchDomainState, ArchPlatformState};
 use crate::serial_println;
+#[cfg(target_arch = "x86_64")]
 use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 
 use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
@@ -255,6 +256,7 @@ unsafe impl Send for ExclusiveGuard {}
 
 // ── Per-VP slot (atomic take/return for exclusive access) ──────────────────── //
 
+#[cfg(target_arch = "x86_64")]
 use crate::vcpu::InactiveVcpu;
 
 /// A slot holding an `InactiveVcpu` that can be atomically taken by one core
@@ -263,6 +265,7 @@ use crate::vcpu::InactiveVcpu;
 /// deactivates and `return()`s the InactiveVcpu back to the slot.
 ///
 /// An empty slot (null pointer) means the VP is currently active on some core.
+#[cfg(target_arch = "x86_64")]
 pub struct VcpuSlot {
     ptr: AtomicPtr<InactiveVcpu>,
     /// Physical address of this VP's Posted Interrupt Descriptor.
@@ -272,6 +275,7 @@ pub struct VcpuSlot {
     pid_phys: AtomicU64,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl VcpuSlot {
     /// Create an empty slot (no VP stored).
     pub const fn empty() -> Self {
@@ -767,6 +771,7 @@ impl PlatformDomain {
     /// # Panics
     ///
     /// Panics if the META pool is empty (no `GiveMetaMem` update received yet).
+    #[cfg(target_arch = "x86_64")]
     pub fn ensure_ept(&mut self) {
         self.arch.ensure_ept(&mut self.meta, self.hhdm_offset);
     }
@@ -775,6 +780,7 @@ impl PlatformDomain {
     ///
     /// `alloc` should be backed by the **root domain's** META pool so that child
     /// domain META budgets are not consumed by hypervisor page-table pages.
+    #[cfg(target_arch = "x86_64")]
     fn ensure_iommu_pt(&mut self, level: Level, alloc: &mut impl ept::FrameAllocator) {
         self.arch.ensure_iommu_pt(level, alloc, self.hhdm_offset);
     }
@@ -785,6 +791,7 @@ impl PlatformDomain {
 /// Map `[gpa, gpa+size)` → `[hpa, hpa+size)` into `ept`, splitting the range at
 /// UC boundaries so that MMIO sub-ranges use [`EptMemoryType::UC`] and all other
 /// sub-ranges use [`EptMemoryType::WB`].
+#[cfg(target_arch = "x86_64")]
 fn map_range_typed(
     ept: &mut EptMapper,
     meta: &mut crate::mem::MetaAllocator,
@@ -886,8 +893,10 @@ pub const ROOT_DOMAIN_ID: DomainId = 0;
 ///
 /// Used by IOMMU SLPT operations in `apply_update` so that child domains'
 /// META budgets are not consumed by hypervisor page-table pages.
+#[cfg(target_arch = "x86_64")]
 struct RootMetaProxy<'a>(&'a ThemisPlatform);
 
+#[cfg(target_arch = "x86_64")]
 impl ept::FrameAllocator for RootMetaProxy<'_> {
     fn allocate_frame(&mut self) -> Option<u64> {
         let arc = self.0.domains.get(ROOT_DOMAIN_ID)?;
@@ -995,16 +1004,19 @@ impl ThemisPlatform {
 
     /// Store per-core VMXON physical addresses (called once by BSP before
     /// AP_LAUNCH_READY).
+    #[cfg(target_arch = "x86_64")]
     pub fn bootstrap_set_vmxon_phys(&mut self, phys: Vec<u64>) {
         self.arch.set_vmxon_phys(phys);
     }
 
     /// Get VMXON physical address for a core (called by APs after Acquire
     /// on AP_LAUNCH_READY).
+    #[cfg(target_arch = "x86_64")]
     pub fn vmxon_phys(&self, core_index: usize) -> u64 {
         self.arch.vmxon_phys(core_index)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
         unsafe {
             *self.lapic_ids.get() = ids;
@@ -1013,6 +1025,7 @@ impl ThemisPlatform {
 
     /// Physical LAPIC ID of the BSP (core 0).
     /// Used as the remapped-IRTE destination for Report/NotReport vectors.
+    #[cfg(target_arch = "x86_64")]
     pub fn bsp_lapic_id(&self) -> u32 {
         unsafe { &*self.lapic_ids.get() }
             .first()
@@ -1025,6 +1038,7 @@ impl ThemisPlatform {
     /// Derived from the minimum AW (adjusted guest-address width) across all
     /// DRHD units: AW=1 → `Level::L3` (39-bit), AW=2 → `Level::L4` (48-bit).
     /// Falls back to `Level::L3` if no DRHD units are present.
+    #[cfg(target_arch = "x86_64")]
     pub fn iommu_pt_level(&self) -> Level {
         let min_aw = self
             .arch
@@ -1049,6 +1063,7 @@ impl ThemisPlatform {
     /// # Panics
     /// Panics if `domain_id` has no IOMMU PT yet (no memory has been mapped for
     /// it), or if no DRHD unit covers the bus encoded in `bdf`.
+    #[cfg(target_arch = "x86_64")]
     pub fn assign_device(&self, bdf: u16, domain_id: DomainId) {
         let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
         let bus = (bdf >> 8) as u8;
@@ -1096,6 +1111,7 @@ impl ThemisPlatform {
     /// dom0 (DID=1, TT=10b pass-through).  Called on child-domain revocation.
     ///
     /// No-ops silently if no DRHD covers the bus.
+    #[cfg(target_arch = "x86_64")]
     pub fn release_device(&self, bdf: u16) {
         let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
         let bus = (bdf >> 8) as u8;
@@ -1120,6 +1136,7 @@ impl ThemisPlatform {
     }
 
     /// Flush context-cache (device-selective) and IOTLB (global) for a DRHD unit.
+    #[cfg(target_arch = "x86_64")]
     fn flush_ctx_and_iotlb(&self, unit: &crate::arch::acpi::DhrdUnit, bdf: u16, hhdm: u64) {
         const CCMD_OFFSET: u64 = 0x28;
         const ECAP_OFFSET: u64 = 0x10;
@@ -1210,6 +1227,7 @@ impl ThemisPlatform {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn eptp(&self, domain_id: DomainId) -> Option<u64> {
         self.domains
             .get(domain_id)?
@@ -1254,6 +1272,7 @@ impl ThemisPlatform {
     ///
     /// `vp_id` is the domain-local VP index (0, 1, 2, ...).
     /// Extends the VP vector if needed.
+    #[cfg(target_arch = "x86_64")]
     pub fn bootstrap_store_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
         let arc = self
             .domains
@@ -1269,6 +1288,7 @@ impl ThemisPlatform {
     /// Atomically take an InactiveVcpu from a domain's VP slot.
     ///
     /// Returns `None` if the VP is already active on another core.
+    #[cfg(target_arch = "x86_64")]
     pub fn take_vcpu(&self, domain_id: DomainId, vp_id: usize) -> Option<InactiveVcpu> {
         let arc = self.domains.get(domain_id)?;
         let d = arc.lock();
@@ -1277,6 +1297,7 @@ impl ThemisPlatform {
 
     /// Return an InactiveVcpu to a domain's VP slot after deactivation.
     #[allow(dead_code)]
+    #[cfg(target_arch = "x86_64")]
     pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
         let arc = self
             .domains
@@ -1293,6 +1314,7 @@ impl ThemisPlatform {
     /// Execute INVEPT(single-context) for the given domain's EPTP on the
     /// current core.  If the domain has no EPT (not yet mapped), this is a
     /// no-op since there can be no cached translations.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn invept_for_domain(&self, domain_id: DomainId) {
         if let Some(arc) = self.domains.get(domain_id) {
             let d = arc.lock();
@@ -1425,11 +1447,18 @@ impl ThemisPlatform {
         while let Some(update) = queue.pop_front() {
             match update {
                 CoreUpdate::TlbShootdown => {
-                    let dom = self.cores[core_id as usize]
-                        .domain_id
-                        .load(Ordering::Relaxed);
-                    if dom != IDLE_DOMAIN {
-                        self.invept_for_domain(dom);
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let dom = self.cores[core_id as usize]
+                            .domain_id
+                            .load(Ordering::Relaxed);
+                        if dom != IDLE_DOMAIN {
+                            self.invept_for_domain(dom);
+                        }
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        unimplemented!("TlbShootdown: arch backend not yet implemented")
                     }
                 }
                 CoreUpdate::Switch { .. } => {
@@ -1447,13 +1476,7 @@ impl ThemisPlatform {
     /// Public wrapper around the Platform trait's get_current_core for
     /// crate-internal use (e.g., by x86_platform.rs).
     pub(crate) fn current_core_id(&self) -> Option<capability_engine::CoreId> {
-        // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
-        let cpuid = core::arch::x86_64::__cpuid(1);
-        let lapic_id = (cpuid.ebx >> 24) as u32;
-        let ids = unsafe { &*self.lapic_ids.get() };
-        ids.iter()
-            .position(|&id| id == lapic_id)
-            .map(|i| i as capability_engine::CoreId)
+        self.get_current_core()
     }
 }
 
@@ -1473,27 +1496,36 @@ impl Platform for ThemisPlatform {
         // Set the flag so the target core (if polling) can respond.
         self.ipi_pending[core_id as usize].store(true, Ordering::Release);
 
-        // Send INIT assert: delivery mode 0x5, level assert (bit 14), edge.
-        // INIT always causes VMEXIT(EXIT_REASON_INIT_SIGNAL = 3) from
-        // non-root mode, regardless of pin-based controls.
-        //
-        // Use xAPIC MMIO (0xFEE0_0000) because the capavisor never enables
-        // x2APIC mode and dom0 could regress it.  When we properly
-        // virtualise dom0's APIC access, we can switch to x2APIC MSRs.
-        let lapic_id = unsafe {
-            let ids = &*self.lapic_ids.get();
-            *ids.get(core_id as usize)
-                .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
-        };
-        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-        let apic_base = hhdm + 0xFEE0_0000u64;
-        unsafe {
-            // ICR high: destination APIC ID in bits 24-31
-            let icr_hi = (apic_base + 0x310) as *mut u32;
-            core::ptr::write_volatile(icr_hi, lapic_id << 24);
-            // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14)
-            let icr_lo = (apic_base + 0x300) as *mut u32;
-            core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Send INIT assert: delivery mode 0x5, level assert (bit 14), edge.
+            // INIT always causes VMEXIT(EXIT_REASON_INIT_SIGNAL = 3) from
+            // non-root mode, regardless of pin-based controls.
+            //
+            // Use xAPIC MMIO (0xFEE0_0000) because the capavisor never enables
+            // x2APIC mode and dom0 could regress it.  When we properly
+            // virtualise dom0's APIC access, we can switch to x2APIC MSRs.
+            let lapic_id = unsafe {
+                let ids = &*self.lapic_ids.get();
+                *ids.get(core_id as usize)
+                    .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
+            };
+            let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+            let apic_base = hhdm + 0xFEE0_0000u64;
+            unsafe {
+                // ICR high: destination APIC ID in bits 24-31
+                let icr_hi = (apic_base + 0x310) as *mut u32;
+                core::ptr::write_volatile(icr_hi, lapic_id << 24);
+                // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14)
+                let icr_lo = (apic_base + 0x300) as *mut u32;
+                core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = core_id;
+            unimplemented!("send_ipi: arch backend not yet implemented")
         }
     }
 
@@ -1559,6 +1591,7 @@ impl Platform for ThemisPlatform {
                 // not DMA targets — no IOMMU PT mapping needed here.
             }
 
+            #[cfg(target_arch = "x86_64")]
             Update::ChangeRights {
                 domain,
                 address,
@@ -1651,6 +1684,12 @@ impl Platform for ThemisPlatform {
                 }
             }
 
+            #[cfg(not(target_arch = "x86_64"))]
+            Update::ChangeRights { .. } => {
+                unimplemented!("ChangeRights: arch backend not yet implemented")
+            }
+
+            #[cfg(target_arch = "x86_64")]
             Update::RevokeDomain { domain, .. } => {
                 if let Some(mut d) = self.domains.remove(*domain) {
                     if let Some(ept) = d.arch.take_ept() {
@@ -1663,14 +1702,25 @@ impl Platform for ThemisPlatform {
                 }
             }
 
+            #[cfg(not(target_arch = "x86_64"))]
+            Update::RevokeDomain { .. } => {
+                unimplemented!("RevokeDomain: arch backend not yet implemented")
+            }
+
             Update::ZeroMemory { address, size } => {
                 let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
                 let virt = (address + hhdm) as *mut u8;
                 unsafe { core::ptr::write_bytes(virt, 0, *size as usize) };
             }
 
+            #[cfg(target_arch = "x86_64")]
             Update::FlushTLB { domain } => {
                 self.invept_for_domain(*domain);
+            }
+
+            #[cfg(not(target_arch = "x86_64"))]
+            Update::FlushTLB { .. } => {
+                unimplemented!("FlushTLB: arch backend not yet implemented")
             }
 
             Update::CommRegion {
@@ -1876,20 +1926,28 @@ impl Platform for ThemisPlatform {
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
-        // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
-        // Works regardless of xAPIC vs x2APIC mode.
-        let cpuid = core::arch::x86_64::__cpuid(1);
-        let lapic_id = (cpuid.ebx >> 24) as u32;
-        let ids = unsafe { &*self.lapic_ids.get() };
-        ids.iter()
-            .position(|&id| id == lapic_id)
-            .map(|i| i as CoreId)
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
+            // Works regardless of xAPIC vs x2APIC mode.
+            let cpuid = core::arch::x86_64::__cpuid(1);
+            let lapic_id = (cpuid.ebx >> 24) as u32;
+            let ids = unsafe { &*self.lapic_ids.get() };
+            ids.iter()
+                .position(|&id| id == lapic_id)
+                .map(|i| i as CoreId)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            unimplemented!("get_current_core: arch backend not yet implemented")
+        }
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────── //
 
 /// Convert capability-engine `Rights` to EPT entry permission flags.
+#[cfg(target_arch = "x86_64")]
 fn rights_to_ept_flags(rights: &capability_engine::Rights) -> EptEntryFlags {
     let mut flags = EptEntryFlags::empty();
     if rights.read() {

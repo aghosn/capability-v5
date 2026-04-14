@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::PhysRegion;
+#[cfg(target_arch = "x86_64")]
 use ept::FrameAllocator;
 
 const PAGE_SIZE: u64 = 4096;
@@ -106,6 +107,7 @@ impl MetaAllocator {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl FrameAllocator for MetaAllocator {
     fn allocate_frame(&mut self) -> Option<u64> {
         if self.free_stack.is_empty() {

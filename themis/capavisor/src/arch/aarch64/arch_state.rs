@@ -3,9 +3,6 @@
 //! Mirrors the API of `arch::x86_64::arch_state` with empty implementations.
 //! A real port would hold Stage-2 page table state, GIC config, etc.
 
-extern crate alloc;
-use alloc::vec::Vec;
-
 // ── Per-domain hardware state ────────────────────────────────────────────── //
 
 /// AArch64 per-domain hardware state (stub).

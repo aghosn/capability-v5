@@ -24,6 +24,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use spin::Once;
 use themis_abi::domcomm::{ATTEST_KEY_SIZE, ATTEST_PCR_INDEX};
+#[cfg(target_arch = "x86_64")]
 use tpm2::Tpm2;
 
 use crate::serial_println;
@@ -76,6 +77,7 @@ fn rdrand_fill(buf: &mut [u8]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rdrand64() -> u64 {
     for _ in 0..10 {
         let mut val: u64;
@@ -94,6 +96,12 @@ fn rdrand64() -> u64 {
         }
     }
     panic!("RDRAND failed after 10 retries");
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn rdrand64() -> u64 {
+    // TODO: Use ARM RNG (RNDR instruction or platform entropy source)
+    unimplemented!("rdrand64: arch backend not yet implemented")
 }
 
 // ── Public API ───────────────────────────────────────────────────────────── //
@@ -184,6 +192,7 @@ pub fn init(elf_file_addr: u64, elf_file_size: u64) {
 /// Transport selection based on ACPI `StartMethod`:
 /// - `6` → TIS (FIFO) at `0xFED4_0000`
 /// - `7` → CRB at `control_area` address
+#[cfg(target_arch = "x86_64")]
 pub fn try_tpm(start_method: u32, _control_area: u64, hhdm_offset: u64) {
     let state = ATTEST_STATE.get().expect("attestation not initialized");
 
@@ -334,6 +343,7 @@ pub fn ak_info() -> Option<(u32, &'static [u8; 256])> {
 /// Create a TPM driver instance using the transport detected at boot.
 ///
 /// Returns `None` if no TPM was detected.
+#[cfg(target_arch = "x86_64")]
 pub fn tpm_driver() -> Option<Tpm2> {
     if !TPM_AVAILABLE.load(Ordering::Acquire) {
         return None;
