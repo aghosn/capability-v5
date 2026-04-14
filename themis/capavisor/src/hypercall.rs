@@ -14,18 +14,23 @@ use capability_engine::{
 };
 use themis_abi::{errors, opcodes};
 
+#[cfg(target_arch = "x86_64")]
 use crate::arch::vmexit::next_instruction;
 use crate::platform::ThemisPlatform;
+#[cfg(target_arch = "x86_64")]
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 use crate::{serial_debug, serial_println};
 
 // ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
 
 /// RFLAGS bit 9: Interrupt Flag. Guest can accept interrupts when set.
+#[cfg(target_arch = "x86_64")]
 const RFLAGS_IF: u64 = 1 << 9;
 /// Interruptibility-state bits [1:0]: blocking by STI (bit 0) or MOV SS (bit 1).
+#[cfg(target_arch = "x86_64")]
 const INTERRUPTIBILITY_STI_MOV_SS: u64 = 0x3;
 /// PRIMARY_PROCBASED_EXEC_CONTROLS bit 2: interrupt-window exiting (Intel SDM §24.6.2).
+#[cfg(target_arch = "x86_64")]
 const PRIMARY_INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
@@ -110,6 +115,7 @@ fn map_error(e: &CapaError) -> u64 {
 
 // ── Opcode dispatch ──────────────────────────────────────────────────────── //
 
+#[cfg(target_arch = "x86_64")]
 /// Handle a VMCALL from the guest.
 ///
 /// Reads the opcode and arguments from guest registers, dispatches to the
@@ -355,13 +361,16 @@ fn do_seal(
     match result {
         Ok(_) => {
             // intr-p3g: program IRTEs for the newly-sealed child domain.
-            let child_cap = caller
-                .read()
-                .data
-                .get_domain_capability(domain_handle)
-                .and_then(|weak| weak.upgrade());
-            if let Some(child) = child_cap {
-                program_domain_irtes(platform, &child);
+            #[cfg(target_arch = "x86_64")]
+            {
+                let child_cap = caller
+                    .read()
+                    .data
+                    .get_domain_capability(domain_handle)
+                    .and_then(|weak| weak.upgrade());
+                if let Some(child) = child_cap {
+                    program_domain_irtes(platform, &child);
+                }
             }
             HypercallResult::success()
         }
@@ -405,6 +414,7 @@ fn do_revoke_domain(
     }) {
         Ok(_) => {
             // intr-p3g: clear all IRTEs that were programmed for this domain.
+            #[cfg(target_arch = "x86_64")]
             if let Some(id) = child_domain_id {
                 invalidate_domain_irtes(platform, id);
             }
@@ -426,6 +436,7 @@ fn do_revoke_domain(
 /// IN:  RDI = mode (0=unsigned, 1=signed), RSI = tx_sequence (if signed)
 /// OUT: Report delivered to caller's DomainComm RX ring.
 ///      RDI = payload size in bytes (0 if DomainComm not initialized).
+#[cfg(target_arch = "x86_64")]
 fn do_attest_self(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -668,6 +679,7 @@ fn do_attest_self(
 /// IN:  RDI = pcr_index
 /// OUT: RDI..RCX = PCR value (4 × u64 = 32 bytes, big-endian packed)
 ///      RAX = SUCCESS if TPM available, ERR_NOTFOUND if no TPM
+#[cfg(target_arch = "x86_64")]
 fn do_read_pcr(pcr_index: u32) -> HypercallResult {
     if !crate::attestation::tpm_available() {
         return HypercallResult::error(errors::ERR_NOTFOUND);
@@ -745,6 +757,7 @@ fn do_register_comm(
 ///
 /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
 /// OUT: RDI = vp_index on success
+#[cfg(target_arch = "x86_64")]
 fn do_add_vp(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -1027,6 +1040,7 @@ fn do_add_vp(
 ///
 /// Returns `None` to tell the VMCALL handler to skip result-writeback
 /// and RIP-advance (the vcpu is now the child's, not the parent's).
+#[cfg(target_arch = "x86_64")]
 fn do_switch(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -1316,6 +1330,7 @@ fn do_switch(
 /// Called on EXIT_REASON_INTERRUPT_WINDOW (7): the guest's IF just became 1.
 /// Drain PIR, inject lowest pending vector, and manage the interrupt-window
 /// exiting bit based on whether vectors remain.
+#[cfg(target_arch = "x86_64")]
 pub fn drain_pir_on_interrupt_window(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
@@ -1400,6 +1415,7 @@ pub fn drain_pir_on_interrupt_window(
 /// can read them).  Then swaps back to the parent — to the parent this
 /// looks like a normal return from the SWITCH VMCALL with the exit reason
 /// in rdi.
+#[cfg(target_arch = "x86_64")]
 pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     use themis_abi::regs::{
         InterceptMessage, ThemicMessageHeader, VpCommPage, ALL_VP_REGISTERS,
@@ -1747,6 +1763,7 @@ fn do_set_policy(
 /// # Safety
 /// `pid_phys` must be a valid physical address of a zeroed 64-byte aligned
 /// PID page accessible via the HHDM.
+#[cfg(target_arch = "x86_64")]
 unsafe fn pid_set_pir(pid_phys: u64, hhdm: u64, vector: u8) {
     use core::sync::atomic::{AtomicU64, Ordering};
     let word = (vector / 64) as usize;
@@ -1758,6 +1775,7 @@ unsafe fn pid_set_pir(pid_phys: u64, hhdm: u64, vector: u8) {
 /// Atomically set the Outstanding Notification (ON) bit (byte 32, bit 0) of
 /// the PID.  Returns `true` if ON was already set (another sender beat us),
 /// `false` if we were the first setter (we must send the notification IPI).
+#[cfg(target_arch = "x86_64")]
 unsafe fn pid_test_and_set_on(pid_phys: u64, hhdm: u64) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
     let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
@@ -1774,6 +1792,7 @@ unsafe fn pid_test_and_set_on(pid_phys: u64, hhdm: u64) -> bool {
 /// # Safety
 /// `pid_phys` must be a valid physical PID page address accessible via HHDM,
 /// or 0 to skip (dom0).
+#[cfg(target_arch = "x86_64")]
 unsafe fn pid_set_ndst(pid_phys: u64, hhdm: u64, lapic_id: u32) {
     if pid_phys == 0 {
         return;
@@ -1790,6 +1809,7 @@ unsafe fn pid_set_ndst(pid_phys: u64, hhdm: u64, lapic_id: u32) {
 /// # Safety
 /// Must be called from VMX root mode; caller must have set `PID.ON = 1` before
 /// calling so the target core correctly processes the PID on VMENTRY.
+#[cfg(target_arch = "x86_64")]
 unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
     let apic_base = hhdm + 0xFEE0_0000u64;
     unsafe {
@@ -1802,6 +1822,7 @@ unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
 }
 
 /// Return the physical LAPIC ID of the calling CPU via CPUID leaf 1.
+#[cfg(target_arch = "x86_64")]
 fn current_lapic_id() -> u32 {
     let cpuid = core::arch::x86_64::__cpuid(1);
     (cpuid.ebx >> 24) as u32
@@ -1817,6 +1838,7 @@ fn current_lapic_id() -> u32 {
 ///
 /// # Safety
 /// `pid_phys` must be a valid 64-byte aligned PID page accessible via HHDM.
+#[cfg(target_arch = "x86_64")]
 unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) {
     unsafe { pid_set_pir(pid_phys, hhdm, vector) };
     // Always set ON so the processor processes PIR→vIRR on the next VMENTRY
@@ -1901,6 +1923,7 @@ fn do_set_reg(
 /// visibility for this vector, the interrupt is injected directly into the child
 /// (it owns the vector).  Otherwise (Report/NotReport) the interrupt is forwarded
 /// to dom0 via lazy-unwind.
+#[cfg(target_arch = "x86_64")]
 pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     use x86::vmx::vmcs;
 
@@ -2095,6 +2118,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 /// Map a `VpRegister` to its VMCS guest-state field encoding.
 /// Returns `None` for GPRs (stored in the register file, not in VMCS)
 /// and for registers without a direct VMCS mapping.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<u32> {
     use themis_abi::regs::VpRegister;
     use x86::vmx::vmcs::guest;
@@ -2159,6 +2183,7 @@ pub(crate) fn vp_reg_to_vmcs_field(reg: themis_abi::regs::VpRegister) -> Option<
 
 /// Map a `VpRegister` to a GPR index (`Reg`).
 /// Returns `None` for non-GPR registers.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
     use themis_abi::regs::VpRegister;
     Some(match reg {
@@ -2182,6 +2207,7 @@ pub(crate) fn vp_reg_to_gpr(reg: themis_abi::regs::VpRegister) -> Option<Reg> {
 }
 
 /// Apply a VMCS-field register to an active VCPU via `ActiveVcpu::set()`.
+#[cfg(target_arch = "x86_64")]
 fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
     use themis_abi::regs::VpRegister;
     let adjusted = match reg {
@@ -2223,6 +2249,7 @@ fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val:
 
 /// Apply a register value to an InactiveVcpu.
 /// GPRs go to the register file; VMCS fields require the VMCS to be loaded.
+#[cfg(target_arch = "x86_64")]
 fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut InactiveVcpu) {
     if let Some(gpr) = vp_reg_to_gpr(reg) {
         vcpu.set_reg(gpr, val);
@@ -2232,11 +2259,13 @@ fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut Ina
 }
 
 /// Returns true if the register is a GPR (stored in register file, not VMCS).
+#[cfg(target_arch = "x86_64")]
 fn is_gpr(reg: themis_abi::regs::VpRegister) -> bool {
     vp_reg_to_gpr(reg).is_some()
 }
 
 /// Helper: VMWRITE with panic on failure.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn vmwrite(field: u32, val: u64) {
     unsafe {
@@ -2590,6 +2619,7 @@ fn do_set_themic_vector(
 /// (future work: posted-interrupt VMCALL while VP is live on a remote core).
 ///
 /// IN:  arg0 = child_domain_handle, arg1 = vp_id, arg2 = vector (0–255)
+#[cfg(target_arch = "x86_64")]
 fn do_inject_interrupt(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -2672,6 +2702,7 @@ fn do_inject_interrupt(
 /// posted device interrupts would be sent to the wrong core (always core 0).
 /// This path has not been exercised yet; it will need end-to-end testing once
 /// real device assignment is in use.
+#[cfg(target_arch = "x86_64")]
 fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>) {
     if platform.arch.drhd_units().is_empty() {
         return;
@@ -2743,6 +2774,7 @@ fn program_domain_irtes(platform: &ThemisPlatform, child_cap: &CapabilityRef<Dom
 /// **Testing note**: this path requires real device assignment (`ASSIGN_DEVICE`)
 /// to exercise end-to-end.  It should be validated once device passthrough is
 /// in use.
+#[cfg(target_arch = "x86_64")]
 fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, new_ndst: u32) {
     if platform.arch.drhd_units().is_empty() {
         return;
@@ -2767,6 +2799,7 @@ fn sync_irte_ndst(platform: &ThemisPlatform, child_cap: &CapabilityRef<Domain>, 
 ///
 /// Called from `do_revoke_domain` after the capability engine removes the
 /// domain.  Clears all 256 entries for every IR-capable DRHD unit.
+#[cfg(target_arch = "x86_64")]
 fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
     if platform.arch.drhd_units().is_empty() {
         return;
@@ -2793,6 +2826,7 @@ fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
 ///
 /// IN:  RDI = domain_handle (u64)
 ///      RSI = pci_bdf (u16 — bus[15:8] | device[7:3] | function[2:0])
+#[cfg(target_arch = "x86_64")]
 fn do_assign_device(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -2816,6 +2850,7 @@ fn do_assign_device(
 /// RELEASE_DEVICE (0x1a): return a PCI device to dom0 passthrough.
 ///
 /// IN:  RDI = pci_bdf (u16)
+#[cfg(target_arch = "x86_64")]
 fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> HypercallResult {
     let bdf = bdf_arg as u16;
     platform.release_device(bdf);
@@ -2826,6 +2861,7 @@ fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> HypercallResult
 
 /// Walk a 4-level EPT to translate GPA → HPA.
 /// Returns `None` if the mapping doesn't exist.
+#[cfg(target_arch = "x86_64")]
 pub fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
     let mut table_phys = ept_root_phys & !0xFFF;
     for level in (0u64..4).rev() {
@@ -2847,6 +2883,7 @@ pub fn ept_gpa_to_hpa(ept_root_phys: u64, hhdm: u64, gpa: u64) -> Option<u64> {
 }
 
 /// Walk guest 4-level page tables (via EPT) to translate GVA → GPA.
+#[cfg(target_arch = "x86_64")]
 pub fn guest_gva_to_gpa(ept_root_phys: u64, hhdm: u64, guest_cr3: u64, gva: u64) -> Option<u64> {
     let mut table_gpa = guest_cr3 & !0xFFF;
     for level in (0u64..4).rev() {
