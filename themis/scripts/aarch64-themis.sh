@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# run-qemu-aarch64.sh — Build the AArch64 ISO and boot Themis under
-#                        qemu-system-aarch64 with the `virt` machine.
+# aarch64-themis.sh — Build the AArch64 ISO and boot Themis under
+#                     qemu-system-aarch64 with the `virt` machine.
 #
 # Usage:
-#   bash scripts/run-qemu-aarch64.sh
+#   cargo aarch64-themis          (via xtask alias)
+#   bash scripts/aarch64-themis.sh
 #
 # Prerequisites:
 #   • qemu-system-aarch64  (sudo apt install qemu-system-arm)
@@ -22,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Build ISO first
-bash "$SCRIPT_DIR/build-iso-aarch64.sh"
+bash "$SCRIPT_DIR/aarch64-iso.sh"
 
 ISO="$WORKSPACE_ROOT/target/themis-aarch64.iso"
 

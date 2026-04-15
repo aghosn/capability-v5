@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# build-iso-aarch64.sh — Build the AArch64 capavisor ELF and package it into
-#                         a Limine UEFI-bootable ISO for qemu-system-aarch64.
+# aarch64-iso.sh — Build the AArch64 capavisor ELF and package it into
+#                  a Limine UEFI-bootable ISO for qemu-system-aarch64.
 #
 # Usage:
-#   bash scripts/build-iso-aarch64.sh
+#   cargo aarch64-iso             (via xtask alias)
+#   bash scripts/aarch64-iso.sh
 #
 # Output:  target/themis-aarch64.iso
 #

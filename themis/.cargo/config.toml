@@ -35,3 +35,7 @@ fetch-dom1    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_
 dom0          = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "run-dom0"]
 setup-limine  = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "setup-limine"]
 resize-disk   = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "resize-disk"]
+
+# AArch64 (cross-build + QEMU emulation)
+aarch64-iso    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-iso"]
+aarch64-themis = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-themis"]
