@@ -87,7 +87,12 @@ impl SerialPort {
 #[cfg(not(target_arch = "x86_64"))]
 impl SerialPort {
     fn init() {
-        // TODO: PL011 UART on aarch64
+        // PL011 init deferred to _start (needs identity map to be set up).
+    }
+
+    /// Initialize PL011 UART using identity-mapped physical address.
+    fn init_physical() {
+        arch::aarch64::serial::init_physical();
     }
 }
 
@@ -106,8 +111,10 @@ impl fmt::Write for SerialPort {
 
 #[cfg(not(target_arch = "x86_64"))]
 impl fmt::Write for SerialPort {
-    fn write_str(&mut self, _s: &str) -> fmt::Result {
-        // TODO: PL011 UART output on aarch64
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for b in s.bytes() {
+            arch::aarch64::serial::putc(b);
+        }
         Ok(())
     }
 }
@@ -135,8 +142,16 @@ macro_rules! serial_debug {
 
 // ── Limine protocol requests ─────────────────────────────────────────────── //
 
+// Use base revision 0 on aarch64 to get identity mapping of first 4 GiB
+// (needed for PL011 UART at 0x0900_0000 before we have our own page tables).
+// Revision 0 is the only one with unconditional 4 GiB identity map.
+// x86 uses revision 3 (default from BaseRevision::new()).
+#[cfg(target_arch = "x86_64")]
 #[used]
 static BASE_REVISION: BaseRevision = BaseRevision::new();
+#[cfg(not(target_arch = "x86_64"))]
+#[used]
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(0);
 #[used]
 static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 #[used]
@@ -378,17 +393,73 @@ pub extern "C" fn _start() -> ! {
 #[no_mangle]
 #[cfg(not(target_arch = "x86_64"))]
 pub extern "C" fn _start() -> ! {
+    // Initialize PL011 UART first using identity-mapped physical address
+    // (base revision 1 gives us identity map of first 4 GiB).
+    SerialPort::init_physical();
+
+    // Early heartbeat — confirms we reached _start.
+    serial_println!("[early] _start reached");
+
     // SAFETY: HEAP is only mutated here (once, BSP-only, before any AP runs).
     unsafe {
         ALLOCATOR
             .lock()
             .init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
     }
-    SerialPort::init();
+
+    serial_println!("[early] heap init done");
+
     assert!(BASE_REVISION.is_supported(), "unsupported Limine revision");
-    serial_println!("Themis capavisor — aarch64 stub (not yet implemented)");
+
+    serial_println!();
+    serial_println!("========================================");
+    serial_println!("  Themis capavisor — AArch64 / Limine OK");
+    serial_println!("========================================");
+    serial_println!();
+
+    // Get HHDM offset.
+    let hhdm_offset = HHDM_REQUEST
+        .get_response()
+        .expect("no HHDM response")
+        .offset();
+    serial_println!("HHDM offset: {:#x}", hhdm_offset);
+
+    // Store kernel phys/virt base.
+    if let Some(r) = KERNEL_ADDR_REQUEST.get_response() {
+        KERNEL_PHYS_BASE.store(r.physical_base(), Ordering::Relaxed);
+        KERNEL_VIRT_BASE.store(r.virtual_base(), Ordering::Relaxed);
+        serial_println!(
+            "Kernel: phys={:#x} virt={:#x}",
+            r.physical_base(),
+            r.virtual_base()
+        );
+    }
+
+    // Log memory map.
+    if let Some(entries) = MEMMAP_REQUEST.get_response() {
+        serial_println!("Memory regions: {}", entries.entries().len());
+        for e in entries.entries() {
+            serial_println!(
+                "  {:#012x}..{:#012x}  len={:#x}",
+                e.base,
+                e.base + e.length,
+                e.length
+            );
+        }
+    }
+
+    // Log CPU info.
+    if let Some(mp) = MP_REQUEST.get_response() {
+        serial_println!("CPUs: {} (BSP MPIDR={:#x})", mp.cpus().len(), mp.bsp_mpidr());
+    }
+
+    serial_println!();
+    serial_println!("AArch64 bringup complete — halting (WFI loop).");
+    serial_println!("Next: EL2 setup, Stage-2 page tables, GICv3.");
+
     loop {
-        core::hint::spin_loop();
+        // WFI — wait for interrupt (low-power halt on ARM).
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
 
@@ -464,6 +535,8 @@ fn panic(info: &PanicInfo) -> ! {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }
         #[cfg(not(target_arch = "x86_64"))]
-        core::hint::spin_loop();
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
     }
 }

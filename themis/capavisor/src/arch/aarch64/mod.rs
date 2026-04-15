@@ -4,12 +4,11 @@
 //! AArch64. It validates that the trait boundaries are correctly portable
 //! without x86 assumptions.
 //!
-//! **Status**: Skeleton — all methods panic with `unimplemented!()`.
-//! A real implementation would use EL2 trap handling (vbar_el2),
-//! Stage-2 translation tables (VTTBR_EL2), and GICv3 for interrupts.
+//! **Status**: M1 bringup — PL011 serial works. Trait methods still stubs.
 
 pub mod aarch64_platform;
 pub mod arch_state;
+pub mod serial;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{ArchDomainState, ArchPlatformState};

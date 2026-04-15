@@ -1,9 +1,12 @@
 fn main() {
-    // Tell cargo to re-run this script only when the linker script changes.
-    println!("cargo:rerun-if-changed=linker.ld");
-
-    // Emit an absolute path so the linker finds it regardless of the working
-    // directory from which `cargo build` is invoked.
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-arg=-T{manifest}/linker.ld");
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+
+    let linker_script = match arch.as_str() {
+        "aarch64" => "linker-aarch64.ld",
+        _ => "linker.ld",
+    };
+
+    println!("cargo:rerun-if-changed={linker_script}");
+    println!("cargo:rustc-link-arg=-T{manifest}/{linker_script}");
 }
