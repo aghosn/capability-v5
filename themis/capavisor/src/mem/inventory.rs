@@ -55,16 +55,12 @@ pub struct MemoryPartition {
 /// Breakdown of how the META pool is sized.
 #[derive(Debug, Clone, Copy)]
 pub struct MetaBreakdown {
-    pub vmxon_pages: u64,
-    pub vmcs_pages: u64,
-    pub vapic_pages: u64,
-    pub ept_pages: u64,
-    /// IRT pages: one per DRHD unit (capped at MAX_DRHD_UNITS).
-    pub irt_pages: u64,
-    /// VT-d DMA root table pages: one per DRHD unit.
-    pub iommu_root_pages: u64,
-    /// VT-d DMA context table pages: one per PCI bus per INCLUDE_PCI_ALL DRHD.
-    pub iommu_ctx_pages: u64,
+    /// Architecture-specific fixed pages (x86: vmxon+vmcs+vapic+irt+iommu; ARM: stage2 roots etc.)
+    pub arch_fixed_pages: u64,
+    /// Page-table pages (EPT on x86, Stage-2 on ARM) — computed iteratively.
+    pub pt_pages: u64,
+    /// IOMMU pages (VT-d root+context on x86, SMMU stream table on ARM).
+    pub iommu_pages: u64,
     pub total_pages: u64,
 }
 
@@ -129,16 +125,16 @@ impl PhysicalInventory {
     ///
     /// # Arguments
     /// * `num_cores` — number of physical cores (from Limine MP response)
-    pub fn partition(&self, num_cores: u64, iommu_counts: (u64, u64)) -> MemoryPartition {
-        let num_vps = num_cores;
-
-        let vmxon_pages = num_cores;
-        let vmcs_pages = num_vps;
-        let vapic_pages = num_vps;
-        let irt_pages = MAX_DRHD_UNITS as u64;
-        let (iommu_root_pages, iommu_ctx_pages) = iommu_counts;
-        let fixed_pages =
-            vmxon_pages + vmcs_pages + vapic_pages + irt_pages + iommu_root_pages + iommu_ctx_pages;
+    /// * `arch_fixed_pages` — architecture-specific fixed META pages
+    ///   (x86: vmxon + vmcs + vapic + irt; ARM: per-VP saved state, etc.)
+    /// * `iommu_pages` — IOMMU table pages (VT-d root+ctx on x86; 0 on ARM without SMMU)
+    pub fn partition(
+        &self,
+        _num_cores: u64,
+        arch_fixed_pages: u64,
+        iommu_pages: u64,
+    ) -> MemoryPartition {
+        let fixed_pages = arch_fixed_pages + iommu_pages;
 
         // Include COMM pages in the total reservation budget so META + COMM
         // are carved together from the top of usable memory.
@@ -266,13 +262,9 @@ impl PhysicalInventory {
             meta_regions,
             meta_count,
             meta_breakdown: MetaBreakdown {
-                vmxon_pages,
-                vmcs_pages,
-                vapic_pages,
-                ept_pages,
-                irt_pages,
-                iommu_root_pages,
-                iommu_ctx_pages,
+                arch_fixed_pages,
+                pt_pages: ept_pages,
+                iommu_pages,
                 total_pages: meta_pages,
             },
             comm_region,

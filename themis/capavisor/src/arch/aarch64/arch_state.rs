@@ -1,18 +1,17 @@
-//! AArch64 architecture-specific state types (stubs).
-//!
-//! Mirrors the API of `arch::x86_64::arch_state` with empty implementations.
-//! A real port would hold Stage-2 page table state, GIC config, etc.
+//! AArch64 architecture-specific state types.
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 // ── Per-domain hardware state ────────────────────────────────────────────── //
 
-/// AArch64 per-domain hardware state (stub).
+/// AArch64 per-domain hardware state.
 ///
-/// A real implementation would hold:
+/// Will eventually hold:
 /// - Stage-2 translation table root (VTTBR_EL2 value)
-/// - SMMU stream table entries
 /// - Per-VP saved EL1/EL0 register state
+/// - SMMU stream table entries
 pub struct ArchDomainState {
-    /// Per-VP COMM HPAs (placeholder, matching x86 layout).
     _placeholder: u8,
 }
 
@@ -24,18 +23,28 @@ impl ArchDomainState {
 
 // ── Per-platform hardware state ──────────────────────────────────────────── //
 
-/// AArch64 platform-level hardware state (stub).
+/// AArch64 platform-level hardware state.
 ///
-/// A real implementation would hold:
-/// - GICv3 distributor/redistributor base addresses
-/// - SMMU base address and stream table
-/// - Device tree or ACPI table references
+/// Holds GICv3 addresses and per-CPU MPIDR values discovered at boot.
 pub struct ArchPlatformState {
-    _placeholder: u8,
+    /// GIC Distributor base address (GICD).
+    pub gicd_base: u64,
+    /// GIC Redistributor base address (GICR) — first CPU's region.
+    pub gicr_base: u64,
+    /// Per-CPU redistributor region stride (typically 0x20000 for GICv3).
+    pub gicr_stride: u64,
+    /// MPIDR values for each CPU, indexed by logical core ID.
+    pub cpu_mpidrs: Vec<u64>,
 }
 
 impl ArchPlatformState {
+    /// Create a default (uninitialized) platform state.
     pub fn new() -> Self {
-        Self { _placeholder: 0 }
+        Self {
+            gicd_base: 0,
+            gicr_base: 0,
+            gicr_stride: 0,
+            cpu_mpidrs: Vec::new(),
+        }
     }
 }

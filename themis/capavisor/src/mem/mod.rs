@@ -7,10 +7,14 @@
 
 mod inventory;
 mod meta_alloc;
+#[cfg(target_arch = "x86_64")]
+mod paging;
+#[cfg(target_arch = "aarch64")]
+#[path = "paging_aarch64.rs"]
 mod paging;
 mod uncacheable;
 
-pub use inventory::{MemoryPartition, PhysRegion, PhysicalInventory};
+pub use inventory::{MemoryPartition, MetaBreakdown, PhysRegion, PhysicalInventory};
 pub use meta_alloc::MetaAllocator;
 pub use paging::map_phys_range;
 pub use uncacheable::UncacheableRanges;

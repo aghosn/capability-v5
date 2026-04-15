@@ -279,7 +279,11 @@ pub fn platform(
     }
 
     let iommu_counts = acpi.iommu_page_counts();
-    let partition = inventory.partition(num_cores as u64, iommu_counts);
+    let (iommu_root_pages, iommu_ctx_pages) = iommu_counts;
+    let iommu_pages = iommu_root_pages + iommu_ctx_pages;
+    // x86-specific fixed META pages: VMXON + VMCS + VAPIC (3 per core) + IRT (4 max).
+    let arch_fixed = num_cores as u64 * 3 + 4;
+    let partition = inventory.partition(num_cores as u64, arch_fixed, iommu_pages);
     // META regions are NOT added to non_ram_e820 here — load_linux() receives
     // them via its `meta_regions` parameter and writes the TYPE_RESERVED entries
     // directly into boot_params.e820_table.  Adding them here too would produce
@@ -512,14 +516,10 @@ pub fn platform(
         );
     }
     serial_println!(
-        "  breakdown:  {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT + {} IOMMU-root + {} IOMMU-ctx  ({} pages = {} KiB)",
-        partition.meta_breakdown.vmxon_pages,
-        partition.meta_breakdown.vmcs_pages,
-        partition.meta_breakdown.vapic_pages,
-        partition.meta_breakdown.ept_pages,
-        partition.meta_breakdown.irt_pages,
-        partition.meta_breakdown.iommu_root_pages,
-        partition.meta_breakdown.iommu_ctx_pages,
+        "  breakdown:  {} arch-fixed + {} page-table + {} IOMMU  ({} pages = {} KiB)",
+        partition.meta_breakdown.arch_fixed_pages,
+        partition.meta_breakdown.pt_pages,
+        partition.meta_breakdown.iommu_pages,
         partition.meta_breakdown.total_pages,
         partition.meta_breakdown.total_bytes() / 1024,
     );
@@ -786,14 +786,10 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
         );
     }
     serial_println!(
-        "  breakdown: {} VMXON + {} VMCS + {} VAPIC + {} EPT + {} IRT + {} IOMMU-root + {} IOMMU-ctx pages",
-        info.partition.meta_breakdown.vmxon_pages,
-        info.partition.meta_breakdown.vmcs_pages,
-        info.partition.meta_breakdown.vapic_pages,
-        info.partition.meta_breakdown.ept_pages,
-        info.partition.meta_breakdown.irt_pages,
-        info.partition.meta_breakdown.iommu_root_pages,
-        info.partition.meta_breakdown.iommu_ctx_pages,
+        "  breakdown: {} arch-fixed + {} page-table + {} IOMMU pages",
+        info.partition.meta_breakdown.arch_fixed_pages,
+        info.partition.meta_breakdown.pt_pages,
+        info.partition.meta_breakdown.iommu_pages,
     );
 
     // ── IRT allocation for VT-d interrupt remapping (intr-p3b) ───────────── //

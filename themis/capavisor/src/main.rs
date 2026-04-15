@@ -394,7 +394,7 @@ pub extern "C" fn _start() -> ! {
 #[cfg(not(target_arch = "x86_64"))]
 pub extern "C" fn _start() -> ! {
     // Initialize PL011 UART first using identity-mapped physical address
-    // (base revision 1 gives us identity map of first 4 GiB).
+    // (base revision 0 gives us identity map of first 4 GiB).
     SerialPort::init_physical();
 
     // Early heartbeat — confirms we reached _start.
@@ -417,14 +417,15 @@ pub extern "C" fn _start() -> ! {
     serial_println!("========================================");
     serial_println!();
 
-    // Get HHDM offset.
+    // ── Unpack Limine responses ──────────────────────────────────────────── //
+
     let hhdm_offset = HHDM_REQUEST
         .get_response()
         .expect("no HHDM response")
         .offset();
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
 
-    // Store kernel phys/virt base.
+    // Store kernel phys/virt base (needed by paging_aarch64 for virt→phys).
     if let Some(r) = KERNEL_ADDR_REQUEST.get_response() {
         KERNEL_PHYS_BASE.store(r.physical_base(), Ordering::Relaxed);
         KERNEL_VIRT_BASE.store(r.virtual_base(), Ordering::Relaxed);
@@ -435,30 +436,34 @@ pub extern "C" fn _start() -> ! {
         );
     }
 
-    // Log memory map.
-    if let Some(entries) = MEMMAP_REQUEST.get_response() {
-        serial_println!("Memory regions: {}", entries.entries().len());
-        for e in entries.entries() {
-            serial_println!(
-                "  {:#012x}..{:#012x}  len={:#x}",
-                e.base,
-                e.base + e.length,
-                e.length
-            );
-        }
-    }
+    let entries = MEMMAP_REQUEST
+        .get_response()
+        .expect("no memory map")
+        .entries();
 
-    // Log CPU info.
-    if let Some(mp) = MP_REQUEST.get_response() {
-        serial_println!("CPUs: {} (BSP MPIDR={:#x})", mp.cpus().len(), mp.bsp_mpidr());
-    }
+    let mp = MP_REQUEST.get_response().expect("no MP response");
+    let cpus = mp.cpus();
+    let bsp_mpidr = mp.bsp_mpidr();
+
+    // ── Phase 1: Platform discovery ──────────────────────────────────────── //
+
+    let info = arch::boot::platform(entries, hhdm_offset, cpus, bsp_mpidr);
+
+    // ── Phase 2a: ThemisPlatform bootstrap ───────────────────────────────── //
+
+    let _platform = arch::boot::init_themis(&info);
+
+    // ── Allocator smoke test ─────────────────────────────────────────────── //
+
+    let test_frame = _platform.alloc_meta_frame(0);
+    serial_println!();
+    serial_println!("META alloc smoke test: frame @ {:#x} ✓", test_frame);
 
     serial_println!();
-    serial_println!("AArch64 bringup complete — halting (WFI loop).");
-    serial_println!("Next: EL2 setup, Stage-2 page tables, GICv3.");
+    serial_println!("AArch64 M2 complete — platform initialized.");
+    serial_println!("Next: M3 (EL2 + Stage-2), M4 (GICv3).");
 
     loop {
-        // WFI — wait for interrupt (low-power halt on ARM).
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
