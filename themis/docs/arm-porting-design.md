@@ -1,8 +1,38 @@
 # Themis Capavisor — Multi-Platform (ARM AArch64) Porting Design
 
-**Status**: Pre-planning / feasibility study.  No code has been modified.
+**Status**: **M1 complete** (2026-04-15). Capavisor boots on QEMU aarch64 via Limine,
+prints to PL011 UART, dumps memory map. Next: M2 (memory + platform discovery).
 **Scope**: Extending the Themis capavisor to run on ARM AArch64 hardware (targeting
 ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoCs).
+
+### Implementation Progress
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| **M1** | Boot on QEMU aarch64, PL011 UART, memory map dump | ✅ Done (9823d73, d0fe7c4) |
+| **M2** | Memory + ACPI/DTB discovery, MetaAllocator, GIC addresses | 🔜 Next |
+| **M3** | EL2 + Stage-2 page tables, exception vectors, guest entry/exit | Planned |
+| **M4** | GICv3 + IPI (GICD/GICR init, SGI, ICH_LR injection) | Planned |
+| **M5** | Boot Linux dom0 on QEMU aarch64 | Planned |
+| **M6** | SMMUv3 (stretch) | Planned |
+
+### Files created/modified (M1)
+
+| File | What |
+|------|------|
+| `capavisor/linker-aarch64.ld` | AArch64 ELF linker script (higher-half 0xffffffff80000000) |
+| `capavisor/src/arch/aarch64/serial.rs` | PL011 UART driver (MMIO 0x0900_0000) |
+| `capavisor/build.rs` | Arch-aware linker script selection |
+| `capavisor/src/main.rs` | aarch64 `_start`: PL011, heap, Limine, memory dump, WFI |
+| `scripts/aarch64-iso.sh` | Build aarch64 UEFI ISO with BOOTAA64.EFI |
+| `scripts/aarch64-themis.sh` | Launch QEMU aarch64 (`cargo aarch64-themis`) |
+
+### Key learnings (M1)
+
+- Limine enters aarch64 kernels at **EL1** (not EL2)
+- Limine base revision 0 required for PL011 access (identity maps first 4 GiB including device MMIO; revision 1+ only HHDM-maps memory-map regions)
+- AAVMF firmware (`qemu-efi-aarch64` package) required for UEFI boot
+- QEMU `virt` machine provides ~1 GiB usable RAM across ~45 memory regions
 
 ---
 

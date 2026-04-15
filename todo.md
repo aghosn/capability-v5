@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-04-14)
+## Current State (2026-04-15)
 
 ### What works
 
@@ -19,6 +19,9 @@
 - **Platform modularization complete**: Phase A7 done. Opaque ArchDomainState/
   ArchPlatformState types, aarch64 cross-check passes with 0 errors.
   See `themis/docs/platform-modularization.md`.
+- **AArch64 M1 complete**: Capavisor boots on QEMU aarch64 via Limine, prints
+  to PL011 UART, dumps memory map (45 regions), halts cleanly.
+  Commands: `cargo aarch64-themis` (build + boot), `cargo aarch64-iso` (ISO only).
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -42,6 +45,9 @@
 
 ### Recent commits
 
+- `d0fe7c4` — **feat: add cargo aarch64-themis / aarch64-iso xtask aliases**
+- `9823d73` — **feat(aarch64): M1 — boot capavisor on QEMU aarch64 via Limine**
+- `3ffc8b5` — **docs: add Multi-ISA build section to README**
 - `0b03cfd` — **cfg-gate x86 code in platform.rs, main.rs, attestation.rs for multi-ISA**
 - `5f1a188` — **cfg-gate x86-specific code in hypercall.rs for multi-ISA support**
 - `b9da854` — **refactor: extract ArchDomainState and ArchPlatformState opaque types**
@@ -96,10 +102,20 @@ Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modu
 - Phase D: ARM skeleton — aarch64 arch module with stub types (arch_state.rs)
 
 **Remaining**:
-- [ ] Implement aarch64 serial console (PL011 UART)
-- [ ] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables)
-- [ ] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR)
-- [ ] QEMU aarch64 testbed setup
+- [x] Implement aarch64 serial console (PL011 UART) — M1 done
+- [x] QEMU aarch64 testbed setup — M1 done (`cargo aarch64-themis`)
+- [ ] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables) — M2-M4
+- [ ] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR) — M3
+
+### TODO: AArch64 backend (active)
+
+Design doc: [`themis/docs/arm-porting-design.md`](themis/docs/arm-porting-design.md)
+
+**M1 complete** (2026-04-15): boot on QEMU, PL011 serial, memory map dump.
+Commits: `9823d73` (M1 implementation), `d0fe7c4` (cargo aliases).
+
+**M2 next**: Memory + platform discovery — ArchBoot impl, MetaAllocator init,
+GIC/timer addresses from device tree or ACPI, memory partitioning.
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
