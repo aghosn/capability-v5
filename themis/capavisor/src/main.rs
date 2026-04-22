@@ -638,9 +638,44 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         }
     }
 
+    // ── Enable MMU at EL2 (identity-mapped) ────────────────────────────────── //
+
+    unsafe { arch::aarch64::mmu::init_and_enable() };
+
+    // ── Install exception vectors and configure EL2 sysregs ──────────────── //
+
+    unsafe { arch::aarch64::vectors::install_vectors() };
+    unsafe { arch::aarch64::el2_regs::configure_el2() };
+
+    // ── Configure Stage-2 translation and smoke test ─────────────────────── //
+
+    unsafe { arch::aarch64::stage2::configure_vtcr() };
+
+    // Create a Stage-2 map and test mapping.
+    {
+        use crate::arch_traits::types::{MapPermissions, PageSize};
+        let mut map = arch::aarch64::stage2::Stage2Map::new();
+
+        // Map a 2M block: IPA 0x4000_0000 → HPA 0x4000_0000 (identity, for test).
+        let perms = MapPermissions { read: true, write: true, execute: true };
+        map.map(0x4000_0000, 0x4000_0000, PageSize::Page2M, &perms);
+
+        serial_println!(
+            "Stage-2 smoke test: mapped IPA 0x40000000 → HPA 0x40000000 (2M RWX), root={:#x}",
+            map.root_phys()
+        );
+
+        // Load the Stage-2 map into VTTBR_EL2 with VMID 1.
+        unsafe { arch::aarch64::stage2::load_vttbr(&map, 1) };
+        serial_println!("VTTBR_EL2 loaded (VMID=1)");
+
+        // Don't drop the map — we're just testing.
+        core::mem::forget(map);
+    }
+
     serial_println!();
     serial_println!("AArch64 EL2 direct-boot — halting (WFI loop).");
-    serial_println!("Next: MMU setup, exception vectors, Stage-2.");
+    serial_println!("Next: exception vectors, Stage-2 page tables.");
 
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
