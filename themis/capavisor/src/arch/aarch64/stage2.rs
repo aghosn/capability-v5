@@ -98,28 +98,27 @@ impl Stage2Map {
     }
 
     /// Map a guest physical address (IPA) to a host physical address.
+    ///
+    /// With VTCR_EL2.SL0=1, the page table walk starts at L1 (root = L1).
     pub fn map(&mut self, ipa: u64, hpa: u64, size: PageSize, perms: &MapPermissions) {
         let desc = build_descriptor(hpa, size, perms);
         match size {
             PageSize::Page1G => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                let l1 = self.ensure_table(self.root_ptr, l0_idx);
+                // L1 block descriptor (root table entry).
                 let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                unsafe { l1.add(l1_idx).write_volatile(desc) };
+                unsafe { self.root_ptr.add(l1_idx).write_volatile(desc) };
             }
             PageSize::Page2M => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                let l1 = self.ensure_table(self.root_ptr, l0_idx);
+                // L1 → L2 block descriptor.
                 let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                let l2 = self.ensure_table(l1, l1_idx);
+                let l2 = self.ensure_table(self.root_ptr, l1_idx);
                 let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                 unsafe { l2.add(l2_idx).write_volatile(desc) };
             }
             PageSize::Page4K => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                let l1 = self.ensure_table(self.root_ptr, l0_idx);
+                // L1 → L2 → L3 page descriptor.
                 let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                let l2 = self.ensure_table(l1, l1_idx);
+                let l2 = self.ensure_table(self.root_ptr, l1_idx);
                 let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                 let l3 = self.ensure_table(l2, l2_idx);
                 let l3_idx = ((ipa >> 12) & 0x1FF) as usize;
@@ -130,35 +129,25 @@ impl Stage2Map {
 
     /// Unmap a guest physical page/block.
     pub fn unmap(&mut self, ipa: u64, size: PageSize) {
-        // Walk to the correct level and clear the entry.
         match size {
             PageSize::Page1G => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                if let Some(l1) = self.get_table(self.root_ptr, l0_idx) {
-                    let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                    unsafe { l1.add(l1_idx).write_volatile(0) };
-                }
+                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                unsafe { self.root_ptr.add(l1_idx).write_volatile(0) };
             }
             PageSize::Page2M => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                if let Some(l1) = self.get_table(self.root_ptr, l0_idx) {
-                    let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                    if let Some(l2) = self.get_table(l1, l1_idx) {
-                        let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
-                        unsafe { l2.add(l2_idx).write_volatile(0) };
-                    }
+                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                if let Some(l2) = self.get_table(self.root_ptr, l1_idx) {
+                    let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
+                    unsafe { l2.add(l2_idx).write_volatile(0) };
                 }
             }
             PageSize::Page4K => {
-                let l0_idx = ((ipa >> 39) & 0x1FF) as usize;
-                if let Some(l1) = self.get_table(self.root_ptr, l0_idx) {
-                    let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
-                    if let Some(l2) = self.get_table(l1, l1_idx) {
-                        let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
-                        if let Some(l3) = self.get_table(l2, l2_idx) {
-                            let l3_idx = ((ipa >> 12) & 0x1FF) as usize;
-                            unsafe { l3.add(l3_idx).write_volatile(0) };
-                        }
+                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                if let Some(l2) = self.get_table(self.root_ptr, l1_idx) {
+                    let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
+                    if let Some(l3) = self.get_table(l2, l2_idx) {
+                        let l3_idx = ((ipa >> 12) & 0x1FF) as usize;
+                        unsafe { l3.add(l3_idx).write_volatile(0) };
                     }
                 }
             }
@@ -288,9 +277,10 @@ pub unsafe fn configure_vtcr() {
     let pa_range = mmfr0 & 0xF;
 
     let mut vtcr: u64 = 0;
-    // T0SZ = 24 → 40-bit IPA (1 TB guest address space)
-    // This gives us 3-level walk (L1→L2→L3) with 4KB granule.
-    vtcr |= 24; // bits[5:0]
+    // T0SZ = 25 → 39-bit IPA (512 GiB guest address space)
+    // With SL0=1 and 4KB granule, the L1 table has 512 entries (= one 4K page).
+    // No concatenation needed.
+    vtcr |= 25; // bits[5:0]
     // SL0 = 0b01 → start at L1 (for 40-bit IPA with 4KB granule)
     vtcr |= 0b01 << 6;
     // IRGN0 = 0b01 → Inner Write-Back, Write-Allocate (for table walks)
@@ -310,7 +300,7 @@ pub unsafe fn configure_vtcr() {
     core::arch::asm!("isb", options(nostack));
 
     serial_println!(
-        "VTCR_EL2 configured: T0SZ=24, SL0=1, TG0=4K, PS={} (VTCR={:#x})",
+        "VTCR_EL2 configured: T0SZ=25, SL0=1, TG0=4K, PS={} (VTCR={:#x})",
         pa_range, vtcr
     );
 }

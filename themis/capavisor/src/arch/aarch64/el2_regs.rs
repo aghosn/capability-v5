@@ -80,3 +80,19 @@ pub unsafe fn configure_el2() {
 
     serial_println!("EL2 sysregs configured (HCR={:#x}, CPTR={:#x})", hcr, cptr);
 }
+
+/// Reconfigure HCR_EL2 for guest entry (M5a: direct-assignment mode).
+///
+/// Enables Stage-2 translation (VM=1) and keeps TSC (trap SMC) and RW
+/// (EL1=AArch64). Clears IMO/FMO/AMO so the guest directly owns physical
+/// interrupts — no vGIC overhead for bringup.
+///
+/// # Safety
+/// Must be called at EL2, after VTTBR_EL2 and VTCR_EL2 are configured.
+pub unsafe fn configure_el2_for_guest() {
+    let hcr = HCR_VM | HCR_SWIO | HCR_TSC | HCR_RW;
+    core::arch::asm!("msr HCR_EL2, {}", in(reg) hcr, options(nostack));
+    core::arch::asm!("isb", options(nostack));
+
+    serial_println!("HCR_EL2 reconfigured for guest: {:#x} (VM=1, direct-assign)", hcr);
+}

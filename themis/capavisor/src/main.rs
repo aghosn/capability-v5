@@ -693,12 +693,83 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
 
     unsafe { arch::aarch64::gicv3::init_gicv3(gicd_base, gicr_base) };
 
-    serial_println!();
-    serial_println!("AArch64 M4 complete — GICv3 initialized.");
-    serial_println!("Next: M5 (boot dom0).");
+    // ── M5a: Guest entry test ────────────────────────────────────────────── //
 
-    loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    serial_println!();
+    serial_println!("=== M5a: Guest entry test ===");
+
+    // Guest stub will be placed at IPA 0x4200_0000 (well away from hypervisor).
+    const GUEST_STUB_IPA: u64 = 0x4200_0000;
+    // Guest stack: 64 KiB below stub entry (grows down).
+    const GUEST_SP: u64 = GUEST_STUB_IPA + 0x10_0000; // 0x4210_0000
+
+    // Build a Stage-2 map for the guest.
+    {
+        use crate::arch_traits::types::{MapPermissions, PageSize};
+
+        let mut map = arch::aarch64::stage2::Stage2Map::new();
+
+        // Map guest code + stack region: 2M block at 0x4200_0000 → identity
+        let rwx = MapPermissions { read: true, write: true, execute: true };
+        map.map(0x4200_0000, 0x4200_0000, PageSize::Page2M, &rwx);
+        serial_println!("Stage-2: mapped guest RAM 0x42000000 (2M, RWX)");
+
+        // Map UART: 4K at 0x0900_0000 → identity (Device memory)
+        let rw = MapPermissions { read: true, write: true, execute: false };
+        map.map(0x0900_0000, 0x0900_0000, PageSize::Page4K, &rw);
+        serial_println!("Stage-2: mapped UART 0x09000000 (4K, RW device)");
+
+        // Load the Stage-2 map and flush TLB.
+        unsafe { arch::aarch64::stage2::load_vttbr(&map, 1) };
+        map.flush();
+        serial_println!("VTTBR_EL2 loaded (VMID=1), TLB flushed");
+
+        // Don't drop — guest will use this map.
+        core::mem::forget(map);
+    }
+
+    // Copy guest stub code to guest RAM.
+    let (stub_start, stub_end) = arch::aarch64::vcpu::guest_stub_range();
+    let stub_size = stub_end as usize - stub_start as usize;
+    serial_println!(
+        "Copying guest stub: {:#x}..{:#x} ({} bytes) → {:#x}",
+        stub_start as u64, stub_end as u64, stub_size, GUEST_STUB_IPA
+    );
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            stub_start,
+            GUEST_STUB_IPA as *mut u8,
+            stub_size,
+        );
+
+        // D-cache clean + I-cache invalidate for the copied region.
+        let mut addr = GUEST_STUB_IPA;
+        while addr < GUEST_STUB_IPA + stub_size as u64 {
+            core::arch::asm!(
+                "dc cvau, {addr}",
+                addr = in(reg) addr,
+                options(nostack),
+            );
+            addr += 64; // cache line size
+        }
+        core::arch::asm!(
+            "dsb ish",
+            "ic iallu",
+            "dsb ish",
+            "isb",
+            options(nostack),
+        );
+    }
+
+    // Reconfigure HCR_EL2 for guest: VM=1, direct-assignment (no IMO/FMO/AMO).
+    unsafe { arch::aarch64::el2_regs::configure_el2_for_guest() };
+
+    serial_println!("Entering guest at IPA {:#x} (SP={:#x})", GUEST_STUB_IPA, GUEST_SP);
+    serial_println!();
+
+    // ERET into guest — does not return.
+    unsafe {
+        arch::aarch64::vcpu::enter_guest_initial(GUEST_STUB_IPA, GUEST_SP, 0);
     }
 }
 

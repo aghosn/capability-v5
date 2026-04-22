@@ -11,6 +11,7 @@ pub mod gicv3;
 pub mod mmu;
 pub mod serial;
 pub mod stage2;
+pub mod vcpu;
 pub mod vectors;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.

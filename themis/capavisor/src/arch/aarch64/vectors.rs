@@ -85,12 +85,27 @@ pub mod ec {
 
 core::arch::global_asm!(r#"
 .section .text
-.balign 2048
-.global __vectors_el2
-__vectors_el2:
 
-// ── Macro: save context and call Rust handler ────────────────────────
-.macro EXCEPTION_ENTRY handler
+// ── Shared trampoline: save context, call handler, restore, ERET ─────
+// Each vector entry branches here via `b`. The handler address is in x0
+// (set by the small per-entry stub).
+//
+// Convention: before branching here, the entry stub does:
+//   stp  x0, x1, [sp, #-16]!    // save X0, X1 (need two scratch regs)
+//   adr  x0, <handler_addr_var>  // load address of the Rust handler
+//   ldr  x0, [x0]
+//   b    __trampoline
+//
+// ...but that's still too many instructions for 128 bytes. Instead, we use
+// a simpler scheme: each entry just branches to a per-handler trampoline
+// that's placed OUTSIDE the vector table. The vector entries are just:
+//   b  __tramp_<handler>
+// which is 1 instruction = 4 bytes, well within 128 bytes.
+
+// ── Per-handler trampolines (placed after the vector table) ──────────
+.macro TRAMPOLINE handler
+.balign 16
+__tramp_\handler:
     // Make room for ExceptionContext on stack
     sub     sp, sp, #(34 * 8)       // 31 GPRs + ELR + SPSR + ESR
 
@@ -123,7 +138,7 @@ __vectors_el2:
     mov     x0, sp
     bl      \handler
 
-    // Restore ELR_EL2, SPSR_EL2
+    // Restore ELR_EL2, SPSR_EL2 (handler may have modified them)
     ldp     x0, x1, [sp, #(31 * 8)]
     msr     ELR_EL2, x0
     msr     SPSR_EL2, x1
@@ -150,67 +165,103 @@ __vectors_el2:
     eret
 .endm
 
-// ── Vector entries ───────────────────────────────────────────────────
-// Each entry must be exactly 128 bytes (0x80). We use the macro which
-// branches to a Rust handler; the branch instruction fits in 128 bytes.
+// ── Vector table ─────────────────────────────────────────────────────
+// Each entry is exactly 128 bytes (0x80). We use a single `b` instruction
+// (4 bytes) to jump to the trampoline code placed after the table.
+// VBAR_EL2 must be 2048-byte (0x800) aligned.
+
+.balign 2048
+.global __vectors_el2
+__vectors_el2:
 
 // Current EL with SP0 (shouldn't happen — we use SPx)
 .balign 0x80
-    EXCEPTION_ENTRY el2_sync_current_sp0
+    b   __tramp_el2_sync_current_sp0
 .balign 0x80
-    EXCEPTION_ENTRY el2_irq_current_sp0
+    b   __tramp_el2_irq_current_sp0
 .balign 0x80
-    EXCEPTION_ENTRY el2_fiq_current_sp0
+    b   __tramp_el2_fiq_current_sp0
 .balign 0x80
-    EXCEPTION_ENTRY el2_serror_current_sp0
+    b   __tramp_el2_serror_current_sp0
 
 // Current EL with SPx (EL2 exceptions while in EL2)
 .balign 0x80
-    EXCEPTION_ENTRY el2_sync_current_spx
+    b   __tramp_el2_sync_current_spx
 .balign 0x80
-    EXCEPTION_ENTRY el2_irq_current_spx
+    b   __tramp_el2_irq_current_spx
 .balign 0x80
-    EXCEPTION_ENTRY el2_fiq_current_spx
+    b   __tramp_el2_fiq_current_spx
 .balign 0x80
-    EXCEPTION_ENTRY el2_serror_current_spx
+    b   __tramp_el2_serror_current_spx
 
 // Lower EL using AArch64 (guest → hypervisor traps)
 .balign 0x80
-    EXCEPTION_ENTRY el2_sync_lower_a64
+    b   __tramp_el2_sync_lower_a64
 .balign 0x80
-    EXCEPTION_ENTRY el2_irq_lower_a64
+    b   __tramp_el2_irq_lower_a64
 .balign 0x80
-    EXCEPTION_ENTRY el2_fiq_lower_a64
+    b   __tramp_el2_fiq_lower_a64
 .balign 0x80
-    EXCEPTION_ENTRY el2_serror_lower_a64
+    b   __tramp_el2_serror_lower_a64
 
 // Lower EL using AArch32 (not supported — halt)
 .balign 0x80
-    EXCEPTION_ENTRY el2_sync_lower_a32
+    b   __tramp_el2_sync_lower_a32
 .balign 0x80
-    EXCEPTION_ENTRY el2_irq_lower_a32
+    b   __tramp_el2_irq_lower_a32
 .balign 0x80
-    EXCEPTION_ENTRY el2_fiq_lower_a32
+    b   __tramp_el2_fiq_lower_a32
 .balign 0x80
-    EXCEPTION_ENTRY el2_serror_lower_a32
+    b   __tramp_el2_serror_lower_a32
+
+// ── Trampolines (outside the 2048-byte vector table) ─────────────────
+
+TRAMPOLINE el2_sync_current_sp0
+TRAMPOLINE el2_irq_current_sp0
+TRAMPOLINE el2_fiq_current_sp0
+TRAMPOLINE el2_serror_current_sp0
+
+TRAMPOLINE el2_sync_current_spx
+TRAMPOLINE el2_irq_current_spx
+TRAMPOLINE el2_fiq_current_spx
+TRAMPOLINE el2_serror_current_spx
+
+TRAMPOLINE el2_sync_lower_a64
+TRAMPOLINE el2_irq_lower_a64
+TRAMPOLINE el2_fiq_lower_a64
+TRAMPOLINE el2_serror_lower_a64
+
+TRAMPOLINE el2_sync_lower_a32
+TRAMPOLINE el2_irq_lower_a32
+TRAMPOLINE el2_fiq_lower_a32
+TRAMPOLINE el2_serror_lower_a32
 "#);
 
 // ── Rust exception handlers ──────────────────────────────────────────────── //
-//
-// For now, all handlers print diagnostic info and halt. Once Stage-2
-// and guest execution are in place, the "lower EL sync" handler will
-// decode ESR_EL2.EC and route to the hypervisor trap handler.
 
+/// Default handler: print diagnostic info and halt.
+/// Used for unexpected exceptions (current EL, AArch32 lower EL).
 macro_rules! define_handler {
     ($name:ident, $label:expr) => {
         #[no_mangle]
-        extern "C" fn $name(ctx: &ExceptionContext) {
+        extern "C" fn $name(ctx: &mut ExceptionContext) {
             crate::serial_println!();
             crate::serial_println!("*** EL2 EXCEPTION: {} ***", $label);
             crate::serial_println!("{}", ctx);
             loop {
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
             }
+        }
+    };
+}
+
+/// Handler that prints and returns (ERETs back to source).
+/// Used for interrupts from lower EL that we want to let pass.
+macro_rules! define_return_handler {
+    ($name:ident, $label:expr) => {
+        #[no_mangle]
+        extern "C" fn $name(_ctx: &mut ExceptionContext) {
+            // Return to guest — the asm stub will restore context and ERET.
         }
     };
 }
@@ -227,13 +278,113 @@ define_handler!(el2_irq_current_spx,    "IRQ (Current EL, SPx)");
 define_handler!(el2_fiq_current_spx,    "FIQ (Current EL, SPx)");
 define_handler!(el2_serror_current_spx, "SError (Current EL, SPx)");
 
-// Lower EL, AArch64
-define_handler!(el2_sync_lower_a64,   "Sync (Lower EL, AArch64)");
-define_handler!(el2_irq_lower_a64,    "IRQ (Lower EL, AArch64)");
-define_handler!(el2_fiq_lower_a64,    "FIQ (Lower EL, AArch64)");
+// ── Lower EL, AArch64: guest trap handlers ───────────────────────────────── //
+
+/// Synchronous exception from guest (EL1/EL0).
+/// Decodes ESR_EL2.EC and dispatches:
+///  - HVC: print + advance ELR + return to guest
+///  - Data/Inst Abort: print fault info + halt
+///  - WFI/WFE: advance ELR + return to guest
+///  - Others: print + halt
+#[no_mangle]
+extern "C" fn el2_sync_lower_a64(ctx: &mut ExceptionContext) {
+    let ec = (ctx.esr_el2 >> 26) & 0x3F;
+    let iss = ctx.esr_el2 & 0x1FF_FFFF;
+    // IL bit (bit 25): 1 = 32-bit instruction, 0 = 16-bit
+    let il = if (ctx.esr_el2 >> 25) & 1 == 1 { 4u64 } else { 2u64 };
+
+    match ec {
+        ec::HVC64 => {
+            crate::serial_println!(
+                "[EL2] HVC trap: X0={:#x}, ELR={:#x}",
+                ctx.gpr[0], ctx.elr_el2
+            );
+            // Advance past the HVC instruction
+            ctx.elr_el2 += il;
+        }
+
+        ec::WFI_WFE => {
+            // Guest executed WFI/WFE — just advance past it and return.
+            // In a real hypervisor we might yield the vCPU here.
+            ctx.elr_el2 += il;
+        }
+
+        ec::DATA_ABORT_LOWER => {
+            // Read FAR_EL2 (faulting virtual address) and HPFAR_EL2 (IPA)
+            let far: u64;
+            let hpfar: u64;
+            unsafe {
+                core::arch::asm!("mrs {}, FAR_EL2", out(reg) far, options(nostack));
+                core::arch::asm!("mrs {}, HPFAR_EL2", out(reg) hpfar, options(nostack));
+            }
+            let ipa = (hpfar & 0xFFFF_FFFF_F0) << 8; // HPFAR[43:4] → IPA[47:12]
+            crate::serial_println!();
+            crate::serial_println!(
+                "*** EL2: Data Abort (Lower EL) ***\n  FAR={:#x}, IPA={:#x}, ISS={:#x}",
+                far, ipa, iss
+            );
+            crate::serial_println!("{}", ctx);
+            loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
+        }
+
+        ec::INST_ABORT_LOWER => {
+            let far: u64;
+            let hpfar: u64;
+            unsafe {
+                core::arch::asm!("mrs {}, FAR_EL2", out(reg) far, options(nostack));
+                core::arch::asm!("mrs {}, HPFAR_EL2", out(reg) hpfar, options(nostack));
+            }
+            let ipa = (hpfar & 0xFFFF_FFFF_F0) << 8;
+            crate::serial_println!();
+            crate::serial_println!(
+                "*** EL2: Instruction Abort (Lower EL) ***\n  FAR={:#x}, IPA={:#x}, ISS={:#x}",
+                far, ipa, iss
+            );
+            crate::serial_println!("{}", ctx);
+            loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
+        }
+
+        ec::SYS_REG => {
+            crate::serial_println!(
+                "[EL2] System register trap: ISS={:#x}, ELR={:#x}",
+                iss, ctx.elr_el2
+            );
+            // Advance past the trapped instruction
+            ctx.elr_el2 += il;
+        }
+
+        ec::SMC64 => {
+            crate::serial_println!(
+                "[EL2] SMC trap: X0={:#x}, ELR={:#x}",
+                ctx.gpr[0], ctx.elr_el2
+            );
+            // Advance past the SMC instruction
+            ctx.elr_el2 += il;
+        }
+
+        _ => {
+            crate::serial_println!();
+            crate::serial_println!(
+                "*** EL2: Unhandled Sync (Lower EL) EC={:#x} ISS={:#x} ***",
+                ec, iss
+            );
+            crate::serial_println!("{}", ctx);
+            loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
+        }
+    }
+}
+
+/// IRQ from lower EL — return to guest (IRQ handled by guest's own GIC config
+/// in direct-assignment mode, or needs vGIC injection in virtualized mode).
+define_return_handler!(el2_irq_lower_a64, "IRQ (Lower EL, AArch64)");
+
+/// FIQ from lower EL — return to guest.
+define_return_handler!(el2_fiq_lower_a64, "FIQ (Lower EL, AArch64)");
+
+/// SError from lower EL — fatal, halt.
 define_handler!(el2_serror_lower_a64, "SError (Lower EL, AArch64)");
 
-// Lower EL, AArch32
+// Lower EL, AArch32 (unsupported)
 define_handler!(el2_sync_lower_a32,   "Sync (Lower EL, AArch32)");
 define_handler!(el2_irq_lower_a32,    "IRQ (Lower EL, AArch32)");
 define_handler!(el2_fiq_lower_a32,    "FIQ (Lower EL, AArch32)");
