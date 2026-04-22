@@ -29,6 +29,12 @@
 - **AArch64 M5a complete**: Guest entry at EL1, PL011 UART write from guest,
   HVC trap → EL2 handler → ERET back to guest. Full EL2→EL1→EL2 cycle verified.
   Vector table rewrite (trampoline pattern), Stage-2 walk fix (SL0=1), T0SZ fix.
+- **AArch64 M5b complete**: Linux kernel boots fully on QEMU aarch64. PSCI v1.0
+  (VERSION/CPU_ON/SYSTEM_OFF/SYSTEM_RESET/FEATURES/MIGRATE_INFO_TYPE/CPU_OFF/
+  CPU_SUSPEND/AFFINITY_INFO). SMCCC v1.1 (VERSION/ARCH_FEATURES/TRNG_VERSION).
+  Stage-2 device memory mapping (GIC, UART, virtio, PCIe ECAM, PCIe MMIO).
+  T0SZ=24 (40-bit IPA) with concatenated root tables (8K, 1024 L1 entries).
+  Linux boots to rootfs panic (expected — no initrd). GICv3 + timer + PCI all OK.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.

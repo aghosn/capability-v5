@@ -1,8 +1,8 @@
 # Themis Capavisor — Multi-Platform (ARM AArch64) Porting Design
 
-**Status**: **M5a complete** (2026-06). First guest execution at EL1: guest stub
-writes to PL011 UART and traps back to EL2 via HVC. Full EL2→EL1→EL2 cycle verified.
-Next: M5b (PSCI + Linux kernel loading).
+**Status**: **M5b complete** (2026-06). Linux kernel boots fully on QEMU aarch64:
+PSCI v1.0, SMCCC v1.1, GICv3, timer, PCI enumeration all working. Panics at
+rootfs mount (expected — no initrd/rootfs). Next: M5c (dom0 console boot).
 **Scope**: Extending the Themis capavisor to run on ARM AArch64 hardware (targeting
 ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoCs).
 
@@ -16,9 +16,31 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 | **M3b** | MMU, exception vectors, EL2 sysregs, Stage-2 page tables | ✅ Done (cab9626) |
 | **M4** | GICv3 (GICD/GICR init, ICC sysregs, ICH virtual interface) | ✅ Done (ae9234c) |
 | **M5a** | Guest entry at EL1, HVC trap loop, ESR decoding | ✅ Done (2f044b2) |
-| **M5b** | PSCI handling + Linux kernel loading | 🔜 Next |
-| **M5c** | Linux dom0 boot to console | Planned |
+| **M5b** | PSCI + SMCCC + Linux kernel boot (to rootfs panic) | ✅ Done (f7e0e19) |
+| **M5c** | Linux dom0 boot to console (initrd, full I/O) | 🔜 Next |
 | **M6** | SMMUv3 (stretch) | Planned |
+
+### Files created/modified (M5b)
+
+| File | What |
+|------|------|
+| `capavisor/src/arch/aarch64/vectors.rs` | PSCI/SMCCC dispatch in handle_hvc(), SMC routing |
+| `capavisor/src/arch/aarch64/stage2.rs` | map_device(), T0SZ=24 concatenated root (8K), cache maint |
+| `capavisor/src/main.rs` | M5b Linux boot flow: full Stage-2 map, FDT copy, ERET to kernel |
+| `scripts/aarch64-direct.sh` | LINUX_IMAGE/INITRD env vars, -smp 1 default |
+
+### Key learnings (M5b)
+
+- **PSCI via SMC, not HVC**: QEMU virt DTB uses `method = "smc"`. Linux sends PSCI
+  calls as SMC64 (EC=0x17). Route through same `handle_hvc()` handler.
+- **Stage-2 device memory**: Must use `S2_MEM_DEVICE` (MemAttr=0b0000, SH=0b00) for
+  MMIO regions. Normal WB attributes cause bus errors on device access.
+- **Concatenated root tables**: T0SZ=24 (40-bit IPA) with SL0=1 needs 1024 L1 entries
+  = 2 concatenated pages (8K, 8K-aligned). L1 index mask is 0x3FF (10 bits).
+- **SL0=2 (L0 start) broken on QEMU**: Translation faults. Abandoned in favor of
+  concatenated roots. May be QEMU cortex-a76 emulation limitation.
+- **Direct-assignment interrupt model**: HCR_EL2 with IMO/FMO/AMO cleared — physical
+  IRQ/FIQ go directly to guest. Linux owns GIC init. Works for single-guest scenario.
 
 ### Files created/modified (M5a)
 
