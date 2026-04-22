@@ -24,6 +24,11 @@
 - **AArch64 M3 complete**: EL2 direct-boot, MMU enabled (identity-mapped),
   exception vectors installed, EL2 sysregs (HCR/CPTR/timers), Stage-2 page
   tables (VTCR, Stage2Map, VTTBR). `cargo aarch64-direct`.
+- **AArch64 M4 complete**: GICv3 distributor, redistributor, CPU interface (ICC),
+  virtual interface (ICH) all initialized. Dynamic GICD/GICR addresses from FDT.
+- **AArch64 M5a complete**: Guest entry at EL1, PL011 UART write from guest,
+  HVC trap → EL2 handler → ERET back to guest. Full EL2→EL1→EL2 cycle verified.
+  Vector table rewrite (trampoline pattern), Stage-2 walk fix (SL0=1), T0SZ fix.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -47,6 +52,9 @@
 
 ### Recent commits
 
+- `81703b9` — **docs: update arm-porting-design.md with M4+M5a completion**
+- `2f044b2` — **feat(aarch64): M5a — guest entry at EL1 with HVC trap loop**
+- `ae9234c` — **feat(aarch64): M4 — GICv3 distributor, redistributor, CPU interface, ICH**
 - `cab9626` — **feat(aarch64): M3b — EL2 MMU, exception vectors, sysregs, Stage-2**
 - `011ed77` — **feat(aarch64): M3a — EL2 direct-boot with FDT parsing**
 - `e20f2d2` — **feat(aarch64): M2 — memory partitioning + ThemisPlatform init**
@@ -109,18 +117,23 @@ Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modu
 **Remaining**:
 - [x] Implement aarch64 serial console (PL011 UART) — M1 done
 - [x] QEMU aarch64 testbed setup — M1 done (`cargo aarch64-themis`)
-- [ ] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables) — M2-M4
-- [ ] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR) — M3
+- [x] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables) — M2-M4 done
+- [x] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR) — M5a done
+- [ ] PSCI handling + Linux kernel loading — M5b
+- [ ] Linux dom0 boot to console — M5c
 
 ### TODO: AArch64 backend (active)
 
 Design doc: [`themis/docs/arm-porting-design.md`](themis/docs/arm-porting-design.md)
 
-**M1 complete** (2026-04-15): boot on QEMU, PL011 serial, memory map dump.
-Commits: `9823d73` (M1 implementation), `d0fe7c4` (cargo aliases).
+**M1–M4 complete**: boot, memory, EL2, MMU, vectors, Stage-2, GICv3.
+**M5a complete**: guest entry at EL1, HVC trap cycle, ESR decoding.
+Commits: `9823d73` (M1), `d0fe7c4` (aliases), `e20f2d2` (M2), `011ed77` (M3a),
+`cab9626` (M3b), `ae9234c` (M4), `2f044b2` (M5a).
 
-**M2 next**: Memory + platform discovery — ArchBoot impl, MetaAllocator init,
-GIC/timer addresses from device tree or ACPI, memory partitioning.
+**M5b next**: PSCI handling (VERSION, CPU_ON, SYSTEM_OFF, SYSTEM_RESET),
+Linux Image loading via QEMU `-device loader`, minimal guest FDT construction,
+full guest RAM Stage-2 mapping.
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
