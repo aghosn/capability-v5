@@ -1,7 +1,8 @@
 # Themis Capavisor — Multi-Platform (ARM AArch64) Porting Design
 
-**Status**: **M1 complete** (2026-04-15). Capavisor boots on QEMU aarch64 via Limine,
-prints to PL011 UART, dumps memory map. Next: M2 (memory + platform discovery).
+**Status**: **M3a complete** (2026-06). Capavisor boots at EL2 via QEMU direct
+`-kernel` boot, parses device tree (FDT), discovers memory/CPUs/GICv3.
+Next: M3b (MMU setup, exception vectors, Stage-2 page tables).
 **Scope**: Extending the Themis capavisor to run on ARM AArch64 hardware (targeting
 ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoCs).
 
@@ -10,29 +11,41 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | **M1** | Boot on QEMU aarch64, PL011 UART, memory map dump | ✅ Done (9823d73, d0fe7c4) |
-| **M2** | Memory + ACPI/DTB discovery, MetaAllocator, GIC addresses | 🔜 Next |
-| **M3** | EL2 + Stage-2 page tables, exception vectors, guest entry/exit | Planned |
+| **M2** | Memory partitioning, MetaAllocator, ThemisPlatform init | ✅ Done (e20f2d2) |
+| **M3a** | EL2 direct-boot, FDT parsing, 4-CPU discovery | ✅ Done (011ed77) |
+| **M3b** | MMU setup, exception vectors, Stage-2 page tables | 🔜 Next |
 | **M4** | GICv3 + IPI (GICD/GICR init, SGI, ICH_LR injection) | Planned |
 | **M5** | Boot Linux dom0 on QEMU aarch64 | Planned |
 | **M6** | SMMUv3 (stretch) | Planned |
 
-### Files created/modified (M1)
+### Files created/modified (M3a)
 
 | File | What |
 |------|------|
-| `capavisor/linker-aarch64.ld` | AArch64 ELF linker script (higher-half 0xffffffff80000000) |
+| `capavisor/linker-aarch64-direct.ld` | Identity-mapped linker script at VMA 0x40100000 |
+| `capavisor/build.rs` | Select linker by arch + `direct-boot` feature |
+| `capavisor/Cargo.toml` | `direct-boot` feature, `fdt` crate dependency |
+| `capavisor/src/main.rs` | Assembly `_start`, `_start_rust`, Limine gating |
+| `scripts/aarch64-direct.sh` | QEMU direct `-kernel` launch script |
+| `.cargo/config.toml` | `cargo aarch64-direct` alias |
+
+### Files created/modified (M1–M2)
+
+| File | What |
+|------|------|
+| `capavisor/linker-aarch64.ld` | AArch64 ELF linker script (higher-half, Limine) |
 | `capavisor/src/arch/aarch64/serial.rs` | PL011 UART driver (MMIO 0x0900_0000) |
-| `capavisor/build.rs` | Arch-aware linker script selection |
-| `capavisor/src/main.rs` | aarch64 `_start`: PL011, heap, Limine, memory dump, WFI |
-| `scripts/aarch64-iso.sh` | Build aarch64 UEFI ISO with BOOTAA64.EFI |
-| `scripts/aarch64-themis.sh` | Launch QEMU aarch64 (`cargo aarch64-themis`) |
+| `capavisor/src/arch/aarch64/boot.rs` | platform() + init_themis() (Limine-based) |
+| `capavisor/src/mem/paging_aarch64.rs` | TTBR1_EL1 walker for HHDM mappings |
+| `scripts/aarch64-iso.sh` | Build aarch64 UEFI ISO with Limine |
+| `scripts/aarch64-themis.sh` | Launch QEMU aarch64 (Limine boot) |
 
-### Key learnings (M1)
+### Key learnings
 
-- Limine enters aarch64 kernels at **EL1** (not EL2)
-- Limine base revision 0 required for PL011 access (identity maps first 4 GiB including device MMIO; revision 1+ only HHDM-maps memory-map regions)
-- AAVMF firmware (`qemu-efi-aarch64` package) required for UEFI boot
-- QEMU `virt` machine provides ~1 GiB usable RAM across ~45 memory regions
+- **EL2 entry**: Limine enters at EL1; QEMU `-kernel` with `virtualization=on` enters at EL2
+- **FDT in X0**: QEMU's EL2 trampoline clobbers X0; DTB reliably at RAM base (0x40000000)
+- **Kernel placement**: Link at 0x40100000 to avoid FDT at 0x40000000
+- Limine base revision 0 required for PL011 access in Limine boot path
 
 ---
 

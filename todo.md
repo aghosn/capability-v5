@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-04-15)
+## Current State (2026-06)
 
 ### What works
 
@@ -19,9 +19,10 @@
 - **Platform modularization complete**: Phase A7 done. Opaque ArchDomainState/
   ArchPlatformState types, aarch64 cross-check passes with 0 errors.
   See `themis/docs/platform-modularization.md`.
-- **AArch64 M1 complete**: Capavisor boots on QEMU aarch64 via Limine, prints
-  to PL011 UART, dumps memory map (45 regions), halts cleanly.
-  Commands: `cargo aarch64-themis` (build + boot), `cargo aarch64-iso` (ISO only).
+- **AArch64 M1 complete**: Limine UEFI boot, PL011 UART, memory map dump.
+- **AArch64 M2 complete**: Memory partitioning, MetaAllocator, ThemisPlatform init.
+- **AArch64 M3a complete**: EL2 direct-boot via QEMU `-kernel`, FDT device tree
+  parsing (memory, 4 CPUs, GICv3+ITS discovered). `cargo aarch64-direct`.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -45,6 +46,8 @@
 
 ### Recent commits
 
+- `011ed77` — **feat(aarch64): M3a — EL2 direct-boot with FDT parsing**
+- `e20f2d2` — **feat(aarch64): M2 — memory partitioning + ThemisPlatform init**
 - `d0fe7c4` — **feat: add cargo aarch64-themis / aarch64-iso xtask aliases**
 - `9823d73` — **feat(aarch64): M1 — boot capavisor on QEMU aarch64 via Limine**
 - `3ffc8b5` — **docs: add Multi-ISA build section to README**
