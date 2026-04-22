@@ -663,61 +663,87 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     unsafe { arch::aarch64::vectors::install_vectors() };
     unsafe { arch::aarch64::el2_regs::configure_el2() };
 
-    // ── Configure Stage-2 translation and smoke test ─────────────────────── //
+    // ── Configure Stage-2 translation ───────────────────────────────────── //
 
     unsafe { arch::aarch64::stage2::configure_vtcr() };
 
-    // Create a Stage-2 map and test mapping.
-    {
-        use crate::arch_traits::types::{MapPermissions, PageSize};
-        let mut map = arch::aarch64::stage2::Stage2Map::new();
+    // ── Skip GIC init — let Linux guest own the physical GIC ─────────── //
+    // (M4's gicv3::init_gicv3 is NOT called here so Linux can initialize
+    //  GICD/GICR/ICC from scratch, which is the expected boot path.)
 
-        // Map a 2M block: IPA 0x4000_0000 → HPA 0x4000_0000 (identity, for test).
-        let perms = MapPermissions { read: true, write: true, execute: true };
-        map.map(0x4000_0000, 0x4000_0000, PageSize::Page2M, &perms);
-
-        serial_println!(
-            "Stage-2 smoke test: mapped IPA 0x40000000 → HPA 0x40000000 (2M RWX), root={:#x}",
-            map.root_phys()
-        );
-
-        // Load the Stage-2 map into VTTBR_EL2 with VMID 1.
-        unsafe { arch::aarch64::stage2::load_vttbr(&map, 1) };
-        serial_println!("VTTBR_EL2 loaded (VMID=1)");
-
-        // Don't drop the map — we're just testing.
-        core::mem::forget(map);
-    }
-
-    // ── Initialize GICv3 ─────────────────────────────────────────────────── //
-
-    unsafe { arch::aarch64::gicv3::init_gicv3(gicd_base, gicr_base) };
-
-    // ── M5a: Guest entry test ────────────────────────────────────────────── //
+    // ── M5b: Boot Linux kernel ──────────────────────────────────────────── //
 
     serial_println!();
-    serial_println!("=== M5a: Guest entry test ===");
+    serial_println!("=== M5b: Linux kernel boot ===");
 
-    // Guest stub will be placed at IPA 0x4200_0000 (well away from hypervisor).
-    const GUEST_STUB_IPA: u64 = 0x4200_0000;
-    // Guest stack: 64 KiB below stub entry (grows down).
-    const GUEST_SP: u64 = GUEST_STUB_IPA + 0x10_0000; // 0x4210_0000
+    // Guest memory layout (identity-mapped via Stage-2):
+    //   0x4000_0000..0x4010_0000  — QEMU FDT (hypervisor reads it, not mapped for guest)
+    //   0x4010_0000..~0x4020_0000 — Hypervisor code (NOT mapped in Stage-2)
+    //   0x4100_0000..             — Linux Image (loaded by QEMU -device loader)
+    //   0x4700_0000              — Guest FDT copy (passed as X0)
+    //   0x4800_0000..0x8000_0000  — Guest RAM (free for Linux)
+    //   0x0800_0000..0x0810_0000  — GIC (GICD + GICR, device memory)
+    //   0x0900_0000..0x0900_1000  — PL011 UART (device memory)
 
-    // Build a Stage-2 map for the guest.
+    const KERNEL_LOAD_ADDR: u64 = 0x4100_0000;
+    const GUEST_FDT_ADDR: u64 = 0x4700_0000;
+    const GUEST_RAM_START: u64 = 0x4020_0000; // after hypervisor
+    const GUEST_RAM_END: u64 = 0x8000_0000;   // 1 GiB top
+    const GUEST_STACK_TOP: u64 = 0x4800_0000;
+
     {
         use crate::arch_traits::types::{MapPermissions, PageSize};
 
         let mut map = arch::aarch64::stage2::Stage2Map::new();
-
-        // Map guest code + stack region: 2M block at 0x4200_0000 → identity
         let rwx = MapPermissions { read: true, write: true, execute: true };
-        map.map(0x4200_0000, 0x4200_0000, PageSize::Page2M, &rwx);
-        serial_println!("Stage-2: mapped guest RAM 0x42000000 (2M, RWX)");
 
-        // Map UART: 4K at 0x0900_0000 → identity (Device memory)
-        let rw = MapPermissions { read: true, write: true, execute: false };
-        map.map(0x0900_0000, 0x0900_0000, PageSize::Page4K, &rw);
-        serial_println!("Stage-2: mapped UART 0x09000000 (4K, RW device)");
+        // Map guest RAM in 2M blocks (0x4020_0000 .. 0x8000_0000).
+        let mut addr = GUEST_RAM_START;
+        while addr < GUEST_RAM_END {
+            map.map(addr, addr, PageSize::Page2M, &rwx);
+            addr += 0x20_0000; // 2 MiB
+        }
+        serial_println!(
+            "Stage-2: mapped guest RAM {:#x}..{:#x} ({} MiB, 2M blocks)",
+            GUEST_RAM_START, GUEST_RAM_END,
+            (GUEST_RAM_END - GUEST_RAM_START) / (1024 * 1024)
+        );
+
+        // Map device MMIO regions (identity-mapped, device memory).
+        // 0x0800_0000..0x0A00_0000: GIC (GICD/GICR) + UART (PL011)
+        addr = 0x0800_0000;
+        while addr < 0x0A00_0000 {
+            map.map_device(addr, addr, PageSize::Page2M);
+            addr += 0x20_0000;
+        }
+        // 0x0A00_0000..0x0A20_0000: virtio-mmio, GPIO, RTC, etc.
+        map.map_device(0x0A00_0000, 0x0A00_0000, PageSize::Page2M);
+
+        // 0x1000_0000..0x4000_0000: PCIe MMIO low (768 MiB, 2M blocks)
+        addr = 0x1000_0000;
+        while addr < 0x4000_0000 {
+            map.map_device(addr, addr, PageSize::Page2M);
+            addr += 0x20_0000;
+        }
+
+        serial_println!("Stage-2: mapped device regions (GIC/UART/virtio/PCIe-low)");
+
+        // PCIe ECAM: 0x40_1000_0000..0x40_2000_0000 (256 MiB, above 4 GiB).
+        addr = 0x40_1000_0000;
+        while addr < 0x40_2000_0000 {
+            map.map_device(addr, addr, PageSize::Page2M);
+            addr += 0x20_0000;
+        }
+        serial_println!("Stage-2: mapped PCIe ECAM 0x4010000000..0x4020000000 (device)");
+
+        // PCIe high MMIO: 0x80_0000_0000..0x100_0000_0000 (512 GiB, 1G device blocks).
+        // Only needed when a PCI device uses 64-bit BARs.
+        addr = 0x80_0000_0000;
+        while addr < 0x100_0000_0000 {
+            map.map_device(addr, addr, PageSize::Page1G);
+            addr += 0x4000_0000; // 1 GiB
+        }
+        serial_println!("Stage-2: mapped PCIe high MMIO 0x8000000000..0x10000000000 (device)");
 
         // Load the Stage-2 map and flush TLB.
         unsafe { arch::aarch64::stage2::load_vttbr(&map, 1) };
@@ -728,48 +754,57 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         core::mem::forget(map);
     }
 
-    // Copy guest stub code to guest RAM.
-    let (stub_start, stub_end) = arch::aarch64::vcpu::guest_stub_range();
-    let stub_size = stub_end as usize - stub_start as usize;
-    serial_println!(
-        "Copying guest stub: {:#x}..{:#x} ({} bytes) → {:#x}",
-        stub_start as u64, stub_end as u64, stub_size, GUEST_STUB_IPA
-    );
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            stub_start,
-            GUEST_STUB_IPA as *mut u8,
-            stub_size,
-        );
-
-        // D-cache clean + I-cache invalidate for the copied region.
-        let mut addr = GUEST_STUB_IPA;
-        while addr < GUEST_STUB_IPA + stub_size as u64 {
-            core::arch::asm!(
-                "dc cvau, {addr}",
-                addr = in(reg) addr,
-                options(nostack),
+    // Copy QEMU's FDT to guest-visible memory at GUEST_FDT_ADDR.
+    // The guest needs this to discover memory, devices, etc.
+    if fdt_addr != 0 {
+        // Read actual FDT size from header (big-endian u32 at offset 4).
+        let fdt_total_size = unsafe {
+            u32::from_be(*(fdt_addr as *const u32).add(1)) as usize
+        };
+        serial_println!("Copying FDT ({} bytes) from {:#x} to {:#x}",
+            fdt_total_size, fdt_addr, GUEST_FDT_ADDR);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                fdt_addr as *const u8,
+                GUEST_FDT_ADDR as *mut u8,
+                fdt_total_size,
             );
-            addr += 64; // cache line size
         }
-        core::arch::asm!(
-            "dsb ish",
-            "ic iallu",
-            "dsb ish",
-            "isb",
-            options(nostack),
-        );
     }
 
-    // Reconfigure HCR_EL2 for guest: VM=1, direct-assignment (no IMO/FMO/AMO).
+    // Check for Linux Image magic at the load address.
+    let image_magic = unsafe { *((KERNEL_LOAD_ADDR + 0x38) as *const u32) };
+    if image_magic == 0x644D_5241 { // "ARM\x64" in little-endian
+        let text_offset = unsafe { *((KERNEL_LOAD_ADDR + 0x08) as *const u64) };
+        serial_println!(
+            "Linux Image detected at {:#x} (magic=ARM\\x64, text_offset={:#x})",
+            KERNEL_LOAD_ADDR, text_offset
+        );
+    } else {
+        serial_println!(
+            "WARNING: No ARM64 Image magic at {:#x} (got {:#x})",
+            KERNEL_LOAD_ADDR, image_magic
+        );
+        serial_println!("Hint: pass LINUX_IMAGE=/path/to/Image to load a kernel");
+        serial_println!();
+        serial_println!("AArch64 M5b — no kernel to boot, halting.");
+        loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
+    }
+
+    // Configure HCR_EL2 for guest: VM=1, direct-assignment (no IMO/FMO/AMO).
     unsafe { arch::aarch64::el2_regs::configure_el2_for_guest() };
 
-    serial_println!("Entering guest at IPA {:#x} (SP={:#x})", GUEST_STUB_IPA, GUEST_SP);
+    // Determine entry point. For modern kernels, text_offset is 0.
+    let text_offset = unsafe { *((KERNEL_LOAD_ADDR + 0x08) as *const u64) };
+    let entry = KERNEL_LOAD_ADDR + text_offset;
+
+    serial_println!("Entering Linux at {:#x} (X0=FDT@{:#x}, SP={:#x})",
+        entry, GUEST_FDT_ADDR, GUEST_STACK_TOP);
     serial_println!();
 
-    // ERET into guest — does not return.
+    // ERET into Linux — does not return.
     unsafe {
-        arch::aarch64::vcpu::enter_guest_initial(GUEST_STUB_IPA, GUEST_SP, 0);
+        arch::aarch64::vcpu::enter_guest_initial(entry, GUEST_STACK_TOP, GUEST_FDT_ADDR);
     }
 }
 

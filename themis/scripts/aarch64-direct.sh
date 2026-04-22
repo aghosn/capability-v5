@@ -6,14 +6,20 @@
 #   cargo aarch64-direct          (via xtask alias)
 #   bash scripts/aarch64-direct.sh
 #
+# For M5b (Linux guest boot):
+#   LINUX_IMAGE=/path/to/Image cargo aarch64-direct
+#   LINUX_IMAGE=/path/to/Image INITRD=/path/to/initrd.img cargo aarch64-direct
+#
 # Prerequisites:
 #   • qemu-system-aarch64  (sudo apt install qemu-system-arm)
 #   • aarch64-unknown-none Rust target
 #
 # Environment knobs:
 #   PROFILE=release       build with --release (default: debug)
-#   QEMU_CPUS=4           number of vCPUs (default: 4)
+#   QEMU_CPUS=1           number of vCPUs (default: 1)
 #   QEMU_MEM=1G           guest RAM (default: 1G)
+#   LINUX_IMAGE=<path>    ARM64 Linux Image to load at 0x41000000
+#   INITRD=<path>         initrd/initramfs to load at 0x44000000
 #   QEMU_EXTRA_ARGS       additional QEMU arguments
 
 set -euo pipefail
@@ -27,8 +33,10 @@ if [[ "$PROFILE" == "release" ]]; then
     BUILD_FLAGS="--release"
 fi
 
-QEMU_CPUS="${QEMU_CPUS:-4}"
+QEMU_CPUS="${QEMU_CPUS:-1}"
 QEMU_MEM="${QEMU_MEM:-1G}"
+LINUX_IMAGE="${LINUX_IMAGE:-}"
+INITRD="${INITRD:-}"
 
 # ── Build the capavisor ELF ───────────────────────────────────────────────
 
@@ -48,6 +56,28 @@ fi
 
 echo "→ ELF:  $ELF"
 echo "→ CPUs: $QEMU_CPUS  RAM: $QEMU_MEM"
+
+# ── Build loader arguments for Linux Image / initrd ─────────────────────
+
+LOADER_ARGS=""
+if [[ -n "$LINUX_IMAGE" ]]; then
+    if [[ ! -f "$LINUX_IMAGE" ]]; then
+        echo "ERROR: Linux Image not found at $LINUX_IMAGE" >&2
+        exit 1
+    fi
+    echo "→ Linux Image: $LINUX_IMAGE (loaded at 0x41000000)"
+    LOADER_ARGS="$LOADER_ARGS -device loader,file=$LINUX_IMAGE,addr=0x41000000"
+fi
+
+if [[ -n "$INITRD" ]]; then
+    if [[ ! -f "$INITRD" ]]; then
+        echo "ERROR: initrd not found at $INITRD" >&2
+        exit 1
+    fi
+    echo "→ Initrd: $INITRD (loaded at 0x44000000)"
+    LOADER_ARGS="$LOADER_ARGS -device loader,file=$INITRD,addr=0x44000000"
+fi
+
 echo
 
 # ── Launch QEMU ───────────────────────────────────────────────────────────
@@ -63,4 +93,5 @@ exec qemu-system-aarch64 \
     -kernel "$ELF" \
     -nographic \
     -serial mon:stdio \
+    $LOADER_ARGS \
     ${QEMU_EXTRA_ARGS:-}

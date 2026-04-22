@@ -3,7 +3,9 @@
 //! ARM's Stage-2 translation is the equivalent of Intel EPT. Each domain
 //! gets its own Stage-2 page table tree, selected via VTTBR_EL2.
 //!
-//! Page table format: 4KB granule, up to 4 levels (L0→L3).
+//! Page table format: 4KB granule, up to 3 levels (L1→L2→L3).
+//! With T0SZ=24 (40-bit IPA) and SL0=1, the walk starts at L1.
+//! The root L1 table uses 2 concatenated 4K pages (1024 entries, 8K).
 //! We support 4KB pages, 2MB blocks (L2), and 1GB blocks (L1).
 //!
 //! VTCR_EL2 controls Stage-2 translation parameters; it is configured
@@ -81,9 +83,11 @@ pub struct Stage2Map {
 
 impl Stage2Map {
     /// Create a new empty Stage-2 map.
+    ///
+    /// With T0SZ=24 and SL0=1, the root L1 table needs 1024 entries =
+    /// 2 concatenated 4K pages (8K total, 8K-aligned).
     pub fn new() -> Self {
-        // Allocate root table (must be page-aligned).
-        let root = alloc_page_table();
+        let root = alloc_concatenated_root();
         let root_phys = root as u64; // Identity-mapped.
         Stage2Map {
             root_phys,
@@ -97,27 +101,41 @@ impl Stage2Map {
         self.root_phys
     }
 
-    /// Map a guest physical address (IPA) to a host physical address.
+    /// Map a guest physical address (IPA) to a host physical address (normal memory).
     ///
-    /// With VTCR_EL2.SL0=1, the page table walk starts at L1 (root = L1).
+    /// With VTCR_EL2.SL0=2, the page table walk starts at L0 (root = L0).
     pub fn map(&mut self, ipa: u64, hpa: u64, size: PageSize, perms: &MapPermissions) {
-        let desc = build_descriptor(hpa, size, perms);
+        self.map_with_type(ipa, hpa, size, perms, false);
+    }
+
+    /// Map a device MMIO region (non-cacheable, non-executable).
+    pub fn map_device(&mut self, ipa: u64, hpa: u64, size: PageSize) {
+        let perms = MapPermissions { read: true, write: true, execute: false };
+        self.map_with_type(ipa, hpa, size, &perms, true);
+    }
+
+    /// Internal map with explicit memory type.
+    ///
+    /// Walk: L1 → L2 → L3 (SL0=1, T0SZ=24, 40-bit IPA).
+    /// With T0SZ=24, L1 has up to 1024 entries (uses concatenated root).
+    fn map_with_type(&mut self, ipa: u64, hpa: u64, size: PageSize, perms: &MapPermissions, device: bool) {
+        let desc = build_descriptor(hpa, size, perms, device);
         match size {
             PageSize::Page1G => {
                 // L1 block descriptor (root table entry).
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize; // 10 bits for 1024 entries
                 unsafe { self.root_ptr.add(l1_idx).write_volatile(desc) };
             }
             PageSize::Page2M => {
                 // L1 → L2 block descriptor.
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize;
                 let l2 = self.ensure_table(self.root_ptr, l1_idx);
                 let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                 unsafe { l2.add(l2_idx).write_volatile(desc) };
             }
             PageSize::Page4K => {
                 // L1 → L2 → L3 page descriptor.
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize;
                 let l2 = self.ensure_table(self.root_ptr, l1_idx);
                 let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                 let l3 = self.ensure_table(l2, l2_idx);
@@ -131,18 +149,18 @@ impl Stage2Map {
     pub fn unmap(&mut self, ipa: u64, size: PageSize) {
         match size {
             PageSize::Page1G => {
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize;
                 unsafe { self.root_ptr.add(l1_idx).write_volatile(0) };
             }
             PageSize::Page2M => {
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize;
                 if let Some(l2) = self.get_table(self.root_ptr, l1_idx) {
                     let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                     unsafe { l2.add(l2_idx).write_volatile(0) };
                 }
             }
             PageSize::Page4K => {
-                let l1_idx = ((ipa >> 30) & 0x1FF) as usize;
+                let l1_idx = ((ipa >> 30) & 0x3FF) as usize;
                 if let Some(l2) = self.get_table(self.root_ptr, l1_idx) {
                     let l2_idx = ((ipa >> 21) & 0x1FF) as usize;
                     if let Some(l3) = self.get_table(l2, l2_idx) {
@@ -205,8 +223,14 @@ impl Stage2Map {
 
 impl Drop for Stage2Map {
     fn drop(&mut self) {
-        // Free all allocated table pages.
-        for &table_ptr in &self.allocated_tables {
+        // Free the concatenated root (first entry, 8K).
+        if let Some(&root) = self.allocated_tables.first() {
+            let root_size = 2 * PAGE_SIZE_4K as usize;
+            let layout = core::alloc::Layout::from_size_align(root_size, root_size).unwrap();
+            unsafe { alloc::alloc::dealloc(root as *mut u8, layout) };
+        }
+        // Free all other allocated table pages (4K each).
+        for &table_ptr in self.allocated_tables.iter().skip(1) {
             let layout = core::alloc::Layout::from_size_align(PAGE_SIZE_4K as usize, PAGE_SIZE_4K as usize).unwrap();
             unsafe { alloc::alloc::dealloc(table_ptr as *mut u8, layout) };
         }
@@ -216,8 +240,10 @@ impl Drop for Stage2Map {
 // ── Descriptor builders ──────────────────────────────────────────────────── //
 
 /// Build a Stage-2 block or page descriptor.
-fn build_descriptor(hpa: u64, size: PageSize, perms: &MapPermissions) -> u64 {
-    let mut desc = S2_VALID | S2_AF | S2_SH_INNER | S2_MEM_NORMAL_WB;
+fn build_descriptor(hpa: u64, size: PageSize, perms: &MapPermissions, device: bool) -> u64 {
+    let mem_attr = if device { S2_MEM_DEVICE } else { S2_MEM_NORMAL_WB };
+    let shareability = if device { 0u64 } else { S2_SH_INNER };
+    let mut desc = S2_VALID | S2_AF | shareability | mem_attr;
 
     // Output address.
     match size {
@@ -261,6 +287,16 @@ fn alloc_page_table() -> *mut u64 {
     ptr as *mut u64
 }
 
+/// Allocate the concatenated root table for T0SZ=24/SL0=1.
+/// Needs 1024 entries = 8K, aligned to 8K.
+fn alloc_concatenated_root() -> *mut u64 {
+    let size = 2 * PAGE_SIZE_4K as usize; // 8K
+    let layout = core::alloc::Layout::from_size_align(size, size).unwrap();
+    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    assert!(!ptr.is_null(), "Stage-2: out of memory for concatenated root");
+    ptr as *mut u64
+}
+
 // ── VTCR_EL2 configuration ──────────────────────────────────────────────── //
 
 /// Configure VTCR_EL2 (Virtualization Translation Control Register).
@@ -277,11 +313,11 @@ pub unsafe fn configure_vtcr() {
     let pa_range = mmfr0 & 0xF;
 
     let mut vtcr: u64 = 0;
-    // T0SZ = 25 → 39-bit IPA (512 GiB guest address space)
-    // With SL0=1 and 4KB granule, the L1 table has 512 entries (= one 4K page).
-    // No concatenation needed.
-    vtcr |= 25; // bits[5:0]
-    // SL0 = 0b01 → start at L1 (for 40-bit IPA with 4KB granule)
+    // T0SZ = 24 → 40-bit IPA (1 TiB guest address space)
+    // With SL0=1 and 4KB granule, walk starts at L1.
+    // 40-bit IPA with SL0=1 needs 1024 L1 entries = 2 concatenated 4K pages (8K).
+    vtcr |= 24; // bits[5:0]
+    // SL0 = 0b01 → start at L1
     vtcr |= 0b01 << 6;
     // IRGN0 = 0b01 → Inner Write-Back, Write-Allocate (for table walks)
     vtcr |= 0b01 << 8;
@@ -300,7 +336,7 @@ pub unsafe fn configure_vtcr() {
     core::arch::asm!("isb", options(nostack));
 
     serial_println!(
-        "VTCR_EL2 configured: T0SZ=25, SL0=1, TG0=4K, PS={} (VTCR={:#x})",
+        "VTCR_EL2 configured: T0SZ=24, SL0=1, TG0=4K, PS={} (VTCR={:#x})",
         pa_range, vtcr
     );
 }
@@ -313,6 +349,24 @@ pub unsafe fn configure_vtcr() {
 /// # Safety
 /// Must be called at EL2.
 pub unsafe fn load_vttbr(map: &Stage2Map, vmid: u16) {
+    // Clean all page table pages to Point of Coherency so the hardware
+    // table walker sees the latest entries.
+    // Root table is 8K (concatenated), rest are 4K.
+    for (i, &table_ptr) in map.allocated_tables.iter().enumerate() {
+        let page_size = if i == 0 { 2 * PAGE_SIZE_4K } else { PAGE_SIZE_4K };
+        let mut addr = table_ptr as u64;
+        let end = addr + page_size;
+        while addr < end {
+            core::arch::asm!(
+                "dc civac, {addr}",
+                addr = in(reg) addr,
+                options(nostack),
+            );
+            addr += 64; // cache line size
+        }
+    }
+    core::arch::asm!("dsb ish", options(nostack));
+
     let vttbr = ((vmid as u64) << 48) | map.root_phys();
     core::arch::asm!(
         "msr VTTBR_EL2, {}",
