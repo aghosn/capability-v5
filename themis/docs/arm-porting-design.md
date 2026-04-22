@@ -1,8 +1,8 @@
 # Themis Capavisor — Multi-Platform (ARM AArch64) Porting Design
 
-**Status**: **M3 complete** (2026-06). Full EL2 hypervisor foundation: MMU,
-exception vectors, EL2 sysregs, Stage-2 page tables with VTTBR_EL2 loading.
-Next: M4 (GICv3 interrupt controller).
+**Status**: **M5a complete** (2026-06). First guest execution at EL1: guest stub
+writes to PL011 UART and traps back to EL2 via HVC. Full EL2→EL1→EL2 cycle verified.
+Next: M5b (PSCI + Linux kernel loading).
 **Scope**: Extending the Themis capavisor to run on ARM AArch64 hardware (targeting
 ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoCs).
 
@@ -14,9 +14,28 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 | **M2** | Memory partitioning, MetaAllocator, ThemisPlatform init | ✅ Done (e20f2d2) |
 | **M3a** | EL2 direct-boot, FDT parsing, 4-CPU discovery | ✅ Done (011ed77) |
 | **M3b** | MMU, exception vectors, EL2 sysregs, Stage-2 page tables | ✅ Done (cab9626) |
-| **M4** | GICv3 + IPI (GICD/GICR init, SGI, ICH_LR injection) | 🔜 Next |
-| **M5** | Boot Linux dom0 on QEMU aarch64 | Planned |
+| **M4** | GICv3 (GICD/GICR init, ICC sysregs, ICH virtual interface) | ✅ Done (ae9234c) |
+| **M5a** | Guest entry at EL1, HVC trap loop, ESR decoding | ✅ Done (2f044b2) |
+| **M5b** | PSCI handling + Linux kernel loading | 🔜 Next |
+| **M5c** | Linux dom0 boot to console | Planned |
 | **M6** | SMMUv3 (stretch) | Planned |
+
+### Files created/modified (M5a)
+
+| File | What |
+|------|------|
+| `capavisor/src/arch/aarch64/vcpu.rs` | Guest entry (enter_guest_initial), EL1 guest stub |
+| `capavisor/src/arch/aarch64/vectors.rs` | Fixed vector table (branch-to-trampoline), ESR decoding |
+| `capavisor/src/arch/aarch64/stage2.rs` | Fixed SL0=1 walk (root=L1), T0SZ=25 (no concatenation) |
+| `capavisor/src/arch/aarch64/el2_regs.rs` | configure_el2_for_guest (VM=1, direct-assignment) |
+| `capavisor/src/main.rs` | M5a boot flow: Stage-2 map, I-cache maint, guest entry |
+
+### Files created/modified (M4)
+
+| File | What |
+|------|------|
+| `capavisor/src/arch/aarch64/gicv3.rs` | GICv3 driver: GICD/GICR/ICC/ICH init |
+| `capavisor/src/main.rs` | FDT GIC address parsing, GIC init wiring |
 
 ### Files created/modified (M3b)
 
@@ -56,9 +75,14 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 - **Kernel placement**: Link at 0x40100000 to avoid FDT at 0x40000000
 - Limine base revision 0 required for PL011 access in Limine boot path
 - **MMU enable**: caches are on at QEMU entry, so page tables need DC CIVAC before MMU enable
-- **Stage-2 descriptors**: AF=1 is mandatory (unlike some x86 EPT configs); S2AP and MemAttr encoding differs from Stage-1 (no MAIR for Stage-2)
+- **Stage-2 descriptors**: AF=1 is mandatory; S2AP and MemAttr encoding differs from Stage-1
 - **Non-VHE EL2**: only TTBR0_EL2 exists (no TTBR1_EL2)
-- **VTCR_EL2**: T0SZ=24 gives 40-bit IPA (1 TB), SL0=1 starts walk at L1
+- **Stage-2 SL0=1**: root table IS L1, not L0. Do NOT add extra L0 indirection.
+- **VTCR T0SZ=25**: 39-bit IPA avoids L1 concatenation (512 entries fit in 1 page). T0SZ=24 requires 2 concatenated pages with 8K alignment.
+- **Vector table entries**: max 128 bytes (32 instructions). Save/restore exceeds this — use branch-to-trampoline pattern (single `b` instruction per entry, trampolines placed after the table).
+- **Guest entry**: ERET with ELR_EL2=entry, SPSR_EL2=0x3C5 (EL1h, DAIF masked), SP_EL1 set
+- **I-cache maintenance**: DC CVAU + IC IALLU + ISB needed after copying code to guest RAM
+- **GICv3 ICC_SRE_EL2**: must be set FIRST before any ICC_* system register access
 
 ---
 
