@@ -591,6 +591,9 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     serial_println!("Heap initialized: {} KiB", HEAP_SIZE / 1024);
 
     // Parse FDT to discover hardware.
+    let mut gicd_base: u64 = 0x0800_0000; // fallback (QEMU virt default)
+    let mut gicr_base: u64 = 0x080A_0000;
+
     if fdt_addr != 0 {
         let fdt_slice = unsafe { core::slice::from_raw_parts(fdt_addr as *const u8, 0x10_0000) };
         match fdt::Fdt::new(fdt_slice) {
@@ -622,12 +625,25 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
                 }
                 serial_println!("CPUs: {}", cpu_count);
 
-                // GIC
+                // GIC — extract register addresses from FDT
                 for node in fdt.all_nodes() {
                     if let Some(compat) = node.compatible() {
-                        if compat.all().any(|c| c.contains("gic")) {
-                            serial_println!("GIC: {} ({})", node.name,
-                                compat.first());
+                        if compat.all().any(|c| c == "arm,gic-v3") {
+                            serial_println!("GIC: {} ({})", node.name, compat.first());
+                            // Parse "reg" property: GICD base+size, GICR base+size
+                            if let Some(mut reg) = node.reg() {
+                                if let Some(gicd_reg) = reg.next() {
+                                    gicd_base = gicd_reg.starting_address as u64;
+                                    serial_println!("  GICD: {:#x} (size {:#x})",
+                                        gicd_base, gicd_reg.size.unwrap_or(0));
+                                }
+                                if let Some(gicr_reg) = reg.next() {
+                                    gicr_base = gicr_reg.starting_address as u64;
+                                    serial_println!("  GICR: {:#x} (size {:#x})",
+                                        gicr_base, gicr_reg.size.unwrap_or(0));
+                                }
+                            }
+                            break;
                         }
                     }
                 }
@@ -673,9 +689,13 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         core::mem::forget(map);
     }
 
+    // ── Initialize GICv3 ─────────────────────────────────────────────────── //
+
+    unsafe { arch::aarch64::gicv3::init_gicv3(gicd_base, gicr_base) };
+
     serial_println!();
-    serial_println!("AArch64 M3 complete — EL2 hypervisor foundation ready.");
-    serial_println!("Next: M4 (GICv3), M5 (boot dom0).");
+    serial_println!("AArch64 M4 complete — GICv3 initialized.");
+    serial_println!("Next: M5 (boot dom0).");
 
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
