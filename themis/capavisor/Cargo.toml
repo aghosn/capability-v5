@@ -18,6 +18,8 @@ no-posted-interrupts = []
 # minimum execution quantum on nested-virt platforms where VMRESUME
 # overhead is high (~100µs).  Should NOT be enabled on bare-metal.
 quantum-sched = []
+# AArch64: boot via QEMU direct `-kernel` at EL2 instead of Limine UEFI.
+direct-boot = []
 
 [dependencies]
 capa-engine           = { workspace = true }
@@ -31,6 +33,9 @@ zeroize               = { workspace = true }
 limine                = { workspace = true }
 acpi                  = { workspace = true }
 pci_types             = { workspace = true }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+fdt                   = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86                   = { workspace = true }

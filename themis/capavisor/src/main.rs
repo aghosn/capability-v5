@@ -2,7 +2,7 @@
 #![no_main]
 // Enable heap-allocated types (Vec, Box, BTreeMap, …) via the global allocator
 // declared below.  The allocator is backed by a static BSS array (`HEAP`) that
-// Limine places and maps as part of the kernel binary — no runtime carving
+// is placed and mapped as part of the kernel binary — no runtime carving
 // of physical memory is required.
 extern crate alloc;
 
@@ -10,13 +10,19 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(not(feature = "direct-boot"))]
 use limine::request::{
     ExecutableAddressRequest, ExecutableFileRequest, HhdmRequest, MemoryMapRequest, ModuleRequest,
     MpRequest, RsdpRequest,
 };
+#[cfg(not(feature = "direct-boot"))]
 use limine::BaseRevision;
 use linked_list_allocator::LockedHeap;
 
+// Direct-boot uses a smaller heap during early bringup (MMU off, BSS zeroed by asm stub).
+#[cfg(feature = "direct-boot")]
+pub(crate) const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+#[cfg(not(feature = "direct-boot"))]
 pub(crate) const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Aligned wrapper so the heap array sits on a 16-byte boundary in .bss.
@@ -140,32 +146,40 @@ macro_rules! serial_debug {
     };
 }
 
-// ── Limine protocol requests ─────────────────────────────────────────────── //
+// ── Limine protocol requests (not used with direct-boot) ─────────────────── //
 
-// Use base revision 0 on aarch64 to get identity mapping of first 4 GiB
-// (needed for PL011 UART at 0x0900_0000 before we have our own page tables).
-// Revision 0 is the only one with unconditional 4 GiB identity map.
-// x86 uses revision 3 (default from BaseRevision::new()).
-#[cfg(target_arch = "x86_64")]
-#[used]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
-#[cfg(not(target_arch = "x86_64"))]
-#[used]
-static BASE_REVISION: BaseRevision = BaseRevision::with_revision(0);
-#[used]
-static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
-#[used]
-static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
-#[used]
-static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
-#[used]
-static MP_REQUEST: MpRequest = MpRequest::new();
-#[used]
-static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
-#[used]
-static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
-#[used]
-static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
+#[cfg(not(feature = "direct-boot"))]
+mod limine_requests {
+    use super::*;
+
+    // Use base revision 0 on aarch64 to get identity mapping of first 4 GiB
+    // (needed for PL011 UART at 0x0900_0000 before we have our own page tables).
+    // Revision 0 is the only one with unconditional 4 GiB identity map.
+    // x86 uses revision 3 (default from BaseRevision::new()).
+    #[cfg(target_arch = "x86_64")]
+    #[used]
+    pub static BASE_REVISION: BaseRevision = BaseRevision::new();
+    #[cfg(not(target_arch = "x86_64"))]
+    #[used]
+    pub static BASE_REVISION: BaseRevision = BaseRevision::with_revision(0);
+    #[used]
+    pub static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+    #[used]
+    pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+    #[used]
+    pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+    #[used]
+    pub static MP_REQUEST: MpRequest = MpRequest::new();
+    #[used]
+    pub static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+    #[used]
+    pub static KERNEL_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+    #[used]
+    pub static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
+}
+
+#[cfg(not(feature = "direct-boot"))]
+use limine_requests::*;
 
 // ── Global heap allocator ────────────────────────────────────────────────── //
 
@@ -390,8 +404,10 @@ pub extern "C" fn _start() -> ! {
     monitor::monitor_loop(&mut vp);
 }
 
+// ── AArch64 Limine-based entry point (non-direct-boot) ──────────────────── //
+
 #[no_mangle]
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(not(target_arch = "x86_64"), not(feature = "direct-boot")))]
 pub extern "C" fn _start() -> ! {
     // Initialize PL011 UART first using identity-mapped physical address
     // (base revision 0 gives us identity map of first 4 GiB).
@@ -462,6 +478,169 @@ pub extern "C" fn _start() -> ! {
     serial_println!();
     serial_println!("AArch64 M2 complete — platform initialized.");
     serial_println!("Next: M3 (EL2 + Stage-2), M4 (GICv3).");
+
+    loop {
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    }
+}
+
+// ── AArch64 direct-boot entry point (EL2, MMU off) ──────────────────────── //
+//
+// QEMU `-kernel` with `virtualization=on` enters at EL2 with:
+//   X0 = FDT pointer, MMU off, caches enabled.
+// The assembly stub zeroes BSS, sets up a stack, and calls _start_rust.
+
+#[cfg(all(target_arch = "aarch64", feature = "direct-boot"))]
+core::arch::global_asm!(
+    r#"
+    .section .text.entry, "ax"
+    .global _start
+    .type _start, @function
+_start:
+    // Save FDT pointer (X0) in a callee-saved register.
+    mov     x19, x0
+
+    // Zero BSS section.
+    ldr     x1, =__bss_start
+    ldr     x2, =__bss_end
+1:
+    cmp     x1, x2
+    b.ge    2f
+    stp     xzr, xzr, [x1], #16
+    b       1b
+2:
+    // Set up initial stack (16-byte aligned, grows downward).
+    ldr     x0, =__boot_stack_top
+    mov     sp, x0
+
+    // Pass FDT pointer as first argument to Rust.
+    mov     x0, x19
+    bl      _start_rust
+
+    // Should not return — halt.
+    b       .
+    "#
+);
+
+/// Boot stack for direct-boot (allocated in BSS, zeroed by assembly stub).
+#[cfg(all(target_arch = "aarch64", feature = "direct-boot"))]
+#[repr(C, align(16))]
+struct BootStack([u8; 64 * 1024]); // 64 KiB
+
+#[cfg(all(target_arch = "aarch64", feature = "direct-boot"))]
+#[no_mangle]
+static mut BOOT_STACK: BootStack = BootStack([0; 64 * 1024]);
+
+/// Symbol for the assembly stub to reference.
+#[cfg(all(target_arch = "aarch64", feature = "direct-boot"))]
+core::arch::global_asm!(
+    r#"
+    .global __boot_stack_top
+    .set    __boot_stack_top, BOOT_STACK + 65536
+    "#
+);
+
+/// Rust entry point for AArch64 direct-boot (called from assembly _start).
+///
+/// Runs at EL2 with MMU off, identity-mapped. `fdt_ptr` is the physical
+/// address of the QEMU-provided FDT blob.
+#[no_mangle]
+#[cfg(all(target_arch = "aarch64", feature = "direct-boot"))]
+pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
+    // PL011 is at 0x0900_0000 — accessible via identity mapping (MMU off).
+    SerialPort::init_physical();
+
+    serial_println!();
+    serial_println!("========================================");
+    serial_println!("  Themis capavisor — AArch64 direct-boot");
+    serial_println!("========================================");
+    serial_println!();
+
+    // Read and display current exception level.
+    let current_el: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, CurrentEL", out(reg) current_el, options(nomem, nostack));
+    }
+    let el = (current_el >> 2) & 0x3;
+    serial_println!("Running at EL{}", el);
+    serial_println!("FDT pointer (X0): {:#x}", fdt_ptr);
+
+    // QEMU places FDT at start of RAM (0x4000_0000) for `-kernel` boot.
+    // If X0 is zero (trampoline clobber), scan known locations.
+    let fdt_addr = if fdt_ptr != 0 {
+        fdt_ptr
+    } else {
+        // QEMU virt places DTB at the start of RAM.
+        const QEMU_RAM_BASE: u64 = 0x4000_0000;
+        let magic = unsafe { *(QEMU_RAM_BASE as *const u32) };
+        if magic == 0xd00d_feed_u32.to_be() {
+            serial_println!("FDT found at RAM base ({:#x})", QEMU_RAM_BASE);
+            QEMU_RAM_BASE
+        } else {
+            serial_println!("WARNING: no FDT found (magic at RAM base = {:#x})", magic);
+            0
+        }
+    };
+
+    // Initialize heap allocator.
+    unsafe {
+        ALLOCATOR
+            .lock()
+            .init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
+    }
+    serial_println!("Heap initialized: {} KiB", HEAP_SIZE / 1024);
+
+    // Parse FDT to discover hardware.
+    if fdt_addr != 0 {
+        let fdt_slice = unsafe { core::slice::from_raw_parts(fdt_addr as *const u8, 0x10_0000) };
+        match fdt::Fdt::new(fdt_slice) {
+            Ok(fdt) => {
+                serial_println!();
+                serial_println!("FDT: model = {:?}", fdt.root().model());
+                serial_println!("FDT: compatible = {:?}", fdt.root().compatible().first());
+
+                // Memory regions
+                let mem = fdt.memory();
+                serial_println!("Memory regions:");
+                for region in mem.regions() {
+                    if let Some(size) = region.size {
+                        serial_println!(
+                            "  {:#x}..{:#x}  ({} MiB)",
+                            region.starting_address as u64,
+                            region.starting_address as u64 + size as u64,
+                            size / (1024 * 1024)
+                        );
+                    }
+                }
+
+                // CPUs
+                let mut cpu_count = 0u32;
+                for node in fdt.all_nodes() {
+                    if node.name.starts_with("cpu@") {
+                        cpu_count += 1;
+                    }
+                }
+                serial_println!("CPUs: {}", cpu_count);
+
+                // GIC
+                for node in fdt.all_nodes() {
+                    if let Some(compat) = node.compatible() {
+                        if compat.all().any(|c| c.contains("gic")) {
+                            serial_println!("GIC: {} ({})", node.name,
+                                compat.first());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                serial_println!("FDT parse error: {:?}", e);
+            }
+        }
+    }
+
+    serial_println!();
+    serial_println!("AArch64 EL2 direct-boot — halting (WFI loop).");
+    serial_println!("Next: MMU setup, exception vectors, Stage-2.");
 
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
