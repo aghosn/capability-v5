@@ -674,8 +674,8 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     }
 
     serial_println!();
-    serial_println!("AArch64 EL2 direct-boot — halting (WFI loop).");
-    serial_println!("Next: exception vectors, Stage-2 page tables.");
+    serial_println!("AArch64 M3 complete — EL2 hypervisor foundation ready.");
+    serial_println!("Next: M4 (GICv3), M5 (boot dom0).");
 
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
