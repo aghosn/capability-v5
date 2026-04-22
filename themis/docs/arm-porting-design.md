@@ -1,8 +1,8 @@
 # Themis Capavisor — Multi-Platform (ARM AArch64) Porting Design
 
-**Status**: **M3a complete** (2026-06). Capavisor boots at EL2 via QEMU direct
-`-kernel` boot, parses device tree (FDT), discovers memory/CPUs/GICv3.
-Next: M3b (MMU setup, exception vectors, Stage-2 page tables).
+**Status**: **M3 complete** (2026-06). Full EL2 hypervisor foundation: MMU,
+exception vectors, EL2 sysregs, Stage-2 page tables with VTTBR_EL2 loading.
+Next: M4 (GICv3 interrupt controller).
 **Scope**: Extending the Themis capavisor to run on ARM AArch64 hardware (targeting
 ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoCs).
 
@@ -13,10 +13,19 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 | **M1** | Boot on QEMU aarch64, PL011 UART, memory map dump | ✅ Done (9823d73, d0fe7c4) |
 | **M2** | Memory partitioning, MetaAllocator, ThemisPlatform init | ✅ Done (e20f2d2) |
 | **M3a** | EL2 direct-boot, FDT parsing, 4-CPU discovery | ✅ Done (011ed77) |
-| **M3b** | MMU setup, exception vectors, Stage-2 page tables | 🔜 Next |
-| **M4** | GICv3 + IPI (GICD/GICR init, SGI, ICH_LR injection) | Planned |
+| **M3b** | MMU, exception vectors, EL2 sysregs, Stage-2 page tables | ✅ Done (cab9626) |
+| **M4** | GICv3 + IPI (GICD/GICR init, SGI, ICH_LR injection) | 🔜 Next |
 | **M5** | Boot Linux dom0 on QEMU aarch64 | Planned |
 | **M6** | SMMUv3 (stretch) | Planned |
+
+### Files created/modified (M3b)
+
+| File | What |
+|------|------|
+| `capavisor/src/arch/aarch64/mmu.rs` | EL2 identity-mapped page tables + MMU enable |
+| `capavisor/src/arch/aarch64/vectors.rs` | Exception vector table (asm) + context save/restore |
+| `capavisor/src/arch/aarch64/el2_regs.rs` | HCR_EL2, CPTR_EL2, timer config |
+| `capavisor/src/arch/aarch64/stage2.rs` | Stage-2 page tables (VTCR, Stage2Map, VTTBR) |
 
 ### Files created/modified (M3a)
 
@@ -46,6 +55,10 @@ ARMv8.1-A+ with VHE — Virtualization Host Extensions — i.e., EL2 capable SoC
 - **FDT in X0**: QEMU's EL2 trampoline clobbers X0; DTB reliably at RAM base (0x40000000)
 - **Kernel placement**: Link at 0x40100000 to avoid FDT at 0x40000000
 - Limine base revision 0 required for PL011 access in Limine boot path
+- **MMU enable**: caches are on at QEMU entry, so page tables need DC CIVAC before MMU enable
+- **Stage-2 descriptors**: AF=1 is mandatory (unlike some x86 EPT configs); S2AP and MemAttr encoding differs from Stage-1 (no MAIR for Stage-2)
+- **Non-VHE EL2**: only TTBR0_EL2 exists (no TTBR1_EL2)
+- **VTCR_EL2**: T0SZ=24 gives 40-bit IPA (1 TB), SL0=1 starts walk at L1
 
 ---
 

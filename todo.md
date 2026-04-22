@@ -21,8 +21,9 @@
   See `themis/docs/platform-modularization.md`.
 - **AArch64 M1 complete**: Limine UEFI boot, PL011 UART, memory map dump.
 - **AArch64 M2 complete**: Memory partitioning, MetaAllocator, ThemisPlatform init.
-- **AArch64 M3a complete**: EL2 direct-boot via QEMU `-kernel`, FDT device tree
-  parsing (memory, 4 CPUs, GICv3+ITS discovered). `cargo aarch64-direct`.
+- **AArch64 M3 complete**: EL2 direct-boot, MMU enabled (identity-mapped),
+  exception vectors installed, EL2 sysregs (HCR/CPTR/timers), Stage-2 page
+  tables (VTCR, Stage2Map, VTTBR). `cargo aarch64-direct`.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -46,6 +47,7 @@
 
 ### Recent commits
 
+- `cab9626` — **feat(aarch64): M3b — EL2 MMU, exception vectors, sysregs, Stage-2**
 - `011ed77` — **feat(aarch64): M3a — EL2 direct-boot with FDT parsing**
 - `e20f2d2` — **feat(aarch64): M2 — memory partitioning + ThemisPlatform init**
 - `d0fe7c4` — **feat: add cargo aarch64-themis / aarch64-iso xtask aliases**
