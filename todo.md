@@ -216,39 +216,14 @@ No more `domain_id != 0` special-casing.
 - [ ] Reduce serial I/O overhead
 - [ ] CPUID policy in DomainPolicy (P16.6c)
 - [ ] Stock cloud image kernel
-- [ ] Attestation: test with real TPM (bare metal or working swtpm probe)
 
-### Full TPM attestation with user binding (P20j)
+### ~~Full TPM attestation with user binding (P20j)~~ ✅ Done
 
 Design doc: [`capa-engine/docs/design/attestation/attestation.md §14`](capa-engine/docs/design/attestation/attestation.md)
 
-**Goal**: Complete the two-layer attestation model — TPM2_Quote (platform proof)
-bundled with Ed25519-signed domain reports (capavisor proof), with user public key
-binding to prevent cross-user attestation replay.
-
-**Two-layer model**:
-- **Layer 1 (Platform)**: TPM2_Quote(AK, nonce, PCR[11]) — TPM signs PCR values
-  with an RSA-2048 Attestation Key. Proves the capavisor binary + pub_key are
-  running on genuine hardware.
-- **Layer 2 (Domain)**: Ed25519 sign SHA-256(report ‖ nonce ‖ user_pub_key) — the
-  capavisor signs the domain configuration for a specific verifier.
-
-**Key design decisions**:
-- `ATTEST_SELF` nonce=0 path unchanged (unsigned PA map for thhv init)
-- Signed path uses DomainComm TX ring to pass `{nonce, user_pub_key}` (64 bytes)
-- VMCALL `arg0=1, arg1=sequence` — flag + TX ring sequence number
-- Defense in depth: thhv mutex (cooperative) + capavisor sequence verification (A2)
-- RSA-2048 AK under Owner hierarchy
-- Graceful degradation: no TPM → Ed25519-only (tpm_quote_size=0)
-
-**Todos**: All complete.
-- [x] P20j-1: TPM driver — `TPM2_CreatePrimary` (RSA-2048) + `TPM2_Quote` commands
-- [x] P20j-2: Capavisor — AK creation at boot after PCR_Extend in `try_tpm()`
-- [x] P20j-3: ABI — extend `SignedAttestReport` with user_pub_key + TPM quote fields
-- [x] P20j-4: Hypercall — `do_attest_self` reads `AttestRequest` from TX ring, sequence verify
-- [x] P20j-5: thhv — mutex + TX enqueue + RX dequeue for signed attestation ioctl
-- [x] P20j-6: Userspace test — Ed25519 + RSA-2048 crypto verification (test_attestation.c)
-- [x] P20j-7: Documentation — attestation.md + todo.md updated
+Two-layer attestation model complete: TPM2_Quote (platform) + Ed25519-signed
+domain reports (capavisor) with user public key binding. All 7 sub-tasks done.
+Graceful degradation: no TPM → Ed25519-only.
 
 ---
 
