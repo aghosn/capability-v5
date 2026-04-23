@@ -41,3 +41,4 @@ aarch64-iso    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86
 aarch64-themis = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-themis"]
 aarch64-direct = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-direct"]
 fetch-aarch64-kernel = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-aarch64-kernel"]
+fetch-aarch64-dom0   = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-aarch64-dom0"]

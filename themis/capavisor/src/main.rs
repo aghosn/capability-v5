@@ -593,6 +593,8 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     // Parse FDT to discover hardware.
     let mut gicd_base: u64 = 0x0800_0000; // fallback (QEMU virt default)
     let mut gicr_base: u64 = 0x080A_0000;
+    let mut fdt_ram_end: u64 = 0x8000_0000; // fallback: 1G
+    let mut fdt_ram_base: u64 = 0x4000_0000; // fallback: QEMU virt default
 
     if fdt_addr != 0 {
         let fdt_slice = unsafe { core::slice::from_raw_parts(fdt_addr as *const u8, 0x10_0000) };
@@ -607,12 +609,19 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
                 serial_println!("Memory regions:");
                 for region in mem.regions() {
                     if let Some(size) = region.size {
+                        let end = region.starting_address as u64 + size as u64;
                         serial_println!(
                             "  {:#x}..{:#x}  ({} MiB)",
-                            region.starting_address as u64,
-                            region.starting_address as u64 + size as u64,
+                            region.starting_address as u64, end,
                             size / (1024 * 1024)
                         );
+                        if end > fdt_ram_end {
+                            fdt_ram_end = end;
+                        }
+                        let base = region.starting_address as u64;
+                        if base < fdt_ram_base {
+                            fdt_ram_base = base;
+                        }
                     }
                 }
 
@@ -685,7 +694,7 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     //   0x0900_0000..0x0900_1000  — PL011 UART (device memory)
 
     const GUEST_FDT_ALLOC: usize = 0x10_0000; // 1 MiB for FDT copy (QEMU pads to this)
-    const GUEST_RAM_END: u64 = 0x8000_0000;    // 1 GiB top (matches QEMU_MEM=1G)
+    let guest_ram_end = fdt_ram_end;
 
     // __image_end is the 2M-aligned end of the capavisor image (BSS included).
     // The boot descriptor blob is loaded at the page right after it.
@@ -695,8 +704,12 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
     let image_end = unsafe { &__image_end as *const u8 as u64 };
     let descriptor_addr = image_end + 0x1000; // 4K after image end
 
-    // Guest RAM starts at the next 2M boundary after the descriptor.
-    let guest_ram_start = (descriptor_addr + 0x20_0000 - 1) & !0x1F_FFFF;
+    // Guest RAM starts at the FDT-declared base (0x40000000 on QEMU virt).
+    // We map the full range in Stage-2 even though the capavisor binary sits
+    // at the low end — the capavisor runs at EL2 with its own Stage-1 tables,
+    // so Stage-2 mappings only affect the guest (EL1). In the single-domain
+    // dev model the guest is trusted; multi-domain will carve this properly.
+    let guest_ram_start = fdt_ram_base;
     serial_println!("Hypervisor image ends at {:#x}", image_end);
     serial_println!("Boot descriptor expected at {:#x}", descriptor_addr);
     serial_println!("Guest RAM starts at {:#x}", guest_ram_start);
@@ -754,16 +767,22 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         let mut map = arch::aarch64::stage2::Stage2Map::new();
         let rwx = MapPermissions { read: true, write: true, execute: true };
 
-        // Map guest RAM in 2M blocks (guest_ram_start .. GUEST_RAM_END).
+        // Map guest RAM using the largest block size possible.
+        // Use 1G blocks where aligned, fall back to 2M for remainders.
         let mut addr = guest_ram_start;
-        while addr < GUEST_RAM_END {
-            map.map(addr, addr, PageSize::Page2M, &rwx);
-            addr += 0x20_0000;
+        while addr < guest_ram_end {
+            if addr % 0x4000_0000 == 0 && addr + 0x4000_0000 <= guest_ram_end {
+                map.map(addr, addr, PageSize::Page1G, &rwx);
+                addr += 0x4000_0000;
+            } else {
+                map.map(addr, addr, PageSize::Page2M, &rwx);
+                addr += 0x20_0000;
+            }
         }
         serial_println!(
-            "Stage-2: mapped guest RAM {:#x}..{:#x} ({} MiB, 2M blocks)",
-            guest_ram_start, GUEST_RAM_END,
-            (GUEST_RAM_END - guest_ram_start) / (1024 * 1024)
+            "Stage-2: mapped guest RAM {:#x}..{:#x} ({} MiB)",
+            guest_ram_start, guest_ram_end,
+            (guest_ram_end - guest_ram_start) / (1024 * 1024)
         );
 
         // Map device MMIO regions (identity-mapped, device memory).

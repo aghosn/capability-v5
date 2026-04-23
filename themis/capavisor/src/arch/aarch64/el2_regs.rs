@@ -87,12 +87,33 @@ pub unsafe fn configure_el2() {
 /// (EL1=AArch64). Clears IMO/FMO/AMO so the guest directly owns physical
 /// interrupts — no vGIC overhead for bringup.
 ///
+/// Also configures the GIC CPU interface for direct-assignment:
+/// - ICC_SRE_EL2: SRE=1 + Enable=1 so the guest can access ICC_*_EL1
+///   system registers for interrupt acknowledge/EOI.
+/// - ICH_HCR_EL2: En=0 so ICC_*_EL1 accesses go to the physical CPU
+///   interface, not the virtual (List Register) interface.
+///
 /// # Safety
 /// Must be called at EL2, after VTTBR_EL2 and VTCR_EL2 are configured.
 pub unsafe fn configure_el2_for_guest() {
     let hcr = HCR_VM | HCR_SWIO | HCR_TSC | HCR_RW;
     core::arch::asm!("msr HCR_EL2, {}", in(reg) hcr, options(nostack));
+
+    // ICC_SRE_EL2: enable system register interface at EL2 (SRE, bit 0)
+    // and allow EL1 to use it (Enable, bit 3). Without Enable=1, EL1
+    // accesses to ICC_SRE_EL1 trap to EL2, breaking the GIC driver.
+    let mut sre: u64;
+    core::arch::asm!("mrs {}, ICC_SRE_EL2", out(reg) sre, options(nostack));
+    sre |= (1 << 0) | (1 << 3); // SRE=1, Enable=1
+    core::arch::asm!("msr ICC_SRE_EL2, {}", in(reg) sre, options(nostack));
+
+    // ICH_HCR_EL2: disable the virtual CPU interface (En=0) so that
+    // ICC_*_EL1 accesses from the guest go to the physical GIC, not
+    // through the List Register / virtual interrupt path.
+    let ich_hcr: u64 = 0;
+    core::arch::asm!("msr ICH_HCR_EL2, {}", in(reg) ich_hcr, options(nostack));
+
     core::arch::asm!("isb", options(nostack));
 
-    serial_println!("HCR_EL2 reconfigured for guest: {:#x} (VM=1, direct-assign)", hcr);
+    serial_println!("HCR_EL2={:#x} (VM=1, direct-assign), ICC_SRE_EL2={:#x}, ICH_HCR_EL2=0", hcr, sre);
 }

@@ -31,7 +31,7 @@ if [[ "$PROFILE" == "release" ]]; then
 fi
 
 QEMU_CPUS="${QEMU_CPUS:-1}"
-QEMU_MEM="${QEMU_MEM:-1G}"
+QEMU_MEM="${QEMU_MEM:-2G}"
 
 # Auto-discover ARM64 kernel if not explicitly set
 if [[ -z "${LINUX_IMAGE:-}" ]]; then
@@ -42,10 +42,29 @@ if [[ -z "${LINUX_IMAGE:-}" ]]; then
 fi
 
 # Auto-discover initrd if not explicitly set
+DEFAULT_INITRD="$WORKSPACE_ROOT/guest/aarch64/initrd.img"
 if [[ -z "${INITRD:-}" ]]; then
-    DEFAULT_INITRD="$WORKSPACE_ROOT/guest/aarch64/initrd.img"
     if [[ -f "$DEFAULT_INITRD" ]]; then
         INITRD="$DEFAULT_INITRD"
+    fi
+fi
+
+# Auto-discover dom0 root disk (Ubuntu ARM64 cloud image)
+DOM0_DISK=""
+DOM0_SEED=""
+DEFAULT_DISK="$WORKSPACE_ROOT/guest/aarch64/dom0.img"
+DEFAULT_SEED="$WORKSPACE_ROOT/guest/aarch64/seed.img"
+if [[ -f "$DEFAULT_DISK" ]]; then
+    DOM0_DISK="$DEFAULT_DISK"
+    if [[ -f "$DEFAULT_SEED" ]]; then
+        DOM0_SEED="$DEFAULT_SEED"
+    fi
+    # When booting from disk, skip the custom initrd — the kernel mounts
+    # root=/dev/vda1 directly (ext4 and virtio_blk are built-in).
+    # Only clear if it was auto-discovered (not explicitly set by user).
+    if [[ "${INITRD:-}" == "$DEFAULT_INITRD" ]]; then
+        echo "→ Disk boot: skipping custom initrd in favor of root=/dev/vda1"
+        INITRD=""
     fi
 fi
 
@@ -210,6 +229,25 @@ echo "→ Layout validated (no overlaps)"
 # - -kernel: direct ELF load (QEMU reads entry point from ELF header)
 # - No firmware/BIOS needed; QEMU provides FDT in X0
 
+DISK_ARGS=()
+APPEND_ARGS=()
+if [[ -n "$DOM0_DISK" ]]; then
+    echo "→ Dom0 disk: $DOM0_DISK"
+    DISK_ARGS+=(-drive "id=dom0,file=$DOM0_DISK,format=qcow2,if=none")
+    DISK_ARGS+=(-device virtio-blk-pci,drive=dom0)
+    if [[ -n "$DOM0_SEED" ]]; then
+        echo "→ Seed:      $DOM0_SEED"
+        DISK_ARGS+=(-drive "id=seed,file=$DOM0_SEED,format=raw,if=none,readonly=on")
+        DISK_ARGS+=(-device virtio-blk-pci,drive=seed)
+    fi
+    # Boot from disk with serial console.
+    BOOTARGS="${BOOTARGS:-console=ttyAMA0 root=/dev/vda1 rw rootwait loglevel=7 systemd.mask=boot-efi.mount systemd.mask=multipathd.service systemd.mask=systemd-networkd-wait-online.service}"
+    APPEND_ARGS=(-append "$BOOTARGS")
+else
+    BOOTARGS="${BOOTARGS:-console=ttyAMA0}"
+    APPEND_ARGS=(-append "$BOOTARGS")
+fi
+
 echo
 exec qemu-system-aarch64 \
     -machine virt,gic-version=3,virtualization=on \
@@ -219,5 +257,8 @@ exec qemu-system-aarch64 \
     -kernel "$ELF" \
     -nographic \
     -serial mon:stdio \
+    -device virtio-rng-pci \
     $LOADER_ARGS \
+    "${DISK_ARGS[@]}" \
+    "${APPEND_ARGS[@]}" \
     ${QEMU_EXTRA_ARGS:-}

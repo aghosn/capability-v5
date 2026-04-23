@@ -25,7 +25,7 @@ fn main() {
         Some(t) => t,
         None => {
             eprintln!("usage: cargo run -p xtask -- <task> [args...]");
-            eprintln!("tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk | aarch64-iso | aarch64-themis | aarch64-direct | fetch-aarch64-kernel");
+            eprintln!("tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk | aarch64-iso | aarch64-themis | aarch64-direct | fetch-aarch64-kernel | fetch-aarch64-dom0");
             std::process::exit(1);
         }
     };
@@ -46,7 +46,7 @@ fn main() {
             task,
             script.display()
         );
-        eprintln!("available tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk | aarch64-iso | aarch64-themis | aarch64-direct | fetch-aarch64-kernel");
+        eprintln!("available tasks: iso | run-qemu | themis-debug | gdb | fetch-dom0 | run-dom0 | setup-limine | resize-disk | aarch64-iso | aarch64-themis | aarch64-direct | fetch-aarch64-kernel | fetch-aarch64-dom0");
         std::process::exit(1);
     }
 
