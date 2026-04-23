@@ -678,18 +678,75 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
 
     // Guest memory layout (identity-mapped via Stage-2):
     //   0x4000_0000..0x4010_0000  — QEMU FDT (hypervisor reads it, not mapped for guest)
-    //   0x4010_0000..~0x4020_0000 — Hypervisor code (NOT mapped in Stage-2)
-    //   0x4100_0000..             — Linux Image (loaded by QEMU -device loader)
-    //   0x4700_0000              — Guest FDT copy (passed as X0)
-    //   0x4800_0000..0x8000_0000  — Guest RAM (free for Linux)
+    //   0x4010_0000..image_end    — Hypervisor code+BSS (NOT mapped in Stage-2)
+    //   image_end+0x1000          — Boot descriptor blob (loaded by QEMU script)
+    //   (kernel/initrd/fdt addresses come from boot descriptor — no hardcoded constants)
     //   0x0800_0000..0x0810_0000  — GIC (GICD + GICR, device memory)
     //   0x0900_0000..0x0900_1000  — PL011 UART (device memory)
 
-    const KERNEL_LOAD_ADDR: u64 = 0x4100_0000;
-    const GUEST_FDT_ADDR: u64 = 0x4700_0000;
-    const GUEST_RAM_START: u64 = 0x4020_0000; // after hypervisor
-    const GUEST_RAM_END: u64 = 0x8000_0000;   // 1 GiB top
-    const GUEST_STACK_TOP: u64 = 0x4800_0000;
+    const GUEST_FDT_ALLOC: usize = 0x10_0000; // 1 MiB for FDT copy (QEMU pads to this)
+    const GUEST_RAM_END: u64 = 0x8000_0000;    // 1 GiB top (matches QEMU_MEM=1G)
+
+    // __image_end is the 2M-aligned end of the capavisor image (BSS included).
+    // The boot descriptor blob is loaded at the page right after it.
+    extern "C" {
+        static __image_end: u8;
+    }
+    let image_end = unsafe { &__image_end as *const u8 as u64 };
+    let descriptor_addr = image_end + 0x1000; // 4K after image end
+
+    // Guest RAM starts at the next 2M boundary after the descriptor.
+    let guest_ram_start = (descriptor_addr + 0x20_0000 - 1) & !0x1F_FFFF;
+    serial_println!("Hypervisor image ends at {:#x}", image_end);
+    serial_println!("Boot descriptor expected at {:#x}", descriptor_addr);
+    serial_println!("Guest RAM starts at {:#x}", guest_ram_start);
+
+    // ── Parse boot descriptor to discover modules ────────────────────────── //
+    use crate::guest::{find_module, ModuleInfo};
+
+    let (modules, module_count) = unsafe {
+        arch::aarch64::boot_descriptor::parse_descriptor::<8>(descriptor_addr as *const u8)
+    }.unwrap_or_else(|e| {
+        serial_println!("WARNING: {}", e);
+        serial_println!("Hint: use 'cargo fetch-aarch64-kernel && cargo aarch64-direct'");
+        serial_println!();
+        serial_println!("AArch64 — no boot descriptor, halting.");
+        loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
+    });
+
+    serial_println!("Boot descriptor: {} module(s)", module_count);
+    for i in 0..module_count {
+        serial_println!("  [{}] {:?} at {:#x} ({} KiB)",
+            i, modules[i].cmdline, modules[i].base as u64,
+            modules[i].size / 1024);
+    }
+
+    let modules_slice = &modules[..module_count];
+
+    // Locate kernel and optional initrd from the descriptor.
+    let kernel_mod = find_module(modules_slice, "dom0-kernel")
+        .expect("boot descriptor: 'dom0-kernel' module not found");
+    let initrd_mod = find_module(modules_slice, "dom0-initrd");
+
+    // Find the guest FDT address from the descriptor (or use a default after initrd/kernel).
+    let guest_fdt_mod = find_module(modules_slice, "guest-fdt");
+    let guest_fdt_addr = if let Some(fdt_mod) = guest_fdt_mod {
+        fdt_mod.base as u64
+    } else {
+        // Place FDT copy 1M after the last module.
+        let mut last_end = kernel_mod.base as u64 + kernel_mod.size;
+        if let Some(initrd) = initrd_mod {
+            let initrd_end = initrd.base as u64 + initrd.size;
+            if initrd_end > last_end {
+                last_end = initrd_end;
+            }
+        }
+        // Align to 2M boundary and add 2M margin.
+        ((last_end + 0x20_0000 - 1) & !0x1F_FFFF) + 0x20_0000
+    };
+
+    // Guest initial stack: 1M after FDT.
+    let guest_stack_top = guest_fdt_addr + GUEST_FDT_ALLOC as u64;
 
     {
         use crate::arch_traits::types::{MapPermissions, PageSize};
@@ -697,16 +754,16 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         let mut map = arch::aarch64::stage2::Stage2Map::new();
         let rwx = MapPermissions { read: true, write: true, execute: true };
 
-        // Map guest RAM in 2M blocks (0x4020_0000 .. 0x8000_0000).
-        let mut addr = GUEST_RAM_START;
+        // Map guest RAM in 2M blocks (guest_ram_start .. GUEST_RAM_END).
+        let mut addr = guest_ram_start;
         while addr < GUEST_RAM_END {
             map.map(addr, addr, PageSize::Page2M, &rwx);
-            addr += 0x20_0000; // 2 MiB
+            addr += 0x20_0000;
         }
         serial_println!(
             "Stage-2: mapped guest RAM {:#x}..{:#x} ({} MiB, 2M blocks)",
-            GUEST_RAM_START, GUEST_RAM_END,
-            (GUEST_RAM_END - GUEST_RAM_START) / (1024 * 1024)
+            guest_ram_start, GUEST_RAM_END,
+            (GUEST_RAM_END - guest_ram_start) / (1024 * 1024)
         );
 
         // Map device MMIO regions (identity-mapped, device memory).
@@ -737,11 +794,10 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         serial_println!("Stage-2: mapped PCIe ECAM 0x4010000000..0x4020000000 (device)");
 
         // PCIe high MMIO: 0x80_0000_0000..0x100_0000_0000 (512 GiB, 1G device blocks).
-        // Only needed when a PCI device uses 64-bit BARs.
         addr = 0x80_0000_0000;
         while addr < 0x100_0000_0000 {
             map.map_device(addr, addr, PageSize::Page1G);
-            addr += 0x4000_0000; // 1 GiB
+            addr += 0x4000_0000;
         }
         serial_println!("Stage-2: mapped PCIe high MMIO 0x8000000000..0x10000000000 (device)");
 
@@ -754,57 +810,70 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
         core::mem::forget(map);
     }
 
-    // Copy QEMU's FDT to guest-visible memory at GUEST_FDT_ADDR.
-    // The guest needs this to discover memory, devices, etc.
+    // Copy QEMU's FDT to guest-visible memory.
     if fdt_addr != 0 {
-        // Read actual FDT size from header (big-endian u32 at offset 4).
         let fdt_total_size = unsafe {
             u32::from_be(*(fdt_addr as *const u32).add(1)) as usize
         };
         serial_println!("Copying FDT ({} bytes) from {:#x} to {:#x}",
-            fdt_total_size, fdt_addr, GUEST_FDT_ADDR);
+            fdt_total_size, fdt_addr, guest_fdt_addr);
         unsafe {
             core::ptr::copy_nonoverlapping(
                 fdt_addr as *const u8,
-                GUEST_FDT_ADDR as *mut u8,
+                guest_fdt_addr as *mut u8,
                 fdt_total_size,
             );
         }
+
+        // Patch FDT /chosen with initrd range if an initrd module was provided.
+        if let Some(initrd) = initrd_mod {
+            let initrd_start = initrd.base as u64;
+            let initrd_end = initrd_start + initrd.size;
+            serial_println!("Initrd: {:#x}..{:#x} ({} KiB)",
+                initrd_start, initrd_end, initrd.size / 1024);
+
+            let patch_result = arch::aarch64::fdt_patch::patch_chosen_initrd(
+                guest_fdt_addr as *mut u8,
+                GUEST_FDT_ALLOC,
+                initrd_start,
+                initrd_end,
+            );
+            match patch_result {
+                Ok(()) => { serial_println!("FDT patched: /chosen with initrd range"); }
+                Err(e) => { serial_println!("WARNING: FDT patch failed: {}", e); }
+            }
+        }
     }
 
-    // Check for Linux Image magic at the load address.
-    let image_magic = unsafe { *((KERNEL_LOAD_ADDR + 0x38) as *const u32) };
-    if image_magic == 0x644D_5241 { // "ARM\x64" in little-endian
-        let text_offset = unsafe { *((KERNEL_LOAD_ADDR + 0x08) as *const u64) };
+    // Validate Linux ARM64 Image magic at the kernel module address.
+    let kernel_addr = kernel_mod.base as u64;
+    let image_magic = unsafe { *((kernel_addr + 0x38) as *const u32) };
+    if image_magic != 0x644D_5241 { // "ARM\x64" in little-endian
         serial_println!(
-            "Linux Image detected at {:#x} (magic=ARM\\x64, text_offset={:#x})",
-            KERNEL_LOAD_ADDR, text_offset
+            "ERROR: No ARM64 Image magic at {:#x} (got {:#x})",
+            kernel_addr, image_magic
         );
-    } else {
-        serial_println!(
-            "WARNING: No ARM64 Image magic at {:#x} (got {:#x})",
-            KERNEL_LOAD_ADDR, image_magic
-        );
-        serial_println!("Hint: pass LINUX_IMAGE=/path/to/Image to load a kernel");
-        serial_println!();
-        serial_println!("AArch64 M5b — no kernel to boot, halting.");
+        serial_println!("The dom0-kernel module does not appear to be a valid ARM64 Image.");
         loop { unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }; }
     }
+
+    let text_offset = unsafe { *((kernel_addr + 0x08) as *const u64) };
+    let entry = kernel_addr + text_offset;
+    serial_println!(
+        "Linux Image at {:#x} (text_offset={:#x}, entry={:#x})",
+        kernel_addr, text_offset, entry
+    );
 
     // Configure HCR_EL2 for guest: VM=1, direct-assignment (no IMO/FMO/AMO).
     unsafe { arch::aarch64::el2_regs::configure_el2_for_guest() };
 
-    // Determine entry point. For modern kernels, text_offset is 0.
-    let text_offset = unsafe { *((KERNEL_LOAD_ADDR + 0x08) as *const u64) };
-    let entry = KERNEL_LOAD_ADDR + text_offset;
-
     serial_println!("Entering Linux at {:#x} (X0=FDT@{:#x}, SP={:#x})",
-        entry, GUEST_FDT_ADDR, GUEST_STACK_TOP);
+        entry, guest_fdt_addr, guest_stack_top);
     serial_println!();
 
     // ERET into Linux — does not return.
     unsafe {
-        arch::aarch64::vcpu::enter_guest_initial(entry, GUEST_STACK_TOP, GUEST_FDT_ADDR);
+        arch::aarch64::vcpu::enter_guest_initial(entry, guest_stack_top, guest_fdt_addr);
     }
 }
 

@@ -50,6 +50,11 @@ SECTIONS {
     . = ALIGN(16);
     __bss_end = .;
 
+    /* End-of-image marker, 2 MiB-aligned for clean Stage-2 boundary.
+     * The boot descriptor blob (if any) is loaded immediately after this. */
+    . = ALIGN(0x200000);
+    __image_end = .;
+
     /* Discard DWARF exception-handling sections; we use panic=abort. */
     /DISCARD/ : {
         *(.eh_frame)

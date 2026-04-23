@@ -6,7 +6,9 @@
 pub mod aarch64_platform;
 pub mod arch_state;
 pub mod boot;
+pub mod boot_descriptor;
 pub mod el2_regs;
+pub mod fdt_patch;
 pub mod gicv3;
 pub mod mmu;
 pub mod serial;
