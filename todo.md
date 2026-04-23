@@ -40,6 +40,12 @@
   Boot descriptor (TDBS) format provides module discovery (kernel, initrd) —
   no hardcoded addresses in Rust. FDT patcher adds initrd properties to /chosen.
   Linux unpacks initramfs, runs /init. x86 boot verified (no regression).
+- **AArch64 M6 in progress**: Full Ubuntu distro boot on QEMU aarch64 (TCG).
+  ICC_SRE_EL2 fix enables GIC interrupt delivery. Stage-2 uses 1G pages.
+  Kernel boots, systemd starts ("Hostname set"), but full boot blocked by
+  QEMU TCG Stage-2 overhead (~25x slower). Confirmed only 1 EL2 trap (SMC)
+  occurs — overhead is purely software page walks, not trap storms. Needs
+  ARM hardware with KVM to validate.
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -63,6 +69,7 @@
 
 ### Recent commits
 
+- `d810b15` — **feat(aarch64): M6 — ICC_SRE_EL2 fix, Stage-2 1G pages, full RAM mapping**
 - `2613117` — **feat(aarch64): M5c — full initramfs boot with boot descriptor system**
 - `f067053` — **feat(aarch64): cargo fetch-aarch64-kernel + auto-discover Linux Image**
 - `f7e0e19` — **feat(aarch64): M5b — boot Linux kernel to rootfs panic**
@@ -133,21 +140,27 @@ Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modu
 - [x] QEMU aarch64 testbed setup — M1 done (`cargo aarch64-themis`)
 - [x] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables) — M2-M4 done
 - [x] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR) — M5a done
-- [ ] PSCI handling + Linux kernel loading — M5b
-- [ ] Linux dom0 boot to console — M5c
+- [x] PSCI handling + Linux kernel loading — M5b done
+- [x] Linux dom0 boot with initramfs — M5c done
+- [ ] Full distro boot (blocked on QEMU TCG Stage-2 overhead) — M6 partial
 
 ### TODO: AArch64 backend (active)
 
 Design doc: [`themis/docs/arm-porting-design.md`](themis/docs/arm-porting-design.md)
 
-**M1–M4 complete**: boot, memory, EL2, MMU, vectors, Stage-2, GICv3.
-**M5a complete**: guest entry at EL1, HVC trap cycle, ESR decoding.
-Commits: `9823d73` (M1), `d0fe7c4` (aliases), `e20f2d2` (M2), `011ed77` (M3a),
-`cab9626` (M3b), `ae9234c` (M4), `2f044b2` (M5a).
+**M1–M5c complete**: boot, memory, EL2, MMU, vectors, Stage-2, GICv3, guest entry,
+PSCI, Linux kernel boot, initramfs boot with boot descriptor system.
 
-**M5b next**: PSCI handling (VERSION, CPU_ON, SYSTEM_OFF, SYSTEM_RESET),
-Linux Image loading via QEMU `-device loader`, minimal guest FDT construction,
-full guest RAM Stage-2 mapping.
+**M6 in progress**: Full Ubuntu distro boot. ICC_SRE_EL2 + ICH_HCR_EL2 configured
+for direct-assign interrupt mode. Stage-2 uses 1G pages. Kernel boots, systemd
+starts, but full boot blocked by QEMU TCG Stage-2 translation overhead (~25x).
+Only 1 EL2 trap occurs (SMC/PSCI) — no trap storms. Needs ARM hardware with KVM.
+
+Commits: `9823d73` (M1), `d0fe7c4` (aliases), `e20f2d2` (M2), `011ed77` (M3a),
+`cab9626` (M3b), `ae9234c` (M4), `2f044b2` (M5a), `f7e0e19` (M5b),
+`2613117` (M5c), `d810b15` (M6 partial).
+
+**Next for ARM**: test on real ARM hardware with KVM to validate Stage-2 performance.
 
 ### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
 
