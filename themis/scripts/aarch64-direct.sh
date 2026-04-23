@@ -35,7 +35,16 @@ fi
 
 QEMU_CPUS="${QEMU_CPUS:-1}"
 QEMU_MEM="${QEMU_MEM:-1G}"
-LINUX_IMAGE="${LINUX_IMAGE:-}"
+# Auto-discover ARM64 kernel if not explicitly set
+if [[ -z "${LINUX_IMAGE:-}" ]]; then
+    DEFAULT_IMAGE="$WORKSPACE_ROOT/guest/aarch64/Image"
+    if [[ -f "$DEFAULT_IMAGE" ]]; then
+        LINUX_IMAGE="$DEFAULT_IMAGE"
+    fi
+else
+    LINUX_IMAGE="$LINUX_IMAGE"
+fi
+
 INITRD="${INITRD:-}"
 
 # ── Build the capavisor ELF ───────────────────────────────────────────────
@@ -60,13 +69,18 @@ echo "→ CPUs: $QEMU_CPUS  RAM: $QEMU_MEM"
 # ── Build loader arguments for Linux Image / initrd ─────────────────────
 
 LOADER_ARGS=""
-if [[ -n "$LINUX_IMAGE" ]]; then
+if [[ -n "${LINUX_IMAGE:-}" ]]; then
     if [[ ! -f "$LINUX_IMAGE" ]]; then
         echo "ERROR: Linux Image not found at $LINUX_IMAGE" >&2
         exit 1
     fi
     echo "→ Linux Image: $LINUX_IMAGE (loaded at 0x41000000)"
     LOADER_ARGS="$LOADER_ARGS -device loader,file=$LINUX_IMAGE,addr=0x41000000"
+else
+    echo "→ No Linux kernel found. The capavisor will boot standalone."
+    echo "  To boot Linux:  cargo fetch-aarch64-kernel && cargo aarch64-direct"
+    echo "  Or manually:    LINUX_IMAGE=/path/to/Image cargo aarch64-direct"
+    echo
 fi
 
 if [[ -n "$INITRD" ]]; then

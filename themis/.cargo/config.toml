@@ -40,3 +40,4 @@ resize-disk   = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_
 aarch64-iso    = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-iso"]
 aarch64-themis = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-themis"]
 aarch64-direct = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "aarch64-direct"]
+fetch-aarch64-kernel = ["run", "--manifest-path", "xtask/Cargo.toml", "--target", "x86_64-unknown-linux-gnu", "--", "fetch-aarch64-kernel"]
