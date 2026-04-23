@@ -35,6 +35,11 @@
   Stage-2 device memory mapping (GIC, UART, virtio, PCIe ECAM, PCIe MMIO).
   T0SZ=24 (40-bit IPA) with concatenated root tables (8K, 1024 L1 entries).
   Linux boots to rootfs panic (expected — no initrd). GICv3 + timer + PCI all OK.
+- **AArch64 M5c complete**: Full initramfs boot with boot descriptor system.
+  QEMU launch script dynamically computes memory layout from ELF `__image_end`.
+  Boot descriptor (TDBS) format provides module discovery (kernel, initrd) —
+  no hardcoded addresses in Rust. FDT patcher adds initrd properties to /chosen.
+  Linux unpacks initramfs, runs /init. x86 boot verified (no regression).
 - **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
 - **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
 - **lean-exec differential testing**: 21/21 tests passing.
@@ -58,6 +63,9 @@
 
 ### Recent commits
 
+- `2613117` — **feat(aarch64): M5c — full initramfs boot with boot descriptor system**
+- `f067053` — **feat(aarch64): cargo fetch-aarch64-kernel + auto-discover Linux Image**
+- `f7e0e19` — **feat(aarch64): M5b — boot Linux kernel to rootfs panic**
 - `81703b9` — **docs: update arm-porting-design.md with M4+M5a completion**
 - `2f044b2` — **feat(aarch64): M5a — guest entry at EL1 with HVC trap loop**
 - `ae9234c` — **feat(aarch64): M4 — GICv3 distributor, redistributor, CPU interface, ICH**
