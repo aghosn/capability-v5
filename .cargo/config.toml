@@ -1,3 +1,4 @@
 [alias]
 build-bins = "run --manifest-path themis/xtask/Cargo.toml -- build-bins"
 build-bins-docker = "run --manifest-path themis/xtask/Cargo.toml -- build-bins-docker"
+build-kernel = "run --manifest-path themis/xtask/Cargo.toml -- build-kernel"
