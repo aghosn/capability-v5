@@ -128,8 +128,10 @@ send shared_buf cvm_ch
 @msg
 @msg CHV (cloud-hypervisor) receives this alias and maps it for
 @msg virtio ring/data access.  Virtio DMA goes through this buffer.
+@msg The alias must be placed at a GPA outside the hypervisor's existing
+@msg address map (pool occupies 0x0..0x100000), so we use 0x100000.
 enumerate-pending hypervisor
-accept-capability hypervisor 0
+accept-capability hypervisor 0 at 0x100000
 
 @msg
 @msg ✓ Hypervisor now has RW access to the bounce buffer only
