@@ -366,16 +366,15 @@ def send (callerId : DomainId) (capHandle : LocalHandle)
   -- Determine GPA for the receiver (use hint or default to access.start)
   let gpa := gpaHint.getD cap.region.access.start
 
-  -- Check for GPA overlap in receiver's address space (Rust: address_map.overlaps).
-  -- Uses full cap ranges including carved-out gaps, which are "blocked" entries
-  -- in Rust's AddressMap and prevent new mappings from landing there.
-  if !attrs.meta then do
-    let s ← CapaM.getState
-    let existingRanges := getGpaFullRanges s receiver
-    if rangesOverlap existingRanges gpa cap.region.access.size then
-      CapaM.throw .regionOverlap
-
   if receiver.isUnsealed then do
+    -- Check for GPA overlap in receiver's address space (Rust: address_map.overlaps).
+    -- Only for unsealed receivers — sealed sends defer overlap check to accept.
+    if !attrs.meta then do
+      let s ← CapaM.getState
+      let existingRanges := getGpaFullRanges s receiver
+      if rangesOverlap existingRanges gpa cap.region.access.size then
+        CapaM.throw .regionOverlap
+
     -- Immediate transfer: remove from caller, add to receiver
     CapaM.modifyDomain callerId (·.removeMemCap capHandle)
 

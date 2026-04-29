@@ -34,6 +34,7 @@ uint32_t lean_ffi_revoke_domain(uint64_t parent_id, uint64_t child_id);
 
 // --- Channel operations ---
 uint32_t lean_ffi_get_chan(uint64_t caller, uint64_t target);
+uint32_t lean_ffi_get_chan_self(uint64_t caller);
 uint32_t lean_ffi_send_channel(uint64_t caller, uint64_t chan_id,
                                uint64_t receiver);
 uint32_t lean_ffi_accept_channel(uint64_t receiver, uint64_t pending_id);

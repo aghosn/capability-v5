@@ -36,6 +36,7 @@ unsafe extern "C" {
 
     // Channel
     fn lean_ffi_get_chan(caller: u64, target: u64) -> u32;
+    fn lean_ffi_get_chan_self(caller: u64) -> u32;
     fn lean_ffi_send_channel(caller: u64, chan: u64, receiver: u64) -> u32;
     fn lean_ffi_accept_channel(receiver: u64, pending: u64) -> u32;
     fn lean_ffi_reject_channel(receiver: u64, pending: u64) -> u32;
@@ -457,8 +458,7 @@ impl Backend for LeanBackend {
     }
 
     fn get_chan_self(&mut self, caller: DomainId) -> Result<DomainId> {
-        // Lean FFI: get_chan with caller == target implements self-channel.
-        let code = unsafe { lean_ffi_get_chan(caller, caller) };
+        let code = unsafe { lean_ffi_get_chan_self(caller) };
         check(code)?;
         Ok(get_result1())
     }

@@ -381,6 +381,18 @@ def ffiGetChan (callerId targetId : UInt64) : IO UInt32 := do
     pure 0
   | .error e => returnError e
 
+@[export lean_exec_get_chan_self]
+def ffiGetChanSelf (callerId : UInt64) : IO UInt32 := do
+  let result ← runOp (LeanExec.getChanSelf callerId.toNat)
+  match result with
+  | .ok chanHandle =>
+    let chanId ← allocChanId
+    gChanMap.modify (· ++ [(chanId, (callerId.toNat, chanHandle, callerId.toNat))])
+    gResult1.set chanId
+    storeUpdates []
+    pure 0
+  | .error e => returnError e
+
 @[export lean_exec_send_channel]
 def ffiSendChannel (callerId chanId receiverId : UInt64) : IO UInt32 := do
   let chanMap ← gChanMap.get

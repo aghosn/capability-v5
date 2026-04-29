@@ -36,6 +36,23 @@ def getChan (callerId : DomainId) (targetHandle : LocalHandle)
   CapaM.setDomain callerId caller
   pure chanHandle
 
+/-- Get a self-channel capability (target = caller).
+
+    Creates a channel whose target is the caller itself, so capabilities
+    sent through it arrive at the caller's own pending queue.  Used by
+    the hypervisor to receive share-back from child domains.
+
+    Caller must be sealed with GETCHAN API. -/
+def getChanSelf (callerId : DomainId) : CapaM LocalHandle := do
+  let caller ← CapaM.getDomain callerId
+  CapaM.requireSealed caller
+  CapaM.requireApi caller (·.canGetChan)
+  -- Allocate a channel handle targeting the caller itself
+  let (caller, chanHandle) := caller.allocDomHandle
+  let caller := caller.addChanCap chanHandle callerId
+  CapaM.setDomain callerId caller
+  pure chanHandle
+
 /-- Send a channel capability to another domain.
 
     Caller must be sealed with SEND API.  `chanHandle` must be a valid,

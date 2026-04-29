@@ -23,6 +23,7 @@ extern lean_object* lean_exec_create_domain(uint64_t, uint64_t, uint64_t);
 extern lean_object* lean_exec_seal(uint64_t, uint64_t);
 extern lean_object* lean_exec_revoke_domain(uint64_t, uint64_t);
 extern lean_object* lean_exec_get_chan(uint64_t, uint64_t);
+extern lean_object* lean_exec_get_chan_self(uint64_t);
 extern lean_object* lean_exec_send_channel(uint64_t, uint64_t, uint64_t);
 extern lean_object* lean_exec_accept_channel(uint64_t, uint64_t);
 extern lean_object* lean_exec_reject_channel(uint64_t, uint64_t);
@@ -177,6 +178,10 @@ uint32_t lean_ffi_revoke_domain(uint64_t parent_id, uint64_t child_id) {
 
 uint32_t lean_ffi_get_chan(uint64_t caller, uint64_t target) {
     return extract_u32(lean_exec_get_chan(caller, target));
+}
+
+uint32_t lean_ffi_get_chan_self(uint64_t caller) {
+    return extract_u32(lean_exec_get_chan_self(caller));
 }
 
 uint32_t lean_ffi_send_channel(uint64_t caller, uint64_t chan_id,
