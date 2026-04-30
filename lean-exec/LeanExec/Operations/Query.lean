@@ -70,6 +70,125 @@ def computeAddressSpace (domId : DomainId) (excludeMeta : Bool := false)
   pure (entries.flatten.mergeSort fun a b => a.1 < b.1)
 
 -- ════════════════════════════════════════════════════════════════════
+-- § computeAttestAddressMap — attest-report address map
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Address map entry for the attest report's GPA Address Space section. -/
+inductive AttestAddrEntry where
+  | mapped  (gpa : Nat) (size : Nat) (hpa : Nat) (rights : Rights)
+  | blocked (gpa : Nat) (size : Nat) (hpa : Nat)
+
+/-- GPA of an address map entry (for sorting). -/
+private def AttestAddrEntry.gpa : AttestAddrEntry → Nat
+  | .mapped g _ _ _ => g
+  | .blocked g _ _  => g
+
+/-- Split (gpa, size, hpa, rights) segments at boundary points.
+    Each point that falls strictly inside a segment splits it into two,
+    preserving GPA–HPA correspondence. -/
+private def splitSegmentsAtPoints
+    (segments : List (Nat × Nat × Nat × Rights))
+    (points : List Nat) : List (Nat × Nat × Nat × Rights) :=
+  points.foldl (fun segs pt =>
+    segs.flatMap fun (gpa, sz, hpa, r) =>
+      let gpaEnd := gpa + sz
+      if pt > gpa && pt < gpaEnd then
+        [(gpa, pt - gpa, hpa, r),
+         (pt, gpaEnd - pt, hpa + (pt - gpa), r)]
+      else
+        [(gpa, sz, hpa, r)]
+  ) segments
+
+/-- Compute address-map-style entries for the attest report.
+
+    Mirrors the Rust engine's AddressMap which tracks per-capability
+    footprints with carved-child blocking and alias-boundary splitting.
+
+    Top-level caps are owned memcaps whose parent is either absent (root cap)
+    or owned by a different domain (received via send/accept).  Non-top-level
+    caps (children of other owned memcaps) are skipped — their footprints
+    are accounted for by the parent's split processing. -/
+def computeAttestAddressMap (domId : DomainId)
+    : CapaM (List AttestAddrEntry) := do
+  let dom ← CapaM.getDomain domId
+  let s ← CapaM.getState
+  let allEntries : List AttestAddrEntry := dom.memCaps.flatMap fun (_, uid) =>
+    match s.getMemCap uid with
+    | none => []
+    | some cap =>
+      -- Determine if this is a top-level cap (root or received from outside)
+      let isRootCap := cap.parentUid.isNone
+      let isReceivedFromOutside := match cap.parentUid with
+        | none => false
+        | some puid =>
+          match s.getMemCap puid with
+          | some parent => parent.capId.domainId != domId
+          | none => true
+      let isTopLevel := isRootCap || isReceivedFromOutside
+      if !isTopLevel then []
+      else
+        let access := cap.region.access
+        -- Compute GPA offset from domain's overrides
+        let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
+          | some (_, g) => g
+          | none => access.start
+        let gpaOffset := gpaBase - access.start
+        match cap.parentUid with
+        | none =>
+          -- Root cap: only children contribute to the address map.
+          cap.childUids.toList.filterMap fun childUid =>
+            match s.getMemCap childUid with
+            | none => none
+            | some child =>
+              let cAccess := child.region.access
+              if child.capId.domainId == domId then
+                some (.mapped (cAccess.start + gpaOffset) cAccess.size
+                              cAccess.start cAccess.rights)
+              else if child.region.kind == .carve then
+                some (.blocked (cAccess.start + gpaOffset) cAccess.size
+                               cAccess.start)
+              else
+                none
+        | some _ =>
+          -- Received cap: include its footprint, subtract carved children,
+          -- split at alias boundaries, and emit BLOCKED for sent carved children.
+          let carvedRanges := cap.childUids.toList.filterMap fun childUid =>
+            match s.getMemCap childUid with
+            | some child =>
+              if child.region.kind == .carve then
+                some (child.region.access.start, child.region.access.size)
+              else none
+            | none => none
+          let visible := subtractRanges access.start access.size carvedRanges
+          let segments := visible.map fun (st, sz) =>
+            (st + gpaOffset, sz, st, access.rights)
+          -- Collect alias boundary points for splitting
+          let aliasPoints := cap.childUids.toList.flatMap fun childUid =>
+            match s.getMemCap childUid with
+            | some child =>
+              if child.region.kind == .alias then
+                let cStart := child.region.access.start + gpaOffset
+                let cEnd := cStart + child.region.access.size
+                [cStart, cEnd]
+              else []
+            | none => []
+          let split := splitSegmentsAtPoints segments aliasPoints
+          let mappedEntries := split.map fun (gpa, sz, hpa, r) =>
+            AttestAddrEntry.mapped gpa sz hpa r
+          -- BLOCKED entries for carved children sent to other domains
+          let blockedEntries := cap.childUids.toList.filterMap fun childUid =>
+            match s.getMemCap childUid with
+            | some child =>
+              if child.region.kind == .carve && child.capId.domainId != domId then
+                let cAccess := child.region.access
+                some (AttestAddrEntry.blocked
+                  (cAccess.start + gpaOffset) cAccess.size cAccess.start)
+              else none
+            | none => none
+          mappedEntries ++ blockedEntries
+  pure (allEntries.mergeSort fun a b => a.gpa < b.gpa)
+
+-- ════════════════════════════════════════════════════════════════════
 -- § enumeratePending — list pending capabilities
 -- ════════════════════════════════════════════════════════════════════
 
@@ -307,9 +426,9 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         let kindStr := toString cap.region.kind
         let attrsStr := attrsToAttestStr cap.attributes
         let mainLine := s!"  Handle {handle}: {memName} = [{toHexR access.start}..{toHexR access.end}) {access.rights} (kind: {kindStr}, attrs: {attrsStr})\n"
-        -- GPA line: only show for child domains (which receive memory via send
-        -- and thus have GPA mappings); root's memcaps have no GPA mapping.
-        let gpaLine := if dom.parentDomId.isSome then
+        -- GPA line: show for all domains.  Root memcaps have identity
+        -- mappings through child footprints in the address map.
+        let gpaLine :=
           let gpaBase := match dom.gpaOverrides.find? (fun p => p.1 == uid) with
             | some (_, g) => g
             | none => access.start
@@ -317,7 +436,6 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
             s!"    GPA: {toHexR gpaBase} (HPA {toHexR access.start})\n"
           else
             s!"    GPA: {toHexR access.start} (identity)\n"
-        else ""
         -- Child carved/aliased lines
         let childLines := cap.childUids.toList.map fun childUid =>
           match s.getMemCap childUid with
@@ -331,23 +449,23 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
         s!"  Handle {handle}: {memName} = <not found>\n"
     out := out ++ String.join mcLines
 
-  -- GPA Address Space: only for child domains with GPA mappings
-  if dom.parentDomId.isSome then do
-    let addrSpace ← computeAddressSpace domId
-    out := out ++ "\nGPA Address Space:\n"
-    if addrSpace.isEmpty then
-      out := out ++ "  (empty)\n"
-    else
-      let gpaLines := addrSpace.map fun (gpa, size, hpa, rights) =>
+  -- GPA Address Space: computed from the address map for all domains
+  let addrMap ← computeAttestAddressMap domId
+  out := out ++ "\nGPA Address Space:\n"
+  if addrMap.isEmpty then
+    out := out ++ "  (empty)\n"
+  else
+    let gpaLines := addrMap.map fun
+      | .mapped gpa size hpa rights =>
         let end_ := gpa + size
         if gpa == hpa then
           s!"  GPA {toHexR gpa}..{toHexR end_} → HPA {toHexR hpa} {rights} (identity)\n"
         else
           s!"  GPA {toHexR gpa}..{toHexR end_} → HPA {toHexR hpa} {rights} \n"
-      out := out ++ String.join gpaLines
-  else
-    out := out ++ "\nGPA Address Space:\n"
-    out := out ++ "  (empty)\n"
+      | .blocked gpa size hpa =>
+        let end_ := gpa + size
+        s!"  GPA {toHexR gpa}..{toHexR end_} → BLOCKED (HPA {toHexR hpa})\n"
+    out := out ++ String.join gpaLines
 
   -- Recursive child expansion (one level)
   if expandChildren then
