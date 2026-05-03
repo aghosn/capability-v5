@@ -121,7 +121,7 @@ EOF
     if [[ -f "$MNT_BOOT/grub/grub.cfg" ]]; then
         sudo sed -i 's|root=LABEL=cloudimg-rootfs|root=/dev/vda1|g' "$MNT_BOOT/grub/grub.cfg"
         # Mask slow boot services that hang without internet access.
-        sudo sed -i '/linux\s/s|$| systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=networkd-wait-online.service|' "$MNT_BOOT/grub/grub.cfg"
+        sudo sed -i '/linux\s/s|$| systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=systemd-networkd-wait-online.service|' "$MNT_BOOT/grub/grub.cfg"
         echo "  ✔ grub.cfg patched (root=/dev/vda1, services masked)"
     fi
     sudo umount "$MNT_BOOT"

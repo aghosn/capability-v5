@@ -96,7 +96,7 @@ exec "$CHV" \
     -v \
     --kernel "$KERNEL_IMG" \
     ${INITRAMFS_ARGS} \
-    --cmdline "earlyprintk=serial,ttyS0,115200 keep_bootcon console=ttyS0,115200 console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=7 no_timer_check" \
+    --cmdline "earlyprintk=serial,ttyS0,115200 keep_bootcon console=ttyS0,115200 console=hvc0 root=/dev/vda1 rw nokaslr nopv lpj=3000000 tsc=reliable clocksource=tsc loglevel=7 no_timer_check systemd.mask=systemd-networkd-wait-online.service systemd.mask=snapd.seeded.service systemd.mask=snapd.service" \
     --disk path="$DOM1_DISK" \
     --net tap="$TAP",mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=34 \
