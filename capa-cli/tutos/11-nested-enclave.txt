@@ -19,7 +19,7 @@ init hypervisor 0x80000000
 
 # Create CVM
 @msg 📋 Step 2: Create a Confidential VM
-create-domain hypervisor cvm1 0b1111 GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND
+create-domain hypervisor cvm1 0b1111 CREATE,GET,ATTEST,SWITCH,SEAL,CARVE,ALIAS,SEND
 
 @msg
 @msg ✓ CVM created with permissions to create child domains
