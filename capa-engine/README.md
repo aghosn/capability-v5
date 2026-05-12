@@ -8,7 +8,9 @@ The capability engine provides a principled mechanism for partitioning resources
 
 The engine is designed for use in hypervisors, monitors, and bare-metal runtimes. It has no OS dependencies (only `alloc` is required) and exposes a clean `Platform` trait so that hardware-specific operations (page-table updates, TLB shootdowns, IPI delivery) can be plugged in separately from the capability logic.
 
-For detailed design and semantics documentation, see [`docs/`](docs/).
+For detailed design and semantics documentation, see
+[`docs/capability-engine/`](../docs/capability-engine/) (semantics, implementation)
+and [`docs/architecture/`](../docs/architecture/) (design documents).
 
 ## Source Code Layout
 
@@ -63,8 +65,7 @@ cargo test --test integration_revoke
 
 ```bash
 # Run all loom suites (alias defined in .cargo/config.toml)
-cargo loom            # core suites (no feature-gated tests)
-cargo loom-all        # includes address_translation suite
+cargo loom
 
 # Or run individual suites:
 cargo test --test loom_concurrency   --features loom --release

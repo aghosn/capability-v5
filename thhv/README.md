@@ -1,7 +1,7 @@
 # thhv — Capability-Aware `/dev/thhv` Kernel Driver
 
 Out-of-tree Linux kernel module that exposes Themis capability operations
-through an ioctl interface modelled on Microsoft's THHV driver, enabling
+through an ioctl interface modelled on Microsoft's MSHV driver, enabling
 **cloud-hypervisor** to target the Themis capavisor with a thin backend swap.
 
 ## Architecture
@@ -97,4 +97,6 @@ See `todo.md` (Phase 15) for the full implementation roadmap.
 
 ## Design
 
-Full design document: `capa-engine/docs/design/thhv_themis/thhv_themis.md`
+Full design document: [`docs/architecture/mshv-themis.md`](../docs/architecture/mshv-themis.md)
+
+Domain communication protocol: [`docs/domain-comm.md`](../docs/domain-comm.md)

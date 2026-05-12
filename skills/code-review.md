@@ -231,7 +231,7 @@ about this?* If not, the feature is either missing engine support
 | `CONTEXT.md` | Architecture changes, new axioms, settled design decisions |
 | `HANDOFF.md` | Before handoff: what works, what doesn't, how to test |
 | Skill files (`skills/`) | New workflows, changed procedures, new conventions |
-| Design docs (`capa-engine/docs/design/`) | New subsystem designs, protocol changes |
+| Design docs (`docs/architecture/`) | New subsystem designs, protocol changes |
 
 ### Documentation standards
 

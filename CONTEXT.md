@@ -372,94 +372,33 @@ is enabled with `--features themis`.
 
 ## 7. Build & Deploy
 
-### Current workflow (requires sudo for NBD mount)
+For the full build guide covering all components, see
+[**docs/building.md**](docs/building.md).
+
+For the detailed script reference and environment variables, see
+[**themis/scripts/README.md**](themis/scripts/README.md).
+
+### Quick reference
 
 ```bash
-# Build capavisor + boot ISO
-cargo themis                        # or: bash themis/scripts/run-qemu.sh
+# From repo root:
+cargo build-bins                   # build capavisor + thhv.ko + CHV, pack into bins.img
+cargo build-kernel                 # build CoCo guest kernel (requires ../linux fork)
 
-# Build dom0 standalone (sanity check)
-SEED=1 cargo dom0                   # first boot: provisions cloud user
-cargo dom0                          # subsequent boots
-
-# Build thhv.ko + test binaries + copy to guest disk
-sudo COPY_TO_GUEST=/root bash thhv/build-guest.sh
-
-# Build cloud-hypervisor with Themis backend
-cd cloud-hypervisor
-cargo build --features themis
+# From themis/:
+SEED=1 cargo themis                # first boot (cloud-init provision)
+cargo themis                       # subsequent boots
+cargo dom0                         # dom0 standalone (no Themis)
+cargo aarch64-direct               # AArch64 QEMU boot
 ```
-
-### Scripts reference
-
-| Script | Purpose | Sudo? |
-|--------|---------|-------|
-| `themis/scripts/build-iso.sh` | Build capavisor + Limine ISO | No |
-| `themis/scripts/run-qemu.sh` | Boot Themis ISO + dom0 under QEMU | No |
-| `themis/scripts/run-dom0.sh` | Boot dom0 standalone under QEMU | No |
-| `themis/scripts/fetch-dom0.sh` | Download Ubuntu image + seed | No |
-| `themis/scripts/mount-guest.sh` | NBD-mount dom0 QCOW2 | **Yes** |
-| `themis/scripts/umount-guest.sh` | Unmount NBD | **Yes** |
-| `themis/scripts/resize-disk.sh` | Grow dom0 QCOW2 | No |
-| `thhv/build-guest.sh` | Build thhv.ko, copy to dom0 disk | **Yes** (NBD) |
-
-### Environment knobs (run-qemu.sh / run-dom0.sh)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROFILE` | `debug` | `release` for optimized builds |
-| `QEMU_CPUS` | `4` (qemu) / `2` (dom0) | vCPU count |
-| `QEMU_MEM` | `4G` | Guest RAM |
-| `QEMU_ENABLE_KVM` | `1` | Use KVM acceleration |
-| `QEMU_BIOS` | `0` | `1` = legacy BIOS instead of UEFI |
-| `SEED` | `` | `1` = attach cloud-init seed (first boot) |
-| `DOM0_VERSION` | `noble` | `noble` or `jammy` |
-| `COPY_TO_GUEST` | `` | Set to guest user home (e.g. `/root`) to copy binaries |
 
 ### Dom0 login
-- User: `cloud` / Password: `cloud123` (provisioned by cloud-init seed on first boot)
-- SSH: `ssh -p 2222 cloud@localhost` (port forward configured in `run-dom0.sh`)
+- User: `cloud` / Password: `cloud123`
+- SSH: `ssh -p 2222 cloud@localhost`
 
 ---
 
-## 8. Planned: Automated Build & Deploy (Phase 16.5)
-
-The planned automation eliminates all sudo from the build/deploy workflow using
-a separate `bins.img` artifact disk (ext2, FUSE-mounted) and downloaded kernel headers.
-See `todo.md` Phase 16.5 for the full plan.
-
-### Target workflow (post Phase 16.5)
-
-```bash
-# One-time tool install (sudo once only)
-sudo apt install e2fsprogs fuse2fs qemu-utils cloud-image-utils xorriso
-
-# One-time project setup (all sudo-free after)
-cargo fetch-dom0                              # download Ubuntu image + seed
-bash themis/scripts/fetch-kheaders.sh        # download + extract kernel headers
-bash themis/scripts/create-bins.sh           # create empty bins.img
-
-# Build everything and pack artifacts
-cargo build-bins                             # native
-cargo build-bins-docker                      # via Docker (older kernel hosts)
-
-# Boot
-SEED=1 cargo dom0                            # first boot
-cargo dom0                                   # subsequent boots
-```
-
-### Two build paths
-
-| Path | When to use | Requires |
-|------|-------------|---------|
-| **Native** (`cargo build-bins`) | WSL / recent Linux host | Rust toolchain, build-essential, fuse2fs |
-| **Docker** (`cargo build-bins-docker`) | Older kernel / CI | Docker only |
-
-Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs natively.
-
----
-
-## 9. Known Issues / Gotchas
+## 8. Known Issues / Gotchas
 
 - **Double kernel log lines in QEMU serial**: Linux guest has both `console=ttyS0`
   and `console=tty0`; both write to the serial port under `-serial mon:stdio`.
@@ -498,7 +437,13 @@ Both paths produce the same `themis/guest/bins.img`.  QEMU boot always runs nati
 
 ---
 
-## 11. Skills
+## 9. Todo Tracker
+
+The authoritative task list is [`todo.md`](todo.md) at the repo root.
+
+---
+
+## 10. Skills
 
 ### Mandatory — read this first, every session
 
@@ -517,22 +462,25 @@ your task:
 |------------|----------------|
 | `skills/debugging-dom-boot.md` | Debugging an early-boot hang in a guest domain (dom1, nested Linux). Covers `themis_trace()` VMCALL instrumentation and the trace code registry. |
 | `skills/running-inside-dom0.md` | Booting Themis + dom0 under QEMU, capturing the full trace to `/tmp/out.txt`, SSH-ing into dom0 in parallel, and diagnosing hangs or crashes. |
-| `skills/working-on-capability-engine.md` | Modifying `capa-engine/` — domain-mediated API, locking model (shared vs. exclusive, `execute()`), running `cargo test` / `cargo loom` / `cargo loom-all`, test policy, verifying capa-cli. |
+| `skills/working-on-capability-engine.md` | Modifying `capa-engine/` — domain-mediated API, locking model (shared vs. exclusive, `execute()`), running `cargo test` / `cargo loom`, test policy, verifying capa-cli. |
 | `skills/working-on-capavisor.md` | Modifying `themis/capavisor/` — core invariants (capability-first, adversarial domains, no dom0 privilege, META pool isolation), adding vmexit handlers, adding hypercalls, `ThemisPlatform::apply_update`, active-codebase caveats. |
 
 Read the full skill file, not just this table — the table is a routing guide only.
 
 ---
 
-## 10. Todo Tracker
+## 11. Documentation
 
-The authoritative task list is `todo.md` at the repo root.  Key open phases:
+All project-wide documentation is consolidated under [`docs/`](docs/):
 
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 15-dc-m5 | Async VP exit via DomainComm | Deferred |
-| 16f | Verify virtio backends with Themis | Pending P16h |
-| 16h | End-to-end: boot Linux guest under cloud-hypervisor on Themis | Blocked on 16.5 |
-| 16.5 | Automated build & deploy (bins.img, no-sudo, Docker) | **Next** |
-| 16e | Device passthrough (`THHV_ASSIGN_DEVICE`) | Requires 16h first |
-| 17 | Dom0 networking | Independent |
+| Path | Contents |
+|------|----------|
+| `docs/building.md` | Unified build guide for all components |
+| `docs/architecture/` | Design documents (confidential VMs, interrupts, attestation, ARM porting, platform modularization) |
+| `docs/capability-engine/` | Engine deep-dive (semantics, implementation, tutorials) |
+| `docs/domain-comm.md` | Domain communication protocol (thhv ↔ capavisor ABI) |
+| `docs/archive/` | Historical docs (old plans, superseded semantics, session notes) |
+
+Each sub-project has its own README with build/run instructions:
+`capa-engine/README.md`, `capa-cli/README.md`, `lean-exec/README.md`,
+`thhv/README.md`, `themis/README.md`, `themis/scripts/README.md`.

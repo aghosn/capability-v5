@@ -310,4 +310,5 @@ cargo build --release --features lean-backend
 ./target/release/capability-cli --backend lean
 ```
 
-See `refactoring-plan.md` for the full roadmap.
+See the [root README](../README.md) for the project overview and
+[docs/building.md](../docs/building.md) for the unified build guide.

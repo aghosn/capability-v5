@@ -117,6 +117,7 @@ cargo gdb
 | Script | Purpose | Sudo required | Key env vars |
 |---|---|---:|---|
 | `build-bins.sh` | Build requested artifacts in dependency order, then refresh `bins.img` | No | `PROFILE`, `BINS_TARGETS`, `KHEADERS_DIR` |
+| `build-kernel.sh` | Build the Themis CoCo guest kernel from the linux fork | No | `LINUX_DIR`, `JOBS`, `TARGETS`, `INSTALL_DIR` |
 | `build-bins-docker.sh` | Run `build-bins.sh` inside `themis-build:latest` | No | `PROFILE`, `BINS_TARGETS`, `KHEADERS_DIR` |
 | `build-iso.sh` | Build `capavisor` and assemble `target/themis.iso` | No | `PROFILE`, `DOM0_VERSION`, `LIMINE_DIR`, `LIMINE_DEPLOY` |
 | `create-bins.sh` | Create an empty sparse ext2 `guest/bins.img` | No | `BINS_SIZE` |
@@ -178,6 +179,82 @@ Key artifact locations inside dom0:
 - `/opt/bins/capa-engine/capa-engine`
 - `/opt/bins/capa-engine/tests/*` (if test binaries were built)
 - `/opt/bins/nested/bzImage` and `/opt/bins/nested/rootfs.img` (optional)
+
+## Building the Themis CoCo guest kernel
+
+Confidential child domains (dom1+) need a custom Linux kernel with
+`CONFIG_THEMIS_COCO` enabled.  The kernel source lives in the
+[aghosn/linux](https://github.com/aghosn/linux) fork on the
+`v6.19.14-themis` branch.
+
+### Prerequisites
+
+Clone the linux fork next to this repository and check out the Themis branch:
+
+```bash
+cd ..                               # parent of capability-v5
+git clone https://github.com/aghosn/linux.git
+cd linux
+git checkout v6.19.14-themis
+```
+
+The branch contains:
+- **`configs/themis-coco-x86_64.config`** — trimmed kernel config with
+  `CONFIG_THEMIS_COCO=y`, only VM-essential drivers (virtio, ext4, serial, 9P)
+- **`CONFIG_THEMIS_COCO` Kconfig** — under `HYPERVISOR_GUEST`, selects
+  `ARCH_HAS_CC_PLATFORM`, `X86_MEM_ENCRYPT`, and `SWIOTLB`
+- **Themis CoCo patches** in `arch/x86/coco/core.c` and `arch/x86/include/asm/coco.h`
+
+### Building
+
+From the **repo root** (`capability-v5/`):
+
+```bash
+# Build bzImage only (default):
+cargo build-kernel
+
+# Build bzImage + modules:
+TARGETS=all cargo build-kernel
+
+# Custom linux path / parallelism:
+LINUX_DIR=/path/to/linux JOBS=16 cargo build-kernel
+
+# Or run the script directly:
+bash themis/scripts/build-kernel.sh
+```
+
+The script:
+1. Copies `configs/themis-coco-x86_64.config` into the linux tree as `.config`
+2. Runs `make olddefconfig` (only if config changed)
+3. Builds the requested targets with `make -j$(nproc)`
+4. Copies `bzImage` to `themis/guest/kernel/bzImage`
+5. If modules are built, installs them to `themis/guest/kernel/modules/`
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LINUX_DIR` | `../linux` (relative to repo root) | Path to the `aghosn/linux` checkout |
+| `JOBS` | `$(nproc)` | Parallel make jobs |
+| `TARGETS` | `bzImage` | What to build: `bzImage`, `modules`, or `all` |
+| `INSTALL_DIR` | `themis/guest/kernel/` | Where to copy the built kernel |
+
+### Deploying to dom1
+
+The built kernel can be passed directly to cloud-hypervisor:
+
+```bash
+# Via NESTED_KERNEL (packed into bins.img):
+NESTED_KERNEL=themis/guest/kernel/bzImage cargo build-bins
+
+# Or passed on the CHV command line inside dom0:
+cloud-hypervisor --kernel /opt/bins/nested/bzImage ...
+```
+
+> **Note:** The dom1 rootfs image must contain matching kernel modules (6.19)
+> if any modules are needed.  The stock dom1 image ships with 6.8 modules.
+
+---
 
 ## Troubleshooting
 

@@ -162,6 +162,9 @@ safety theorems.
 ## Relationship to capa-cli
 
 `lean-exec` accepts the same command syntax as `capa-cli` (the Rust
-implementation). Session files are interchangeable. A future FFI bridge
-will allow `capa-cli` to select `--backend lean` to run the Lean model
-as a swappable backend for differential testing.
+implementation). Session files are interchangeable. The `capa-cli` binary
+supports `--backend lean` to run the Lean model as a swappable backend
+via C FFI, enabling differential testing against the Rust engine. See the
+[regression README](../capa-cli/regression/README.md) and the
+[root README](../README.md#differential-testing-lean--rust) for
+how to run the cross-backend test suite.

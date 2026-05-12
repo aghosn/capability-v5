@@ -1,9 +1,9 @@
 ## Themis — Implementation Status & Plan
 
 > **Archives**: Previous todo content archived to:
-> - [`capa-engine/docs/archived/09-03-2026/archived_todo.md`](capa-engine/docs/archived/09-03-2026/archived_todo.md) — phases 0–15, BUG-1–15, dom0 bringup
-> - [`themis/docs/archive/27_03_2026.md`](themis/docs/archive/27_03_2026.md) — full history through dom1 multi-core debugging
-> - [`themis/docs/archive/07_04_2026.md`](themis/docs/archive/07_04_2026.md) — differential testing, VITAL cascade fix, TPM, code review
+> - [`docs/archive/todos/archived_todo_09_03_2026.md`](docs/archive/todos/archived_todo_09_03_2026.md) — phases 0–15, BUG-1–15, dom0 bringup
+> - [`docs/archive/session-notes/27_03_2026.md`](docs/archive/session-notes/27_03_2026.md) — full history through dom1 multi-core debugging
+> - [`docs/archive/session-notes/07_04_2026.md`](docs/archive/session-notes/07_04_2026.md) — differential testing, VITAL cascade fix, TPM, code review
 
 ---
 
@@ -18,7 +18,7 @@
   `graphical.target`). Verified 2026-04-14 after full modularization.
 - **Platform modularization complete**: Phase A7 done. Opaque ArchDomainState/
   ArchPlatformState types, aarch64 cross-check passes with 0 errors.
-  See `themis/docs/platform-modularization.md`.
+  See `docs/architecture/platform-modularization.md`.
 - **AArch64 M1 complete**: Limine UEFI boot, PL011 UART, memory map dump.
 - **AArch64 M2 complete**: Memory partitioning, MetaAllocator, ThemisPlatform init.
 - **AArch64 M3 complete**: EL2 direct-boot, MMU enabled (identity-mapped),
@@ -109,9 +109,9 @@
   field to Domain (behind `address_translation` feature).
 - `capa-engine/tests/unit/translation.rs` — 21 new refcounted projection unit tests.
 - `capa-engine/tests/integration/translation.rs` — 12 new MAP_SELF integration tests.
-- `capa-engine/docs/design/address_translation/address_translation.md` — §13 Refcounted
+- `docs/architecture/address-translation.md` — §13 Refcounted
   Projection Model design doc.
-- `capa-engine/docs/design/confidential-vm/confidential-vm.md` — Phase B step 1 marked done.
+- `docs/architecture/confidential-vm.md` — Phase B step 1 marked done.
 
 ---
 
@@ -121,7 +121,7 @@
 
 ### ~~TODO: Platform modularization (multi-ISA support)~~ ✅ Phases A-C, E, F Done
 
-Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modularization.md)
+Design doc: [`docs/architecture/platform-modularization.md`](docs/architecture/platform-modularization.md)
 
 **Completed**:
 - Phases A1-A6: Trait seams (ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot) + X86Platform impls
@@ -146,7 +146,7 @@ Design doc: [`themis/docs/platform-modularization.md`](themis/docs/platform-modu
 
 ### TODO: AArch64 backend (active)
 
-Design doc: [`themis/docs/arm-porting-design.md`](themis/docs/arm-porting-design.md)
+Design doc: [`docs/architecture/arm-porting.md`](docs/architecture/arm-porting.md)
 
 **M1–M5c complete**: boot, memory, EL2, MMU, vectors, Stage-2, GICv3, guest entry,
 PSCI, Linux kernel boot, initramfs boot with boot descriptor system.
@@ -219,7 +219,7 @@ No more `domain_id != 0` special-casing.
 
 ### ~~Full TPM attestation with user binding (P20j)~~ ✅ Done
 
-Design doc: [`capa-engine/docs/design/attestation/attestation.md §14`](capa-engine/docs/design/attestation/attestation.md)
+Design doc: [`docs/architecture/attestation.md §14`](docs/architecture/attestation.md)
 
 Two-layer attestation model complete: TPM2_Quote (platform) + Ed25519-signed
 domain reports (capavisor) with user public key binding. All 7 sub-tasks done.
@@ -233,10 +233,10 @@ Graceful degradation: no TPM → Ed25519-only.
 
 | Document | Path | Content |
 |----------|------|---------|
-| **Interrupt Virtualization** | `capa-engine/docs/design/interrupt-virtualization.md` | Single source of truth: goals, HW background, routing model, gap analysis, nested-virt scheduling, quantum-sched, Directvisor reference, 3 delivery bugs |
-| **Attestation** | `capa-engine/docs/design/attestation/attestation.md` | Two-layer TPM + Ed25519 model |
-| **Address Translation** | `capa-engine/docs/design/address_translation/address_translation.md` | EPT/IOMMU design |
-| **ARM Porting** | `themis/docs/arm-porting-design.md` | ARM GICv4 as PI equivalent |
+| **Interrupt Virtualization** | `docs/architecture/interrupt-virtualization.md` | Single source of truth: goals, HW background, routing model, gap analysis, nested-virt scheduling, quantum-sched, Directvisor reference, 3 delivery bugs |
+| **Attestation** | `docs/architecture/attestation.md` | Two-layer TPM + Ed25519 model |
+| **Address Translation** | `docs/architecture/address-translation.md` | EPT/IOMMU design |
+| **ARM Porting** | `docs/architecture/arm-porting.md` | ARM GICv4 as PI equivalent |
 
 ### Key files
 

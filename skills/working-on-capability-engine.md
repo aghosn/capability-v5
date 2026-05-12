@@ -170,11 +170,11 @@ apply it manually — `execute()` handles that. The batch is visible to tests vi
 ```bash
 cd capa-engine/
 cargo test          # unit + integration tests (~0.1 s)
-cargo loom-all      # ALL loom suites including address_translation (~3 min)
+cargo loom      # ALL loom suites including address_translation (~3 min)
 ```
 
 Do NOT use `cargo loom` (without `-all`) as your final check — it skips the
-`address_translation` concurrency tests. **Always use `cargo loom-all`.**
+`address_translation` concurrency tests. **Always use `cargo loom`.**
 
 ### Standard Tests (unit + integration)
 
@@ -205,24 +205,14 @@ bookkeeping is CPU-intensive and release mode is 5–10× faster.
 ```bash
 cd capa-engine/
 
-# ✅ ALWAYS use loom-all (includes address_translation concurrency tests)
-cargo loom-all
-
-# ❌ Do NOT rely on `cargo loom` alone — it skips translation tests
+# Run all loom suites (includes address_translation)
 cargo loom
 ```
 
-These are cargo aliases defined in `capa-engine/.cargo/config.toml`. Expanded forms:
+This is a cargo alias defined in `capa-engine/.cargo/config.toml`. Expanded form:
 
 ```bash
 # cargo loom expands to:
-cargo test --features loom --release \
-  --test loom_concurrency \
-  --test loom_e2e \
-  --test loom_vp_switch \
-  --test loom_meta
-
-# cargo loom-all expands to:
 cargo test --features loom,address_translation --release \
   --test loom_concurrency \
   --test loom_e2e \
@@ -251,8 +241,8 @@ this as a concurrency bug.
 
 ## Test Policy
 
-- **Every code change** → run `cargo test` **and** `cargo loom-all` before committing.
-  Both must pass. No exceptions. Do NOT substitute `cargo loom` for `cargo loom-all`.
+- **Every code change** → run `cargo test` **and** `cargo loom` before committing.
+  Both must pass. No exceptions. Do NOT substitute `cargo loom` for `cargo loom`.
 - **Logic bug fixes** → add a regression test that fails without the fix and passes with it.
   Every validation check (guard, error return) in the engine must have a corresponding
   unit test that exercises that specific rejection path.
@@ -260,7 +250,7 @@ this as a concurrency bug.
   `tests/unit/` or `tests/integration/` file. For any new concurrent code path, add a
   loom scenario in `tests/concurrency/`.
 - **Address-translation changes** → add to `tests/unit/translation.rs` and/or
-  `tests/integration/translation.rs`; run `cargo loom-all`.
+  `tests/integration/translation.rs`; run `cargo loom`.
 - **Loom tests must always pass without timeout** — a hanging loom test means a
   new interleaving does not terminate, which is a bug.
 
@@ -332,12 +322,12 @@ Reference implementations to study:
 | All public exports | `capa-engine/src/lib.rs` | — |
 | Domain-mediated ops | `capa-engine/src/capability.rs` | — |
 | Platform trait | `capa-engine/src/platform.rs` | — |
-| Locking design | `capa-engine/docs/implementation/concurrency.md` | — |
-| Update variants | `capa-engine/docs/implementation/updates.md` | — |
-| API lifecycle | `capa-engine/docs/semantics/api.md` | — |
-| Module overview | `capa-engine/docs/implementation/readme.md` | — |
+| Locking design | `docs/capability-engine/implementation.md` | — |
+| Update variants | `docs/capability-engine/implementation.md` | — |
+| API lifecycle | `docs/capability-engine/semantics.md` | — |
+| Module overview | `docs/capability-engine/implementation.md` | — |
 | Run all tests | `capa-engine/` | `cargo test` |
 | Run loom suite | `capa-engine/` | `cargo loom` |
-| Run loom + translation | `capa-engine/` | `cargo loom-all` |
+| Run loom + translation | `capa-engine/` | `cargo loom` |
 | Build CLI | `capa-cli/` | `cargo build --release` |
 | Run CLI interactively | `capa-cli/` | `cargo run` |

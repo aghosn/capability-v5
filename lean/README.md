@@ -67,6 +67,6 @@ No external dependencies — pure Lean 4.16.0.
 
 ## Related Documentation
 
-- [`capa-engine/docs/semantics/`](../capa-engine/docs/semantics/) — informal specification
+- [`docs/capability-engine/semantics.md`](../docs/capability-engine/semantics.md) — informal specification
 - [`CONTEXT.md`](../CONTEXT.md) — axioms A1–A11, architecture overview
 - [`skills/working-on-capability-engine.md`](../skills/working-on-capability-engine.md) — Rust codebase guide

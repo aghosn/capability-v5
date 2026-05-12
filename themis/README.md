@@ -12,8 +12,9 @@ From dom0, additional domains can be created by delegating sub-capabilities,
 each forming a nested trust hierarchy enforced in hardware via Intel VT-x / EPT
 (AMD SVM / NPT planned).
 
-The design is documented in `../todo.md` and the EuroS&P paper draft in
-`../capa-engine/`.  This directory is the implementation root.
+The design is documented in [`../CONTEXT.md`](../CONTEXT.md) and the design docs
+under [`../docs/architecture/`](../docs/architecture/).  This directory is the
+implementation root.
 
 ---
 
@@ -406,7 +407,7 @@ capavisor _start  (BSP, interrupts off)
   ├─ Phase 7: read Limine modules, parse Linux boot header,
   │           populate boot_params, place kernel in dom0 EPT
   └─ VMENTRY → dom0 Linux kernel
-                └─ loads themis-vmm.ko → hypercalls to Themis
+                └─ loads thhv.ko → hypercalls to Themis
                          └─ child domains created via capability delegation
 ```
 
@@ -473,13 +474,100 @@ insmod thhv.ko
 
 ---
 
+## AArch64 (QEMU)
+
+The capavisor is being ported to AArch64 with EL2 direct-boot. Current milestone:
+M5c (full initramfs boot with boot descriptor system).
+
+### Prerequisites
+
+```sh
+# Cross-compilation toolchain
+sudo apt install gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-none
+
+# QEMU with TCG (no KVM needed on x86 host)
+sudo apt install qemu-system-aarch64
+```
+
+### Build and run
+
+```sh
+# Direct EL2 boot with initramfs (current default)
+cargo aarch64-direct
+
+# Fetch a pre-built ARM64 Linux Image (one-time)
+cargo fetch-aarch64-kernel
+
+# Build the aarch64 ISO
+cargo aarch64-iso
+```
+
+Environment variables for `cargo aarch64-direct`:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `QEMU_MEM` | `4G` | Guest RAM |
+| `QEMU_CPUS` | `2` | vCPU count |
+| `AARCH64_KERNEL` | auto-detect | Path to ARM64 Linux Image |
+
+See [`docs/architecture/arm-porting.md`](../docs/architecture/arm-porting.md)
+for the porting design and milestone status.
+
+---
+
+## CoCo Guest Kernel
+
+Confidential child domains need a custom Linux kernel with `CONFIG_THEMIS_COCO`
+enabled. The kernel source is the [aghosn/linux](https://github.com/aghosn/linux)
+fork on the `v6.19.14-themis` branch.
+
+```sh
+# From the repo root:
+cargo build-kernel                    # build bzImage (default)
+TARGETS=all cargo build-kernel        # bzImage + modules
+LINUX_DIR=/path/to/linux cargo build-kernel  # custom linux path
+```
+
+Output: `themis/guest/kernel/bzImage`
+
+See [`scripts/README.md`](scripts/README.md) §Building the Themis CoCo guest
+kernel for prerequisites and full details.
+
+---
+
+## Building all artifacts (`cargo build-bins`)
+
+Build the capavisor, thhv.ko, and cloud-hypervisor in one command, then pack
+into `bins.img` for deployment inside dom0:
+
+```sh
+# From the repo root:
+cargo build-bins                     # native build (all targets)
+cargo build-bins-docker              # Docker build (if host toolchain issues)
+BINS_TARGETS=capavisor cargo build-bins  # single target
+```
+
+See [`scripts/README.md`](scripts/README.md) for the full script reference,
+Docker build path, and environment variables.
+
+---
+
 ## Status
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 0 | Workspace setup | ✅ done |
-| 0.5 | dom0 Linux image & bootloader integration | ✅ done |
-| 1 | Boot, memory, ACPI, PCI | ⬜ pending |
-| 2 | VT-x foundation | ⬜ pending |
-| 3–13 | Platform, APICv, IRQ routing, capability integration, AMD SVM | ⬜ pending |
-| 14 | Custom dom0 image with `themis-vmm.ko` | ⬜ pending |
+| Feature | Status |
+|---------|--------|
+| Dom0 boot (4 CPUs, Ubuntu Noble) | ✅ Stable |
+| Dom1 boot (1–2 CPUs, systemd to login) | ✅ Working |
+| Capability engine integration | ✅ Full |
+| VT-x / EPT / VMCS management | ✅ Full |
+| IOMMU (VT-d) | ✅ Working |
+| thhv.ko kernel driver | ✅ Working |
+| cloud-hypervisor Themis backend | ✅ Working |
+| TPM attested boot (Ed25519 + SHA-256 + PCR extend) | ✅ Working |
+| AArch64 QEMU boot (EL2, GICv3, Stage-2, PSCI, Linux) | ✅ M5c complete |
+| AArch64 full distro (Ubuntu ARM64) | 🔄 M6 in progress |
+| CoCo guest kernel (CONFIG_THEMIS_COCO) | 🔄 bzImage built, untested in dom1 |
+| EPT enforcement (private memory isolation) | ⬜ Planned |
+
+See [`todo.md`](../todo.md) for detailed tracking.
