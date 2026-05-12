@@ -51,6 +51,13 @@
 - **lean-exec differential testing**: 21/21 tests passing.
 - **Lean formal spec**: 83 proved theorems, zero `sorry`.
 - **TPM attested boot (P20)**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
+- **CoCo guest kernel**: Minimal config (245 modules vs 1750). Virtio/ext4/9p built-in,
+  no initramfs needed. `KERNEL_PROFILE=minimal` (default) in `build-kernel.sh`.
+- **Dom1 CoCo boot tooling**: `run-dom1.sh` with `--kvm`/`--themis`/auto-detect,
+  CoCo kernel priority, module install, networking setup. Comprehensive README
+  packed into bins.img at `/opt/bins/README.md`.
+- **Dom1 boots under Themis with CoCo kernel**: Verified serial I/O, MSR exits,
+  PCI probing. Slow under nested QEMU but functional.
 
 ### What doesn't work / known issues
 
@@ -63,12 +70,23 @@
   reproduce on retry). Should add IF guard to all injection paths.
 - **Posted interrupts**: hardware PI is disabled (software PIR drain used instead).
 - **Dom1 on real hardware**: not yet tested.
+- **KVM nested dom1**: CHV `FailEntry(0, 2)` under nested QEMU — missing VT-x features.
+  Only Themis backend works for dom1 under QEMU. KVM backend needs bare-metal.
 - **thhv kernel headers**: must match dom0 kernel exactly. After image upgrade:
   `rm -rf themis/target/kheaders && bash themis/scripts/fetch-kheaders.sh`
   then clean rebuild `rm thhv/*.o thhv/*.ko thhv/src/*.o && cargo build-bins`.
 
 ### Recent commits
 
+- `866132c` — **fix: --kvm flag now rmmod's thhv to force KVM backend**
+- `48ecad0` — **docs: add comprehensive dom0 README and update deploy docs**
+- `e41e2c8` — **feat: revamp run-dom1.sh for CoCo-ready dom1 boot**
+- `b3908a8` — **feat: auto-detect CoCo kernel for dom1 boot**
+- `d9feb47` — **feat(thhv): add 'make tidy' target**
+- `d9d8d25` — **fix: set MODULE_SIG_KEY path in minimal kernel config**
+- `d2d6ea1` — **feat: add minimal CoCo guest kernel config (1750 → 245 modules)**
+- `0100975` — **docs: update loom runtime estimates from actual measurements**
+- `5b063da` — **refactor: merge cargo loom-all into cargo loom**
 - `d810b15` — **feat(aarch64): M6 — ICC_SRE_EL2 fix, Stage-2 1G pages, full RAM mapping**
 - `2613117` — **feat(aarch64): M5c — full initramfs boot with boot descriptor system**
 - `f067053` — **feat(aarch64): cargo fetch-aarch64-kernel + auto-discover Linux Image**
