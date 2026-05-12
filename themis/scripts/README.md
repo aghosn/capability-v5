@@ -256,18 +256,30 @@ The script:
 
 ### Deploying to dom1
 
-The built kernel can be passed directly to cloud-hypervisor:
+The CoCo kernel and modules are automatically packed into `bins.img` by
+`update-bins.sh` when `guest/kernel/bzImage` exists.
+
+From inside dom0, `run-dom1.sh` picks up the CoCo kernel automatically:
 
 ```bash
-# Via NESTED_KERNEL (packed into bins.img):
-NESTED_KERNEL=themis/guest/kernel/bzImage cargo build-bins
+# Auto-detect: uses CoCo kernel from bins.img, falls back to dom0 /boot
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 
-# Or passed on the CHV command line inside dom0:
-cloud-hypervisor --kernel /opt/bins/nested/bzImage ...
+# Force backend:
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh --themis
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh --kvm
+
+# Override kernel:
+KERNEL=/path/to/bzImage sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+
+# Tune resources:
+CHV_CPUS=4 CHV_MEM=2G sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 ```
 
-> **Note:** The dom1 rootfs image must contain matching kernel modules (6.19)
-> if any modules are needed.  The stock dom1 image ships with 6.8 modules.
+The CoCo kernel has virtio/ext4/9p built-in — no initramfs needed.
+Modules are available in `/opt/bins/nested/modules/` if needed.
+
+See `/opt/bins/README.md` inside dom0 for the full reference.
 
 ---
 

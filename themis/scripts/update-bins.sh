@@ -146,37 +146,86 @@ mkdir -p \
 
 # ── README ───────────────────────────────────────────────────────────────────
 cat > "$MNT/README.md" <<'EOF'
-# Themis bins
+# Themis — dom0 Quick Reference
 
-This partition contains pre-built binaries and guest images for the Themis project.
+This partition (`/opt/bins`) contains pre-built binaries and guest images
+for running dom1 (the nested confidential VM) from inside dom0.
 
-## Boot dom1 (nested VM)
-
-From inside dom0:
+## Booting dom1
 
 ```bash
-# First boot (cloud-init provisioning):
-SEED_DOM1=1 sudo /opt/bins/cloud-hypervisor/run-dom1.sh
-
-# Subsequent boots:
+# Auto-detect backend (Themis if thhv.ko available, else KVM):
 sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+
+# Force a specific backend:
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh --themis
+sudo /opt/bins/cloud-hypervisor/run-dom1.sh --kvm
+
+# Override kernel:
+KERNEL=/path/to/bzImage sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+
+# Tune resources:
+CHV_CPUS=4 CHV_MEM=2G sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 ```
 
 Login: `cloud` / `cloud123`
+
+### Kernel selection
+
+The boot script picks the kernel in this order:
+1. `KERNEL` env var (if set)
+2. `/opt/bins/nested/bzImage` — the CoCo-patched kernel (if present)
+3. dom0's `/boot/vmlinuz-*` — fallback to dom0's own kernel
+
+The CoCo kernel has virtio, ext4, and 9p built-in — no initramfs needed.
+
+### Backend modes
+
+| Mode | Device | Description |
+|------|--------|-------------|
+| `--themis` | `/dev/thhv` | Capability-enforced via thhv.ko → capavisor |
+| `--kvm` | `/dev/kvm` | Standard KVM (for development/comparison) |
+| (auto) | detect | Tries Themis first, falls back to KVM |
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KERNEL` | (auto) | Override kernel path |
+| `INITRAMFS` | (auto) | Override initramfs path |
+| `CHV_CPUS` | 2 | Number of vCPUs |
+| `CHV_MEM` | 1G | Guest RAM |
+| `CHV_EXTRA_ARGS` | (none) | Extra cloud-hypervisor flags |
+
+## Loading thhv.ko manually
+
+```bash
+sudo insmod /opt/bins/thhv/thhv.ko
+ls -la /dev/thhv   # should appear
+dmesg | tail        # check for errors
+```
 
 ## Contents
 
 | Path | Description |
 |------|-------------|
-| `cloud-hypervisor/cloud-hypervisor` | Cloud Hypervisor VMM binary |
-| `cloud-hypervisor/run-dom1.sh` | Script to boot dom1 |
+| `cloud-hypervisor/cloud-hypervisor` | Cloud Hypervisor VMM binary (Themis fork) |
+| `cloud-hypervisor/run-dom1.sh` | Dom1 boot script |
 | `dom1/dom1.raw` | Dom1 root disk (Ubuntu Noble, raw) |
-| `dom1/hypervisor-fw` | Rust Hypervisor Firmware |
-| `dom1/dom1-seed.img` | Dom1 cloud-init seed (first boot) |
 | `thhv/thhv.ko` | Themis kernel module |
-| `thhv/tests/` | Themis unit tests |
-| `capa-engine/` | Capability engine binaries and tests |
-| `nested/` | Nested kernel / rootfs (if built) |
+| `thhv/tests/` | thhv unit/integration tests |
+| `capa-engine/` | Capability engine binary and tests |
+| `nested/bzImage` | CoCo guest kernel (if built) |
+| `nested/modules/` | CoCo kernel modules (if built) |
+| `version.txt` | Build metadata (git rev, timestamp) |
+
+## Troubleshooting
+
+- **"dom1 disk not found"** — run `cargo fetch-dom1` on the host, then `cargo update-bins`
+- **"cloud-hypervisor not found"** — run `cargo build-bins` on the host
+- **thhv.ko fails to load** — check `dmesg`; ensure capavisor is running (boot via `cargo themis`)
+- **No network in dom1** — the script sets up TAP + NAT automatically; check `ip addr` in dom0
+- **dom1 kernel panic** — try `--kvm` mode first to isolate Themis vs kernel issues
 EOF
 
 THHV_KO="$REPO_ROOT/thhv/thhv.ko"
