@@ -1,10 +1,10 @@
-# Tutorial 13: Channels — Driver Isolation with CVM Communication
+# Tutorial 15: Channels — Driver Isolation with CVM Communication
 # =================================================================
 # Demonstrates channels for device driver isolation: the hypervisor
 # creates a driver domain and a CVM, the CVM attests the driver via
 # a channel, then shares memory with it for I/O.
 
-@msg ━━━ Tutorial 13: Channels — Driver Isolation ━━━
+@msg ━━━ Tutorial 15: Channels — Driver Isolation ━━━
 @msg
 @msg Channels let one domain communicate with another without the parent
 @msg domain staying in the middle.  This tutorial shows a real use case:

@@ -1,8 +1,8 @@
-# Tutorial 9: Nested Enclave Architecture
+# Tutorial 11: Nested Enclave Architecture
 # ========================================
 # Demonstrates creating a CVM with a nested secure enclave inside.
 
-@msg ━━━ Tutorial 9: Nested Enclave (CVM → Enclave) ━━━
+@msg ━━━ Tutorial 11: Nested Enclave (CVM → Enclave) ━━━
 @msg
 @msg This tutorial demonstrates a three-level hierarchy:
 @msg   Hypervisor → CVM → Secure Enclave

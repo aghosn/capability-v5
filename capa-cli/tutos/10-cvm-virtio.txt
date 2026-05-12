@@ -1,8 +1,8 @@
-# Tutorial 8: Confidential VM with Shared VirtIO Buffer
+# Tutorial 10: Confidential VM with Shared VirtIO Buffer
 # ======================================================
 # Demonstrates creating a CVM with a shared buffer for I/O communication.
 
-@msg ━━━ Tutorial 8: Confidential VM with VirtIO Buffer ━━━
+@msg ━━━ Tutorial 10: Confidential VM with VirtIO Buffer ━━━
 @msg
 @msg This tutorial shows how to create a Confidential VM (CVM) with:
 @msg   • Private memory for the VM (carved, exclusive)

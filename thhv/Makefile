@@ -64,4 +64,12 @@ clean:
 	cd $(LIBTHEMIS_DIR) && cargo clean
 	rm -rf $(TEST_BINDIR)
 
-.PHONY: all clean guest tests
+# Remove build intermediates but keep thhv.ko
+tidy:
+	rm -f $(PWD)/src/*.o $(PWD)/src/.*.cmd
+	rm -f $(PWD)/*.mod $(PWD)/*.mod.c $(PWD)/*.mod.o
+	rm -f $(PWD)/*.o $(PWD)/.*.cmd
+	rm -f $(PWD)/Module.symvers $(PWD)/modules.order
+	rm -rf $(PWD)/.tmp_versions
+
+.PHONY: all clean tidy guest tests
