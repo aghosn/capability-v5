@@ -234,9 +234,21 @@ fi
 if [[ -n "$NESTED_KERNEL" ]]; then
     if [[ -f "$NESTED_KERNEL" ]]; then
         cp "$NESTED_KERNEL" "$MNT/nested/bzImage"
+        echo "  ✔ nested/bzImage"
     else
         warn_missing "$NESTED_KERNEL"
     fi
+fi
+
+# Pack CoCo kernel modules alongside the kernel.
+NESTED_MODULES="${NESTED_MODULES:-$WORKSPACE_ROOT/guest/kernel/modules}"
+if [[ -d "$NESTED_MODULES/lib/modules" ]]; then
+    mkdir -p "$MNT/nested/modules/lib"
+    cp -a "$NESTED_MODULES/lib/modules" "$MNT/nested/modules/lib/"
+    # Remove build/source symlinks (point to host paths, broken in guest)
+    find "$MNT/nested/modules" -name build -type l -delete 2>/dev/null || true
+    find "$MNT/nested/modules" -name source -type l -delete 2>/dev/null || true
+    echo "  ✔ nested/modules"
 fi
 
 if [[ -n "$NESTED_ROOTFS" ]]; then
