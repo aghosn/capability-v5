@@ -8,6 +8,7 @@
 #
 # Environment knobs:
 #   LINUX_DIR     Path to the aghosn/linux checkout (default: ../linux relative to repo root)
+#   KERNEL_PROFILE  Config profile: "minimal" (default, ~245 modules) or "full" (~1750 modules)
 #   JOBS          Parallel make jobs (default: $(nproc))
 #   TARGETS       What to build: bzImage, modules, or all (default: bzImage)
 #   INSTALL_DIR   Where to copy the built kernel (default: themis/guest/kernel/)
@@ -18,12 +19,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 LINUX_DIR="${LINUX_DIR:-$(cd "$REPO_ROOT/.." && pwd)/linux}"
+KERNEL_PROFILE="${KERNEL_PROFILE:-minimal}"
 JOBS="${JOBS:-$(nproc)}"
 TARGETS="${TARGETS:-bzImage}"
 INSTALL_DIR="${INSTALL_DIR:-$REPO_ROOT/themis/guest/kernel}"
 
-CONFIG_NAME="themis-coco-x86_64.config"
-CONFIG_SRC="$LINUX_DIR/configs/$CONFIG_NAME"
+case "$KERNEL_PROFILE" in
+    minimal)
+        CONFIG_NAME="themis-coco-x86_64-minimal.config"
+        # Try repo-local copy first, fall back to linux tree
+        if [ -f "$REPO_ROOT/themis/configs/$CONFIG_NAME" ]; then
+            CONFIG_SRC="$REPO_ROOT/themis/configs/$CONFIG_NAME"
+        else
+            CONFIG_SRC="$LINUX_DIR/configs/$CONFIG_NAME"
+        fi
+        ;;
+    full)
+        CONFIG_NAME="themis-coco-x86_64.config"
+        CONFIG_SRC="$LINUX_DIR/configs/$CONFIG_NAME"
+        ;;
+    *)
+        echo "ERROR: Unknown KERNEL_PROFILE='$KERNEL_PROFILE'. Use 'minimal' or 'full'."
+        exit 1
+        ;;
+esac
 
 # --- Validation -----------------------------------------------------------
 
@@ -48,6 +67,7 @@ fi
 
 echo "=== Themis kernel build ==="
 echo "  Linux dir:  $LINUX_DIR"
+echo "  Profile:    $KERNEL_PROFILE"
 echo "  Config:     $CONFIG_NAME"
 echo "  Targets:    $TARGETS"
 echo "  Jobs:       $JOBS"

@@ -117,7 +117,7 @@ cargo gdb
 | Script | Purpose | Sudo required | Key env vars |
 |---|---|---:|---|
 | `build-bins.sh` | Build requested artifacts in dependency order, then refresh `bins.img` | No | `PROFILE`, `BINS_TARGETS`, `KHEADERS_DIR` |
-| `build-kernel.sh` | Build the Themis CoCo guest kernel from the linux fork | No | `LINUX_DIR`, `JOBS`, `TARGETS`, `INSTALL_DIR` |
+| `build-kernel.sh` | Build the Themis CoCo guest kernel from the linux fork | No | `LINUX_DIR`, `KERNEL_PROFILE`, `JOBS`, `TARGETS`, `INSTALL_DIR` |
 | `build-bins-docker.sh` | Run `build-bins.sh` inside `themis-build:latest` | No | `PROFILE`, `BINS_TARGETS`, `KHEADERS_DIR` |
 | `build-iso.sh` | Build `capavisor` and assemble `target/themis.iso` | No | `PROFILE`, `DOM0_VERSION`, `LIMINE_DIR`, `LIMINE_DEPLOY` |
 | `create-bins.sh` | Create an empty sparse ext2 `guest/bins.img` | No | `BINS_SIZE` |
@@ -210,8 +210,11 @@ The branch contains:
 From the **repo root** (`capability-v5/`):
 
 ```bash
-# Build bzImage only (default):
+# Build bzImage with minimal config (default):
 cargo build-kernel
+
+# Build with the full (distro-like) config:
+KERNEL_PROFILE=full cargo build-kernel
 
 # Build bzImage + modules:
 TARGETS=all cargo build-kernel
@@ -223,18 +226,30 @@ LINUX_DIR=/path/to/linux JOBS=16 cargo build-kernel
 bash themis/scripts/build-kernel.sh
 ```
 
+Two config profiles are available:
+
+| Profile | Modules | Description |
+|---------|---------|-------------|
+| `minimal` (default) | ~245 | Trimmed for CoCo VMs: virtio, ext4, 9p, TDX, attestation. No physical hardware drivers. |
+| `full` | ~1750 | Original distro-based config with broad hardware support. |
+
+The minimal config is stored in `themis/configs/themis-coco-x86_64-minimal.config`
+and can also be found in the linux fork at `configs/themis-coco-x86_64-minimal.config`.
+
 The script:
-1. Copies `configs/themis-coco-x86_64.config` into the linux tree as `.config`
-2. Runs `make olddefconfig` (only if config changed)
-3. Builds the requested targets with `make -j$(nproc)`
-4. Copies `bzImage` to `themis/guest/kernel/bzImage`
-5. If modules are built, installs them to `themis/guest/kernel/modules/`
+1. Selects the config based on `KERNEL_PROFILE` (default: `minimal`)
+2. Copies the config into the linux tree as `.config`
+3. Runs `make olddefconfig` (only if config changed)
+4. Builds the requested targets with `make -j$(nproc)`
+5. Copies `bzImage` to `themis/guest/kernel/bzImage`
+6. If modules are built, installs them to `themis/guest/kernel/modules/`
 
 ### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `LINUX_DIR` | `../linux` (relative to repo root) | Path to the `aghosn/linux` checkout |
+| `KERNEL_PROFILE` | `minimal` | Config profile: `minimal` or `full` |
 | `JOBS` | `$(nproc)` | Parallel make jobs |
 | `TARGETS` | `bzImage` | What to build: `bzImage`, `modules`, or `all` |
 | `INSTALL_DIR` | `themis/guest/kernel/` | Where to copy the built kernel |
