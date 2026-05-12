@@ -74,6 +74,10 @@ fi
 setup_backend() {
     case "$BACKEND_MODE" in
         kvm)
+            if [[ -c /dev/thhv ]]; then
+                echo "→ Unloading thhv.ko to force KVM backend..."
+                rmmod thhv 2>/dev/null || true
+            fi
             if [[ ! -c /dev/kvm ]]; then
                 echo "ERROR: /dev/kvm not available"
                 exit 1
