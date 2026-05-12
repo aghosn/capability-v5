@@ -5,11 +5,16 @@
 #   - If /dev/thhv is present (or thhv.ko loads successfully): Themis backend
 #   - Otherwise: KVM backend
 #
-# Uses dom0's own kernel + initrd for direct kernel boot, bypassing GRUB.
-# Slow/network-dependent services are masked via the kernel cmdline.
+# Kernel selection priority:
+#   1. KERNEL env var (explicit path)
+#   2. /opt/bins/nested/bzImage (CoCo kernel from bins.img)
+#   3. dom0's /boot/vmlinuz-* (highest version, auto-detected)
+#
+# The CoCo kernel has virtio/ext4 built-in and does not need an initramfs.
 #
 # Usage (from inside dom0):
 #   sudo /opt/bins/cloud-hypervisor/run-dom1.sh
+#   KERNEL=/path/to/bzImage sudo /opt/bins/cloud-hypervisor/run-dom1.sh
 
 set -euo pipefail
 
@@ -20,6 +25,10 @@ DOM1_DISK="$BINS/dom1/dom1.raw"
 
 CHV_CPUS="${CHV_CPUS:-2}"
 CHV_MEM="${CHV_MEM:-1G}"
+
+# Kernel override: explicit path, bins.img nested kernel, or dom0 /boot autodetect.
+KERNEL="${KERNEL:-}"
+INITRAMFS="${INITRAMFS:-}"
 
 if [[ ! -f "$DOM1_DISK" ]]; then
     echo "ERROR: dom1 disk not found at $DOM1_DISK"
@@ -64,16 +73,23 @@ echo "→ Booting dom1 — ${CHV_CPUS} CPUs, ${CHV_MEM} RAM"
 echo "  Login: cloud / cloud123"
 echo ""
 
-# Auto-detect kernel and initramfs from dom0's /boot.
-# Uses the highest-versioned vmlinuz and its matching initrd.
-KERNEL_IMG=""
-INITRAMFS_IMG=""
+# ── Kernel selection ───────────────────────────────────────────────────────
+# Priority: 1) KERNEL env var  2) bins.img nested kernel  3) dom0 /boot
+KERNEL_IMG="${KERNEL:-}"
+INITRAMFS_IMG="${INITRAMFS:-}"
 
-for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
-[[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
+if [[ -z "$KERNEL_IMG" && -f "$BINS/nested/bzImage" ]]; then
+    KERNEL_IMG="$BINS/nested/bzImage"
+    echo "  (using CoCo kernel from bins.img)"
+fi
+
+if [[ -z "$KERNEL_IMG" ]]; then
+    # Fallback: auto-detect from dom0's /boot (highest version).
+    for f in $(ls /boot/vmlinuz-* 2>/dev/null | sort -V); do KERNEL_IMG="$f"; done
+    [[ -z "$KERNEL_IMG" && -f /boot/vmlinuz ]] && KERNEL_IMG=/boot/vmlinuz
+fi
 
 # Auto-detect initramfs matching the selected kernel.
-# Stock kernels need initramfs for virtio/ext4 modules.
 if [[ -z "$INITRAMFS_IMG" && -n "$KERNEL_IMG" ]]; then
     KVER="${KERNEL_IMG##*/vmlinuz-}"
     if [[ -f "/boot/initrd.img-${KVER}" ]]; then

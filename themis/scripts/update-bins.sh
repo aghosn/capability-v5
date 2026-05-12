@@ -21,6 +21,11 @@ PROFILE="${PROFILE:-release}"
 BINS_TARGETS="${BINS_TARGETS:-all}"
 NESTED_KERNEL="${NESTED_KERNEL:-}"
 NESTED_ROOTFS="${NESTED_ROOTFS:-}"
+
+# Auto-detect CoCo kernel if NESTED_KERNEL not explicitly set
+if [[ -z "$NESTED_KERNEL" && -f "$WORKSPACE_ROOT/guest/kernel/bzImage" ]]; then
+    NESTED_KERNEL="$WORKSPACE_ROOT/guest/kernel/bzImage"
+fi
 MNT=""
 MOUNTED=false
 
