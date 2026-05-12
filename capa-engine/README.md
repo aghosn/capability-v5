@@ -82,9 +82,9 @@ cargo test --test loom_translation   --features loom,address_translation --relea
 > | `loom_concurrency` |  30   |  ~36 s    | Core capability / memory / domain races      |
 > | `loom_e2e`         |   8   |  ~4 min   | Full send/accept/revoke end-to-end races     |
 > | `loom_meta`        |   2   |  ~34 s    | META attribute send & revoke races           |
-> | `loom_vp_switch`   |   5   |   ~5 s    | VP switch / interrupt delivery races         |
-> | `loom_translation` |   4   |  ~4 min   | Address translation send_at/accept_at/revoke |
-> | **Total**          |  49   | **~10 min** |                                            |
+> | `loom_vp_switch`   |   5   |  ~29 s    | VP switch / interrupt delivery races         |
+> | `loom_translation` |   4   | ~10 min   | Address translation send_at/accept_at/revoke |
+> | **Total**          |  49   | **~15 min** |                                            |
 >
 > `loom_e2e` and `loom_translation` contain tests that explore a very large interleaving
 > space — it is normal for individual tests within those suites to run for several minutes
