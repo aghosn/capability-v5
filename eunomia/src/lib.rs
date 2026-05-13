@@ -17,6 +17,7 @@ pub mod gdt;
 pub mod idt;
 pub mod boot;
 pub mod sched;
+pub mod hv;
 
 /// Kernel services handle passed to workload's `app_main`.
 ///
