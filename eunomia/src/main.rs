@@ -7,6 +7,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod gdt;
 mod idt;
 mod workloads;
@@ -163,6 +165,9 @@ pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
     idt::init();
     eunomia::println!("[ok] IDT loaded (32 exception vectors)");
 
+    unsafe { eunomia::mm::init(); }
+    eunomia::println!("[ok] Heap initialised ({} KiB)", eunomia::mm::allocator().remaining() / 1024);
+
     let services = eunomia::KernelServices { hvm_start_info };
 
     // Dispatch to the selected workload.
@@ -172,7 +177,10 @@ pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
     #[cfg(feature = "app-timer")]
     workloads::timer::app_main(&services);
 
-    #[cfg(not(any(feature = "app-smoke", feature = "app-timer")))]
+    #[cfg(feature = "app-memory")]
+    workloads::memory::app_main(&services);
+
+    #[cfg(not(any(feature = "app-smoke", feature = "app-timer", feature = "app-memory")))]
     {
         eunomia::println!("No workload selected. Halting.");
         loop {

@@ -17,6 +17,7 @@ console-serial = []
 # Workload selection — enable exactly one app-* feature.
 app-smoke = []    # Basic sanity tests (serial, GDT, IDT, stack)
 app-timer = []    # Timer interrupt test
+app-memory = []   # Heap allocator tests (Box, Vec, alignment)
 
 [profile.dev]
 panic = "abort"

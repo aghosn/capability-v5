@@ -6,8 +6,11 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod serial;
 pub mod timer;
+pub mod mm;
 pub mod test_harness;
 
 /// Kernel services handle passed to workload's `app_main`.

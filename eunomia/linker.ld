@@ -68,9 +68,20 @@ SECTIONS {
     . = ALIGN(4096);
 
     /* ── Boot stack (64 KiB) ─────────────────────────────────────── */
-    __stack_bottom = .;
-    . += 0x10000;
-    __stack_top = .;
+    .stack (NOLOAD) : {
+        __stack_bottom = .;
+        . += 0x10000;
+        __stack_top = .;
+    } :data
+
+    . = ALIGN(4096);
+
+    /* ── Heap (starts here, grows up to RAM limit) ───────────────── */
+    .heap (NOLOAD) : {
+        __heap_start = .;
+        . += 0x100000;   /* 1 MiB reservation (actual use may be less) */
+        __heap_end_reserved = .;
+    } :data
 
     /* ── Discard ─────────────────────────────────────────────────── */
     /DISCARD/ : {

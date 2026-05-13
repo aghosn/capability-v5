@@ -5,3 +5,6 @@ pub mod smoke;
 
 #[cfg(feature = "app-timer")]
 pub mod timer;
+
+#[cfg(feature = "app-memory")]
+pub mod memory;

@@ -102,6 +102,14 @@ Verifies the LAPIC one-shot timer fires and increments the tick counter.
 cargo run --release --no-default-features --features "console-serial,app-timer"
 ```
 
+### Memory allocator test
+
+Verifies heap allocation: Box, Vec, large allocations, alignment, heap stats.
+
+```bash
+cargo run --release --no-default-features --features "console-serial,app-memory"
+```
+
 Expected output:
 
 ```
