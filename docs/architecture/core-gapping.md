@@ -16,11 +16,15 @@ This model works but has two fundamental problems:
    prevent the parent from observing the child's state.  For I/O-heavy
    workloads this dominates runtime.
 
-2. **Security — single-stepping attacks**: because dom0 regains control on
-   the child's core after every event, a malicious parent can single-step the
-   child instruction by instruction (e.g., by programming a timer interrupt to
-   fire after each instruction).  This enables side-channel attacks and
-   microarchitectural observation of the child's execution.
+2. **Security — cache side channels and single-stepping attacks**: because
+   dom0 regains control on the child's core after every event, a malicious
+   parent can observe the child's cache state (L1D, L2) between switches —
+   this is the basis of cache-based side-channel attacks (e.g., Prime+Probe,
+   Flush+Reload).  Without core-gapping, each switch requires expensive
+   L1D/L2 flushes to prevent leakage.  Furthermore, a malicious parent can
+   single-step the child instruction by instruction (e.g., by programming a
+   timer interrupt to fire after each instruction), combining cache
+   observation with fine-grained control flow leakage.
 
 ### Goal
 
@@ -338,10 +342,17 @@ Core-gapping provides significant security improvements:
   each instruction and observe microarchitectural state.  The capavisor
   handles events without switching to dom0 on core 1.
 
-- **No microarchitectural flush overhead**: since dom0 never runs on core 1
-  during child execution, there is no need to flush L1D, TLB, branch
+- **No cache side channels**: since dom0 never runs on core 1 during child
+  execution, L1D and L2 cache contents remain exclusively the child's.
+  There is no window for the parent to perform Prime+Probe, Flush+Reload,
+  or similar cache-based attacks.  Without core-gapping, every switch back
+  to dom0 would require flushing L1D (and ideally L2) to prevent leakage —
+  core-gapping eliminates this attack surface entirely.
+
+- **No microarchitectural flush overhead**: because the parent never executes
+  on the child's core, there is no need to flush L1D, L2, TLB, branch
   predictors, etc. after each event.  The child's microarchitectural state
-  remains undisturbed.
+  remains undisturbed.  This is both a performance and security win.
 
 - **Capability enforcement**: all policies go through the capability engine
   (A1).  The `Forward` policy variant is validated the same way as `Deliver`
