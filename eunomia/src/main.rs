@@ -6,6 +6,8 @@
 #![no_std]
 #![no_main]
 
+mod gdt;
+mod idt;
 mod serial;
 
 use core::arch::global_asm;
@@ -148,6 +150,19 @@ pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
     println!("Eunomia v0.1.0 booted");
     println!("hvm_start_info @ {:#x}", hvm_start_info);
 
+    gdt::init();
+    println!("[ok] GDT loaded (with TSS)");
+
+    idt::init();
+    println!("[ok] IDT loaded (32 exception vectors)");
+
+    // Smoke test: trigger #UD (invalid opcode) to verify exception handling.
+    println!("[test] triggering #UD...");
+    unsafe {
+        core::arch::asm!("ud2");
+    }
+
+    // Should not reach here.
     loop {
         unsafe {
             core::arch::asm!("hlt");
