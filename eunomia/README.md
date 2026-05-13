@@ -48,11 +48,15 @@ eunomia/
 │   ├── mm.rs               # Bump allocator with GlobalAlloc
 │   ├── gdt.rs              # GDT with TSS, IST1 double-fault stack
 │   ├── idt.rs              # IDT, 32 exception stubs, timer ISR
+│   ├── sched.rs            # Cooperative round-robin scheduler
+│   ├── hv.rs               # HypervisorInterface trait, Themis/Stub backends
 │   └── test_harness.rs     # TestCase, runner, QEMU exit codes
 └── workloads/
     ├── smoke/              # Smoke tests: serial, GDT, IDT, stack
     ├── timer/              # Timer interrupt test
-    └── memory/             # Heap allocator tests (Box, Vec, alignment)
+    ├── memory/             # Heap allocator tests (Box, Vec, alignment)
+    ├── sched/              # Cooperative scheduler context-switch tests
+    └── hypercall/          # Hypervisor interface trait + constant tests
 ```
 
 ## Building
@@ -94,6 +98,22 @@ Verifies heap allocation: Box, Vec, large allocations, alignment, heap stats.
 
 ```bash
 cd workloads/memory && cargo run --release
+```
+
+### Scheduler test
+
+Verifies cooperative context switching: single task, interleaving, round-robin yield.
+
+```bash
+cd workloads/sched && cargo run --release
+```
+
+### Hypercall interface test
+
+Verifies the HypervisorInterface trait, StubBackend, and hypercall constants.
+
+```bash
+cd workloads/hypercall && cargo run --release
 ```
 
 ### Writing a new workload

@@ -614,34 +614,29 @@ fn test_pio_serial_echo() -> Result<(), &'static str> {
 
 ```
 eunomia/
-├── Cargo.toml                # lib + bin, features for workload selection
+├── Cargo.toml                # Kernel library crate
 ├── .cargo/config.toml        # target, QEMU runner, rustflags
-├── rust-toolchain.toml       # nightly
+├── rust-toolchain.toml       # nightly (independent from themis/)
 ├── build.rs                  # linker script path emission
 ├── linker.ld                 # PVH boot, load at 0x100000
 ├── src/
-│   ├── lib.rs                # kernel library: KernelServices, re-exports
-│   ├── main.rs               # binary: PVH boot asm, init, → app_main()
-│   │
+│   ├── lib.rs                # crate root: re-exports all modules
+│   ├── boot.rs               # PVH boot asm, rust_main, panic handler
 │   ├── serial.rs             # 16550 UART (0x3F8), print!/println! macros
-│   ├── timer.rs              # LAPIC TSC-deadline timer driver
+│   ├── timer.rs              # LAPIC one-shot timer driver
+│   ├── mm.rs                 # Bump allocator with GlobalAlloc
 │   ├── gdt.rs                # GDT + TSS (IST for double-fault)
 │   ├── idt.rs                # IDT, 32 exception stubs, timer ISR
-│   ├── test_harness.rs       # TestCase, run(), QEMU exit
-│   │
-│   └── tests/                # Built-in test workload (app-tests feature)
-│       ├── mod.rs            # app_main(), test registry
-│       └── smoke.rs          # serial, GDT, IDT, stack sanity tests
+│   ├── sched.rs              # Cooperative round-robin scheduler
+│   ├── hv.rs                 # HypervisorInterface trait, ThemisBackend, StubBackend
+│   └── test_harness.rs       # TestCase, run(), QEMU exit
 │
-│   # Future directories (from design, not yet implemented):
-│   # arch/         — architecture-specific code
-│   # traits/       — Scheduler, MemoryManager, Device, UKI, HVI traits
-│   # sched/        — scheduler implementations
-│   # mem/          — allocator implementations
-│   # devices/      — device drivers
-│   # themis/       — Themis integration (hypercalls, DomainComm)
-│   # uki/          — UserKernelInterface implementations
-│   # hvi/          — HypervisorInterface implementations
+├── workloads/                # Independent binary crates
+│   ├── smoke/                # Serial, GDT, IDT, stack sanity tests
+│   ├── timer/                # LAPIC timer interrupt test
+│   ├── memory/               # Heap allocator tests (Box, Vec, alignment)
+│   ├── sched/                # Cooperative scheduler context-switch tests
+│   └── hypercall/            # HypervisorInterface trait + constant tests
 │
 └── README.md
 ```
