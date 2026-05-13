@@ -364,253 +364,224 @@ Core-gapping provides significant security improvements:
 
 ---
 
-## 10. Paravirtualized Timer Design
+## 10. Timer Virtualization for Core-Gapping
 
 With core-gapping, the child's timer is one of the most critical events to
 handle efficiently.  Forwarding every timer tick to core 0 would negate much
-of core-gapping's benefit.  This section proposes designs for handling timers
-locally on the gapped core.
+of core-gapping's benefit.  This section describes how timer handling
+integrates with APIC virtualization on the gapped core.
 
-### 10.1 Current Timer Path (Sync Mode)
+### 10.1 APIC Virtualization Context
+
+The capavisor enables full APIC virtualization for child domains:
+
+| Feature | VMCS control | Effect |
+|---------|-------------|--------|
+| Virtual APIC page | VIRTUALIZE_APIC_ACCESSES | Child APIC register R/W handled by HW, no VMEXIT |
+| APIC-register virtualization | APIC_REGISTER_VIRT | Writes to virtual APIC backed by virtual APIC page |
+| Virtual interrupt delivery (VID) | VIRTUAL_INTERRUPT_DELIVERY | HW delivers interrupts from vIRR to guest automatically |
+| Posted interrupts (PI) | PROCESS_POSTED_INTERRUPTS | External injection via PIR + notification vector, zero VMEXIT |
+| x2APIC virtualization | VIRTUALIZE_X2APIC | MSR-based APIC access virtualized |
+
+With these enabled, **most APIC operations are hardware-accelerated**.
+The child reads/writes its virtual APIC page without exits.  Interrupt
+delivery from PIR to guest is fully automatic.
+
+However, **TSC-deadline mode (MSR 0x6E0) is NOT an APIC register** — it is
+a separate MSR trapped by the MSR bitmap regardless of APIC virtualization
+settings.  This is the one timer operation that always causes a VMEXIT.
+
+### 10.2 Current Timer Path (Sync Mode)
 
 Today, dom1's timer works as follows:
-1. Dom1's Linux kernel uses TSC-deadline mode (WRMSR to IA32_TSC_DEADLINE,
-   MSR 0x6E0).
-2. The capavisor traps this WRMSR (MSR bitmap) and reports it to the parent.
-3. CHV (cloud-hypervisor) receives the WRMSR exit, reads the deadline value,
-   and arms a host `timerfd` with the corresponding absolute time.
-4. When the `timerfd` fires: eventfd → thhv workqueue → `INJECT_INTERRUPT`
-   VMCALL → capavisor sets the PIR bit for the timer vector.
-5. On the next VMRESUME of the child, PIR is drained and the timer interrupt
-   is injected.
+1. Dom1 programs TSC-deadline: WRMSR 0x6E0 → VMEXIT (MSR bitmap trap).
+2. Capavisor reports the exit to dom0 via SWITCH.
+3. CHV reads the deadline value, arms a host `timerfd`.
+4. timerfd fires → eventfd → thhv workqueue → `INJECT_INTERRUPT` VMCALL →
+   capavisor sets PIR bit → VID delivers on next VMRESUME.
 
-This path involves: WRMSR exit → switch to dom0 → ioctl to userspace → CHV
-processes → timerfd fires → eventfd → kernel → VMCALL → PIR → VMRESUME.
-Multiple context switches, multiple IPIs, kernel-userspace transitions.
+Total: WRMSR exit → VMCS swap to dom0 → ioctl → userspace → timerfd →
+eventfd → kernel → VMCALL → PIR → VMCS swap → VMRESUME.
+**6+ context transitions per tick.**
 
-### 10.2 Design Options
+### 10.3 Core-Gapped Timer: VMX Preemption Timer Approach (Recommended)
 
-#### Option A: LAPIC Timer Passthrough on Gapped Core
+The VMX preemption timer is a per-VMCS countdown timer that fires
+`EXIT_REASON_VMX_PREEMPTION_TIMER` when it reaches zero.  It is:
+- **Per-VMCS**: saved and restored automatically with the VMCS, so there
+  is zero conflict when dom0 returns to core 1.
+- **No physical LAPIC involvement**: does not touch the LAPIC timer state,
+  so it is fully compatible with APIC virtualization.
+- **Counts only while guest runs**: the countdown is active only during
+  VMX non-root operation (guest execution), not while the capavisor is
+  handling exits.
 
-Since dom0 does NOT run on core 1, core 1's physical LAPIC timer is unused.
-The capavisor can program it directly for the child:
-
-```
-Child WRMSR 0x6E0 (TSC-deadline) → VMEXIT to capavisor (core 1)
-  → capavisor reads deadline value from guest ECX:EDX
-  → capavisor programs core 1's PHYSICAL IA32_TSC_DEADLINE MSR
-  → VMRESUME child
-
-Physical timer fires → EXIT_REASON_EXTERNAL_INTERRUPT (core 1)
-  → capavisor recognizes it as the LAPIC timer vector
-  → sets PIR bit for child's timer vector
-  → VMRESUME child (PIR drained on entry → timer injected)
-```
-
-**Pros**:
-- Fastest possible path: 1 WRMSR exit + 1 external-interrupt exit per timer
-  tick.  No IPI, no shared memory, no dom0 involvement.
-- No guest kernel changes needed — dom1 uses standard TSC-deadline mode.
-- The LAPIC timer on core 1 has nanosecond precision (TSC-based).
-
-**Cons**:
-- The capavisor must manage a translation between the child's virtual TSC
-  and the physical TSC (if TSC offsetting is used).
-- If the child is parked (synchronous Forward for an I/O exit), the timer
-  may fire while the capavisor is polling.  The capavisor must check for
-  pending LAPIC timer interrupts before VMRESUME.
-- LAPIC timer vector must be known to the capavisor (fixed at setup time).
-
-#### Option B: Synthetic Timer (Hyper-V Style)
-
-Define Themis-specific synthetic timer MSRs.  The child guest uses a
-paravirtualized clockevent driver instead of the native LAPIC timer.
+#### Flow
 
 ```
-Synthetic timer MSRs (per VP):
-  THEMIS_STIMER_CONFIG  (0x400000A0)  — enable, periodic/one-shot, vector
-  THEMIS_STIMER_COUNT   (0x400000A1)  — deadline (in reference time units)
+Child (core 1)                    Capavisor (core 1)           Dom0 (core 0)
+──────────────                    ─────────────────            ──────────────
 
-Child WRMSR THEMIS_STIMER_COUNT → VMEXIT to capavisor (core 1)
-  → capavisor converts reference time to TSC ticks
-  → programs core 1's physical LAPIC timer (or VMX preemption timer)
-  → VMRESUME child
+1. hrtimer arms timer:
+   WRMSR 0x6E0 = deadline
+        ──── VMEXIT ────→
+                              2. Read deadline from ECX:EDX
+                              3. Compute: ticks_remaining =
+                                 (deadline + tsc_offset) - rdtsc()
+                              4. Convert to preemption timer:
+                                 pt_value = ticks_remaining >>
+                                            pt_rate_shift
+                              5. VMWRITE VMX_PREEMPTION_TIMER_VALUE
+                              6. Advance guest RIP
+        ←── VMRESUME ────
+                                                                (not involved)
+   ... guest runs ...
+   preemption timer counts down
 
-Timer fires → capavisor injects the configured synthetic vector directly
+                              7. EXIT_REASON_VMX_PREEMPTION_TIMER
+                              8. Read child's virtual LVT timer
+                                 entry → get guest timer vector
+                              9. Set PIR bit for that vector
+        ←── VMRESUME ────
+10. VID hardware delivers
+    interrupt from PIR to guest
+    (zero additional exit)
+    hrtimer callback runs
+    next deadline → step 1
 ```
 
-**Pros**:
-- Clean abstraction: supports multiple timers (4 per VP, like Hyper-V).
-- Can use the VMX preemption timer instead of LAPIC timer (no external
-  interrupt exit — uses EXIT_REASON_VMX_PREEMPTION_TIMER which is cheaper).
-- Periodic mode built in: capavisor auto-rearms without guest exit.
-- Well-understood model (Hyper-V enlightened Linux already has a driver:
-  `drivers/clocksource/hyperv_timer.c`).
+**Total exits per timer tick: 2** (WRMSR + preemption timer expiry).
+**Dom0 involvement: zero.**  **IPIs: zero.**
+**Interrupt delivery: hardware VID** (PIR → vIRR → guest, no exit).
 
-**Cons**:
-- Requires a guest kernel driver (clocksource + clockevent).
-- More complex capavisor code (timer state machine, multiple timers).
-- Adds a Themis-specific paravirt interface that guests must opt into.
+#### Integration with APIC Virtualization
 
-#### Option C: Shared-Page Timer (kvmclock-Inspired)
+The timer delivery uses the **same Posted Interrupt + VID pipeline** as all
+other child interrupts:
 
-Use a shared page for timer registration.  The child writes deadlines to a
-shared memory region instead of through MSR exits.
+1. Capavisor sets PIR bit for the guest's timer vector.
+2. On VMRESUME, the processor checks PIR (because PROCESS_POSTED_INTERRUPTS
+   is enabled).
+3. Hardware moves PIR bits to vIRR in the virtual APIC page.
+4. VID delivers the highest-priority pending interrupt to the guest.
+5. Guest's IDT handler runs — from the guest's perspective, this is
+   indistinguishable from a native LAPIC timer interrupt.
 
+No special timer injection path needed — the existing PI/VID infrastructure
+handles everything.
+
+#### VMX Preemption Timer Rate
+
+The preemption timer counts down at rate `TSC / (2^N)` where N is
+`IA32_VMX_MISC[4:0]`.  Common values:
+
+| N | Rate | Resolution at 2.5 GHz TSC |
+|---|------|---------------------------|
+| 0 | TSC rate | 0.4 ns |
+| 5 | TSC / 32 | 12.8 ns |
+
+The capavisor reads `IA32_VMX_MISC` at boot to determine the rate shift and
+uses it for all TSC-deadline → preemption-timer conversions:
+
+```rust
+let pt_rate_shift = rdmsr(IA32_VMX_MISC) & 0x1F;
+let tsc_now = rdtsc();
+let tsc_deadline = virtual_deadline + tsc_offset;
+let ticks_remaining = tsc_deadline.saturating_sub(tsc_now);
+let pt_value = ticks_remaining >> pt_rate_shift;
+vmwrite(VMX_PREEMPTION_TIMER_VALUE, pt_value);
 ```
-Shared timer page (mapped into child's GPA):
-  offset 0x00: timer_deadline (uint64, TSC value)
-  offset 0x08: timer_vector   (uint32)
-  offset 0x0C: timer_armed    (uint32, set by guest, cleared by capavisor)
 
-Child writes deadline to shared page → no VMEXIT
-Capavisor checks timer_armed on every VMRESUME (or uses preemption timer)
-```
-
-**Pros**:
-- Zero exit overhead for timer arming (memory write, no WRMSR exit).
-- Simple guest driver (just memory writes).
-
-**Cons**:
-- Capavisor must poll or use a secondary mechanism to notice new deadlines.
-- If using preemption timer as backing, precision depends on the preemption
-  timer rate divisor.
-- Security concern: the shared page is in the child's GPA space, so the
-  child can manipulate it freely.  Need to validate deadline values.
-
-### 10.3 Recommendation
-
-**Option A (LAPIC passthrough) for the initial implementation**, with
-Option B as a future enhancement.
-
-Rationale:
-- Option A requires **zero guest kernel changes** — dom1 uses standard
-  TSC-deadline mode, which it already does today.
-- Option A is the simplest capavisor change: intercept WRMSR 0x6E0, write
-  the value to the physical MSR, handle the resulting timer interrupt locally.
-- Option A is the fastest: one VMEXIT for arming, one VMEXIT for firing,
-  everything handled locally on core 1.
-- The LAPIC timer is already per-core and naturally belongs to whatever
-  domain owns core 1 in the gapped model.
-
-Option B becomes valuable when:
-- We want periodic timers without per-tick WRMSR exits.
-- We need multiple independent timers per VP.
-- We want CoCo-aware guests with a Themis-specific clocksource.
-
-### 10.4 Implementation Details (Option A)
-
-#### Capavisor Changes
-
-1. **WRMSR 0x6E0 handler (core 1, child exit)**:
-   ```rust
-   fn handle_child_tsc_deadline_wrmsr(deadline: u64) {
-       // Convert child's virtual TSC to physical TSC if offset is used.
-       let phys_deadline = deadline + tsc_offset;
-       // Program core 1's physical LAPIC timer.
-       unsafe { wrmsr(IA32_TSC_DEADLINE, phys_deadline); }
-       // Advance child RIP past the WRMSR instruction.
-       advance_guest_rip();
-       // VMRESUME child — no forwarding to dom0.
-   }
-   ```
-
-2. **External interrupt handler (core 1, timer fires)**:
-   ```rust
-   fn handle_timer_interrupt_on_gapped_core(vector: u8) {
-       if vector == LAPIC_TIMER_VECTOR {
-           // This is the child's timer — inject directly via PIR.
-           set_pir_bit(child_timer_guest_vector);
-           // VMRESUME: PIR will be drained automatically on VM entry.
-       } else {
-           // Not the timer — handle per existing interrupt policy.
-           handle_external_interrupt_per_policy(vector);
-       }
-   }
-   ```
-
-3. **Parked state handling**: if the child is parked (synchronous Forward for
-   an I/O exit) and the timer fires, the capavisor must:
-   - ACK the interrupt (EOI the LAPIC).
-   - Set the PIR bit for the child's timer vector.
-   - The timer injection happens on the next VMRESUME when the child unparks.
+If the deadline has already passed (`tsc_deadline <= tsc_now`), set
+`pt_value = 0` — the timer fires immediately on VMRESUME.
 
 #### TSC Offset Handling
 
 The child's virtual TSC may be offset from the physical TSC (VMCS field
 `TSC_OFFSET`).  The child writes `virtual_deadline` to MSR 0x6E0.  The
-capavisor must add the TSC offset to get the physical deadline:
+capavisor converts:
 
 ```
 physical_deadline = virtual_deadline + tsc_offset
 ```
 
-The `tsc_offset` is already stored in the VMCS and known to the capavisor.
+The `tsc_offset` is already stored in the child's VMCS.
 
-#### LAPIC Timer Vector
+#### Parked State Handling
 
-The child's Linux kernel configures its LAPIC timer with a specific LVT
-vector (typically 0xEC for `LOCAL_TIMER_VECTOR`).  The capavisor doesn't
-need to know this — it programs the physical LAPIC timer and when it fires
-as EXIT_REASON_EXTERNAL_INTERRUPT, the vector in the exit info identifies
-it.  The capavisor then injects that same vector into the child via PIR.
+If the child is parked (synchronous Forward for an I/O exit) and the
+preemption timer value was set before parking, the timer does NOT count
+down while the guest is not running.  The remaining countdown resumes
+on the next VMRESUME.  This is correct behavior — the timer measures
+guest-perceived time, not wall time.
 
-Actually, the physical LAPIC timer vector is set by the **capavisor** (it
-owns the physical LAPIC on core 1).  The child's virtual LAPIC timer vector
-(in its virtual LVT) is what gets injected via PIR.  The capavisor must
-read the child's virtual LVT timer entry to know which vector to inject.
+If the child needs wall-time semantics (e.g., for watchdogs), this is a
+future enhancement (see Option B below).
 
-#### Dom0 / thhv Changes
+#### Guest Timer Vector Discovery
 
-**None for the timer path.**  Dom0 is completely out of the loop.  The
-timerfd/irqfd path in CHV is still used for sync mode but is bypassed
-entirely when core-gapping is active.
+The capavisor must know which vector to inject when the timer fires.  The
+child configures its LAPIC timer vector via the LVT Timer register in the
+virtual APIC page.  The capavisor reads the virtual LVT Timer entry
+(offset 0x320 in the virtual APIC page) to extract the vector:
 
-#### Dom1 Kernel Changes
-
-**None.**  Dom1 uses standard TSC-deadline mode.  From the guest's
-perspective, it writes MSR 0x6E0 and eventually receives a timer interrupt
-— indistinguishable from native hardware.
-
-### 10.5 How Deadlines Are Registered and Triggered
-
-Summary of the complete timer lifecycle on a gapped core:
-
-```
-          Dom1 (guest, core 1)         Capavisor (core 1)        Dom0 (core 0)
-          ──────────────────           ─────────────────          ──────────────
-1. hrtimer arms LAPIC timer:
-   WRMSR 0x6E0 = deadline
-          ──── VMEXIT ────→
-                                  2. Read deadline from
-                                     guest ECX:EDX
-                                  3. Add TSC offset
-                                  4. WRMSR 0x6E0 (physical)
-                                  5. Advance guest RIP
-          ←── VMRESUME ────
-                                                                  (not involved)
-   ... guest runs ...
-
-                                  6. Physical LAPIC timer fires
-          ──── VMEXIT ────→          EXIT_REASON_EXTERNAL_INTERRUPT
-                                  7. ACK interrupt (EOI)
-                                  8. Read child's virtual LVT
-                                     timer vector
-                                  9. Set PIR bit for that vector
-          ←── VMRESUME ────
-10. Timer interrupt injected
-    via PIR drain on VM entry
-    hrtimer callback runs
-    next deadline programmed → back to step 1
+```rust
+let virt_apic = virtual_apic_page_ptr();
+let lvt_timer = unsafe { *(virt_apic.add(0x320) as *const u32) };
+let timer_vector = lvt_timer & 0xFF;
 ```
 
-**Total exits per timer tick: 2** (WRMSR + external interrupt).
-**Dom0 involvement: zero.**
-**IPIs: zero.**
+### 10.4 Fallback: Remote Deadline Registration (Core 0)
 
-Compare to the current sync path which requires: WRMSR exit → switch to
-dom0 → ioctl → userspace timerfd → eventfd → workqueue → VMCALL →
-PIR → switch → VMRESUME = **6+ context transitions per tick**.
+If VMX preemption timer precision is insufficient (unlikely on modern
+hardware) or for cases requiring wall-time semantics, the alternative is
+to forward the deadline to dom0 on core 0:
+
+```
+Child WRMSR 0x6E0 → VMEXIT to capavisor (core 1)
+  → capavisor writes deadline to shared page (Forward async)
+  → IPI core 0
+  → VMRESUME child immediately
+
+Dom0 (core 0):
+  → ISR reads deadline from shared page
+  → dom0 programs a timerfd/hrtimer for the deadline
+  → when deadline expires, dom0 sets PIR bit for child's timer vector
+  → sends notification IPI to core 1
+  → VID delivers the timer interrupt on next VMRESUME
+```
+
+This adds 2 IPIs per tick (deadline notification + expiry notification) and
+kernel scheduling overhead on core 0.  It is functionally correct but
+significantly slower than the local preemption timer approach.
+
+### 10.5 Future Enhancement: Synthetic Timer (Hyper-V Style)
+
+For advanced use cases, a Hyper-V-style synthetic timer could be added:
+
+- Define synthetic timer MSRs (e.g., `THEMIS_STIMER_CONFIG`,
+  `THEMIS_STIMER_COUNT`) — 4 timers per VP.
+- Support one-shot and periodic modes.
+- Periodic mode: capavisor auto-rearms the preemption timer on each
+  expiry without a guest WRMSR exit, reducing exits to 1 per tick.
+- Requires a guest clockevent driver (`drivers/clocksource/themis_timer.c`).
+- Useful for CoCo-aware guests that opt into Themis paravirt interfaces.
+
+This is a medium-term enhancement.  The VMX preemption timer approach
+(§10.3) requires zero guest changes and is sufficient for initial
+core-gapping.
+
+### 10.6 Comparison
+
+| Metric | Current (sync) | Preemption timer (§10.3) | Remote (§10.4) | Synthetic (§10.5) |
+|--------|---------------|--------------------------|----------------|-------------------|
+| Exits per tick | 6+ transitions | 2 (WRMSR + PT expiry) | 1 (WRMSR only) | 1 per period (periodic) |
+| IPIs per tick | 1+ (inject) | 0 | 2 (notify + expiry) | 0 |
+| Dom0 involvement | Full (timerfd) | None | Deadline relay | None |
+| Guest kernel changes | None | None | None | Clockevent driver |
+| APIC virt compatible | Yes | Yes (per-VMCS, uses PI/VID) | Yes (uses PI/VID) | Yes (uses PI/VID) |
+| Wall-time semantics | Yes | No (guest-time) | Yes | Configurable |
+| LAPIC state conflict | N/A (same core) | None (no LAPIC touch) | None | None |
 
 ---
 
@@ -710,16 +681,19 @@ bring it back online on teardown.  Disable watchdogs, pin thread.
 - `docs/architecture/mshv-themis.md` §4 (ThemIC), §6.1–6.2 (sync/async
   scheduling), §15f (RUN_VP)
 - `docs/architecture/interrupt-virtualization.md` Phase 3 (core-gapping),
-  §Key Design Constraint (LAPIC timer), §Nested Virtualization Scheduling
-  (timer flood analysis)
+  §Key Design Constraint (LAPIC timer), §Nested Virtualization Scheduling,
+  §Directvisor-Inspired Optimizations (Deliver fast-path, PI/VID pipeline)
 - `docs/domain-comm.md` (DomainComm rings, message types)
 - Hyper-V TLFS: SynIC (Chapter 11), Root Scheduler (Chapter 14),
   Timers (Chapter 10 — synthetic timers, reference TSC page)
 - KVM timekeeping: `docs.kernel.org/virt/kvm/x86/timekeeping.html`
-  (TSC, kvmclock, pvclock structure)
-- Linux clocksource: `drivers/clocksource/hyperv_timer.c` (Hyper-V
-  synthetic timer guest driver — reference for Option B)
-- Intel SDM Vol 3C §25.5.1 (VMX preemption timer), §10.5.4 (LAPIC timer,
-  TSC-deadline mode)
+  (TSC, kvmclock — clock source, NOT timer mechanism)
+- DirectVisor (VEE 2020): Kevin Cheng et al., "Directvisor: Virtualization
+  for Bare-Metal Cloud." pp. 45–58. Minimal interrupt virtualization model;
+  validates that PI/VID-based delivery achieves near-native performance.
+- Intel SDM Vol 3C §25.5.1 (VMX preemption timer, rate in IA32_VMX_MISC[4:0]),
+  §10.5.4 (LAPIC timer, TSC-deadline mode), §29.6 (Posted Interrupts)
+- Linux: `drivers/clocksource/hyperv_timer.c` (Hyper-V synthetic timer
+  guest driver — reference for future synthetic timer option)
 - vmxvmm/monitor/tyche: `monitor.rs` (CoreUpdate, CORE_REMAP),
   `calls.rs` (SWITCH, CONFIGURE_CORE)
