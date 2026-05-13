@@ -68,7 +68,7 @@ with the Themis capavisor via paravirtualized interfaces.
 ┌─────────────────────────────────────────────────────┐
 │                    Applications                      │
 │  (test harness, crypto enclave, key store, ...)      │
-├─────────────────────────────────────────────────────┤
+├───────────────── UserKernelInterface ────────────────┤
 │                   Kernel Services                    │
 │  ┌──────────┐  ┌───────────┐  ┌──────────────────┐  │
 │  │Scheduler │  │  Memory   │  │    Device I/O    │  │
@@ -84,7 +84,7 @@ with the Themis capavisor via paravirtualized interfaces.
 ├─────────────────────────────────────────────────────┤
 │                  Arch Layer (x86_64)                 │
 │  boot.rs  gdt.rs  idt.rs  paging.rs  msr.rs         │
-├─────────────────────────────────────────────────────┤
+├───────────────── HypervisorInterface ───────────────┤
 │               Themis Integration Layer               │
 │  hypercall.rs  capability.rs  domcomm.rs             │
 ├─────────────────────────────────────────────────────┤
@@ -143,6 +143,41 @@ pub trait TimerDevice: Device {
     /// Acknowledge the timer interrupt.
     fn ack(&mut self);
 }
+
+/// User-to-kernel interface — defines how user-level code invokes kernel
+/// services (syscalls, upcalls, signal delivery).
+///
+/// Implementations may range from a simple function-call ABI (single
+/// address space unikernel) to a full SYSCALL/SYSRET trap-based
+/// interface for a multi-process configuration.
+pub trait UserKernelInterface {
+    /// Handle a user request identified by `op` with up to 4 arguments.
+    /// Returns a result value or an error code.
+    fn handle_request(&mut self, op: u64, args: [u64; 4]) -> Result<u64, SyscallError>;
+    /// Deliver an asynchronous event (signal/upcall) to user code.
+    fn deliver_upcall(&mut self, event: UpcallEvent) -> Result<(), SyscallError>;
+    /// Register a handler for a given upcall type.
+    fn register_upcall_handler(&mut self, event_type: u64, handler: UpcallHandler);
+}
+
+/// Kernel-to-hypervisor / remote-domain interface — defines how the
+/// kernel communicates with the hypervisor (capavisor) and with peer
+/// or parent domains.
+///
+/// Implementations:
+/// - `ThemisBackend`: VMCALL-based hypercalls + DomainComm shared pages.
+/// - `StubBackend`: no-op (for unit testing outside a VM).
+/// - Future: could target different hypervisors (e.g., KVM pvcalls).
+pub trait HypervisorInterface {
+    /// Issue a hypercall to the hypervisor.
+    fn hypercall(&self, op: u64, args: [u64; 4]) -> Result<u64, HvError>;
+    /// Send a message to a peer domain identified by `domain_id`.
+    fn send(&self, domain_id: u64, buf: &[u8]) -> Result<usize, HvError>;
+    /// Receive a message from any domain.  Returns (sender_id, bytes_read).
+    fn recv(&self, buf: &mut [u8]) -> Result<(u64, usize), HvError>;
+    /// Query hypervisor for a capability or configuration value.
+    fn query(&self, key: u64) -> Result<u64, HvError>;
+}
 ```
 
 ### 4.2 Compile-Time Configuration
@@ -172,6 +207,14 @@ timer-pv      = []   # Themis paravirtualized synthetic timer (future)
 # Themis integration
 themis-hypercall = [] # Enable Themis hypercall interface
 themis-attest    = [] # Enable attestation support
+
+# User-kernel interface implementations
+uki-direct  = []  # Direct function calls (unikernel, single address space)
+uki-syscall = []  # SYSCALL/SYSRET trap-based (multi-process, future)
+
+# Hypervisor/domain interface implementations
+hvi-themis  = []  # Themis VMCALL + DomainComm (production)
+hvi-stub    = []  # No-op stub (unit testing outside a VM)
 ```
 
 ---
@@ -275,6 +318,36 @@ Initial implementation: **cooperative round-robin**.
 channel.  CHV captures serial output via `--serial tty` or `--serial
 file=/path`.
 
+### 6.5 User-Kernel Interface
+
+The `UserKernelInterface` trait (§4.1) defines the boundary between
+application code and the kernel.  Two planned implementations:
+
+- **Direct call** (`uki-direct`): In the default unikernel / single
+  address space mode, applications call kernel services through normal
+  Rust function calls via a global `KernelServices` struct.  No ring
+  transition, no context switch — just a trait method invocation.  This
+  is the initial implementation.
+
+- **Syscall** (`uki-syscall`): For a future multi-process configuration,
+  applications would use `SYSCALL`/`SYSRET` to trap into the kernel.
+  The `handle_request` method would be invoked from the syscall handler
+  in the IDT path.  Upcalls (signals/notifications) would be delivered
+  by modifying the user-space return frame.
+
+### 6.6 Hypervisor / Domain Interface
+
+The `HypervisorInterface` trait (§4.1) abstracts all communication
+below the kernel — toward the hypervisor and toward peer domains.
+
+- **Themis backend** (`hvi-themis`): production implementation using
+  `VMCALL` for hypercalls and DomainComm shared pages for inter-domain
+  messaging (see §7 for details).
+
+- **Stub backend** (`hvi-stub`): no-op implementation that returns
+  errors or canned values.  Allows unit-testing kernel logic on the
+  host without a hypervisor.
+
 ```rust
 pub struct SerialConsole;
 
@@ -298,12 +371,13 @@ The `print!` and `println!` macros use this globally.
 ## 7. Themis Integration Layer
 
 This is what distinguishes Eunomia from a generic toy OS: tight
-integration with the Themis capavisor.
+integration with the Themis capavisor, abstracted behind the
+`HypervisorInterface` trait (§4.1).
 
 ### 7.1 Hypercall Interface
 
-Eunomia can issue Themis hypercalls (VMCALL) to interact with the
-capavisor.  This is used for:
+The `ThemisBackend` implementation of `HypervisorInterface` issues
+Themis hypercalls (VMCALL) to interact with the capavisor:
 
 - **Attestation**: request attestation report from the capavisor.
 - **Memory management**: request additional memory pages via capability
@@ -469,7 +543,9 @@ eunomia/
 │   │   ├── mod.rs
 │   │   ├── scheduler.rs      # Scheduler trait
 │   │   ├── memory.rs         # MemoryManager trait
-│   │   └── device.rs         # Device, ConsoleDevice, TimerDevice traits
+│   │   ├── device.rs         # Device, ConsoleDevice, TimerDevice traits
+│   │   ├── uki.rs            # UserKernelInterface trait
+│   │   └── hvi.rs            # HypervisorInterface trait
 │   │
 │   ├── sched/
 │   │   ├── mod.rs             # compile-time scheduler selection
@@ -490,8 +566,19 @@ eunomia/
 │   ├── themis/
 │   │   ├── mod.rs
 │   │   ├── hypercall.rs       # VMCALL interface
+│   │   ├── hvi_themis.rs      # HypervisorInterface: Themis backend
 │   │   ├── domcomm.rs         # DomainComm ring (future)
 │   │   └── attest.rs          # attestation (future)
+│   │
+│   ├── uki/
+│   │   ├── mod.rs             # compile-time UKI selection
+│   │   ├── direct.rs          # direct-call (unikernel mode)
+│   │   └── syscall.rs         # SYSCALL/SYSRET (future)
+│   │
+│   ├── hvi/
+│   │   ├── mod.rs             # compile-time HVI selection
+│   │   ├── stub.rs            # no-op stub (host testing)
+│   │   └── themis.rs          # re-exports themis/hvi_themis.rs
 │   │
 │   └── tests/
 │       ├── mod.rs             # test registry, runner
