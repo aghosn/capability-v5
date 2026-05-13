@@ -2,6 +2,7 @@
 target = "x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
+runner = "qemu-system-x86_64 -M microvm -enable-kvm -cpu host -m 128M -nographic -serial mon:stdio -no-reboot -kernel"
 rustflags = [
     # Bare-metal: no SSE until FPU is explicitly initialised.
     "-C", "target-feature=-sse,-sse2",
