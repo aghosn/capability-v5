@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    # Bare-metal: no SSE until FPU is explicitly initialised.
+    "-C", "target-feature=-sse,-sse2",
+    # Static executable (ET_EXEC).  PVH entry needs known physical addresses.
+    "-C", "relocation-model=static",
+]
