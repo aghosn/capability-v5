@@ -7,7 +7,7 @@ use crate::domain::{
     VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
-use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus, Rights};
+use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
 use crate::platform::Platform;
 use crate::switch::{SwitchContext, VpInterruptContext};
 use crate::sync::RwLock;
@@ -1116,7 +1116,7 @@ impl Capability<Domain> {
         // loom's interleaving space.
         let child_sub;
         #[cfg(feature = "address_translation")]
-        let footprint: (u64, u64, Vec<Access>, Rights);
+        let footprint: (u64, u64, Vec<Access>, crate::memory::Rights);
         {
             let mut cw = child_ref.write();
             child_sub = cw.sub_handle;
@@ -1244,7 +1244,7 @@ impl Capability<Domain> {
         // footprint data.  Same loom optimisation as carve().
         let child_sub;
         #[cfg(feature = "address_translation")]
-        let footprint: (u64, u64, Vec<Access>, Rights);
+        let footprint: (u64, u64, Vec<Access>, crate::memory::Rights);
         {
             let mut cw = child_ref.write();
             child_sub = cw.sub_handle;

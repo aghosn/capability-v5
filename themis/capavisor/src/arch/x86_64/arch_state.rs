@@ -62,10 +62,6 @@ impl ArchDomainState {
         self.ept.as_mut()
     }
 
-    pub fn set_ept(&mut self, ept: Option<EptMapper>) {
-        self.ept = ept;
-    }
-
     pub fn take_ept(&mut self) -> Option<EptMapper> {
         self.ept.take()
     }

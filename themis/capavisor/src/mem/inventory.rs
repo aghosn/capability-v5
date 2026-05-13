@@ -11,6 +11,7 @@ pub const MAX_META_REGIONS: usize = 16;
 /// Maximum number of VT-d DRHD units we budget for in the META pool.
 /// One 4 KiB IRT page is reserved per unit.  Typical hardware has 1–2 units;
 /// 4 is a safe upper bound that costs only 16 KiB.
+#[allow(dead_code)] // reserved for future IOMMU IRT allocation
 pub const MAX_DRHD_UNITS: usize = 4;
 
 /// Default number of DomainComm pages per domain (header + RX + TX).
