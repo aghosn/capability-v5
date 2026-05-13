@@ -9,10 +9,7 @@
 
 mod gdt;
 mod idt;
-
-// Test workload (compiled in when feature "app-tests" is enabled).
-#[cfg(feature = "app-tests")]
-mod tests;
+mod workloads;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -41,7 +38,7 @@ global_asm!(
 //
 // PVH ABI: entered in 32-bit protected mode, paging OFF, %ebx =
 // pointer to hvm_start_info.  We build identity-mapped page tables
-// (2 MiB pages covering first 1 GiB), enable long mode, and jump
+// (2 MiB pages covering first 4 GiB), enable long mode, and jump
 // to 64-bit Rust code.
 
 global_asm!(
@@ -53,24 +50,30 @@ _pvh_start:
     cli
     mov %ebx, %esi                  /* save hvm_start_info ptr */
 
-    /* ── Zero 3 pages for page tables (PML4 + PDPT + PD) ──────── */
+    /* ── Zero page tables: PML4 + PDPT + 4×PD = 6 pages ─────── */
     movl $page_tables, %edi
     xor  %eax, %eax
-    movl $(4096 * 3 / 4), %ecx
+    movl $(4096 * 6 / 4), %ecx
     rep stosl                       /* EDI now past page_tables */
 
     /* PML4[0] → PDPT */
     movl $(page_tables + 0x1000 + 0x3), %eax
     movl %eax, page_tables
 
-    /* PDPT[0] → PD */
+    /* PDPT[0..3] → PD0..PD3  (covers 0–4 GiB, includes LAPIC at 0xFEE00000) */
     movl $(page_tables + 0x2000 + 0x3), %eax
-    movl %eax, (page_tables + 0x1000)
+    movl %eax, (page_tables + 0x1000 + 0*8)
+    movl $(page_tables + 0x3000 + 0x3), %eax
+    movl %eax, (page_tables + 0x1000 + 1*8)
+    movl $(page_tables + 0x4000 + 0x3), %eax
+    movl %eax, (page_tables + 0x1000 + 2*8)
+    movl $(page_tables + 0x5000 + 0x3), %eax
+    movl %eax, (page_tables + 0x1000 + 3*8)
 
-    /* PD: 512 × 2 MiB identity-mapped pages (covers first 1 GiB) */
+    /* Fill all 4 PDs: 4×512 = 2048 entries, identity-mapping 0–4 GiB */
     movl $(page_tables + 0x2000), %edi
-    movl $0x83, %eax                /* Present | Writable | PageSize */
-    movl $512, %ecx
+    movl $0x83, %eax                /* Present | Writable | PageSize (2 MiB) */
+    movl $(512 * 4), %ecx
 .Lfill_pd:
     movl %eax, (%edi)
     addl $8, %edi
@@ -132,7 +135,7 @@ _start64:
 .align 4096
 .global page_tables
 page_tables:
-    .space 4096 * 3
+    .space 4096 * 6
 
 /* ── 64-bit GDT ───────────────────────────────────────────────── */
 .section .rodata
@@ -163,10 +166,13 @@ pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
     let services = eunomia::KernelServices { hvm_start_info };
 
     // Dispatch to the selected workload.
-    #[cfg(feature = "app-tests")]
-    tests::app_main(&services);
+    #[cfg(feature = "app-smoke")]
+    workloads::smoke::app_main(&services);
 
-    #[cfg(not(feature = "app-tests"))]
+    #[cfg(feature = "app-timer")]
+    workloads::timer::app_main(&services);
+
+    #[cfg(not(any(feature = "app-smoke", feature = "app-timer")))]
     {
         eunomia::println!("No workload selected. Halting.");
         loop {

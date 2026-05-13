@@ -379,17 +379,18 @@ unsafe extern "C" fn timer_isr_stub() {
 
         // TIMER_TICKS.fetch_add(1, Relaxed)
         "mov rax, 1",
-        "lock xadd [{ticks}], rax",
+        "lea rcx, [{ticks}]",
+        "lock xadd [rcx], rax",
 
-        // EOI: write 0 to LAPIC EOI register.
+        // EOI: write 0 to LAPIC EOI register (0xFEE000B0).
+        "mov ecx, 0xFEE000B0",
         "xor eax, eax",
-        "mov dword ptr [{eoi}], eax",
+        "mov dword ptr [rcx], eax",
 
         "pop rdx",
         "pop rcx",
         "pop rax",
         "iretq",
         ticks = sym eunomia::timer::TIMER_TICKS,
-        eoi = const 0xFEE0_00B0u64,
     );
 }

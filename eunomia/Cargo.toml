@@ -12,10 +12,11 @@ name = "eunomia"
 path = "src/main.rs"
 
 [features]
-default = ["console-serial", "app-tests"]
+default = ["console-serial", "app-smoke"]
 console-serial = []
-# Workload selection — exactly one app-* feature should be enabled.
-app-tests = []
+# Workload selection — enable exactly one app-* feature.
+app-smoke = []    # Basic sanity tests (serial, GDT, IDT, stack)
+app-timer = []    # Timer interrupt test
 
 [profile.dev]
 panic = "abort"
