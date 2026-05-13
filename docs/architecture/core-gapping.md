@@ -22,9 +22,9 @@ This model works but has two fundamental problems:
    this is the basis of cache-based side-channel attacks (e.g., Prime+Probe,
    Flush+Reload).  Without core-gapping, each switch requires expensive
    L1D/L2 flushes to prevent leakage.  Furthermore, a malicious parent can
-   single-step the child instruction by instruction (e.g., by programming a
-   timer interrupt to fire after each instruction), combining cache
-   observation with fine-grained control flow leakage.
+   single-step the child instruction by instruction (e.g., by programming
+   an interrupt to fire after each instruction), combining cache observation
+   with fine-grained control flow leakage.
 
 ### Goal
 
@@ -364,29 +364,275 @@ Core-gapping provides significant security improvements:
 
 ---
 
-## 10. Open Design Questions
+## 10. Paravirtualized Timer Design
 
-1. **Paravirtualized timer**: should the capavisor handle timer interrupts
-   locally on core 1 (similar to Hyper-V synthetic timer) instead of
-   forwarding them?  This would avoid IPI overhead for periodic timers.
+With core-gapping, the child's timer is one of the most critical events to
+handle efficiently.  Forwarding every timer tick to core 0 would negate much
+of core-gapping's benefit.  This section proposes designs for handling timers
+locally on the gapped core.
 
-2. **Per-event-type policy granularity**: do we need per-exit-reason policy
+### 10.1 Current Timer Path (Sync Mode)
+
+Today, dom1's timer works as follows:
+1. Dom1's Linux kernel uses TSC-deadline mode (WRMSR to IA32_TSC_DEADLINE,
+   MSR 0x6E0).
+2. The capavisor traps this WRMSR (MSR bitmap) and reports it to the parent.
+3. CHV (cloud-hypervisor) receives the WRMSR exit, reads the deadline value,
+   and arms a host `timerfd` with the corresponding absolute time.
+4. When the `timerfd` fires: eventfd → thhv workqueue → `INJECT_INTERRUPT`
+   VMCALL → capavisor sets the PIR bit for the timer vector.
+5. On the next VMRESUME of the child, PIR is drained and the timer interrupt
+   is injected.
+
+This path involves: WRMSR exit → switch to dom0 → ioctl to userspace → CHV
+processes → timerfd fires → eventfd → kernel → VMCALL → PIR → VMRESUME.
+Multiple context switches, multiple IPIs, kernel-userspace transitions.
+
+### 10.2 Design Options
+
+#### Option A: LAPIC Timer Passthrough on Gapped Core
+
+Since dom0 does NOT run on core 1, core 1's physical LAPIC timer is unused.
+The capavisor can program it directly for the child:
+
+```
+Child WRMSR 0x6E0 (TSC-deadline) → VMEXIT to capavisor (core 1)
+  → capavisor reads deadline value from guest ECX:EDX
+  → capavisor programs core 1's PHYSICAL IA32_TSC_DEADLINE MSR
+  → VMRESUME child
+
+Physical timer fires → EXIT_REASON_EXTERNAL_INTERRUPT (core 1)
+  → capavisor recognizes it as the LAPIC timer vector
+  → sets PIR bit for child's timer vector
+  → VMRESUME child (PIR drained on entry → timer injected)
+```
+
+**Pros**:
+- Fastest possible path: 1 WRMSR exit + 1 external-interrupt exit per timer
+  tick.  No IPI, no shared memory, no dom0 involvement.
+- No guest kernel changes needed — dom1 uses standard TSC-deadline mode.
+- The LAPIC timer on core 1 has nanosecond precision (TSC-based).
+
+**Cons**:
+- The capavisor must manage a translation between the child's virtual TSC
+  and the physical TSC (if TSC offsetting is used).
+- If the child is parked (synchronous Forward for an I/O exit), the timer
+  may fire while the capavisor is polling.  The capavisor must check for
+  pending LAPIC timer interrupts before VMRESUME.
+- LAPIC timer vector must be known to the capavisor (fixed at setup time).
+
+#### Option B: Synthetic Timer (Hyper-V Style)
+
+Define Themis-specific synthetic timer MSRs.  The child guest uses a
+paravirtualized clockevent driver instead of the native LAPIC timer.
+
+```
+Synthetic timer MSRs (per VP):
+  THEMIS_STIMER_CONFIG  (0x400000A0)  — enable, periodic/one-shot, vector
+  THEMIS_STIMER_COUNT   (0x400000A1)  — deadline (in reference time units)
+
+Child WRMSR THEMIS_STIMER_COUNT → VMEXIT to capavisor (core 1)
+  → capavisor converts reference time to TSC ticks
+  → programs core 1's physical LAPIC timer (or VMX preemption timer)
+  → VMRESUME child
+
+Timer fires → capavisor injects the configured synthetic vector directly
+```
+
+**Pros**:
+- Clean abstraction: supports multiple timers (4 per VP, like Hyper-V).
+- Can use the VMX preemption timer instead of LAPIC timer (no external
+  interrupt exit — uses EXIT_REASON_VMX_PREEMPTION_TIMER which is cheaper).
+- Periodic mode built in: capavisor auto-rearms without guest exit.
+- Well-understood model (Hyper-V enlightened Linux already has a driver:
+  `drivers/clocksource/hyperv_timer.c`).
+
+**Cons**:
+- Requires a guest kernel driver (clocksource + clockevent).
+- More complex capavisor code (timer state machine, multiple timers).
+- Adds a Themis-specific paravirt interface that guests must opt into.
+
+#### Option C: Shared-Page Timer (kvmclock-Inspired)
+
+Use a shared page for timer registration.  The child writes deadlines to a
+shared memory region instead of through MSR exits.
+
+```
+Shared timer page (mapped into child's GPA):
+  offset 0x00: timer_deadline (uint64, TSC value)
+  offset 0x08: timer_vector   (uint32)
+  offset 0x0C: timer_armed    (uint32, set by guest, cleared by capavisor)
+
+Child writes deadline to shared page → no VMEXIT
+Capavisor checks timer_armed on every VMRESUME (or uses preemption timer)
+```
+
+**Pros**:
+- Zero exit overhead for timer arming (memory write, no WRMSR exit).
+- Simple guest driver (just memory writes).
+
+**Cons**:
+- Capavisor must poll or use a secondary mechanism to notice new deadlines.
+- If using preemption timer as backing, precision depends on the preemption
+  timer rate divisor.
+- Security concern: the shared page is in the child's GPA space, so the
+  child can manipulate it freely.  Need to validate deadline values.
+
+### 10.3 Recommendation
+
+**Option A (LAPIC passthrough) for the initial implementation**, with
+Option B as a future enhancement.
+
+Rationale:
+- Option A requires **zero guest kernel changes** — dom1 uses standard
+  TSC-deadline mode, which it already does today.
+- Option A is the simplest capavisor change: intercept WRMSR 0x6E0, write
+  the value to the physical MSR, handle the resulting timer interrupt locally.
+- Option A is the fastest: one VMEXIT for arming, one VMEXIT for firing,
+  everything handled locally on core 1.
+- The LAPIC timer is already per-core and naturally belongs to whatever
+  domain owns core 1 in the gapped model.
+
+Option B becomes valuable when:
+- We want periodic timers without per-tick WRMSR exits.
+- We need multiple independent timers per VP.
+- We want CoCo-aware guests with a Themis-specific clocksource.
+
+### 10.4 Implementation Details (Option A)
+
+#### Capavisor Changes
+
+1. **WRMSR 0x6E0 handler (core 1, child exit)**:
+   ```rust
+   fn handle_child_tsc_deadline_wrmsr(deadline: u64) {
+       // Convert child's virtual TSC to physical TSC if offset is used.
+       let phys_deadline = deadline + tsc_offset;
+       // Program core 1's physical LAPIC timer.
+       unsafe { wrmsr(IA32_TSC_DEADLINE, phys_deadline); }
+       // Advance child RIP past the WRMSR instruction.
+       advance_guest_rip();
+       // VMRESUME child — no forwarding to dom0.
+   }
+   ```
+
+2. **External interrupt handler (core 1, timer fires)**:
+   ```rust
+   fn handle_timer_interrupt_on_gapped_core(vector: u8) {
+       if vector == LAPIC_TIMER_VECTOR {
+           // This is the child's timer — inject directly via PIR.
+           set_pir_bit(child_timer_guest_vector);
+           // VMRESUME: PIR will be drained automatically on VM entry.
+       } else {
+           // Not the timer — handle per existing interrupt policy.
+           handle_external_interrupt_per_policy(vector);
+       }
+   }
+   ```
+
+3. **Parked state handling**: if the child is parked (synchronous Forward for
+   an I/O exit) and the timer fires, the capavisor must:
+   - ACK the interrupt (EOI the LAPIC).
+   - Set the PIR bit for the child's timer vector.
+   - The timer injection happens on the next VMRESUME when the child unparks.
+
+#### TSC Offset Handling
+
+The child's virtual TSC may be offset from the physical TSC (VMCS field
+`TSC_OFFSET`).  The child writes `virtual_deadline` to MSR 0x6E0.  The
+capavisor must add the TSC offset to get the physical deadline:
+
+```
+physical_deadline = virtual_deadline + tsc_offset
+```
+
+The `tsc_offset` is already stored in the VMCS and known to the capavisor.
+
+#### LAPIC Timer Vector
+
+The child's Linux kernel configures its LAPIC timer with a specific LVT
+vector (typically 0xEC for `LOCAL_TIMER_VECTOR`).  The capavisor doesn't
+need to know this — it programs the physical LAPIC timer and when it fires
+as EXIT_REASON_EXTERNAL_INTERRUPT, the vector in the exit info identifies
+it.  The capavisor then injects that same vector into the child via PIR.
+
+Actually, the physical LAPIC timer vector is set by the **capavisor** (it
+owns the physical LAPIC on core 1).  The child's virtual LAPIC timer vector
+(in its virtual LVT) is what gets injected via PIR.  The capavisor must
+read the child's virtual LVT timer entry to know which vector to inject.
+
+#### Dom0 / thhv Changes
+
+**None for the timer path.**  Dom0 is completely out of the loop.  The
+timerfd/irqfd path in CHV is still used for sync mode but is bypassed
+entirely when core-gapping is active.
+
+#### Dom1 Kernel Changes
+
+**None.**  Dom1 uses standard TSC-deadline mode.  From the guest's
+perspective, it writes MSR 0x6E0 and eventually receives a timer interrupt
+— indistinguishable from native hardware.
+
+### 10.5 How Deadlines Are Registered and Triggered
+
+Summary of the complete timer lifecycle on a gapped core:
+
+```
+          Dom1 (guest, core 1)         Capavisor (core 1)        Dom0 (core 0)
+          ──────────────────           ─────────────────          ──────────────
+1. hrtimer arms LAPIC timer:
+   WRMSR 0x6E0 = deadline
+          ──── VMEXIT ────→
+                                  2. Read deadline from
+                                     guest ECX:EDX
+                                  3. Add TSC offset
+                                  4. WRMSR 0x6E0 (physical)
+                                  5. Advance guest RIP
+          ←── VMRESUME ────
+                                                                  (not involved)
+   ... guest runs ...
+
+                                  6. Physical LAPIC timer fires
+          ──── VMEXIT ────→          EXIT_REASON_EXTERNAL_INTERRUPT
+                                  7. ACK interrupt (EOI)
+                                  8. Read child's virtual LVT
+                                     timer vector
+                                  9. Set PIR bit for that vector
+          ←── VMRESUME ────
+10. Timer interrupt injected
+    via PIR drain on VM entry
+    hrtimer callback runs
+    next deadline programmed → back to step 1
+```
+
+**Total exits per timer tick: 2** (WRMSR + external interrupt).
+**Dom0 involvement: zero.**
+**IPIs: zero.**
+
+Compare to the current sync path which requires: WRMSR exit → switch to
+dom0 → ioctl → userspace timerfd → eventfd → workqueue → VMCALL →
+PIR → switch → VMRESUME = **6+ context transitions per tick**.
+
+---
+
+## 11. Open Design Questions
+
+1. **Per-event-type policy granularity**: do we need per-exit-reason policy
    entries (e.g., I/O on port 0x60 → Forward sync, CPUID → Forward async)?
    Or is a per-domain global policy sufficient?
 
-3. **Multiple children**: if dom0 manages multiple children on multiple
+2. **Multiple children**: if dom0 manages multiple children on multiple
    gapped cores, how does core 0 handle concurrent event queues?  Likely
    one shared page per child VP, one doorbell vector per child (or a single
    vector + event queue with source identification).
 
-4. **Synchronous polling overhead**: if core 1 polls a shared variable while
+3. **Synchronous polling overhead**: if core 1 polls a shared variable while
    waiting for dom0's response, this burns CPU cycles.  Alternatives:
    - Dom0 sends an IPI back to core 1 when the response is ready (but
      interrupts are disabled in capavisor, so this would need special
      handling — e.g., NMI or checking in the poll loop).
    - Accept the polling cost since the alternative (switch back) is worse.
 
-5. **START_VP / RESUME_VP / STOP_VP VMCALLs**: with the policy-driven model,
+4. **START_VP / RESUME_VP / STOP_VP VMCALLs**: with the policy-driven model,
    are these needed?  The existing SWITCH + policy system may suffice:
    - SWITCH starts the child (same as today).
    - `Forward` policy prevents switches back.
@@ -395,7 +641,7 @@ Core-gapping provides significant security improvements:
 
 ---
 
-## 11. Implementation Plan
+## 12. Implementation Plan
 
 ### Phase G1: Policy extension
 
@@ -459,12 +705,21 @@ bring it back online on teardown.  Disable watchdogs, pin thread.
 
 ---
 
-## 12. References
+## 13. References
 
 - `docs/architecture/mshv-themis.md` §4 (ThemIC), §6.1–6.2 (sync/async
   scheduling), §15f (RUN_VP)
-- `docs/architecture/interrupt-virtualization.md` Phase 3 (core-gapping)
+- `docs/architecture/interrupt-virtualization.md` Phase 3 (core-gapping),
+  §Key Design Constraint (LAPIC timer), §Nested Virtualization Scheduling
+  (timer flood analysis)
 - `docs/domain-comm.md` (DomainComm rings, message types)
-- Hyper-V TLFS: SynIC (Chapter 11), Root Scheduler (Chapter 14)
+- Hyper-V TLFS: SynIC (Chapter 11), Root Scheduler (Chapter 14),
+  Timers (Chapter 10 — synthetic timers, reference TSC page)
+- KVM timekeeping: `docs.kernel.org/virt/kvm/x86/timekeeping.html`
+  (TSC, kvmclock, pvclock structure)
+- Linux clocksource: `drivers/clocksource/hyperv_timer.c` (Hyper-V
+  synthetic timer guest driver — reference for Option B)
+- Intel SDM Vol 3C §25.5.1 (VMX preemption timer), §10.5.4 (LAPIC timer,
+  TSC-deadline mode)
 - vmxvmm/monitor/tyche: `monitor.rs` (CoreUpdate, CORE_REMAP),
   `calls.rs` (SWITCH, CONFIGURE_CORE)
