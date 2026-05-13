@@ -9,6 +9,8 @@
 mod gdt;
 mod idt;
 mod serial;
+mod test_harness;
+mod tests;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -156,18 +158,8 @@ pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
     idt::init();
     println!("[ok] IDT loaded (32 exception vectors)");
 
-    // Smoke test: trigger #UD (invalid opcode) to verify exception handling.
-    println!("[test] triggering #UD...");
-    unsafe {
-        core::arch::asm!("ud2");
-    }
-
-    // Should not reach here.
-    loop {
-        unsafe {
-            core::arch::asm!("hlt");
-        }
-    }
+    // Run all registered tests and exit.
+    test_harness::run(tests::TESTS);
 }
 
 // ── Panic handler ───────────────────────────────────────────────────────── //
