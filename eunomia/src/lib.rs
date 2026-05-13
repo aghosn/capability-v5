@@ -1,8 +1,9 @@
-//! Eunomia kernel library — exported services for workload crates.
+//! Eunomia kernel library — runtime and services for workload crates.
 //!
-//! Workload crates depend on this library to access kernel services
-//! (serial I/O, timer, IDT info).  The kernel binary (`main.rs`)
-//! initialises everything and then calls the workload's `app_main`.
+//! Provides the complete boot runtime (PVH entry, 32→64 transition,
+//! GDT, IDT, heap), kernel services (serial, timer, memory), and test
+//! harness.  Workload crates depend on this library and define an
+//! `app_main` function that the runtime calls after initialisation.
 
 #![no_std]
 
@@ -12,6 +13,9 @@ pub mod serial;
 pub mod timer;
 pub mod mm;
 pub mod test_harness;
+pub mod gdt;
+pub mod idt;
+pub mod boot;
 
 /// Kernel services handle passed to workload's `app_main`.
 ///

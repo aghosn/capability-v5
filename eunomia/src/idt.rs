@@ -131,26 +131,26 @@ extern "C" fn exception_handler(frame: &InterruptFrame) {
     } else {
         "Unknown"
     };
-    eunomia::println!("EXCEPTION: {} (vector {})", name, vec);
-    eunomia::println!("  error_code = {:#x}", frame.error_code);
-    eunomia::println!("  RIP = {:#018x}  CS  = {:#x}", frame.rip, frame.cs);
-    eunomia::println!("  RSP = {:#018x}  SS  = {:#x}", frame.rsp, frame.ss);
-    eunomia::println!("  RFLAGS = {:#018x}", frame.rflags);
-    eunomia::println!("  RAX={:#018x} RBX={:#018x}", frame.rax, frame.rbx);
-    eunomia::println!("  RCX={:#018x} RDX={:#018x}", frame.rcx, frame.rdx);
-    eunomia::println!("  RSI={:#018x} RDI={:#018x}", frame.rsi, frame.rdi);
-    eunomia::println!("  RBP={:#018x} R8 ={:#018x}", frame.rbp, frame.r8);
-    eunomia::println!("  R9 ={:#018x} R10={:#018x}", frame.r9, frame.r10);
-    eunomia::println!("  R11={:#018x} R12={:#018x}", frame.r11, frame.r12);
-    eunomia::println!("  R13={:#018x} R14={:#018x}", frame.r13, frame.r14);
-    eunomia::println!("  R15={:#018x}", frame.r15);
+    crate::println!("EXCEPTION: {} (vector {})", name, vec);
+    crate::println!("  error_code = {:#x}", frame.error_code);
+    crate::println!("  RIP = {:#018x}  CS  = {:#x}", frame.rip, frame.cs);
+    crate::println!("  RSP = {:#018x}  SS  = {:#x}", frame.rsp, frame.ss);
+    crate::println!("  RFLAGS = {:#018x}", frame.rflags);
+    crate::println!("  RAX={:#018x} RBX={:#018x}", frame.rax, frame.rbx);
+    crate::println!("  RCX={:#018x} RDX={:#018x}", frame.rcx, frame.rdx);
+    crate::println!("  RSI={:#018x} RDI={:#018x}", frame.rsi, frame.rdi);
+    crate::println!("  RBP={:#018x} R8 ={:#018x}", frame.rbp, frame.r8);
+    crate::println!("  R9 ={:#018x} R10={:#018x}", frame.r9, frame.r10);
+    crate::println!("  R11={:#018x} R12={:#018x}", frame.r11, frame.r12);
+    crate::println!("  R13={:#018x} R14={:#018x}", frame.r13, frame.r14);
+    crate::println!("  R15={:#018x}", frame.r15);
 
     if vec == 14 {
         let cr2: u64;
         unsafe {
             core::arch::asm!("mov {}, cr2", out(reg) cr2);
         }
-        eunomia::println!("  CR2 (fault addr) = {:#018x}", cr2);
+        crate::println!("  CR2 (fault addr) = {:#018x}", cr2);
     }
 
     // Halt after exception.
@@ -353,7 +353,7 @@ pub fn init() {
         }
 
         // Timer interrupt (vector 32).
-        idt[eunomia::timer::TIMER_VECTOR as usize] =
+        idt[crate::timer::TIMER_VECTOR as usize] =
             IdtEntry::interrupt_gate(timer_isr_stub as *const () as u64, 0);
 
         let ptr = IdtPtr {
@@ -391,6 +391,6 @@ unsafe extern "C" fn timer_isr_stub() {
         "pop rcx",
         "pop rax",
         "iretq",
-        ticks = sym eunomia::timer::TIMER_TICKS,
+        ticks = sym crate::timer::TIMER_TICKS,
     );
 }

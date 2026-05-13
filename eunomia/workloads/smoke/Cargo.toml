@@ -1,15 +1,14 @@
 [package]
-name    = "eunomia"
+name    = "eunomia-smoke"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "eunomia"
-path = "src/lib.rs"
+[[bin]]
+name = "eunomia-smoke"
+path = "src/main.rs"
 
-[features]
-default = ["console-serial"]
-console-serial = []
+[dependencies]
+eunomia = { path = "../.." }
 
 [profile.dev]
 panic = "abort"

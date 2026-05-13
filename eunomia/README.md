@@ -9,7 +9,7 @@ Named after the Greek goddess of lawful order, daughter of Themis.
 
 Eunomia boots via the PVH protocol (used by Cloud Hypervisor), sets up a
 64-bit execution environment with GDT, TSS, and IDT, and dispatches to a
-compile-time-selected **workload**.  It is intentionally tiny — the full
+workload-defined `app_main` entry point.  It is intentionally tiny — the full
 kernel fits in a few hundred lines of Rust plus a small assembly boot stub.
 
 Key properties:
@@ -18,7 +18,8 @@ Key properties:
 - **GDT + TSS**: code/data segments, IST1 for double-fault isolation
 - **IDT**: 32 exception vectors with full register-dump handler, timer ISR
 - **LAPIC timer**: one-shot mode, tick counter
-- **Workload model**: feature-gated workloads with `app_main` entry point
+- **Bump allocator**: `GlobalAlloc` — `Box`, `Vec`, `String` work out of the box
+- **Workload model**: independent crates linked against the eunomia runtime
 - **Test harness**: declarative tests, QEMU `isa-debug-exit` for CI
 
 See [docs/architecture/eunomia.md](../docs/architecture/eunomia.md) for the
@@ -30,68 +31,53 @@ full design document (trait-based configurable core, future phases).
 - QEMU with KVM (`qemu-system-x86_64`)
 - KVM access (`/dev/kvm`)
 
+## Project Structure
+
+```
+eunomia/
+├── Cargo.toml              # Kernel library crate
+├── .cargo/config.toml      # x86_64-unknown-none target, QEMU runner
+├── rust-toolchain.toml     # Nightly toolchain (independent from themis/)
+├── build.rs                # Linker script path
+├── linker.ld               # PVH layout: load at 0x100000, PT_NOTE segment
+├── src/
+│   ├── lib.rs              # Crate root, re-exports all modules
+│   ├── boot.rs             # PVH boot asm, rust_main, panic handler
+│   ├── serial.rs           # COM1 UART driver, print!/println! macros
+│   ├── timer.rs            # LAPIC one-shot timer driver
+│   ├── mm.rs               # Bump allocator with GlobalAlloc
+│   ├── gdt.rs              # GDT with TSS, IST1 double-fault stack
+│   ├── idt.rs              # IDT, 32 exception stubs, timer ISR
+│   └── test_harness.rs     # TestCase, runner, QEMU exit codes
+└── workloads/
+    ├── smoke/              # Smoke tests: serial, GDT, IDT, stack
+    ├── timer/              # Timer interrupt test
+    └── memory/             # Heap allocator tests (Box, Vec, alignment)
+```
+
 ## Building
 
 ```bash
 cd eunomia/
 
-# Build the default workload (smoke tests)
+# Build the kernel library
 cargo build --release
 
-# Build a specific workload
-cargo build --release --no-default-features --features "console-serial,app-timer"
-```
-
-The binary is produced at `target/x86_64-unknown-none/release/eunomia`.
-
-## Project Structure
-
-```
-eunomia/
-├── Cargo.toml          # lib+bin crate, feature-based workload selection
-├── .cargo/config.toml  # x86_64-unknown-none target, QEMU runner
-├── rust-toolchain.toml # Nightly toolchain (independent from themis/)
-├── build.rs            # Linker script path
-├── linker.ld           # PVH layout: load at 0x100000, PT_NOTE segment
-└── src/
-    ├── lib.rs           # KernelServices, re-exports serial/timer/test_harness
-    ├── main.rs          # PVH boot asm, GDT/IDT init, workload dispatch
-    ├── serial.rs        # COM1 UART driver, print!/println! macros
-    ├── timer.rs         # LAPIC one-shot timer driver
-    ├── gdt.rs           # GDT with TSS, IST1 double-fault stack
-    ├── idt.rs           # IDT, 32 exception stubs, timer ISR
-    ├── test_harness.rs  # TestCase, runner, QEMU exit codes
-    └── workloads/
-        ├── mod.rs       # Feature-gated dispatch to workload app_main
-        ├── smoke.rs     # Smoke tests: serial, GDT, IDT, stack
-        └── timer.rs     # Timer interrupt test
+# Build a workload
+cd workloads/smoke && cargo build --release
 ```
 
 ## Running Workloads
 
-Each workload is selected at compile time via Cargo features.  `cargo run`
-boots Eunomia under QEMU (configured in `.cargo/config.toml`).
+Each workload is an independent binary crate under `workloads/`.
+Run with `cargo run --release` from the workload directory.
 
-### Smoke tests (default)
+### Smoke tests
 
 Verifies serial output, GDT, IDT, and stack are operational.
 
 ```bash
-cargo run --release
-```
-
-Expected output:
-
-```
-Eunomia v0.1.0 booted
-[ok] GDT loaded (with TSS)
-[ok] IDT loaded (32 exception vectors)
---- running 4 tests ---
-test serial_output ... ok
-test gdt_loaded ... ok
-test idt_loaded ... ok
-test stack_sanity ... ok
---- results: 4 passed, 0 failed ---
+cd workloads/smoke && cargo run --release
 ```
 
 ### Timer test
@@ -99,7 +85,7 @@ test stack_sanity ... ok
 Verifies the LAPIC one-shot timer fires and increments the tick counter.
 
 ```bash
-cargo run --release --no-default-features --features "console-serial,app-timer"
+cd workloads/timer && cargo run --release
 ```
 
 ### Memory allocator test
@@ -107,23 +93,33 @@ cargo run --release --no-default-features --features "console-serial,app-timer"
 Verifies heap allocation: Box, Vec, large allocations, alignment, heap stats.
 
 ```bash
-cargo run --release --no-default-features --features "console-serial,app-memory"
-```
-
-Expected output:
-
-```
---- running 1 tests ---
-test timer_fires ... ok
---- results: 1 passed, 0 failed ---
+cd workloads/memory && cargo run --release
 ```
 
 ### Writing a new workload
 
-1. Create `src/workloads/mywork.rs` with a `pub fn app_main(_: &eunomia::KernelServices) -> !`
-2. Add a feature `app-mywork = []` in `Cargo.toml`
-3. Wire it in `src/workloads/mod.rs` with `#[cfg(feature = "app-mywork")]`
-4. Run: `cargo run --release --no-default-features --features "console-serial,app-mywork"`
+Create a new crate under `workloads/`:
+
+```
+workloads/mywork/
+├── Cargo.toml    # depends on eunomia = { path = "../.." }
+├── build.rs      # points to ../../linker.ld
+└── src/main.rs
+```
+
+The `main.rs` must define `app_main`:
+
+```rust
+#![no_std]
+#![no_main]
+extern crate eunomia;
+
+#[no_mangle]
+pub fn app_main(services: &eunomia::KernelServices) -> ! {
+    eunomia::println!("Hello from my workload!");
+    loop { unsafe { core::arch::asm!("hlt"); } }
+}
+```
 
 ## Exit Codes
 

@@ -1,11 +1,15 @@
 //! Memory allocator test workload — verifies heap allocation works.
 
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+extern crate eunomia;
+
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use eunomia::test_harness::TestCase;
-
-extern crate alloc;
 
 static TESTS: &[TestCase] = &[
     TestCase { name: "box_alloc", func: test_box_alloc },
@@ -15,6 +19,7 @@ static TESTS: &[TestCase] = &[
     TestCase { name: "heap_stats", func: test_heap_stats },
 ];
 
+#[no_mangle]
 pub fn app_main(_services: &eunomia::KernelServices) -> ! {
     eunomia::test_harness::run(TESTS);
 }
@@ -46,7 +51,6 @@ fn test_vec_push() -> Result<(), &'static str> {
 }
 
 fn test_large_vec() -> Result<(), &'static str> {
-    // Allocate 64 KiB worth of u64s (8192 elements).
     let v: Vec<u64> = vec![0xDEAD_BEEF_CAFE_BABE; 8192];
     if v.len() != 8192 {
         return Err("large vec length");
@@ -58,13 +62,11 @@ fn test_large_vec() -> Result<(), &'static str> {
 }
 
 fn test_alignment() -> Result<(), &'static str> {
-    // Box<u64> must be 8-byte aligned.
     let b = Box::new(0u64);
     let addr = &*b as *const u64 as usize;
     if addr % 8 != 0 {
         return Err("u64 not 8-byte aligned");
     }
-    // Box<u128> must be 16-byte aligned.
     let b128 = Box::new(0u128);
     let addr128 = &*b128 as *const u128 as usize;
     if addr128 % 16 != 0 {
@@ -76,33 +78,22 @@ fn test_alignment() -> Result<(), &'static str> {
 fn test_heap_stats() -> Result<(), &'static str> {
     let alloc = eunomia::mm::allocator();
 
-    // Verify heap is properly configured.
     if alloc.heap_start() == 0 {
         return Err("heap not initialised");
     }
     if alloc.heap_end() <= alloc.heap_start() {
         return Err("heap end <= heap start");
     }
-
-    // Verify allocated > 0 (prior tests used the heap).
     if alloc.allocated() == 0 {
         return Err("allocated should be > 0 after prior tests");
     }
 
-    // Verify remaining is sane.
-    let remaining = alloc.remaining();
-    if remaining == 0 {
-        return Err("heap exhausted");
-    }
-
-    // Allocate more and verify remaining decreases.
-    let before = remaining;
+    let before = alloc.remaining();
     let v: Vec<u8> = vec![0xAA; 4096];
     core::hint::black_box(&v);
     let after = alloc.remaining();
     if after >= before {
         return Err("remaining did not decrease after 4K alloc");
     }
-
     Ok(())
 }

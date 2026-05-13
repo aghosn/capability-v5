@@ -1,12 +1,18 @@
-//! Timer test workload — verifies TSC-deadline LAPIC timer fires.
+//! Timer test workload — verifies LAPIC one-shot timer fires.
+
+#![no_std]
+#![no_main]
 
 use core::sync::atomic::Ordering;
 use eunomia::test_harness::TestCase;
+
+extern crate eunomia;
 
 static TESTS: &[TestCase] = &[
     TestCase { name: "timer_fires", func: test_timer_fires },
 ];
 
+#[no_mangle]
 pub fn app_main(_services: &eunomia::KernelServices) -> ! {
     eunomia::test_harness::run(TESTS);
 }

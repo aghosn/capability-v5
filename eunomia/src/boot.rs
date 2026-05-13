@@ -1,17 +1,15 @@
-//! Eunomia — minimal micro-kernel for Themis guests.
+//! Eunomia boot runtime — PVH entry, 32→64 transition, kernel init.
 //!
-//! Boots via PVH (32-bit protected mode entry from CHV), transitions to
-//! 64-bit long mode, initialises kernel subsystems, and calls the
-//! workload's `app_main`.
-
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod gdt;
-mod idt;
-mod workloads;
+//! Contains the PVH ELF note, 32-bit boot stub, and `rust_main` which
+//! initialises all kernel subsystems then calls the workload's `app_main`.
+//!
+//! Workload crates pull in this module by depending on the `eunomia`
+//! library.  They must define:
+//!
+//! ```rust,ignore
+//! #[no_mangle]
+//! pub fn app_main(services: &eunomia::KernelServices) -> ! { /* ... */ }
+//! ```
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -153,47 +151,37 @@ gdt64_ptr:
     options(att_syntax),
 );
 
+// ── Rust entry point ────────────────────────────────────────────────────── //
+
+extern "Rust" {
+    /// Workload entry point — must be defined by the workload crate.
+    fn app_main(services: &crate::KernelServices) -> !;
+}
+
 #[no_mangle]
 pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
-    eunomia::serial::init();
-    eunomia::println!("Eunomia v0.1.0 booted");
-    eunomia::println!("hvm_start_info @ {:#x}", hvm_start_info);
+    crate::serial::init();
+    crate::println!("Eunomia v0.1.0 booted");
+    crate::println!("hvm_start_info @ {:#x}", hvm_start_info);
 
-    gdt::init();
-    eunomia::println!("[ok] GDT loaded (with TSS)");
+    crate::gdt::init();
+    crate::println!("[ok] GDT loaded (with TSS)");
 
-    idt::init();
-    eunomia::println!("[ok] IDT loaded (32 exception vectors)");
+    crate::idt::init();
+    crate::println!("[ok] IDT loaded (32 exception vectors)");
 
-    unsafe { eunomia::mm::init(); }
-    eunomia::println!("[ok] Heap initialised ({} KiB)", eunomia::mm::allocator().remaining() / 1024);
+    unsafe { crate::mm::init(); }
+    crate::println!("[ok] Heap initialised ({} KiB)", crate::mm::allocator().remaining() / 1024);
 
-    let services = eunomia::KernelServices { hvm_start_info };
-
-    // Dispatch to the selected workload.
-    #[cfg(feature = "app-smoke")]
-    workloads::smoke::app_main(&services);
-
-    #[cfg(feature = "app-timer")]
-    workloads::timer::app_main(&services);
-
-    #[cfg(feature = "app-memory")]
-    workloads::memory::app_main(&services);
-
-    #[cfg(not(any(feature = "app-smoke", feature = "app-timer", feature = "app-memory")))]
-    {
-        eunomia::println!("No workload selected. Halting.");
-        loop {
-            unsafe { core::arch::asm!("hlt"); }
-        }
-    }
+    let services = crate::KernelServices { hvm_start_info };
+    unsafe { app_main(&services) }
 }
 
 // ── Panic handler ───────────────────────────────────────────────────────── //
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    eunomia::println!("PANIC: {}", info);
+    crate::println!("PANIC: {}", info);
     loop {
         unsafe {
             core::arch::asm!("hlt");
