@@ -131,26 +131,26 @@ extern "C" fn exception_handler(frame: &InterruptFrame) {
     } else {
         "Unknown"
     };
-    crate::println!("EXCEPTION: {} (vector {})", name, vec);
-    crate::println!("  error_code = {:#x}", frame.error_code);
-    crate::println!("  RIP = {:#018x}  CS  = {:#x}", frame.rip, frame.cs);
-    crate::println!("  RSP = {:#018x}  SS  = {:#x}", frame.rsp, frame.ss);
-    crate::println!("  RFLAGS = {:#018x}", frame.rflags);
-    crate::println!("  RAX={:#018x} RBX={:#018x}", frame.rax, frame.rbx);
-    crate::println!("  RCX={:#018x} RDX={:#018x}", frame.rcx, frame.rdx);
-    crate::println!("  RSI={:#018x} RDI={:#018x}", frame.rsi, frame.rdi);
-    crate::println!("  RBP={:#018x} R8 ={:#018x}", frame.rbp, frame.r8);
-    crate::println!("  R9 ={:#018x} R10={:#018x}", frame.r9, frame.r10);
-    crate::println!("  R11={:#018x} R12={:#018x}", frame.r11, frame.r12);
-    crate::println!("  R13={:#018x} R14={:#018x}", frame.r13, frame.r14);
-    crate::println!("  R15={:#018x}", frame.r15);
+    eunomia::println!("EXCEPTION: {} (vector {})", name, vec);
+    eunomia::println!("  error_code = {:#x}", frame.error_code);
+    eunomia::println!("  RIP = {:#018x}  CS  = {:#x}", frame.rip, frame.cs);
+    eunomia::println!("  RSP = {:#018x}  SS  = {:#x}", frame.rsp, frame.ss);
+    eunomia::println!("  RFLAGS = {:#018x}", frame.rflags);
+    eunomia::println!("  RAX={:#018x} RBX={:#018x}", frame.rax, frame.rbx);
+    eunomia::println!("  RCX={:#018x} RDX={:#018x}", frame.rcx, frame.rdx);
+    eunomia::println!("  RSI={:#018x} RDI={:#018x}", frame.rsi, frame.rdi);
+    eunomia::println!("  RBP={:#018x} R8 ={:#018x}", frame.rbp, frame.r8);
+    eunomia::println!("  R9 ={:#018x} R10={:#018x}", frame.r9, frame.r10);
+    eunomia::println!("  R11={:#018x} R12={:#018x}", frame.r11, frame.r12);
+    eunomia::println!("  R13={:#018x} R14={:#018x}", frame.r13, frame.r14);
+    eunomia::println!("  R15={:#018x}", frame.r15);
 
     if vec == 14 {
         let cr2: u64;
         unsafe {
             core::arch::asm!("mov {}, cr2", out(reg) cr2);
         }
-        crate::println!("  CR2 (fault addr) = {:#018x}", cr2);
+        eunomia::println!("  CR2 (fault addr) = {:#018x}", cr2);
     }
 
     // Halt after exception.
@@ -344,12 +344,17 @@ fn stub_addr(vec: usize) -> u64 {
 /// Initialise and load the IDT.  Must be called after `gdt::init()`.
 pub fn init() {
     unsafe {
-        // Set up exception gates (vectors 0–31).
         let idt = &mut *(&raw mut IDT);
+
+        // Exception gates (vectors 0–31).
         for vec in 0..32 {
             let ist = if vec == 8 { gdt::IST_DF } else { 0 };
             idt[vec] = IdtEntry::interrupt_gate(stub_addr(vec), ist);
         }
+
+        // Timer interrupt (vector 32).
+        idt[eunomia::timer::TIMER_VECTOR as usize] =
+            IdtEntry::interrupt_gate(timer_isr_stub as *const () as u64, 0);
 
         let ptr = IdtPtr {
             limit: (mem::size_of::<[IdtEntry; IDT_SIZE]>() - 1) as u16,
@@ -358,4 +363,33 @@ pub fn init() {
 
         core::arch::asm!("lidt [{}]", in(reg) &ptr);
     }
+}
+
+// ── Timer ISR ──────────────────────────────────────────────────────────── //
+//
+// Minimal stub: increment tick counter, send EOI, iretq.
+// Written as a naked function to avoid compiler-generated prologue.
+
+#[unsafe(naked)]
+unsafe extern "C" fn timer_isr_stub() {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+
+        // TIMER_TICKS.fetch_add(1, Relaxed)
+        "mov rax, 1",
+        "lock xadd [{ticks}], rax",
+
+        // EOI: write 0 to LAPIC EOI register.
+        "xor eax, eax",
+        "mov dword ptr [{eoi}], eax",
+
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        ticks = sym eunomia::timer::TIMER_TICKS,
+        eoi = const 0xFEE0_00B0u64,
+    );
 }

@@ -3,13 +3,19 @@ name    = "eunomia"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "eunomia"
+path = "src/lib.rs"
+
 [[bin]]
 name = "eunomia"
 path = "src/main.rs"
 
 [features]
-default = ["console-serial"]
+default = ["console-serial", "app-tests"]
 console-serial = []
+# Workload selection — exactly one app-* feature should be enabled.
+app-tests = []
 
 [profile.dev]
 panic = "abort"

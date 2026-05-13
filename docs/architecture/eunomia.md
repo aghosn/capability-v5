@@ -421,7 +421,98 @@ paravirtualized interfaces:
 
 ---
 
-## 8. Test Harness
+## 8. Workload Model
+
+Eunomia separates the kernel from the application ("workload") that
+runs on top of it.  This enables different workloads — test suites,
+crypto enclaves, benchmark harnesses — to be compiled against the same
+kernel without modifying kernel code.
+
+### 8.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│              Workload (app_main)                      │
+│  Selected at compile time via Cargo feature.          │
+│  e.g., app-tests, app-enclave, app-bench              │
+├──────────────────────────────────────────────────────┤
+│              eunomia (lib crate)                      │
+│  KernelServices, serial, timer, test_harness, ...     │
+├──────────────────────────────────────────────────────┤
+│              eunomia (bin crate)                      │
+│  PVH boot stub, GDT, IDT, init → app_main()          │
+└──────────────────────────────────────────────────────┘
+```
+
+### 8.2 Contract
+
+The kernel binary (`main.rs`) handles all hardware init and then calls
+the workload's entry point:
+
+```rust
+/// Workload entry point.  Called after all kernel subsystems are
+/// initialised.  Must not return.
+pub fn app_main(services: &eunomia::KernelServices) -> !
+```
+
+The `KernelServices` struct gives the workload access to kernel state:
+
+```rust
+pub struct KernelServices {
+    /// Physical address of hvm_start_info (PVH boot data).
+    pub hvm_start_info: u64,
+    // Future: references to scheduler, allocator, HV interface, etc.
+}
+```
+
+The workload uses `eunomia::println!`, `eunomia::timer::*`,
+`eunomia::test_harness::*`, etc. directly from the library crate.
+
+### 8.3 Workload Selection
+
+Workloads are selected via Cargo features.  The binary dispatches to
+the active workload at compile time:
+
+```toml
+[features]
+default = ["app-tests"]
+app-tests   = []   # Built-in test suite
+# app-enclave = []   # Crypto enclave (future)
+# app-bench   = []   # Benchmark harness (future)
+```
+
+```rust
+// In main.rs, after kernel init:
+#[cfg(feature = "app-tests")]
+tests::app_main(&services);
+```
+
+To add a new workload:
+1. Create a module (e.g., `src/enclave/mod.rs`) with `pub fn app_main(...)`.
+2. Add a feature flag (`app-enclave = []`).
+3. Add a `#[cfg(feature = "app-enclave")]` dispatch in `main.rs`.
+4. Build: `cargo run --release --no-default-features --features app-enclave`.
+
+### 8.4 Future: Separate Workload Crates
+
+As workloads grow, they can be extracted into separate crates that
+depend on `eunomia` as a library.  The binary crate would then select
+a workload crate via optional Cargo dependencies:
+
+```toml
+[dependencies]
+eunomia-enclave = { path = "../eunomia-enclave", optional = true }
+
+[features]
+app-enclave = ["eunomia-enclave"]
+```
+
+This keeps the kernel crate small and workloads independently testable
+on the host (via the `hvi-stub` backend).
+
+---
+
+## 9. Test Harness
 
 The test harness is a core feature of Eunomia, not an add-on.
 
@@ -519,81 +610,45 @@ fn test_pio_serial_echo() -> Result<(), &'static str> {
 
 ---
 
-## 9. Project Structure
+## 10. Project Structure
 
 ```
 eunomia/
-├── Cargo.toml                # no_std, features for subsystem selection
+├── Cargo.toml                # lib + bin, features for workload selection
+├── .cargo/config.toml        # target, QEMU runner, rustflags
+├── rust-toolchain.toml       # nightly
 ├── build.rs                  # linker script path emission
-├── linker.ld                 # flat binary, load at 0x100000
+├── linker.ld                 # PVH boot, load at 0x100000
 ├── src/
-│   ├── main.rs               # entry point, boot sequence, test runner
-│   ├── lib.rs                # kernel API (for future app crates)
+│   ├── lib.rs                # kernel library: KernelServices, re-exports
+│   ├── main.rs               # binary: PVH boot asm, init, → app_main()
 │   │
-│   ├── arch/
-│   │   └── x86_64/
-│   │       ├── mod.rs
-│   │       ├── boot.rs       # PVH entry, hvm_start_info parsing
-│   │       ├── gdt.rs        # GDT + TSS setup
-│   │       ├── idt.rs        # IDT setup, exception/interrupt handlers
-│   │       ├── msr.rs        # MSR read/write helpers
-│   │       └── paging.rs     # page table manipulation (future)
+│   ├── serial.rs             # 16550 UART (0x3F8), print!/println! macros
+│   ├── timer.rs              # LAPIC TSC-deadline timer driver
+│   ├── gdt.rs                # GDT + TSS (IST for double-fault)
+│   ├── idt.rs                # IDT, 32 exception stubs, timer ISR
+│   ├── test_harness.rs       # TestCase, run(), QEMU exit
 │   │
-│   ├── traits/
-│   │   ├── mod.rs
-│   │   ├── scheduler.rs      # Scheduler trait
-│   │   ├── memory.rs         # MemoryManager trait
-│   │   ├── device.rs         # Device, ConsoleDevice, TimerDevice traits
-│   │   ├── uki.rs            # UserKernelInterface trait
-│   │   └── hvi.rs            # HypervisorInterface trait
-│   │
-│   ├── sched/
-│   │   ├── mod.rs             # compile-time scheduler selection
-│   │   ├── coop.rs            # cooperative round-robin
-│   │   └── preempt.rs         # preemptive (future)
-│   │
-│   ├── mem/
-│   │   ├── mod.rs             # compile-time allocator selection
-│   │   ├── bump.rs            # bump allocator
-│   │   └── page.rs            # page allocator (future)
-│   │
-│   ├── devices/
-│   │   ├── mod.rs
-│   │   ├── serial.rs          # 16550 UART (0x3F8)
-│   │   ├── timer_tsc.rs       # TSC-deadline timer
-│   │   └── timer_pv.rs        # Themis PV timer (future)
-│   │
-│   ├── themis/
-│   │   ├── mod.rs
-│   │   ├── hypercall.rs       # VMCALL interface
-│   │   ├── hvi_themis.rs      # HypervisorInterface: Themis backend
-│   │   ├── domcomm.rs         # DomainComm ring (future)
-│   │   └── attest.rs          # attestation (future)
-│   │
-│   ├── uki/
-│   │   ├── mod.rs             # compile-time UKI selection
-│   │   ├── direct.rs          # direct-call (unikernel mode)
-│   │   └── syscall.rs         # SYSCALL/SYSRET (future)
-│   │
-│   ├── hvi/
-│   │   ├── mod.rs             # compile-time HVI selection
-│   │   ├── stub.rs            # no-op stub (host testing)
-│   │   └── themis.rs          # re-exports themis/hvi_themis.rs
-│   │
-│   └── tests/
-│       ├── mod.rs             # test registry, runner
-│       ├── timer.rs           # timer interrupt tests
-│       ├── pio.rs             # PIO exit tests
-│       ├── mmio.rs            # MMIO exit tests (future)
-│       ├── exception.rs       # exception handler tests
-│       └── core_gapping.rs    # core-gapping specific tests (future)
+│   └── tests/                # Built-in test workload (app-tests feature)
+│       ├── mod.rs            # app_main(), test registry
+│       └── smoke.rs          # serial, GDT, IDT, stack sanity tests
+│
+│   # Future directories (from design, not yet implemented):
+│   # arch/         — architecture-specific code
+│   # traits/       — Scheduler, MemoryManager, Device, UKI, HVI traits
+│   # sched/        — scheduler implementations
+│   # mem/          — allocator implementations
+│   # devices/      — device drivers
+│   # themis/       — Themis integration (hypercalls, DomainComm)
+│   # uki/          — UserKernelInterface implementations
+│   # hvi/          — HypervisorInterface implementations
 │
 └── README.md
 ```
 
 ---
 
-## 10. Implementation Phases
+## 11. Implementation Phases
 
 ### Phase E1: Boot and Serial (Foundation)
 
@@ -695,7 +750,7 @@ eunomia/
 
 ---
 
-## 11. Build Integration
+## 12. Build Integration
 
 ### Workspace
 
@@ -746,7 +801,7 @@ KERNEL=/path/to/eunomia sudo ./run-dom1.sh
 
 ---
 
-## 12. Relationship to Existing Components
+## 13. Relationship to Existing Components
 
 | Component | Relationship |
 |-----------|-------------|
@@ -759,7 +814,7 @@ KERNEL=/path/to/eunomia sudo ./run-dom1.sh
 
 ---
 
-## 13. References
+## 14. References
 
 - **Writing an OS in Rust**: https://os.phil-opp.com/ — boot, GDT, IDT,
   paging, heap, async patterns

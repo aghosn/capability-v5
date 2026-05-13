@@ -1,15 +1,17 @@
 //! Eunomia — minimal micro-kernel for Themis guests.
 //!
 //! Boots via PVH (32-bit protected mode entry from CHV), transitions to
-//! 64-bit long mode, and prints a banner over COM1 serial.
+//! 64-bit long mode, initialises kernel subsystems, and calls the
+//! workload's `app_main`.
 
 #![no_std]
 #![no_main]
 
 mod gdt;
 mod idt;
-mod serial;
-mod test_harness;
+
+// Test workload (compiled in when feature "app-tests" is enabled).
+#[cfg(feature = "app-tests")]
 mod tests;
 
 use core::arch::global_asm;
@@ -148,25 +150,36 @@ gdt64_ptr:
 
 #[no_mangle]
 pub extern "C" fn rust_main(hvm_start_info: u64) -> ! {
-    serial::init();
-    println!("Eunomia v0.1.0 booted");
-    println!("hvm_start_info @ {:#x}", hvm_start_info);
+    eunomia::serial::init();
+    eunomia::println!("Eunomia v0.1.0 booted");
+    eunomia::println!("hvm_start_info @ {:#x}", hvm_start_info);
 
     gdt::init();
-    println!("[ok] GDT loaded (with TSS)");
+    eunomia::println!("[ok] GDT loaded (with TSS)");
 
     idt::init();
-    println!("[ok] IDT loaded (32 exception vectors)");
+    eunomia::println!("[ok] IDT loaded (32 exception vectors)");
 
-    // Run all registered tests and exit.
-    test_harness::run(tests::TESTS);
+    let services = eunomia::KernelServices { hvm_start_info };
+
+    // Dispatch to the selected workload.
+    #[cfg(feature = "app-tests")]
+    tests::app_main(&services);
+
+    #[cfg(not(feature = "app-tests"))]
+    {
+        eunomia::println!("No workload selected. Halting.");
+        loop {
+            unsafe { core::arch::asm!("hlt"); }
+        }
+    }
 }
 
 // ── Panic handler ───────────────────────────────────────────────────────── //
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("PANIC: {}", info);
+    eunomia::println!("PANIC: {}", info);
     loop {
         unsafe {
             core::arch::asm!("hlt");
