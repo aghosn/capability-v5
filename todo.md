@@ -117,19 +117,7 @@
 
 ### Uncommitted changes
 
-- `capa-engine/src/translation.rs` — Refcounted projection model: `RightsRefCount`,
-  `SegmentMeta`, `add_contribution`/`remove_contribution`, all legacy methods
-  updated to maintain `segment_meta`.
-- `capa-engine/src/capability.rs` — `add_footprint`/`remove_footprint` helpers,
-  `map_self` rewrite using contribution model, `mapped_gpas` tracking on accept paths.
-  Removed `restore_snapshot` (no longer needed).
-- `capa-engine/src/domain.rs` — Added `mapped_gpas: BTreeMap<LocalHandle, u64>`
-  field to Domain (behind `address_translation` feature).
-- `capa-engine/tests/unit/translation.rs` — 21 new refcounted projection unit tests.
-- `capa-engine/tests/integration/translation.rs` — 12 new MAP_SELF integration tests.
-- `docs/architecture/address-translation.md` — §13 Refcounted
-  Projection Model design doc.
-- `docs/architecture/confidential-vm.md` — Phase B step 1 marked done.
+(none — all prior MAP_SELF work has been committed)
 
 ---
 
