@@ -20,15 +20,17 @@ Key properties:
 - **LAPIC timer**: one-shot mode, tick counter
 - **Bump allocator**: `GlobalAlloc` — `Box`, `Vec`, `String` work out of the box
 - **Workload model**: independent crates linked against the eunomia runtime
-- **Test harness**: declarative tests, QEMU `isa-debug-exit` for CI
+- **Test harness**: declarative tests, clean exit on both QEMU and CHV
 
 See [docs/architecture/eunomia.md](../docs/architecture/eunomia.md) for the
-full design document (trait-based configurable core, future phases).
+full design document.  See [docs/architecture/eunomia-roadmap.md](../docs/architecture/eunomia-roadmap.md)
+for the roadmap (CHV boot, CoCo, core-gapping).
 
 ## Prerequisites
 
 - Rust nightly (managed by `rust-toolchain.toml`)
-- QEMU with KVM (`qemu-system-x86_64`)
+- QEMU with KVM (`qemu-system-x86_64`) — for local testing
+- Cloud Hypervisor (`cloud-hypervisor`) — for real PVH boot testing
 - KVM access (`/dev/kvm`)
 
 ## Project Structure
@@ -50,13 +52,17 @@ eunomia/
 │   ├── idt.rs              # IDT, 32 exception stubs, timer ISR
 │   ├── sched.rs            # Cooperative round-robin scheduler
 │   ├── hv.rs               # HypervisorInterface trait, Themis/Stub backends
-│   └── test_harness.rs     # TestCase, runner, QEMU exit codes
+│   └── test_harness.rs     # TestCase, runner, VMM-aware exit
+├── scripts/
+│   ├── run-chv.sh          # Standalone CHV launcher (takes ELF path)
+│   └── run-chv-runner.sh   # Cargo-compatible CHV runner (used by alias)
 └── workloads/
     ├── smoke/              # Smoke tests: serial, GDT, IDT, stack
     ├── timer/              # Timer interrupt test
     ├── memory/             # Heap allocator tests (Box, Vec, alignment)
     ├── sched/              # Cooperative scheduler context-switch tests
-    └── hypercall/          # Hypervisor interface trait + constant tests
+    ├── hypercall/          # Hypervisor interface trait + constant tests
+    └── pvh-info/           # PVH hvm_start_info validation (CHV-specific)
 ```
 
 ## Building
@@ -74,46 +80,48 @@ cd workloads/smoke && cargo build --release
 ## Running Workloads
 
 Each workload is an independent binary crate under `workloads/`.
-Run with `cargo run --release` from the workload directory.
+Two runners are available:
 
-### Smoke tests
+| Command | VMM | Boot path | Notes |
+|---------|-----|-----------|-------|
+| `cargo run --release` | QEMU microvm | Linux boot protocol | Default, fast iteration |
+| `cargo run-chv` | Cloud Hypervisor | Real PVH boot | Validates hvm_start_info, ACPI shutdown |
 
-Verifies serial output, GDT, IDT, and stack are operational.
+### Under QEMU (default)
 
 ```bash
 cd workloads/smoke && cargo run --release
 ```
 
-### Timer test
-
-Verifies the LAPIC one-shot timer fires and increments the tick counter.
+### Under Cloud Hypervisor
 
 ```bash
-cd workloads/timer && cargo run --release
+cd workloads/smoke && cargo run-chv
 ```
 
-### Memory allocator test
+Requires `cloud-hypervisor` in PATH, or set `CHV=/path/to/cloud-hypervisor`.
+You can also tune resources: `CHV_CPUS=2 CHV_MEM=256M cargo run-chv`.
 
-Verifies heap allocation: Box, Vec, large allocations, alignment, heap stats.
-
+For standalone use (without cargo alias):
 ```bash
-cd workloads/memory && cargo run --release
+scripts/run-chv.sh workloads/smoke/target/x86_64-unknown-none/release/eunomia-smoke
 ```
 
-### Scheduler test
+### Available workloads
 
-Verifies cooperative context switching: single task, interleaving, round-robin yield.
+| Workload | Tests | Description |
+|----------|-------|-------------|
+| `smoke` | 4 | Serial, GDT, IDT, stack sanity |
+| `timer` | 1 | LAPIC one-shot timer interrupt |
+| `memory` | 5 | Heap: Box, Vec, alignment, stats |
+| `sched` | 4 | Cooperative scheduler context switching |
+| `hypercall` | 5 | HypervisorInterface trait + constants |
+| `pvh-info` | 5 | hvm_start_info parsing (magic, memmap, RSDP) |
 
+Example — run any workload:
 ```bash
-cd workloads/sched && cargo run --release
-```
-
-### Hypercall interface test
-
-Verifies the HypervisorInterface trait, StubBackend, and hypercall constants.
-
-```bash
-cd workloads/hypercall && cargo run --release
+cd workloads/<name> && cargo run-chv    # Cloud Hypervisor (PVH)
+cd workloads/<name> && cargo run --release  # QEMU (microvm)
 ```
 
 ### Writing a new workload
@@ -141,20 +149,19 @@ pub fn app_main(services: &eunomia::KernelServices) -> ! {
 }
 ```
 
-## Exit Codes
+## Exit Mechanism
 
-The test harness uses QEMU's `isa-debug-exit` device (port `0xF4`):
+The test harness uses a VMM-aware exit sequence:
 
-| Write value | QEMU exit code | Meaning |
-|-------------|----------------|---------|
-| `0x00`      | `1`            | All tests passed |
-| `0x01`      | `3`            | One or more tests failed |
+1. **CHV**: ACPI shutdown (port `0x600`, S5 sleep) — clean exit, code 0
+2. **QEMU**: `isa-debug-exit` (port `0xF4`) — exit code 1 = success, 3 = failure
+3. **Fallback**: HLT loop
 
 ## Notes
 
-- **QEMU microvm ≠ PVH**: the QEMU runner uses SeaBIOS, not true PVH boot.
-  The 32→64 transition runs correctly, but `hvm_start_info` is not valid.
-  Real PVH boot testing requires Cloud Hypervisor as the VMM.
+- **QEMU microvm ≠ PVH**: QEMU's microvm uses SeaBIOS / Linux boot protocol.
+  The 32→64 transition works, and basic hvm_start_info is populated, but the
+  full PVH experience (RSDP, memory map) is best tested under CHV.
 - **No SSE**: floating-point / SIMD is disabled (`-C target-feature=-sse,-sse2`)
   since the FPU is not explicitly initialised.
 - Eunomia is a standalone crate, independent from the `themis/` workspace.

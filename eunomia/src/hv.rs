@@ -136,9 +136,7 @@ impl HypervisorInterface for StubBackend {
     }
 
     fn exit(&self, _code: u64) -> ! {
-        // Use QEMU debug exit port.
-        unsafe { asm!("out dx, al", in("dx") 0xF4u16, in("al") 0u8); }
-        loop { unsafe { asm!("hlt"); } }
+        crate::test_harness::guest_exit(true);
     }
 
     fn is_available(&self) -> bool {
