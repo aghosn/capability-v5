@@ -7,74 +7,36 @@
 
 ---
 
-## Current State (2026-06)
+## Current State (2026-05-14)
 
 ### What works
 
 - **Dom0**: boots to login on 4 CPUs. Ubuntu Noble 6.8.0-107-generic. Stable.
-- **Dom1 (1 CPU)**: full systemd boot (reaches emergency.target on local QEMU due
-  to missing fstab partitions — known issue, not a regression).
-- **Dom1 (2 CPUs)**: **full systemd boot to login prompt** (`multi-user.target`,
-  `graphical.target`). Verified 2026-04-14 after full modularization.
-- **Platform modularization complete**: Phase A7 done. Opaque ArchDomainState/
-  ArchPlatformState types, aarch64 cross-check passes with 0 errors.
-  See `docs/architecture/platform-modularization.md`.
-- **AArch64 M1 complete**: Limine UEFI boot, PL011 UART, memory map dump.
-- **AArch64 M2 complete**: Memory partitioning, MetaAllocator, ThemisPlatform init.
-- **AArch64 M3 complete**: EL2 direct-boot, MMU enabled (identity-mapped),
-  exception vectors installed, EL2 sysregs (HCR/CPTR/timers), Stage-2 page
-  tables (VTCR, Stage2Map, VTTBR). `cargo aarch64-direct`.
-- **AArch64 M4 complete**: GICv3 distributor, redistributor, CPU interface (ICC),
-  virtual interface (ICH) all initialized. Dynamic GICD/GICR addresses from FDT.
-- **AArch64 M5a complete**: Guest entry at EL1, PL011 UART write from guest,
-  HVC trap → EL2 handler → ERET back to guest. Full EL2→EL1→EL2 cycle verified.
-  Vector table rewrite (trampoline pattern), Stage-2 walk fix (SL0=1), T0SZ fix.
-- **AArch64 M5b complete**: Linux kernel boots fully on QEMU aarch64. PSCI v1.0
-  (VERSION/CPU_ON/SYSTEM_OFF/SYSTEM_RESET/FEATURES/MIGRATE_INFO_TYPE/CPU_OFF/
-  CPU_SUSPEND/AFFINITY_INFO). SMCCC v1.1 (VERSION/ARCH_FEATURES/TRNG_VERSION).
-  Stage-2 device memory mapping (GIC, UART, virtio, PCIe ECAM, PCIe MMIO).
-  T0SZ=24 (40-bit IPA) with concatenated root tables (8K, 1024 L1 entries).
-  Linux boots to rootfs panic (expected — no initrd). GICv3 + timer + PCI all OK.
-- **AArch64 M5c complete**: Full initramfs boot with boot descriptor system.
-  QEMU launch script dynamically computes memory layout from ELF `__image_end`.
-  Boot descriptor (TDBS) format provides module discovery (kernel, initrd) —
-  no hardcoded addresses in Rust. FDT patcher adds initrd properties to /chosen.
-  Linux unpacks initramfs, runs /init. x86 boot verified (no regression).
-- **AArch64 M6 in progress**: Full Ubuntu distro boot on QEMU aarch64 (TCG).
-  ICC_SRE_EL2 fix enables GIC interrupt delivery. Stage-2 uses 1G pages.
-  Kernel boots, systemd starts ("Hostname set"), but full boot blocked by
-  QEMU TCG Stage-2 overhead (~25x slower). Confirmed only 1 EL2 trap (SMC)
-  occurs — overhead is purely software page walks, not trap storms. Needs
-  ARM hardware with KVM to validate.
-- **VITAL memory revocation** cascades domain cleanup correctly (fix: 5830fdacf).
-- **Interrupt injection** guards against IF=0 and STI/MOV-SS blocking (fix: afca23206).
-- **lean-exec differential testing**: 21/21 tests passing.
-- **Lean formal spec**: 83 proved theorems, zero `sorry`.
-- **TPM attested boot (P20)**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
-- **CoCo guest kernel**: Minimal config (245 modules vs 1750). Virtio/ext4/9p built-in,
-  no initramfs needed. `KERNEL_PROFILE=minimal` (default) in `build-kernel.sh`.
-- **Dom1 CoCo boot tooling**: `run-dom1.sh` with `--kvm`/`--themis`/auto-detect,
-  CoCo kernel priority, module install, networking setup. Comprehensive README
-  packed into bins.img at `/opt/bins/README.md`.
-- **Dom1 boots under Themis with CoCo kernel**: Verified serial I/O, MSR exits,
-  PCI probing. Slow under nested QEMU but functional.
+- **Dom1 Linux (1 CPU)**: full systemd boot under Themis (emergency.target on local
+  QEMU due to missing fstab — known, not a regression).
+- **Dom1 Linux (2 CPUs)**: full systemd boot to login prompt. Verified 2026-04-14.
+- **Eunomia as dom1**: ✅ boots under full Themis stack (capavisor + dom0 + CHV).
+  23/24 tests pass. Timer fails (LAPIC one-shot not yet supported for child domains).
+  Also boots standalone under CHV and QEMU. 6 workloads, 24 tests total.
+- **Platform modularization**: complete. Opaque ArchDomainState/ArchPlatformState,
+  aarch64 cross-check 0 errors. Generic monitor loop with SemanticExit dispatch.
+- **AArch64 M1–M5c**: boot → memory → EL2 → GICv3 → guest → PSCI → Linux initramfs.
+  M6 partial (full Ubuntu boot blocked by QEMU TCG overhead, needs real ARM HW).
+- **Capability engine**: MAP_SELF implemented. 83 Lean theorems, 0 sorry.
+  lean-exec 21/21 differential tests passing.
+- **TPM attested boot**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
+- **CoCo guest kernel**: minimal config (245 modules), virtio/ext4/9p built-in.
 
 ### What doesn't work / known issues
 
-- **Dom1 emergency mode on local QEMU machine**: fstab references missing /boot,
-  /boot/efi partitions → systemd enters emergency mode. Confirmed on both 1-CPU
-  and 2-CPU dom1 (2026-04-14). Networking not configured in dom1 image.
-- **Unguarded interrupt injection paths**: `forward_interrupt_to_handler` has 2
-  fallback paths (Deliver + route-error) that write VMENTRY_INTERRUPTION_INFO
-  without checking RFLAGS.IF. Saw transient exit-33 crash on 2-CPU run (did not
-  reproduce on retry). Should add IF guard to all injection paths.
-- **Posted interrupts**: hardware PI is disabled (software PIR drain used instead).
+- **Dom1 timer under Themis**: LAPIC one-shot timer for child domains not delivered.
+  Eunomia timer workload fails. Likely needs capavisor to handle LVT/ICR writes
+  and arm timerfd for child domain (not just dom0's timer path).
+- **Dom1 emergency mode on QEMU**: fstab references missing partitions.
+- **Unguarded interrupt injection**: 2 fallback paths without RFLAGS.IF check.
+- **Posted interrupts**: hardware PI disabled (software PIR drain instead).
 - **Dom1 on real hardware**: not yet tested.
-- **KVM nested dom1**: CHV `FailEntry(0, 2)` under nested QEMU — missing VT-x features.
-  Only Themis backend works for dom1 under QEMU. KVM backend needs bare-metal.
-- **thhv kernel headers**: must match dom0 kernel exactly. After image upgrade:
-  `rm -rf themis/target/kheaders && bash themis/scripts/fetch-kheaders.sh`
-  then clean rebuild `rm thhv/*.o thhv/*.ko thhv/src/*.o && cargo build-bins`.
+- **KVM nested dom1**: CHV FailEntry under nested QEMU — only Themis backend works.
 
 ### Recent commits
 
@@ -121,115 +83,128 @@
 
 ---
 
-## Active Work
+## Active Work Streams
 
-### ~~TODO: Implement VITAL cascade in Lean~~ ✅ Done (2f2df4af6)
+### 1. Eunomia — minimal micro-kernel guest (active)
 
-### ~~TODO: Platform modularization (multi-ISA support)~~ ✅ Phases A-C, E, F Done
+Design docs: [`docs/architecture/eunomia.md`](docs/architecture/eunomia.md),
+[`docs/architecture/eunomia-roadmap.md`](docs/architecture/eunomia-roadmap.md)
 
-Design doc: [`docs/architecture/platform-modularization.md`](docs/architecture/platform-modularization.md)
+Eunomia is the test vehicle for core-gapping and CoCo before tackling Linux dom1
+complexity.  ~1200 LOC, boots in <50ms, 6 workloads / 24 tests.
 
-**Completed**:
-- Phases A1-A6: Trait seams (ArchVpOps, ArchGuestPhysMap, ArchCoreSignaling, ArchIommu, ArchBoot) + X86Platform impls
-- Phases B1-B2: ArchExit translation, unified dom0/child dispatch via ExitPolicy
-- Phases C1-C4: File reorganization (9 x86-specific files to `arch/x86_64/`)
-- Phases E1-E6: Policy enforcement fixes + unified SET_POLICY (0x22) across full stack
-- Phases F1-F3: Generic monitor loop with SemanticExit dispatch (-405 lines)
-- Cleanup: Removed all old per-type policy paths (-245 lines)
-- Phase A7: Full platform generification — opaque ArchDomainState/ArchPlatformState types,
-  cfg-gated x86 code across platform.rs, hypercall.rs, main.rs, attestation.rs.
-  **aarch64 cross-check: 0 errors.** x86 build clean.
-- Phase D: ARM skeleton — aarch64 arch module with stub types (arch_state.rs)
+**Completed (E1–E7, Phase A)**:
+- Boot (PVH 32→64, GDT/TSS, IDT, LAPIC timer, bump allocator, scheduler)
+- HypervisorInterface trait (ThemisBackend VMCALL, StubBackend)
+- Workload model (independent crates, `app_main` entry point)
+- CHV PVH boot + ACPI shutdown exit path
+- `cargo run-chv` alias, `run-eunomia.sh` for dom0
+- pvh-info workload (validates hvm_start_info, memmap, RSDP)
+- ✅ Tested under full Themis stack: 23/24 tests pass
 
-**Remaining**:
-- [x] Implement aarch64 serial console (PL011 UART) — M1 done
-- [x] QEMU aarch64 testbed setup — M1 done (`cargo aarch64-themis`)
-- [x] Implement aarch64 boot sequence (EL2, GICv3, Stage-2 tables) — M2-M4 done
-- [x] Implement aarch64 VP lifecycle (EL2 entry/exit, SPSR/ELR) — M5a done
-- [x] PSCI handling + Linux kernel loading — M5b done
-- [x] Linux dom0 boot with initramfs — M5c done
-- [ ] Full distro boot (blocked on QEMU TCG Stage-2 overhead) — M6 partial
+**Next**:
+- [ ] Fix timer workload under Themis (LAPIC one-shot for child domains)
+- [ ] Phase B: CoCo integration (shared.rs, MAP_SELF, CHANNEL_SEND workload)
+- [ ] Phase C: Core-gapping workload (Forward policy, VMX preemption timer)
 
-### TODO: AArch64 backend (active)
+Commits: `19bff01` (timer fix), `6037171` (allocator), `b097b9f` (restructure),
+`737828c` (scheduler), `9dc4cf6` (hv interface), `14340c6` (CHV boot),
+`59dd2d6` (dom0 packaging).
+
+### 2. Core-gapping (design complete, implementation pending)
+
+Design doc: [`docs/architecture/core-gapping.md`](docs/architecture/core-gapping.md)
+
+Run child domain on dedicated core, events forwarded to dom0 on separate core
+via shared pages + IPI.  Eliminates cache side channels and single-stepping.
+
+**Design decisions (settled)**:
+- `Forward { target_core, synchronous }` policy variant
+- VMX preemption timer for local timer delivery (2 exits/tick, zero IPIs)
+- Shared notification area = existing VpCommPage / meta page
+- Policy-driven: core-gapping emerges from per-event Forward policies
+
+**Implementation plan**:
+- [ ] `InterruptPolicy::Forward` variant in capa-engine + tests
+- [ ] Capavisor Forward handler (write event → IPI → poll response → VMRESUME)
+- [ ] thhv.ko doorbell ISR on core 0
+- [ ] VMX preemption timer for TSC-deadline → local timer delivery
+- [ ] Core isolation in dom0 (cpu offline, watchdog disable, pin switch thread)
+- [ ] Eunomia core-gap workload for end-to-end validation
+
+### 3. Confidential VMs — CoCo (design complete, implementation pending)
+
+Design doc: [`docs/architecture/confidential-vm.md`](docs/architecture/confidential-vm.md)
+
+Dom1 memory private by default.  VTOM address-space split for explicit sharing.
+No hardware encryption needed — EPT isolation provides equivalent protection.
+
+**Design decisions (settled)**:
+- VTOM (address-range split, not per-page C-bit)
+- Guest-initiated sharing via ALIAS + MAP_SELF + CHANNEL_SEND
+- MAP_SELF engine operation ✅ implemented (refcounted projections, 33 tests)
+
+**Implementation plan**:
+- [ ] Wire MAP_SELF hypercall in capavisor (apply_update for MapSelf batch)
+- [ ] Wire CHANNEL_SEND / CHANNEL_RECV hypercalls in capavisor
+- [ ] CPUID leaf 0x4000_0100 for Themis CoCo detection
+- [ ] Capavisor EPT enforcement: remove HPAs from dom0 EPT after SEND
+- [ ] Eunomia CoCo workload (shared.rs, shared buffer, dom0 read verification)
+- [ ] Linux CoCo kernel patch: CC_VENDOR_THEMIS (~50 lines in arch/x86/coco/)
+- [ ] swiotlb bounce buffer integration with VTOM
+
+**Open questions**:
+- VTOM bit position (bit 39 proposed, needs finalization)
+- CPUID leaf number (0x4000_0100 proposed)
+- Channel revocation semantics (does revoking endpoint cascade to sent caps?)
+
+### 4. Contiguous physical memory for VMs (research needed)
+
+**Problem**: VMs need physically contiguous memory regions for efficient EPT
+mapping (2M/1G pages) and DMA.  Currently CHV allocates guest memory via
+mmap which gives scattered 4K pages.  This matters for:
+- EPT performance (fewer page table entries with large pages)
+- IOMMU mapping (IOVA=GPA requires contiguous backing, axiom A4)
+- Core-gapping shared notification area (meta pages)
+
+**Questions to investigate**:
+- [ ] Can CHV use hugetlbfs (2M/1G hugepages) for guest memory?
+- [ ] Does the Themis CARVE+SEND flow preserve contiguity?
+- [ ] Do we need a capavisor-side contiguous allocator for meta/notification pages?
+- [ ] Impact on memory fragmentation under multiple domains
+
+### 5. Inter-domain shared memory / ivshmem equivalent (research needed)
+
+**Problem**: Domains need private shared memory for communication (not through
+dom0).  Use cases:
+- Core-gapped child ↔ dom0 event queue (currently meta page, but needs scaling)
+- Domain-to-domain direct communication (e.g., crypto enclave ↔ app domain)
+- High-bandwidth data plane without dom0 intermediary
+
+**Questions to investigate**:
+- [ ] Does CHV support ivshmem or similar shared memory device?
+- [ ] Can ALIAS capabilities serve as the shared memory primitive?
+  (A creates ALIAS, sends to B via CHANNEL → both map same HPAs)
+- [ ] How does this interact with VTOM / CoCo? (shared window must be at
+  GPA|VTOM in both domains)
+- [ ] Performance: polling vs doorbell interrupt for notification
+- [ ] Could Eunomia-to-Eunomia communication be the first test case?
+
+### 6. AArch64 backend (blocked on hardware)
 
 Design doc: [`docs/architecture/arm-porting.md`](docs/architecture/arm-porting.md)
 
-**M1–M5c complete**: boot, memory, EL2, MMU, vectors, Stage-2, GICv3, guest entry,
-PSCI, Linux kernel boot, initramfs boot with boot descriptor system.
+M1–M5c complete.  M6 (full Ubuntu boot) blocked by QEMU TCG Stage-2 overhead.
+Needs real ARM hardware with KVM to validate.
 
-**M6 in progress**: Full Ubuntu distro boot. ICC_SRE_EL2 + ICH_HCR_EL2 configured
-for direct-assign interrupt mode. Stage-2 uses 1G pages. Kernel boots, systemd
-starts, but full boot blocked by QEMU TCG Stage-2 translation overhead (~25x).
-Only 1 EL2 trap occurs (SMC/PSCI) — no trap storms. Needs ARM hardware with KVM.
+### 7. Posted interrupts / hardware PI (deferred)
 
-Commits: `9823d73` (M1), `d0fe7c4` (aliases), `e20f2d2` (M2), `011ed77` (M3a),
-`cab9626` (M3b), `ae9234c` (M4), `2f044b2` (M5a), `f7e0e19` (M5b),
-`2613117` (M5c), `d810b15` (M6 partial).
+Requires `intel_iommu=on` and IOMMU intremap support.  Currently using software
+PIR drain.  Not blocking any active work stream.
 
-**Next for ARM**: test on real ARM hardware with KVM to validate Stage-2 performance.
-
-### TODO: Confidential dom1 design (CC_VENDOR_THEMIS + VTOM)
-
-New item — design phase. Goal: dom1 runs with most memory exclusive to it
-(dom0/CHV cannot read/write). Uses VTOM (Virtual Top of Memory) address-space
-split:
-
-- Below VTOM: private memory (CARVE+SEND, removed from dom0 EPT)
-- Above VTOM: shared memory (ALIAS, dom0 retains access for virtio I/O)
-- Guest kernel detects Themis CoCo via CPUID leaf → enables swiotlb bounce buffers
-- ~50 line kernel patch to add CC_VENDOR_THEMIS to arch/x86/coco/core.c
-- Same kernel binary for dom0 (no CoCo) and dom1 (CoCo enabled via CPUID)
-- Key design decisions pending: VTOM bit position, CPUID leaf number, capavisor
-  EPT enforcement
-
-**MAP_SELF engine operation**: ✅ **Implemented.** Refcounted projection model
-(`add_footprint`/`remove_footprint`), per-cap GPA tracking (`mapped_gpas`),
-snapshot-diff → UpdateBatch. 12 integration tests + 21 unit tests pass.
-Files: `translation.rs`, `capability.rs`, `domain.rs`.
-Next: wire MAP_SELF to capavisor hypercall (Phase B step 2).
-
-### ~~Phase 3: VMEXIT dispatch unification~~ ✅ Subsumed by modularization (Phases B+F)
-
-Merged dom0/child dispatch into unified ExitPolicy-based dispatch (Phase B2),
-then restructured into generic monitor loop with SemanticExit (Phase F1-F3).
-No more `domain_id != 0` special-casing.
-
-### Phase 4: Posted interrupts (hardware PI)
-
-**Goal**: Enable hardware posted interrupts for child VMs.
-
-**Prerequisites** (from `testing-posted.md`):
-- [ ] Add `intel_iommu=on` to host kernel cmdline (requires reboot)
-- [ ] QEMU: `intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,aw-bits=48`
-- [ ] QEMU: `-cpu host,host-phys-bits=on`
-- [ ] QEMU: virtio devices with `iommu_platform=on,ats=on`
-- [ ] Re-enable PI bit 7 in vmcs.rs child pin-based controls
-- [ ] Remove software PIR drain guard (or keep as fallback)
-- [ ] Test 1-vCPU and 2-vCPU dom1 boot with hardware PI
-
-### Phase 5: Stabilization + real hardware
-
-- [ ] Test with 4 CPUs
-- [ ] Test on real hardware (not nested KVM)
-- [ ] Dom1 networking (ping 192.168.100.2 from dom0)
-- [ ] Document what works on nested vs real hardware
-- [ ] Update `HANDOFF.md`
-
-### Future work
-
-- [ ] Per-VP irqfd: struct updated, needs end-to-end test
-- [ ] Paravirt timer (PV MMIO hypercall, P16.6d3)
-- [ ] Reduce serial I/O overhead
-- [ ] CPUID policy in DomainPolicy (P16.6c)
-- [ ] Stock cloud image kernel
-
-### ~~Full TPM attestation with user binding (P20j)~~ ✅ Done
-
-Design doc: [`docs/architecture/attestation.md §14`](docs/architecture/attestation.md)
-
-Two-layer attestation model complete: TPM2_Quote (platform) + Ed25519-signed
-domain reports (capavisor) with user public key binding. All 7 sub-tasks done.
-Graceful degradation: no TPM → Ed25519-only.
+### ~~TODO: Platform modularization~~ ✅ Complete
+### ~~TODO: Implement VITAL cascade in Lean~~ ✅ Complete
+### ~~TODO: Full TPM attestation~~ ✅ Complete
 
 ---
 
