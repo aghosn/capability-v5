@@ -16,76 +16,51 @@
   QEMU due to missing fstab — known, not a regression).
 - **Dom1 Linux (2 CPUs)**: full systemd boot to login prompt. Verified 2026-04-14.
 - **Eunomia as dom1**: ✅ boots under full Themis stack (capavisor + dom0 + CHV).
-  23/24 tests pass. Timer fails (LAPIC one-shot not yet supported for child domains).
-  Also boots standalone under CHV and QEMU. 6 workloads, 24 tests total.
+  All 24/24 tests pass (incl. timer via TSC-deadline). 6 workloads.
+  `cargo build-bins` now rebuilds Eunomia workloads before packaging.
 - **Platform modularization**: complete. Opaque ArchDomainState/ArchPlatformState,
   aarch64 cross-check 0 errors. Generic monitor loop with SemanticExit dispatch.
 - **AArch64 M1–M5c**: boot → memory → EL2 → GICv3 → guest → PSCI → Linux initramfs.
   M6 partial (full Ubuntu boot blocked by QEMU TCG overhead, needs real ARM HW).
-- **Capability engine**: MAP_SELF implemented. 83 Lean theorems, 0 sorry.
-  lean-exec 21/21 differential tests passing.
+- **Capability engine**: MAP_SELF implemented (refcounted projections, 33 tests).
+  83 Lean theorems, 0 sorry. lean-exec 21/21 differential tests passing.
 - **TPM attested boot**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
-- **CoCo guest kernel**: minimal config (245 modules), virtio/ext4/9p built-in.
+- **CoCo guest kernel**: CC_VENDOR_THEMIS patch in `../linux`.  Minimal config
+  (245 modules), virtio/ext4/9p built-in.
+- **MAP_SELF hypercall**: wired across themis-abi (0x1f), capavisor handler, thhv.
+- **CARVE+SEND**: fully working — dom0 loses EPT access when SENDing to child.
 
 ### What doesn't work / known issues
 
-- **Dom1 timer under Themis**: LAPIC one-shot timer for child domains not delivered.
-  Eunomia timer workload fails. Likely needs capavisor to handle LVT/ICR writes
-  and arm timerfd for child domain (not just dom0's timer path).
 - **Dom1 emergency mode on QEMU**: fstab references missing partitions.
 - **Unguarded interrupt injection**: 2 fallback paths without RFLAGS.IF check.
 - **Posted interrupts**: hardware PI disabled (software PIR drain instead).
 - **Dom1 on real hardware**: not yet tested.
 - **KVM nested dom1**: CHV FailEntry under nested QEMU — only Themis backend works.
+- **CoCo share-back**: MAP_SELF wired but not yet tested end-to-end. Channels
+  not wired in capavisor. No dom1-initiated sharing yet.
 
 ### Recent commits
 
+- `c15e246` — **fix(eunomia): emit CR+LF on serial output**
+- `04edb1b` — **feat: build-bins rebuilds eunomia workloads before packaging**
+- `ee4b960` — **fix(eunomia): use vector 0xEC to match CHV's LOCAL_TIMER_VECTOR**
+- `958bcf5` — **feat(eunomia): switch timer from LAPIC one-shot to TSC-deadline**
+- `32dac6d` — **docs: comprehensive todo.md rewrite with 7 work streams**
 - `866132c` — **fix: --kvm flag now rmmod's thhv to force KVM backend**
 - `48ecad0` — **docs: add comprehensive dom0 README and update deploy docs**
 - `e41e2c8` — **feat: revamp run-dom1.sh for CoCo-ready dom1 boot**
-- `b3908a8` — **feat: auto-detect CoCo kernel for dom1 boot**
-- `d9feb47` — **feat(thhv): add 'make tidy' target**
-- `d9d8d25` — **fix: set MODULE_SIG_KEY path in minimal kernel config**
-- `d2d6ea1` — **feat: add minimal CoCo guest kernel config (1750 → 245 modules)**
-- `0100975` — **docs: update loom runtime estimates from actual measurements**
-- `5b063da` — **refactor: merge cargo loom-all into cargo loom**
-- `d810b15` — **feat(aarch64): M6 — ICC_SRE_EL2 fix, Stage-2 1G pages, full RAM mapping**
-- `2613117` — **feat(aarch64): M5c — full initramfs boot with boot descriptor system**
-- `f067053` — **feat(aarch64): cargo fetch-aarch64-kernel + auto-discover Linux Image**
-- `f7e0e19` — **feat(aarch64): M5b — boot Linux kernel to rootfs panic**
-- `81703b9` — **docs: update arm-porting-design.md with M4+M5a completion**
-- `2f044b2` — **feat(aarch64): M5a — guest entry at EL1 with HVC trap loop**
-- `ae9234c` — **feat(aarch64): M4 — GICv3 distributor, redistributor, CPU interface, ICH**
-- `cab9626` — **feat(aarch64): M3b — EL2 MMU, exception vectors, sysregs, Stage-2**
-- `011ed77` — **feat(aarch64): M3a — EL2 direct-boot with FDT parsing**
-- `e20f2d2` — **feat(aarch64): M2 — memory partitioning + ThemisPlatform init**
-- `d0fe7c4` — **feat: add cargo aarch64-themis / aarch64-iso xtask aliases**
-- `9823d73` — **feat(aarch64): M1 — boot capavisor on QEMU aarch64 via Limine**
-- `3ffc8b5` — **docs: add Multi-ISA build section to README**
-- `0b03cfd` — **cfg-gate x86 code in platform.rs, main.rs, attestation.rs for multi-ISA**
-- `5f1a188` — **cfg-gate x86-specific code in hypercall.rs for multi-ISA support**
-- `b9da854` — **refactor: extract ArchDomainState and ArchPlatformState opaque types**
-- `6f81c14` — **feat: ARM AArch64 skeleton + arch-neutral trait fixes**
-- `0d03948` — **chore: update cloud-hypervisor submodule (unified SET_POLICY)**
-- `097f59d` — **cleanup: remove old per-type policy opcodes, unified SET_POLICY only (-245 lines)**
-- `5e5acdb` — **feat: THHV ioctl + CHV support for unified SET_POLICY**
-- `fd1964d` — **feat: unified THEMIS_SET_POLICY hypercall (0x22)**
-- `45285a7` — **fix: copy registers via InterruptPolicy.read_set on interrupt forward**
-- `1114535` — **refactor: wire generic monitor loop, remove old dispatch (-405 lines)**
-- `5f5f9d2` — **feat: generic monitor_loop with SemanticExit dispatch**
-- `4c028a1` — **feat: SemanticExit types + ArchVpOps::run/handle_local**
-- `a41ca13` — **fix: register_access_check branches on interrupt vs non-interrupt exit**
-- `730756c` — **feat: store exit reason in VP metadata for policy lookup**
+- CHV submodule: **fix: add CR to all debug eprintln for clean terminal output**
 
 ### Uncommitted changes
 
-(none — all prior MAP_SELF work has been committed)
+(none)
 
 ---
 
 ## Active Work Streams
 
-### 1. Eunomia — minimal micro-kernel guest (active)
+### 1. Eunomia — minimal micro-kernel guest ✅ Phase A complete
 
 Design docs: [`docs/architecture/eunomia.md`](docs/architecture/eunomia.md),
 [`docs/architecture/eunomia-roadmap.md`](docs/architecture/eunomia-roadmap.md)
@@ -100,16 +75,14 @@ complexity.  ~1200 LOC, boots in <50ms, 6 workloads / 24 tests.
 - CHV PVH boot + ACPI shutdown exit path
 - `cargo run-chv` alias, `run-eunomia.sh` for dom0
 - pvh-info workload (validates hvm_start_info, memmap, RSDP)
-- ✅ Tested under full Themis stack: 23/24 tests pass
+- ✅ Timer: TSC-deadline mode, vector 0xEC (matches CHV's irqfd injection)
+- ✅ All 24/24 tests pass under QEMU, CHV, and full Themis stack
+- ✅ `cargo build-bins` rebuilds Eunomia workloads before packaging
+- ✅ Clean serial output (CR+LF)
 
 **Next**:
-- [ ] Fix timer workload under Themis (LAPIC one-shot for child domains)
 - [ ] Phase B: CoCo integration (shared.rs, MAP_SELF, CHANNEL_SEND workload)
 - [ ] Phase C: Core-gapping workload (Forward policy, VMX preemption timer)
-
-Commits: `19bff01` (timer fix), `6037171` (allocator), `b097b9f` (restructure),
-`737828c` (scheduler), `9dc4cf6` (hv interface), `14340c6` (CHV boot),
-`59dd2d6` (dom0 packaging).
 
 ### 2. Core-gapping (design complete, implementation pending)
 
@@ -132,30 +105,38 @@ via shared pages + IPI.  Eliminates cache side channels and single-stepping.
 - [ ] Core isolation in dom0 (cpu offline, watchdog disable, pin switch thread)
 - [ ] Eunomia core-gap workload for end-to-end validation
 
-### 3. Confidential VMs — CoCo (design complete, implementation pending)
+### 3. Confidential VMs — CoCo (active)
 
 Design doc: [`docs/architecture/confidential-vm.md`](docs/architecture/confidential-vm.md)
 
 Dom1 memory private by default.  VTOM address-space split for explicit sharing.
 No hardware encryption needed — EPT isolation provides equivalent protection.
 
-**Design decisions (settled)**:
-- VTOM (address-range split, not per-page C-bit)
-- Guest-initiated sharing via ALIAS + MAP_SELF + CHANNEL_SEND
-- MAP_SELF engine operation ✅ implemented (refcounted projections, 33 tests)
+**What already works**:
+- CARVE+SEND removes pages from sender (dom0) EPT → dom1 memory is exclusive ✅
+- MAP_SELF engine operation implemented (refcounted projections, 33 tests) ✅
+- MAP_SELF hypercall wired: themis-abi (0x1f), capavisor handler, thhv ✅
+- CC_VENDOR_THEMIS kernel patch exists in `../linux` (CPUID detection, cc_mkenc/cc_mkdec, VTOM) ✅
+- CoCo guest kernel config (245 modules, virtio/ext4/9p built-in) ✅
 
-**Implementation plan**:
-- [ ] Wire MAP_SELF hypercall in capavisor (apply_update for MapSelf batch)
-- [ ] Wire CHANNEL_SEND / CHANNEL_RECV hypercalls in capavisor
-- [ ] CPUID leaf 0x4000_0100 for Themis CoCo detection
-- [ ] Capavisor EPT enforcement: remove HPAs from dom0 EPT after SEND
-- [ ] Eunomia CoCo workload (shared.rs, shared buffer, dom0 read verification)
-- [ ] Linux CoCo kernel patch: CC_VENDOR_THEMIS (~50 lines in arch/x86/coco/)
-- [ ] swiotlb bounce buffer integration with VTOM
+**What needs implementation**:
+- [ ] CHV: distinguish shared (MMIO) vs exclusive (guest RAM) memory at setup time.
+      Currently `create_user_memory_region` uses `THHV_MEM_F_ALIAS` for everything.
+      For CoCo: guest RAM should use CARVE (flags=0), MMIO regions stay ALIAS.
+- [ ] CHV: receive shared regions back from dom1 (accept alias via channel or
+      new ioctl after dom1 shares bounce buffers back)
+- [ ] Capavisor: wire CHANNEL_SEND / CHANNEL_RECV hypercalls
+- [ ] Capavisor: CPUID leaf 0x4000_0100 interception for confidential child domains
+      (return VTOM bit position + Themis signature)
+- [ ] Dom1 kernel: early init share-back — create aliases of swiotlb pool,
+      MAP_SELF at VTOM GPA, CHANNEL_SEND the other to dom0
+- [ ] Eunomia CoCo workload: minimal test that verifies dom0 cannot read dom1
+      private memory after SEND
+- [ ] End-to-end: Linux dom1 boots with CC_VENDOR_THEMIS, swiotlb active,
+      virtio works through shared bounce buffers
 
 **Open questions**:
 - VTOM bit position (bit 39 proposed, needs finalization)
-- CPUID leaf number (0x4000_0100 proposed)
 - Channel revocation semantics (does revoking endpoint cascade to sent caps?)
 
 ### 4. Contiguous physical memory for VMs (research needed)

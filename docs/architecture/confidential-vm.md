@@ -395,118 +395,319 @@ This is set at `CREATE_DOMAIN` time and stored in the domain's metadata.
 
 ---
 
-## 6. Cloud-Hypervisor (CHV) Changes
+## 6. Responsibility Split: Who Does What
 
-### 6.1 Memory setup: send everything
+### Overview diagram
 
-In confidential mode, CHV sends **all** guest RAM as a single CARVE (not ALIAS).
-Dom0 loses all access after SEND:
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         BOOT-TIME SETUP                                 │
+│                                                                         │
+│  CHV (userspace)            thhv.ko (driver)           Capavisor (L0)   │
+│  ─────────────────          ──────────────────          ────────────── │
+│                                                                         │
+│  1. mmap guest RAM ───────► allocate contiguous  ────► (physical pages  │
+│     via /dev/thhv            phys memory (hugetlb       reserved)       │
+│                              or CMA)                                    │
+│                                                                         │
+│  2. write firmware,                                                     │
+│     kernel, initramfs                                                   │
+│     into guest RAM                                                      │
+│                                                                         │
+│  3. SET_GUEST_MEMORY ─────► relay to capavisor ──────► CARVE from dom0  │
+│     (flag = CARVE for                                   + SEND to dom1  │
+│      private RAM,                                       (dom0 loses     │
+│      flag = ALIAS for                                    EPT access     │
+│      MMIO/shared)                                        for CARVEd)    │
+│                                                                         │
+│  4. CREATE_PARTITION ─────► auto-create channel ─────► channel cap in   │
+│     (confidential=true)      parent↔child               dom1's cap set  │
+│                              (CHV does NOT see                          │
+│                               the channel)                              │
+│                                                                         │
+│  5. first vCPU run ──────► SEAL + run ───────────────► dom1 starts      │
+│                                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
 
-```rust
-// All guest RAM: CARVE + SEND (dom0 loses access)
-thhv_set_guest_memory(ThhvSetGuestMemory {
-    guest_pfn: 0,
-    size: ram_size,
-    flags: 0,  // CARVE (not ALIAS)
-    rights: THHV_MEM_R_READ | THHV_MEM_R_WRITE | THHV_MEM_R_EXEC,
-    ..
-});
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    DOM1 EARLY BOOT (inside guest)                        │
+│                                                                         │
+│  Dom1 kernel / Eunomia                     Capavisor (L0)               │
+│  ─────────────────────                     ──────────────               │
+│                                                                         │
+│  6. CPUID 0x4000_0100 ──── VMEXIT ────────► return VTOM bit + sig      │
+│     → CC_VENDOR_THEMIS                      (only for confidential      │
+│                                              domains)                   │
+│                                                                         │
+│  7. allocate swiotlb                                                    │
+│     bounce buffer pool                                                  │
+│     (e.g. 64 MB at                                                      │
+│      GPA 0x200_0000)                                                    │
+│                                                                         │
+│  8. ALIAS(guest_ram, ──── VMCALL ─────────► create alias cap            │
+│     swiotlb_off, size)                      (child of guest_ram)        │
+│     → alias_self                                                        │
+│                                                                         │
+│  9. ALIAS(guest_ram, ──── VMCALL ─────────► create alias cap            │
+│     swiotlb_off, size)                      (child of guest_ram)        │
+│     → alias_parent                                                      │
+│                                                                         │
+│  10. MAP_SELF(alias_self, ─ VMCALL ───────► map alias_self at           │
+│      GPA|VTOM)                               GPA|VTOM in dom1 EPT      │
+│                                                                         │
+│  11. CHANNEL_SEND( ─────── VMCALL ────────► transfer alias_parent       │
+│      chan_endpoint,                          to parent (dom0)            │
+│      alias_parent)                                                      │
+│                                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    SHARE-BACK COMPLETION                                 │
+│                                                                         │
+│  Capavisor (L0)                            Dom0 EPT                     │
+│  ──────────────                            ─────────                   │
+│                                                                         │
+│  12. receives channel  ──── ChangeRights ──► map alias_parent           │
+│      send from dom1          for dom0        HPAs into dom0             │
+│                                              EPT (bounce                │
+│                                              buffer only)               │
+│                                                                         │
+│      CHV's original mmap pointers now work again — the EPT              │
+│      entries are restored for the bounce buffer sub-region.             │
+│      No new ioctl or mmap needed.                                       │
+│                                                                         │
+│      ⚠ AddressMap overlap: dom0's Blocked range (from                   │
+│        original CARVE) must allow sub-region insertion.                  │
+│        See §6.4.                                                        │
+│                                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    STEADY STATE                                         │
+│                                                                         │
+│  Dom1 (guest)                              Dom0 / CHV                   │
+│  ────────────                              ──────────                  │
+│                                                                         │
+│  Private access:                           Can ONLY access:             │
+│    GPA 0x0..0x3FFF_FFFF                     - bounce buffer region     │
+│    (kernel, page tables,                      (alias_parent)            │
+│     user pages — invisible                  - MMIO via EPT violation    │
+│     to dom0)                                  forwarding                │
+│                                                                         │
+│  Shared access (DMA):                                                   │
+│    GPA 0x80_0200_0000                                                   │
+│    (VTOM bit set →                                                      │
+│     hits alias_self EPT                                                 │
+│     → same HPAs as                                                      │
+│     bounce buffer)                                                      │
+│                                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Firmware/kernel loading (unchanged)
+### 6.1 CHV (cloud-hypervisor) — memory classification only
 
-CHV writes firmware tables, kernel, and initramfs into guest memory **before**
-SEND. This already works (the `ensure_initialized()` pattern defers SEND until
-first vCPU run). No change needed.
+CHV's job is simple: **decide CARVE vs ALIAS per memory region**.
 
-### 6.3 Receiving the shared region
+| Region type | Flag | Effect |
+|-------------|------|--------|
+| Guest RAM (private) | `flags = 0` (CARVE) | Dom0 loses access after SEND |
+| MMIO regions (PCI BARs, LAPIC page) | `flags = THHV_MEM_F_ALIAS` | Dom0 retains access for device emulation |
+| Shared meta pages (VpCommPage, etc.) | `flags = THHV_MEM_F_ALIAS` | Dom0 needs ongoing access |
 
-After dom1 boots and shares back its bounce buffer region (§3.3), CHV receives
-the alias via the channel or grant mechanism. CHV then maps this region for
-virtio device I/O:
+CHV does **NOT** handle:
+- Channel creation (thhv.ko does this automatically)
+- Accepting shared regions back from dom1 (thhv.ko + capavisor handle this)
+- VTOM configuration (capavisor synthesizes CPUID, guest kernel reads it)
+
+**Memory allocation**: CHV's `mmap` for guest RAM should go through `/dev/thhv`
+(or a thhv-provided mechanism) so the driver can attempt contiguous physical
+allocation (hugetlb, CMA, or similar). This enables efficient 2M/1G EPT mappings
+and satisfies IOMMU requirements (axiom A4: IOVA = GPA).
+
+### 6.2 thhv.ko — automatic channel creation
+
+When CHV calls `THHV_CREATE_PARTITION` with `confidential=true`:
+
+1. thhv.ko relays the creation to the capavisor
+2. **thhv.ko automatically creates a parent↔child channel** via a hypercall to
+   the capavisor: `CREATE_CHANNEL(dom0, dom1) → dom0_endpoint, dom1_endpoint`
+3. The child's endpoint is placed in dom1's initial capability set (discoverable
+   at boot via a well-known handle or CPUID sub-leaf)
+4. The parent's endpoint is stored in thhv's per-partition state
+
+CHV is **unaware** of the channel. This keeps the VMM simple and ensures the
+channel exists regardless of VMM implementation.
+
+When dom1 sends an alias back through the channel:
+- The capavisor processes the transfer (ChangeRights for dom0)
+- thhv.ko receives a notification (poll/eventfd on the parent endpoint)
+- thhv.ko exposes the shared region to CHV via an ioctl or mmap
+
+### 6.3 Share-back: how dom0 regains access to bounce buffers
+
+After CARVE+SEND, CHV's original `mmap` pointers still exist in dom0's process
+page tables, but the EPT entries for those HPAs are gone. When dom1 sends an
+alias back via channel, the capavisor handles all EPT changes through capability
+operations (`apply_update`). The question is how CHV's userspace pointers become
+usable again.
+
+**Chosen approach: accept at same GPA (= HPA, identity mapping)**
+
+The alias is accepted at `GPA = HPA` (the original physical address). The
+capavisor restores the EPT entry at the original GPA → CHV's existing process
+PTEs (VA → GPA) are still valid → the original mmap pointer works immediately.
+No userspace changes needed.
+
+**Required engine change: `unblock_subrange()`**
+
+Currently, `accept()` calls `overlaps()` which rejects any insertion that
+touches a Blocked entry. We need a new operation that allows "plugging a hole"
+with the same physical memory:
 
 ```rust
-// CHV receives shared_alias from dom1 (via channel accept or grant callback)
-// Maps it for virtio ring/data access
-let shared_region = accept_shared_from_guest(channel_fd)?;
-// Now CHV can read/write virtio descriptors in this region only
+/// Unblock a sub-range within a Blocked entry, converting it to Mapped.
+///
+/// The alias's HPA must match the corresponding HPA within the Blocked range
+/// (same physical memory that was carved out). Splits the Blocked entry into
+/// up to 3 parts:
+///
+///   Blocked(before) | Mapped(alias) | Blocked(after)
+///
+/// # Validation
+/// - The sub-range [gpa, gpa+size) must fall entirely within one Blocked entry
+/// - alias_hpa == blocked_hpa + (gpa - blocked_gpa)  ← same physical memory
+///
+/// # Errors
+/// - No Blocked entry contains the range
+/// - HPA mismatch (different physical memory — reject)
+pub fn unblock_subrange(
+    &mut self,
+    gpa: u64,
+    size: u64,
+    alias_hpa: u64,
+    rights: Rights,
+) -> Result<(), &'static str>
 ```
 
-### 6.4 Post-share device I/O
+This is ~30-40 lines. The building blocks exist: `block()` / `unblock()` handle
+full entries, `split()` already splits Mapped entries. This adds a
+`split_blocked()` variant + HPA validation.
 
-After receiving the shared alias, CHV can only access that specific region.
-Virtio devices work because:
-1. Guest kernel detects CoCo → enables swiotlb
-2. Virtio DMA goes through bounce buffers in the shared window
-3. CHV accesses virtio rings/data via the aliased region
+**Semantics**: you can only plug a hole with the same physical memory that was
+carved out. This preserves the security invariant — you can't trick a domain
+into mapping different HPAs at a GPA it expects.
 
-For MMIO devices (serial, RTC), the capavisor intercepts EPT violations and
-forwards them — no guest memory access needed.
+**Alternative considered: accept at different GPA**
+
+Would avoid the engine change but requires thhv.ko to patch CHV's process page
+tables (`remap_pfn_range()` or new mmap). More kernel complexity, less clean.
+Rejected in favour of Option A.
+
+### 6.4 Inter-domain shared memory (future: ivshmem-like)
+
+For sibling domains (dom1 ↔ dom2, both children of dom0), the plan is an
+**ivshmem-equivalent** device backed by capabilities:
+
+- Dom0 creates a shared memory region (ALIAS from its own memory, or dedicated
+  allocation)
+- Dom0 sends aliases to both dom1 and dom2 via their respective channels
+- Each child MAP_SELFs the alias into its address space
+- Doorbell interrupts via existing interrupt injection (inject_via_pid)
+
+This reuses the same ALIAS + CHANNEL + MAP_SELF primitives. The ivshmem-like
+device model in CHV provides the familiar PCI BAR interface that existing
+drivers expect. **Implementation deferred** — CoCo share-back comes first.
 
 ---
 
-## 7. thhv.ko Changes
+## 7. Guest-Side: Share-Back Protocol
 
-Minimal — the driver already supports CARVE and ALIAS. Changes needed:
+The guest (Linux with CC_VENDOR_THEMIS, or Eunomia) performs the share-back
+during early boot, **before** any virtio device probe.
 
-- A new flag `THHV_MEM_F_CONFIDENTIAL` or `THHV_CREATE_PARTITION` flag to signal
-  confidential mode to the capavisor
-- Pass-through of the VTOM bit in the partition creation ioctl
-- **Channel or grant accept ioctl**: when dom1 shares back its bounce buffer
-  region, CHV needs an ioctl to accept the incoming capability and map it:
-  - Option A (channel): extend existing channel ioctls for memory cap transfer
-  - Option B (grant): new `THHV_ACCEPT_GRANT` ioctl to accept pending caps
+### 7.1 Steps (same for Linux and Eunomia, different implementations)
 
-The driver does NOT need to understand confidential memory semantics — it just
-relays flags to the capavisor and provides ioctls for CHV to accept shared regions.
+1. **Detect CoCo**: CPUID leaf `0x4000_0100` → read VTOM bit position + signature
+2. **Enable swiotlb**: allocate bounce buffer pool (Linux: automatic when
+   `cc_platform_has(CC_ATTR_MEM_ENCRYPT)` returns true; Eunomia: manual)
+3. **Create alias_self**: `ALIAS(guest_ram_handle, swiotlb_offset, swiotlb_size)`
+4. **Create alias_parent**: `ALIAS(guest_ram_handle, swiotlb_offset, swiotlb_size)`
+5. **MAP_SELF(alias_self, GPA | VTOM)**: creates the VTOM-offset EPT mapping in
+   dom1's own address space
+6. **CHANNEL_SEND(endpoint, alias_parent)**: transfers alias_parent to dom0;
+   dom0/thhv receives it and maps the bounce buffer HPAs into dom0's EPT
+7. **Virtio probe begins**: DMA goes through swiotlb → VTOM-mapped bounce
+   buffers → CHV can access via alias_parent
+
+### 7.2 Channel discovery
+
+Dom1 must find its channel endpoint handle at boot. Options:
+- **Well-known handle** (e.g., handle 1 is always the parent channel) — simplest
+- **CPUID sub-leaf** (e.g., CPUID 0x4000_0101 returns channel handle) — flexible
+
+Decision: TBD (well-known handle preferred for simplicity).
+
+### 7.3 Linux implementation
+
+In `arch/x86/coco/themis.c` (or equivalent early init):
+
+```c
+void __init themis_coco_shareback(void)
+{
+    phys_addr_t swiotlb_base = swiotlb_get_base();
+    size_t swiotlb_size = swiotlb_get_size();
+
+    /* Create two aliases of the bounce buffer */
+    u64 alias_self = themis_vmcall(THEMIS_ALIAS, guest_ram, swiotlb_base, swiotlb_size);
+    u64 alias_parent = themis_vmcall(THEMIS_ALIAS, guest_ram, swiotlb_base, swiotlb_size);
+
+    /* Map alias_self at VTOM-offset GPA in our own EPT */
+    themis_vmcall(THEMIS_MAP_SELF, alias_self, swiotlb_base | cc_mask);
+
+    /* Send alias_parent to dom0 via channel */
+    themis_vmcall(THEMIS_CHANNEL_SEND, channel_endpoint, alias_parent);
+}
+```
+
+### 7.4 Eunomia implementation
+
+Eunomia CoCo workload (`eunomia/workloads/coco/`): minimal version of the above
+using direct VMCALL wrappers. Tests: verify MAP_SELF creates the VTOM mapping,
+verify CHANNEL_SEND delivers the alias to dom0.
 
 ---
 
 ## 8. Implementation Plan
 
-### Phase A: Kernel patch + detection (minimal, testable independently)
+### Phase A: Kernel patch + detection ✅ done
 
-1. Create the ~50 line kernel patch (CC_VENDOR_THEMIS)
-2. Add CPUID leaf `0x4000_0100` interception in capavisor (return VTOM config)
-3. Boot dom1 with the patched kernel → verify `cc_platform_has()` returns true
-4. Verify swiotlb is activated (`dmesg | grep swiotlb`)
-5. At this point virtio will break (bounce buffers allocated in private memory
-   that dom0 can't access) — that's expected, confirms the detection works
+1. ✅ CC_VENDOR_THEMIS kernel patch in `../linux`
+2. ✅ CoCo guest kernel config (245 modules)
+3. [ ] CPUID leaf `0x4000_0100` interception in capavisor (for confidential children)
+4. [ ] Boot dom1 with CoCo kernel → verify `cc_platform_has()` → swiotlb active
 
-### Phase B: MAP_SELF + channel share-back protocol
+### Phase B: CHV memory classification + driver channel
 
-1. ✅ **MAP_SELF engine operation implemented** — refcounted projection model with
-   `add_footprint`/`remove_footprint`, per-cap GPA tracking (`mapped_gpas`),
-   snapshot-diff → UpdateBatch. Comprehensive integration tests pass.
-2. ✅ **MAP_SELF hypercall wired** — `THEMIS_MAP_SELF` (0x1f) across themis-abi,
-   capavisor handler, thhv defines + wrapper.
-3. Implement kernel-side share-back: Themis-specific early init creates two
-   aliases of swiotlb pool, MAP_SELFs one at VTOM GPA, sends the other via channel
-4. Implement CHV-side: accept alias from channel, map shared region
-5. Test: dom1 boots, shares back bounce buffer, CHV maps it, virtio works
+1. ✅ MAP_SELF engine + hypercall wired
+2. [ ] CHV: classify regions as CARVE (private RAM) vs ALIAS (MMIO/shared)
+3. [ ] thhv.ko: direct guest RAM allocation via driver (contiguous phys memory)
+4. [ ] thhv.ko: auto-create parent↔child channel on CREATE_PARTITION(confidential)
+5. [ ] Capavisor: wire CHANNEL_SEND / CHANNEL_RECV hypercalls
+6. [ ] thhv.ko: receive alias from channel, expose to CHV
 
-Note: revocation of shared aliases is handled by the standard capability tree
-model — the parent capability holder (dom1) can revoke any alias it created,
-regardless of which domain currently holds it. Channels are only a transport
-mechanism; they play no role in revocation semantics.
+### Phase C: Guest share-back + end-to-end
 
-### Phase C: EPT enforcement + full confidential boot
+1. [ ] Eunomia CoCo workload: ALIAS + MAP_SELF + CHANNEL_SEND
+2. [ ] Linux dom1 early init: `themis_coco_shareback()` in arch/x86/coco/
+3. [ ] End-to-end: dom1 boots confidential, swiotlb active, virtio works
+4. [ ] Test: dom0 cannot read dom1 private memory after SEND
 
-1. Implement `enforce_exclusive_hpa()` in capavisor — remove HPAs from dom0 HHDM
-   when memory is CARVE'd + SEND'd to a confidential domain
-2. Implement re-map on revoke (parent regains access when domain is destroyed)
-3. Boot dom1 → share-back → virtio works through shared bounce buffers
-4. Test: dom0 cannot read dom1's kernel text, page tables, user data
-5. Test: dom1 boots to systemd login with confidential memory
+### Phase D: Hardening + sibling sharing
 
-### Phase D: Hardening
-
-1. Attestation: include VTOM configuration and shared region list in attestation
-2. Capability engine: ensure VITAL/META semantics work with exclusive memory
-3. Revoke: verify clean teardown (all private HPAs returned to dom0 EPT)
-4. Multi-vCPU: verify shared window works with 2+ vCPU dom1
-5. Malicious guest test: dom1 tries to alias more than it should — verify
-   capability engine rejects (aliased region must be within owned range)
+1. [ ] Revoke: verify clean teardown (all private HPAs returned to dom0 EPT)
+2. [ ] Multi-vCPU: verify shared window works with 2+ vCPU dom1
+3. [ ] ivshmem-like device for dom1↔dom2 shared memory
+4. [ ] Attestation: include VTOM config and shared region list
 
 ---
 
