@@ -9,7 +9,7 @@
 #
 # Environment knobs:
 #   PROFILE       debug | release (default: debug)
-#   BINS_TARGETS  all | comma-separated subset of: capavisor,chv,capa-engine,thhv
+#   BINS_TARGETS  all | comma-separated subset of: capavisor,chv,capa-engine,thhv,eunomia
 #   KHEADERS_DIR  explicit kernel headers tree for thhv.ko builds
 
 set -euo pipefail
@@ -79,12 +79,12 @@ if [[ "$BINS_TARGETS" != "all" ]]; then
         _target="${_target,,}"
         [[ -z "$_target" ]] && continue
         case "$_target" in
-            capavisor|chv|cloud-hypervisor|capa-engine|thhv)
+            capavisor|chv|cloud-hypervisor|capa-engine|thhv|eunomia)
                 SELECTED_TARGETS+=("$_target")
                 ;;
             *)
                 echo "ERROR: unknown BINS_TARGETS entry '$_raw'" >&2
-                echo "       Supported values: all, capavisor, chv, capa-engine, thhv" >&2
+                echo "       Supported values: all, capavisor, chv, capa-engine, thhv, eunomia" >&2
                 exit 1
                 ;;
         esac
@@ -228,6 +228,23 @@ if should_build thhv; then
     fi
 else
     echo "→ [thhv] skipped"
+fi
+
+if should_build eunomia; then
+    EUNOMIA_DIR="$REPO_ROOT/eunomia/workloads"
+    if [[ -d "$EUNOMIA_DIR" ]]; then
+        echo "→ [eunomia] building workloads"
+        for wdir in "$EUNOMIA_DIR"/*/; do
+            [[ -f "$wdir/Cargo.toml" ]] || continue
+            wname="$(basename "$wdir")"
+            echo "  → $wname"
+            (cd "$wdir" && cargo build --release)
+        done
+    else
+        warn "eunomia/workloads/ not found; skipping eunomia build"
+    fi
+else
+    echo "→ [eunomia] skipped"
 fi
 
 if [[ ! -f "$BINS_IMG" ]]; then
