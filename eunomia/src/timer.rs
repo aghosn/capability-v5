@@ -6,8 +6,9 @@
 
 use core::sync::atomic::AtomicU64;
 
-/// Timer interrupt vector (above the 32 exception vectors).
-pub const TIMER_VECTOR: u8 = 32;
+/// Timer interrupt vector.  Must match CHV's LOCAL_TIMER_VECTOR (0xEC)
+/// so that the timerfd→irqfd injection path delivers on this vector.
+pub const TIMER_VECTOR: u8 = 0xEC;
 
 /// Counter incremented by the timer ISR.
 pub static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);

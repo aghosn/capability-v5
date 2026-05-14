@@ -352,7 +352,7 @@ pub fn init() {
             idt[vec] = IdtEntry::interrupt_gate(stub_addr(vec), ist);
         }
 
-        // Timer interrupt (vector 32).
+        // Timer interrupt (vector 0xEC — matches CHV's LOCAL_TIMER_VECTOR).
         idt[crate::timer::TIMER_VECTOR as usize] =
             IdtEntry::interrupt_gate(timer_isr_stub as *const () as u64, 0);
 
