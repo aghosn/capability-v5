@@ -142,7 +142,8 @@ mkdir -p \
     "$MNT/thhv/tests" \
     "$MNT/cloud-hypervisor" \
     "$MNT/capa-engine/tests" \
-    "$MNT/nested"
+    "$MNT/nested" \
+    "$MNT/eunomia"
 
 # ── README ───────────────────────────────────────────────────────────────────
 cat > "$MNT/README.md" <<'EOF'
@@ -217,6 +218,8 @@ dmesg | tail        # check for errors
 | `capa-engine/` | Capability engine binary and tests |
 | `nested/bzImage` | CoCo guest kernel (if built) |
 | `nested/modules/` | CoCo kernel modules (if built) |
+| `eunomia/run-eunomia.sh` | Eunomia workload boot script |
+| `eunomia/eunomia-*` | Eunomia workload ELFs (smoke, timer, etc.) |
 | `version.txt` | Build metadata (git rev, timestamp) |
 
 ## Troubleshooting
@@ -226,6 +229,24 @@ dmesg | tail        # check for errors
 - **thhv.ko fails to load** — check `dmesg`; ensure capavisor is running (boot via `cargo themis`)
 - **No network in dom1** — the script sets up TAP + NAT automatically; check `ip addr` in dom0
 - **dom1 kernel panic** — try `--kvm` mode first to isolate Themis vs kernel issues
+
+## Eunomia (minimal micro-kernel dom1)
+
+```bash
+# List available workloads:
+ls /opt/bins/eunomia/eunomia-*
+
+# Run smoke test (auto-detect Themis/KVM):
+sudo /opt/bins/eunomia/run-eunomia.sh smoke
+
+# Force Themis backend:
+sudo /opt/bins/eunomia/run-eunomia.sh --themis smoke
+
+# Run all workloads:
+for w in smoke timer memory sched hypercall pvh-info; do
+    echo "=== \$w ===" && sudo /opt/bins/eunomia/run-eunomia.sh \$w
+done
+```
 EOF
 
 THHV_KO="$REPO_ROOT/thhv/thhv.ko"
@@ -278,6 +299,30 @@ if should_package capa-engine; then
         warn_missing "$CAPENG_BIN"
     fi
     copy_capa-engine_tests
+fi
+
+# ── Eunomia workloads ─────────────────────────────────────────────────────────
+if should_package eunomia; then
+    EUNOMIA_DIR="$REPO_ROOT/eunomia/workloads"
+    EUNOMIA_PACKED=0
+    if [[ -d "$EUNOMIA_DIR" ]]; then
+        for wdir in "$EUNOMIA_DIR"/*/; do
+            wname="$(basename "$wdir")"
+            elf="$wdir/target/x86_64-unknown-none/release/eunomia-${wname}"
+            if [[ -f "$elf" ]]; then
+                cp "$elf" "$MNT/eunomia/eunomia-${wname}"
+                EUNOMIA_PACKED=$((EUNOMIA_PACKED + 1))
+            fi
+        done
+    fi
+    # Package the runner script
+    cp "$SCRIPT_DIR/run-eunomia.sh" "$MNT/eunomia/run-eunomia.sh"
+    chmod +x "$MNT/eunomia/run-eunomia.sh"
+    if (( EUNOMIA_PACKED > 0 )); then
+        echo "  ✔ eunomia/ ($EUNOMIA_PACKED workloads)"
+    else
+        warn_missing "eunomia workload ELFs (build with: cd eunomia/workloads/<name> && cargo build --release)"
+    fi
 fi
 
 if [[ -n "$NESTED_KERNEL" ]]; then
