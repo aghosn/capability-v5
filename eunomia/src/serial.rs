@@ -44,6 +44,9 @@ pub struct SerialWriter;
 impl fmt::Write for SerialWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
+            if b == b'\n' {
+                write_byte(b'\r');
+            }
             write_byte(b);
         }
         Ok(())
