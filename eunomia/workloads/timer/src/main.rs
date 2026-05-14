@@ -1,4 +1,4 @@
-//! Timer test workload — verifies LAPIC one-shot timer fires.
+//! Timer test workload — verifies LAPIC TSC-deadline timer fires.
 
 #![no_std]
 #![no_main]
@@ -22,8 +22,8 @@ fn test_timer_fires() -> Result<(), &'static str> {
 
     let before = eunomia::timer::TIMER_TICKS.load(Ordering::SeqCst);
 
-    // Arm timer with a large count (fires after ~1M LAPIC ticks).
-    eunomia::timer::arm(1_000_000);
+    // Arm timer ~1ms in the future (assuming ~3 GHz TSC).
+    eunomia::timer::arm(3_000_000);
 
     // Enable interrupts so the timer can fire.
     unsafe { core::arch::asm!("sti"); }
