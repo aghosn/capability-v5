@@ -21,6 +21,7 @@ use crate::arch_traits::traits::ArchVpOps;
 use crate::arch_traits::types::{ExitInfo, SemanticExit, Vp};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
+use capability_engine::interposition::{DefaultAction, ProcFeaturePolicy};
 use capability_engine::Platform as _;
 
 // ── Generic monitor loop ──────────────────────────────────────────────────── //
@@ -68,6 +69,52 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                     }
                 }
 
+                // CPUID interposition: per-leaf policy overrides ExitPolicy.
+                if let ExitInfo::Cpuid { leaf, .. } = info {
+                    match lookup_cpuid_action(platform, *leaf) {
+                        InterpositionAction::Trap => {
+                            vp.forward_exit(reason);
+                            continue;
+                        }
+                        InterpositionAction::Native => {
+                            vp.handle_local(reason, info);
+                            continue;
+                        }
+                        InterpositionAction::Emulate(result) => {
+                            vp.emulate_cpuid(&result);
+                            continue;
+                        }
+                    }
+                }
+
+                // MSR interposition: per-MSR policy overrides ExitPolicy.
+                if let ExitInfo::Msr {
+                    number, is_write, ..
+                } = info
+                {
+                    if !is_write {
+                        // RDMSR: check MSR interposition policy.
+                        match lookup_msr_action(platform, *number) {
+                            InterpositionAction::Trap => {
+                                vp.forward_exit(reason);
+                                continue;
+                            }
+                            InterpositionAction::Native => {
+                                vp.handle_local(reason, info);
+                                continue;
+                            }
+                            InterpositionAction::Emulate(value) => {
+                                vp.emulate_rdmsr(value);
+                                continue;
+                            }
+                        }
+                    }
+                    // WRMSR: for now, fall through to ExitPolicy.
+                    // (MSR emulate only defines read values; writes use
+                    // trap/native per ExitPolicy.)
+                }
+
+                // Default: consult ExitPolicy for all other exit reasons.
                 if lookup_exit_trap(platform, reason) {
                     vp.forward_exit(reason);
                 } else {
@@ -102,6 +149,56 @@ fn lookup_exit_trap(platform: &ThemisPlatform, reason: u32) -> bool {
         .get_core_cap(core_id)
         .map(|c| c.read().data.policy.exits.get_action(reason).trap)
         .unwrap_or(true)
+}
+
+// ── CPUID / MSR interposition ─────────────────────────────────────────────── //
+
+/// Result of looking up a CPUID or MSR interposition policy.
+enum InterpositionAction<V> {
+    Trap,
+    Native,
+    Emulate(V),
+}
+
+/// Look up CPUID interposition policy for a specific leaf.
+fn lookup_cpuid_action(
+    platform: &ThemisPlatform,
+    leaf: u32,
+) -> InterpositionAction<capability_engine::interposition::CpuidResult> {
+    let core_id = platform.get_current_core().unwrap_or(0) as usize;
+    let Some(cap) = platform.get_core_cap(core_id) else {
+        return InterpositionAction::Trap; // fail-closed
+    };
+    let guard = cap.read();
+    let cpuid_cfg = &guard.data.policy.cpuid;
+    match cpuid_cfg.lookup(&leaf) {
+        Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
+        Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
+        Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
+        None => match cpuid_cfg.default {
+            DefaultAction::Trap => InterpositionAction::Trap,
+            DefaultAction::Native => InterpositionAction::Native,
+        },
+    }
+}
+
+/// Look up MSR interposition policy for a specific MSR number.
+fn lookup_msr_action(platform: &ThemisPlatform, msr: u32) -> InterpositionAction<u64> {
+    let core_id = platform.get_current_core().unwrap_or(0) as usize;
+    let Some(cap) = platform.get_core_cap(core_id) else {
+        return InterpositionAction::Trap; // fail-closed
+    };
+    let guard = cap.read();
+    let msr_cfg = &guard.data.policy.msrs;
+    match msr_cfg.lookup(&msr) {
+        Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
+        Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
+        Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
+        None => match msr_cfg.default {
+            DefaultAction::Trap => InterpositionAction::Trap,
+            DefaultAction::Native => InterpositionAction::Native,
+        },
+    }
 }
 
 // ── Interrupt handling (generic policy, arch primitives) ───────────────────── //

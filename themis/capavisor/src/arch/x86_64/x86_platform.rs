@@ -175,6 +175,24 @@ impl ArchVpOps for X86Platform {
             vmexit::PREEMPTION_TIMER_TICKS,
         );
     }
+
+    fn emulate_cpuid(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        result: &capability_engine::interposition::CpuidResult,
+    ) {
+        vp.set_reg(Reg::Rax, result.v0 as u64);
+        vp.set_reg(Reg::Rbx, result.v1 as u64);
+        vp.set_reg(Reg::Rcx, result.v2 as u64);
+        vp.set_reg(Reg::Rdx, result.v3 as u64);
+        vmexit::next_instruction(vp);
+    }
+
+    fn emulate_rdmsr(&mut self, vp: &mut Self::VpHandle, value: u64) {
+        vp.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
+        vp.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
+        vmexit::next_instruction(vp);
+    }
 }
 
 // ── ArchGuestPhysMap ─────────────────────────────────────────────────────── //

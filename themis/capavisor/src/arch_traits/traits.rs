@@ -84,6 +84,22 @@ pub trait ArchVpOps {
 
     /// Reset the preemption / scheduling timer for the current VP.
     fn reset_timer(&mut self, vp: &mut Self::VpHandle);
+
+    // ── Interposition emulation ─────────────────────────────────────────── //
+
+    /// Write an emulated CPUID result into guest registers and advance IP.
+    /// Called by the generic monitor loop when CPUID interposition policy
+    /// returns Emulate for a leaf.
+    fn emulate_cpuid(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        result: &capability_engine::interposition::CpuidResult,
+    );
+
+    /// Write an emulated MSR value into guest registers and advance IP.
+    /// Called by the generic monitor loop when MSR interposition policy
+    /// returns Emulate for a RDMSR exit.
+    fn emulate_rdmsr(&mut self, vp: &mut Self::VpHandle, value: u64);
 }
 
 // ── Guest physical address space (EPT / Stage-2) ─────────────────────────── //

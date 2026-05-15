@@ -225,7 +225,7 @@ pub enum InsertError {
 // ── Concrete resource types ─────────────────────────────────────────────── //
 
 /// CPUID emulated value.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CpuidResult {
     pub v0: u32,
     pub v1: u32,

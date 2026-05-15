@@ -280,4 +280,14 @@ impl<A: ArchVpOps> Vp<A> {
     pub fn reset_timer(&mut self) {
         self.arch.reset_timer(&mut self.handle);
     }
+
+    /// Write an emulated CPUID result and advance IP.
+    pub fn emulate_cpuid(&mut self, result: &capability_engine::interposition::CpuidResult) {
+        self.arch.emulate_cpuid(&mut self.handle, result);
+    }
+
+    /// Write an emulated MSR read result and advance IP.
+    pub fn emulate_rdmsr(&mut self, value: u64) {
+        self.arch.emulate_rdmsr(&mut self.handle, value);
+    }
 }
