@@ -170,6 +170,16 @@ pub mod policy_kind {
     pub const EXIT_REASON_TRAP: u64 = 7;
     pub const EXIT_REASON_REG_READ_SET: u64 = 8;
     pub const EXIT_REASON_REG_WRITE_SET: u64 = 9;
+
+    // CPUID interposition (ResourceKind::Cpuid)
+    pub const CPUID_DEFAULT: u64 = 10;
+    pub const CPUID_RANGE: u64 = 11;
+    pub const CPUID_EMULATE: u64 = 12;
+
+    // MSR interposition (ResourceKind::Msr)
+    pub const MSR_DEFAULT: u64 = 13;
+    pub const MSR_RANGE: u64 = 14;
+    pub const MSR_EMULATE: u64 = 15;
 }
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //

@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-14)
+## Current State (2026-05-15)
 
 ### What works
 
@@ -29,6 +29,10 @@
   (245 modules), virtio/ext4/9p built-in.
 - **MAP_SELF hypercall**: wired across themis-abi (0x1f), capavisor handler, thhv.
 - **CARVE+SEND**: fully working — dom0 loses EPT access when SENDing to child.
+- **CPUID/MSR interposition policy**: ✅ generic ProcFeature trait framework in
+  capa-engine. Attestation includes policies. capa-cli and lean-exec extended.
+  `cargo diff-test` (from capa-cli/) runs automated Rust-vs-Lean differential
+  testing on all 16 tutorials.
 
 ### What doesn't work / known issues
 
@@ -42,6 +46,8 @@
 
 ### Recent commits
 
+- `ce15689` — **capa-cli, lean-exec: interposition policy support and differential testing**
+- `836359b` — **capa-engine: generic CPUID/MSR interposition policy framework**
 - `c15e246` — **fix(eunomia): emit CR+LF on serial output**
 - `04edb1b` — **feat: build-bins rebuilds eunomia workloads before packaging**
 - `ee4b960` — **fix(eunomia): use vector 0xEC to match CHV's LOCAL_TIMER_VECTOR**
@@ -118,16 +124,28 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 - MAP_SELF hypercall wired: themis-abi (0x1f), capavisor handler, thhv ✅
 - CC_VENDOR_THEMIS kernel patch exists in `../linux` (CPUID detection, cc_mkenc/cc_mkdec, VTOM) ✅
 - CoCo guest kernel config (245 modules, virtio/ext4/9p built-in) ✅
+- CPUID/MSR interposition policy framework in capa-engine ✅
+  - Generic ProcFeature trait, ProcFeatureConfig<T>, Cpuid/Msr types
+  - DomainPolicy extended with CpuidPolicy + MsrPolicy
+  - Attestation includes CPUID/MSR policies
+  - capa-cli: set-policy parsing for all interposition variants
+  - lean-exec: DefaultAction/ProcFeatureConfig types, setPolicy/getPolicy support
+  - Design doc: `docs/architecture/cpuid-policy.md`
 
-**What needs implementation**:
+**What needs implementation (interposition wiring)**:
+- [ ] themis-abi: add policy_kind constants 10–15 for CPUID/MSR PolicyIdentifier variants
+- [ ] Capavisor: update handle_cpuid_local (vmexit.rs) to consult domain CPUID policy
+- [ ] Capavisor: update MSR exit handlers to consult domain MSR policy
+- [ ] thhv.ko: new ioctl cases to forward CPUID/MSR policy_kind values
+- [ ] CHV: call new ioctls to set CPUID/MSR policy during domain setup
+
+**What needs implementation (CoCo end-to-end)**:
 - [ ] CHV: distinguish shared (MMIO) vs exclusive (guest RAM) memory at setup time.
       Currently `create_user_memory_region` uses `THHV_MEM_F_ALIAS` for everything.
       For CoCo: guest RAM should use CARVE (flags=0), MMIO regions stay ALIAS.
 - [ ] CHV: receive shared regions back from dom1 (accept alias via channel or
       new ioctl after dom1 shares bounce buffers back)
 - [ ] Capavisor: wire CHANNEL_SEND / CHANNEL_RECV hypercalls
-- [ ] Capavisor: CPUID leaf 0x4000_0100 interception for confidential child domains
-      (return VTOM bit position + Themis signature)
 - [ ] Dom1 kernel: early init share-back — create aliases of swiotlb pool,
       MAP_SELF at VTOM GPA, CHANNEL_SEND the other to dom0
 - [ ] Eunomia CoCo workload: minimal test that verifies dom0 cannot read dom1

@@ -10,7 +10,8 @@ use core::sync::atomic::Ordering;
 
 use capability_engine::{
     execute, Access, Attributes, CapaError, Capability, CapabilityRef, Domain, DomainId,
-    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier, Rights, UpdateBatch,
+    DomainPolicy, InterruptVisibility, MonitorAPI, Platform, PolicyIdentifier, ResourceKind,
+    Rights, UpdateBatch,
 };
 use themis_abi::{errors, opcodes};
 
@@ -93,7 +94,8 @@ fn map_error(e: &CapaError) -> u64 {
         | CapaError::InvalidOperation(_)
         | CapaError::RegionOverlap
         | CapaError::InvalidRemapping
-        | CapaError::AlreadyExists => errors::ERR_INVALID,
+        | CapaError::AlreadyExists
+        | CapaError::InvalidValue => errors::ERR_INVALID,
 
         CapaError::PermissionDenied
         | CapaError::CannotAliasCarved
@@ -110,6 +112,8 @@ fn map_error(e: &CapaError) -> u64 {
         }
 
         CapaError::NotSupported | CapaError::RegisterOutOfRange => errors::ERR_UNIMPL,
+
+        CapaError::NoMemory => errors::ERR_NOMEM,
     }
 }
 
@@ -1710,6 +1714,24 @@ fn do_set_policy(
         }
         policy_kind::EXIT_REASON_REG_WRITE_SET => {
             PolicyIdentifier::ExitReasonRegWriteSet(key as u32, sub_key as u8)
+        }
+        policy_kind::CPUID_DEFAULT => {
+            PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid)
+        }
+        policy_kind::CPUID_RANGE => {
+            PolicyIdentifier::ProcFeatureRange(ResourceKind::Cpuid, key as u32, sub_key as u32)
+        }
+        policy_kind::CPUID_EMULATE => {
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, key as u32, sub_key as u8)
+        }
+        policy_kind::MSR_DEFAULT => {
+            PolicyIdentifier::ProcFeatureDefault(ResourceKind::Msr)
+        }
+        policy_kind::MSR_RANGE => {
+            PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, key as u32, sub_key as u32)
+        }
+        policy_kind::MSR_EMULATE => {
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key as u32, sub_key as u8)
         }
         _ => return HypercallResult::error(errors::ERR_INVALID),
     };
