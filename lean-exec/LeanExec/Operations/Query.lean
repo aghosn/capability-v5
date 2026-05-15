@@ -395,6 +395,36 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
     out := out ++ "  Overrides:\n"
     out := out ++ String.join overrideLines
 
+  -- CPUID interposition policy
+  let cpuidDefault := match dom.policy.cpuid.default with
+    | .trap => "Trap" | .native => "Native"
+  out := out ++ "CPUID Policy:\n"
+  out := out ++ s!"  Default: {cpuidDefault}\n"
+  if dom.policy.cpuid.overrides.isEmpty then
+    out := out ++ "  Overrides: (none)\n"
+  else
+    out := out ++ "  Overrides:\n"
+    for ovr in dom.policy.cpuid.overrides do
+      match ovr with
+      | .trap s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Trap\n"
+      | .native s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Native\n"
+      | .emulate s e _ => out := out ++ s!"    {toHexR s}..={toHexR e}: Emulate(...)\n"
+
+  -- MSR interposition policy
+  let msrDefault := match dom.policy.msrs.default with
+    | .trap => "Trap" | .native => "Native"
+  out := out ++ "MSR Policy:\n"
+  out := out ++ s!"  Default: {msrDefault}\n"
+  if dom.policy.msrs.overrides.isEmpty then
+    out := out ++ "  Overrides: (none)\n"
+  else
+    out := out ++ "  Overrides:\n"
+    for ovr in dom.policy.msrs.overrides do
+      match ovr with
+      | .trap s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Trap\n"
+      | .native s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Native\n"
+      | .emulate s e _ => out := out ++ s!"    {toHexR s}..={toHexR e}: Emulate(...)\n"
+
   -- Children + parent (includes CDT children + channels targeting this domain)
   out := out ++ s!"Children: {dom.domCaps.length + channelsTargetingMe.length}\n"
   out := out ++ (match dom.parentDomId with

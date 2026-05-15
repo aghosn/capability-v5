@@ -14,7 +14,12 @@ cargo build --release --manifest-path "$CLI_DIR/Cargo.toml" --quiet
 echo "Building Lean backend..."
 cargo build --release --manifest-path "$CLI_DIR/Cargo.toml" --features lean-backend --quiet
 
-BIN="$CLI_DIR/../target/release/capability-cli"
+BIN="$CLI_DIR/target/release/capability-cli"
+
+if [ ! -x "$BIN" ]; then
+    echo "ERROR: binary not found at $BIN" >&2
+    exit 1
+fi
 
 passed=0
 failed=0
@@ -25,8 +30,8 @@ for tuto in "$TUTO_DIR"/*.txt; do
     # Skip index.txt (meta-file that loads other tutorials)
     [ "$name" = "index.txt" ] && continue
 
-    echo "load $tuto" | "$BIN" 2>/dev/null > "$TMPDIR/rust.txt" || true
-    echo "load $tuto" | "$BIN" --backend lean 2>/dev/null > "$TMPDIR/lean.txt" || true
+    echo "load $tuto" | "$BIN" 2>/dev/null > "$TMPDIR/rust.txt"
+    echo "load $tuto" | "$BIN" --backend lean 2>/dev/null > "$TMPDIR/lean.txt"
 
     # Strip the "Backend: ..." line since it will always differ
     grep -v '^Backend:' "$TMPDIR/rust.txt" > "$TMPDIR/rust_clean.txt" || true
