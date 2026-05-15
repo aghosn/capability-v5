@@ -3566,7 +3566,6 @@ impl Capability<Domain> {
                 };
                 result.map_err(|e| match e {
                     crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
-                    crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
                     crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
                     crate::interposition::InsertError::NotFound => CapaError::NotFound,
                 })?;
@@ -3939,7 +3938,6 @@ fn cpuid_set_emulate_word(
                 policy.insert_emulate((key, key), result)
                     .map_err(|e| match e {
                         crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
-                        crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
                         crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
                         crate::interposition::InsertError::NotFound => CapaError::NotFound,
                     })?;
@@ -3986,7 +3984,6 @@ fn msr_set_emulate_word(
                 policy.insert_emulate((msr, msr), lo)
                     .map_err(|e| match e {
                         crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
-                        crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
                         crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
                         crate::interposition::InsertError::NotFound => CapaError::NotFound,
                     })?;

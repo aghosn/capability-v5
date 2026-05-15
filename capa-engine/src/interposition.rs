@@ -7,8 +7,6 @@
 
 use alloc::vec::Vec;
 
-/// Maximum number of override entries per policy to prevent memory exhaustion.
-pub const MAX_OVERRIDES: usize = 64;
 
 /// Trait defining the associated types for a processor feature resource class.
 pub trait ProcFeature: Clone {
@@ -104,16 +102,12 @@ impl<T: ProcFeature> ProcFeatureConfig<T> {
     }
 
     /// Insert a Trap or Native range override.
-    /// Returns an error if the range overlaps an existing override or exceeds
-    /// the maximum number of entries.
+    /// Returns an error if the range overlaps an existing override.
     pub fn insert_range(
         &mut self,
         range: T::Range,
         action: DefaultAction,
     ) -> core::result::Result<(), InsertError> {
-        if self.overrides.len() >= MAX_OVERRIDES {
-            return Err(InsertError::TooManyEntries);
-        }
         let start = T::range_start(&range);
         let end = T::range_end(&range);
         if end < start {
@@ -141,9 +135,6 @@ impl<T: ProcFeature> ProcFeatureConfig<T> {
         range: T::Range,
         value: T::Value,
     ) -> core::result::Result<(), InsertError> {
-        if self.overrides.len() >= MAX_OVERRIDES {
-            return Err(InsertError::TooManyEntries);
-        }
         let start = T::range_start(&range);
         let end = T::range_end(&range);
         if end < start {
@@ -214,8 +205,6 @@ impl<T: ProcFeature> ProcFeatureConfig<T> {
 pub enum InsertError {
     /// The new range overlaps an existing override.
     Overlap,
-    /// Maximum number of overrides reached.
-    TooManyEntries,
     /// Range end < start.
     InvalidRange,
     /// No matching entry found for update.

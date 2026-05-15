@@ -8,7 +8,7 @@
 //! - Sorted insertion order
 //! - Remove entries
 //! - Update emulate values
-//! - Edge cases (adjacent ranges, full u32 range, MAX_OVERRIDES limit)
+//! - Edge cases (adjacent ranges, full u32 range)
 //! - Both CPUID and MSR instantiations
 //! - CPUID subleaf granularity
 
@@ -295,23 +295,6 @@ fn update_emulate_on_native_range_fails() {
     assert_eq!(
         policy.update_emulate_value(&(0x150, 0), v),
         Err(InsertError::NotFound)
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════ //
-//  Capacity limit
-// ═══════════════════════════════════════════════════════════════════════════ //
-
-#[test]
-fn max_overrides_limit() {
-    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
-    for i in 0..MAX_OVERRIDES {
-        let msr = (i * 0x100) as u32;
-        policy.insert_range((msr, msr), DefaultAction::Native).unwrap();
-    }
-    assert_eq!(
-        policy.insert_range((0xFFFF_0000, 0xFFFF_0000), DefaultAction::Native),
-        Err(InsertError::TooManyEntries)
     );
 }
 

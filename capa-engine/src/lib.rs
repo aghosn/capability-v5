@@ -47,7 +47,7 @@ pub use domain::{
 pub use error::{CapaError, Result};
 pub use interposition::{
     Cpuid, CpuidPolicy, CpuidResult, DefaultAction, InsertError, Msr, MsrPolicy,
-    ProcFeature, ProcFeatureConfig, ProcFeaturePolicy, MAX_OVERRIDES,
+    ProcFeature, ProcFeatureConfig, ProcFeaturePolicy,
 };
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
 pub use platform::{execute, OpLockGuard, Platform};
