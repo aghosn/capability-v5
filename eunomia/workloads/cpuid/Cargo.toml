@@ -1,0 +1,19 @@
+[package]
+name    = "eunomia-cpuid"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "eunomia-cpuid"
+path = "src/main.rs"
+
+[dependencies]
+eunomia = { path = "../.." }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic   = "abort"
+opt-level = "s"
+lto     = true
