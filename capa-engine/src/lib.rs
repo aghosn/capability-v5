@@ -22,6 +22,7 @@ pub mod attest;
 pub mod capability;
 pub mod domain;
 pub mod error;
+pub mod interposition;
 pub mod memory;
 pub mod platform;
 pub mod switch;
@@ -40,10 +41,14 @@ pub use capability::{
 pub use domain::{
     Domain, DomainPolicy, DomainStatus, ExitAction, ExitPolicy,
     InterruptPolicy, InterruptVisibility, MonitorAPI, PendingDomainCapability, PolicyIdentifier,
-    RegBitmap, VProcessorRef, VProcessorState, VectorPolicy, VpCallContext, VpRunState,
-    VECTOR_AVAILABLE,
+    RegBitmap, ResourceKind, VProcessorRef, VProcessorState, VectorPolicy, VpCallContext,
+    VpRunState, VECTOR_AVAILABLE,
 };
 pub use error::{CapaError, Result};
+pub use interposition::{
+    Cpuid, CpuidPolicy, CpuidResult, DefaultAction, InsertError, Msr, MsrPolicy,
+    ProcFeature, ProcFeatureConfig, ProcFeaturePolicy, MAX_OVERRIDES,
+};
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
 pub use platform::{execute, OpLockGuard, Platform};
 pub use switch::{

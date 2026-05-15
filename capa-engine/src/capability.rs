@@ -3,8 +3,8 @@
 use crate::attest::{self, AttestationReport};
 use crate::domain::{
     Domain, DomainPolicy, ExitAction, InterruptVisibility, MonitorAPI,
-    PendingCapability, PendingDomainCapability, PolicyIdentifier, RegBitmap, VProcessorRef,
-    VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
+    PendingCapability, PendingDomainCapability, PolicyIdentifier, RegBitmap, ResourceKind,
+    VProcessorRef, VectorPolicy, VpCallContext, VpRunState, VECTOR_AVAILABLE,
 };
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
@@ -3540,6 +3540,55 @@ impl Capability<Domain> {
                     });
                 entry.write_set.set_word(word as usize, value);
             }
+
+            // ── Processor feature interposition policy ──
+
+            PolicyIdentifier::ProcFeatureDefault(rk) => {
+                let default = crate::interposition::DefaultAction::from_u8(value as u8)
+                    .ok_or(CapaError::InvalidValue)?;
+                match rk {
+                    ResourceKind::Cpuid => child_w.data.policy.cpuid.default = default,
+                    ResourceKind::Msr => child_w.data.policy.msrs.default = default,
+                }
+            }
+            PolicyIdentifier::ProcFeatureRange(rk, start, end) => {
+                let action = crate::interposition::DefaultAction::from_u8(value as u8)
+                    .ok_or(CapaError::InvalidValue)?;
+                let result = match rk {
+                    ResourceKind::Cpuid => {
+                        child_w.data.policy.cpuid.insert_range((start, end), action)
+                    }
+                    ResourceKind::Msr => {
+                        child_w.data.policy.msrs.insert_range((start, end), action)
+                    }
+                };
+                result.map_err(|e| match e {
+                    crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
+                    crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
+                    crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
+                    crate::interposition::InsertError::NotFound => CapaError::NotFound,
+                })?;
+            }
+            PolicyIdentifier::ProcFeatureEmulate(rk, key32, word) => {
+                match rk {
+                    ResourceKind::Cpuid => {
+                        cpuid_set_emulate_word(
+                            &mut child_w.data.policy.cpuid,
+                            key32,
+                            word,
+                            value,
+                        )?;
+                    }
+                    ResourceKind::Msr => {
+                        msr_set_emulate_word(
+                            &mut child_w.data.policy.msrs,
+                            key32,
+                            word,
+                            value,
+                        )?;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -3612,6 +3661,18 @@ impl Capability<Domain> {
                 .get_action(reason)
                 .write_set
                 .word(word as usize),
+            // ProcFeature policies are set-only for now; get returns the default.
+            PolicyIdentifier::ProcFeatureDefault(rk) => {
+                let default = match rk {
+                    ResourceKind::Cpuid => child_r.data.policy.cpuid.default,
+                    ResourceKind::Msr => child_r.data.policy.msrs.default,
+                };
+                default as u64
+            }
+            PolicyIdentifier::ProcFeatureRange(..)
+            | PolicyIdentifier::ProcFeatureEmulate(..) => {
+                return Err(CapaError::NotSupported);
+            }
         };
 
         Ok(value)
@@ -3844,4 +3905,105 @@ fn register_access_check(
     };
 
     Ok((child_domain_id, bitmap))
+}
+
+// ── CPUID/MSR emulate word helpers ───────────────────────────────────────── //
+
+use crate::interposition::{CpuidResult, CpuidPolicy, MsrPolicy, ProcFeaturePolicy};
+
+/// Set one word of a CPUID emulate entry.
+///
+/// - word 0: `value = (eax << 32) | ebx`
+/// - word 1: `value = (ecx << 32) | edx`
+///
+/// If no emulate entry exists for `leaf`, word 0 creates it.
+/// Word 1 then updates the existing entry.
+fn cpuid_set_emulate_word(
+    policy: &mut CpuidPolicy,
+    leaf: u32,
+    word: u8,
+    value: u64,
+) -> Result<()> {
+    match word {
+        0 => {
+            let hi = (value >> 32) as u32;
+            let lo = value as u32;
+            let result = CpuidResult { v0: hi, v1: lo, v2: 0, v3: 0 };
+            // Try update first; if not found, insert new.
+            if policy.update_emulate_value(&leaf, result.clone()).is_err() {
+                policy.insert_emulate((leaf, leaf), result)
+                    .map_err(|e| match e {
+                        crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
+                        crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
+                        crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
+                        crate::interposition::InsertError::NotFound => CapaError::NotFound,
+                    })?;
+            }
+            Ok(())
+        }
+        1 => {
+            let hi = (value >> 32) as u32;
+            let lo = value as u32;
+            // Must find existing entry (word 0 should have been set first).
+            let idx = policy.overrides.iter().position(|rule| {
+                if let ProcFeaturePolicy::Emulate(range, _) = rule {
+                    range.0 <= leaf && leaf <= range.1
+                } else {
+                    false
+                }
+            }).ok_or(CapaError::NotFound)?;
+            if let ProcFeaturePolicy::Emulate(range, ref mut result) = policy.overrides[idx] {
+                let _ = range; // already validated
+                result.v2 = hi;
+                result.v3 = lo;
+            }
+            Ok(())
+        }
+        _ => Err(CapaError::InvalidValue),
+    }
+}
+
+/// Set one word of an MSR emulate entry.
+///
+/// - word 0: `value` = lower 32 bits of emulated MSR value
+/// - word 1: `value` = upper 32 bits of emulated MSR value
+///
+/// Word 0 creates the entry; word 1 updates it.
+fn msr_set_emulate_word(
+    policy: &mut MsrPolicy,
+    msr: u32,
+    word: u8,
+    value: u64,
+) -> Result<()> {
+    match word {
+        0 => {
+            let lo = value as u64;
+            if policy.update_emulate_value(&msr, lo).is_err() {
+                policy.insert_emulate((msr, msr), lo)
+                    .map_err(|e| match e {
+                        crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
+                        crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
+                        crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
+                        crate::interposition::InsertError::NotFound => CapaError::NotFound,
+                    })?;
+            }
+            Ok(())
+        }
+        1 => {
+            let hi = value & 0xFFFF_FFFF;
+            let idx = policy.overrides.iter().position(|rule| {
+                if let ProcFeaturePolicy::Emulate(range, _) = rule {
+                    range.0 <= msr && msr <= range.1
+                } else {
+                    false
+                }
+            }).ok_or(CapaError::NotFound)?;
+            if let ProcFeaturePolicy::Emulate(_, ref mut val) = policy.overrides[idx] {
+                // Keep lower 32 bits, set upper 32 bits.
+                *val = (*val & 0xFFFF_FFFF) | (hi << 32);
+            }
+            Ok(())
+        }
+        _ => Err(CapaError::InvalidValue),
+    }
 }

@@ -1,0 +1,432 @@
+//! Unit tests for the generic interposition policy (`ProcFeatureConfig<T>`).
+//!
+//! Tests cover:
+//! - Default action fallback
+//! - Range insert and lookup (Trap, Native)
+//! - Emulate point entries
+//! - Overlap rejection
+//! - Sorted insertion order
+//! - Remove entries
+//! - Update emulate values
+//! - Edge cases (adjacent ranges, full u32 range, MAX_OVERRIDES limit)
+//! - Both CPUID and MSR instantiations
+
+use capability_engine::interposition::*;
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Basic ProcFeatureConfig operations (using Cpuid as the test vehicle)
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn default_trap_returns_none_on_lookup() {
+    let policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    assert!(policy.lookup(&0x0).is_none());
+    assert!(policy.lookup(&0x4000_0100).is_none());
+    assert!(policy.lookup(&u32::MAX).is_none());
+}
+
+#[test]
+fn default_native_returns_none_on_lookup() {
+    let policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    assert!(policy.lookup(&42).is_none());
+}
+
+#[test]
+fn insert_native_range_and_lookup() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+
+    // Inside range
+    assert!(matches!(
+        policy.lookup(&0x10),
+        Some(ProcFeaturePolicy::Native(_))
+    ));
+    assert!(matches!(
+        policy.lookup(&0x15),
+        Some(ProcFeaturePolicy::Native(_))
+    ));
+    assert!(matches!(
+        policy.lookup(&0x20),
+        Some(ProcFeaturePolicy::Native(_))
+    ));
+
+    // Outside range → default
+    assert!(policy.lookup(&0x0F).is_none());
+    assert!(policy.lookup(&0x21).is_none());
+}
+
+#[test]
+fn insert_trap_range_and_lookup() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    policy.insert_range((0x100, 0x1FF), DefaultAction::Trap).unwrap();
+
+    assert!(matches!(
+        policy.lookup(&0x150),
+        Some(ProcFeaturePolicy::Trap(_))
+    ));
+    assert!(policy.lookup(&0x200).is_none());
+}
+
+#[test]
+fn insert_emulate_point_and_lookup() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    let result = CpuidResult { v0: 39, v1: 0x1234, v2: 0x5678, v3: 0x9ABC };
+    policy.insert_emulate((0x4000_0100, 0x4000_0100), result.clone()).unwrap();
+
+    match policy.lookup(&0x4000_0100) {
+        Some(ProcFeaturePolicy::Emulate(_, v)) => assert_eq!(*v, result),
+        other => panic!("expected Emulate, got {:?}", other),
+    }
+
+    // Adjacent leaves should not match
+    assert!(policy.lookup(&0x4000_00FF).is_none());
+    assert!(policy.lookup(&0x4000_0101).is_none());
+}
+
+#[test]
+fn insert_emulate_range_and_lookup() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_emulate((0x800, 0x83F), 0xDEAD_BEEF).unwrap();
+
+    match policy.lookup(&0x810) {
+        Some(ProcFeaturePolicy::Emulate(_, v)) => assert_eq!(*v, 0xDEAD_BEEF),
+        other => panic!("expected Emulate, got {:?}", other),
+    }
+    assert!(policy.lookup(&0x7FF).is_none());
+    assert!(policy.lookup(&0x840).is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Multiple ranges — sorted order and binary search
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn multiple_ranges_sorted_insertion() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    // Insert out of order
+    policy.insert_range((0x100, 0x1FF), DefaultAction::Native).unwrap();
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    policy.insert_range((0x1000, 0x1FFF), DefaultAction::Trap).unwrap();
+
+    // All should be findable
+    assert!(matches!(policy.lookup(&0x15), Some(ProcFeaturePolicy::Native(_))));
+    assert!(matches!(policy.lookup(&0x150), Some(ProcFeaturePolicy::Native(_))));
+    assert!(matches!(policy.lookup(&0x1500), Some(ProcFeaturePolicy::Trap(_))));
+
+    // Gaps between ranges → default
+    assert!(policy.lookup(&0x50).is_none());
+    assert!(policy.lookup(&0x500).is_none());
+}
+
+#[test]
+fn mixed_types_in_overrides() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    let result = CpuidResult { v0: 1, v1: 2, v2: 3, v3: 4 };
+    policy.insert_emulate((0x30, 0x30), result.clone()).unwrap();
+    policy.insert_range((0x40, 0x50), DefaultAction::Trap).unwrap();
+
+    assert!(matches!(policy.lookup(&0x15), Some(ProcFeaturePolicy::Native(_))));
+    assert!(matches!(policy.lookup(&0x30), Some(ProcFeaturePolicy::Emulate(_, _))));
+    assert!(matches!(policy.lookup(&0x45), Some(ProcFeaturePolicy::Trap(_))));
+    assert!(policy.lookup(&0x25).is_none());
+    assert!(policy.lookup(&0x35).is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Overlap rejection
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn overlap_exact_same_range() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_range((0x10, 0x20), DefaultAction::Trap),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn overlap_partial_left() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_range((0x05, 0x15), DefaultAction::Native),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn overlap_partial_right() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_range((0x15, 0x25), DefaultAction::Native),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn overlap_contained() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_range((0x12, 0x18), DefaultAction::Trap),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn overlap_containing() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_range((0x05, 0x25), DefaultAction::Trap),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn overlap_emulate_with_range() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert_eq!(
+        policy.insert_emulate(
+            (0x15, 0x15),
+            CpuidResult { v0: 0, v1: 0, v2: 0, v3: 0 }
+        ),
+        Err(InsertError::Overlap)
+    );
+}
+
+#[test]
+fn adjacent_ranges_no_overlap() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x1F), DefaultAction::Native).unwrap();
+    // Adjacent: starts right after
+    policy.insert_range((0x20, 0x2F), DefaultAction::Trap).unwrap();
+
+    assert!(matches!(policy.lookup(&0x1F), Some(ProcFeaturePolicy::Native(_))));
+    assert!(matches!(policy.lookup(&0x20), Some(ProcFeaturePolicy::Trap(_))));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Invalid range
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn invalid_range_end_less_than_start() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    assert_eq!(
+        policy.insert_range((0x20, 0x10), DefaultAction::Native),
+        Err(InsertError::InvalidRange)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Remove
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn remove_existing_entry() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x10, 0x20), DefaultAction::Native).unwrap();
+    assert!(policy.lookup(&0x15).is_some());
+
+    assert!(policy.remove(&0x15));
+    assert!(policy.lookup(&0x15).is_none());
+}
+
+#[test]
+fn remove_nonexistent_returns_false() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    assert!(!policy.remove(&0x42));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Update emulate value
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn update_emulate_value_success() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    let v1 = CpuidResult { v0: 1, v1: 2, v2: 3, v3: 4 };
+    let v2 = CpuidResult { v0: 10, v1: 20, v2: 30, v3: 40 };
+    policy.insert_emulate((0x100, 0x100), v1).unwrap();
+
+    policy.update_emulate_value(&0x100, v2.clone()).unwrap();
+
+    match policy.lookup(&0x100) {
+        Some(ProcFeaturePolicy::Emulate(_, v)) => assert_eq!(*v, v2),
+        other => panic!("expected Emulate, got {:?}", other),
+    }
+}
+
+#[test]
+fn update_emulate_value_not_found() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    let v = CpuidResult { v0: 1, v1: 2, v2: 3, v3: 4 };
+    assert_eq!(
+        policy.update_emulate_value(&0x100, v),
+        Err(InsertError::NotFound)
+    );
+}
+
+#[test]
+fn update_emulate_on_native_range_fails() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x100, 0x200), DefaultAction::Native).unwrap();
+    let v = CpuidResult { v0: 1, v1: 2, v2: 3, v3: 4 };
+    assert_eq!(
+        policy.update_emulate_value(&0x150, v),
+        Err(InsertError::NotFound)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Capacity limit
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn max_overrides_limit() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    for i in 0..MAX_OVERRIDES {
+        let msr = (i * 0x100) as u32;
+        policy.insert_range((msr, msr), DefaultAction::Native).unwrap();
+    }
+    assert_eq!(
+        policy.insert_range((0xFFFF_0000, 0xFFFF_0000), DefaultAction::Native),
+        Err(InsertError::TooManyEntries)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  Edge cases
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn single_point_range() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x6E0, 0x6E0), DefaultAction::Native).unwrap();
+
+    assert!(matches!(policy.lookup(&0x6E0), Some(ProcFeaturePolicy::Native(_))));
+    assert!(policy.lookup(&0x6DF).is_none());
+    assert!(policy.lookup(&0x6E1).is_none());
+}
+
+#[test]
+fn boundary_values_u32() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0, 0), DefaultAction::Native).unwrap();
+    policy.insert_range((u32::MAX, u32::MAX), DefaultAction::Native).unwrap();
+
+    assert!(matches!(policy.lookup(&0), Some(ProcFeaturePolicy::Native(_))));
+    assert!(matches!(policy.lookup(&u32::MAX), Some(ProcFeaturePolicy::Native(_))));
+    assert!(policy.lookup(&1).is_none());
+    assert!(policy.lookup(&(u32::MAX - 1)).is_none());
+}
+
+#[test]
+fn range_helper_extracts_correctly() {
+    let policy_entry: ProcFeaturePolicy<Cpuid> = ProcFeaturePolicy::Trap((0x10, 0x20));
+    assert_eq!(*policy_entry.range(), (0x10, 0x20));
+
+    let policy_entry: ProcFeaturePolicy<Cpuid> = ProcFeaturePolicy::Native((0x30, 0x40));
+    assert_eq!(*policy_entry.range(), (0x30, 0x40));
+
+    let v = CpuidResult { v0: 1, v1: 2, v2: 3, v3: 4 };
+    let policy_entry: ProcFeaturePolicy<Cpuid> = ProcFeaturePolicy::Emulate((0x50, 0x50), v);
+    assert_eq!(*policy_entry.range(), (0x50, 0x50));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  MSR-specific tests
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn msr_emulate_u64_value() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    policy.insert_emulate((0xC000_0080, 0xC000_0080), 0xDEAD_BEEF_CAFE_BABE).unwrap();
+
+    match policy.lookup(&0xC000_0080) {
+        Some(ProcFeaturePolicy::Emulate(_, v)) => {
+            assert_eq!(*v, 0xDEAD_BEEF_CAFE_BABE);
+        }
+        other => panic!("expected Emulate, got {:?}", other),
+    }
+}
+
+#[test]
+fn msr_x2apic_range_native() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+    policy.insert_range((0x800, 0x83F), DefaultAction::Native).unwrap();
+
+    for msr in 0x800..=0x83F {
+        assert!(matches!(
+            policy.lookup(&msr),
+            Some(ProcFeaturePolicy::Native(_))
+        ));
+    }
+    assert!(policy.lookup(&0x7FF).is_none());
+    assert!(policy.lookup(&0x840).is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
+//  CoCo scenario: CPUID 0x4000_0100 emulate
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn coco_cpuid_scenario() {
+    let mut policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Trap);
+
+    // Themis hypervisor leaves: native
+    policy.insert_range((0x4000_0000, 0x4000_00FF), DefaultAction::Native).unwrap();
+
+    // CoCo detection leaf: emulate with VTOM=39 + signature
+    let coco = CpuidResult {
+        v0: 39,
+        v1: u32::from_le_bytes(*b"Them"),
+        v2: u32::from_le_bytes(*b"isCo"),
+        v3: u32::from_le_bytes(*b"Co\0\0"),
+    };
+    policy.insert_emulate((0x4000_0100, 0x4000_0100), coco.clone()).unwrap();
+
+    // TSC leaf: native
+    policy.insert_range((0x15, 0x15), DefaultAction::Native).unwrap();
+
+    // CoCo leaf returns emulated values
+    match policy.lookup(&0x4000_0100) {
+        Some(ProcFeaturePolicy::Emulate(_, v)) => {
+            assert_eq!(v.v0, 39);
+            assert_eq!(v.v1, u32::from_le_bytes(*b"Them"));
+            assert_eq!(v.v2, u32::from_le_bytes(*b"isCo"));
+            assert_eq!(v.v3, u32::from_le_bytes(*b"Co\0\0"));
+        }
+        other => panic!("expected Emulate for CoCo leaf, got {:?}", other),
+    }
+
+    // Themis base leaf: native
+    assert!(matches!(
+        policy.lookup(&0x4000_0000),
+        Some(ProcFeaturePolicy::Native(_))
+    ));
+
+    // TSC leaf: native
+    assert!(matches!(
+        policy.lookup(&0x15),
+        Some(ProcFeaturePolicy::Native(_))
+    ));
+
+    // Random leaf: default (Trap)
+    assert!(policy.lookup(&0x0B).is_none());
+}
+
+#[test]
+fn dom0_no_coco_leaf() {
+    // Dom0 policy: native by default, no CoCo emulate entry
+    let policy: CpuidPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+
+    // CoCo leaf → default (Native, returns native CPUID which won't have Themis signature)
+    assert!(policy.lookup(&0x4000_0100).is_none());
+}

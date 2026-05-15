@@ -15,6 +15,7 @@
 
 use crate::capability::{CapabilityRef, CapabilityWeak, LocalHandle};
 use crate::domain::{Domain, DomainPolicy, DomainStatus, InterruptVisibility};
+use crate::interposition::{CpuidResult, DefaultAction, ProcFeature, ProcFeaturePolicy};
 use crate::memory::MemoryRegion;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -339,6 +340,16 @@ fn attest_with_context(
         }
     }
 
+    // CPUID interposition policy.
+    attest_proc_feature_policy(&mut out, "CPUID", &snap.policy.cpuid, |v| {
+        format!("v0={:#x}, v1={:#x}, v2={:#x}, v3={:#x}", v.v0, v.v1, v.v2, v.v3)
+    });
+
+    // MSR interposition policy.
+    attest_proc_feature_policy(&mut out, "MSR", &snap.policy.msrs, |v| {
+        format!("{:#x}", v)
+    });
+
     // Children / parent.
     out.push_str(&format!("Children: {}\n", snap.children_len));
     if let Some(parent_ref) = snap.parent_weak.upgrade() {
@@ -575,5 +586,45 @@ fn enumerate_domain_recursive(domain_ref: &CapabilityRef<Domain>, ids: &mut Vec<
     ids.push(domain.data.id);
     for child_ref in &domain.children {
         enumerate_domain_recursive(child_ref, ids);
+    }
+}
+
+/// Format a `ProcFeatureConfig<T>` for attestation.
+fn attest_proc_feature_policy<T, F>(
+    out: &mut String,
+    label: &str,
+    config: &crate::interposition::ProcFeatureConfig<T>,
+    fmt_value: F,
+) where
+    T: ProcFeature<Range = (u32, u32)>,
+    F: Fn(&T::Value) -> String,
+{
+    let default_str = match config.default {
+        DefaultAction::Trap => "Trap",
+        DefaultAction::Native => "Native",
+    };
+    out.push_str(&format!("{label} Policy:\n"));
+    out.push_str(&format!("  Default: {default_str}\n"));
+    if config.overrides.is_empty() {
+        out.push_str("  Overrides: (none)\n");
+    } else {
+        out.push_str("  Overrides:\n");
+        for entry in &config.overrides {
+            let (start, end) = *entry.range();
+            match entry {
+                ProcFeaturePolicy::Trap(_) => {
+                    out.push_str(&format!("    {:#x}..={:#x}: Trap\n", start, end));
+                }
+                ProcFeaturePolicy::Native(_) => {
+                    out.push_str(&format!("    {:#x}..={:#x}: Native\n", start, end));
+                }
+                ProcFeaturePolicy::Emulate(_, val) => {
+                    out.push_str(&format!(
+                        "    {:#x}..={:#x}: Emulate({})\n",
+                        start, end, fmt_value(val)
+                    ));
+                }
+            }
+        }
     }
 }

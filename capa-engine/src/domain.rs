@@ -5,6 +5,7 @@ use crate::error::{CapaError, Result};
 use crate::memory::MemoryRegion;
 use crate::sync::RwLock;
 use crate::update::CoreId;
+use crate::interposition::{CpuidPolicy, DefaultAction, MsrPolicy};
 use crate::view::AddressSpaceView;
 // CapabilityRef and compute_view_from_cap_arcs are only used in refresh_view,
 // which is compiled out under loom to avoid O(N) lock acquisitions.
@@ -392,6 +393,13 @@ pub enum VpRunState {
 /// register visibility for the normal state the same way it does for a real vector.
 pub const VECTOR_AVAILABLE: u8 = 0xFF;
 
+/// Which interposition policy to operate on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Cpuid = 0,
+    Msr = 1,
+}
+
 /// Identifier for a domain-wide policy field, used by `set_policy` / `get_policy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyIdentifier {
@@ -426,6 +434,21 @@ pub enum PolicyIdentifier {
     /// Per-exit-reason register write bitmap (one word at a time).
     /// `u32` is the exit reason, `u8` is the word index (0..2).
     ExitReasonRegWriteSet(u32, u8),
+
+    // ── Processor feature interposition policy identifiers ──
+
+    /// Set the default action for a resource class.
+    /// Value: 0 = Trap, 1 = Native.
+    ProcFeatureDefault(ResourceKind),
+    /// Insert a Trap or Native range override.
+    /// Inner u32s = range start and end (inclusive).
+    /// Value: 0 = Trap, 1 = Native.
+    ProcFeatureRange(ResourceKind, u32, u32),
+    /// Insert/update an Emulate point entry.
+    /// Inner u32 = resource id (CPUID leaf or MSR number).
+    /// Inner u8 = word_index.
+    /// Value: packed emulated value (resource-specific encoding).
+    ProcFeatureEmulate(ResourceKind, u32, u8),
 }
 pub struct VProcessorState {
     pub id: u64,
@@ -472,6 +495,12 @@ pub struct DomainPolicy {
     /// VMEXIT exit routing policy
     pub exits: ExitPolicy,
 
+    /// CPUID interposition policy
+    pub cpuid: CpuidPolicy,
+
+    /// MSR interposition policy
+    pub msrs: MsrPolicy,
+
     /// List of valid virtual processor states
     pub vprocessor_states: Vec<VProcessorRef>,
 
@@ -496,6 +525,8 @@ impl DomainPolicy {
             api: MonitorAPI::ALL,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_deliver()),
             exits: ExitPolicy::new_default(ExitAction::default_local()),
+            cpuid: CpuidPolicy::new(DefaultAction::Native),
+            msrs: MsrPolicy::new(DefaultAction::Native),
             vprocessor_states: Vec::new(),
             num_vprocessors: num_cores,
         }
@@ -510,6 +541,8 @@ impl DomainPolicy {
             api,
             interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
             exits: ExitPolicy::new_default(ExitAction::default_trap()),
+            cpuid: CpuidPolicy::new(DefaultAction::Trap),
+            msrs: MsrPolicy::new(DefaultAction::Trap),
             vprocessor_states: Vec::new(),
             num_vprocessors: cores.count_ones() as usize,
         }

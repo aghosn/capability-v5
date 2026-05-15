@@ -45,6 +45,10 @@ name = "unit_domain"
 path = "tests/unit/domain.rs"
 
 [[test]]
+name = "unit_interposition"
+path = "tests/unit/interposition.rs"
+
+[[test]]
 name = "unit_update"
 path = "tests/unit/update.rs"
 

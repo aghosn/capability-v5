@@ -61,6 +61,12 @@ pub enum CapaError {
 
     /// Register access denied by the effective-vector policy bitmap
     RegisterAccessDenied,
+
+    /// Invalid value for a policy field
+    InvalidValue,
+
+    /// Out of memory or resource limit reached
+    NoMemory,
 }
 
 impl fmt::Display for CapaError {
@@ -93,6 +99,8 @@ impl fmt::Display for CapaError {
             CapaError::RegisterAccessDenied => {
                 write!(f, "Register access denied by effective-vector policy bitmap")
             }
+            CapaError::InvalidValue => write!(f, "Invalid value for a policy field"),
+            CapaError::NoMemory => write!(f, "Out of memory or resource limit reached"),
         }
     }
 }

@@ -132,6 +132,8 @@ fn convert_error(e: CapaError) -> BackendError {
         CapaError::NotSupported => BackendError::NotSupported,
         CapaError::RegisterOutOfRange => BackendError::RegisterOutOfRange,
         CapaError::RegisterAccessDenied => BackendError::RegisterAccessDenied,
+        CapaError::InvalidValue => BackendError::InvalidOperation("invalid value".into()),
+        CapaError::NoMemory => BackendError::InvalidOperation("no memory".into()),
     }
 }
 
