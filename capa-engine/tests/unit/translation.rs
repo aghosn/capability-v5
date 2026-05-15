@@ -215,6 +215,130 @@ fn unblock_not_blocked_err() {
     assert!(map.unblock(0x1000, Rights::RWX).is_err());
 }
 
+// ── unblock_subrange ────────────────────────────────────────────
+
+#[test]
+fn unblock_subrange_middle() {
+    let mut map = AddressMap::new();
+    // [0x0 .. 0x9000) Mapped, then block it.
+    ins(&mut map, 0x0, 0x9000, Rights::RWX, None).unwrap();
+    map.block(0x0).unwrap();
+
+    // Unblock the middle [0x3000 .. 0x6000).
+    map.unblock_subrange(0x3000, 0x3000, 0x3000, Rights::RW).unwrap();
+
+    assert_eq!(map.entries().len(), 3);
+    // Before: Blocked [0x0 .. 0x3000)
+    match map.entries().get(&0x0).unwrap() {
+        MapEntry::Blocked { size, .. } => assert_eq!(*size, 0x3000),
+        _ => panic!("expected Blocked"),
+    }
+    // Middle: Mapped [0x3000 .. 0x6000)
+    match map.entries().get(&0x3000).unwrap() {
+        MapEntry::Mapped(m) => {
+            assert_eq!(m.hpa_start, 0x3000);
+            assert_eq!(m.size, 0x3000);
+            assert_eq!(m.rights, Rights::RW);
+        }
+        _ => panic!("expected Mapped"),
+    }
+    // After: Blocked [0x6000 .. 0x9000)
+    match map.entries().get(&0x6000).unwrap() {
+        MapEntry::Blocked { hpa_start, size } => {
+            assert_eq!(*hpa_start, 0x6000);
+            assert_eq!(*size, 0x3000);
+        }
+        _ => panic!("expected Blocked"),
+    }
+}
+
+#[test]
+fn unblock_subrange_prefix() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x0, 0x6000, Rights::RWX, None).unwrap();
+    map.block(0x0).unwrap();
+
+    // Unblock the prefix [0x0 .. 0x2000).
+    map.unblock_subrange(0x0, 0x2000, 0x0, Rights::R).unwrap();
+
+    assert_eq!(map.entries().len(), 2);
+    match map.entries().get(&0x0).unwrap() {
+        MapEntry::Mapped(m) => assert_eq!(m.size, 0x2000),
+        _ => panic!("expected Mapped"),
+    }
+    match map.entries().get(&0x2000).unwrap() {
+        MapEntry::Blocked { size, .. } => assert_eq!(*size, 0x4000),
+        _ => panic!("expected Blocked"),
+    }
+}
+
+#[test]
+fn unblock_subrange_suffix() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x0, 0x6000, Rights::RWX, None).unwrap();
+    map.block(0x0).unwrap();
+
+    // Unblock the suffix [0x4000 .. 0x6000).
+    map.unblock_subrange(0x4000, 0x2000, 0x4000, Rights::RW).unwrap();
+
+    assert_eq!(map.entries().len(), 2);
+    match map.entries().get(&0x0).unwrap() {
+        MapEntry::Blocked { size, .. } => assert_eq!(*size, 0x4000),
+        _ => panic!("expected Blocked"),
+    }
+    match map.entries().get(&0x4000).unwrap() {
+        MapEntry::Mapped(m) => assert_eq!(m.size, 0x2000),
+        _ => panic!("expected Mapped"),
+    }
+}
+
+#[test]
+fn unblock_subrange_full() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x1000, 0x3000, Rights::RWX, None).unwrap();
+    map.block(0x1000).unwrap();
+
+    // Unblock the entire range.
+    map.unblock_subrange(0x1000, 0x3000, 0x1000, Rights::RWX).unwrap();
+
+    assert_eq!(map.entries().len(), 1);
+    match map.entries().get(&0x1000).unwrap() {
+        MapEntry::Mapped(m) => assert_eq!(m.size, 0x3000),
+        _ => panic!("expected Mapped"),
+    }
+}
+
+#[test]
+fn unblock_subrange_hpa_mismatch() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x0, 0x6000, Rights::RWX, None).unwrap();
+    map.block(0x0).unwrap();
+
+    // Wrong HPA: 0xDEAD instead of 0x2000.
+    let err = map.unblock_subrange(0x2000, 0x1000, 0xDEAD, Rights::RW);
+    assert!(err.is_err());
+    assert!(err.unwrap_err().contains("HPA mismatch"));
+}
+
+#[test]
+fn unblock_subrange_exceeds_blocked() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x0, 0x4000, Rights::RWX, None).unwrap();
+    map.block(0x0).unwrap();
+
+    // Sub-range exceeds the Blocked entry.
+    assert!(map.unblock_subrange(0x2000, 0x4000, 0x2000, Rights::RW).is_err());
+}
+
+#[test]
+fn unblock_subrange_not_blocked() {
+    let mut map = AddressMap::new();
+    ins(&mut map, 0x0, 0x4000, Rights::RWX, None).unwrap();
+
+    // Entry is Mapped, not Blocked.
+    assert!(map.unblock_subrange(0x1000, 0x1000, 0x1000, Rights::RW).is_err());
+}
+
 // ── remove ──────────────────────────────────────────────────────
 
 #[test]

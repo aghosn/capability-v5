@@ -357,6 +357,90 @@ impl AddressMap {
         Ok(())
     }
 
+    /// Unblock a sub-range within a Blocked entry, converting it to Mapped.
+    ///
+    /// Used when a domain receives a capability (alias or carve) back for a
+    /// sub-region of a previously carved-away range.  The capability's HPA
+    /// must match the corresponding HPA within the Blocked range (same
+    /// physical memory that was originally carved out).
+    ///
+    /// Splits the Blocked entry into up to 3 parts:
+    ///   `Blocked(before) | Mapped(sub-range) | Blocked(after)`
+    pub fn unblock_subrange(
+        &mut self,
+        gpa: u64,
+        size: u64,
+        hpa: u64,
+        rights: Rights,
+    ) -> core::result::Result<(), &'static str> {
+        // Find the Blocked entry containing [gpa, gpa+size).
+        let (&b_gpa, entry) = self
+            .entries
+            .range(..=gpa)
+            .next_back()
+            .ok_or("no entry contains GPA")?;
+        let (b_hpa, b_size) = match entry {
+            MapEntry::Blocked { hpa_start, size } => (*hpa_start, *size),
+            _ => return Err("entry is not Blocked"),
+        };
+        if gpa + size > b_gpa + b_size {
+            return Err("sub-range exceeds Blocked entry");
+        }
+
+        // Validate HPA: must map to the same physical memory.
+        let expected_hpa = b_hpa + (gpa - b_gpa);
+        if hpa != expected_hpa {
+            return Err("HPA mismatch: capability does not match blocked physical memory");
+        }
+
+        // Remove the original Blocked entry.
+        self.entries.remove(&b_gpa);
+        self.segment_meta.remove(&b_gpa);
+
+        // Insert Blocked(before) if non-empty.
+        let before_size = gpa - b_gpa;
+        if before_size > 0 {
+            self.entries.insert(b_gpa, MapEntry::Blocked {
+                hpa_start: b_hpa,
+                size: before_size,
+            });
+            self.segment_meta.insert(b_gpa, SegmentMeta {
+                refcounts: RightsRefCount::ZERO,
+                blocked: true,
+            });
+        }
+
+        // Insert Mapped(sub-range).
+        self.entries.insert(gpa, MapEntry::Mapped(MappingEntry {
+            hpa_start: hpa,
+            gpa_start: gpa,
+            size,
+            rights,
+            #[cfg(feature = "cache_coloring")]
+            color_bitmap: None,
+        }));
+        self.segment_meta.insert(gpa, SegmentMeta {
+            refcounts: RightsRefCount::from_rights(rights),
+            blocked: false,
+        });
+
+        // Insert Blocked(after) if non-empty.
+        let after_gpa = gpa + size;
+        let after_size = (b_gpa + b_size) - after_gpa;
+        if after_size > 0 {
+            self.entries.insert(after_gpa, MapEntry::Blocked {
+                hpa_start: b_hpa + (after_gpa - b_gpa),
+                size: after_size,
+            });
+            self.segment_meta.insert(after_gpa, SegmentMeta {
+                refcounts: RightsRefCount::ZERO,
+                blocked: true,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Remove a mapping entirely.
     ///
     /// Used when a domain is revoked — its entries are dropped.
