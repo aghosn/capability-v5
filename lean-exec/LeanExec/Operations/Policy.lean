@@ -108,6 +108,12 @@ def setPolicy (callerId : DomainId) (childHandle : LocalHandle)
       pure { policy with interrupts := { policy.interrupts with defaultPolicy := vis } }
     | "num-vps" =>
       pure { policy with numVps := value }
+    | "cpuid-default" =>
+      let action := if value == 0 then DefaultAction.trap else DefaultAction.native
+      pure { policy with cpuid := { policy.cpuid with default := action } }
+    | "msr-default" =>
+      let action := if value == 0 then DefaultAction.trap else DefaultAction.native
+      pure { policy with msrs := { policy.msrs with default := action } }
     | _ => CapaM.throw (.invalidOperation s!"unknown policy field: {field}")
   CapaM.setDomain childId { child with policy := newPolicy }
 
@@ -132,6 +138,10 @@ def getPolicy (callerId : DomainId) (childHandle : LocalHandle)
     | "api-monitor"        => pure (apiToNat child.policy.api)
     | "default-visibility" => pure (visibilityToNat child.policy.interrupts.defaultPolicy)
     | "num-vps"            => pure child.policy.numVps
+    | "cpuid-default"      =>
+      pure (match child.policy.cpuid.default with | .trap => 0 | .native => 1)
+    | "msr-default"        =>
+      pure (match child.policy.msrs.default with | .trap => 0 | .native => 1)
     | _ => CapaM.throw (.invalidOperation s!"unknown policy field: {field}")
 
 -- ════════════════════════════════════════════════════════════════════

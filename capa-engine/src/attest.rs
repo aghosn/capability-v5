@@ -15,7 +15,7 @@
 
 use crate::capability::{CapabilityRef, CapabilityWeak, LocalHandle};
 use crate::domain::{Domain, DomainPolicy, DomainStatus, InterruptVisibility};
-use crate::interposition::{CpuidResult, DefaultAction, ProcFeature, ProcFeaturePolicy};
+use crate::interposition::{DefaultAction, ProcFeature, ProcFeaturePolicy};
 use crate::memory::MemoryRegion;
 use alloc::collections::BTreeMap;
 use alloc::format;

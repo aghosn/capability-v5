@@ -1,3 +1,4 @@
 [alias]
 cli-rust = "run --release -- --backend rust"
 cli-lean = "run --release --features lean-backend -- --backend lean"
+diff-test = ["run", "--manifest-path", "xtask/Cargo.toml"]

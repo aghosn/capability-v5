@@ -323,7 +323,9 @@ def ffiCreateDomain (parentId cores api : UInt64) : IO UInt32 := do
     cores := coreList
     api := apiFromBits api.toNat
     interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
-    numVps := coreList.length }
+    numVps := coreList.length
+    cpuid := { default := .trap, overrides := [] }
+    msrs := { default := .trap, overrides := [] } }
   let result ← runOp (LeanExec.create parentId.toNat policy)
   match result with
   | .ok (_, newId, updates) =>

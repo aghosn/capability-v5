@@ -59,6 +59,29 @@ structure InterruptPolicy where
 deriving Repr
 
 -- ════════════════════════════════════════════════════════════════════
+-- § Interposition policy (CPUID, MSR)
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Default action for processor feature queries not matched by overrides. -/
+inductive DefaultAction where
+  | trap    -- forward exit to parent domain
+  | native  -- execute natively on physical CPU
+deriving DecidableEq, Repr
+
+/-- A policy entry for a range of processor feature identifiers. -/
+inductive ProcFeatureEntry where
+  | trap    (start finish : Nat)
+  | native  (start finish : Nat)
+  | emulate (start finish : Nat) (value : List Nat)
+deriving Repr
+
+/-- Per-domain interposition configuration for a resource class. -/
+structure ProcFeatureConfig where
+  default   : DefaultAction
+  overrides : List ProcFeatureEntry
+deriving Repr
+
+-- ════════════════════════════════════════════════════════════════════
 -- § Domain policy — frozen at seal time
 -- ════════════════════════════════════════════════════════════════════
 
@@ -75,6 +98,8 @@ structure DomainPolicy where
   api        : MonitorAPI        -- which hypercall operations are permitted
   interrupts : InterruptPolicy
   numVps     : Nat               -- number of virtual processors
+  cpuid      : ProcFeatureConfig -- CPUID interposition policy
+  msrs       : ProcFeatureConfig -- MSR interposition policy
 deriving Repr
 
 -- ════════════════════════════════════════════════════════════════════

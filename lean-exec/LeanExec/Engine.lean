@@ -271,7 +271,9 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
     let childPolicy : DomainPolicy :=
       { cores := coreList, api := api
         interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
-        numVps := coreList.length }
+        numVps := coreList.length
+        cpuid := { default := .trap, overrides := [] }
+        msrs := { default := .trap, overrides := [] } }
     let result ← runCapaM stRef (LeanExec.create parentId childPolicy)
     match result with
     | .ok (handle, newId, updates) =>

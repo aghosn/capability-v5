@@ -38,7 +38,22 @@ The `--backend` flag selects which engine computes state transitions. The CLI
 handles all parsing and display identically for both backends. The prompt shows
 which backend is active: `cap[rust]>` or `cap[lean]>`.
 
-**Differential testing:** run the same session through both backends and diff:
+**Differential testing:** run every tutorial through both backends and diff the
+output automatically:
+
+```bash
+# From the capa-cli directory:
+cargo diff-test
+
+# Or directly (works from any directory):
+./scripts/diff-test.sh
+```
+
+This builds both backends, runs each tutorial in `tutos/` through both, and
+reports any differences.  Any divergence (other than the `Backend:` header line)
+is treated as a failure.
+
+For manual one-off comparison of a single session:
 
 ```bash
 ./target/release/capability-cli < session.txt > rust_out.txt 2>&1

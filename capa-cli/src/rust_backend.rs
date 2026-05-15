@@ -7,8 +7,8 @@ use parking_lot::RwLock;
 
 use capability_engine::{
     Access, Attributes, Capability, CapaError, CoreState, Domain, DomainPolicy, LocalHandle,
-    MemoryRegion, MonitorAPI, Platform, PolicyIdentifier, Rights, Update, UpdateBatch, VpRunState,
-    attest_domain, compute_address_space, execute,
+    MemoryRegion, MonitorAPI, Platform, PolicyIdentifier, ResourceKind, Rights, Update,
+    UpdateBatch, VpRunState, attest_domain, compute_address_space, execute,
 };
 
 use crate::backend::{
@@ -1101,6 +1101,31 @@ fn parse_policy_id(s: &str) -> Result<PolicyIdentifier> {
             BackendError::InvalidOperation(format!("Invalid vector: {}", vec_str)))?;
         return Ok(PolicyIdentifier::VectorRegWriteSet(v, word));
     }
+    // Interposition: cpuid-default, msr-default
+    if s.eq_ignore_ascii_case("cpuid-default") {
+        return Ok(PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid));
+    }
+    if s.eq_ignore_ascii_case("msr-default") {
+        return Ok(PolicyIdentifier::ProcFeatureDefault(ResourceKind::Msr));
+    }
+    // Interposition: cpuid-range:<start>-<end>, msr-range:<start>-<end>
+    if let Some(rest) = s.strip_prefix("cpuid-range:") {
+        let (start, end) = parse_range_pair(rest)?;
+        return Ok(PolicyIdentifier::ProcFeatureRange(ResourceKind::Cpuid, start, end));
+    }
+    if let Some(rest) = s.strip_prefix("msr-range:") {
+        let (start, end) = parse_range_pair(rest)?;
+        return Ok(PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, start, end));
+    }
+    // Interposition: cpuid-emulate:<leaf>:<word>, msr-emulate:<addr>:<word>
+    if let Some(rest) = s.strip_prefix("cpuid-emulate:") {
+        let (key, word) = parse_emulate_pair(rest)?;
+        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, key, word));
+    }
+    if let Some(rest) = s.strip_prefix("msr-emulate:") {
+        let (key, word) = parse_emulate_pair(rest)?;
+        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key, word));
+    }
     Err(BackendError::InvalidOperation(format!("Unknown policy: '{}'", s)))
 }
 
@@ -1117,4 +1142,36 @@ fn parse_vector_word(s: &str) -> Result<(&str, u8)> {
     } else {
         Ok((s, 0))
     }
+}
+
+/// Parse "start-end" into two u32s (hex with 0x prefix or decimal).
+fn parse_range_pair(s: &str) -> Result<(u32, u32)> {
+    let (a, b) = s.split_once('-').ok_or_else(|| {
+        BackendError::InvalidOperation(format!("Expected start-end, got '{}'", s))
+    })?;
+    let start = parse_u32_flex(a)?;
+    let end = parse_u32_flex(b)?;
+    Ok((start, end))
+}
+
+/// Parse "key:word" into (u32, u8).
+fn parse_emulate_pair(s: &str) -> Result<(u32, u8)> {
+    let (key_str, word_str) = s.split_once(':').ok_or_else(|| {
+        BackendError::InvalidOperation(format!("Expected key:word, got '{}'", s))
+    })?;
+    let key = parse_u32_flex(key_str)?;
+    let word = word_str.parse::<u8>().map_err(|_| {
+        BackendError::InvalidOperation(format!("Invalid word index: {}", word_str))
+    })?;
+    Ok((key, word))
+}
+
+/// Parse a u32 from hex (0x...) or decimal.
+fn parse_u32_flex(s: &str) -> Result<u32> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u32>()
+    }
+    .map_err(|_| BackendError::InvalidOperation(format!("Invalid u32: '{}'", s)))
 }

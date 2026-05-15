@@ -138,7 +138,9 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × CapNodeId) := do
     { cores := coreList
       api := MonitorAPI.full
       interrupts := { defaultPolicy := .deliver, perVector := [] }
-      numVps := numCores }
+      numVps := numCores
+      cpuid := { default := .native, overrides := [] }
+      msrs := { default := .native, overrides := [] } }
 
   let rootDomain : ExecDomain :=
     { (ExecDomain.empty domId none policy) with
