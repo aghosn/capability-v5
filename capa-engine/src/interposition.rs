@@ -238,19 +238,21 @@ pub struct CpuidResult {
 pub struct Cpuid;
 
 impl ProcFeature for Cpuid {
-    type Input = u32;
-    type Range = (u32, u32); // (start, end) inclusive
+    /// (leaf, subleaf) — uses lexicographic Ord on tuples.
+    type Input = (u32, u32);
+    /// ((start_leaf, start_subleaf), (end_leaf, end_subleaf)) inclusive.
+    type Range = ((u32, u32), (u32, u32));
     type Value = CpuidResult;
 
-    fn in_range(leaf: &u32, range: &(u32, u32)) -> bool {
-        *leaf >= range.0 && *leaf <= range.1
+    fn in_range(input: &(u32, u32), range: &((u32, u32), (u32, u32))) -> bool {
+        *input >= range.0 && *input <= range.1
     }
 
-    fn range_start(range: &(u32, u32)) -> u32 {
+    fn range_start(range: &((u32, u32), (u32, u32))) -> (u32, u32) {
         range.0
     }
 
-    fn range_end(range: &(u32, u32)) -> u32 {
+    fn range_end(range: &((u32, u32), (u32, u32))) -> (u32, u32) {
         range.1
     }
 }

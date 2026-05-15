@@ -3551,12 +3551,14 @@ impl Capability<Domain> {
                     ResourceKind::Msr => child_w.data.policy.msrs.default = default,
                 }
             }
-            PolicyIdentifier::ProcFeatureRange(rk, start, end) => {
+            PolicyIdentifier::ProcFeatureRange(rk, start, start_sub, end, end_sub) => {
                 let action = crate::interposition::DefaultAction::from_u8(value as u8)
                     .ok_or(CapaError::InvalidValue)?;
                 let result = match rk {
                     ResourceKind::Cpuid => {
-                        child_w.data.policy.cpuid.insert_range((start, end), action)
+                        child_w.data.policy.cpuid.insert_range(
+                            ((start, start_sub), (end, end_sub)), action,
+                        )
                     }
                     ResourceKind::Msr => {
                         child_w.data.policy.msrs.insert_range((start, end), action)
@@ -3569,12 +3571,13 @@ impl Capability<Domain> {
                     crate::interposition::InsertError::NotFound => CapaError::NotFound,
                 })?;
             }
-            PolicyIdentifier::ProcFeatureEmulate(rk, key32, word) => {
+            PolicyIdentifier::ProcFeatureEmulate(rk, key32, sub_key32, word) => {
                 match rk {
                     ResourceKind::Cpuid => {
                         cpuid_set_emulate_word(
                             &mut child_w.data.policy.cpuid,
                             key32,
+                            sub_key32,
                             word,
                             value,
                         )?;
@@ -3916,22 +3919,24 @@ use crate::interposition::{CpuidResult, CpuidPolicy, MsrPolicy, ProcFeaturePolic
 /// - word 0: `value = (eax << 32) | ebx`
 /// - word 1: `value = (ecx << 32) | edx`
 ///
-/// If no emulate entry exists for `leaf`, word 0 creates it.
+/// If no emulate entry exists for `(leaf, subleaf)`, word 0 creates it.
 /// Word 1 then updates the existing entry.
 fn cpuid_set_emulate_word(
     policy: &mut CpuidPolicy,
     leaf: u32,
+    subleaf: u32,
     word: u8,
     value: u64,
 ) -> Result<()> {
+    let key = (leaf, subleaf);
     match word {
         0 => {
             let hi = (value >> 32) as u32;
             let lo = value as u32;
             let result = CpuidResult { v0: hi, v1: lo, v2: 0, v3: 0 };
             // Try update first; if not found, insert new.
-            if policy.update_emulate_value(&leaf, result.clone()).is_err() {
-                policy.insert_emulate((leaf, leaf), result)
+            if policy.update_emulate_value(&key, result.clone()).is_err() {
+                policy.insert_emulate((key, key), result)
                     .map_err(|e| match e {
                         crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
                         crate::interposition::InsertError::TooManyEntries => CapaError::NoMemory,
@@ -3947,13 +3952,12 @@ fn cpuid_set_emulate_word(
             // Must find existing entry (word 0 should have been set first).
             let idx = policy.overrides.iter().position(|rule| {
                 if let ProcFeaturePolicy::Emulate(range, _) = rule {
-                    range.0 <= leaf && leaf <= range.1
+                    key >= range.0 && key <= range.1
                 } else {
                     false
                 }
             }).ok_or(CapaError::NotFound)?;
-            if let ProcFeaturePolicy::Emulate(range, ref mut result) = policy.overrides[idx] {
-                let _ = range; // already validated
+            if let ProcFeaturePolicy::Emulate(_range, ref mut result) = policy.overrides[idx] {
                 result.v2 = hi;
                 result.v3 = lo;
             }

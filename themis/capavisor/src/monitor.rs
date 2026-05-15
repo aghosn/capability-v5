@@ -69,9 +69,9 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                     }
                 }
 
-                // CPUID interposition: per-leaf policy overrides ExitPolicy.
-                if let ExitInfo::Cpuid { leaf, .. } = info {
-                    match lookup_cpuid_action(platform, *leaf) {
+                // CPUID interposition: per-(leaf, subleaf) policy overrides ExitPolicy.
+                if let ExitInfo::Cpuid { leaf, subleaf } = info {
+                    match lookup_cpuid_action(platform, *leaf, *subleaf) {
                         InterpositionAction::Trap => {
                             vp.forward_exit(reason);
                             continue;
@@ -160,10 +160,11 @@ enum InterpositionAction<V> {
     Emulate(V),
 }
 
-/// Look up CPUID interposition policy for a specific leaf.
+/// Look up CPUID interposition policy for a specific (leaf, subleaf).
 fn lookup_cpuid_action(
     platform: &ThemisPlatform,
     leaf: u32,
+    subleaf: u32,
 ) -> InterpositionAction<capability_engine::interposition::CpuidResult> {
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
     let Some(cap) = platform.get_core_cap(core_id) else {
@@ -171,7 +172,8 @@ fn lookup_cpuid_action(
     };
     let guard = cap.read();
     let cpuid_cfg = &guard.data.policy.cpuid;
-    match cpuid_cfg.lookup(&leaf) {
+    let key = (leaf, subleaf);
+    match cpuid_cfg.lookup(&key) {
         Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
         Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
         Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,

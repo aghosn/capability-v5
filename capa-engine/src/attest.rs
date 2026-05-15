@@ -343,11 +343,21 @@ fn attest_with_context(
     // CPUID interposition policy.
     attest_proc_feature_policy(&mut out, "CPUID", &snap.policy.cpuid, |v| {
         format!("v0={:#x}, v1={:#x}, v2={:#x}, v3={:#x}", v.v0, v.v1, v.v2, v.v3)
+    }, |r| {
+        let ((sl, ss), (el, es)) = *r;
+        if ss == 0 && es == u32::MAX {
+            format!("{:#x}..={:#x}", sl, el)
+        } else {
+            format!("{:#x}.{:#x}..={:#x}.{:#x}", sl, ss, el, es)
+        }
     });
 
     // MSR interposition policy.
     attest_proc_feature_policy(&mut out, "MSR", &snap.policy.msrs, |v| {
         format!("{:#x}", v)
+    }, |r| {
+        let (start, end) = *r;
+        format!("{:#x}..={:#x}", start, end)
     });
 
     // Children / parent.
@@ -590,14 +600,16 @@ fn enumerate_domain_recursive(domain_ref: &CapabilityRef<Domain>, ids: &mut Vec<
 }
 
 /// Format a `ProcFeatureConfig<T>` for attestation.
-fn attest_proc_feature_policy<T, F>(
+fn attest_proc_feature_policy<T, F, R>(
     out: &mut String,
     label: &str,
     config: &crate::interposition::ProcFeatureConfig<T>,
     fmt_value: F,
+    fmt_range: R,
 ) where
-    T: ProcFeature<Range = (u32, u32)>,
+    T: ProcFeature,
     F: Fn(&T::Value) -> String,
+    R: Fn(&T::Range) -> String,
 {
     let default_str = match config.default {
         DefaultAction::Trap => "Trap",
@@ -610,18 +622,18 @@ fn attest_proc_feature_policy<T, F>(
     } else {
         out.push_str("  Overrides:\n");
         for entry in &config.overrides {
-            let (start, end) = *entry.range();
+            let range_str = fmt_range(entry.range());
             match entry {
                 ProcFeaturePolicy::Trap(_) => {
-                    out.push_str(&format!("    {:#x}..={:#x}: Trap\n", start, end));
+                    out.push_str(&format!("    {}: Trap\n", range_str));
                 }
                 ProcFeaturePolicy::Native(_) => {
-                    out.push_str(&format!("    {:#x}..={:#x}: Native\n", start, end));
+                    out.push_str(&format!("    {}: Native\n", range_str));
                 }
                 ProcFeaturePolicy::Emulate(_, val) => {
                     out.push_str(&format!(
-                        "    {:#x}..={:#x}: Emulate({})\n",
-                        start, end, fmt_value(val)
+                        "    {}: Emulate({})\n",
+                        range_str, fmt_value(val)
                     ));
                 }
             }

@@ -43,6 +43,10 @@
 - **KVM nested dom1**: CHV FailEntry under nested QEMU — only Themis backend works.
 - **CoCo share-back**: MAP_SELF wired but not yet tested end-to-end. Channels
   not wired in capavisor. No dom1-initiated sharing yet.
+- **Dom1 Linux IO-APIC crash (regression)**: kernel boots and detects Themis CoCo
+  but crashes at `native_io_apic_read` (CR2: `0xffffffffff5fc000`). IO-APIC MMIO
+  at phys `0xFEC00000` likely not mapped in child EPT. Was working 2026-04-14.
+  Needs investigation — possibly a platform modularization or monitor loop regression.
 
 ### Recent commits
 

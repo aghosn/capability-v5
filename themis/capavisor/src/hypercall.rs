@@ -1719,19 +1719,33 @@ fn do_set_policy(
             PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid)
         }
         policy_kind::CPUID_RANGE => {
-            PolicyIdentifier::ProcFeatureRange(ResourceKind::Cpuid, key as u32, sub_key as u32)
+            // key = (start_leaf << 32) | start_subleaf
+            // sub_key = (end_leaf << 32) | end_subleaf
+            let start_leaf = (key >> 32) as u32;
+            let start_sub = key as u32;
+            let end_leaf = (sub_key >> 32) as u32;
+            let end_sub = sub_key as u32;
+            PolicyIdentifier::ProcFeatureRange(
+                ResourceKind::Cpuid, start_leaf, start_sub, end_leaf, end_sub,
+            )
         }
         policy_kind::CPUID_EMULATE => {
-            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, key as u32, sub_key as u8)
+            // key = (leaf << 32) | subleaf
+            // sub_key = word_index
+            let leaf = (key >> 32) as u32;
+            let subleaf = key as u32;
+            PolicyIdentifier::ProcFeatureEmulate(
+                ResourceKind::Cpuid, leaf, subleaf, sub_key as u8,
+            )
         }
         policy_kind::MSR_DEFAULT => {
             PolicyIdentifier::ProcFeatureDefault(ResourceKind::Msr)
         }
         policy_kind::MSR_RANGE => {
-            PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, key as u32, sub_key as u32)
+            PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, key as u32, 0, sub_key as u32, 0)
         }
         policy_kind::MSR_EMULATE => {
-            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key as u32, sub_key as u8)
+            PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key as u32, 0, sub_key as u8)
         }
         _ => return HypercallResult::error(errors::ERR_INVALID),
     };

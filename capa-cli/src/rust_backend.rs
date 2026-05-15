@@ -1109,22 +1109,27 @@ fn parse_policy_id(s: &str) -> Result<PolicyIdentifier> {
         return Ok(PolicyIdentifier::ProcFeatureDefault(ResourceKind::Msr));
     }
     // Interposition: cpuid-range:<start>-<end>, msr-range:<start>-<end>
+    // CPUID ranges cover all subleaves (0..0xFFFFFFFF).
     if let Some(rest) = s.strip_prefix("cpuid-range:") {
         let (start, end) = parse_range_pair(rest)?;
-        return Ok(PolicyIdentifier::ProcFeatureRange(ResourceKind::Cpuid, start, end));
+        return Ok(PolicyIdentifier::ProcFeatureRange(
+            ResourceKind::Cpuid, start, 0, end, u32::MAX,
+        ));
     }
     if let Some(rest) = s.strip_prefix("msr-range:") {
         let (start, end) = parse_range_pair(rest)?;
-        return Ok(PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, start, end));
+        return Ok(PolicyIdentifier::ProcFeatureRange(ResourceKind::Msr, start, 0, end, 0));
     }
-    // Interposition: cpuid-emulate:<leaf>:<word>, msr-emulate:<addr>:<word>
+    // Interposition: cpuid-emulate:<leaf>.<subleaf>:<word>, msr-emulate:<addr>:<word>
+    // For CPUID, subleaf defaults to 0 if omitted.
     if let Some(rest) = s.strip_prefix("cpuid-emulate:") {
-        let (key, word) = parse_emulate_pair(rest)?;
-        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, key, word));
+        let (key_str, word) = parse_cpuid_emulate_pair(rest)?;
+        let (leaf, subleaf) = parse_leaf_subleaf(key_str)?;
+        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Cpuid, leaf, subleaf, word));
     }
     if let Some(rest) = s.strip_prefix("msr-emulate:") {
         let (key, word) = parse_emulate_pair(rest)?;
-        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key, word));
+        return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key, 0, word));
     }
     Err(BackendError::InvalidOperation(format!("Unknown policy: '{}'", s)))
 }
@@ -1164,6 +1169,29 @@ fn parse_emulate_pair(s: &str) -> Result<(u32, u8)> {
         BackendError::InvalidOperation(format!("Invalid word index: {}", word_str))
     })?;
     Ok((key, word))
+}
+
+/// Parse "leaf.subleaf" or just "leaf" (subleaf defaults to 0).
+fn parse_leaf_subleaf(s: &str) -> Result<(u32, u32)> {
+    if let Some((leaf_str, sub_str)) = s.split_once('.') {
+        let leaf = parse_u32_flex(leaf_str)?;
+        let sub = parse_u32_flex(sub_str)?;
+        Ok((leaf, sub))
+    } else {
+        let leaf = parse_u32_flex(s)?;
+        Ok((leaf, 0))
+    }
+}
+
+/// Parse "key_with_dots:word" — splits on the LAST ':' so leaf.subleaf works.
+fn parse_cpuid_emulate_pair(s: &str) -> Result<(&str, u8)> {
+    let (key_str, word_str) = s.rsplit_once(':').ok_or_else(|| {
+        BackendError::InvalidOperation(format!("Expected key:word, got '{}'", s))
+    })?;
+    let word = word_str.parse::<u8>().map_err(|_| {
+        BackendError::InvalidOperation(format!("Invalid word index: {}", word_str))
+    })?;
+    Ok((key_str, word))
 }
 
 /// Parse a u32 from hex (0x...) or decimal.

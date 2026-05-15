@@ -441,14 +441,15 @@ pub enum PolicyIdentifier {
     /// Value: 0 = Trap, 1 = Native.
     ProcFeatureDefault(ResourceKind),
     /// Insert a Trap or Native range override.
-    /// Inner u32s = range start and end (inclusive).
+    /// For CPUID: (start_leaf, start_subleaf, end_leaf, end_subleaf).
+    /// For MSR:   (start_msr, 0, end_msr, 0) — subleaf ignored.
     /// Value: 0 = Trap, 1 = Native.
-    ProcFeatureRange(ResourceKind, u32, u32),
+    ProcFeatureRange(ResourceKind, u32, u32, u32, u32),
     /// Insert/update an Emulate point entry.
-    /// Inner u32 = resource id (CPUID leaf or MSR number).
-    /// Inner u8 = word_index.
+    /// For CPUID: (leaf, subleaf, word_index).
+    /// For MSR:   (msr, 0, word_index) — subleaf ignored.
     /// Value: packed emulated value (resource-specific encoding).
-    ProcFeatureEmulate(ResourceKind, u32, u8),
+    ProcFeatureEmulate(ResourceKind, u32, u32, u8),
 }
 pub struct VProcessorState {
     pub id: u64,
