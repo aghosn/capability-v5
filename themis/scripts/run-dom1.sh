@@ -250,7 +250,7 @@ exec "$CHV" \
     --cmdline "$CMDLINE" \
     --disk path="$DOM1_DISK" \
     --net tap=tap-dom1,mac=12:34:56:78:90:ab \
-    --cpus boot="$CHV_CPUS",max_phys_bits=34 \
+    --cpus boot="$CHV_CPUS",max_phys_bits=40 \
     --memory size="$CHV_MEM" \
     --serial tty \
     --console tty \

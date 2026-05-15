@@ -123,7 +123,6 @@ const CPUID_THEMIS_MAX: u32 = 0x40000003;
 const CPUID_THEMIS_FEATURES: u32 = 0x40000001;
 const CPUID_THEMIS_DOMCOMM: u32 = 0x40000002;
 const CPUID_THEMIS_LIMITS: u32 = 0x40000003;
-const CPUID_THEMIS_COCO: u32 = 0x40000100;
 const CPUID_HV_RANGE_END: u32 = 0x4FFFFFFF;
 const CPUID_DEBUG_RANGE_START: u32 = 0xDEAD0000;
 const CPUID_DEBUG_RANGE_END: u32 = 0xDEADFFFF;
@@ -132,9 +131,6 @@ const CPUID_DEBUG_RANGE_END: u32 = 0xDEADFFFF;
 const THEMIS_MAX_VPS: u32 = 256;
 const THEMIS_MAX_PARTITIONS: u32 = 1024;
 const THEMIS_MAX_MEM_REGIONS: u32 = 4096;
-
-/// VTOM bit position for confidential domains (bit 39 = 512 GiB boundary).
-const THEMIS_VTOM_BIT: u32 = 39;
 
 // ── SIPI constants (Intel SDM Vol 3A §8.4.4) ─────────────────────────────── //
 
@@ -269,18 +265,16 @@ pub(crate) fn classify_and_handle_internal(
             }
         }
 
-        // ── CPUID: Themis leaves always local, others → policy ──
+        // ── CPUID: all leaves go through policy-driven path ──
+        // The parent domain controls what the child sees via Native/Emulate/Trap
+        // overrides.  Native falls through to handle_cpuid_local which has the
+        // capavisor's own leaf responses.
         EXIT_REASON_CPUID => {
             let leaf = vcpu.reg(Reg::Rax) as u32;
-            if matches!(leaf, CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END) || leaf == 0x15 {
-                handle_cpuid_local(vcpu);
-                SemanticExit::ArchHandled
-            } else {
-                let subleaf = vcpu.reg(Reg::Rcx) as u32;
-                SemanticExit::PolicyDriven {
-                    reason,
-                    info: ExitInfo::Cpuid { leaf, subleaf },
-                }
+            let subleaf = vcpu.reg(Reg::Rcx) as u32;
+            SemanticExit::PolicyDriven {
+                reason,
+                info: ExitInfo::Cpuid { leaf, subleaf },
             }
         }
 
@@ -870,15 +864,6 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
             ebx = THEMIS_MAX_PARTITIONS;
             ecx = THEMIS_MAX_MEM_REGIONS;
             edx = 0;
-        }
-        // CoCo detection leaf — kernel checks this for CC_VENDOR_THEMIS.
-        // Returns VTOM bit position in EAX and "ThemisCoCo" signature.
-        // TODO: only return this for confidential child domains, not dom0.
-        (CPUID_THEMIS_COCO, _) => {
-            eax = THEMIS_VTOM_BIT;
-            ebx = u32::from_le_bytes(*b"Them");
-            ecx = u32::from_le_bytes(*b"isCo");
-            edx = u32::from_le_bytes(*b"Co\0\0");
         }
         (CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END, _) => {
             eax = 0;

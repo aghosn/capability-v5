@@ -33,10 +33,10 @@ QEMU_MEM="${QEMU_MEM:-4G}"
 # Detect KVM availability
 KVM_ARGS=""
 if [[ "${QEMU_ENABLE_KVM:-1}" == "1" ]] && [[ -e /dev/kvm ]]; then
-    KVM_ARGS="-enable-kvm -cpu host,+vmx"
+    KVM_ARGS="-enable-kvm -cpu host,+vmx,phys-bits=40"
 else
     echo "WARNING: KVM not available — running without hardware acceleration"
-    KVM_ARGS="-cpu qemu64,+vmx"
+    KVM_ARGS="-cpu qemu64,+vmx,phys-bits=40"
 fi
 
 # ── Firmware: UEFI (default) or legacy BIOS ─────────────────────────────────
