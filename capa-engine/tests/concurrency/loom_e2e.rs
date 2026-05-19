@@ -1156,14 +1156,12 @@ fn loom_e2e_send_vs_revoke_same_cap() {
                     "A-first: Unmap and reclaim Map must be consecutive"
                 );
 
-                // revoke_subtree emits hardware updates (Unmap/Map) but does NOT
-                // remove the stale handle entry from the new owner's local table.
-                // recv's table still holds a dead Weak — upgrading it returns None.
-                // This is intentional: the hardware-level Unmap is what matters.
+                // revoke_subtree now eagerly removes the capability from the
+                // receiver's tracking table via remove_memory_capability_by_ref.
                 assert_eq!(
                     recv.read().data.memory_capability_handles().len(),
-                    1,
-                    "A-first: stale dead-Weak entry remains in recv's table after revoke"
+                    0,
+                    "A-first: revoke cleans up recv's table"
                 );
             }
             Err(e) => {

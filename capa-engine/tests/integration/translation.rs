@@ -1794,3 +1794,168 @@ fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
     assert_eq!(sz, 0x1000, "size should match the alias");
     assert_eq!(r, Rights::RWX, "rights should be RWX");
 }
+
+// ── View cache correctness tests ─────────────────────────────────────────────
+//
+// These tests exercise multi-step mutation sequences and verify that the
+// GPA-based view (and emitted ChangeRights) is correct at each step.
+// They are designed to detect stale-cache bugs — if the view isn't
+// properly refreshed after a mutation, the diff will be wrong.
+
+/// Two sequential sends to the same receiver: the second send's before-view
+/// must include the first send's region, so the diff only shows the new region.
+#[test]
+fn test_sequential_sends_cumulative_receiver_view() {
+    // Root with 64K at HPA 0x0, identity GPA.
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (child_h, child_dom) = make_child(&root);
+    let child_id = dom_id(&child_dom);
+
+    // Carve two non-overlapping 4K regions.
+    let (c1_h, _, _) = Capability::carve(&root, r0_h, Access::new(0x0, 0x1000, Rights::RWX)).unwrap();
+    let (c2_h, _, _) = Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RWX)).unwrap();
+
+    // Send first region to child at GPA 0x0.
+    let u1 = Capability::send_at(&root, c1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let maps1: Vec<_> = u1.updates().iter().filter_map(|u| match u {
+        Update::ChangeRights { domain, address, size, rights, shootdown_required, .. }
+            if *domain == child_id && !*shootdown_required && *rights != Rights::NONE
+            => Some((*address, *size)),
+        _ => None,
+    }).collect();
+    assert_eq!(maps1.len(), 1, "first send: one map for child");
+    assert_eq!(maps1[0], (0x0, 0x1000));
+
+    // Send second region to child at GPA 0x1000.
+    let u2 = Capability::send_at(&root, c2_h, child_h, Attributes::NONE, Some(0x1000)).unwrap();
+    let maps2: Vec<_> = u2.updates().iter().filter_map(|u| match u {
+        Update::ChangeRights { domain, address, size, rights, shootdown_required, .. }
+            if *domain == child_id && !*shootdown_required && *rights != Rights::NONE
+            => Some((*address, *size)),
+        _ => None,
+    }).collect();
+    assert_eq!(maps2.len(), 1, "second send: only one NEW map for child (not two)");
+    assert_eq!(maps2[0], (0x1000, 0x1000));
+}
+
+/// Carve then send: the carve changes the parent's view (if rights differ),
+/// and the subsequent send must reflect the post-carve state.
+#[test]
+fn test_carve_then_send_view_consistency() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let root_id = dom_id(&root);
+    let (child_h, child_dom) = make_child(&root);
+    let child_id = dom_id(&child_dom);
+
+    // Carve with reduced rights — parent view changes (4K hole at reduced rights).
+    let (carve_h, _, carve_updates) =
+        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
+
+    // The carve should produce ChangeRights for the parent (rights reduced).
+    let parent_changes: Vec<_> = carve_updates.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, .. } if *domain == root_id)
+    }).collect();
+    assert!(!parent_changes.is_empty(), "carve with reduced rights must emit ChangeRights for parent");
+
+    // Now send the carve to the child at GPA 0x5000.
+    let send_updates =
+        Capability::send_at(&root, carve_h, child_h, Attributes::NONE, Some(0x5000)).unwrap();
+
+    // Child must get a map at GPA 0x5000, size 0x1000, rights R.
+    let child_maps: Vec<_> = send_updates.updates().iter().filter_map(|u| match u {
+        Update::ChangeRights { domain, address, physical, size, rights, shootdown_required, .. }
+            if *domain == child_id && !*shootdown_required && *rights != Rights::NONE
+            => Some((*address, *physical, *size, *rights)),
+        _ => None,
+    }).collect();
+    assert_eq!(child_maps.len(), 1, "send should produce one map for child");
+    let (addr, phys, sz, r) = child_maps[0];
+    assert_eq!(addr, 0x5000, "child GPA");
+    assert_eq!(phys, 0x2000, "child HPA");
+    assert_eq!(sz, 0x1000, "size");
+    assert_eq!(r, Rights::R, "rights should be R (from carve)");
+}
+
+/// Send → revoke → re-send: after revoking, the receiver's view must be
+/// empty again, and a fresh send must produce a new ChangeRights.
+#[test]
+fn test_send_revoke_resend_view_updates() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (child_h, child_dom) = make_child(&root);
+    let child_id = dom_id(&child_dom);
+
+    // Alias and send to child.
+    let access = Access::new(0x0, 0x1000, Rights::RWX);
+    let (a1_h, a1_sub) = Capability::alias(&root, r0_h, access).unwrap();
+    let u1 = Capability::send_at(&root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let child_maps1 = u1.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, shootdown_required, .. }
+            if *domain == child_id && !*shootdown_required && *rights != Rights::NONE)
+    }).count();
+    assert_eq!(child_maps1, 1, "first send: child gets a map");
+
+    // Revoke the alias.
+    let revoke_updates = Capability::revoke(&root, r0_h, a1_sub).unwrap();
+    let child_unmaps = revoke_updates.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, .. }
+            if *domain == child_id && *rights == Rights::NONE)
+    }).count();
+    assert_eq!(child_unmaps, 1, "revoke: child loses the map");
+
+    // Re-send a fresh alias at the same GPA.
+    let (a2_h, _) = Capability::alias(&root, r0_h, access).unwrap();
+    let u2 = Capability::send_at(&root, a2_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let child_maps2 = u2.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, shootdown_required, .. }
+            if *domain == child_id && !*shootdown_required && *rights != Rights::NONE)
+    }).count();
+    assert_eq!(child_maps2, 1, "re-send after revoke: child gets a fresh map");
+}
+
+/// Double-map + revoke first: revoking the first alias at GPA A should NOT
+/// affect the second alias at GPA B.
+#[test]
+fn test_double_map_revoke_one_keeps_other() {
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    let (child_h, child_dom) = make_child(&root);
+    let child_id = dom_id(&child_dom);
+
+    // Two aliases of overlapping HPA range.
+    let access = Access::new(0x0, 0x1000, Rights::RWX);
+    let (a1_h, a1_sub) = Capability::alias(&root, r0_h, access).unwrap();
+    let (a2_h, _a2_sub) = Capability::alias(&root, r0_h, access).unwrap();
+
+    // Send alias1 at GPA 0x0.
+    let _ = Capability::send_at(&root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    // Send alias2 at GPA 0x8000_0000 (double-map).
+    let u2 = Capability::send_at(&root, a2_h, child_h, Attributes::NONE, Some(0x8000_0000)).unwrap();
+    let maps2 = u2.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, address, rights, shootdown_required, .. }
+            if *domain == child_id && *address == 0x8000_0000u64
+            && !*shootdown_required && *rights != Rights::NONE)
+    }).count();
+    assert_eq!(maps2, 1, "second alias at different GPA must emit a map");
+
+    // Revoke alias1 — child should lose GPA 0x0 but keep GPA 0x8000_0000.
+    let revoke_u = Capability::revoke(&root, r0_h, a1_sub).unwrap();
+    let unmap_gpa0 = revoke_u.updates().iter().filter(|u| {
+        matches!(u, Update::ChangeRights { domain, rights, .. }
+            if *domain == child_id && *rights == Rights::NONE)
+    }).count();
+    assert_eq!(unmap_gpa0, 1, "revoke alias1: child loses one mapping");
+
+    // Verify child's address space still has a region (from alias2 at GPA 0x8000_0000).
+    let child_view = compute_address_space(&child_dom);
+    assert!(
+        !child_view.regions.is_empty(),
+        "child should still have alias2's mapping after revoking alias1"
+    );
+}

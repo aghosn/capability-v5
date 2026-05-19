@@ -417,8 +417,12 @@ impl Capability<MemoryRegion> {
             None
         };
 
-        #[cfg(feature = "address_translation")]
         let child_domain_weak = capa.owned.owner_domain.clone();
+
+        // Weak ref to the capability being revoked — used to remove it from the
+        // child domain's memory_capabilities table (the Arc is still live at
+        // this point, so prune_stale won't catch it).
+        let cap_weak_ref = Arc::downgrade(capa_ref);
 
         // Extract cross-domain info while we hold the lock.
         let parent_info = if kind == RegionKind::Carve {
@@ -531,16 +535,22 @@ impl Capability<MemoryRegion> {
             }
         }
 
-        // === Address translation: clean up child domain's AddressMap ===
-        // Skip if child is revoked — address_map was already cleared by revoke().
-        #[cfg(feature = "address_translation")]
+        // === Clean up child domain after cross-domain revoke ===
+        // Remove the revoked capability from the child domain's tracking table
+        // and refresh cached_view.  We use remove_memory_capability_by_ref
+        // because the Arc is still alive (held by revoke_child), so
+        // prune_stale_memory_capabilities would not catch it.
+        // With address_translation, also remove from the child's AddressMap.
+        // Skip if child is revoked — it's already being torn down.
         if parent_info.is_some() && !child_revoked {
             if let Some(ref w) = child_domain_weak {
                 if let Some(dom_ref) = w.upgrade() {
                     if let Some(mut dom) = dom_ref.try_write() {
+                        #[cfg(feature = "address_translation")]
                         dom.data
                             .address_map
                             .remove_by_hpa_range(hpa_start, hpa_size);
+                        dom.data.remove_memory_capability_by_ref(&cap_weak_ref);
                     }
                 }
             }

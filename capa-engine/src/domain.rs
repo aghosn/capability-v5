@@ -14,7 +14,7 @@ use crate::capability::CapabilityRef;
 #[cfg(not(feature = "loom"))]
 use crate::view::compute_view_from_cap_arcs;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -856,6 +856,15 @@ impl Domain {
     /// transiently unreachable.
     pub fn prune_stale_memory_capabilities(&mut self) {
         self.memory_capabilities.retain(|_, weak| weak.upgrade().is_some());
+        self.refresh_view();
+    }
+
+    /// Remove the memory capability whose backing `Arc` is the same allocation
+    /// as `target`.  Used by `revoke_subtree` to eagerly clean up the child
+    /// domain's tracking table while the capability `Arc` is still alive.
+    pub fn remove_memory_capability_by_ref(&mut self, target: &CapabilityWeak<MemoryRegion>) {
+        self.memory_capabilities
+            .retain(|_, weak| !Weak::ptr_eq(weak, target));
         self.refresh_view();
     }
 
