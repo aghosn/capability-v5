@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-18)
+## Current State (2026-05-19)
 
 ### What works
 
@@ -24,6 +24,7 @@
   M6 partial (full Ubuntu boot blocked by QEMU TCG overhead, needs real ARM HW).
 - **Capability engine**: MAP_SELF implemented (refcounted projections, 33 tests).
   83 Lean theorems, 0 sorry. lean-exec 21/21 differential tests passing.
+  GPA-aware view_diff with lazy dirty-flag caching.
 - **TPM attested boot**: Ed25519 + SHA-256 + TPM PCR extend. CRB/TIS auto-select.
 - **CoCo guest kernel**: CC_VENDOR_THEMIS patch in `../linux`.  Minimal config
   (245 modules), virtio/ext4/9p built-in.
@@ -38,12 +39,20 @@
 - **Dom1 CoCo detection**: ✅ kernel detects CC_VENDOR_THEMIS, reads VTOM bit 38.
 - **MMIO VTOM stripping**: ✅ IO-APIC reads correctly (`version 17, GSI 0-23`)
   after stripping VTOM bit in CHV's handle_mmio_exit and emulator translate_gva.
+- **VTOM EBDA double-map**: ✅ CHV double-maps ACPI/EBDA region at VTOM-offset GPA
+  so CoCo kernel can access firmware tables with VTOM bit set.
+- **GPA-aware view_diff**: ✅ `translate_view_to_gpa()` + `snapshot_view()` produce
+  GPA-keyed views so same-HPA-at-two-GPAs emits distinct ChangeRights. Tutorial 17
+  validates.  Removed ad-hoc fixup patch.
+- **Lazy view caching**: ✅ `Domain.view_dirty` flag — mutations mark dirty,
+  `ensure_view_fresh()` recomputes only when read. Eliminates redundant
+  double-recomputation. No loom gate — full correctness under loom.
+- **Cross-domain revoke cleanup**: ✅ `remove_memory_capability_by_ref()` eagerly
+  removes capability from child domain's table using `Weak::ptr_eq` (can't use
+  prune since Arc is still alive on revoke_child's stack).
 
 ### What doesn't work / known issues
 
-- **Dom1 CoCo: ACPI table access crash**: CoCo kernel reads ACPI tables with VTOM
-  bit set → GPA `0x40_000A12B3` not in EPT → emulation failure on unsupported
-  instruction. Fix: double-map ACPI/firmware region at VTOM-offset GPA.
 - **Dom1 emergency mode on QEMU**: fstab references missing partitions.
 - **Unguarded interrupt injection**: 2 fallback paths without RFLAGS.IF check.
 - **Posted interrupts**: hardware PI disabled (software PIR drain instead).
@@ -54,21 +63,24 @@
 
 ### Recent commits
 
+- `84bfaed` — **capa-engine: fix stale cached_view after cross-domain revoke**
+  (remove_memory_capability_by_ref, 4 cache-staleness tests, loom fix)
+- `2b34aad` — **capa-engine: GPA-aware view_diff for VTOM double-map**
+  (translate_view_to_gpa, snapshot_view, tutorial 17, removed ad-hoc fixup)
+- CHV `bc2ccfe` — **VTOM-aware MMIO emulation and EBDA double-map**
 - `e642a14` — **policy-driven CPUID for all leaves (capavisor, eunomia, QEMU config)**
 - CHV `1fa1e19` — **Native/Emulate CPUID policy for hypervisor leaves + CoCo VTOM bit**
-- `ce15689` — **capa-cli, lean-exec: interposition policy support and differential testing**
-- `836359b` — **capa-engine: generic CPUID/MSR interposition policy framework**
-- `c15e246` — **fix(eunomia): emit CR+LF on serial output**
-- `04edb1b` — **feat: build-bins rebuilds eunomia workloads before packaging**
 
 ### Uncommitted changes
 
-- **CHV** (`cloud-hypervisor/hypervisor/src/themis/mod.rs`):
-  - `vm_state.vtom_bit` field + VTOM mask stripping in `handle_mmio_exit`
-  - `vtom_mask` passed to emulator context
-- **CHV** (`cloud-hypervisor/hypervisor/src/themis/emulator.rs`):
-  - `vtom_mask` field in `ThemisEmulatorContext`
-  - Strip VTOM from GPAs in `translate_gva` (all 3 page-size return paths)
+- **capa-engine** (`domain.rs`, `capability.rs`):
+  - Lazy view caching: `view_dirty` flag, `ensure_view_fresh()`, removed
+    `refresh_domain_view()` and 7 redundant refresh calls
+  - `snapshot_view` takes `&mut Domain`, `compute_address_space` uses write lock
+  - Removed loom gate on view recomputation (was masking real bugs)
+- **docs** (`docs/capability-engine/implementation.md`):
+  - Documented view caching, dirty tracking, GPA-aware view_diff
+- **todo.md**: updated to reflect current state
 
 ---
 

@@ -1035,25 +1035,16 @@ fn remove_footprint(
     Ok(())
 }
 
-fn refresh_domain_view(cap: &mut Capability<Domain>) {
-    let domain_id = cap.data.id;
-    let cap_arcs: alloc::vec::Vec<Arc<RwLock<Capability<MemoryRegion>>>> = cap
-        .data
-        .memory_capabilities
-        .values()
-        .filter_map(|w| w.upgrade())
-        .collect();
-    cap.data.cached_view = compute_view_from_cap_arcs(domain_id, &cap_arcs);
-}
-
 /// Snapshot the domain's current view for diff purposes.
 ///
+/// Lazily recomputes the HPA-based `cached_view` if `view_dirty` is set.
 /// When `address_translation` is enabled and the domain has AddressMap
 /// entries, translates the HPA-based `cached_view` through the domain's
 /// [`AddressMap`] to produce a GPA-based view.  When the map is empty
 /// (bootstrap / test domains), returns the cached HPA view as-is
 /// (identity GPA=HPA fallback).
-fn snapshot_view(domain: &crate::domain::Domain) -> AddressSpaceView {
+fn snapshot_view(domain: &mut crate::domain::Domain) -> AddressSpaceView {
+    domain.ensure_view_fresh();
     #[cfg(feature = "address_translation")]
     {
         if domain.address_map.entries().is_empty() {
@@ -1068,12 +1059,12 @@ fn snapshot_view(domain: &crate::domain::Domain) -> AddressSpaceView {
     }
 }
 
-/// Read the cached address-space view for a domain.  O(1).
-/// Updated automatically after every mutating operation
-/// (carve, send, accept, revoke).  Callers get a consistent snapshot
-/// by reading under a single domain read lock.
+/// Read the cached address-space view for a domain.  Lazily recomputes
+/// if the view is dirty.
 pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView {
-    domain.read().data.cached_view.clone()
+    let mut w = domain.write();
+    w.data.ensure_view_fresh();
+    w.data.cached_view.clone()
 }
 
 // =============================================================================
@@ -1141,7 +1132,7 @@ impl Capability<Domain> {
         // carve_child and child_ref operate on CapabilityRef<MemoryRegion> — independent
         // arcs, safe to lock while holding the domain write lock.
         let mut w = caller.write();
-        let view_before = snapshot_view(&w.data);
+        let view_before = snapshot_view(&mut w.data);
 
         let child_ref = Capability::carve_child(&parent_ref, access, owner_id)?;
 
@@ -1169,7 +1160,6 @@ impl Capability<Domain> {
         let new_handle = w.data.allocate_memory_handle();
         w.data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
-        refresh_domain_view(&mut *w);
 
         // Record the carved child's GPA and add its footprint (bumps refcounts
         // in the overlapping region with the parent).
@@ -1201,7 +1191,7 @@ impl Capability<Domain> {
                 }
             }
 
-            let view_after = snapshot_view(&w.data);
+            let view_after = snapshot_view(&mut w.data);
             view_diff(owner_id, &view_before, &view_after)
         };
 
@@ -1291,7 +1281,6 @@ impl Capability<Domain> {
         let new_handle = w.data.allocate_memory_handle();
         w.data
             .add_memory_capability(new_handle, Arc::downgrade(&child_ref));
-        refresh_domain_view(&mut *w);
 
         // Add the alias's footprint to the address map (bumps refcounts in
         // the overlapping region) and record its GPA for future MAP_SELF.
@@ -1553,14 +1542,13 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        let view_caller_before = snapshot_view(&caller_w.data);
-        let view_receiver_before = snapshot_view(&recv_w.data);
+        let view_caller_before = snapshot_view(&mut caller_w.data);
+        let view_receiver_before = snapshot_view(&mut recv_w.data);
 
         let cap_weak = caller_w
             .data
             .remove_memory_capability(cap)
             .ok_or(CapaError::NotFound)?;
-        refresh_domain_view(&mut *caller_w);
 
         let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
 
@@ -1588,7 +1576,6 @@ impl Capability<Domain> {
                 caller_w
                     .data
                     .add_memory_capability(cap, Arc::downgrade(&cap_ref));
-                refresh_domain_view(&mut *caller_w);
                 return Err(CapaError::RegionOverlap);
             }
         }
@@ -1620,7 +1607,6 @@ impl Capability<Domain> {
         recv_w
             .data
             .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
-        refresh_domain_view(&mut *recv_w);
 
         // Insert into receiver's AddressMap: visible ranges as Mapped,
         // carved-away gaps as Blocked.
@@ -1638,8 +1624,8 @@ impl Capability<Domain> {
         }
 
         // Snapshot GPA-aware views AFTER all mutations (caps + AddressMap).
-        let view_caller_after = snapshot_view(&caller_w.data);
-        let view_receiver_after = snapshot_view(&recv_w.data);
+        let view_caller_after = snapshot_view(&mut caller_w.data);
+        let view_receiver_after = snapshot_view(&mut recv_w.data);
 
         let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
         updates.merge(view_diff(
@@ -1775,15 +1761,14 @@ impl Capability<Domain> {
         }
 
         // Snapshot views BEFORE mutation.
-        let view_sender_before = snapshot_view(&sender_w.data);
-        let view_receiver_before = snapshot_view(&recv_w.data);
+        let view_sender_before = snapshot_view(&mut sender_w.data);
+        let view_receiver_before = snapshot_view(&mut recv_w.data);
 
         let new_handle = recv_w.data.allocate_memory_handle();
 
-        // Remove cap from sender's tables and refresh.
+        // Remove cap from sender's tables.
         sender_w.data.remove_memory_capability(sender_handle);
         sender_w.data.unfreeze_memory_handle(sender_handle);
-        refresh_domain_view(&mut *sender_w);
 
         // Block sender's AddressMap entry (Carve only).
         #[cfg(feature = "address_translation")]
@@ -1805,11 +1790,10 @@ impl Capability<Domain> {
             (is_meta, start, size)
         };
 
-        // Register in receiver's table and refresh.
+        // Register in receiver's table.
         recv_w
             .data
             .add_memory_capability(new_handle, Arc::downgrade(&cap_ref));
-        refresh_domain_view(&mut *recv_w);
 
         // Insert into receiver's AddressMap: visible ranges as Mapped,
         // carved-away gaps as Blocked.
@@ -1827,8 +1811,8 @@ impl Capability<Domain> {
         }
 
         // Snapshot GPA-aware views AFTER all mutations (caps + AddressMap).
-        let view_sender_after = snapshot_view(&sender_w.data);
-        let view_receiver_after = snapshot_view(&recv_w.data);
+        let view_sender_after = snapshot_view(&mut sender_w.data);
+        let view_receiver_after = snapshot_view(&mut recv_w.data);
 
         let mut updates = view_diff(sender_domain_id, &view_sender_before, &view_sender_after);
         updates.merge(view_diff(
@@ -2275,7 +2259,6 @@ impl Capability<Domain> {
         #[allow(unused_mut)]
         let mut updates = Capability::revoke_child(&parent_ref, child_sub)?;
         w.data.prune_stale_memory_capabilities();
-        refresh_domain_view(&mut *w);
 
         // Unblock parent's AddressMap entries that were blocked during send.
         // The updates contain ChangeRights(parent, ..., rights, false) for

@@ -7,11 +7,7 @@ use crate::sync::RwLock;
 use crate::update::CoreId;
 use crate::interposition::{CpuidPolicy, DefaultAction, MsrPolicy};
 use crate::view::AddressSpaceView;
-// CapabilityRef and compute_view_from_cap_arcs are only used in refresh_view,
-// which is compiled out under loom to avoid O(N) lock acquisitions.
-#[cfg(not(feature = "loom"))]
 use crate::capability::CapabilityRef;
-#[cfg(not(feature = "loom"))]
 use crate::view::compute_view_from_cap_arcs;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
@@ -640,8 +636,13 @@ pub struct Domain {
     /// this child domain.  Used during child revocation to clear COMM bindings.
     pub comm_bindings: Vec<CapabilityWeak<MemoryRegion>>,
 
-    /// Cached address-space view (kept up-to-date by all capability mutations)
+    /// Cached address-space view (recomputed lazily when `view_dirty` is set)
     pub cached_view: AddressSpaceView,
+
+    /// Set by any mutation that affects the address-space view (add/remove
+    /// memory capabilities, address-map changes).  Cleared by
+    /// [`ensure_view_fresh`] which recomputes `cached_view` on demand.
+    pub view_dirty: bool,
 
     /// Per-domain HPA↔GPA translation bookkeeping.
     #[cfg(feature = "address_translation")]
@@ -673,6 +674,7 @@ impl Domain {
             frozen_handles: BTreeSet::new(),
             comm_bindings: Vec::new(),
             cached_view: AddressSpaceView::new(id),
+            view_dirty: false,
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
             #[cfg(feature = "address_translation")]
@@ -696,6 +698,7 @@ impl Domain {
             frozen_handles: BTreeSet::new(),
             comm_bindings: Vec::new(),
             cached_view: AddressSpaceView::new(0),
+            view_dirty: false,
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
             #[cfg(feature = "address_translation")]
@@ -723,6 +726,7 @@ impl Domain {
             frozen_handles: BTreeSet::new(),
             comm_bindings: Vec::new(),
             cached_view: AddressSpaceView::new(u64::MAX),
+            view_dirty: false,
             #[cfg(feature = "address_translation")]
             address_map: crate::translation::AddressMap::new(),
             #[cfg(feature = "address_translation")]
@@ -821,7 +825,7 @@ impl Domain {
         capa: CapabilityWeak<MemoryRegion>,
     ) {
         self.memory_capabilities.insert(handle, capa);
-        self.refresh_view();
+        self.view_dirty = true;
     }
 
     /// Register a domain capability owned by this domain
@@ -835,7 +839,7 @@ impl Domain {
         handle: LocalHandle,
     ) -> Option<CapabilityWeak<MemoryRegion>> {
         let result = self.memory_capabilities.remove(&handle);
-        self.refresh_view();
+        self.view_dirty = true;
         result
     }
 
@@ -856,7 +860,7 @@ impl Domain {
     /// transiently unreachable.
     pub fn prune_stale_memory_capabilities(&mut self) {
         self.memory_capabilities.retain(|_, weak| weak.upgrade().is_some());
-        self.refresh_view();
+        self.view_dirty = true;
     }
 
     /// Remove the memory capability whose backing `Arc` is the same allocation
@@ -865,7 +869,7 @@ impl Domain {
     pub fn remove_memory_capability_by_ref(&mut self, target: &CapabilityWeak<MemoryRegion>) {
         self.memory_capabilities
             .retain(|_, weak| !Weak::ptr_eq(weak, target));
-        self.refresh_view();
+        self.view_dirty = true;
     }
 
     /// Remove a domain capability from tracking
@@ -934,19 +938,19 @@ impl Domain {
         self.frozen_handles.contains(&handle)
     }
 
-    /// Recompute the cached address-space view from the current memory_capabilities table.
-    fn refresh_view(&mut self) {
-        // Under loom, skip the O(N) lock-acquisition walk — view correctness is
-        // covered by integration tests; loom only checks concurrency invariants.
-        #[cfg(not(feature = "loom"))]
-        {
-            let cap_arcs: alloc::vec::Vec<CapabilityRef<MemoryRegion>> = self
-                .memory_capabilities
-                .values()
-                .filter_map(|w| w.upgrade())
-                .collect();
-            self.cached_view = compute_view_from_cap_arcs(self.id, &cap_arcs);
+    /// Recompute the cached address-space view if `view_dirty` is set.
+    /// No-op if the view is already up-to-date.
+    pub fn ensure_view_fresh(&mut self) {
+        if !self.view_dirty {
+            return;
         }
+        let cap_arcs: alloc::vec::Vec<CapabilityRef<MemoryRegion>> = self
+            .memory_capabilities
+            .values()
+            .filter_map(|w| w.upgrade())
+            .collect();
+        self.cached_view = compute_view_from_cap_arcs(self.id, &cap_arcs);
+        self.view_dirty = false;
     }
 
     /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)

@@ -560,13 +560,43 @@ The extension trait methods are thin wrappers: they read `self`'s current owner 
 
 ## `compute_address_space`
 
-`capability.rs` also hosts `compute_address_space(domain_ref)`, which walks the capability tree rooted at a domain and produces a merged `AddressSpaceView`:
+`capability.rs` hosts `compute_address_space(domain_ref)`, which returns the
+domain's current merged `AddressSpaceView`:
 
 ```rust
 let view: AddressSpaceView = compute_address_space(&domain_ref);
 ```
 
-This is the basis for the `view <domain>` CLI command. See `view.rs` for the merge algorithm.
+This acquires a write lock on the domain and calls `ensure_view_fresh()` to
+lazily recompute the view if dirty (see below). See `view.rs` for the merge
+algorithm.
+
+### View caching and dirty tracking
+
+Each `Domain` holds a `cached_view: AddressSpaceView` and a `view_dirty: bool`
+flag. Mutations that affect the view (add/remove memory capability, address-map
+changes) set `view_dirty = true` without recomputing. The view is recomputed
+lazily when actually read:
+
+- **`ensure_view_fresh()`** — if dirty, walks `memory_capabilities`, upgrades
+  weak refs, calls `compute_view_from_cap_arcs`, clears the flag.
+- **`snapshot_view()`** (internal) — calls `ensure_view_fresh()`, then
+  optionally translates the HPA-based view to GPA via `translate_view_to_gpa`
+  when `address_translation` is enabled.
+- **`compute_address_space()`** (public) — acquires write lock, calls
+  `ensure_view_fresh()`, returns clone of `cached_view`.
+
+### GPA-aware view_diff
+
+When `address_translation` is enabled, the same HPA can be mapped at multiple
+GPAs (e.g., VTOM double-mapping). The HPA-based `cached_view` cannot detect
+these duplicates. `snapshot_view()` translates through the domain's `AddressMap`
+to produce a GPA-keyed view, so `view_diff` naturally emits distinct
+`ChangeRights` updates for each GPA mapping.
+
+`ViewRegion` carries a `physical_start` field (the HPA) alongside the
+GPA-based `address`/`size`, so `ChangeRights` updates contain both the GPA
+(for EPT mapping) and the HPA (for the physical backing).
 
 ## Root Capabilities
 
