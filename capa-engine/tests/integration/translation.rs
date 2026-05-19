@@ -1723,3 +1723,74 @@ fn test_map_self_parent_cap_with_alias_staying() {
     let alias_gpa = dom.read().data.mapped_gpas[&alias_h];
     assert_eq!(alias_gpa, 0x0, "alias GPA unchanged");
 }
+
+// ── double-map (VTOM) ────────────────────────────────────────────────────────
+
+/// When an alias is sent at a different GPA to a domain that already has
+/// a superset physical mapping (same physical pages visible at a different GPA),
+/// `view_diff` produces no updates (the physical view is unchanged). The engine
+/// must still emit a ChangeRights for the new GPA so the platform maps it.
+#[test]
+fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
+    // Setup: root with a 64K region.
+    let (root, _r0, r0_h) = bootstrap();
+    seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
+
+    // Create child domain.
+    let (child_h, child_dom) = make_child(&root);
+    let child_id = dom_id(&child_dom);
+
+    // Alias the full region and send to child at GPA 0 (identity).
+    let access_full = Access::new(0x0, 0x10000, Rights::RWX);
+    let (alias1_h, _alias1_sub) =
+        Capability::alias(&root, r0_h, access_full).unwrap();
+    let updates1 = Capability::send_at(&root, alias1_h, child_h, Attributes::NONE, Some(0x0))
+        .unwrap();
+
+    // Verify the first send emits ChangeRights for the child at GPA 0.
+    let cr1: Vec<_> = updates1
+        .updates()
+        .iter()
+        .filter(|u| matches!(u, Update::ChangeRights { domain, .. } if *domain == child_id))
+        .collect();
+    assert!(
+        !cr1.is_empty(),
+        "first send should produce ChangeRights for child"
+    );
+
+    // Now alias a SUBSET (4K at HPA 0x2000) and send at a completely different GPA (0x8000_0000).
+    let access_sub = Access::new(0x2000, 0x1000, Rights::RWX);
+    let (alias2_h, _alias2_sub) =
+        Capability::alias(&root, r0_h, access_sub).unwrap();
+    let vtom_gpa: u64 = 0x8000_0000;
+    let updates2 =
+        Capability::send_at(&root, alias2_h, child_h, Attributes::NONE, Some(vtom_gpa))
+            .unwrap();
+
+    // The critical check: even though the child already sees HPA 0x2000-0x3000
+    // (via the 64K mapping), a ChangeRights at GPA 0x8000_0000 must be emitted.
+    let cr2: Vec<_> = updates2
+        .updates()
+        .iter()
+        .filter_map(|u| match u {
+            Update::ChangeRights {
+                domain,
+                address,
+                physical,
+                size,
+                rights,
+                ..
+            } if *domain == child_id => Some((*address, *physical, *size, *rights)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !cr2.is_empty(),
+        "subset alias at different GPA must emit ChangeRights (VTOM double-map)"
+    );
+    let (addr, phys, sz, r) = cr2[0];
+    assert_eq!(addr, vtom_gpa, "address should be the VTOM GPA");
+    assert_eq!(phys, 0x2000, "physical should be the subset HPA");
+    assert_eq!(sz, 0x1000, "size should match the alias");
+    assert_eq!(r, Rights::RWX, "rights should be RWX");
+}

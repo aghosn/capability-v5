@@ -1,0 +1,27 @@
+# Tutorial 17: VTOM Double-Map (ACPI at two GPAs)
+# Validates: alias sent at different GPA emits MapMemory
+
+# Init dom0 with 1GB
+init dom0 0x40000000
+
+# Create unsealed child
+create-domain dom0 child 0b1111 GET,ATTEST,SWITCH
+
+carve r0 ram1 0x0 0x1000 RWX
+carve r0 ram2 0x2000 0x8000 RWX
+
+# Create alias for the acpi
+alias r0 acpi 0x1000 0x1000 RWX
+
+# Alias acpi for double map
+alias acpi vtom_acpi 0x1000 0x1000 RWX
+
+
+send ram1 child at 0x0
+send ram2 child at 0x2000
+
+send acpi child at 0x1000
+send vtom_acpi child at 0x4000001000
+
+# View child's address space — should show both GPAs
+view child

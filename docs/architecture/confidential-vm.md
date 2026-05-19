@@ -728,10 +728,35 @@ verify CHANNEL_SEND delivers the alias to dom0.
    already intercepted by the capavisor as EPT violations. They don't need to be
    in the VTOM shared window — they go through hypercall-based device emulation.
 
-4. **Firmware tables**: ACPI tables are written by CHV before SEND and become private
-   to dom1 after boot. If CHV needs ongoing read access to tables (e.g., for
-   hotplug), dom1 can share them back as **read-only** aliases. The capability
-   engine already supports `R` (read-only) rights on aliases.
+4. **Firmware tables (ACPI) — separate shared memory slot**:
+
+   ACPI tables live at `0xA0000–0xA1FFF` (EBDA region). The CoCo kernel accesses
+   them with the VTOM bit set (marking them as shared/host-provided data), which
+   means the CPU generates accesses to `GPA | (1 << VTOM_BIT)` — e.g.,
+   `0x40_000A12B3` with VTOM bit 38. If only the base range is mapped in the EPT,
+   this causes an EPT violation that cannot be emulated (it's RAM, not MMIO).
+
+   **Solution**: CHV registers the firmware/ACPI region as a **separate memory slot**
+   and double-maps it: once at the base GPA (`0xA0000`) and once at the VTOM-offset
+   GPA (`0x40_000A0000`). Both point to the same backing memory. This is safe because:
+
+   - The EBDA/ACPI region (`0xA0000–0xFFFFF`) is in the e820 gap — Linux marks it
+     as "nosave" memory and never reclaims or repurposes it.
+   - The region is small and fixed (≈8 KB of ACPI tables, within a 384 KB window).
+   - CHV already knows where it places the tables (`RSDP_POINTER = EBDA_START`).
+
+   In `create_user_memory_region`, when CHV registers the ACPI/firmware region, it
+   issues **two** THHV_SET_GUEST_MEMORY calls: one for the base GPA and one for the
+   VTOM-aliased GPA. The capavisor sees both as valid ALIAS mappings.
+
+   **Scope**: Only the firmware data region needs double-mapping. Guest RAM (kernel,
+   user pages) remains single-mapped — the guest handles its own VTOM mappings for
+   shared regions (bounce buffers) via the MAP_SELF share-back protocol.
+
+   **Alternative considered**: Double-map ALL guest RAM at the VTOM alias. Rejected —
+   this defeats the purpose of CoCo (the parent would retain access to the full
+   VTOM-aliased range). Only firmware data that the guest *must* access as shared
+   gets the double-mapping.
 
 5. **Debug/fallback**: Use **opt-in** rather than opt-out. The kernel does NOT
    enable CoCo by default when detecting the CPUID leaf. Instead, boot with

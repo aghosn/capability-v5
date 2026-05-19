@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-15)
+## Current State (2026-05-18)
 
 ### What works
 
@@ -16,7 +16,7 @@
   QEMU due to missing fstab — known, not a regression).
 - **Dom1 Linux (2 CPUs)**: full systemd boot to login prompt. Verified 2026-04-14.
 - **Eunomia as dom1**: ✅ boots under full Themis stack (capavisor + dom0 + CHV).
-  All 24/24 tests pass (incl. timer via TSC-deadline). 6 workloads.
+  All 33/33 tests pass (incl. timer via TSC-deadline, CPUID). 7 workloads.
   `cargo build-bins` now rebuilds Eunomia workloads before packaging.
 - **Platform modularization**: complete. Opaque ArchDomainState/ArchPlatformState,
   aarch64 cross-check 0 errors. Generic monitor loop with SemanticExit dispatch.
@@ -29,13 +29,21 @@
   (245 modules), virtio/ext4/9p built-in.
 - **MAP_SELF hypercall**: wired across themis-abi (0x1f), capavisor handler, thhv.
 - **CARVE+SEND**: fully working — dom0 loses EPT access when SENDing to child.
-- **CPUID/MSR interposition policy**: ✅ generic ProcFeature trait framework in
-  capa-engine. Attestation includes policies. capa-cli and lean-exec extended.
+- **CPUID/MSR interposition policy**: ✅ fully policy-driven. All CPUID leaves
+  (including hypervisor range) go through PolicyDriven path. No ArchHandled special
+  case. CHV pushes Native/Emulate overrides for dom1. CoCo leaf (0x40000100)
+  returns dynamic VTOM bit = MAXPHYADDR-1.
   `cargo diff-test` (from capa-cli/) runs automated Rust-vs-Lean differential
   testing on all 16 tutorials.
+- **Dom1 CoCo detection**: ✅ kernel detects CC_VENDOR_THEMIS, reads VTOM bit 38.
+- **MMIO VTOM stripping**: ✅ IO-APIC reads correctly (`version 17, GSI 0-23`)
+  after stripping VTOM bit in CHV's handle_mmio_exit and emulator translate_gva.
 
 ### What doesn't work / known issues
 
+- **Dom1 CoCo: ACPI table access crash**: CoCo kernel reads ACPI tables with VTOM
+  bit set → GPA `0x40_000A12B3` not in EPT → emulation failure on unsupported
+  instruction. Fix: double-map ACPI/firmware region at VTOM-offset GPA.
 - **Dom1 emergency mode on QEMU**: fstab references missing partitions.
 - **Unguarded interrupt injection**: 2 fallback paths without RFLAGS.IF check.
 - **Posted interrupts**: hardware PI disabled (software PIR drain instead).
@@ -43,28 +51,24 @@
 - **KVM nested dom1**: CHV FailEntry under nested QEMU — only Themis backend works.
 - **CoCo share-back**: MAP_SELF wired but not yet tested end-to-end. Channels
   not wired in capavisor. No dom1-initiated sharing yet.
-- **Dom1 Linux IO-APIC crash (regression)**: kernel boots and detects Themis CoCo
-  but crashes at `native_io_apic_read` (CR2: `0xffffffffff5fc000`). IO-APIC MMIO
-  at phys `0xFEC00000` likely not mapped in child EPT. Was working 2026-04-14.
-  Needs investigation — possibly a platform modularization or monitor loop regression.
 
 ### Recent commits
 
+- `e642a14` — **policy-driven CPUID for all leaves (capavisor, eunomia, QEMU config)**
+- CHV `1fa1e19` — **Native/Emulate CPUID policy for hypervisor leaves + CoCo VTOM bit**
 - `ce15689` — **capa-cli, lean-exec: interposition policy support and differential testing**
 - `836359b` — **capa-engine: generic CPUID/MSR interposition policy framework**
 - `c15e246` — **fix(eunomia): emit CR+LF on serial output**
 - `04edb1b` — **feat: build-bins rebuilds eunomia workloads before packaging**
-- `ee4b960` — **fix(eunomia): use vector 0xEC to match CHV's LOCAL_TIMER_VECTOR**
-- `958bcf5` — **feat(eunomia): switch timer from LAPIC one-shot to TSC-deadline**
-- `32dac6d` — **docs: comprehensive todo.md rewrite with 7 work streams**
-- `866132c` — **fix: --kvm flag now rmmod's thhv to force KVM backend**
-- `48ecad0` — **docs: add comprehensive dom0 README and update deploy docs**
-- `e41e2c8` — **feat: revamp run-dom1.sh for CoCo-ready dom1 boot**
-- CHV submodule: **fix: add CR to all debug eprintln for clean terminal output**
 
 ### Uncommitted changes
 
-(none)
+- **CHV** (`cloud-hypervisor/hypervisor/src/themis/mod.rs`):
+  - `vm_state.vtom_bit` field + VTOM mask stripping in `handle_mmio_exit`
+  - `vtom_mask` passed to emulator context
+- **CHV** (`cloud-hypervisor/hypervisor/src/themis/emulator.rs`):
+  - `vtom_mask` field in `ThemisEmulatorContext`
+  - Strip VTOM from GPAs in `translate_gva` (all 3 page-size return paths)
 
 ---
 
@@ -136,12 +140,18 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
   - lean-exec: DefaultAction/ProcFeatureConfig types, setPolicy/getPolicy support
   - Design doc: `docs/architecture/cpuid-policy.md`
 
-**What needs implementation (interposition wiring)**:
-- [ ] themis-abi: add policy_kind constants 10–15 for CPUID/MSR PolicyIdentifier variants
-- [ ] Capavisor: update handle_cpuid_local (vmexit.rs) to consult domain CPUID policy
-- [ ] Capavisor: update MSR exit handlers to consult domain MSR policy
-- [ ] thhv.ko: new ioctl cases to forward CPUID/MSR policy_kind values
-- [ ] CHV: call new ioctls to set CPUID/MSR policy during domain setup
+**What needs implementation (interposition wiring)**: ✅ DONE
+- [x] themis-abi: policy_kind constants for CPUID/MSR PolicyIdentifier variants
+- [x] Capavisor: all CPUID leaves through PolicyDriven path
+- [x] CHV: push Native/Emulate CPUID policy during domain setup
+- [x] VTOM bit stripping in handle_mmio_exit + emulator translate_gva
+
+**What needs implementation (ACPI firmware double-map — NEXT)**:
+- [ ] CHV: separate ACPI/firmware region (`0xA0000–0xFFFFF`) into its own memory
+      slot instead of being part of the main RAM blob. Register it twice:
+      once at base GPA and once at `GPA | (1 << vtom_bit)`.
+      The EBDA region is in the e820 gap (kernel marks it nosave, never recycles).
+- [ ] Verify dom1 CoCo kernel boots past ACPI table parsing after double-map.
 
 **What needs implementation (CoCo end-to-end)**:
 - [ ] CHV: distinguish shared (MMIO) vs exclusive (guest RAM) memory at setup time.
@@ -158,8 +168,8 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
       virtio works through shared bounce buffers
 
 **Open questions**:
-- VTOM bit position (bit 39 proposed, needs finalization)
 - Channel revocation semantics (does revoking endpoint cascade to sent caps?)
+  → Resolved: yes, CDT cascades naturally (see design doc §9.8)
 
 ### 4. Contiguous physical memory for VMs (research needed)
 

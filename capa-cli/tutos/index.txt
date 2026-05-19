@@ -21,3 +21,4 @@
 14-sibling-attestation.txt|Sibling Attestation via Channels|Two enclaves attest each other and share memory through cross-connected channels
 15-driver-channels.txt|Channels — Driver Isolation with CVM|Hypervisor creates driver and CVM, CVM attests and shares memory via channel
 16-confidential-vm-vtom.txt|Confidential VM with VTOM Share-Back|Guest-initiated sharing: CVM sends ALL memory privately, shares back bounce buffer via self-channel
+17-vtom-double-map.txt|VTOM Double-Map (ACPI at two GPAs)|Same physical ACPI region mapped at normal GPA and VTOM GPA — validates engine emits MapMemory for both
