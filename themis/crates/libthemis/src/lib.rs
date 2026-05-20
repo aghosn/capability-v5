@@ -124,6 +124,12 @@ pub fn alias(parent: u64, start: u64, size: u64, rights: u64) -> Result<(u64, u6
     Ok((rdi, rsi))
 }
 
+/// Remap a memory capability at a new GPA within the caller's address space.
+pub fn map_self(cap: u64, new_gpa: u64) -> Result<(), u64> {
+    let (rax, _, _, _) = unsafe { vmcall2(opcodes::THEMIS_MAP_SELF, cap, new_gpa) };
+    check(rax)
+}
+
 /// Send a memory capability to a receiver domain.
 pub fn send(cap: u64, receiver: u64, attrs: u64) -> Result<(), u64> {
     let (rax, _, _, _) = unsafe { vmcall3(opcodes::THEMIS_SEND, cap, receiver, attrs) };
@@ -199,6 +205,25 @@ pub fn switch(target_domain: u64, vp_id: u64) -> Result<(), u64> {
 /// Returns the channel handle.
 pub fn get_chan(domain: u64) -> Result<u64, u64> {
     let (rax, rdi, _, _) = unsafe { vmcall1(opcodes::THEMIS_GET_CHAN, domain) };
+    check(rax)?;
+    Ok(rdi)
+}
+
+/// Send a memory capability through a channel.
+///
+/// `chan_handle` — channel obtained via `get_chan` or `accept_chan`.
+/// `cap_handle` — the memory capability to send.
+/// `attrs` — attribute bits for the receiver (e.g., SHARED).
+pub fn send_chan(chan_handle: u64, cap_handle: u64, attrs: u64) -> Result<(), u64> {
+    let (rax, _, _, _) = unsafe { vmcall3(opcodes::THEMIS_SEND_CHAN, chan_handle, cap_handle, attrs) };
+    check(rax)
+}
+
+/// Accept a pending channel capability.
+///
+/// Returns the new channel handle.
+pub fn accept_chan(pending_id: u64) -> Result<u64, u64> {
+    let (rax, rdi, _, _) = unsafe { vmcall1(opcodes::THEMIS_ACCEPT_CHAN, pending_id) };
     check(rax)?;
     Ok(rdi)
 }
