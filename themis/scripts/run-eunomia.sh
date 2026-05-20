@@ -108,10 +108,25 @@ echo "  cpus:    $CHV_CPUS"
 echo "  memory:  $CHV_MEM"
 echo ""
 
-exec "$CHV" \
-    --kernel "$KERNEL" \
-    --cpus boot="$CHV_CPUS" \
-    --memory size="$CHV_MEM" \
-    --serial tty \
-    --console off \
+# ── Build CHV command line ─────────────────────────────────────────────────
+CHV_ARGS=(
+    --kernel "$KERNEL"
+    --cpus boot="$CHV_CPUS"
+    --memory size="$CHV_MEM"
+    --serial tty
+    --console off
     --seccomp false
+)
+
+# CoCo workloads get the confidential platform flag.
+WORKLOAD_NAME="$(basename "$KERNEL" | sed 's/^eunomia-//')"
+case "$WORKLOAD_NAME" in
+    coco*)
+        CHV_ARGS+=(--platform "confidential=on")
+        echo "  mode:    confidential (CoCo)"
+        ;;
+esac
+
+echo ""
+
+exec "$CHV" "${CHV_ARGS[@]}"
