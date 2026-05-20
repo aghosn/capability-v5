@@ -183,6 +183,19 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 **Open questions**:
 - Channel revocation semantics (does revoking endpoint cascade to sent caps?)
   → Resolved: yes, CDT cascades naturally (see design doc §9.8)
+- **Intercept message leaks guest state to parent unconditionally**:
+  `forward_child_exit` populates the full `InterceptMessage` (RAX, RIP,
+  RFLAGS, exit_qualification, guest_physical_address, instruction_bytes,
+  MSR values, I/O port+data, CPUID leaf values) for ALL exit reasons
+  regardless of policy. The `read_set` only gates the register area of
+  the VpCommPage, not the intercept message fields. Fix: reuse the
+  `ProcFeature` / `ProcFeatureConfig<T>` interposition infrastructure
+  (shared by CPUID and MSR) to add per-exit-reason policy. Key space is
+  platform-specific (x86 exit reasons ≠ ARM exception classes). Actions
+  control which intercept message fields are exposed to the parent
+  (Trap with full info / Trap with masked fields / Block / Native).
+  Related: `themis/capavisor/src/hypercall.rs` lines 1536–1609,
+  `capa-engine/src/interposition.rs`.
 
 ### 4. Contiguous physical memory for VMs (research needed)
 

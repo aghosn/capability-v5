@@ -74,7 +74,14 @@ impl DomainComm {
             return Err(DomCommError::NotPresent);
         }
 
-        // GPA == VA in Eunomia (identity-mapped PVH guest).
+        // The DomainComm GPA may be outside the boot identity map (above 4 GiB).
+        // Map all pages into the guest page tables before accessing them.
+        let size = (nr_pages as u64) * 0x1000;
+        if !crate::paging::map_range(gpa, size) {
+            return Err(DomCommError::BadMagic(0)); // mapping failed
+        }
+
+        // GPA == VA after mapping.
         let header = gpa as *mut domcomm::Header;
 
         // Validate header.

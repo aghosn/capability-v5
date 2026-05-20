@@ -18,6 +18,7 @@ pub mod idt;
 pub mod boot;
 pub mod sched;
 pub mod hv;
+pub mod paging;
 pub mod domcomm;
 
 // Re-export libthemis (typed hypercall wrappers) and themis-abi (opcodes,

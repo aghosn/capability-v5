@@ -106,8 +106,6 @@
 #define THEMIS_OP_UNREGISTER_DOORBELL 0x16
 #define THEMIS_OP_SET_THEMIC_VECTOR   0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
-/* Sentinel vp_id for REGISTER_COMM: marks pages as per-domain DomainComm. */
-#define THEMIS_DOMAIN_GLOBAL_COMM    0xFFFFFFFFu
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
@@ -255,6 +253,7 @@ struct thhv_set_guest_memory {
 #define THHV_MEM_A_CLEAN     (1U << 1)  /* Zeroed on revocation */
 #define THHV_MEM_A_VITAL     (1U << 2)  /* Revocation kills the domain */
 #define THHV_MEM_A_META      (1U << 3)  /* Capavisor internal allocator (implies CLEAN+VITAL) */
+#define THHV_MEM_A_COMM      (1U << 4)  /* DomainComm page (implies CLEAN) */
 
 struct thhv_reg_name_value {
 	__u64 name;            /* VpRegister discriminant (THHV_VP_REG_*) */
@@ -1092,19 +1091,12 @@ struct thhv_partition {
 	 * creation.  The child accepts it to send capabilities back. */
 	u64 chan_handle;
 
-	/* Per-domain DomainComm pages: kernel-allocated, registered as
-	 * DOMAIN_GLOBAL_COMM so the capavisor initialises the child's
-	 * DomainComm ring at seal time. */
+	/* Per-domain DomainComm pages: kernel-allocated, sent to child with
+	 * COMM attribute so the capavisor initialises the child's DomainComm
+	 * ring at seal time.  After send, the caps belong to the child; only
+	 * the struct page pointers are kept for __free_page on teardown. */
 	struct page **domcomm_pages;
 	unsigned int  domcomm_nr_pages;
-	/* Per-page capability tracking for revoking on teardown:
-	 *   carved_handles[i] = local handle of carved cap (for cap_table removal)
-	 *   parent_handles[i] = parent handle (for REVOKE_MEM)
-	 *   sub_handles[i]    = sub-handle within parent (for REVOKE_MEM)
-	 */
-	u64 *domcomm_carved_handles;
-	u64 *domcomm_parent_handles;
-	u64 *domcomm_sub_handles;
 };
 
 /* Per-VP state. */

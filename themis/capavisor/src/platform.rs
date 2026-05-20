@@ -400,7 +400,7 @@ pub struct PlatformDomain {
     /// `None` until `init_domcomm()` allocates it.
     pub domcomm: Option<DomainCommState>,
 
-    /// HPAs of pages registered as `DOMAIN_GLOBAL_COMM` before seal.
+    /// HPAs of pages sent with COMM attribute before seal.
     /// Consumed by `init_domcomm` at seal time, then cleared.
     pub pending_domcomm_hpas: Vec<u64>,
 
@@ -1757,9 +1757,9 @@ impl Platform for ThemisPlatform {
                 if *domain_id != *target_domain_id {
                     if let Some(arc) = self.domains.get(*target_domain_id) {
                         let mut pd = arc.lock();
-                        if *vp_id == themis_abi::DOMAIN_GLOBAL_COMM {
-                            // Domain-level COMM: accumulate pages for
-                            // init_domcomm at seal time.
+                        if *vp_id == u32::MAX {
+                            // Domain-level COMM (from SEND with COMM attr):
+                            // accumulate pages for init_domcomm at seal time.
                             let nr = (*size as usize + 0xFFF) / 0x1000;
                             for i in 0..nr {
                                 pd.pending_domcomm_hpas.push(*phys + i as u64 * 0x1000);

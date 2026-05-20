@@ -62,23 +62,14 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->ept_meta_pages);
 	}
 
-	/* Revoke and free kernel-allocated DomainComm pages. */
+	/* Free kernel-allocated DomainComm pages.
+	 * Caps revoked via sent_caps below; only struct pages freed here. */
 	if (part->domcomm_pages) {
 		unsigned int j;
 
-		for (j = 0; j < part->domcomm_nr_pages; j++) {
-			if (part->domcomm_carved_handles[j])
-				thhv_cap_table_remove(part->domcomm_carved_handles[j]);
-			if (part->domcomm_parent_handles[j] ||
-			    part->domcomm_sub_handles[j])
-				themis_revoke_mem(part->domcomm_parent_handles[j],
-						  part->domcomm_sub_handles[j]);
+		for (j = 0; j < part->domcomm_nr_pages; j++)
 			__free_page(part->domcomm_pages[j]);
-		}
 		kfree(part->domcomm_pages);
-		kfree(part->domcomm_carved_handles);
-		kfree(part->domcomm_parent_handles);
-		kfree(part->domcomm_sub_handles);
 	}
 
 	/* Free all memory regions (unpin pages only; caps revoked via sent_caps). */
@@ -1036,29 +1027,20 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 
 	/*
 	 * Provision per-domain DomainComm pages: allocate 4 kernel pages,
-	 * CARVE each from dom0's memory, and REGISTER_COMM with the
-	 * DOMAIN_GLOBAL_COMM sentinel.  The capavisor accumulates the HPAs
-	 * and initialises the child's DomainComm ring at seal time.
+	 * CARVE each from dom0's memory, and SEND to the child with the
+	 * COMM attribute.  The capavisor accumulates the HPAs and
+	 * initialises the child's DomainComm ring at seal time.
+	 * After SEND, the caps belong to the child (identity-mapped,
+	 * GPA=HPA); only the struct page pointers are kept for __free_page.
 	 */
 	{
 #define DOMCOMM_NR_PAGES 4
 		unsigned int i;
 		struct page **dc_pages;
-		u64 *dc_carved, *dc_parents, *dc_subs;
 
 		dc_pages = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_pages),
 				   GFP_KERNEL);
-		dc_carved = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_carved),
-				    GFP_KERNEL);
-		dc_parents = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_parents),
-				     GFP_KERNEL);
-		dc_subs = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_subs),
-				  GFP_KERNEL);
-		if (!dc_pages || !dc_carved || !dc_parents || !dc_subs) {
-			kfree(dc_pages);
-			kfree(dc_carved);
-			kfree(dc_parents);
-			kfree(dc_subs);
+		if (!dc_pages) {
 			ret = -ENOMEM;
 			goto err_revoke;
 		}
@@ -1069,18 +1051,86 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				while (i--)
 					__free_page(dc_pages[i]);
 				kfree(dc_pages);
-				kfree(dc_carved);
-				kfree(dc_parents);
-				kfree(dc_subs);
 				ret = -ENOMEM;
 				goto err_revoke;
 			}
+		}
+
+		/*
+		 * Send extra EPT META frames so the child's EPT can map the
+		 * domcomm pages (identity-mapped at HPA, potentially above
+		 * the child's normal GPA range).
+		 */
+		{
+			unsigned int nr_dc_meta = 0;
+			struct page **dc_meta;
+			unsigned int j;
+
+			for (i = 0; i < DOMCOMM_NR_PAGES; i++)
+				nr_dc_meta += thhv_ept_meta_needed(
+					(u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT,
+					PAGE_SIZE);
+
+			dc_meta = kcalloc(nr_dc_meta, sizeof(*dc_meta),
+					  GFP_KERNEL);
+			if (!dc_meta) {
+				ret = -ENOMEM;
+				goto err_free_domcomm_pages;
+			}
+			for (j = 0; j < nr_dc_meta; j++) {
+				dc_meta[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+				if (!dc_meta[j]) {
+					while (j--)
+						__free_page(dc_meta[j]);
+					kfree(dc_meta);
+					ret = -ENOMEM;
+					goto err_free_domcomm_pages;
+				}
+			}
+
+			ret = thhv_send_meta_pages(part, dc_meta, nr_dc_meta,
+						   THHV_META_KEY_EPT);
+			if (ret) {
+				for (j = 0; j < nr_dc_meta; j++)
+					__free_page(dc_meta[j]);
+				kfree(dc_meta);
+				goto err_free_domcomm_pages;
+			}
+
+			/* Track META pages for teardown. */
+			if (part->ept_meta_pages) {
+				struct page **merged;
+				unsigned int total = part->ept_meta_nr_pages +
+						     nr_dc_meta;
+
+				merged = krealloc(part->ept_meta_pages,
+						  total * sizeof(struct page *),
+						  GFP_KERNEL);
+				if (!merged) {
+					kfree(dc_meta);
+					ret = -ENOMEM;
+					goto err_free_domcomm_pages;
+				}
+				memcpy(merged + part->ept_meta_nr_pages,
+				       dc_meta,
+				       nr_dc_meta * sizeof(struct page *));
+				kfree(dc_meta);
+				part->ept_meta_pages = merged;
+				part->ept_meta_nr_pages = total;
+			} else {
+				part->ept_meta_pages = dc_meta;
+				part->ept_meta_nr_pages = nr_dc_meta;
+			}
+
+			pr_debug("thhv: sent %u EPT META pages for domcomm\n",
+				 nr_dc_meta);
 		}
 
 		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
 			u64 gpa = (u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT;
 			u64 hpa = thhv_gpa_to_hpa(gpa);
 			u64 parent_handle, carved_handle, sub;
+			struct thhv_sent_cap *sc;
 
 			if (hpa == (u64)-1) {
 				pr_err("thhv: domcomm page %u: GPA %#llx not in PA map\n",
@@ -1106,58 +1156,45 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				goto err_free_domcomm;
 			}
 
-			dc_carved[i] = carved_handle;
-			dc_parents[i] = parent_handle;
-			dc_subs[i] = sub;
-
-			ret = thhv_cap_table_insert(carved_handle, parent_handle,
-						    sub, hpa, PAGE_SIZE);
+			ret = themis_send(carved_handle,
+					  part->domain_handle,
+					  THHV_MEM_A_COMM);
 			if (ret) {
-				pr_err("thhv: domcomm page %u: cap_table_insert failed (%d)\n",
+				pr_err("thhv: domcomm page %u: SEND COMM failed (%d)\n",
 				       i, ret);
-				/* Revoke the carve we just made. */
 				themis_revoke_mem(parent_handle, sub);
 				goto err_free_domcomm;
 			}
 
-			ret = themis_register_comm(carved_handle,
-						   part->domain_handle,
-						   THEMIS_DOMAIN_GLOBAL_COMM);
-			if (ret) {
-				pr_err("thhv: domcomm page %u: REGISTER_COMM failed (%d)\n",
-				       i, ret);
+			/* Track in sent_caps like any other sent cap. */
+			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+			if (!sc) {
+				pr_err("thhv: domcomm sent_cap alloc failed\n");
+				ret = -ENOMEM;
 				goto err_free_domcomm;
 			}
+			sc->parent_handle = parent_handle;
+			sc->sub_handle    = sub;
+			sc->region_key    = hpa >> PAGE_SHIFT;
+
+			spin_lock(&part->sent_caps.lock);
+			list_add_tail(&sc->list, &part->sent_caps.list);
+			spin_unlock(&part->sent_caps.lock);
 		}
 
 		part->domcomm_pages = dc_pages;
 		part->domcomm_nr_pages = DOMCOMM_NR_PAGES;
-		part->domcomm_carved_handles = dc_carved;
-		part->domcomm_parent_handles = dc_parents;
-		part->domcomm_sub_handles = dc_subs;
 		pr_debug("thhv: provisioned %u DomainComm pages for child\n",
 			 DOMCOMM_NR_PAGES);
 
 		goto domcomm_done;
+err_free_domcomm_pages:
 err_free_domcomm:
-		/* Revoke any carves already made. */
-		{
-			unsigned int j;
-			for (j = 0; j < i; j++) {
-				if (dc_parents[j] || dc_subs[j]) {
-					thhv_cap_table_remove(dc_carved[j]);
-					themis_revoke_mem(dc_parents[j], dc_subs[j]);
-				}
-			}
-		}
 		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
 			if (dc_pages[i])
 				__free_page(dc_pages[i]);
 		}
 		kfree(dc_pages);
-		kfree(dc_carved);
-		kfree(dc_parents);
-		kfree(dc_subs);
 		goto err_revoke;
 domcomm_done:
 		;

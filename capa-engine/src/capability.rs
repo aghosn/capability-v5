@@ -1398,6 +1398,12 @@ impl Capability<Domain> {
         // any META-specific branches there.
         let attrs = attrs.canonicalize();
 
+        // COMM sends are only valid to unsealed receivers — they need
+        // immediate EPT mapping (the unsealed path handles this).
+        if recv_sealed && attrs.comm() {
+            return Err(CapaError::PermissionDenied);
+        }
+
         if recv_sealed {
             Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)
         } else {
@@ -1622,6 +1628,14 @@ impl Capability<Domain> {
         // `attrs` is the value just written to cap; `meta_start/size` captured above.
         if attrs.meta() {
             updates.add_give_meta_mem(receiver_id, meta_start, meta_size);
+        }
+
+        // COMM send: tell the platform about the new COMM region so it can
+        // accumulate HPAs for DomainComm initialisation at seal time.
+        // domain_id = caller (parent), target_domain_id = receiver (child).
+        // vp_id = u32::MAX signals domain-level COMM (not per-VP).
+        if attrs.comm() {
+            updates.add_comm_region(caller_id, receiver_id, u32::MAX, meta_start, meta_size);
         }
 
         Ok(updates)
@@ -2461,32 +2475,26 @@ impl Capability<Domain> {
             let child_r = child_ref.read();
             child_domain_id = child_r.data.id;
 
-            // DOMAIN_GLOBAL_COMM sentinel (u32::MAX): skip VP index
-            // validation and allow multiple bindings (one per DomainComm page).
-            let is_domcomm = vp_id == u32::MAX;
-
-            if !is_domcomm {
-                if vp_id as usize >= child_r.data.policy.num_vprocessors {
-                    return Err(CapaError::InvalidOperation(
-                        "vp_id exceeds child domain VP count".into(),
-                    ));
-                }
-                // Each VP may have at most one COMM binding.
-                let already_bound = child_r.data.comm_bindings.iter().any(|weak| {
-                    weak.upgrade()
-                        .map(|cap| {
-                            cap.read()
-                                .data
-                                .comm_binding
-                                .map_or(false, |b| b.vp_id == vp_id)
-                        })
-                        .unwrap_or(false)
-                });
-                if already_bound {
-                    return Err(CapaError::InvalidOperation(
-                        "VP already has a COMM binding".into(),
-                    ));
-                }
+            if vp_id as usize >= child_r.data.policy.num_vprocessors {
+                return Err(CapaError::InvalidOperation(
+                    "vp_id exceeds child domain VP count".into(),
+                ));
+            }
+            // Each VP may have at most one COMM binding.
+            let already_bound = child_r.data.comm_bindings.iter().any(|weak| {
+                weak.upgrade()
+                    .map(|cap| {
+                        cap.read()
+                            .data
+                            .comm_binding
+                            .map_or(false, |b| b.vp_id == vp_id)
+                    })
+                    .unwrap_or(false)
+            });
+            if already_bound {
+                return Err(CapaError::InvalidOperation(
+                    "VP already has a COMM binding".into(),
+                ));
             }
         }
 
