@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [features]
 default = []
-ffi     = []       # Enable C-FFI shims for linking into kernel modules
+ffi     = []       # Enable C-FFI shims + panic handler for standalone staticlib builds
 
 [dependencies]
 themis-abi = { path = "../themis-abi" }

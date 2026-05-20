@@ -11,6 +11,10 @@ path = "src/lib.rs"
 default = ["console-serial"]
 console-serial = []
 
+[dependencies]
+libthemis = { path = "../themis/crates/libthemis" }
+themis-abi = { path = "../themis/crates/themis-abi" }
+
 [profile.dev]
 panic = "abort"
 

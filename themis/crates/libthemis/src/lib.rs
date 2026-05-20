@@ -22,10 +22,9 @@ use themis_abi::{errors, opcodes};
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-// When built as a staticlib (for linking into a kernel module), we need
-// a panic handler.  In the kernel context, panics should never happen;
-// if they do, loop forever (the kernel's own BUG() is the real handler).
-#[cfg(not(test))]
+// Panic handler only for staticlib builds (thhv kernel module).
+// rlib consumers (eunomia) provide their own.
+#[cfg(all(not(test), feature = "ffi"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -40,8 +39,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 ///   OUT: RAX = error,  RDI = r0, RSI = r1, RDX = r2
 ///
 /// Returns `(rax, rdi, rsi, rdx)`.
+///
+/// # Safety
+/// Only valid when running under a VMX hypervisor.
 #[inline(always)]
-unsafe fn vmcall5(
+pub unsafe fn raw_vmcall(
     opcode: u64,
     a0: u64,
     a1: u64,
@@ -73,23 +75,23 @@ unsafe fn vmcall5(
 /// Convenience: VMCALL with 0–4 args (fills unused regs with 0).
 #[inline(always)]
 unsafe fn vmcall0(op: u64) -> (u64, u64, u64, u64) {
-    vmcall5(op, 0, 0, 0, 0, 0)
+    raw_vmcall(op, 0, 0, 0, 0, 0)
 }
 #[inline(always)]
 unsafe fn vmcall1(op: u64, a0: u64) -> (u64, u64, u64, u64) {
-    vmcall5(op, a0, 0, 0, 0, 0)
+    raw_vmcall(op, a0, 0, 0, 0, 0)
 }
 #[inline(always)]
 unsafe fn vmcall2(op: u64, a0: u64, a1: u64) -> (u64, u64, u64, u64) {
-    vmcall5(op, a0, a1, 0, 0, 0)
+    raw_vmcall(op, a0, a1, 0, 0, 0)
 }
 #[inline(always)]
 unsafe fn vmcall3(op: u64, a0: u64, a1: u64, a2: u64) -> (u64, u64, u64, u64) {
-    vmcall5(op, a0, a1, a2, 0, 0)
+    raw_vmcall(op, a0, a1, a2, 0, 0)
 }
 #[inline(always)]
 unsafe fn vmcall4(op: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (u64, u64, u64, u64) {
-    vmcall5(op, a0, a1, a2, a3, 0)
+    raw_vmcall(op, a0, a1, a2, a3, 0)
 }
 
 /// Check RAX; return `Ok(())` on SUCCESS or `Err(code)`.
@@ -241,7 +243,7 @@ pub fn set_reg(
 /// Maps to `Capability::set_policy` via THEMIS_SET_POLICY opcode.
 pub fn set_policy(domain: u64, kind: u64, key: u64, sub_key: u64, value: u64) -> Result<(), u64> {
     let (rax, _, _, _) = unsafe {
-        vmcall5(
+        raw_vmcall(
             opcodes::THEMIS_SET_POLICY,
             domain,
             kind,
@@ -279,7 +281,7 @@ pub fn register_doorbell(
     flags: u64,
 ) -> Result<u64, u64> {
     let (rax, rdi, _, _) = unsafe {
-        vmcall5(
+        raw_vmcall(
             opcodes::THEMIS_REGISTER_DOORBELL,
             child_domain,
             gpa,

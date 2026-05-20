@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "eunomia"
 version = "0.1.0"
+dependencies = [
+ "libthemis",
+ "themis-abi",
+]
 
 [[package]]
 name = "eunomia-hypercall"
@@ -12,3 +16,14 @@ version = "0.1.0"
 dependencies = [
  "eunomia",
 ]
+
+[[package]]
+name = "libthemis"
+version = "0.1.0"
+dependencies = [
+ "themis-abi",
+]
+
+[[package]]
+name = "themis-abi"
+version = "0.1.0"

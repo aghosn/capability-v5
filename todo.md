@@ -65,29 +65,24 @@
 - **Posted interrupts**: hardware PI disabled (software PIR drain instead).
 - **Dom1 on real hardware**: not yet tested.
 - **KVM nested dom1**: CHV FailEntry under nested QEMU — only Themis backend works.
-- **CoCo share-back**: MAP_SELF wired but not yet tested end-to-end. Channels
-  not wired in capavisor. No dom1-initiated sharing yet.
+- **CoCo share-back**: MAP_SELF wired, channels wired (GET/SEND/ACCEPT).
+  Not yet tested end-to-end. Need Eunomia workload first.
 
 ### Recent commits
 
-- `HEAD` — **capa-engine: GPA-native view computation redesign**
+- `HEAD` — **CHV: gate CoCo features on confidential mode**
+  (vtom_bit=0 when !confidential, EBDA/CoCo-CPUID/VTOM-stripping gated)
+- `8d3dd56f` — **CHV: confidential mode — CARVE guest RAM instead of ALIAS**
+  (`--platform confidential=on`, MMIO classification, run-dom1.sh flag)
+- `7ec460f` — **Wire channel hypercalls: GET_CHAN, SEND_CHAN, ACCEPT_CHAN**
+  (capavisor handlers, thhv wrappers, auto-provision parent-back-channel)
+- `e962a89` — **capa-engine: GPA-native view computation redesign**
   (ViewRegion carries {GPA, HPA}, ensure_view_fresh translates via address_map,
   removed snapshot_view/translate_view_to_gpa, cleaned fixup from carve/send/accept)
-- `53d7b1e` — **capa-engine: lazy view caching with dirty flag**
-- `84bfaed` — **capa-engine: fix stale cached_view after cross-domain revoke**
-  (remove_memory_capability_by_ref, 4 cache-staleness tests, loom fix)
-- `2b34aad` — **capa-engine: GPA-aware view_diff for VTOM double-map**
-  (translate_view_to_gpa, snapshot_view, tutorial 17, removed ad-hoc fixup)
-- CHV `bc2ccfe` — **VTOM-aware MMIO emulation and EBDA double-map**
-- `e642a14` — **policy-driven CPUID for all leaves (capavisor, eunomia, QEMU config)**
-- CHV `1fa1e19` — **Native/Emulate CPUID policy for hypervisor leaves + CoCo VTOM bit**
 
 ### Uncommitted changes
 
 None — all changes committed.
-- **docs** (`docs/capability-engine/implementation.md`):
-  - Documented view caching, dirty tracking, GPA-aware view_diff
-- **todo.md**: updated to reflect current state
 
 ---
 
@@ -173,16 +168,15 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 - [ ] **NEXT**: Boot dom0 + CoCo dom1, verify kernel gets past ACPI table parsing
 
 **What needs implementation (CoCo end-to-end)**:
-- [ ] CHV: distinguish shared (MMIO) vs exclusive (guest RAM) memory at setup time.
-      Currently `create_user_memory_region` uses `THHV_MEM_F_ALIAS` for everything.
-      For CoCo: guest RAM should use CARVE (flags=0), MMIO regions stay ALIAS.
-- [ ] CHV: receive shared regions back from dom1 (accept alias via channel or
-      new ioctl after dom1 shares bounce buffers back)
-- [ ] Capavisor: wire CHANNEL_SEND / CHANNEL_RECV hypercalls
+- [x] CHV: `--platform confidential=on` flag. Guest RAM → CARVE, MMIO → ALIAS.
+- [x] Capavisor: wire CHANNEL GET/SEND/ACCEPT hypercalls (0x1e, 0x20, 0x21)
+- [x] thhv: auto-provision parent-back-channel at domain creation
+- [x] CHV: gate VTOM/EBDA/CoCo-CPUID on confidential mode (vtom_bit=0 when off)
+- [ ] Eunomia CoCo workload: test CARVE isolation (dom0 can't read carved memory),
+      channel accept, MAP_SELF in non-confidential mode first
+- [ ] CHV: receive shared regions back from dom1 (accept alias via channel)
 - [ ] Dom1 kernel: early init share-back — create aliases of swiotlb pool,
       MAP_SELF at VTOM GPA, CHANNEL_SEND the other to dom0
-- [ ] Eunomia CoCo workload: minimal test that verifies dom0 cannot read dom1
-      private memory after SEND
 - [ ] End-to-end: Linux dom1 boots with CC_VENDOR_THEMIS, swiotlb active,
       virtio works through shared bounce buffers
 

@@ -31,7 +31,7 @@ THHV_SRCS := $(wildcard $(PWD)/src/*.c) $(wildcard $(PWD)/inc/*.h)
 # Build libthemis.a as a no_std static lib with the "ffi" feature.
 $(LIBTHEMIS_A):
 	cd $(LIBTHEMIS_DIR) && \
-	cargo build --release --features ffi --target x86_64-unknown-none
+	cargo rustc --release --features ffi --target x86_64-unknown-none --crate-type staticlib
 
 # Force our 'all' target as the default goal, even if Kbuild is present.
 # Without this, GNU Make may pick up Kbuild's obj-m rules as the default goal.
