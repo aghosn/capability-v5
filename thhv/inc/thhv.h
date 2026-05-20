@@ -106,6 +106,8 @@
 #define THEMIS_OP_UNREGISTER_DOORBELL 0x16
 #define THEMIS_OP_SET_THEMIC_VECTOR   0x17
 #define THEMIS_OP_REGISTER_COMM       0x18
+/* Sentinel vp_id for REGISTER_COMM: marks pages as per-domain DomainComm. */
+#define THEMIS_DOMAIN_GLOBAL_COMM    0xFFFFFFFFu
 #define THEMIS_OP_DOMCOMM_NOTIFY     0x19
 #define THEMIS_OP_INJECT_INTERRUPT   0x1b
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
@@ -1089,6 +1091,12 @@ struct thhv_partition {
 	 * (dom0), automatically created and sent to the child at domain
 	 * creation.  The child accepts it to send capabilities back. */
 	u64 chan_handle;
+
+	/* Per-domain DomainComm pages: kernel-allocated, registered as
+	 * DOMAIN_GLOBAL_COMM so the capavisor initialises the child's
+	 * DomainComm ring at seal time. */
+	struct page **domcomm_pages;
+	unsigned int  domcomm_nr_pages;
 };
 
 /* Per-VP state. */

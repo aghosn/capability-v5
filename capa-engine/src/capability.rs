@@ -2460,26 +2460,33 @@ impl Capability<Domain> {
         {
             let child_r = child_ref.read();
             child_domain_id = child_r.data.id;
-            if vp_id as usize >= child_r.data.policy.num_vprocessors {
-                return Err(CapaError::InvalidOperation(
-                    "vp_id exceeds child domain VP count".into(),
-                ));
-            }
-            // Each VP may have at most one COMM binding.
-            let already_bound = child_r.data.comm_bindings.iter().any(|weak| {
-                weak.upgrade()
-                    .map(|cap| {
-                        cap.read()
-                            .data
-                            .comm_binding
-                            .map_or(false, |b| b.vp_id == vp_id)
-                    })
-                    .unwrap_or(false)
-            });
-            if already_bound {
-                return Err(CapaError::InvalidOperation(
-                    "VP already has a COMM binding".into(),
-                ));
+
+            // DOMAIN_GLOBAL_COMM sentinel (u32::MAX): skip VP index
+            // validation and allow multiple bindings (one per DomainComm page).
+            let is_domcomm = vp_id == u32::MAX;
+
+            if !is_domcomm {
+                if vp_id as usize >= child_r.data.policy.num_vprocessors {
+                    return Err(CapaError::InvalidOperation(
+                        "vp_id exceeds child domain VP count".into(),
+                    ));
+                }
+                // Each VP may have at most one COMM binding.
+                let already_bound = child_r.data.comm_bindings.iter().any(|weak| {
+                    weak.upgrade()
+                        .map(|cap| {
+                            cap.read()
+                                .data
+                                .comm_binding
+                                .map_or(false, |b| b.vp_id == vp_id)
+                        })
+                        .unwrap_or(false)
+                });
+                if already_bound {
+                    return Err(CapaError::InvalidOperation(
+                        "VP already has a COMM binding".into(),
+                    ));
+                }
             }
         }
 

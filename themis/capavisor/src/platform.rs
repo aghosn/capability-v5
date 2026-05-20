@@ -400,6 +400,10 @@ pub struct PlatformDomain {
     /// `None` until `init_domcomm()` allocates it.
     pub domcomm: Option<DomainCommState>,
 
+    /// HPAs of pages registered as `DOMAIN_GLOBAL_COMM` before seal.
+    /// Consumed by `init_domcomm` at seal time, then cleared.
+    pub pending_domcomm_hpas: Vec<u64>,
+
     /// Registered doorbell entries for this domain's child VPs (fast-path EPT violations).
     /// Keyed by doorbell_id; max THEMIC_MAX_DOORBELLS entries.
     pub doorbells: Vec<DoorbellEntry>,
@@ -463,44 +467,46 @@ impl PlatformDomain {
             hhdm_offset,
             comm_hpas: Vec::new(),
             domcomm: None,
+            pending_domcomm_hpas: Vec::new(),
             doorbells: Vec::new(),
             next_doorbell_id: 1,
         }
     }
 
-    /// Initialize DomainComm pages for this domain.
+    /// Initialize DomainComm from a list of page HPAs (possibly non-contiguous).
     ///
-    /// For dom0 the pages live at a fixed GPA inside the identity-mapped RAM
-    /// region (marked TYPE_RESERVED in e820 so Linux won't use them).  The
-    /// caller passes the contiguous base HPA and page count; no META allocation
-    /// is needed because the pages are ordinary DRAM already EPT-mapped.
+    /// `page_hpas[0]` is the header page; the remaining pages are split
+    /// between RX and TX rings (RX gets the majority).
     ///
-    /// For child domains the caller will CARVE pages and pass their HPAs.
-    fn init_domcomm(&mut self, base_hpa: u64, nr_pages: u32, _gpa: u64) -> &DomainCommState {
+    /// For dom0 the caller builds this list from a contiguous region.
+    /// For child domains the pages are accumulated via `pending_domcomm_hpas`
+    /// during `REGISTER_COMM` calls and consumed at seal time.
+    fn init_domcomm(&mut self, page_hpas: &[u64]) -> &DomainCommState {
         use themis_abi::domcomm;
 
+        let nr_pages = page_hpas.len() as u32;
         assert!(
             nr_pages >= 2,
             "DomainComm needs at least 2 pages (header + 1 ring)"
         );
 
-        let header_hpa = base_hpa;
+        let header_hpa = page_hpas[0];
 
         // Write header to page 0 via HHDM.
         let hdr_virt = (header_hpa + self.hhdm_offset) as *mut domcomm::Header;
         let rx_page_count = (nr_pages - 1).saturating_sub(1).max(1);
         let tx_page_count = nr_pages - 1 - rx_page_count;
 
-        // Build per-ring page HPA lists.
+        // Build per-ring page HPA lists from the (possibly sparse) page_hpas.
         let mut rx_ring = DomainCommRing::new();
-        for i in 0..rx_page_count {
-            rx_ring.page_hpas.push(base_hpa + (1 + i as u64) * 0x1000);
+        for i in 0..rx_page_count as usize {
+            rx_ring.page_hpas.push(page_hpas[1 + i]);
         }
         let mut tx_ring = DomainCommRing::new();
-        for i in 0..tx_page_count {
+        for i in 0..tx_page_count as usize {
             tx_ring
                 .page_hpas
-                .push(base_hpa + (1 + rx_page_count as u64 + i as u64) * 0x1000);
+                .push(page_hpas[1 + rx_page_count as usize + i]);
         }
 
         unsafe {
@@ -1203,8 +1209,26 @@ impl ThemisPlatform {
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_init_domcomm: domain not registered"));
         let mut d = arc.lock();
-        d.init_domcomm(base_hpa, nr_pages, gpa);
+        // Build contiguous HPA list from base.
+        let hpas: Vec<u64> = (0..nr_pages as u64).map(|i| base_hpa + i * 0x1000).collect();
+        d.init_domcomm(&hpas);
         (gpa, nr_pages)
+    }
+
+    /// Finalize DomainComm for a child domain at seal time.
+    ///
+    /// Consumes `pending_domcomm_hpas` accumulated during `REGISTER_COMM`
+    /// calls and initialises the DomainComm header + rings.  Returns the
+    /// header HPA (for CPUID discovery) or `None` if no pages were registered.
+    pub fn finalize_domcomm(&self, domain_id: DomainId) -> Option<u64> {
+        let arc = self.domains.get(domain_id)?;
+        let mut pd = arc.lock();
+        if pd.pending_domcomm_hpas.is_empty() {
+            return None;
+        }
+        let hpas: Vec<u64> = core::mem::take(&mut pd.pending_domcomm_hpas);
+        let state = pd.init_domcomm(&hpas);
+        Some(state.header_hpa)
     }
 
     /// Write a binary attestation message to a domain's DomainComm RX ring.
@@ -1731,14 +1755,23 @@ impl Platform for ThemisPlatform {
                 size,
             } => {
                 if *domain_id != *target_domain_id {
-                    // VP-level COMM: store HPA for child VP.
                     if let Some(arc) = self.domains.get(*target_domain_id) {
                         let mut pd = arc.lock();
-                        let vp = *vp_id as usize;
-                        if vp >= pd.comm_hpas.len() {
-                            pd.comm_hpas.resize(vp + 1, 0);
+                        if *vp_id == themis_abi::DOMAIN_GLOBAL_COMM {
+                            // Domain-level COMM: accumulate pages for
+                            // init_domcomm at seal time.
+                            let nr = (*size as usize + 0xFFF) / 0x1000;
+                            for i in 0..nr {
+                                pd.pending_domcomm_hpas.push(*phys + i as u64 * 0x1000);
+                            }
+                        } else {
+                            // VP-level COMM: store HPA for child VP.
+                            let vp = *vp_id as usize;
+                            if vp >= pd.comm_hpas.len() {
+                                pd.comm_hpas.resize(vp + 1, 0);
+                            }
+                            pd.comm_hpas[vp] = *phys;
                         }
-                        pd.comm_hpas[vp] = *phys;
                     }
                 }
                 let _ = (domain_id, phys, size);

@@ -114,6 +114,11 @@ pub mod opcodes {
 
     /// Register a COMM page owned by the caller, bound to a child VP.
     /// IN:  RDI = mem_cap_handle, RSI = child_domain_handle, RDX = vp_id
+    ///
+    /// When `vp_id == DOMAIN_GLOBAL_COMM` the page is accumulated as part
+    /// of the child's per-domain DomainComm region (header + RX/TX rings)
+    /// rather than a per-VP COMM page.  The capavisor initialises the
+    /// DomainComm at seal time once enough pages have been registered.
     pub const THEMIS_REGISTER_COMM: u64 = 0x18;
 
     /// Notify the capavisor to process the caller's DomainComm TX ring.
@@ -190,6 +195,14 @@ pub mod policy_kind {
     pub const MSR_RANGE: u64 = 14;
     pub const MSR_EMULATE: u64 = 15;
 }
+
+// ── REGISTER_COMM vp_id sentinel ──────────────────────────────────────────── //
+
+/// Sentinel `vp_id` for `REGISTER_COMM`: marks the page as part of the
+/// per-domain DomainComm region (header + RX/TX rings) rather than a per-VP
+/// COMM page.  Pages are accumulated and the DomainComm is initialised at
+/// seal time.
+pub const DOMAIN_GLOBAL_COMM: u32 = u32::MAX;
 
 // ── Hypercall return codes (RAX on return) ───────────────────────────────── //
 

@@ -1008,7 +1008,7 @@ impl Domain {
             for (cov_hpa_start, cov_hpa_end, cov_gpa) in &covers {
                 // Identity gap before this covered range.
                 if cursor < *cov_hpa_start {
-                    let mut vr = ViewRegion::new(Access::new(cursor, *cov_hpa_start - cursor, rights));
+                    let vr = ViewRegion::new(Access::new(cursor, *cov_hpa_start - cursor, rights));
                     // physical_start already == cursor (identity)
                     translated.push(vr);
                 }
@@ -1021,7 +1021,7 @@ impl Domain {
             }
             // Identity tail after last covered range.
             if cursor < hpa_end {
-                let mut vr = ViewRegion::new(Access::new(cursor, hpa_end - cursor, rights));
+                let vr = ViewRegion::new(Access::new(cursor, hpa_end - cursor, rights));
                 translated.push(vr);
             }
         }

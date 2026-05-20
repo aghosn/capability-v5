@@ -422,7 +422,7 @@ pub(crate) fn handle_local_exit(
     platform: &crate::platform::ThemisPlatform,
 ) {
     match reason {
-        EXIT_REASON_CPUID => handle_cpuid_local(vcpu),
+        EXIT_REASON_CPUID => handle_cpuid_local(vcpu, platform),
         EXIT_REASON_RDMSR => handle_rdmsr_local(vcpu),
         EXIT_REASON_WRMSR => handle_wrmsr_local(vcpu),
         EXIT_REASON_CR_ACCESS => handle_cr_access(vcpu),
@@ -793,7 +793,7 @@ fn reinject_exception(vcpu: &mut ActiveVcpu) {
 /// Executes `cpuid` on the physical CPU, applies security masks (AVX-512,
 /// XSAVE area), and intercepts Themis hypervisor leaves.
 /// Used by both the dom0 path and child domains with `trap=false` for CPUID.
-fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
+fn handle_cpuid_local(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisPlatform) {
     let leaf = vcpu.reg(Reg::Rax) as u32;
     let sub_leaf = vcpu.reg(Reg::Rcx) as u32;
     let result = core::arch::x86_64::__cpuid_count(leaf, sub_leaf);
@@ -852,12 +852,32 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu) {
             edx = 0;
         }
         (CPUID_THEMIS_DOMCOMM, _) => {
-            let gpa = DOMCOMM_GPA.load(core::sync::atomic::Ordering::Relaxed);
-            let pages = DOMCOMM_PAGES.load(core::sync::atomic::Ordering::Relaxed);
-            eax = gpa as u32;
-            ebx = (gpa >> 32) as u32;
-            ecx = pages;
-            edx = 0;
+            // Per-domain DomainComm discovery: look up the calling domain's
+            // DomainComm header HPA.  Falls back to the global dom0 value
+            // for domains that don't have their own DomainComm yet.
+            let mut found = false;
+            if let Some(core_id) = platform.get_current_core() {
+                let dom_id = platform.core_domain_id(core_id as usize);
+                if let Some(arc) = platform.get_platform_domain(dom_id) {
+                    let pd = arc.lock();
+                    if let Some(ref dc) = pd.domcomm {
+                        eax = dc.header_hpa as u32;
+                        ebx = (dc.header_hpa >> 32) as u32;
+                        ecx = 1 + dc.rx.page_hpas.len() as u32 + dc.tx.page_hpas.len() as u32;
+                        edx = 0;
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                // Fallback: global dom0 values (bootstrap path).
+                let gpa = DOMCOMM_GPA.load(core::sync::atomic::Ordering::Relaxed);
+                let pages = DOMCOMM_PAGES.load(core::sync::atomic::Ordering::Relaxed);
+                eax = gpa as u32;
+                ebx = (gpa >> 32) as u32;
+                ecx = pages;
+                edx = 0;
+            }
         }
         (CPUID_THEMIS_LIMITS, _) => {
             eax = THEMIS_MAX_VPS;

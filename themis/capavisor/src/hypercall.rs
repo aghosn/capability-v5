@@ -408,16 +408,30 @@ fn do_seal(
     });
     match result {
         Ok(_) => {
+            // Resolve the child domain for post-seal setup.
+            let child_cap = caller
+                .read()
+                .data
+                .get_domain_capability(domain_handle)
+                .and_then(|weak| weak.upgrade());
+
+            if let Some(child) = &child_cap {
+                // Finalize DomainComm if pages were registered pre-seal.
+                let child_id = child.read().data.id;
+                if let Some(header_hpa) = platform.finalize_domcomm(child_id) {
+                    serial_println!(
+                        "[seal] DomainComm initialized for domain {:?} (header @ {:#x})",
+                        child_id,
+                        header_hpa,
+                    );
+                }
+            }
+
             // intr-p3g: program IRTEs for the newly-sealed child domain.
             #[cfg(target_arch = "x86_64")]
             {
-                let child_cap = caller
-                    .read()
-                    .data
-                    .get_domain_capability(domain_handle)
-                    .and_then(|weak| weak.upgrade());
-                if let Some(child) = child_cap {
-                    program_domain_irtes(platform, &child);
+                if let Some(child) = &child_cap {
+                    program_domain_irtes(platform, child);
                 }
             }
             HypercallResult::success()

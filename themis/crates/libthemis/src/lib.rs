@@ -318,3 +318,8 @@ pub fn register_comm(cap: u64, child_domain: u64, vp_id: u64) -> Result<(), u64>
         unsafe { vmcall3(opcodes::THEMIS_REGISTER_COMM, cap, child_domain, vp_id) };
     check(rax)
 }
+
+/// Register a page as part of the child domain's per-domain DomainComm region.
+pub fn register_domcomm(cap: u64, child_domain: u64) -> Result<(), u64> {
+    register_comm(cap, child_domain, themis_abi::DOMAIN_GLOBAL_COMM as u64)
+}

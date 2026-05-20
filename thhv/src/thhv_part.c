@@ -62,6 +62,15 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->ept_meta_pages);
 	}
 
+	/* Free kernel-allocated DomainComm pages. */
+	if (part->domcomm_pages) {
+		unsigned int j;
+
+		for (j = 0; j < part->domcomm_nr_pages; j++)
+			__free_page(part->domcomm_pages[j]);
+		kfree(part->domcomm_pages);
+	}
+
 	/* Free all memory regions (unpin pages only; caps revoked via sent_caps). */
 	{
 		struct rb_node *n;
@@ -1013,6 +1022,100 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 		}
 		part->chan_handle = chan;
 		pr_debug("thhv: sent channel 0x%llx to child\n", chan);
+	}
+
+	/*
+	 * Provision per-domain DomainComm pages: allocate 4 kernel pages,
+	 * CARVE each from dom0's memory, and REGISTER_COMM with the
+	 * DOMAIN_GLOBAL_COMM sentinel.  The capavisor accumulates the HPAs
+	 * and initialises the child's DomainComm ring at seal time.
+	 */
+	{
+#define DOMCOMM_NR_PAGES 4
+		unsigned int i;
+		struct page **dc_pages;
+
+		dc_pages = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_pages),
+				   GFP_KERNEL);
+		if (!dc_pages) {
+			ret = -ENOMEM;
+			goto err_revoke;
+		}
+
+		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
+			dc_pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+			if (!dc_pages[i]) {
+				while (i--)
+					__free_page(dc_pages[i]);
+				kfree(dc_pages);
+				ret = -ENOMEM;
+				goto err_revoke;
+			}
+		}
+
+		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
+			u64 gpa = (u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT;
+			u64 hpa = thhv_gpa_to_hpa(gpa);
+			u64 parent_handle, carved_handle, sub;
+
+			if (hpa == (u64)-1) {
+				pr_err("thhv: domcomm page %u: GPA %#llx not in PA map\n",
+				       i, gpa);
+				ret = -EFAULT;
+				goto err_free_domcomm;
+			}
+
+			ret = thhv_find_parent_handle(hpa, PAGE_SIZE,
+						      &parent_handle);
+			if (ret) {
+				pr_err("thhv: domcomm page %u: no parent cap for HPA %#llx\n",
+				       i, hpa);
+				goto err_free_domcomm;
+			}
+
+			ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
+					   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
+					   &carved_handle, &sub);
+			if (ret) {
+				pr_err("thhv: domcomm page %u: CARVE failed (%d)\n",
+				       i, ret);
+				goto err_free_domcomm;
+			}
+
+			ret = thhv_cap_table_insert(carved_handle, parent_handle,
+						    sub, hpa, PAGE_SIZE);
+			if (ret) {
+				pr_err("thhv: domcomm page %u: cap_table_insert failed (%d)\n",
+				       i, ret);
+				goto err_free_domcomm;
+			}
+
+			ret = themis_register_comm(carved_handle,
+						   part->domain_handle,
+						   THEMIS_DOMAIN_GLOBAL_COMM);
+			if (ret) {
+				pr_err("thhv: domcomm page %u: REGISTER_COMM failed (%d)\n",
+				       i, ret);
+				goto err_free_domcomm;
+			}
+		}
+
+		part->domcomm_pages = dc_pages;
+		part->domcomm_nr_pages = DOMCOMM_NR_PAGES;
+		pr_debug("thhv: provisioned %u DomainComm pages for child\n",
+			 DOMCOMM_NR_PAGES);
+
+		goto domcomm_done;
+err_free_domcomm:
+		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
+			if (dc_pages[i])
+				__free_page(dc_pages[i]);
+		}
+		kfree(dc_pages);
+		goto err_revoke;
+domcomm_done:
+		;
+#undef DOMCOMM_NR_PAGES
 	}
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
