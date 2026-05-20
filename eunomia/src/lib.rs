@@ -18,6 +18,7 @@ pub mod idt;
 pub mod boot;
 pub mod sched;
 pub mod hv;
+pub mod domcomm;
 
 // Re-export libthemis (typed hypercall wrappers) and themis-abi (opcodes,
 // error codes) so workloads can call e.g. `eunomia::themis::alias()`.
