@@ -3,8 +3,6 @@
 use crate::capability::CapabilityRef;
 use crate::memory::{Access, MemoryRegion, RegionKind, Rights};
 use crate::update::{DomainId, UpdateBatch};
-#[cfg(feature = "address_translation")]
-use crate::translation::{AddressMap, MapEntry};
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -12,54 +10,21 @@ use core::fmt;
 
 /// A view region representing accessible memory for a domain.
 ///
-/// When `address_translation` is enabled, `access.start` is the GPA and
-/// `physical_start` is the backing HPA.  Without translation both are equal.
-#[derive(Debug, Clone)]
+/// `access.start` is the GPA (what the domain sees).
+/// `physical_start` is the HPA (backing physical address).
+/// When no remap, `physical_start == access.start`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ViewRegion {
-    /// Memory access descriptor (address, size, rights).
-    /// `start` is GPA when translated, HPA otherwise.
+    /// Memory access descriptor (GPA address, size, rights)
     pub access: Access,
-    /// Backing physical address (HPA).  Equals `access.start` when no
-    /// address translation is in use.
+    /// Backing physical address (HPA). Equal to access.start when no remap.
     pub physical_start: u64,
 }
 
-/// Sort by address (GPA/HPA) only; physical_start is secondary.
-impl PartialEq for ViewRegion {
-    fn eq(&self, other: &Self) -> bool {
-        self.access == other.access && self.physical_start == other.physical_start
-    }
-}
-impl Eq for ViewRegion {}
-
-impl PartialOrd for ViewRegion {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for ViewRegion {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.access
-            .cmp(&other.access)
-            .then(self.physical_start.cmp(&other.physical_start))
-    }
-}
-
 impl ViewRegion {
-    /// Create a view region where physical == virtual (identity / HPA mode).
     pub fn new(access: Access) -> Self {
-        ViewRegion {
-            physical_start: access.start,
-            access,
-        }
-    }
-
-    /// Create a view region with explicit physical backing (GPA mode).
-    pub fn new_translated(access: Access, physical_start: u64) -> Self {
-        ViewRegion {
-            access,
-            physical_start,
-        }
+        let physical_start = access.start;
+        ViewRegion { access, physical_start }
     }
 
     pub fn start(&self) -> u64 {
@@ -74,7 +39,6 @@ impl ViewRegion {
     pub fn size(&self) -> u64 {
         self.access.size
     }
-    /// End of the physical backing range.
     pub fn physical_end(&self) -> u64 {
         self.physical_start + self.access.size
     }
@@ -154,9 +118,9 @@ impl fmt::Display for AddressSpaceView {
 /// Uses a sweep-line over all boundary points:
 /// for each sub-interval between adjacent boundaries, compute the union of
 /// rights from all regions that cover it.  Then merge adjacent same-rights
-/// sub-intervals in a final pass (only if physically contiguous).
+/// sub-intervals in a final pass.
 fn coalesce_regions(regions: &mut Vec<ViewRegion>) {
-    // Collect all boundary points.
+    // Collect all boundary points (GPA-based).
     let mut points: Vec<u64> = Vec::new();
     for r in regions.iter() {
         points.push(r.start());
@@ -169,28 +133,28 @@ fn coalesce_regions(regions: &mut Vec<ViewRegion>) {
     for w in points.windows(2) {
         let seg_start = w[0];
         let seg_end = w[1];
+        let seg_size = seg_end - seg_start;
 
         // Union of rights from every region that fully covers [seg_start, seg_end).
-        // Take physical_start from the first covering region.
+        // Also recover the physical_start from the first covering region.
         let mut combined: Option<Rights> = None;
-        let mut phys: Option<u64> = None;
+        let mut phys = seg_start; // default: identity
         for r in regions.iter() {
             if r.start() <= seg_start && r.end() >= seg_end {
+                if combined.is_none() {
+                    // Physical offset within the covering region.
+                    phys = r.physical_start + (seg_start - r.start());
+                }
                 combined = Some(match combined {
                     None => r.rights(),
                     Some(e) => e.union(&r.rights()),
                 });
-                if phys.is_none() {
-                    phys = Some(r.physical_start + (seg_start - r.start()));
-                }
             }
         }
         if let Some(rights) = combined {
-            let physical = phys.unwrap_or(seg_start);
-            result.push(ViewRegion::new_translated(
-                Access::new(seg_start, seg_end - seg_start, rights),
-                physical,
-            ));
+            let mut vr = ViewRegion::new(Access::new(seg_start, seg_size, rights));
+            vr.physical_start = phys;
+            result.push(vr);
         }
     }
 
@@ -285,10 +249,6 @@ pub fn compute_view_from_cap_arcs(
 ///
 /// Both views must be in canonical (coalesced, non-overlapping, sorted) form.
 /// Uses a sweep-line over all boundary points from both views.
-///
-/// When views are GPA-based (address_translation), the emitted `ChangeRights`
-/// updates carry the correct `address` (GPA) and `physical` (HPA) fields
-/// directly — no post-hoc fixup is needed.
 pub fn view_diff(
     domain_id: DomainId,
     before: &AddressSpaceView,
@@ -322,35 +282,21 @@ pub fn view_diff(
             .iter()
             .find(|r| r.start() <= seg_start && r.end() >= seg_end);
 
-        let before_rights = before_region.map(|r| r.rights());
-        let after_rights = after_region.map(|r| r.rights());
+        // Recover the physical address for this segment from the covering region.
+        let phys_from = |r: &ViewRegion| r.physical_start + (seg_start - r.start());
 
-        match (before_rights, after_rights) {
+        match (before_region, after_region) {
             (None, None) => {}
             (Some(_), None) => {
-                let phys = before_region
-                    .map(|r| r.physical_start + (seg_start - r.start()))
-                    .unwrap_or(seg_start);
-                updates.add_change_rights(domain_id, seg_start, seg_size, phys, Rights::NONE, true);
+                updates.add_change_rights(domain_id, seg_start, seg_size, seg_start, Rights::NONE, true);
             }
-            (None, Some(r)) => {
-                let phys = after_region
-                    .map(|r| r.physical_start + (seg_start - r.start()))
-                    .unwrap_or(seg_start);
-                updates.add_change_rights(domain_id, seg_start, seg_size, phys, r, false);
+            (None, Some(a)) => {
+                updates.add_change_rights(domain_id, seg_start, seg_size, phys_from(a), a.rights(), false);
             }
-            (Some(b), Some(a)) if b == a => {}
-            (Some(b), Some(a)) => {
-                let phys = after_region
-                    .map(|r| r.physical_start + (seg_start - r.start()))
-                    .unwrap_or(seg_start);
-                if a.is_subset_of(&b) {
-                    // Rights reduced.
-                    updates.add_change_rights(domain_id, seg_start, seg_size, phys, a, true);
-                } else {
-                    // Rights expanded or changed — remap with new rights.
-                    updates.add_change_rights(domain_id, seg_start, seg_size, phys, a, false);
-                }
+            (Some(b), Some(a)) if b.rights() == a.rights() => {}
+            (Some(_b), Some(a)) => {
+                let shootdown = a.rights().is_subset_of(&_b.rights());
+                updates.add_change_rights(domain_id, seg_start, seg_size, phys_from(a), a.rights(), shootdown);
             }
         }
     }
@@ -418,50 +364,4 @@ pub(crate) fn subtract_access_list(regions: Vec<Access>, to_sub: Access) -> Vec<
         }
     }
     result
-}
-
-// ── GPA translation ───────────────────────────────────────────────────────
-
-/// Translate an HPA-based view into a GPA-based view using the domain's
-/// [`AddressMap`].
-///
-/// For each HPA view region, finds ALL matching `Mapped` entries in the
-/// address map (handles double-maps: same HPA mapped at multiple GPAs).
-/// The resulting view has `access.start` = GPA and `physical_start` = HPA.
-///
-/// HPA regions with no corresponding AddressMap entry are omitted (they
-/// have no GPA translation → no EPT mapping).
-#[cfg(feature = "address_translation")]
-pub fn translate_view_to_gpa(
-    hpa_view: &AddressSpaceView,
-    map: &AddressMap,
-) -> AddressSpaceView {
-    let mut gpa_view = AddressSpaceView::new(hpa_view.domain_id);
-
-    for region in &hpa_view.regions {
-        let hpa_start = region.start();
-        let hpa_end = region.end();
-        let rights = region.rights();
-
-        for entry in map.entries().values() {
-            if let MapEntry::Mapped(m) = entry {
-                let m_hpa_end = m.hpa_start + m.size;
-                // Compute overlap of [hpa_start, hpa_end) and [m.hpa_start, m_hpa_end)
-                let overlap_start = core::cmp::max(hpa_start, m.hpa_start);
-                let overlap_end = core::cmp::min(hpa_end, m_hpa_end);
-                if overlap_start < overlap_end {
-                    let offset_in_entry = overlap_start - m.hpa_start;
-                    let gpa_start = m.gpa_start + offset_in_entry;
-                    let overlap_size = overlap_end - overlap_start;
-                    gpa_view.add_region(ViewRegion::new_translated(
-                        Access::new(gpa_start, overlap_size, rights),
-                        overlap_start,
-                    ));
-                }
-            }
-        }
-    }
-
-    gpa_view.coalesce();
-    gpa_view
 }

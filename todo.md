@@ -41,9 +41,13 @@
   after stripping VTOM bit in CHV's handle_mmio_exit and emulator translate_gva.
 - **VTOM EBDA double-map**: ✅ CHV double-maps ACPI/EBDA region at VTOM-offset GPA
   so CoCo kernel can access firmware tables with VTOM bit set.
-- **GPA-aware view_diff**: ✅ `translate_view_to_gpa()` + `snapshot_view()` produce
-  GPA-keyed views so same-HPA-at-two-GPAs emits distinct ChangeRights. Tutorial 17
-  validates.  Removed ad-hoc fixup patch.
+- **GPA-native view computation**: ✅ ViewRegion carries both GPA (`access.start`)
+  and HPA (`physical_start`). `ensure_view_fresh()` translates HPA→GPA via
+  address_map entries (identity fallback when uncovered). `view_diff` produces
+  {GPA, HPA} ChangeRights directly. Same-HPA-at-two-GPAs (VTOM double-map)
+  naturally produces two view regions. Tutorial 17 validates. Removed
+  `snapshot_view`, `translate_view_to_gpa`, `fixup_domain_addresses` from
+  carve/send/accept (kept in revoke for tree-walk updates).
 - **Lazy view caching**: ✅ `Domain.view_dirty` flag — mutations mark dirty,
   `ensure_view_fresh()` recomputes only when read. Eliminates redundant
   double-recomputation. No loom gate — full correctness under loom.
@@ -63,6 +67,10 @@
 
 ### Recent commits
 
+- `HEAD` — **capa-engine: GPA-native view computation redesign**
+  (ViewRegion carries {GPA, HPA}, ensure_view_fresh translates via address_map,
+  removed snapshot_view/translate_view_to_gpa, cleaned fixup from carve/send/accept)
+- `53d7b1e` — **capa-engine: lazy view caching with dirty flag**
 - `84bfaed` — **capa-engine: fix stale cached_view after cross-domain revoke**
   (remove_memory_capability_by_ref, 4 cache-staleness tests, loom fix)
 - `2b34aad` — **capa-engine: GPA-aware view_diff for VTOM double-map**
@@ -73,11 +81,7 @@
 
 ### Uncommitted changes
 
-- **capa-engine** (`domain.rs`, `capability.rs`):
-  - Lazy view caching: `view_dirty` flag, `ensure_view_fresh()`, removed
-    `refresh_domain_view()` and 7 redundant refresh calls
-  - `snapshot_view` takes `&mut Domain`, `compute_address_space` uses write lock
-  - Removed loom gate on view recomputation (was masking real bugs)
+None — all changes committed.
 - **docs** (`docs/capability-engine/implementation.md`):
   - Documented view caching, dirty tracking, GPA-aware view_diff
 - **todo.md**: updated to reflect current state
@@ -158,12 +162,12 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 - [x] CHV: push Native/Emulate CPUID policy during domain setup
 - [x] VTOM bit stripping in handle_mmio_exit + emulator translate_gva
 
-**What needs implementation (ACPI firmware double-map — NEXT)**:
-- [ ] CHV: separate ACPI/firmware region (`0xA0000–0xFFFFF`) into its own memory
-      slot instead of being part of the main RAM blob. Register it twice:
-      once at base GPA and once at `GPA | (1 << vtom_bit)`.
-      The EBDA region is in the e820 gap (kernel marks it nosave, never recycles).
-- [ ] Verify dom1 CoCo kernel boots past ACPI table parsing after double-map.
+**What needs implementation (ACPI firmware double-map)**:
+- [x] CHV: double-map EBDA (0xA0000–0xFFFFF) at VTOM-offset GPA during
+      initialization (committed CHV `bc2ccfe`)
+- [x] Engine: GPA-aware view_diff handles same-HPA-at-two-GPAs correctly
+      (committed `2b34aad`, `84bfaed`, `53d7b1e`)
+- [ ] **NEXT**: Boot dom0 + CoCo dom1, verify kernel gets past ACPI table parsing
 
 **What needs implementation (CoCo end-to-end)**:
 - [ ] CHV: distinguish shared (MMIO) vs exclusive (guest RAM) memory at setup time.

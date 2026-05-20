@@ -15,9 +15,7 @@ use crate::sync::RwLock;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 #[cfg(not(feature = "address_translation"))]
 use crate::update::{CoreId, DomainId, UpdateBatch};
-use crate::view::{compute_view_from_cap_arcs, view_diff, AddressSpaceView};
-#[cfg(feature = "address_translation")]
-use crate::view::translate_view_to_gpa;
+use crate::view::{view_diff, AddressSpaceView};
 use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -1035,30 +1033,6 @@ fn remove_footprint(
     Ok(())
 }
 
-/// Snapshot the domain's current view for diff purposes.
-///
-/// Lazily recomputes the HPA-based `cached_view` if `view_dirty` is set.
-/// When `address_translation` is enabled and the domain has AddressMap
-/// entries, translates the HPA-based `cached_view` through the domain's
-/// [`AddressMap`] to produce a GPA-based view.  When the map is empty
-/// (bootstrap / test domains), returns the cached HPA view as-is
-/// (identity GPA=HPA fallback).
-fn snapshot_view(domain: &mut crate::domain::Domain) -> AddressSpaceView {
-    domain.ensure_view_fresh();
-    #[cfg(feature = "address_translation")]
-    {
-        if domain.address_map.entries().is_empty() {
-            domain.cached_view.clone()
-        } else {
-            translate_view_to_gpa(&domain.cached_view, &domain.address_map)
-        }
-    }
-    #[cfg(not(feature = "address_translation"))]
-    {
-        domain.cached_view.clone()
-    }
-}
-
 /// Read the cached address-space view for a domain.  Lazily recomputes
 /// if the view is dirty.
 pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView {
@@ -1132,7 +1106,9 @@ impl Capability<Domain> {
         // carve_child and child_ref operate on CapabilityRef<MemoryRegion> — independent
         // arcs, safe to lock while holding the domain write lock.
         let mut w = caller.write();
-        let view_before = snapshot_view(&mut w.data);
+
+        w.data.ensure_view_fresh();
+        let view_before = w.data.cached_view.clone();
 
         let child_ref = Capability::carve_child(&parent_ref, access, owner_id)?;
 
@@ -1191,8 +1167,10 @@ impl Capability<Domain> {
                 }
             }
 
-            let view_after = snapshot_view(&mut w.data);
-            view_diff(owner_id, &view_before, &view_after)
+            w.data.ensure_view_fresh();
+            let view_after = w.data.cached_view.clone();
+            let updates = view_diff(owner_id, &view_before, &view_after);
+            updates
         };
 
         Ok((new_handle, child_sub, updates))
@@ -1542,8 +1520,10 @@ impl Capability<Domain> {
             return Err(CapaError::PermissionDenied);
         }
 
-        let view_caller_before = snapshot_view(&mut caller_w.data);
-        let view_receiver_before = snapshot_view(&mut recv_w.data);
+        caller_w.data.ensure_view_fresh();
+        let view_caller_before = caller_w.data.cached_view.clone();
+        recv_w.data.ensure_view_fresh();
+        let view_receiver_before = recv_w.data.cached_view.clone();
 
         let cap_weak = caller_w
             .data
@@ -1623,9 +1603,11 @@ impl Capability<Domain> {
             recv_w.data.mapped_gpas.insert(new_handle, gpa_base);
         }
 
-        // Snapshot GPA-aware views AFTER all mutations (caps + AddressMap).
-        let view_caller_after = snapshot_view(&mut caller_w.data);
-        let view_receiver_after = snapshot_view(&mut recv_w.data);
+        // Snapshot views AFTER all mutations.
+        caller_w.data.ensure_view_fresh();
+        let view_caller_after = caller_w.data.cached_view.clone();
+        recv_w.data.ensure_view_fresh();
+        let view_receiver_after = recv_w.data.cached_view.clone();
 
         let mut updates = view_diff(caller_id, &view_caller_before, &view_caller_after);
         updates.merge(view_diff(
@@ -1761,8 +1743,10 @@ impl Capability<Domain> {
         }
 
         // Snapshot views BEFORE mutation.
-        let view_sender_before = snapshot_view(&mut sender_w.data);
-        let view_receiver_before = snapshot_view(&mut recv_w.data);
+        sender_w.data.ensure_view_fresh();
+        let view_sender_before = sender_w.data.cached_view.clone();
+        recv_w.data.ensure_view_fresh();
+        let view_receiver_before = recv_w.data.cached_view.clone();
 
         let new_handle = recv_w.data.allocate_memory_handle();
 
@@ -1810,9 +1794,11 @@ impl Capability<Domain> {
             recv_w.data.mapped_gpas.insert(new_handle, gpa_base);
         }
 
-        // Snapshot GPA-aware views AFTER all mutations (caps + AddressMap).
-        let view_sender_after = snapshot_view(&mut sender_w.data);
-        let view_receiver_after = snapshot_view(&mut recv_w.data);
+        // Snapshot views AFTER all mutations.
+        sender_w.data.ensure_view_fresh();
+        let view_sender_after = sender_w.data.cached_view.clone();
+        recv_w.data.ensure_view_fresh();
+        let view_receiver_after = recv_w.data.cached_view.clone();
 
         let mut updates = view_diff(sender_domain_id, &view_sender_before, &view_sender_after);
         updates.merge(view_diff(

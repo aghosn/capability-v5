@@ -62,9 +62,6 @@ pub use view::{
 };
 
 #[cfg(feature = "address_translation")]
-pub use view::translate_view_to_gpa;
-
-#[cfg(feature = "address_translation")]
 pub use translation::{AddressMap, MapEntry, MappingEntry};
 #[cfg(feature = "cache_coloring")]
 pub use translation::ColorBitmap;

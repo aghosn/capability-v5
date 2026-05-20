@@ -940,6 +940,9 @@ impl Domain {
 
     /// Recompute the cached address-space view if `view_dirty` is set.
     /// No-op if the view is already up-to-date.
+    ///
+    /// When `address_translation` is enabled, translates HPA regions to GPA
+    /// using the address_map. Regions with no mapping keep GPA = HPA.
     pub fn ensure_view_fresh(&mut self) {
         if !self.view_dirty {
             return;
@@ -950,7 +953,82 @@ impl Domain {
             .filter_map(|w| w.upgrade())
             .collect();
         self.cached_view = compute_view_from_cap_arcs(self.id, &cap_arcs);
+
+        #[cfg(feature = "address_translation")]
+        self.translate_view_to_gpa();
+
         self.view_dirty = false;
+    }
+
+    /// Translate the cached HPA view to GPA using address_map.
+    ///
+    /// For each view region (HPA-keyed), find overlapping address_map entries
+    /// and remap to GPA. Regions (or sub-regions) with no address_map coverage
+    /// keep GPA = HPA (identity).
+    #[cfg(feature = "address_translation")]
+    fn translate_view_to_gpa(&mut self) {
+        use crate::translation::MapEntry;
+        use crate::view::ViewRegion;
+        use crate::memory::Access;
+
+        if self.address_map.entries().is_empty() {
+            return; // All identity — nothing to do.
+        }
+
+        let mut translated = alloc::vec::Vec::new();
+
+        for region in &self.cached_view.regions {
+            let hpa_start = region.start();
+            let hpa_end = region.end();
+            let rights = region.rights();
+
+            // Collect mapped sub-ranges that overlap this HPA region.
+            let mut covers: alloc::vec::Vec<(u64, u64, u64)> = alloc::vec::Vec::new(); // (hpa_overlap_start, hpa_overlap_end, gpa_start)
+            for entry in self.address_map.entries().values() {
+                if let MapEntry::Mapped(m) = entry {
+                    let m_hpa_end = m.hpa_start + m.size;
+                    let overlap_start = core::cmp::max(hpa_start, m.hpa_start);
+                    let overlap_end = core::cmp::min(hpa_end, m_hpa_end);
+                    if overlap_start < overlap_end {
+                        let offset = overlap_start - m.hpa_start;
+                        covers.push((overlap_start, overlap_end, m.gpa_start + offset));
+                    }
+                }
+            }
+            covers.sort_by_key(|&(s, _, _)| s);
+
+            if covers.is_empty() {
+                // No mapping — identity (GPA = HPA).
+                translated.push(region.clone());
+                continue;
+            }
+
+            // Emit: identity gaps + translated overlaps.
+            let mut cursor = hpa_start;
+            for (cov_hpa_start, cov_hpa_end, cov_gpa) in &covers {
+                // Identity gap before this covered range.
+                if cursor < *cov_hpa_start {
+                    let mut vr = ViewRegion::new(Access::new(cursor, *cov_hpa_start - cursor, rights));
+                    // physical_start already == cursor (identity)
+                    translated.push(vr);
+                }
+                // Translated range.
+                let size = *cov_hpa_end - *cov_hpa_start;
+                let mut vr = ViewRegion::new(Access::new(*cov_gpa, size, rights));
+                vr.physical_start = *cov_hpa_start;
+                translated.push(vr);
+                cursor = *cov_hpa_end;
+            }
+            // Identity tail after last covered range.
+            if cursor < hpa_end {
+                let mut vr = ViewRegion::new(Access::new(cursor, hpa_end - cursor, rights));
+                translated.push(vr);
+            }
+        }
+
+        self.cached_view.regions = translated;
+        self.cached_view.regions.sort();
+        self.cached_view.coalesce();
     }
 
     /// Add a capability to the pending queue (for sealed domains with RECEIVE_AFTER_SEAL)
