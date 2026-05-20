@@ -1097,6 +1097,14 @@ struct thhv_partition {
 	 * DomainComm ring at seal time. */
 	struct page **domcomm_pages;
 	unsigned int  domcomm_nr_pages;
+	/* Per-page capability tracking for revoking on teardown:
+	 *   carved_handles[i] = local handle of carved cap (for cap_table removal)
+	 *   parent_handles[i] = parent handle (for REVOKE_MEM)
+	 *   sub_handles[i]    = sub-handle within parent (for REVOKE_MEM)
+	 */
+	u64 *domcomm_carved_handles;
+	u64 *domcomm_parent_handles;
+	u64 *domcomm_sub_handles;
 };
 
 /* Per-VP state. */
