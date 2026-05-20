@@ -77,6 +77,8 @@
 #define THEMIS_HC_INJECT_INTERRUPT   0x1b
 #define THEMIS_HC_READ_PCR           0x1e
 #define THEMIS_HC_MAP_SELF           0x1f
+#define THEMIS_HC_SEND_CHAN          0x20
+#define THEMIS_HC_ACCEPT_CHAN        0x21
 #define THEMIS_HC_SET_POLICY        0x22
 
 /* ── Themis hypercall opcodes (RAX in) ─────────────────────────────────────── */
@@ -109,6 +111,8 @@
 #define THEMIS_OP_TOGGLE_DEBUG      0x1d
 #define THEMIS_OP_READ_PCR          0x1e
 #define THEMIS_OP_MAP_SELF          0x1f
+#define THEMIS_OP_SEND_CHAN        0x20
+#define THEMIS_OP_ACCEPT_CHAN      0x21
 #define THEMIS_OP_SET_POLICY      0x22
 
 /* ── Policy-kind discriminants for THEMIS_OP_SET_POLICY ────────────────────── */
@@ -1080,6 +1084,11 @@ struct thhv_partition {
 
 	struct file *file;
 	struct kref refcount;
+
+	/* Channel capability handle: a channel pointing back to the parent
+	 * (dom0), automatically created and sent to the child at domain
+	 * creation.  The child accepts it to send capabilities back. */
+	u64 chan_handle;
 };
 
 /* Per-VP state. */
@@ -1176,6 +1185,8 @@ int themis_accept(u64 pending_id, u64 *out_handle);
 int themis_reject(u64 pending_id);
 int themis_switch(u64 target_domain, u64 vp_id);
 int themis_get_chan(u64 domain, u64 *out_handle);
+int themis_send_chan(u64 chan, u64 receiver, u64 attrs);
+int themis_accept_chan(u64 pending_id, u64 *out_handle);
 int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
 		       u64 *out_size);
 int themis_attest_self_signed(u64 tx_sequence, u64 *out_size);

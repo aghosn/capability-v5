@@ -992,6 +992,29 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 	pr_debug("thhv: created domain handle 0x%llx (%u VPs)\n",
 		 part->domain_handle, cp.num_vps);
 
+	/*
+	 * Provision a channel back to the parent: get a self-channel (handle=0
+	 * means "channel pointing at myself") and send it to the child.  The
+	 * child will accept it after boot and use it to send capabilities
+	 * (e.g. shared bounce buffers) back to the parent.
+	 */
+	{
+		u64 chan;
+
+		ret = themis_get_chan(0, &chan);
+		if (ret) {
+			pr_err("thhv: GET_CHAN(self) failed (%d)\n", ret);
+			goto err_revoke;
+		}
+		ret = themis_send_chan(chan, part->domain_handle, 0);
+		if (ret) {
+			pr_err("thhv: SEND_CHAN failed (%d)\n", ret);
+			goto err_revoke;
+		}
+		part->chan_handle = chan;
+		pr_debug("thhv: sent channel 0x%llx to child\n", chan);
+	}
+
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		ret = fd;

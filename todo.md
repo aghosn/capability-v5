@@ -57,7 +57,10 @@
 
 ### What doesn't work / known issues
 
-- **Dom1 emergency mode on QEMU**: fstab references missing partitions.
+- **Dom1 virtio-blk rootfs failure**: kernel boots fully (ACPI, PCI, 2 CPUs) but
+  panics at VFS mount — `/dev/vda1` shows as `unknown-block(0,0)` error -6.
+  Virtio-blk not registering; likely transport negotiation or IOMMU/DMA issue.
+  **Must fix before CoCo e2e.**
 - **Unguarded interrupt injection**: 2 fallback paths without RFLAGS.IF check.
 - **Posted interrupts**: hardware PI disabled (software PIR drain instead).
 - **Dom1 on real hardware**: not yet tested.

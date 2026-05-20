@@ -134,6 +134,22 @@ int themis_get_chan(u64 domain, u64 *out_handle)
 	return __themis_to_errno(status);
 }
 
+int themis_send_chan(u64 chan, u64 receiver, u64 attrs)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_SEND_CHAN,
+				     chan, receiver, attrs, 0, 0,
+				     NULL, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
+int themis_accept_chan(u64 pending_id, u64 *out_handle)
+{
+	u64 status = __themis_vmcall(THEMIS_OP_ACCEPT_CHAN,
+				     pending_id, 0, 0, 0, 0,
+				     out_handle, NULL, NULL);
+	return __themis_to_errno(status);
+}
+
 int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
 		       u64 *out_size)
 {

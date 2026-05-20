@@ -63,7 +63,7 @@ pub mod opcodes {
     pub const THEMIS_SWITCH: u64 = 0x0A;
 
     /// Get a channel capability to a domain.
-    /// IN:  RDI = domain_handle
+    /// IN:  RDI = domain_handle (0 = self-channel, for receiving from children)
     /// OUT: RDI = channel_handle
     pub const THEMIS_GET_CHAN: u64 = 0x0B;
 
@@ -144,6 +144,15 @@ pub mod opcodes {
     ///      RSI = new_gpa (target GPA; must not overlap other mapped regions)
     /// OUT: RAX = error code (0 on success)
     pub const THEMIS_MAP_SELF: u64 = 0x1f;
+
+    /// Send a channel capability to a receiver domain.
+    /// IN:  RDI = channel_handle, RSI = receiver_domain_handle, RDX = attributes
+    pub const THEMIS_SEND_CHAN: u64 = 0x20;
+
+    /// Accept a pending channel capability.
+    /// IN:  RDI = pending_id
+    /// OUT: RDI = new_handle
+    pub const THEMIS_ACCEPT_CHAN: u64 = 0x21;
 
     /// Unified policy-setting hypercall — maps directly to
     /// `Capability::set_policy(&caller, child_handle, PolicyIdentifier, value)`.

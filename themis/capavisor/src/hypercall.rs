@@ -221,8 +221,12 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
 
         opcodes::THEMIS_MAP_SELF => Some(do_map_self(platform, &caller, arg0, arg1)),
 
+        opcodes::THEMIS_GET_CHAN => Some(do_get_chan(&caller, arg0)),
+        opcodes::THEMIS_SEND_CHAN => Some(do_send_chan(&caller, arg0, arg1, arg2)),
+        opcodes::THEMIS_ACCEPT_CHAN => Some(do_accept_chan(&caller, arg0)),
+
         // Stubbed — return ERR_UNIMPL
-        opcodes::THEMIS_GET_CHAN | opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
+        opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
             Some(HypercallResult::unimpl())
         }
 
@@ -326,6 +330,46 @@ fn do_reject(
         Capability::reject(&caller, pending_id).map(|()| ((), Default::default()))
     }) {
         Ok(_) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+// ── Channel (domain capability transfer) handlers ────────────────────────── //
+
+/// GET_CHAN (0x0B): get a channel capability to a child domain.
+/// If domain_handle == 0, creates a self-channel (for receiving from children).
+fn do_get_chan(caller: &CapabilityRef<Domain>, domain_handle: u64) -> HypercallResult {
+    let caller = caller.clone();
+    let result = if domain_handle == 0 {
+        Capability::get_chan_self(&caller)
+    } else {
+        Capability::get_chan(&caller, domain_handle)
+    };
+    match result {
+        Ok(handle) => HypercallResult::success_1(handle),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// SEND_CHAN (0x20): send a channel capability to a receiver domain.
+fn do_send_chan(
+    caller: &CapabilityRef<Domain>,
+    chan_handle: u64,
+    receiver_handle: u64,
+    attrs: u64,
+) -> HypercallResult {
+    let caller = caller.clone();
+    match Capability::send_channel(&caller, chan_handle, receiver_handle, Attributes::from_bits(attrs as u8)) {
+        Ok(()) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
+}
+
+/// ACCEPT_CHAN (0x21): accept a pending channel capability.
+fn do_accept_chan(caller: &CapabilityRef<Domain>, pending_id: u64) -> HypercallResult {
+    let caller = caller.clone();
+    match Capability::accept_channel(&caller, pending_id) {
+        Ok(handle) => HypercallResult::success_1(handle),
         Err(e) => HypercallResult::error(map_error(&e)),
     }
 }
