@@ -19,6 +19,11 @@ pub mod boot;
 pub mod sched;
 pub mod hv;
 
+// Re-export libthemis (typed hypercall wrappers) and themis-abi (opcodes,
+// error codes) so workloads can call e.g. `eunomia::themis::alias()`.
+pub use libthemis as themis;
+pub use themis_abi;
+
 /// Kernel services handle passed to workload's `app_main`.
 ///
 /// Provides access to initialised kernel subsystems.  Currently a
