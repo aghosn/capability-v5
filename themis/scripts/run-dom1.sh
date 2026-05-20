@@ -41,12 +41,14 @@ CHV_MEM="${CHV_MEM:-1G}"
 KERNEL="${KERNEL:-}"
 INITRAMFS="${INITRAMFS:-}"
 BACKEND_MODE="auto"
+CONFIDENTIAL=false
 
 # ── Parse arguments ───────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --kvm)     BACKEND_MODE="kvm";    shift ;;
-        --themis)  BACKEND_MODE="themis"; shift ;;
+        --themis)        BACKEND_MODE="themis"; shift ;;
+        --confidential)  CONFIDENTIAL=true;     shift ;;
         --help|-h)
             head -27 "$0" | tail -25
             exit 0
@@ -243,6 +245,12 @@ if [[ -n "$SELECTED_INITRAMFS" ]]; then
     INITRAMFS_ARGS="--initramfs $SELECTED_INITRAMFS"
 fi
 
+PLATFORM_ARGS=""
+if [[ "$CONFIDENTIAL" == "true" ]]; then
+    PLATFORM_ARGS="--platform confidential=on"
+    echo "  mode:      CONFIDENTIAL (guest RAM carved, dom0 loses access)"
+fi
+
 exec "$CHV" \
     -v \
     --kernel "$SELECTED_KERNEL" \
@@ -255,4 +263,5 @@ exec "$CHV" \
     --serial tty \
     --console tty \
     --seccomp false \
+    ${PLATFORM_ARGS} \
     ${CHV_EXTRA_ARGS:-} >/tmp/chv-stdout.log 2>/tmp/chv-stderr.log
