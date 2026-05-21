@@ -837,6 +837,11 @@ pub struct ThemicMessageHeader {
 /// offset 512 on a child VP exit.  The driver copies it to userspace.
 ///
 /// Matches `struct themic_intercept_message` in thhv.h (120 bytes).
+/// Slim intercept message — exit metadata only, no register values.
+///
+/// Register values live in the COMM page register area, gated by
+/// `ExitPolicy.read_set`.  thhv reads registers from there and
+/// assembles the full `themic_intercept_message` for CHV.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InterceptMessage {
@@ -845,23 +850,13 @@ pub struct InterceptMessage {
     pub instruction_length: u32,
     pub exit_qualification: u64,
     pub guest_physical_address: u64,
-    pub guest_rip: u64,
-    pub guest_rflags: u64,
-    // I/O port intercept fields.
+    // I/O port intercept fields (from exit_qualification, not registers).
     pub port_number: u16,
     pub access_size: u8,
     pub is_write: u8,
     pub _reserved: u32,
-    pub rax: u64,
     // MMIO intercept fields.
     pub instruction_bytes: [u8; 16],
-    // CPUID intercept fields.
-    pub cpuid_rax: u64,
-    pub cpuid_rcx: u64,
-    // MSR intercept fields.
-    pub msr_number: u32,
-    pub _rsvd2: u32,
-    pub msr_value: u64,
 }
 
-const _INTERCEPT_MSG_SIZE_CHECK: () = assert!(core::mem::size_of::<InterceptMessage>() == 120);
+const _INTERCEPT_MSG_SIZE_CHECK: () = assert!(core::mem::size_of::<InterceptMessage>() == 64);

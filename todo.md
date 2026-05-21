@@ -75,6 +75,10 @@
 
 ### Recent commits
 
+- `9c13207af` — **Structured attestation API and CoCo workload fixes**:
+  `build_structured_attestation()` in engine as single source of truth,
+  `to_bytes()` binary serialization, capavisor `do_attest_self` rewritten
+  to use engine API, eunomia CoCo tests all 4 pass
 - `1d9867d8d` — **COMM-as-SEND redesign**: DomainComm pages provisioned via
   CARVE+SEND, domcomm finalization on first hypercall, CHV confidential cleanup
 - `235ed4c81` — **CHV: confidential memory slot splitting** (cloud-hypervisor submodule)
@@ -88,61 +92,16 @@
   (ViewRegion carries {GPA, HPA}, ensure_view_fresh translates via address_map,
   removed snapshot_view/translate_view_to_gpa, cleaned fixup from carve/send/accept)
 
-### Uncommitted changes
-
-**Compound allocation batching + Eunomia CoCo test fixes** (not yet committed):
-
-- `thhv/src/thhv_part.c` — compound `alloc_pages(order)` for META and COMM pages;
-  `thhv_send_meta_pages()` detects contiguous physical runs → single CARVE+SEND per
-  run; teardown handles compound pages via `PageHead()`/`PageTail()`.
-- `thhv/inc/thhv.h` — added `DOMCOMM_NR_PAGES` (4) / `DOMCOMM_ORDER` (2) defines.
-- `eunomia/workloads/coco/src/main.rs` — added `attest_self()` call before dequeue;
-  added `paging::map_4k()` for vTOM alias address in `test_vtom_double_map`.
-- `themis/capavisor/src/hypercall.rs` — **debug prints to remove** (`[DBG] do_attest_self`,
-  `[DBG] attest_self: enqueueing/domcomm is None`).
-- `themis/capavisor/src/platform.rs` — **debug prints to remove** (`[DBG] finalize_domcomm`,
-  `[DBG] CommRegion`).
-
-**Results so far**:
-- `domcomm_discover` ✅, `attest_dequeue` ✅ (24 mem caps, down from ~128).
-- `vtom_double_map` ❌ — see BUG-16 below.
+---
 
 ---
 
-### BUG-16: vtom_double_map #PF at unrelated address
+### ~~BUG-16: vtom_double_map~~ ✅ Fixed
 
-**Symptom**: `test_vtom_double_map` faults with `error_code=0x0` (read, not-present,
-supervisor) at `CR2 = 0x7acf5a5fbeb8` — an address that doesn't correspond to any
-test pointer.
-
-**Context**: the test picks a usable mem cap (non-META, non-COMM) via attestation,
-creates an ALIAS at `VTOM + page_gpa`, does `MAP_SELF`, maps the vTOM VA in guest
-page tables, writes `0xDEAD_BEEF_C0C0_CAFE` through the vTOM pointer, then reads
-back through `orig_ptr = page_gpa`. RAX already contains `0xDEADBEEFC0C0CAFE`
-in the register dump, suggesting the vTOM write succeeded.
-
-**Root cause analysis** (two issues identified):
-
-1. **`orig_ptr` above 4 GiB identity map**: the usable cap is at GPA `0x1041cd000`
-   (~4.065 GiB), which is above Eunomia's boot identity map (covers 0–4 GiB with
-   2M pages). Reading from `orig_ptr` as a VA will fault because there's no guest
-   page table entry. **Fix**: either `map_4k(page_gpa, page_gpa)` for the original
-   mapping too, or `find_usable_mem_cap` should prefer caps within the identity-
-   mapped range (below 4 GiB).
-
-2. **Suspicious CR2**: `0x7acf5a5fbeb8` is NOT `0x1041cd000`. This suggests the
-   fault might actually be inside `paging::map_4k()` or inside `println!` formatting
-   code, or that `alloc_pt_frame()` in `eunomia/src/paging.rs` returns a BSS pool
-   virtual address that gets stored as a physical address in page table entries —
-   which only works if BSS is within the identity-mapped range.
-
-**Where to look**:
-- `eunomia/workloads/coco/src/main.rs` lines 182–222 — the test function
-- `eunomia/src/paging.rs` — `map_4k`, `ensure_table`, `alloc_pt_frame` (line 49)
-- Check if `alloc_pt_frame()` addresses are valid when used as physical addresses
-  in PTEs
-
-**TODO**: pick one fix approach and verify.
+Fixed in commit `9c13207af`. Root causes: (1) attestation reported HPA in both
+GPA and HPA fields — fixed by using `mapped_gpas` via structured attestation API;
+(2) unnecessary `map_4k` call on identity-mapped addresses — removed;
+(3) `send_chan` vs `send` confusion in bounce_buffer_send — corrected.
 
 ---
 
@@ -232,8 +191,9 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 - [x] Capavisor: wire CHANNEL GET/SEND/ACCEPT hypercalls (0x1e, 0x20, 0x21)
 - [x] thhv: auto-provision parent-back-channel at domain creation
 - [x] CHV: gate VTOM/EBDA/CoCo-CPUID on confidential mode (vtom_bit=0 when off)
-- [ ] Eunomia CoCo workload: ~~test CARVE isolation~~ domcomm+attest done,
-      vtom_double_map blocked on BUG-16, bounce_buffer_send not yet reached
+- [ ] Eunomia CoCo workload: domcomm+attest+vtom_double_map+bounce_send all pass ✅
+      Structured attestation API in engine (single source of truth).
+- [ ] thhv: receive pending capability from child (wait for event, ACCEPT_CHAN)
 - [ ] CHV: receive shared regions back from dom1 (accept alias via channel)
 - [ ] Dom1 kernel: early init share-back — create aliases of swiotlb pool,
       MAP_SELF at VTOM GPA, CHANNEL_SEND the other to dom0
@@ -243,19 +203,37 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 **Open questions**:
 - Channel revocation semantics (does revoking endpoint cascade to sent caps?)
   → Resolved: yes, CDT cascades naturally (see design doc §9.8)
-- **Intercept message leaks guest state to parent unconditionally**:
-  `forward_child_exit` populates the full `InterceptMessage` (RAX, RIP,
-  RFLAGS, exit_qualification, guest_physical_address, instruction_bytes,
-  MSR values, I/O port+data, CPUID leaf values) for ALL exit reasons
-  regardless of policy. The `read_set` only gates the register area of
-  the VpCommPage, not the intercept message fields. Fix: reuse the
-  `ProcFeature` / `ProcFeatureConfig<T>` interposition infrastructure
-  (shared by CPUID and MSR) to add per-exit-reason policy. Key space is
-  platform-specific (x86 exit reasons ≠ ARM exception classes). Actions
-  control which intercept message fields are exposed to the parent
-  (Trap with full info / Trap with masked fields / Block / Native).
-  Related: `themis/capavisor/src/hypercall.rs` lines 1536–1609,
-  `capa-engine/src/interposition.rs`.
+- **Intercept message register leak fix** (active):
+  `forward_child_exit` currently embeds register values (RAX, RIP,
+  RFLAGS, CPUID leaf/subleaf, MSR number/value) directly in the
+  `InterceptMessage`, bypassing `ExitPolicy.read_set`. Fix plan:
+  1. **Capavisor**: slim `InterceptMessage` to exit metadata only
+     (exit_reason, exit_qualification, guest_physical_address,
+     instruction_length, instruction_bytes, port/size/is_write).
+     Register values stay in COMM page register area, gated by read_set.
+  2. **thhv**: after reading slim intercept, populate register fields
+     by reading from COMM page register area based on exit_reason
+     (IO → RAX; MSR → RCX/RDX/RAX; CPUID → RAX/RCX). Assembles
+     full `themic_intercept_message` for CHV.
+  3. **CHV**: unchanged — same struct, same dispatch code.
+  Policy enforcement is automatic: read_set zeros disallowed registers
+  in COMM page → thhv reads zeros → CHV sees zeros.
+  Engine-side `ExitPolicy` (ExitAction with trap/read_set/write_set,
+  register_access_check, set_policy hypercall) already complete.
+  Related: `themis/capavisor/src/hypercall.rs` forward_child_exit,
+  `thhv/src/thhv_vp.c` thhv_read_intercept_msg,
+  `capa-engine/src/domain.rs` ExitPolicy/ExitAction.
+- **Refine per-exit-reason policies for confidential mode**: The default
+  ExitPolicy uses `RegBitmap::ALL` (read & write) for child domains.
+  When booting dom1 Linux in confidential mode, the child (or its
+  creation policy) should restrict read_set/write_set per exit reason
+  so the parent can only see/modify the registers actually needed
+  (e.g., IO exits → RAX only; CPUID → RAX/RCX; MSR → RCX/RAX/RDX).
+  Infrastructure is fully wired (`set_policy` hypercall, `ExitReasonRegReadSet`,
+  `ExitReasonRegWriteSet`); only needs concrete policy definitions.
+- **Future optimization**: mmap COMM page to CHV userspace so CHV reads
+  registers directly without ioctl round-trips. Would eliminate thhv
+  register-assembly step entirely.
 
 ### 4. Contiguous physical memory for VMs (research needed)
 

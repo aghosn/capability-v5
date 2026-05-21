@@ -211,8 +211,12 @@ struct thhv_create_vp {
 #define THHV_LAPIC_GPA	0xFEE00000ULL
 
 /* ── VM exit reasons (Intel SDM Vol 3C §27.9.1, Appendix C) ──────────── */
+#define THHV_EXIT_REASON_CPUID		10
 #define THHV_EXIT_REASON_HLT		12
+#define THHV_EXIT_REASON_IO		30
+#define THHV_EXIT_REASON_RDMSR		31
 #define THHV_EXIT_REASON_WRMSR		32
+#define THHV_EXIT_REASON_EPT_VIOLATION	48
 
 /* ── VP activity / MP state (Intel SDM Vol 3C §24.4.2) ───────────────── */
 #define THHV_MP_STATE_RUNNABLE		0
@@ -426,6 +430,35 @@ static inline void thhv_comm_mark_dirty(struct thhv_vp_comm_page *comm, unsigned
 }
 
 /*
+ * Read a register value from the COMM page.
+ * Returns 0 for unknown register IDs.
+ */
+static inline __u64 thhv_comm_get_reg(const struct thhv_vp_comm_page *comm, unsigned int reg)
+{
+	switch (reg) {
+	case THHV_VP_REG_RAX: return comm->rax;
+	case THHV_VP_REG_RBX: return comm->rbx;
+	case THHV_VP_REG_RCX: return comm->rcx;
+	case THHV_VP_REG_RDX: return comm->rdx;
+	case THHV_VP_REG_RSI: return comm->rsi;
+	case THHV_VP_REG_RDI: return comm->rdi;
+	case THHV_VP_REG_RBP: return comm->rbp;
+	case THHV_VP_REG_R8:  return comm->r8;
+	case THHV_VP_REG_R9:  return comm->r9;
+	case THHV_VP_REG_R10: return comm->r10;
+	case THHV_VP_REG_R11: return comm->r11;
+	case THHV_VP_REG_R12: return comm->r12;
+	case THHV_VP_REG_R13: return comm->r13;
+	case THHV_VP_REG_R14: return comm->r14;
+	case THHV_VP_REG_R15: return comm->r15;
+	case THHV_VP_REG_RSP:    return comm->rsp;
+	case THHV_VP_REG_RIP:    return comm->rip;
+	case THHV_VP_REG_RFLAGS: return comm->rflags;
+	default: return 0;
+	}
+}
+
+/*
  * Write a u64 register value to the COMM page field for 'reg' and mark dirty.
  * For selectors (u16) and limits/access-rights (u32), the caller writes
  * the value zero-extended to u64; the capavisor truncates on read.
@@ -470,9 +503,27 @@ struct themic_message_header {
 };
 
 /*
- * Intercept message — written by capavisor to slot 0 on VP exit.
- * This is the canonical exit info format.  The driver copies it
- * directly into thhv_run_vp.msg_buf for userspace.
+ * Slim intercept message — written by capavisor to COMM page offset 512.
+ * Contains only exit metadata; register values stay in the COMM page
+ * register area (gated by ExitPolicy.read_set).  thhv reads registers
+ * from there and assembles the full themic_intercept_message for CHV.
+ */
+struct themic_slim_intercept {
+	struct themic_message_header header;
+	__u32 exit_reason;
+	__u32 instruction_length;
+	__u64 exit_qualification;
+	__u64 guest_physical_address;
+	__u16 port_number;
+	__u8  access_size;
+	__u8  is_write;
+	__u32 reserved;
+	__u8  instruction_bytes[16];
+};
+
+/*
+ * Full intercept message — assembled by thhv from slim + COMM page regs.
+ * This is the format exposed to userspace (CHV).
  *
  * Fields are a superset: not all are valid for every exit reason.
  * The exit_reason field carries the capavisor-translated exit reason

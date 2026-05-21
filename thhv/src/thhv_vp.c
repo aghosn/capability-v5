@@ -20,18 +20,62 @@
 /* ── ThemIC intercept message reader ────────────────────────────────────────── */
 
 /*
- * Read the ThemIC intercept message from the message page slot 0.
- * The capavisor writes a themic_intercept_message there on VP exit.
+ * Read the slim intercept from COMM page offset 512 and assemble the
+ * full themic_intercept_message by pulling registers from the COMM page
+ * register area (which the capavisor filters via ExitPolicy.read_set).
  *
- * ThemIC message page: not yet implemented (see todo.md §Future work).
- * For now this reads from the COMM page padding area (offset 512+)
- * as a transitional measure.  Once ThemIC pages are wired, this
- * reads from the actual message page slot 0.
+ * This ensures the only path for register exposure is read_set — the
+ * intercept message itself carries no register values.
  */
 static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
 {
-	/* Copy the intercept slot (256 bytes) from comm page offset 512. */
-	memcpy(out_buf, (u8 *)vp->comm_kaddr + 512, THEMIC_MSG_SLOT_SIZE);
+	struct themic_slim_intercept slim;
+	struct themic_intercept_message *msg = (struct themic_intercept_message *)out_buf;
+	const struct thhv_vp_comm_page *comm =
+		(const struct thhv_vp_comm_page *)vp->comm_kaddr;
+
+	memset(msg, 0, sizeof(*msg));
+
+	/* Read slim intercept from COMM page offset 512. */
+	memcpy(&slim, (u8 *)vp->comm_kaddr + 512, sizeof(slim));
+
+	/* Copy exit metadata. */
+	msg->header              = slim.header;
+	msg->exit_reason         = slim.exit_reason;
+	msg->instruction_length  = slim.instruction_length;
+	msg->exit_qualification  = slim.exit_qualification;
+	msg->guest_physical_address = slim.guest_physical_address;
+	msg->port_number         = slim.port_number;
+	msg->access_size         = slim.access_size;
+	msg->is_write            = slim.is_write;
+	memcpy(msg->instruction_bytes, slim.instruction_bytes, 16);
+
+	/* Always populate RIP and RFLAGS (needed for logging/emulation). */
+	msg->guest_rip    = thhv_comm_get_reg(comm, THHV_VP_REG_RIP);
+	msg->guest_rflags = thhv_comm_get_reg(comm, THHV_VP_REG_RFLAGS);
+
+	/* Populate exit-type-specific register fields. */
+	switch (slim.exit_reason) {
+	case THHV_EXIT_REASON_IO:
+		msg->rax = thhv_comm_get_reg(comm, THHV_VP_REG_RAX);
+		break;
+	case THHV_EXIT_REASON_CPUID:
+		msg->cpuid_rax = thhv_comm_get_reg(comm, THHV_VP_REG_RAX);
+		msg->cpuid_rcx = thhv_comm_get_reg(comm, THHV_VP_REG_RCX);
+		break;
+	case THHV_EXIT_REASON_RDMSR:
+		msg->msr_number = (u32)thhv_comm_get_reg(comm, THHV_VP_REG_RCX);
+		break;
+	case THHV_EXIT_REASON_WRMSR: {
+		__u64 rax = thhv_comm_get_reg(comm, THHV_VP_REG_RAX);
+		__u64 rdx = thhv_comm_get_reg(comm, THHV_VP_REG_RDX);
+		msg->msr_number = (u32)thhv_comm_get_reg(comm, THHV_VP_REG_RCX);
+		msg->msr_value  = ((rdx & 0xFFFFFFFF) << 32) | (rax & 0xFFFFFFFF);
+		break;
+	}
+	default:
+		break;
+	}
 }
 
 /* ── THHV_RUN_VP handler ──────────────────────────────────────────────────── */

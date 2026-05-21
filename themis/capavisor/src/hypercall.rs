@@ -1517,10 +1517,10 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             comm.write_reg(*reg, val);
         }
 
-        // Write the intercept message at offset 512 so the driver can read it.
+        // Write the slim intercept message at offset 512.
+        // Register values stay in the COMM page register area (gated by read_set);
+        // thhv reads them from there per exit_reason.
         let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
-        let guest_rip = vcpu.get(vmcs::guest::RIP);
-        let guest_rflags = vcpu.get(vmcs::guest::RFLAGS);
         let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
         let guest_phys = vcpu
             .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
@@ -1548,7 +1548,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             (0u16, 0u8, 0u8)
         };
 
-        let msg = InterceptMessage {
+        let mut msg = InterceptMessage {
             header: ThemicMessageHeader {
                 message_type: THEMIC_MSG_VP_INTERCEPT,
                 payload_size: (core::mem::size_of::<InterceptMessage>()
@@ -1560,31 +1560,17 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             instruction_length: instr_len,
             exit_qualification: exit_qual,
             guest_physical_address: guest_phys,
-            guest_rip,
-            guest_rflags,
-            rax: vcpu.reg(Reg::Rax),
-            // I/O exit fields (only meaningful when exit_reason == 28).
             port_number: io_port,
             access_size: io_size,
             is_write: io_is_write,
-            // Fill CPUID leaf/subleaf so CHV emulates the correct leaf.
-            cpuid_rax: vcpu.reg(Reg::Rax),
-            cpuid_rcx: vcpu.reg(Reg::Rcx),
-            // Fill MSR fields for RDMSR/WRMSR exits (exit reasons 31/32).
-            msr_number: vcpu.reg(Reg::Rcx) as u32,
-            msr_value: ((vcpu.reg(Reg::Rdx) & 0xFFFF_FFFF) << 32)
-                | (vcpu.reg(Reg::Rax) & 0xFFFF_FFFF),
             ..InterceptMessage::default()
         };
 
         // ── MMIO instruction decode for EPT violations ──
         // For EPT violations, supply the raw instruction bytes so CHV's
         // iced-x86 emulator can decode and emulate the faulting instruction.
-        let mut msg = msg; // make mutable
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
-            let _exit_qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let _gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-            // Try to decode the instruction at guest RIP.
+            let guest_rip = vcpu.get(vmcs::guest::RIP);
             let ept_root = {
                 let cd = child_arc.lock();
                 cd.arch.ept().map(|e| e.root_phys())
