@@ -47,6 +47,195 @@ impl AttestationReport {
     }
 }
 
+// ─── Structured attestation ───────────────────────────────────────────────────
+
+/// A memory capability entry in a structured attestation.
+#[derive(Debug, Clone)]
+pub struct MemCapInfo {
+    pub handle: LocalHandle,
+    /// Guest Physical Address (where this region appears in the domain's
+    /// address space).  Falls back to `hpa` when no GPA mapping exists
+    /// (e.g. the root domain with identity mapping).
+    pub gpa: u64,
+    /// Host Physical Address (the actual physical address of the region).
+    pub hpa: u64,
+    pub size: u64,
+    pub rights: u32,
+    pub attributes: u32,
+}
+
+/// A domain capability entry in a structured attestation.
+#[derive(Debug, Clone)]
+pub struct DomCapInfo {
+    pub handle: LocalHandle,
+    pub domain_id: u64,
+}
+
+/// A GPA→HPA translation entry.
+#[derive(Debug, Clone)]
+pub struct PaMapInfo {
+    pub gpa: u64,
+    pub hpa: u64,
+    pub size: u64,
+}
+
+/// Structured attestation report for a domain.
+///
+/// Contains all the information a domain needs to understand its own
+/// capabilities and address space.  Platform code can serialize this
+/// into whatever wire format is appropriate (binary for the capavisor,
+/// text for the CLI, etc.).
+#[derive(Debug, Clone)]
+pub struct StructuredAttestation {
+    pub domain_id: u64,
+    pub flags: u32,
+    pub num_vps: u32,
+    pub api_flags: u32,
+    pub mem_caps: Vec<MemCapInfo>,
+    pub dom_caps: Vec<DomCapInfo>,
+    pub pa_map: Vec<PaMapInfo>,
+}
+
+impl StructuredAttestation {
+    /// Serialize to the binary wire format used by DomainComm.
+    ///
+    /// Layout: `[header (40B)] [MemCapEntry * N] [DomCapEntry * N] [PaMapEntry * N]`
+    ///
+    /// The header and entry types match `themis-abi::domcomm` exactly.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // Header: 40 bytes (10 × u32/u64 fields, see AttestReport in domcomm.rs)
+        let hdr_size = 40usize;
+        let mem_entry_size = 40usize; // handle(8) + gpa(8) + size(8) + rights(4) + attr(4) + hpa(8)
+        let dom_entry_size = 16usize; // handle(8) + domain_id(8)
+        let pa_entry_size = 24usize;  // gpa(8) + hpa(8) + size(8)
+
+        let total = hdr_size
+            + self.mem_caps.len() * mem_entry_size
+            + self.dom_caps.len() * dom_entry_size
+            + self.pa_map.len() * pa_entry_size;
+
+        let mut buf = Vec::with_capacity(total);
+
+        // Header fields (little-endian)
+        buf.extend_from_slice(&self.domain_id.to_le_bytes());       // 0..8
+        buf.extend_from_slice(&self.flags.to_le_bytes());           // 8..12
+        buf.extend_from_slice(&self.num_vps.to_le_bytes());         // 12..16
+        buf.extend_from_slice(&self.api_flags.to_le_bytes());       // 16..20
+        buf.extend_from_slice(&(self.mem_caps.len() as u32).to_le_bytes()); // 20..24
+        buf.extend_from_slice(&(self.dom_caps.len() as u32).to_le_bytes()); // 24..28
+        buf.extend_from_slice(&(self.pa_map.len() as u32).to_le_bytes());   // 28..32
+        buf.extend_from_slice(&0u16.to_le_bytes());                 // chunk_index 32..34
+        buf.extend_from_slice(&1u16.to_le_bytes());                 // total_chunks 34..36
+        buf.extend_from_slice(&0u32.to_le_bytes());                 // reserved 36..40
+
+        // MemCapEntry[]
+        for m in &self.mem_caps {
+            buf.extend_from_slice(&(m.handle as u64).to_le_bytes());
+            buf.extend_from_slice(&m.gpa.to_le_bytes());
+            buf.extend_from_slice(&m.size.to_le_bytes());
+            buf.extend_from_slice(&m.rights.to_le_bytes());
+            buf.extend_from_slice(&m.attributes.to_le_bytes());
+            buf.extend_from_slice(&m.hpa.to_le_bytes());
+        }
+
+        // DomCapEntry[]
+        for d in &self.dom_caps {
+            buf.extend_from_slice(&(d.handle as u64).to_le_bytes());
+            buf.extend_from_slice(&d.domain_id.to_le_bytes());
+        }
+
+        // PaMapEntry[]
+        for p in &self.pa_map {
+            buf.extend_from_slice(&p.gpa.to_le_bytes());
+            buf.extend_from_slice(&p.hpa.to_le_bytes());
+            buf.extend_from_slice(&p.size.to_le_bytes());
+        }
+
+        buf
+    }
+}
+
+/// Build a structured attestation for the given domain.
+///
+/// This is the **single source of truth** for attestation data.  The
+/// capavisor serializes it with [`StructuredAttestation::to_bytes()`];
+/// the CLI can format it however it likes.
+pub fn build_structured_attestation(
+    domain_ref: &CapabilityRef<Domain>,
+) -> StructuredAttestation {
+    let domain = domain_ref.read();
+    let domain_id = domain.data.id;
+    let num_vps = domain.data.policy.num_vprocessors as u32;
+    let api_flags = domain.data.policy.api.bits() as u32;
+    let flags = if domain.data.is_sealed() { 1u32 } else { 0u32 };
+
+    // Memory capabilities with proper GPA lookup.
+    let mem_caps: Vec<MemCapInfo> = domain
+        .data
+        .memory_capabilities
+        .iter()
+        .filter_map(|(handle, weak)| {
+            let cap_ref = weak.upgrade()?;
+            let c = cap_ref.read();
+            let hpa = c.data.access.start;
+            #[cfg(feature = "address_translation")]
+            let gpa = domain.data.mapped_gpas.get(handle).copied().unwrap_or(hpa);
+            #[cfg(not(feature = "address_translation"))]
+            let gpa = hpa;
+            Some(MemCapInfo {
+                handle: *handle,
+                gpa,
+                hpa,
+                size: c.data.access.size,
+                rights: c.data.access.rights.bits() as u32,
+                attributes: c.owned.attributes.bits() as u32,
+            })
+        })
+        .collect();
+
+    // Domain capabilities.
+    let dom_caps: Vec<DomCapInfo> = domain
+        .data
+        .domain_capabilities
+        .iter()
+        .filter_map(|(handle, weak)| {
+            let cap_ref = weak.upgrade()?;
+            let c = cap_ref.read();
+            Some(DomCapInfo {
+                handle: *handle,
+                domain_id: c.data.id,
+            })
+        })
+        .collect();
+
+    // PA map: non-META, non-COMM memory capabilities.
+    let meta_bit = crate::memory::Attributes::META as u32;
+    let comm_bit = crate::memory::Attributes::COMM as u32;
+    let pa_map: Vec<PaMapInfo> = mem_caps
+        .iter()
+        .filter(|m| m.attributes & meta_bit == 0)
+        .filter(|m| m.attributes & comm_bit == 0)
+        .filter(|m| m.size > 0)
+        .map(|m| PaMapInfo {
+            gpa: m.gpa,
+            hpa: m.hpa,
+            size: m.size,
+        })
+        .collect();
+
+    drop(domain);
+
+    StructuredAttestation {
+        domain_id,
+        flags,
+        num_vps,
+        api_flags,
+        mem_caps,
+        dom_caps,
+        pa_map,
+    }
+}
+
 // ─── Name-assignment context ──────────────────────────────────────────────────
 
 /// Carried through the recursive attestation, mapping each `Arc` pointer

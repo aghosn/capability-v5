@@ -273,8 +273,12 @@ fn do_alias(
         Capability::alias(&caller, parent_handle, access)
             .map(|(h, s)| ((h, s), UpdateBatch::default()))
     }) {
-        Ok(((handle, sub), _)) => HypercallResult::success_2(handle, sub),
-        Err(e) => HypercallResult::error(map_error(&e)),
+        Ok(((handle, sub), _)) => {
+            HypercallResult::success_2(handle, sub)
+        }
+        Err(e) => {
+            HypercallResult::error(map_error(&e))
+        }
     }
 }
 
@@ -513,6 +517,7 @@ fn do_attest_self(
     _arg3: u64,
 ) -> HypercallResult {
     use alloc::vec::Vec;
+    use capability_engine::build_structured_attestation;
     use themis_abi::domcomm;
 
     fn as_bytes<T: Sized>(val: &T) -> &[u8] {
@@ -524,78 +529,28 @@ fn do_attest_self(
     let is_signed = arg0 == 1;
     let offset = arg1 as usize;
 
-    // Snapshot the domain's capabilities under the read lock.
-    let domain = caller.read();
-    let domain_id = domain.data.id;
-    let num_vps = domain.data.policy.num_vprocessors as u32;
-    let api_flags = domain.data.policy.api.bits() as u32;
-
-    let mem_entries: Vec<domcomm::MemCapEntry> = domain
-        .data
-        .memory_capabilities
-        .iter()
-        .filter_map(|(handle, weak)| {
-            let cap_ref = weak.upgrade()?;
-            let c = cap_ref.read();
-            let hpa = c.data.access.start;
-            let gpa = domain.data.mapped_gpas.get(handle).copied().unwrap_or(hpa);
-            Some(domcomm::MemCapEntry {
-                handle: *handle,
-                gpa_start: gpa,
-                size: c.data.access.size,
-                rights: c.data.access.rights.bits() as u32,
-                attributes: c.owned.attributes.bits() as u32,
-                hpa_start: hpa,
-            })
-        })
-        .collect();
-
-    let dom_entries: Vec<domcomm::DomCapEntry> = domain
-        .data
-        .domain_capabilities
-        .iter()
-        .filter_map(|(handle, weak)| {
-            let cap_ref = weak.upgrade()?;
-            let c = cap_ref.read();
-            Some(domcomm::DomCapEntry {
-                handle: *handle,
-                domain_id: c.data.id,
-            })
-        })
-        .collect();
-
-    // PA entries from non-META, non-COMM memory capabilities (proper GPA→HPA).
-    let pa_entries: Vec<domcomm::PaMapEntry> = mem_entries
-        .iter()
-        .filter(|e| e.attributes & (Attributes::META as u32) == 0)
-        .filter(|e| e.attributes & (Attributes::COMM as u32) == 0)
-        .filter(|e| e.size > 0)
-        .map(|e| domcomm::PaMapEntry {
-            gpa_start: e.gpa_start,
-            hpa_start: e.hpa_start,
-            size: e.size,
-        })
-        .collect();
-
-    drop(domain); // Release read lock before platform domain lock.
-
-    let hdr = domcomm::AttestReport {
-        domain_id,
-        flags: 0,
-        num_vps,
-        api_flags,
-        nr_mem_caps: mem_entries.len() as u32,
-        nr_dom_caps: dom_entries.len() as u32,
-        nr_pa_entries: pa_entries.len() as u32,
-        chunk_index: 0,
-        total_chunks: 1,
-        reserved: 0,
-    };
+    // Build structured attestation from the engine (single source of truth).
+    let attest = build_structured_attestation(caller);
+    let domain_id = attest.domain_id;
 
     if is_signed {
         use sha2::{Digest, Sha256};
 
         let expected_seq = arg2;
+
+        // We need a domcomm::AttestReport header for the signed envelope.
+        let hdr = domcomm::AttestReport {
+            domain_id: attest.domain_id,
+            flags: attest.flags,
+            num_vps: attest.num_vps,
+            api_flags: attest.api_flags,
+            nr_mem_caps: attest.mem_caps.len() as u32,
+            nr_dom_caps: attest.dom_caps.len() as u32,
+            nr_pa_entries: attest.pa_map.len() as u32,
+            chunk_index: 0,
+            total_chunks: 1,
+            reserved: 0,
+        };
 
         // Dequeue AttestRequest from the caller's TX ring.
         let pd = match platform.get_platform_domain(domain_id) {
@@ -720,28 +675,11 @@ fn do_attest_self(
         }
         HypercallResult::success_2(total_size as u64, wrote as u64)
     } else {
-        // Full domain config — same wire format the thhv driver expects.
-        // Build the complete payload first, then slice from offset.
-
-        let offset = arg1 as usize;
-
-        let mut payload = Vec::new();
-        // Placeholder header — we'll patch chunk fields after we know the slice.
-        payload.extend_from_slice(as_bytes(&hdr));
-        for e in &mem_entries {
-            payload.extend_from_slice(as_bytes(e));
-        }
-        for e in &dom_entries {
-            payload.extend_from_slice(as_bytes(e));
-        }
-        for e in &pa_entries {
-            payload.extend_from_slice(as_bytes(e));
-        }
-
+        // Unsigned: serialize structured attestation to wire format.
+        let payload = attest.to_bytes();
         let total_size = payload.len();
 
         if offset >= total_size {
-            // Nothing left to send — return total_size with 0 bytes written.
             return HypercallResult::success_2(total_size as u64, 0);
         }
 
@@ -809,8 +747,12 @@ fn do_map_self(
     match execute(platform, false, || {
         Capability::map_self(&caller, cap_handle, new_gpa).map(|batch| ((), batch))
     }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
+        Ok(_) => {
+            HypercallResult::success()
+        }
+        Err(e) => {
+            HypercallResult::error(map_error(&e))
+        }
     }
 }
 

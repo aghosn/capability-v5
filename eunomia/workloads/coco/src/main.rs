@@ -209,8 +209,7 @@ fn find_cap_for_hpa(info: &AttestInfo, hpa: u64) -> Option<(&dc::MemCapEntry, u6
     for e in &info.mem_caps {
         // Skip META and COMM (canonicalized: META has CLEAN|VITAL, COMM has CLEAN).
         if e.attributes & 0x12 != 0 { continue; }
-        // MemCapEntry.gpa_start is actually the HPA (access.start from root domain).
-        let cap_hpa = e.gpa_start;
+        let cap_hpa = e.hpa_start;
         if hpa >= cap_hpa && hpa < cap_hpa + e.size {
             return Some((e, hpa - cap_hpa));
         }
@@ -248,12 +247,6 @@ fn test_attest_dequeue() -> Result<(), &'static str> {
     eunomia::println!("  attest: {} mem_caps, {} pa_entries, chan=0x{:x}",
         info.mem_caps.len(), info.pa_map.len(), info.chan_handle);
 
-    // Print PA map for debugging.
-    for (i, e) in info.pa_map.iter().enumerate() {
-        eunomia::println!("    pa[{}]: gpa=0x{:x} hpa=0x{:x} size=0x{:x}",
-            i, e.gpa_start, e.hpa_start, e.size);
-    }
-
     Ok(())
 }
 
@@ -275,41 +268,49 @@ fn test_vtom_double_map() -> Result<(), &'static str> {
     }
     let info = get_attest_info();
 
-    // 1. Allocate a page from the guest heap (VA = GPA, identity-mapped).
-    let page_gpa = alloc_page()?;
+    // 1. Pick a page from a free capability that does NOT overlap eunomia's
+    //    loaded image.  Use linker symbols to know our footprint.
+    extern "C" { static __heap_end_reserved: u8; }
+    let image_end = unsafe { &__heap_end_reserved as *const u8 as u64 };
 
-    // 2. Translate GPA → HPA via the attestation PA map.
-    let page_hpa = gpa_to_hpa(info, page_gpa).ok_or("GPA not in PA map")?;
+    let cap = info.mem_caps.iter()
+        .filter(|e| e.attributes & 0x12 == 0)   // skip META/COMM
+        .filter(|e| e.size >= 0x2000)            // need at least 2 pages
+        .filter(|e| e.gpa_start >= image_end)    // above eunomia image
+        .max_by_key(|e| e.size)
+        .ok_or("no usable free cap above image")?;
 
-    // 3. Find the covering capability (exclusive carve) by HPA.
-    let (cap, offset) = find_cap_for_hpa(info, page_hpa)
-        .ok_or("no cap covers this HPA")?;
+    // Use the first page of this capability.
+    let page_gpa = cap.gpa_start;
 
-    eunomia::println!("  page_gpa=0x{:x} hpa=0x{:x} cap=0x{:x}+0x{:x}",
-        page_gpa, page_hpa, cap.handle, offset);
+    // GPAs below 4GB are already identity-mapped (2M boot pages).
+    // Only call map_4k for addresses above 4GB.
+    if page_gpa >= 0x1_0000_0000 && !eunomia::paging::map_4k(page_gpa, page_gpa) {
+        return Err("paging map page failed");
+    }
 
-    // 4. Alias the page from the covering capability at the HPA offset.
-    let alias_start = cap.gpa_start + offset;
+    // 2. Alias the first page from this capability.
+    let alias_start = cap.hpa_start;
     let (vtom_handle, _) = eunomia::themis::alias(cap.handle, alias_start, 0x1000, R_RW)
         .map_err(|_| "alias for vTOM failed")?;
 
-    // 5. MAP_SELF the alias at VTOM + GPA (the shared/decrypted address).
+    // 3. MAP_SELF the alias at VTOM + GPA (the shared/decrypted address).
     eunomia::themis::map_self(vtom_handle, VTOM + page_gpa)
         .map_err(|_| "map_self vTOM failed")?;
 
-    // 6. Map the vTOM alias VA in guest page tables (identity: VA = GPA).
+    // 4. Map the vTOM alias VA in guest page tables.
     if !eunomia::paging::map_4k(VTOM + page_gpa, VTOM + page_gpa) {
         return Err("paging map vTOM failed");
     }
 
-    // 7. Write through the vTOM alias (simulated "shared" view).
+    // 5. Write through the vTOM alias (simulated "shared" view).
     let vtom_ptr = (VTOM + page_gpa) as *mut u64;
     let orig_ptr = page_gpa as *mut u64;
     unsafe {
         core::ptr::write_volatile(vtom_ptr, 0xDEAD_BEEF_C0C0_CAFE);
     }
 
-    // 8. Read through the original mapping — both map the same physical page.
+    // 6. Read through the original mapping — both map the same physical page.
     let val = unsafe { core::ptr::read_volatile(orig_ptr) };
     if val != 0xDEAD_BEEF_C0C0_CAFE {
         return Err("vTOM write not visible through original mapping");
@@ -327,31 +328,45 @@ fn test_bounce_buffer_send() -> Result<(), &'static str> {
     }
     let info = get_attest_info();
 
-    // 1. Allocate a page for the bounce buffer.
-    let bounce_gpa = alloc_page()?;
+    // 1. Pick a free page from a capability above eunomia's image.
+    extern "C" { static __heap_end_reserved: u8; }
+    let image_end = unsafe { &__heap_end_reserved as *const u8 as u64 };
 
-    // 2. GPA → HPA → covering capability.
-    let bounce_hpa = gpa_to_hpa(info, bounce_gpa).ok_or("bounce GPA not in PA map")?;
-    let (cap, offset) = find_cap_for_hpa(info, bounce_hpa)
-        .ok_or("no cap covers bounce HPA")?;
+    // Use second-largest cap (vtom_double_map may have taken the largest).
+    let mut candidates: Vec<&dc::MemCapEntry> = info.mem_caps.iter()
+        .filter(|e| e.attributes & 0x12 == 0)
+        .filter(|e| e.size >= 0x2000)
+        .filter(|e| e.gpa_start >= image_end)
+        .collect();
+    candidates.sort_by_key(|e| core::cmp::Reverse(e.size));
+    // Use second candidate if available, else first (different from vtom test).
+    let cap = if candidates.len() > 1 { candidates[1] } else {
+        candidates.first().ok_or("no usable free cap for bounce")?
+    };
 
-    // 3. Write a marker before sharing.
+    let bounce_gpa = cap.gpa_start;
+
+    // Ensure mapped in guest page tables (only needed above 4GB).
+    if bounce_gpa >= 0x1_0000_0000 && !eunomia::paging::map_4k(bounce_gpa, bounce_gpa) {
+        return Err("paging map bounce page failed");
+    }
+
+    // 2. Write a marker before sharing.
     let bounce_ptr = bounce_gpa as *mut u64;
     unsafe {
         core::ptr::write_volatile(bounce_ptr, 0xB0_B0_CAFE_BABE);
     }
 
-    // 4. Alias the page from the covering capability.
-    let alias_start = cap.gpa_start + offset;
+    // 3. Alias the page from the covering capability.
+    let alias_start = cap.hpa_start;
     let (bounce_handle, _) = eunomia::themis::alias(cap.handle, alias_start, 0x1000, R_RW)
         .map_err(|_| "alias for bounce buffer failed")?;
 
-    // 5. Send the alias to the parent via the channel.
-    eunomia::themis::send_chan(info.chan_handle, bounce_handle, 0)
-        .map_err(|_| "send_chan bounce buffer failed")?;
+    // 4. Send the memory alias to the parent via the channel handle.
+    eunomia::themis::send(bounce_handle, info.chan_handle, 0)
+        .map_err(|_| "send bounce buffer failed")?;
 
-    eunomia::println!("  bounce buffer sent via channel: gpa=0x{:x} handle=0x{:x}",
-        bounce_gpa, bounce_handle);
+    eunomia::println!("  bounce buffer sent: gpa=0x{:x}", bounce_gpa);
 
     Ok(())
 }
