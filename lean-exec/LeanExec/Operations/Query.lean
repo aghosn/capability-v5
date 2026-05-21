@@ -222,6 +222,18 @@ def attest (callerId : DomainId) (targetHandle : LocalHandle)
 
 private def toHexR (n : Nat) : String := s!"0x{String.ofList (Nat.toDigits 16 n)}"
 
+/-- Format a RegBitmap (list of 3 u64 words) as hex, matching Rust LowerHex.
+    Prints word[2]:word[1]:word[0] big-endian, skipping leading zero words. -/
+private def regBitmapToHex (words : List Nat) : String :=
+  let w0 := words.getD 0 0
+  let w1 := words.getD 1 0
+  let w2 := words.getD 2 0
+  if w0 == 0 && w1 == 0 && w2 == 0 then "0x0"
+  else
+    -- Combine into one big Nat: w2 << 128 | w1 << 64 | w0
+    let combined := w2 * (2^128) + w1 * (2^64) + w0
+    s!"0x{String.ofList (Nat.toDigits 16 combined)}"
+
 private def coresToBinaryStr (cores : CoreMask) : String :=
   if cores.isEmpty then "0b0"
   else
@@ -424,6 +436,21 @@ private partial def attestWithCtx (domId : DomainId) (ctx : AttestCtx)
       | .trap s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Trap\n"
       | .native s e => out := out ++ s!"    {toHexR s}..={toHexR e}: Native\n"
       | .emulate s e _ => out := out ++ s!"    {toHexR s}..={toHexR e}: Emulate(...)\n"
+
+  -- Exit policy
+  let exitActionStr := fun (a : ExitAction) =>
+    let actionStr := if a.trap then "Trap" else "Local"
+    let readStr := regBitmapToHex a.readSet
+    let writeStr := regBitmapToHex a.writeSet
+    s!"action={actionStr}, read={readStr}, write={writeStr}"
+  out := out ++ "Exit Policy:\n"
+  out := out ++ s!"  Default: {exitActionStr dom.policy.exits.default}\n"
+  if dom.policy.exits.overrides.isEmpty then
+    out := out ++ "  Overrides: (none)\n"
+  else
+    out := out ++ "  Overrides:\n"
+    for (reason, action) in dom.policy.exits.overrides do
+      out := out ++ s!"    Reason {reason}: {exitActionStr action}\n"
 
   -- Children + parent (includes CDT children + channels targeting this domain)
   out := out ++ s!"Children: {dom.domCaps.length + channelsTargetingMe.length}\n"

@@ -193,6 +193,7 @@ fn policy_field_code(field: &str) -> u64 {
         "num-vps" => 3,
         "cpuid-default" => 4,
         "msr-default" => 5,
+        "exit-default-trap" => 6,
         _ => 0xFF,
     }
 }

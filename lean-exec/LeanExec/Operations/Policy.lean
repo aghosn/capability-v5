@@ -114,6 +114,10 @@ def setPolicy (callerId : DomainId) (childHandle : LocalHandle)
     | "msr-default" =>
       let action := if value == 0 then DefaultAction.trap else DefaultAction.native
       pure { policy with msrs := { policy.msrs with default := action } }
+    | "exit-default-trap" =>
+      let trap := value != 0
+      pure { policy with exits := { policy.exits with
+        default := { policy.exits.default with trap := trap } } }
     | _ => CapaM.throw (.invalidOperation s!"unknown policy field: {field}")
   CapaM.setDomain childId { child with policy := newPolicy }
 
@@ -142,6 +146,8 @@ def getPolicy (callerId : DomainId) (childHandle : LocalHandle)
       pure (match child.policy.cpuid.default with | .trap => 0 | .native => 1)
     | "msr-default"        =>
       pure (match child.policy.msrs.default with | .trap => 0 | .native => 1)
+    | "exit-default-trap"  =>
+      pure (if child.policy.exits.default.trap then 1 else 0)
     | _ => CapaM.throw (.invalidOperation s!"unknown policy field: {field}")
 
 -- ════════════════════════════════════════════════════════════════════

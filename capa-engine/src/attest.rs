@@ -549,6 +549,31 @@ fn attest_with_context(
         format!("{:#x}..={:#x}", start, end)
     });
 
+    // Exit policy.
+    out.push_str("Exit Policy:\n");
+    let exits = &snap.policy.exits;
+    let trap_str = |t: bool| if t { "Trap" } else { "Local" };
+    out.push_str(&format!(
+        "  Default: action={}, read={:x}, write={:x}\n",
+        trap_str(exits.default.trap),
+        exits.default.read_set,
+        exits.default.write_set,
+    ));
+    if exits.overrides.is_empty() {
+        out.push_str("  Overrides: (none)\n");
+    } else {
+        out.push_str("  Overrides:\n");
+        for (reason, action) in &exits.overrides {
+            out.push_str(&format!(
+                "    Reason {}: action={}, read={:x}, write={:x}\n",
+                reason,
+                trap_str(action.trap),
+                action.read_set,
+                action.write_set,
+            ));
+        }
+    }
+
     // Children / parent.
     out.push_str(&format!("Children: {}\n", snap.children_len));
     if let Some(parent_ref) = snap.parent_weak.upgrade() {

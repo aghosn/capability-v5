@@ -82,6 +82,25 @@ structure ProcFeatureConfig where
 deriving Repr
 
 -- ════════════════════════════════════════════════════════════════════
+-- § Exit policy — per-exit-reason register gating
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Action for a specific VMEXIT reason.
+    trap = true means forward to parent; read/write sets gate register access.
+    RegBitmap is modeled as a list of 3 u64 words (192 bits). -/
+structure ExitAction where
+  trap     : Bool
+  readSet  : List Nat   -- 3 words (each word is a Nat representing u64)
+  writeSet : List Nat
+deriving Repr, BEq
+
+/-- VMEXIT routing policy: default action + per-exit-reason overrides. -/
+structure ExitPolicy where
+  default   : ExitAction
+  overrides : List (Nat × ExitAction)  -- (exit_reason, action)
+deriving Repr
+
+-- ════════════════════════════════════════════════════════════════════
 -- § Domain policy — frozen at seal time
 -- ════════════════════════════════════════════════════════════════════
 
@@ -100,6 +119,7 @@ structure DomainPolicy where
   numVps     : Nat               -- number of virtual processors
   cpuid      : ProcFeatureConfig -- CPUID interposition policy
   msrs       : ProcFeatureConfig -- MSR interposition policy
+  exits      : ExitPolicy        -- VMEXIT exit routing policy
 deriving Repr
 
 -- ════════════════════════════════════════════════════════════════════

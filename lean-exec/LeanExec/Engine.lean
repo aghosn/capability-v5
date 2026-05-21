@@ -273,7 +273,8 @@ def dispatch (stRef : IO.Ref CliState) (cmd : Command) : IO String := do
         interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
         numVps := coreList.length
         cpuid := { default := .trap, overrides := [] }
-        msrs := { default := .trap, overrides := [] } }
+        msrs := { default := .trap, overrides := [] }
+        exits := { default := { trap := true, readSet := [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF], writeSet := [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF] }, overrides := [] } }
     let result ← runCapaM stRef (LeanExec.create parentId childPolicy)
     match result with
     | .ok (handle, newId, updates) =>

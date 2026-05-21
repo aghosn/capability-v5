@@ -210,6 +210,13 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
   Slim `InterceptMessage` (120B → 64B, exit metadata only). thhv assembles
   full message from slim + COMM page registers. `ExitPolicy.read_set` is now
   the single gate for register exposure. Dom1 Linux boots successfully.
+- [x] **ExitPolicy in attestation** (uncommitted):
+  Added Exit Policy section to attestation reports (both Rust engine and Lean
+  executable model). Shows default action + per-reason overrides with trap/read_set/
+  write_set bitmaps. Lean `setPolicy`/`getPolicy` supports `exit-default-trap`.
+  Differential test passes (15/17 tutorials — 2 pre-existing view failures).
+  Rust CLI `parse_policy_id` supports `exit-default-trap`, `exit-reason-trap:<N>`,
+  `exit-read:<reason>:<word>`, `exit-write:<reason>:<word>`.
 - **Refine per-exit-reason policies for confidential mode**: The default
   ExitPolicy uses `RegBitmap::ALL` (read & write) for child domains.
   When booting dom1 Linux in confidential mode, the child (or its

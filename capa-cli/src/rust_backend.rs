@@ -1131,6 +1131,28 @@ fn parse_policy_id(s: &str) -> Result<PolicyIdentifier> {
         let (key, word) = parse_emulate_pair(rest)?;
         return Ok(PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key, 0, word));
     }
+    // Exit policy: exit-default-trap, exit-reason-trap:<reason>,
+    // exit-read:<reason>:<word>, exit-write:<reason>:<word>
+    if s.eq_ignore_ascii_case("exit-default-trap") {
+        return Ok(PolicyIdentifier::DefaultExitTrap);
+    }
+    if let Some(rest) = s.strip_prefix("exit-reason-trap:") {
+        let reason = rest.parse::<u32>().map_err(|_|
+            BackendError::InvalidOperation(format!("Invalid exit reason: {}", rest)))?;
+        return Ok(PolicyIdentifier::ExitReasonTrap(reason));
+    }
+    if let Some(rest) = s.strip_prefix("exit-read:") {
+        let (reason_str, word) = parse_exit_reason_word(rest)?;
+        let reason = reason_str.parse::<u32>().map_err(|_|
+            BackendError::InvalidOperation(format!("Invalid exit reason: {}", reason_str)))?;
+        return Ok(PolicyIdentifier::ExitReasonRegReadSet(reason, word));
+    }
+    if let Some(rest) = s.strip_prefix("exit-write:") {
+        let (reason_str, word) = parse_exit_reason_word(rest)?;
+        let reason = reason_str.parse::<u32>().map_err(|_|
+            BackendError::InvalidOperation(format!("Invalid exit reason: {}", reason_str)))?;
+        return Ok(PolicyIdentifier::ExitReasonRegWriteSet(reason, word));
+    }
     Err(BackendError::InvalidOperation(format!("Unknown policy: '{}'", s)))
 }
 
@@ -1144,6 +1166,22 @@ fn parse_vector_word(s: &str) -> Result<(&str, u8)> {
             ));
         }
         Ok((vec_part, w))
+    } else {
+        Ok((s, 0))
+    }
+}
+
+/// Parse "reason:word" for exit policy reg read/write set.
+fn parse_exit_reason_word(s: &str) -> Result<(&str, u8)> {
+    if let Some((reason_part, word_part)) = s.split_once(':') {
+        let w = word_part.parse::<u8>().map_err(|_|
+            BackendError::InvalidOperation(format!("Invalid word index: {}", word_part)))?;
+        if w >= 3 {
+            return Err(BackendError::InvalidOperation(
+                format!("Word index must be 0..2, got {}", w),
+            ));
+        }
+        Ok((reason_part, w))
     } else {
         Ok((s, 0))
     }

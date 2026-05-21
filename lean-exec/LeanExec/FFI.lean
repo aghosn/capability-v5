@@ -325,7 +325,8 @@ def ffiCreateDomain (parentId cores api : UInt64) : IO UInt32 := do
     interrupts := { defaultPolicy := .deliverAndClear, perVector := [] }
     numVps := coreList.length
     cpuid := { default := .trap, overrides := [] }
-    msrs := { default := .trap, overrides := [] } }
+    msrs := { default := .trap, overrides := [] }
+    exits := { default := { trap := true, readSet := [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF], writeSet := [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF] }, overrides := [] } }
   let result ← runOp (LeanExec.create parentId.toNat policy)
   match result with
   | .ok (_, newId, updates) =>
@@ -511,6 +512,9 @@ private def fieldCodeToStr : Nat → String
   | 1 => "api-monitor"
   | 2 => "default-visibility"
   | 3 => "num-vps"
+  | 4 => "cpuid-default"
+  | 5 => "msr-default"
+  | 6 => "exit-default-trap"
   | _ => "unknown"
 
 @[export lean_exec_set_policy]

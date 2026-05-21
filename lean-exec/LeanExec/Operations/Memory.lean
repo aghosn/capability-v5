@@ -140,7 +140,8 @@ def init (memSize : Nat) (numCores : Nat) : CapaM (DomainId × CapNodeId) := do
       interrupts := { defaultPolicy := .deliver, perVector := [] }
       numVps := numCores
       cpuid := { default := .native, overrides := [] }
-      msrs := { default := .native, overrides := [] } }
+      msrs := { default := .native, overrides := [] }
+      exits := { default := { trap := false, readSet := [0, 0, 0], writeSet := [0, 0, 0] }, overrides := [] } }
 
   let rootDomain : ExecDomain :=
     { (ExecDomain.empty domId none policy) with
