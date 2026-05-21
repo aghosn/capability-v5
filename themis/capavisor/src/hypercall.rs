@@ -493,18 +493,23 @@ fn do_revoke_domain(
 ///                  DomCapEntry[] + PaMapEntry[]).  Used by thhv at module init.
 ///   arg0 == 1  →  Signed attestation with user binding + optional TPM quote.
 ///                  Reads AttestRequest {nonce, user_pub_key} from TX ring.
-///                  arg1 = expected TX ring message sequence (defense in depth).
+///                  arg2 = expected TX ring message sequence (defense in depth).
 ///
-/// IN:  RDI = mode (0=unsigned, 1=signed), RSI = tx_sequence (if signed)
+/// arg1 = byte offset into the serialised payload (both modes).  The
+/// capavisor enqueues the slice `payload[offset..]` (capped at the
+/// single-page message limit).  Call repeatedly with increasing offsets
+/// to retrieve the full report.
+///
+/// IN:  RDI = mode (0=unsigned, 1=signed), RSI = byte offset, RDX = tx_sequence (if signed)
 /// OUT: Report delivered to caller's DomainComm RX ring.
-///      RDI = payload size in bytes (0 if DomainComm not initialized).
+///      RDI = total payload size, RSI = bytes written this call.
 #[cfg(target_arch = "x86_64")]
 fn do_attest_self(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     arg0: u64,
     arg1: u64,
-    _arg2: u64,
+    arg2: u64,
     _arg3: u64,
 ) -> HypercallResult {
     use alloc::vec::Vec;
@@ -517,6 +522,7 @@ fn do_attest_self(
     }
 
     let is_signed = arg0 == 1;
+    let offset = arg1 as usize;
 
     // Snapshot the domain's capabilities under the read lock.
     let domain = caller.read();
@@ -531,13 +537,15 @@ fn do_attest_self(
         .filter_map(|(handle, weak)| {
             let cap_ref = weak.upgrade()?;
             let c = cap_ref.read();
+            let hpa = c.data.access.start;
+            let gpa = domain.data.mapped_gpas.get(handle).copied().unwrap_or(hpa);
             Some(domcomm::MemCapEntry {
                 handle: *handle,
-                gpa_start: c.data.access.start,
+                gpa_start: gpa,
                 size: c.data.access.size,
                 rights: c.data.access.rights.bits() as u32,
                 attributes: c.owned.attributes.bits() as u32,
-                hpa_start: c.data.access.start, // identity for root domain
+                hpa_start: hpa,
             })
         })
         .collect();
@@ -556,7 +564,7 @@ fn do_attest_self(
         })
         .collect();
 
-    // PA entries from non-META, non-COMM memory capabilities (GPA == HPA identity).
+    // PA entries from non-META, non-COMM memory capabilities (proper GPA→HPA).
     let pa_entries: Vec<domcomm::PaMapEntry> = mem_entries
         .iter()
         .filter(|e| e.attributes & (Attributes::META as u32) == 0)
@@ -587,7 +595,7 @@ fn do_attest_self(
     if is_signed {
         use sha2::{Digest, Sha256};
 
-        let expected_seq = arg1;
+        let expected_seq = arg2;
 
         // Dequeue AttestRequest from the caller's TX ring.
         let pd = match platform.get_platform_domain(domain_id) {
@@ -701,14 +709,24 @@ fn do_attest_self(
             payload.extend_from_slice(&ak_pub_buf[..ak_pub_size as usize]);
         }
 
-        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload);
+        let total_size = payload.len();
+        if offset >= total_size {
+            return HypercallResult::success_2(total_size as u64, 0);
+        }
+        let slice = &payload[offset..];
+        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
         if wrote == 0 {
             return HypercallResult::error(errors::ERR_BUSY);
         }
-        HypercallResult::success_1(payload.len() as u64)
+        HypercallResult::success_2(total_size as u64, wrote as u64)
     } else {
         // Full domain config — same wire format the thhv driver expects.
+        // Build the complete payload first, then slice from offset.
+
+        let offset = arg1 as usize;
+
         let mut payload = Vec::new();
+        // Placeholder header — we'll patch chunk fields after we know the slice.
         payload.extend_from_slice(as_bytes(&hdr));
         for e in &mem_entries {
             payload.extend_from_slice(as_bytes(e));
@@ -720,19 +738,28 @@ fn do_attest_self(
             payload.extend_from_slice(as_bytes(e));
         }
 
+        let total_size = payload.len();
+
+        if offset >= total_size {
+            // Nothing left to send — return total_size with 0 bytes written.
+            return HypercallResult::success_2(total_size as u64, 0);
+        }
+
+        let slice = &payload[offset..];
+
         let pd = match platform.get_platform_domain(domain_id) {
             Some(pd) => pd,
-            None => return HypercallResult::success_1(0),
+            None => return HypercallResult::success_2(0, 0),
         };
         let mut pd_locked = pd.lock();
         if pd_locked.domcomm.is_none() {
-            return HypercallResult::success_1(0);
+            return HypercallResult::success_2(0, 0);
         }
-        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload);
+        let wrote = pd_locked.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
         if wrote == 0 {
             return HypercallResult::error(errors::ERR_BUSY);
         }
-        HypercallResult::success_1(payload.len() as u64)
+        HypercallResult::success_2(total_size as u64, wrote as u64)
     }
 }
 

@@ -1095,6 +1095,9 @@ struct thhv_partition {
 	 * COMM attribute so the capavisor initialises the child's DomainComm
 	 * ring at seal time.  After send, the caps belong to the child; only
 	 * the struct page pointers are kept for __free_page on teardown. */
+#define DOMCOMM_NR_PAGES 4
+#define DOMCOMM_ORDER    2  /* log2(DOMCOMM_NR_PAGES) */
+
 	struct page **domcomm_pages;
 	unsigned int  domcomm_nr_pages;
 };

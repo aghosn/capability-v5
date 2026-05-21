@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-19)
+## Current State (2026-05-20)
 
 ### What works
 
@@ -29,7 +29,12 @@
 - **CoCo guest kernel**: CC_VENDOR_THEMIS patch in `../linux`.  Minimal config
   (245 modules), virtio/ext4/9p built-in.
 - **MAP_SELF hypercall**: wired across themis-abi (0x1f), capavisor handler, thhv.
-- **CARVE+SEND**: fully working — dom0 loses EPT access when SENDing to child.
+- **COMM-as-SEND + DomainComm**: ✅ COMM pages provisioned via CARVE+SEND (commit
+  `1d9867d8d`). CHV slot splitting for confidential memory (commit `235ed4c81`).
+  `domcomm_discover` and `attest_dequeue` Eunomia tests pass.
+- **Compound allocation batching** (uncommitted): thhv uses `alloc_pages(order)` for
+  META and COMM pages. Contiguous runs merged into single CARVE+SEND. Reduces
+  attestation cap count from ~128 to ~24.
 - **CPUID/MSR interposition policy**: ✅ fully policy-driven. All CPUID leaves
   (including hypervisor range) go through PolicyDriven path. No ArchHandled special
   case. CHV pushes Native/Emulate overrides for dom1. CoCo leaf (0x40000100)
@@ -70,6 +75,9 @@
 
 ### Recent commits
 
+- `1d9867d8d` — **COMM-as-SEND redesign**: DomainComm pages provisioned via
+  CARVE+SEND, domcomm finalization on first hypercall, CHV confidential cleanup
+- `235ed4c81` — **CHV: confidential memory slot splitting** (cloud-hypervisor submodule)
 - `HEAD` — **CHV: gate CoCo features on confidential mode**
   (vtom_bit=0 when !confidential, EBDA/CoCo-CPUID/VTOM-stripping gated)
 - `8d3dd56f` — **CHV: confidential mode — CARVE guest RAM instead of ALIAS**
@@ -82,7 +90,59 @@
 
 ### Uncommitted changes
 
-None — all changes committed.
+**Compound allocation batching + Eunomia CoCo test fixes** (not yet committed):
+
+- `thhv/src/thhv_part.c` — compound `alloc_pages(order)` for META and COMM pages;
+  `thhv_send_meta_pages()` detects contiguous physical runs → single CARVE+SEND per
+  run; teardown handles compound pages via `PageHead()`/`PageTail()`.
+- `thhv/inc/thhv.h` — added `DOMCOMM_NR_PAGES` (4) / `DOMCOMM_ORDER` (2) defines.
+- `eunomia/workloads/coco/src/main.rs` — added `attest_self()` call before dequeue;
+  added `paging::map_4k()` for vTOM alias address in `test_vtom_double_map`.
+- `themis/capavisor/src/hypercall.rs` — **debug prints to remove** (`[DBG] do_attest_self`,
+  `[DBG] attest_self: enqueueing/domcomm is None`).
+- `themis/capavisor/src/platform.rs` — **debug prints to remove** (`[DBG] finalize_domcomm`,
+  `[DBG] CommRegion`).
+
+**Results so far**:
+- `domcomm_discover` ✅, `attest_dequeue` ✅ (24 mem caps, down from ~128).
+- `vtom_double_map` ❌ — see BUG-16 below.
+
+---
+
+### BUG-16: vtom_double_map #PF at unrelated address
+
+**Symptom**: `test_vtom_double_map` faults with `error_code=0x0` (read, not-present,
+supervisor) at `CR2 = 0x7acf5a5fbeb8` — an address that doesn't correspond to any
+test pointer.
+
+**Context**: the test picks a usable mem cap (non-META, non-COMM) via attestation,
+creates an ALIAS at `VTOM + page_gpa`, does `MAP_SELF`, maps the vTOM VA in guest
+page tables, writes `0xDEAD_BEEF_C0C0_CAFE` through the vTOM pointer, then reads
+back through `orig_ptr = page_gpa`. RAX already contains `0xDEADBEEFC0C0CAFE`
+in the register dump, suggesting the vTOM write succeeded.
+
+**Root cause analysis** (two issues identified):
+
+1. **`orig_ptr` above 4 GiB identity map**: the usable cap is at GPA `0x1041cd000`
+   (~4.065 GiB), which is above Eunomia's boot identity map (covers 0–4 GiB with
+   2M pages). Reading from `orig_ptr` as a VA will fault because there's no guest
+   page table entry. **Fix**: either `map_4k(page_gpa, page_gpa)` for the original
+   mapping too, or `find_usable_mem_cap` should prefer caps within the identity-
+   mapped range (below 4 GiB).
+
+2. **Suspicious CR2**: `0x7acf5a5fbeb8` is NOT `0x1041cd000`. This suggests the
+   fault might actually be inside `paging::map_4k()` or inside `println!` formatting
+   code, or that `alloc_pt_frame()` in `eunomia/src/paging.rs` returns a BSS pool
+   virtual address that gets stored as a physical address in page table entries —
+   which only works if BSS is within the identity-mapped range.
+
+**Where to look**:
+- `eunomia/workloads/coco/src/main.rs` lines 182–222 — the test function
+- `eunomia/src/paging.rs` — `map_4k`, `ensure_table`, `alloc_pt_frame` (line 49)
+- Check if `alloc_pt_frame()` addresses are valid when used as physical addresses
+  in PTEs
+
+**TODO**: pick one fix approach and verify.
 
 ---
 
@@ -172,8 +232,8 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 - [x] Capavisor: wire CHANNEL GET/SEND/ACCEPT hypercalls (0x1e, 0x20, 0x21)
 - [x] thhv: auto-provision parent-back-channel at domain creation
 - [x] CHV: gate VTOM/EBDA/CoCo-CPUID on confidential mode (vtom_bit=0 when off)
-- [ ] Eunomia CoCo workload: test CARVE isolation (dom0 can't read carved memory),
-      channel accept, MAP_SELF in non-confidential mode first
+- [ ] Eunomia CoCo workload: ~~test CARVE isolation~~ domcomm+attest done,
+      vtom_double_map blocked on BUG-16, bounce_buffer_send not yet reached
 - [ ] CHV: receive shared regions back from dom1 (accept alias via channel)
 - [ ] Dom1 kernel: early init share-back — create aliases of swiotlb pool,
       MAP_SELF at VTOM GPA, CHANNEL_SEND the other to dom0

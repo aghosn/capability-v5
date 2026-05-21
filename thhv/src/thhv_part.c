@@ -53,22 +53,26 @@ static void thhv_partition_destroy(struct kref *ref)
 		kfree(part->apic_access_pages);
 	}
 
-	/* Free kernel-allocated EPT META pages. */
+	/* Free kernel-allocated EPT META pages.
+	 * Pages may be compound (contiguous batches) — only free heads. */
 	if (part->ept_meta_pages) {
 		unsigned int j;
 
-		for (j = 0; j < part->ept_meta_nr_pages; j++)
-			__free_page(part->ept_meta_pages[j]);
+		for (j = 0; j < part->ept_meta_nr_pages; j++) {
+			if (PageHead(part->ept_meta_pages[j]))
+				__free_pages(part->ept_meta_pages[j],
+					     compound_order(part->ept_meta_pages[j]));
+			else if (!PageTail(part->ept_meta_pages[j]))
+				__free_page(part->ept_meta_pages[j]);
+			/* tail pages freed implicitly with their head */
+		}
 		kfree(part->ept_meta_pages);
 	}
 
-	/* Free kernel-allocated DomainComm pages.
+	/* Free kernel-allocated DomainComm pages (compound allocation).
 	 * Caps revoked via sent_caps below; only struct pages freed here. */
 	if (part->domcomm_pages) {
-		unsigned int j;
-
-		for (j = 0; j < part->domcomm_nr_pages; j++)
-			__free_page(part->domcomm_pages[j]);
+		__free_pages(part->domcomm_pages[0], DOMCOMM_ORDER);
 		kfree(part->domcomm_pages);
 	}
 
@@ -316,7 +320,8 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 		unsigned int nr_ept_meta = thhv_ept_meta_needed(child_gpa,
 								gm.size);
 		struct page **ept_pages;
-		unsigned int j;
+		struct page *compound;
+		unsigned int j, order;
 
 		ept_pages = kcalloc(nr_ept_meta, sizeof(struct page *),
 				    GFP_KERNEL);
@@ -325,22 +330,20 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 			goto err_free_segs;
 		}
 
-		for (j = 0; j < nr_ept_meta; j++) {
-			ept_pages[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-			if (!ept_pages[j]) {
-				while (j--)
-					__free_page(ept_pages[j]);
-				kfree(ept_pages);
-				ret = -ENOMEM;
-				goto err_free_segs;
-			}
+		order = get_order(nr_ept_meta * PAGE_SIZE);
+		compound = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		if (!compound) {
+			kfree(ept_pages);
+			ret = -ENOMEM;
+			goto err_free_segs;
 		}
+		for (j = 0; j < nr_ept_meta; j++)
+			ept_pages[j] = compound + j;
 
 		ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
 					   THHV_META_KEY_EPT);
 		if (ret) {
-			for (j = 0; j < nr_ept_meta; j++)
-				__free_page(ept_pages[j]);
+			__free_pages(compound, order);
 			kfree(ept_pages);
 			goto err_free_segs;
 		}
@@ -517,13 +520,12 @@ err_free:
 /* ── CARVE + SEND META pages to child domain ───────────────────────────────── */
 
 /*
- * CARVE each pinned page from its parent capability and SEND to the child
- * domain with META attribute.  META pages are used by the capavisor for
- * internal allocations (VMCS, VAPIC, MSR bitmap, EPT pages).
+ * CARVE + SEND a set of pages to the child domain with META attribute.
+ * Detects physically-contiguous runs and batches them into a single
+ * CARVE + SEND per run, reducing the number of capability objects.
  *
- * On success, each page's capability is tracked in part->sent_caps for
- * revocation on teardown.  region_key is set to a synthetic value to
- * distinguish META caps from normal memory mappings.
+ * On success, each run's capability is tracked in part->sent_caps for
+ * revocation on teardown.  region_key distinguishes META flavours.
  *
  * Returns 0 on success, negative errno on failure (partial sends are
  * rolled back).
@@ -535,37 +537,53 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 	unsigned int i, nr_sent = 0;
 	int ret;
 
-	for (i = 0; i < nr_pages; i++) {
-		u64 gpa, hpa, parent_handle, cap_handle, cap_sub;
+	i = 0;
+	while (i < nr_pages) {
+		u64 run_gpa, run_hpa, parent_handle, cap_handle, cap_sub;
 		struct thhv_sent_cap *sc;
+		unsigned int run_len = 1;
 
-		gpa = (u64)page_to_pfn(pages[i]) << PAGE_SHIFT;
-		hpa = thhv_gpa_to_hpa(gpa);
-		if (hpa == (u64)-1) {
+		run_gpa = (u64)page_to_pfn(pages[i]) << PAGE_SHIFT;
+		run_hpa = thhv_gpa_to_hpa(run_gpa);
+		if (run_hpa == (u64)-1) {
 			pr_err("thhv: META page[%u] GPA 0x%llx: no HPA\n",
-			       i, gpa);
+			       i, run_gpa);
 			ret = -EFAULT;
 			goto err_revoke;
 		}
 
-		ret = thhv_find_parent_handle(hpa, PAGE_SIZE, &parent_handle);
+		/* Extend run while pages are physically contiguous. */
+		while (i + run_len < nr_pages) {
+			u64 next_gpa = (u64)page_to_pfn(pages[i + run_len]) << PAGE_SHIFT;
+			u64 next_hpa = thhv_gpa_to_hpa(next_gpa);
+
+			if (next_hpa != run_hpa + (u64)run_len * PAGE_SIZE)
+				break;
+			run_len++;
+		}
+
+		ret = thhv_find_parent_handle(run_hpa,
+					      (u64)run_len * PAGE_SIZE,
+					      &parent_handle);
 		if (ret) {
-			pr_err("thhv: META page[%u] HPA 0x%llx: no parent cap\n",
-			       i, hpa);
+			pr_err("thhv: META run[%u+%u] HPA 0x%llx: no parent cap\n",
+			       i, run_len, run_hpa);
 			goto err_revoke;
 		}
 
-		ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
+		ret = themis_carve(parent_handle, run_hpa,
+				   (u64)run_len * PAGE_SIZE,
 				   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
 				   &cap_handle, &cap_sub);
 		if (ret) {
-			pr_err("thhv: META page[%u] CARVE failed (%d)\n",
-			       i, ret);
+			pr_err("thhv: META run[%u+%u] CARVE failed (%d)\n",
+			       i, run_len, ret);
 			goto err_revoke;
 		}
 
 		ret = thhv_cap_table_insert(cap_handle, parent_handle,
-					    cap_sub, hpa, PAGE_SIZE);
+					    cap_sub, run_hpa,
+					    (u64)run_len * PAGE_SIZE);
 		if (ret) {
 			themis_revoke_mem(parent_handle, cap_sub);
 			goto err_revoke;
@@ -576,8 +594,8 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 		if (ret) {
 			themis_revoke_mem(parent_handle, cap_sub);
 			thhv_cap_table_remove(cap_handle);
-			pr_err("thhv: META page[%u] SEND failed (%d)\n",
-			       i, ret);
+			pr_err("thhv: META run[%u+%u] SEND failed (%d)\n",
+			       i, run_len, ret);
 			goto err_revoke;
 		}
 
@@ -597,6 +615,7 @@ int thhv_send_meta_pages(struct thhv_partition *part,
 		spin_unlock(&part->sent_caps.lock);
 
 		nr_sent++;
+		i += run_len;
 	}
 
 	pr_debug("thhv: sent %u META pages to domain 0x%llx (key=0x%llx)\n",
@@ -740,21 +759,21 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 			if (!ept_pages)
 				return -ENOMEM;
 
-			for (j = 0; j < nr_ept_meta; j++) {
-				ept_pages[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-				if (!ept_pages[j]) {
-					while (j--)
-						__free_page(ept_pages[j]);
+			{
+				unsigned int order = get_order(nr_ept_meta * PAGE_SIZE);
+				struct page *compound = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+				if (!compound) {
 					kfree(ept_pages);
 					return -ENOMEM;
 				}
+				for (j = 0; j < nr_ept_meta; j++)
+					ept_pages[j] = compound + j;
 			}
 
 			ret = thhv_send_meta_pages(part, ept_pages, nr_ept_meta,
 						   THHV_META_KEY_EPT);
 			if (ret) {
-				for (j = 0; j < nr_ept_meta; j++)
-					__free_page(ept_pages[j]);
+				__free_pages(ept_pages[0], get_order(nr_ept_meta * PAGE_SIZE));
 				kfree(ept_pages);
 				pr_err("thhv: APIC-access EPT META send failed (%d)\n", ret);
 				return ret;
@@ -1034,9 +1053,9 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 	 * GPA=HPA); only the struct page pointers are kept for __free_page.
 	 */
 	{
-#define DOMCOMM_NR_PAGES 4
 		unsigned int i;
 		struct page **dc_pages;
+		struct page *dc_compound;
 
 		dc_pages = kcalloc(DOMCOMM_NR_PAGES, sizeof(*dc_pages),
 				   GFP_KERNEL);
@@ -1045,31 +1064,26 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 			goto err_revoke;
 		}
 
-		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
-			dc_pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-			if (!dc_pages[i]) {
-				while (i--)
-					__free_page(dc_pages[i]);
-				kfree(dc_pages);
-				ret = -ENOMEM;
-				goto err_revoke;
-			}
+		dc_compound = alloc_pages(GFP_KERNEL | __GFP_ZERO, DOMCOMM_ORDER);
+		if (!dc_compound) {
+			kfree(dc_pages);
+			ret = -ENOMEM;
+			goto err_revoke;
 		}
+		for (i = 0; i < DOMCOMM_NR_PAGES; i++)
+			dc_pages[i] = dc_compound + i;
 
 		/*
-		 * Send extra EPT META frames so the child's EPT can map the
-		 * domcomm pages (identity-mapped at HPA, potentially above
-		 * the child's normal GPA range).
+		 * Since domcomm pages are now contiguous, only one EPT META
+		 * computation is needed for the whole block.
 		 */
 		{
-			unsigned int nr_dc_meta = 0;
+			u64 dc_base_gpa = (u64)page_to_pfn(dc_compound) << PAGE_SHIFT;
+			unsigned int nr_dc_meta = thhv_ept_meta_needed(
+				dc_base_gpa, DOMCOMM_NR_PAGES * PAGE_SIZE);
 			struct page **dc_meta;
+			struct page *dc_meta_compound;
 			unsigned int j;
-
-			for (i = 0; i < DOMCOMM_NR_PAGES; i++)
-				nr_dc_meta += thhv_ept_meta_needed(
-					(u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT,
-					PAGE_SIZE);
 
 			dc_meta = kcalloc(nr_dc_meta, sizeof(*dc_meta),
 					  GFP_KERNEL);
@@ -1077,22 +1091,27 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				ret = -ENOMEM;
 				goto err_free_domcomm_pages;
 			}
-			for (j = 0; j < nr_dc_meta; j++) {
-				dc_meta[j] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-				if (!dc_meta[j]) {
-					while (j--)
-						__free_page(dc_meta[j]);
+
+			if (nr_dc_meta > 0) {
+				unsigned int meta_order = get_order(nr_dc_meta * PAGE_SIZE);
+
+				dc_meta_compound = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+							       meta_order);
+				if (!dc_meta_compound) {
 					kfree(dc_meta);
 					ret = -ENOMEM;
 					goto err_free_domcomm_pages;
 				}
+				for (j = 0; j < nr_dc_meta; j++)
+					dc_meta[j] = dc_meta_compound + j;
 			}
 
 			ret = thhv_send_meta_pages(part, dc_meta, nr_dc_meta,
 						   THHV_META_KEY_EPT);
 			if (ret) {
-				for (j = 0; j < nr_dc_meta; j++)
-					__free_page(dc_meta[j]);
+				if (nr_dc_meta > 0)
+					__free_pages(dc_meta[0],
+						     get_order(nr_dc_meta * PAGE_SIZE));
 				kfree(dc_meta);
 				goto err_free_domcomm_pages;
 			}
@@ -1126,33 +1145,36 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 				 nr_dc_meta);
 		}
 
-		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
-			u64 gpa = (u64)page_to_pfn(dc_pages[i]) << PAGE_SHIFT;
+		/* Single CARVE + SEND for the contiguous domcomm block. */
+		{
+			u64 gpa = (u64)page_to_pfn(dc_compound) << PAGE_SHIFT;
 			u64 hpa = thhv_gpa_to_hpa(gpa);
 			u64 parent_handle, carved_handle, sub;
 			struct thhv_sent_cap *sc;
 
 			if (hpa == (u64)-1) {
-				pr_err("thhv: domcomm page %u: GPA %#llx not in PA map\n",
-				       i, gpa);
+				pr_err("thhv: domcomm block: GPA %#llx not in PA map\n",
+				       gpa);
 				ret = -EFAULT;
 				goto err_free_domcomm;
 			}
 
-			ret = thhv_find_parent_handle(hpa, PAGE_SIZE,
+			ret = thhv_find_parent_handle(hpa,
+						      DOMCOMM_NR_PAGES * PAGE_SIZE,
 						      &parent_handle);
 			if (ret) {
-				pr_err("thhv: domcomm page %u: no parent cap for HPA %#llx\n",
-				       i, hpa);
+				pr_err("thhv: domcomm block: no parent cap for HPA %#llx\n",
+				       hpa);
 				goto err_free_domcomm;
 			}
 
-			ret = themis_carve(parent_handle, hpa, PAGE_SIZE,
+			ret = themis_carve(parent_handle, hpa,
+					   DOMCOMM_NR_PAGES * PAGE_SIZE,
 					   THHV_MEM_R_READ | THHV_MEM_R_WRITE,
 					   &carved_handle, &sub);
 			if (ret) {
-				pr_err("thhv: domcomm page %u: CARVE failed (%d)\n",
-				       i, ret);
+				pr_err("thhv: domcomm block: CARVE failed (%d)\n",
+				       ret);
 				goto err_free_domcomm;
 			}
 
@@ -1160,13 +1182,12 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 					  part->domain_handle,
 					  THHV_MEM_A_COMM);
 			if (ret) {
-				pr_err("thhv: domcomm page %u: SEND COMM failed (%d)\n",
-				       i, ret);
+				pr_err("thhv: domcomm block: SEND COMM failed (%d)\n",
+				       ret);
 				themis_revoke_mem(parent_handle, sub);
 				goto err_free_domcomm;
 			}
 
-			/* Track in sent_caps like any other sent cap. */
 			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
 			if (!sc) {
 				pr_err("thhv: domcomm sent_cap alloc failed\n");
@@ -1190,15 +1211,11 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 		goto domcomm_done;
 err_free_domcomm_pages:
 err_free_domcomm:
-		for (i = 0; i < DOMCOMM_NR_PAGES; i++) {
-			if (dc_pages[i])
-				__free_page(dc_pages[i]);
-		}
+		__free_pages(dc_compound, DOMCOMM_ORDER);
 		kfree(dc_pages);
 		goto err_revoke;
 domcomm_done:
 		;
-#undef DOMCOMM_NR_PAGES
 	}
 
 	fd = get_unused_fd_flags(O_CLOEXEC);

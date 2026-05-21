@@ -74,6 +74,7 @@ pub unsafe fn raw_vmcall(
 
 /// Convenience: VMCALL with 0–4 args (fills unused regs with 0).
 #[inline(always)]
+#[allow(dead_code)]
 unsafe fn vmcall0(op: u64) -> (u64, u64, u64, u64) {
     raw_vmcall(op, 0, 0, 0, 0, 0)
 }
@@ -228,9 +229,17 @@ pub fn accept_chan(pending_id: u64) -> Result<u64, u64> {
     Ok(rdi)
 }
 
-/// Self-attestation: returns `(hash_lo, hash_hi)` — first 16 bytes of SHA-256.
+/// Self-attestation (unsigned, offset=0).
+/// Returns `(total_payload_size, bytes_written)`.
 pub fn attest_self() -> Result<(u64, u64), u64> {
-    let (rax, rdi, rsi, _) = unsafe { vmcall0(opcodes::THEMIS_ATTEST_SELF) };
+    attest_self_at(0)
+}
+
+/// Self-attestation (unsigned) starting at `offset` bytes into the report.
+/// Returns `(total_payload_size, bytes_written)`.
+/// Call with increasing offsets (dequeue between calls) to retrieve large reports.
+pub fn attest_self_at(offset: u64) -> Result<(u64, u64), u64> {
+    let (rax, rdi, rsi, _) = unsafe { vmcall2(opcodes::THEMIS_ATTEST_SELF, 0, offset) };
     check(rax)?;
     Ok((rdi, rsi))
 }
