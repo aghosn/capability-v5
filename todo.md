@@ -75,6 +75,9 @@
 
 ### Recent commits
 
+- `985c1bf83` — **Slim intercept message: ExitPolicy.read_set enforcement**:
+  InterceptMessage 120B→64B (exit metadata only), thhv assembles full msg
+  from slim + COMM page regs. Registers gated by read_set. Dom1 boots OK.
 - `9c13207af` — **Structured attestation API and CoCo workload fixes**:
   `build_structured_attestation()` in engine as single source of truth,
   `to_bytes()` binary serialization, capavisor `do_attest_self` rewritten
@@ -203,26 +206,10 @@ No hardware encryption needed — EPT isolation provides equivalent protection.
 **Open questions**:
 - Channel revocation semantics (does revoking endpoint cascade to sent caps?)
   → Resolved: yes, CDT cascades naturally (see design doc §9.8)
-- **Intercept message register leak fix** (active):
-  `forward_child_exit` currently embeds register values (RAX, RIP,
-  RFLAGS, CPUID leaf/subleaf, MSR number/value) directly in the
-  `InterceptMessage`, bypassing `ExitPolicy.read_set`. Fix plan:
-  1. **Capavisor**: slim `InterceptMessage` to exit metadata only
-     (exit_reason, exit_qualification, guest_physical_address,
-     instruction_length, instruction_bytes, port/size/is_write).
-     Register values stay in COMM page register area, gated by read_set.
-  2. **thhv**: after reading slim intercept, populate register fields
-     by reading from COMM page register area based on exit_reason
-     (IO → RAX; MSR → RCX/RDX/RAX; CPUID → RAX/RCX). Assembles
-     full `themic_intercept_message` for CHV.
-  3. **CHV**: unchanged — same struct, same dispatch code.
-  Policy enforcement is automatic: read_set zeros disallowed registers
-  in COMM page → thhv reads zeros → CHV sees zeros.
-  Engine-side `ExitPolicy` (ExitAction with trap/read_set/write_set,
-  register_access_check, set_policy hypercall) already complete.
-  Related: `themis/capavisor/src/hypercall.rs` forward_child_exit,
-  `thhv/src/thhv_vp.c` thhv_read_intercept_msg,
-  `capa-engine/src/domain.rs` ExitPolicy/ExitAction.
+- [x] **Intercept message register leak fix** (commit `985c1bf83`):
+  Slim `InterceptMessage` (120B → 64B, exit metadata only). thhv assembles
+  full message from slim + COMM page registers. `ExitPolicy.read_set` is now
+  the single gate for register exposure. Dom1 Linux boots successfully.
 - **Refine per-exit-reason policies for confidential mode**: The default
   ExitPolicy uses `RegBitmap::ALL` (read & write) for child domains.
   When booting dom1 Linux in confidential mode, the child (or its
