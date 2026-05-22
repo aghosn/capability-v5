@@ -65,7 +65,15 @@ fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
 
 impl DomainComm {
     /// Discover and validate the DomainComm region via CPUID.
+    ///
+    /// Requires running under Themis (checks hypervisor signature first).
     pub fn discover() -> Result<Self, DomCommError> {
+        // Gate on Themis hypervisor detection — same check used by
+        // ivshmem discovery and (future) Linux CoCo driver.
+        if !themis_abi::cpuid::is_themis() {
+            return Err(DomCommError::NotPresent);
+        }
+
         let (eax, ebx, ecx, _edx) = cpuid(domcomm::CPUID_DOMCOMM_LEAF);
         let gpa = ((ebx as u64) << 32) | (eax as u64);
         let nr_pages = ecx;

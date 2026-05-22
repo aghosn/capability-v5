@@ -222,6 +222,53 @@ pub mod regs;
 
 pub mod domcomm;
 
+// ── Themis hypervisor CPUID discovery ──────────────────────────────────────── //
+//
+// These constants define the CPUID leaf layout for discovering the Themis
+// hypervisor and its features.  Used by both Eunomia (bare-metal guest) and
+// Linux CoCo support (kernel driver) to detect and interact with Themis.
+
+pub mod cpuid {
+    /// Base leaf: signature + max supported leaf.
+    /// EAX = max leaf (currently 0x40000004).
+    /// EBX:ECX:EDX = "ThemisCapa  " (12-byte signature).
+    pub const LEAF_BASE: u32 = 0x4000_0000;
+
+    /// Feature flags leaf.
+    /// EAX = feature bitmap (bit 0: sync-switch supported).
+    pub const LEAF_FEATURES: u32 = 0x4000_0001;
+
+    /// DomainComm discovery (alias for domcomm::CPUID_DOMCOMM_LEAF).
+    /// EAX:EBX = base GPA (lo:hi), ECX = size in pages.
+    pub const LEAF_DOMCOMM: u32 = 0x4000_0002;
+
+    /// Capacity limits.
+    /// EAX = max VPs, EBX = max partitions, ECX = max memory regions.
+    pub const LEAF_LIMITS: u32 = 0x4000_0003;
+
+    /// ivshmem device discovery (per-device subleaf).
+    /// Subleaf N describes ivshmem device N.
+    /// EAX = BAR0 GPA (32-bit MMIO, doorbell registers).
+    /// EBX = total number of ivshmem devices.
+    /// ECX = BAR2 GPA low 32 bits (shared data region).
+    /// EDX = BAR2 GPA high 32 bits.
+    pub const LEAF_IVSHMEM: u32 = 0x4000_0004;
+
+    /// Expected signature bytes in EBX:ECX:EDX of LEAF_BASE.
+    pub const SIG_EBX: u32 = u32::from_le_bytes(*b"Them");
+    pub const SIG_ECX: u32 = u32::from_le_bytes(*b"isCa");
+    pub const SIG_EDX: u32 = u32::from_le_bytes(*b"pa  ");
+
+    /// Check CPUID leaf 0x40000000 for the Themis signature.
+    /// Returns `true` if the hypervisor identifies as Themis.
+    ///
+    #[cfg(target_arch = "x86_64")]
+    pub fn is_themis() -> bool {
+        let result = core::arch::x86_64::__cpuid(LEAF_BASE);
+        result.ebx == SIG_EBX && result.ecx == SIG_ECX && result.edx == SIG_EDX
+    }
+}
+
 pub use regs::{DescriptorTableReg, SegmentReg, VpCommPage, VpGpRegs, VpRegister, VpSregs};
 
 // ── META VP-state page layout (Phase 10) ────────────────────────────────── //
