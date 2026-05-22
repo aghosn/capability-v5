@@ -231,6 +231,10 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 
 	nr_pages = gm.size >> PAGE_SHIFT;
 
+	pr_info("thhv: SET_GUEST_MEMORY gfn=0x%llx uaddr=0x%llx size=0x%llx nr_pages=%lu flags=0x%x shmem_mode=%u\n",
+		gm.guest_pfn, gm.userspace_addr, gm.size, nr_pages,
+		gm.flags, gm.shmem_mode);
+
 	/* ── Unmap path ─────────────────────────────────────────────────── */
 	if (gm.flags & THHV_MEM_F_UNMAP) {
 		struct thhv_sent_cap *sc, *tmp;
@@ -282,19 +286,32 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	region->rights = gm.rights;
 	region->attrs = gm.attrs;
 
-	/* Pin userspace pages. */
+	/* Pin userspace pages.
+	 * For shmem regions (file-backed MAP_SHARED), skip FOLL_LONGTERM
+	 * because tmpfs pages fail the longterm-pinnable check on some
+	 * kernels.  The pin itself still prevents migration. */
 	region->pages = kcalloc(nr_pages, sizeof(struct page *), GFP_KERNEL);
 	if (!region->pages) {
 		ret = -ENOMEM;
 		goto err_free;
 	}
 
-	ret = pin_user_pages_fast(gm.userspace_addr, nr_pages,
-				  FOLL_WRITE | FOLL_LONGTERM,
-				  region->pages);
-	if (ret < 0)
+	{
+		unsigned int gup_flags = FOLL_WRITE;
+		if (gm.shmem_mode == THHV_SHMEM_MODE_NONE)
+			gup_flags |= FOLL_LONGTERM;
+
+		ret = pin_user_pages_fast(gm.userspace_addr, nr_pages,
+					  gup_flags, region->pages);
+	}
+	if (ret < 0) {
+		pr_err("thhv: pin_user_pages_fast failed: ret=%d uaddr=0x%llx nr_pages=%lu\n",
+		       ret, gm.userspace_addr, nr_pages);
 		goto err_free_pages;
+	}
 	if ((unsigned long)ret != nr_pages) {
+		pr_err("thhv: pin_user_pages_fast partial: got %d/%lu uaddr=0x%llx\n",
+		       ret, nr_pages, gm.userspace_addr);
 		unpin_user_pages(region->pages, ret);
 		ret = -EFAULT;
 		goto err_free_pages;
@@ -306,8 +323,12 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	 * Falls through as identity (GPA==HPA) when no PA map is loaded.
 	 */
 	ret = thhv_translate_pages(region->pages, nr_pages, &segs, &nr_segs);
-	if (ret)
+	if (ret) {
+		pr_err("thhv: translate_pages failed: ret=%d\n", ret);
 		goto err_unpin;
+	}
+	pr_info("thhv: translated %lu pages → %u segs, first hpa=0x%llx size=0x%llx\n",
+		nr_pages, nr_segs, segs[0].hpa_start, segs[0].size);
 
 	/*
 	 * Send EPT META pages to the child so the capavisor can allocate
