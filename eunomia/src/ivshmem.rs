@@ -50,24 +50,11 @@ pub enum IvshmemError {
     MapFailed(u32),
 }
 
-/// Raw CPUID wrapper with subleaf support.
+/// CPUID with subleaf support.
 #[inline(always)]
 fn cpuid_subleaf(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let (eax, ebx, ecx, edx): (u32, u32, u32, u32);
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            inlateout("eax") leaf => eax,
-            ebx_out = out(reg) ebx,
-            inlateout("ecx") subleaf => ecx,
-            out("edx") edx,
-            options(nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// Discover all ivshmem devices via CPUID.
