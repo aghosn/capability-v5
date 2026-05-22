@@ -215,24 +215,28 @@ automatically (vendor `0x1AF4`, device `0x1110`).  BAR0 = doorbell
 registers, BAR2 = shared data region.  No synthetic CPUID leaf needed.
 
 **Eunomia**: Doesn't do PCI enumeration.  Discovers ivshmem BAR GPAs
-via CPUID leaf `0x40000003` (extending the existing Themis convention:
+via CPUID leaf `0x40000004` (extending the existing Themis convention:
 `0x40000000` = signature, `0x40000001` = version, `0x40000002` =
-DomainComm):
+DomainComm, `0x40000003` = limits):
 
 ```
-EAX = feature flags
-      bit 0: MMIO doorbell available (ivshmem BAR0)
-      bit 1: VMCALL doorbell available
-      bits 2-31: reserved
+CPUID leaf 0x40000004, subleaf N  (N = ivshmem device index)
 
-EBX = BAR0 GPA (low 32 bits)   — doorbell registers
-ECX = BAR0 GPA (high 32 bits)
-EDX = number of ivshmem devices
+EAX = BAR0 GPA (32-bit MMIO)   — doorbell registers
+EBX = number of ivshmem devices (same in every subleaf)
+ECX = BAR2 GPA (low 32 bits)   — shared data region
+EDX = BAR2 GPA (high 32 bits)
 ```
 
-BAR2 GPAs (shared data regions) are discoverable via the attestation
-report — each ivshmem memory cap appears with its GPA.  Eunomia calls
-`ATTEST_SELF`, parses the report, and maps accordingly (see §4.6).
+CHV pushes these as Emulate CPUID overrides via SET_POLICY (same
+mechanism as CoCo detection leaf `0x40000100`).  The capavisor
+serves the pushed values on CPUID exit — no new capavisor code
+needed for this leaf.
+
+BAR2 GPAs (shared data regions) are also discoverable via the
+attestation report — each ivshmem memory cap appears with its GPA.
+Eunomia calls `ATTEST_SELF`, parses the report, and maps accordingly
+(see §4.6).
 
 ### 3.5 Sync-Switch Integration
 
@@ -421,8 +425,9 @@ It needs to explicitly map the ivshmem BAR2 GPA in its page tables at
 boot.  Two approaches:
 
 - **CPUID discovery**: the capavisor reports ivshmem BAR GPAs via a
-  synthetic CPUID leaf (e.g., `0x40000003`).  Eunomia reads CPUID at
-  boot, maps the reported GPA range into its page tables.
+  synthetic CPUID leaf (`0x40000004`), pushed by CHV as Emulate
+  overrides via SET_POLICY.  Eunomia reads CPUID at boot, maps the
+  reported GPA range into its page tables.
 - **Attestation report**: the ivshmem region appears in the domain's
   attestation report as a memory capability with its GPA.  Eunomia
   calls `ATTEST_SELF`, parses the report, and maps accordingly.
@@ -511,62 +516,93 @@ buffer for device I/O.  Replaces the swiotlb share-back mechanism.
 
 ## 5. Implementation Plan
 
-### Phase 0: Multi-ivshmem + capability-backed mode
+### Phase 0: Multi-ivshmem + capability-backed mode ✅ DONE
+
+Committed across several PRs.  Key implementation notes:
+
+- `THHV_REGISTER_SHMEM` was folded into `THHV_SET_GUEST_MEMORY` to
+  eliminate a double-send issue.  The `thhv_set_guest_memory` struct
+  was extended with `shmem_mode`, `shmem_count`, `shmem_path[256]`.
+- Shmem mode values: NONE=0 (default), ALIAS=1, CARVE=2, PLUG=3.
+- Rendezvous aliases are created BEFORE the per-segment map loop
+  (critical for carve ordering — carve removes dom0 access).
+- Plug mode skips the per-segment map loop entirely and pops from
+  the rendezvous table.
+- CHV's `annotate_shmem()` annotates pending memory entries by GPA
+  match, then the unified `ensure_initialized()` flush handles both
+  normal and shmem memory slots in one path.
+
+### Phase 1: Doorbell infrastructure (ivshmem BAR0 + CPUID)
+
+**Key insight**: the doorbell pipeline is **already fully implemented**
+via the existing IOEVENTFD mechanism.  The full chain exists:
+
+```
+Guest writes to doorbell GPA
+  → EPT violation in capavisor
+  → handle_ept_doorbell() matches GPA (fast-path)
+  → writes DoorbellNotify to parent DomainComm RX ring
+  → advances child RIP, resumes child immediately
+  → thhv drains DomainComm → eventfd_signal()
+  → CHV worker thread wakes up
+```
+
+What's **actually needed** is to wire ivshmem BAR0 to this existing
+pipeline, add CPUID discovery for Eunomia, and handle the eventfd
+signal on the CHV side.
+
+| # | Task | Where | Notes |
+|---|------|-------|-------|
+| 1 | Register IOEVENTFD for ivshmem BAR0 doorbell offset (GPA+0xC) | CHV `device_manager.rs` | Creates eventfd, calls `register_ioevent(fd, Mmio(bar0+0xC))`. Same pattern as virtio notification BARs. |
+| 2 | Push CPUID leaf `0x40000004` as Emulate override | CHV `themis/mod.rs` | Per ivshmem device: subleaf N = (BAR0 GPA, count, BAR2 GPA lo/hi). Pushed during `ensure_initialized()`. |
+| 3 | Bump `CPUID_THEMIS_MAX` to `0x40000004` | capavisor `vmexit.rs` | One-line change. The catch-all `(CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END)` already returns zeros for unknown leaves, and the Emulate override takes precedence anyway. |
+| 4 | Handle doorbell eventfd in CHV | CHV worker/event loop | Minimal: log + wake parent thread to check pending work. |
+| 5 | Update IvshmemDevice BAR0 write handler | CHV `ivshmem.rs` | Remove "unexpected write" warning for offset 0xC (handled via IOEVENTFD, not BusDevice). |
+| 6 | Eunomia: map ivshmem BARs at boot | `eunomia` | Read CPUID `0x40000004`, identity-map BAR0 and BAR2 GPA ranges. |
+
+### Phase 1.5: Kernel-bypass doorbell (optimization, deferred)
+
+For performance-critical paths, the doorbell can be handled entirely
+in the **kernel (thhv)** without going through CHV userspace:
+
+```
+Guest writes to doorbell GPA
+  → EPT violation → capavisor handle_ept_doorbell()
+  → writes DoorbellNotify to DomainComm
+  → thhv drains DomainComm in-kernel
+  → thhv directly performs the action (e.g., signals a peer domain,
+    writes to a shared page) WITHOUT signaling CHV via eventfd
+```
+
+This avoids the userspace round-trip (eventfd → epoll wake → CHV
+handler → ioctl back to thhv).  Useful for inter-domain doorbell
+forwarding where thhv can directly ring the target domain's doorbell
+via the capavisor, or for coalesced notification delivery.
+
+### Phase 2: VMCALL trigger + deferred delivery
 
 | # | Task | Where |
 |---|------|-------|
-| 1 | Extend `IvshmemConfig` with `mode`, `count` fields | `cloud-hypervisor/vm_config.rs` |
-| 2 | Support multiple `--ivshmem` flags (Vec, unique names) | `cloud-hypervisor/device_manager.rs` |
-| 3 | CHV: pass ivshmem UA + metadata to thhv via new ioctl | `cloud-hypervisor`, `thhv` |
-| 4 | thhv: rendezvous table (`thhv_shmem_entry`) | `thhv/thhv_shmem.c` (new) |
-| 5 | thhv: alias/carve + hold aliases at setup | `thhv/thhv_part.c` |
-| 6 | thhv: plug lookup + send alias at child creation | `thhv/thhv_part.c` |
-| 7 | thhv: new ioctl `THHV_REGISTER_SHMEM` | `thhv/thhv_ioctl.c` |
+| 7 | Add `VMCALL_NOTIFY_PARENT` constant | `themis-abi` |
+| 8 | Hypercall dispatch → `handle_doorbell` | `capavisor/hypercall.rs` |
+| 9 | Capavisor: set flag + resume child (no switch) | `capavisor/hypercall.rs` |
+| 10 | Parent discovers notification on next drain | `thhv/thhv_vp.c` |
 
-### Phase 1: Doorbell infrastructure + MMIO trigger (sync-switch)
+### Phase 3: Core-gapped doorbell
 
 | # | Task | Where |
 |---|------|-------|
-| 8 | Add `EXIT_REASON_DOORBELL` constant | `themis-abi` |
-| 9 | Add `NotifyReason` enum (CapabilitySent, Generic) | `themis-abi` |
-| 10 | Add shared region message layout structs | `themis-abi` |
-| 11 | `PlatformDomain`: store `doorbell_gpa` (BAR0 addr) | `capavisor/platform.rs` |
-| 12 | EPT violation handler: check doorbell GPA | `capavisor/vmexit.rs` |
-| 13 | `handle_doorbell`: eager return to parent | `capavisor/hypercall.rs` |
-| 14 | thhv: register doorbell GPA with capavisor | `thhv/thhv_part.c` |
-| 15 | thhv: recognize DOORBELL exit reason | `thhv/thhv_vp.c` |
-| 16 | CHV: handle doorbell (check pending caps) | `cloud-hypervisor` |
-| 17 | Eunomia: map ivshmem BAR2 GPA in page tables at boot | `eunomia` |
-
-### Phase 2: VMCALL trigger
-
-| # | Task | Where |
-|---|------|-------|
-| 18 | Add `VMCALL_NOTIFY_PARENT` constant | `themis-abi` |
-| 19 | Hypercall dispatch → `handle_doorbell` | `capavisor/hypercall.rs` |
-
-### Phase 3: Deferred delivery (optimization)
-
-| # | Task | Where |
-|---|------|-------|
-| 20 | Capavisor: set flag + resume child (no switch) | `capavisor/hypercall.rs` |
-| 21 | Parent discovers notification on next drain | `thhv/thhv_vp.c` |
-
-### Phase 4: Core-gapped doorbell
-
-| # | Task | Where |
-|---|------|-------|
-| 22 | Replace eager return with IPI to parent core | `capavisor/hypercall.rs` |
-| 23 | thhv doorbell ISR (reuse core-gapping infra) | `thhv` |
+| 11 | Replace eager return with IPI to parent core | `capavisor/hypercall.rs` |
+| 12 | thhv doorbell ISR (reuse core-gapping infra) | `thhv` |
 
 ---
 
 ## 6. Open Questions
 
 1. **Doorbell GPA provisioning**: The ivshmem BAR0 address is assigned
-   by CHV's PCI allocator.  thhv registers this address with the
-   capavisor via `THEMIS_REGISTER_DOORBELL` (already exists) so the
-   capavisor can match EPT violations against it.
+   by CHV's PCI allocator.  CHV registers an IOEVENTFD at BAR0+0xC
+   (doorbell register offset) which triggers the capavisor's existing
+   `handle_ept_doorbell()` fast-path via `REGISTER_DOORBELL`.
 
 2. **Reason code encoding for MMIO trigger**: When the child writes
    to the BAR0 doorbell register, the ivshmem spec uses the write
@@ -591,20 +627,30 @@ buffer for device I/O.  Replaces the swiotlb share-back mechanism.
 
 6. **Carve mode alias ordering**: When mode is `carve`, thhv must
    create `count` aliases BEFORE carving the sub-cap away to the child
-   domain (otherwise it loses access and can't alias).  Order:
-   carve sub-cap → alias × count → send carve to child.
+   domain (otherwise it loses access and can't alias).  ✅ Implemented:
+   rendezvous aliases are created before the per-segment loop in
+   `thhv_set_guest_memory()`.
 
 7. **Eunomia BAR mapping**: Eunomia doesn't do PCI enumeration.  It
-   needs either (a) CPUID `0x40000003` reporting BAR2 GPA, or
-   (b) attestation report listing the ivshmem memory cap.  Either
-   way, Eunomia must identity-map the BAR2 GPA in its page tables
-   at boot (it's in PCI MMIO space above 0xC0000000, not in e820 RAM).
+   discovers ivshmem BAR GPAs via CPUID leaf `0x40000004` (pushed by
+   CHV as Emulate overrides).  Eunomia must identity-map both BAR0
+   (doorbell MMIO, 256B) and BAR2 (shared data region) in its page
+   tables at boot.  BAR2 is in PCI MMIO space (above 0xC0000000 for
+   32-bit, or above 4GB for 64-bit), not in e820 RAM.
+
+8. **Kernel-bypass doorbell** (future optimization): For inter-domain
+   doorbell forwarding, thhv can handle `DOORBELL_NOTIFY` messages
+   directly in-kernel without signaling CHV via eventfd.  thhv would
+   look up the target domain's doorbell GPA and ring it via the
+   capavisor, avoiding the userspace round-trip entirely.  This is
+   orthogonal to the basic IOEVENTFD pipeline and can be added
+   incrementally.
 
 ---
 
 ## 7. Relationship to Other Designs
 
-- **Core-gapping** (`core-gapping.md`): Phase 4 reuses the same shared
+- **Core-gapping** (`core-gapping.md`): Phase 3 reuses the same shared
   notification area + IPI doorbell.  The `Forward` policy variant
   described there is a superset of what the doorbell needs.
 
@@ -613,9 +659,11 @@ buffer for device I/O.  Replaces the swiotlb share-back mechanism.
   instead of per-device GPA registration by the VMM, each domain gets
   a single doorbell GPA checked by the capavisor on EPT fault.
 
-- **`THEMIS_REGISTER_DOORBELL`** (existing hypercall 0x10): Already
-  exists for ioeventfd registration.  Could be extended or reused to
-  register the general doorbell GPA for a child domain.
+- **`THEMIS_REGISTER_DOORBELL`** (existing hypercall 0x15): Already
+  exists for ioeventfd registration.  The IOEVENTFD pipeline
+  (`register_ioevent` → thhv `ioeventfd_assign` → capavisor
+  `REGISTER_DOORBELL`) is the mechanism used for both virtio and
+  ivshmem doorbells.  No new hypercall needed.
 
 - **Child DomainComm** (`child-domcomm.md`): DomainComm is the
   capavisor-managed data plane (RX/TX rings).  The private shared

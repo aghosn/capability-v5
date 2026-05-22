@@ -119,10 +119,11 @@ const APIC_ACCESS_TYPE_WRITE: u64 = 1;
 // ── Themis CPUID hypervisor leaves (§ custom ABI) ─────────────────────────── //
 
 const CPUID_THEMIS_BASE: u32 = 0x40000000;
-const CPUID_THEMIS_MAX: u32 = 0x40000003;
+const CPUID_THEMIS_MAX: u32 = 0x40000004;
 const CPUID_THEMIS_FEATURES: u32 = 0x40000001;
 const CPUID_THEMIS_DOMCOMM: u32 = 0x40000002;
 const CPUID_THEMIS_LIMITS: u32 = 0x40000003;
+const CPUID_THEMIS_IVSHMEM: u32 = 0x40000004;
 const CPUID_HV_RANGE_END: u32 = 0x4FFFFFFF;
 const CPUID_DEBUG_RANGE_START: u32 = 0xDEAD0000;
 const CPUID_DEBUG_RANGE_END: u32 = 0xDEADFFFF;
@@ -883,6 +884,15 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisP
             eax = THEMIS_MAX_VPS;
             ebx = THEMIS_MAX_PARTITIONS;
             ecx = THEMIS_MAX_MEM_REGIONS;
+            edx = 0;
+        }
+        // Leaf 0x40000004: ivshmem device info (subleaf = device index).
+        // Values are pushed by CHV as Emulate overrides via SET_POLICY.
+        // Native handler returns zeros (no ivshmem when handled locally).
+        (CPUID_THEMIS_IVSHMEM, _) => {
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
             edx = 0;
         }
         (CPUID_THEMIS_BASE..=CPUID_HV_RANGE_END, _) => {
