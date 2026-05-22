@@ -66,6 +66,7 @@ fn get_attest_info() -> &'static AttestInfo {
 static TESTS: &[TestCase] = &[
     TestCase { name: "domcomm_discover", func: test_domcomm_discover },
     TestCase { name: "attest_dequeue", func: test_attest_dequeue },
+    TestCase { name: "ivshmem_doorbell", func: test_ivshmem_doorbell },
     TestCase { name: "vtom_double_map", func: test_vtom_double_map },
     TestCase { name: "bounce_buffer_send", func: test_bounce_buffer_send },
 ];
@@ -215,6 +216,30 @@ fn find_cap_for_hpa(info: &AttestInfo, hpa: u64) -> Option<(&dc::MemCapEntry, u6
         }
     }
     None
+}
+
+// ── ivshmem doorbell test ──────────────────────────────────────────────────── //
+
+fn test_ivshmem_doorbell() -> Result<(), &'static str> {
+    let devices = eunomia::ivshmem::discover().map_err(|e| match e {
+        eunomia::ivshmem::IvshmemError::NotThemis => "not running under Themis",
+        eunomia::ivshmem::IvshmemError::NoDevices => "no ivshmem devices",
+        eunomia::ivshmem::IvshmemError::MapFailed(_) => "BAR2 map failed",
+    })?;
+
+    eunomia::println!("  found {} ivshmem device(s)", devices.len());
+
+    for dev in &devices {
+        eunomia::println!("  dev[{}]: bar0=0x{:x} bar2=0x{:x}",
+            dev.index, dev.bar0_gpa, dev.bar2_gpa);
+
+        // Ring the doorbell — this should trigger the IOEVENTFD pipeline
+        // and print "[IVSHMEM] doorbell[N] rang!" on the CHV side.
+        unsafe { dev.ring_doorbell(0x42); }
+        eunomia::println!("  doorbell[{}] rung with value 0x42", dev.index);
+    }
+
+    Ok(())
 }
 
 // ── Test functions ───────────────────────────────────────────────────────── //

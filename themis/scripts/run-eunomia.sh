@@ -123,7 +123,13 @@ WORKLOAD_NAME="$(basename "$KERNEL" | sed 's/^eunomia-//')"
 case "$WORKLOAD_NAME" in
     coco*)
         CHV_ARGS+=(--platform "confidential=on")
+        # Provision a capability-backed ivshmem device for doorbell/notification.
+        # alias mode: dom0 keeps access, child discovers via CPUID 0x40000004.
+        IVSHMEM_PATH="/tmp/eunomia-doorbell-$$"
+        truncate -s 4096 "$IVSHMEM_PATH"
+        CHV_ARGS+=(--ivshmem "path=${IVSHMEM_PATH},size=4096,mode=alias,count=1")
         echo "  mode:    confidential (CoCo)"
+        echo "  ivshmem: ${IVSHMEM_PATH} (4K, alias, doorbell)"
         ;;
 esac
 
