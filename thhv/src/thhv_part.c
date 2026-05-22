@@ -386,13 +386,14 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	 * (sent_caps) vs. how many only got as far as CARVE (cap table).
 	 *
 	 * Shmem plug: skip this loop — use pre-held alias from rendezvous.
-	 * Shmem alias/carve: create rendezvous aliases first, then map normally.
+	 * Shmem alias: create rendezvous aliases from parent, then alias+send.
+	 * Shmem carve: carve from parent, create rendezvous aliases from the
+	 *              carve, then send the carve.
 	 */
 
-	/* For shmem carve, create rendezvous aliases BEFORE carving
-	 * (carve removes dom0 access to the region). */
-	if (gm.shmem_mode == THHV_SHMEM_MODE_CARVE ||
-	    gm.shmem_mode == THHV_SHMEM_MODE_ALIAS) {
+	/* For shmem alias mode, create rendezvous aliases from the parent
+	 * BEFORE the primary alias+send (parent still owns the region). */
+	if (gm.shmem_mode == THHV_SHMEM_MODE_ALIAS) {
 		u64 ph;
 		if (nr_segs != 1) {
 			pr_err("thhv: shmem requires physically contiguous region (%u segs)\n",
@@ -444,6 +445,20 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 						   &cap_handle, &cap_sub);
 			if (ret)
 				goto err_revoke_partial;
+
+			/* For shmem carve, create rendezvous aliases FROM
+			 * the carve (not from parent) before sending it. */
+			if (gm.shmem_mode == THHV_SHMEM_MODE_CARVE) {
+				ret = thhv_shmem_create_post(part, &gm,
+							     cap_handle,
+							     segs[i].hpa_start,
+							     segs[i].size);
+				if (ret) {
+					themis_revoke_mem(parent_handle,
+							 cap_sub);
+					goto err_revoke_partial;
+				}
+			}
 
 			ret = thhv_cap_table_insert(cap_handle, parent_handle,
 						    cap_sub,
