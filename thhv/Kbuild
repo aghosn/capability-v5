@@ -2,6 +2,6 @@
 obj-m += thhv.o
 thhv-objs := src/thhv_main.o src/thhv_hvcall.o src/thhv_part.o src/thhv_vp.o \
              src/thhv_translate.o src/thhv_domcomm.o src/thhv_ioeventfd.o \
-             src/thhv_irqfd.o
+             src/thhv_irqfd.o src/thhv_shmem.o
 
 ccflags-y += -I$(src)/inc

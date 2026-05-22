@@ -941,6 +941,9 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 		return ret;
 	}
 
+	case THHV_REGISTER_SHMEM:
+		return thhv_register_shmem(part, uarg);
+
 	default:
 		return -ENOTTY;
 	}

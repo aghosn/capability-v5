@@ -305,6 +305,7 @@ static int __init thhv_init(void)
 		return ret;
 	}
 
+	thhv_shmem_init();
 	pr_info("thhv: /dev/%s registered\n", THHV_DEV_NAME);
 	return 0;
 }
@@ -312,6 +313,7 @@ static int __init thhv_init(void)
 static void __exit thhv_exit(void)
 {
 	misc_deregister(&thhv_misc);
+	thhv_shmem_cleanup();
 	thhv_pa_map_cleanup();
 	pr_info("thhv: /dev/%s unregistered\n", THHV_DEV_NAME);
 }

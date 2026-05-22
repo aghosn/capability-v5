@@ -982,10 +982,40 @@ struct thhv_set_policy {
 	__u64 value;
 };
 
+/* ── Capability-backed shared memory (ivshmem) ─────────────────────────────── */
+
+#define THHV_SHMEM_MODE_ALIAS   0  /* Creator keeps access */
+#define THHV_SHMEM_MODE_CARVE   1  /* Creator loses access */
+#define THHV_SHMEM_MODE_PLUG    2  /* Join existing region */
+
+#define THHV_SHMEM_PATH_MAX    256
+#define THHV_SHMEM_MAX_ENTRIES  16
+
+/*
+ * Register a capability-backed shared memory region for this partition.
+ *
+ * alias/carve: thhv pins the pages, carves/aliases from dom0's memory cap,
+ *   creates `count` extra aliases and registers them under `path` for later
+ *   plug operations.  The primary alias/carve is sent to the child domain.
+ *
+ * plug: thhv looks up `path` in the rendezvous table, pops the next pre-held
+ *   alias, and sends it to this partition's child domain.
+ */
+struct thhv_register_shmem {
+	__u64 userspace_addr;                  /* Host VA (mmap of backing file) */
+	__u64 size;                            /* Region size (power of 2) */
+	__u64 guest_gpa;                       /* GPA where BAR2 is placed */
+	__u32 mode;                            /* THHV_SHMEM_MODE_* */
+	__u32 count;                           /* Nr of plug aliases (creator) */
+	char  path[THHV_SHMEM_PATH_MAX];       /* Rendezvous key */
+};
+
 #define THHV_INJECT_INTERRUPT \
 	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
 #define THHV_SET_POLICY \
 	_IOW(THHV_IOCTL_MAGIC, 0x1a, struct thhv_set_policy)
+#define THHV_REGISTER_SHMEM \
+	_IOW(THHV_IOCTL_MAGIC, 0x1b, struct thhv_register_shmem)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -1286,6 +1316,12 @@ void thhv_irqfd_release_all(struct thhv_partition *part);
 long thhv_vp_create(struct thhv_partition *part, void __user *uarg);
 void thhv_wake_vp(struct thhv_partition *part, u32 vp_index);
 extern const struct file_operations thhv_vp_fops;
+
+/* thhv_shmem.c — capability-backed shared memory (ivshmem rendezvous) */
+long thhv_register_shmem(struct thhv_partition *part, void __user *uarg);
+void thhv_shmem_cleanup_partition(struct thhv_partition *part);
+void thhv_shmem_init(void);
+void thhv_shmem_cleanup(void);
 
 /* thhv_translate.c — GPA→HPA translation + capability table */
 int thhv_set_pa_map(void __user *uarg);
