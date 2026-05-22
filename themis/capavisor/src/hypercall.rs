@@ -225,6 +225,8 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SEND_CHAN => Some(do_send_chan(&caller, arg0, arg1, arg2)),
         opcodes::THEMIS_ACCEPT_CHAN => Some(do_accept_chan(&caller, arg0)),
 
+        opcodes::THEMIS_RING_DOORBELL => Some(do_ring_doorbell(platform, &caller, arg0, arg1)),
+
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
             Some(HypercallResult::unimpl())
@@ -2630,6 +2632,71 @@ fn do_unregister_doorbell(
     if pd.doorbells.len() == before {
         return HypercallResult::error(errors::ERR_NOTFOUND);
     }
+
+    HypercallResult::success()
+}
+
+/// RING_DOORBELL (0x23): called by a child domain to ring a doorbell.
+/// The capavisor matches the GPA against the caller's doorbell list and
+/// enqueues a notification to the parent domain's DomainComm RX ring.
+///
+/// arg0 = doorbell GPA, arg1 = value
+fn do_ring_doorbell(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    gpa: u64,
+    value: u64,
+) -> HypercallResult {
+    use crate::platform::THEMIC_DOORBELL_FLAG_ANY_VALUE;
+    use themis_abi::domcomm;
+
+    let caller_id = caller.read().data.id;
+    let caller_arc = match platform.domain_arc(caller_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+
+    let (doorbell_id, parent_id) = {
+        let pd = caller_arc.lock();
+        let entry = pd.doorbells.iter().find(|e| {
+            if e.gpa != gpa {
+                return false;
+            }
+            let any_value = e.flags & THEMIC_DOORBELL_FLAG_ANY_VALUE != 0;
+            any_value || e.datamatch == value
+        });
+        let db_id = match entry {
+            Some(e) => e.doorbell_id,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        let parent = match pd.parent {
+            Some(p) => p,
+            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        };
+        (db_id, parent)
+    };
+
+    let parent_arc = match platform.domain_arc(parent_id) {
+        Some(a) => a,
+        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+    };
+    let mut parent_pd = parent_arc.lock();
+
+    let notify = domcomm::DoorbellNotify {
+        doorbell_id,
+        reserved: 0,
+        gpa,
+        value,
+        size: 0,
+        reserved2: 0,
+    };
+    let notify_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &notify as *const domcomm::DoorbellNotify as *const u8,
+            core::mem::size_of::<domcomm::DoorbellNotify>(),
+        )
+    };
+    parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
 
     HypercallResult::success()
 }

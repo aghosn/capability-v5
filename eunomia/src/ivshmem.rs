@@ -122,15 +122,20 @@ impl IvshmemDevice {
 
     /// Ring the doorbell by writing to BAR0 + 0xC.
     ///
-    /// The write value encodes (dest_peer << 16 | vector) per the ivshmem
-    /// spec.  This triggers an EPT violation → capavisor doorbell handler
-    /// → DomainComm notification → eventfd signal in the parent.
+    /// Ring the doorbell register in BAR0 via a VMCALL to the capavisor.
     ///
-    /// # Safety
-    /// BAR0 must be identity-mapped (true for < 4 GiB boot map).
-    pub unsafe fn ring_doorbell(&self, value: u32) {
-        let addr = (self.bar0_gpa + bar0::REG_DOORBELL) as *mut u32;
-        core::ptr::write_volatile(addr, value);
+    /// The capavisor matches the GPA against the caller's doorbell list and
+    /// enqueues a notification to the parent domain's DomainComm RX ring.
+    pub fn ring_doorbell(&self, value: u32) {
+        let gpa = self.bar0_gpa + bar0::REG_DOORBELL;
+        unsafe {
+            libthemis::raw_vmcall(
+                themis_abi::opcodes::THEMIS_RING_DOORBELL,
+                gpa as u64,
+                value as u64,
+                0, 0, 0,
+            );
+        }
     }
 
     /// Read the IV Position register (peer ID assigned by the VMM).

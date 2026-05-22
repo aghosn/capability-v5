@@ -1326,6 +1326,13 @@ fn handle_ept_doorbell(
         child_pd.doorbells.len()
     );
 
+    serial_println!(
+        "[DOORBELL-DBG] gpa={:#x} qual={:#x} sz={} val={:#x} #db={} rip={:#x} insn_len={}",
+        gpa, qual, write_size, written_value, child_pd.doorbells.len(),
+        vcpu.get(vmcs::guest::RIP),
+        vcpu.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
+    );
+
     let matched: Option<(u32, u64, u64, u32)> = child_pd.doorbells.iter().find_map(|e| {
         if e.gpa != gpa {
             return None;
@@ -1342,9 +1349,12 @@ fn handle_ept_doorbell(
     });
 
     let (doorbell_id, matched_gpa, value, size) = match matched {
-        Some(m) => m,
+        Some(m) => {
+            serial_println!("[DOORBELL-DBG] MATCHED db_id={}", m.0);
+            m
+        }
         None => {
-            serial_rtdbg!("[DOORBELL] no match gpa={:#x}", gpa);
+            serial_println!("[DOORBELL-DBG] NO MATCH gpa={:#x}", gpa);
             return Some(false);
         }
     };

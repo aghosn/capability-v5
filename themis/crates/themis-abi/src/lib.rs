@@ -166,6 +166,10 @@ pub mod opcodes {
     ///      RCX = sub_key (word_index for register bitmap variants, 0 otherwise)
     ///      R8  = value
     pub const THEMIS_SET_POLICY: u64 = 0x22;
+
+    /// Ring a doorbell from inside the guest (child domain).
+    /// IN:  RDI = doorbell GPA, RSI = value
+    pub const THEMIS_RING_DOORBELL: u64 = 0x23;
 }
 
 /// Policy-kind discriminants for `THEMIS_SET_POLICY`.
