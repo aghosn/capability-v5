@@ -234,6 +234,14 @@ struct thhv_initialize_partition {
 	__u64 apic_access_size;    /* Must be PAGE_SIZE */
 };
 
+/* Shared-memory rendezvous constants (used in thhv_set_guest_memory). */
+#define THHV_SHMEM_PATH_MAX    256
+#define THHV_SHMEM_MAX_ENTRIES  16
+#define THHV_SHMEM_MODE_NONE    0  /* Not a shmem region (default) */
+#define THHV_SHMEM_MODE_ALIAS   1  /* Creator keeps access */
+#define THHV_SHMEM_MODE_CARVE   2  /* Creator loses access */
+#define THHV_SHMEM_MODE_PLUG    3  /* Join existing region */
+
 struct thhv_set_guest_memory {
 	__u64 guest_pfn;       /* GPA >> 12 */
 	__u64 userspace_addr;  /* Host VA (page-aligned) */
@@ -241,6 +249,10 @@ struct thhv_set_guest_memory {
 	__u32 flags;           /* THHV_MEM_F_* bitmask */
 	__u32 rights;          /* THHV_MEM_R_* bitmask (R/W/X) */
 	__u64 attrs;           /* THHV_MEM_A_* bitmask (HASH/CLEAN/VITAL/META) */
+	/* Optional shared-memory fields (shmem_mode == 0 → not shmem). */
+	__u32 shmem_mode;      /* THHV_SHMEM_MODE_* (0 = none) */
+	__u32 shmem_count;     /* Nr of plug aliases (creator only) */
+	char  shmem_path[THHV_SHMEM_PATH_MAX]; /* Rendezvous key */
 };
 
 /* flags — operation type */
@@ -982,40 +994,10 @@ struct thhv_set_policy {
 	__u64 value;
 };
 
-/* ── Capability-backed shared memory (ivshmem) ─────────────────────────────── */
-
-#define THHV_SHMEM_MODE_ALIAS   0  /* Creator keeps access */
-#define THHV_SHMEM_MODE_CARVE   1  /* Creator loses access */
-#define THHV_SHMEM_MODE_PLUG    2  /* Join existing region */
-
-#define THHV_SHMEM_PATH_MAX    256
-#define THHV_SHMEM_MAX_ENTRIES  16
-
-/*
- * Register a capability-backed shared memory region for this partition.
- *
- * alias/carve: thhv pins the pages, carves/aliases from dom0's memory cap,
- *   creates `count` extra aliases and registers them under `path` for later
- *   plug operations.  The primary alias/carve is sent to the child domain.
- *
- * plug: thhv looks up `path` in the rendezvous table, pops the next pre-held
- *   alias, and sends it to this partition's child domain.
- */
-struct thhv_register_shmem {
-	__u64 userspace_addr;                  /* Host VA (mmap of backing file) */
-	__u64 size;                            /* Region size (power of 2) */
-	__u64 guest_gpa;                       /* GPA where BAR2 is placed */
-	__u32 mode;                            /* THHV_SHMEM_MODE_* */
-	__u32 count;                           /* Nr of plug aliases (creator) */
-	char  path[THHV_SHMEM_PATH_MAX];       /* Rendezvous key */
-};
-
 #define THHV_INJECT_INTERRUPT \
 	_IOW(THHV_IOCTL_MAGIC, 0x19, struct thhv_inject_interrupt)
 #define THHV_SET_POLICY \
 	_IOW(THHV_IOCTL_MAGIC, 0x1a, struct thhv_set_policy)
-#define THHV_REGISTER_SHMEM \
-	_IOW(THHV_IOCTL_MAGIC, 0x1b, struct thhv_register_shmem)
 
 /* ── VP-level ioctls ───────────────────────────────────────────────────────── */
 
@@ -1318,7 +1300,11 @@ void thhv_wake_vp(struct thhv_partition *part, u32 vp_index);
 extern const struct file_operations thhv_vp_fops;
 
 /* thhv_shmem.c — capability-backed shared memory (ivshmem rendezvous) */
-long thhv_register_shmem(struct thhv_partition *part, void __user *uarg);
+long thhv_shmem_handle(struct thhv_partition *part,
+		       struct thhv_set_guest_memory *gm);
+long thhv_shmem_create_post(struct thhv_partition *part,
+			    struct thhv_set_guest_memory *gm,
+			    u64 parent_handle, u64 hpa_start, u64 hpa_size);
 void thhv_shmem_cleanup_partition(struct thhv_partition *part);
 void thhv_shmem_init(void);
 void thhv_shmem_cleanup(void);

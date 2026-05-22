@@ -384,10 +384,42 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 	 *
 	 * On error, we track how many segments completed the full cycle
 	 * (sent_caps) vs. how many only got as far as CARVE (cap table).
+	 *
+	 * Shmem plug: skip this loop — use pre-held alias from rendezvous.
+	 * Shmem alias/carve: create rendezvous aliases first, then map normally.
 	 */
-	{
+
+	/* For shmem carve, create rendezvous aliases BEFORE carving
+	 * (carve removes dom0 access to the region). */
+	if (gm.shmem_mode == THHV_SHMEM_MODE_CARVE ||
+	    gm.shmem_mode == THHV_SHMEM_MODE_ALIAS) {
+		u64 ph;
+		if (nr_segs != 1) {
+			pr_err("thhv: shmem requires physically contiguous region (%u segs)\n",
+			       nr_segs);
+			ret = -EINVAL;
+			goto err_free_segs;
+		}
+		ret = thhv_find_parent_handle(segs[0].hpa_start,
+					      segs[0].size, &ph);
+		if (ret)
+			goto err_free_segs;
+		ret = thhv_shmem_create_post(part, &gm, ph,
+					     segs[0].hpa_start,
+					     segs[0].size);
+		if (ret)
+			goto err_free_segs;
+	}
+
+	if (gm.shmem_mode == THHV_SHMEM_MODE_PLUG) {
+		/* Plug: pop pre-held alias and SEND_AT. */
+		ret = thhv_shmem_handle(part, &gm);
+		if (ret)
+			goto err_free_segs;
+	} else {
+		/* Standard per-segment map loop. */
 		u64 child_gpa_cursor = gm.guest_pfn << PAGE_SHIFT;
-		unsigned int nr_sent = 0;  /* segments fully sent */
+		unsigned int nr_sent = 0;
 
 		for (i = 0; i < nr_segs; i++) {
 			u64 cap_handle, cap_sub;
@@ -413,7 +445,6 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 			if (ret)
 				goto err_revoke_partial;
 
-			/* Insert child region into cap table. */
 			ret = thhv_cap_table_insert(cap_handle, parent_handle,
 						    cap_sub,
 						    segs[i].hpa_start,
@@ -423,26 +454,20 @@ static long thhv_set_guest_memory(struct thhv_partition *part,
 				goto err_revoke_partial;
 			}
 
-			/* SEND_AT to child domain. */
 			ret = themis_send_at(cap_handle,
 					     part->domain_handle,
 					     gm.attrs,
 					     child_gpa_cursor);
 			if (ret) {
-				/* Undo: revoke + remove from cap table. */
 				themis_revoke_mem(parent_handle, cap_sub);
 				thhv_cap_table_remove(cap_handle);
 				goto err_revoke_partial;
 			}
 
-			/* Handle sent: remove from cap table, add to sent_caps. */
 			thhv_cap_table_remove(cap_handle);
 
 			sc = kzalloc(sizeof(*sc), GFP_KERNEL);
 			if (!sc) {
-				/* Cap already sent — can't undo SEND easily.
-				 * Still record for cleanup even if alloc fails.
-				 */
 				pr_err("thhv: sent_cap alloc failed\n");
 				ret = -ENOMEM;
 				goto err_revoke_partial;
@@ -940,9 +965,6 @@ static long thhv_part_ioctl(struct file *file, unsigned int cmd,
 			thhv_wake_vp(part, ii.vp_index);
 		return ret;
 	}
-
-	case THHV_REGISTER_SHMEM:
-		return thhv_register_shmem(part, uarg);
 
 	default:
 		return -ENOTTY;
