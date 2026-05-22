@@ -196,10 +196,10 @@ else
 fi
 
 if should_build chv; then
-    echo "→ [cloud-hypervisor] cargo ${CARGO_BUILD_ARGS[*]} --features themis,kvm"
+    echo "→ [cloud-hypervisor] cargo ${CARGO_BUILD_ARGS[*]} --features themis,kvm,ivshmem"
     (
         cd "$REPO_ROOT/cloud-hypervisor"
-        cargo "${CARGO_BUILD_ARGS[@]}" --features themis,kvm
+        cargo "${CARGO_BUILD_ARGS[@]}" --features themis,kvm,ivshmem
     )
 else
     echo "→ [cloud-hypervisor] skipped"
