@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-20)
+## Current State (2026-05-22)
 
 ### What works
 
@@ -18,6 +18,10 @@
 - **Eunomia as dom1**: ✅ boots under full Themis stack (capavisor + dom0 + CHV).
   All 33/33 tests pass (incl. timer via TSC-deadline, CPUID). 7 workloads.
   `cargo build-bins` now rebuilds Eunomia workloads before packaging.
+- **ivshmem doorbell pipeline**: CHV ivshmem multi-device, CPUID discovery,
+  deferred IOEVENTFD, shmem ALIAS mapping, DomainComm doorbell notification.
+  Doorbell registration and matching works. Pending: RING_DOORBELL VMCALL
+  needs to context-switch to parent (synthetic exit reason).
 - **Platform modularization**: complete. Opaque ArchDomainState/ArchPlatformState,
   aarch64 cross-check 0 errors. Generic monitor loop with SemanticExit dispatch.
 - **AArch64 M1–M5c**: boot → memory → EL2 → GICv3 → guest → PSCI → Linux initramfs.
@@ -244,22 +248,41 @@ mmap which gives scattered 4K pages.  This matters for:
 - [ ] Do we need a capavisor-side contiguous allocator for meta/notification pages?
 - [ ] Impact on memory fragmentation under multiple domains
 
-### 5. Inter-domain shared memory / ivshmem equivalent (research needed)
+### 5. Inter-domain shared memory / ivshmem doorbell (active)
 
-**Problem**: Domains need private shared memory for communication (not through
-dom0).  Use cases:
-- Core-gapped child ↔ dom0 event queue (currently meta page, but needs scaling)
-- Domain-to-domain direct communication (e.g., crypto enclave ↔ app domain)
-- High-bandwidth data plane without dom0 intermediary
+**Design doc**: [`docs/architecture/ivshmem-doorbell.md`](docs/architecture/ivshmem-doorbell.md)
 
-**Questions to investigate**:
-- [ ] Does CHV support ivshmem or similar shared memory device?
-- [ ] Can ALIAS capabilities serve as the shared memory primitive?
-  (A creates ALIAS, sends to B via CHANNEL → both map same HPAs)
-- [ ] How does this interact with VTOM / CoCo? (shared window must be at
-  GPA|VTOM in both domains)
-- [ ] Performance: polling vs doorbell interrupt for notification
-- [ ] Could Eunomia-to-Eunomia communication be the first test case?
+**What works**:
+- [x] CHV ivshmem multi-device support + capability-backed shmem (ALIAS)
+- [x] Shmem registration folded into SET_GUEST_MEMORY (shmem_mode flag)
+- [x] thhv REGISTER_DOORBELL VMCALL + DomainComm notification pipeline
+- [x] CPUID leaf 0x40000004 for ivshmem device discovery (BAR0/BAR2 GPAs)
+- [x] Eunomia ivshmem module: discover devices, read BAR0/BAR2
+- [x] Deferred IOEVENTFD registration (after domain creation, before seal)
+- [x] CHV doorbell eventfd listener thread
+- [x] Doorbell registration reaches capavisor (doorbells matched correctly)
+- [x] CHV squashed to 2 logical commits (CoCo gating + doorbell pipeline)
+
+**Current blocker**: RING_DOORBELL VMCALL returns to child instead of
+switching back to parent. Dom0's thhv poller can't drain DomainComm
+while child owns the core (sync switch model).
+
+**Next steps (in order)**:
+- [ ] Add synthetic `THEMIS_EXIT_DOORBELL` exit reason to themis-abi
+      (high bit set, e.g. 0x8000_0001, to distinguish from hardware exits)
+- [ ] `do_ring_doorbell`: after enqueuing DomainComm notification, call
+      `forward_child_exit(vcpu, THEMIS_EXIT_DOORBELL)` and return `None`
+      (same pattern as SWITCH — context switch back to parent)
+- [ ] thhv: handle `THEMIS_EXIT_DOORBELL` after SCHED_SYNC returns —
+      DomainComm poller drains RX ring, signals matching eventfd
+- [ ] Verify end-to-end: eunomia rings doorbell → capavisor switches to
+      dom0 → thhv poller → eventfd → CHV listener prints "doorbell rang"
+- [ ] Cleanup: remove debug serial_println!, squash main repo commits
+
+**Key insight (2026-05-22)**: `VMEXIT_INSTRUCTION_LEN` is NOT reliable
+for EPT violation or EPT misconfig under KVM nested virtualization.
+The field contains stale values. VMCALL-based doorbell avoids this
+entirely — VMCALL always has valid instruction length.
 
 ### 6. AArch64 backend (blocked on hardware)
 
