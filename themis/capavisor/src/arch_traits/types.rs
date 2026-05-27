@@ -271,11 +271,6 @@ impl<A: ArchVpOps> Vp<A> {
         self.arch.forward_interrupt(&mut self.handle, vector);
     }
 
-    /// Check if a memory fault is a doorbell event.
-    pub fn check_doorbell(&mut self, exit_info: &ExitInfo) -> bool {
-        self.arch.check_doorbell(&mut self.handle, exit_info)
-    }
-
     /// Reset the preemption timer.
     pub fn reset_timer(&mut self) {
         self.arch.reset_timer(&mut self.handle);

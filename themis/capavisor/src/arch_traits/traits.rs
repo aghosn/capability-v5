@@ -77,11 +77,6 @@ pub trait ArchVpOps {
     /// Forward an interrupt to the handler domain via the capability engine.
     fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32);
 
-    /// Check if a memory fault (EPT violation / Stage-2 fault) is a
-    /// doorbell-triggered event. Returns `true` if handled (loop continues).
-    /// The arch code extracts GPA and fault info from `exit_info`.
-    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, exit_info: &ExitInfo) -> bool;
-
     /// Reset the preemption / scheduling timer for the current VP.
     fn reset_timer(&mut self, vp: &mut Self::VpHandle);
 

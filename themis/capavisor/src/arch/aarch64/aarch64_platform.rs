@@ -107,11 +107,6 @@ impl ArchVpOps for Aarch64Platform {
         unimplemented!("aarch64: forward_interrupt")
     }
 
-    fn check_doorbell(&mut self, _vp: &mut Self::VpHandle, _exit_info: &ExitInfo) -> bool {
-        // Would check Stage2Fault { ipa, is_write, .. } for doorbell GPA.
-        false
-    }
-
     fn reset_timer(&mut self, _vp: &mut Self::VpHandle) {
         // ARM EL2 physical timer: write CNTHP_TVAL_EL2 or CNTHP_CTL_EL2.
         unimplemented!("aarch64: reset_timer")

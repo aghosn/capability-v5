@@ -158,17 +158,6 @@ impl ArchVpOps for X86Platform {
         crate::hypercall::forward_interrupt_to_handler(vp, vector as u8);
     }
 
-    fn check_doorbell(&mut self, vp: &mut Self::VpHandle, exit_info: &ExitInfo) -> bool {
-        if let ExitInfo::EptViolation {
-            gpa, qualification, ..
-        } = exit_info
-        {
-            vmexit::check_ept_doorbell(self.platform(), vp, *gpa, *qualification).unwrap_or(false)
-        } else {
-            false
-        }
-    }
-
     fn reset_timer(&mut self, vp: &mut Self::VpHandle) {
         vp.set(
             vmcs::guest::VMX_PREEMPTION_TIMER_VALUE,

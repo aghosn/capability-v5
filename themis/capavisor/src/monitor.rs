@@ -59,16 +59,6 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
             }
 
             SemanticExit::PolicyDriven { reason, ref info } => {
-                // Memory-fault doorbell fast-path: always checked before policy.
-                if matches!(
-                    info,
-                    ExitInfo::EptViolation { .. } | ExitInfo::Stage2Fault { .. }
-                ) {
-                    if vp.check_doorbell(info) {
-                        continue;
-                    }
-                }
-
                 // CPUID interposition: per-(leaf, subleaf) policy overrides ExitPolicy.
                 if let ExitInfo::Cpuid { leaf, subleaf } = info {
                     match lookup_cpuid_action(platform, *leaf, *subleaf) {
