@@ -218,6 +218,9 @@ struct thhv_create_vp {
 #define THHV_EXIT_REASON_WRMSR		32
 #define THHV_EXIT_REASON_EPT_VIOLATION	48
 
+/* ── Synthetic exit reasons (high bit set, not hardware VMX reasons) ──── */
+#define THHV_EXIT_REASON_DOORBELL	0x80000001u
+
 /* ── VP activity / MP state (Intel SDM Vol 3C §24.4.2) ───────────────── */
 #define THHV_MP_STATE_RUNNABLE		0
 #define THHV_MP_STATE_WAIT_FOR_SIPI	3

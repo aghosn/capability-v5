@@ -233,10 +233,11 @@ fn test_ivshmem_doorbell() -> Result<(), &'static str> {
         eunomia::println!("  dev[{}]: bar0=0x{:x} bar2=0x{:x}",
             dev.index, dev.bar0_gpa, dev.bar2_gpa);
 
-        // Ring the doorbell — this should trigger the IOEVENTFD pipeline
-        // and print "[IVSHMEM] doorbell[N] rang!" on the CHV side.
-        dev.ring_doorbell(0x42);
-        eunomia::println!("  doorbell[{}] rung with value 0x42", dev.index);
+        // Ring the doorbell 5 times to verify the full pipeline.
+        for i in 0..5 {
+            dev.ring_doorbell(0x42 + i);
+            eunomia::println!("  doorbell[{}] rung #{} with value {:#x}", dev.index, i, 0x42u32 + i);
+        }
     }
 
     Ok(())

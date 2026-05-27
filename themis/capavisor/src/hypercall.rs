@@ -225,7 +225,7 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) -> Option<HypercallResult> {
         opcodes::THEMIS_SEND_CHAN => Some(do_send_chan(&caller, arg0, arg1, arg2)),
         opcodes::THEMIS_ACCEPT_CHAN => Some(do_accept_chan(&caller, arg0)),
 
-        opcodes::THEMIS_RING_DOORBELL => Some(do_ring_doorbell(platform, &caller, arg0, arg1)),
+        opcodes::THEMIS_RING_DOORBELL => do_ring_doorbell(platform, &caller, arg0, arg1, vcpu),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => {
@@ -1341,9 +1341,8 @@ fn do_switch(
         child_active.set_reg(Reg::Rdi, vector as u64);
         child_active.set_reg(Reg::Rsi, 0);
         child_active.set_reg(Reg::Rdx, 0);
-        // Advance RIP past the SWITCH VMCALL (3 bytes).
-        let rip = child_active.get(x86::vmx::vmcs::guest::RIP);
-        child_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
+        // Advance RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN.
+        crate::arch::x86_64::vmexit::next_instruction(&mut child_active);
     }
 
     // ── 9. Replace the monitor loop's ActiveVcpu ──
@@ -2149,10 +2148,9 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     }
 
-    // Advance handler's RIP past the SWITCH VMCALL (3 bytes) and return ERR_RETRY
-    // with the preempting vector in RDI (per A3 contract).
-    let rip = handler_active.get(x86::vmx::vmcs::guest::RIP);
-    handler_active.set(x86::vmx::vmcs::guest::RIP, rip + 3);
+    // Advance handler's RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN
+    // and return ERR_RETRY with the preempting vector in RDI (per A3 contract).
+    crate::arch::x86_64::vmexit::next_instruction(&mut handler_active);
     handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
     handler_active.set_reg(Reg::Rdi, vector as u64);
     handler_active.set_reg(Reg::Rsi, 0);
@@ -2637,8 +2635,10 @@ fn do_unregister_doorbell(
 }
 
 /// RING_DOORBELL (0x23): called by a child domain to ring a doorbell.
-/// The capavisor matches the GPA against the caller's doorbell list and
-/// enqueues a notification to the parent domain's DomainComm RX ring.
+/// The capavisor matches the GPA against the caller's doorbell list,
+/// enqueues a notification to the parent domain's DomainComm RX ring,
+/// then context-switches back to the parent so thhv can drain the ring
+/// and signal the matching ioeventfd.
 ///
 /// arg0 = doorbell GPA, arg1 = value
 fn do_ring_doorbell(
@@ -2646,14 +2646,16 @@ fn do_ring_doorbell(
     caller: &CapabilityRef<Domain>,
     gpa: u64,
     value: u64,
-) -> HypercallResult {
+    vcpu: &mut ActiveVcpu,
+) -> Option<HypercallResult> {
     use crate::platform::THEMIC_DOORBELL_FLAG_ANY_VALUE;
     use themis_abi::domcomm;
+    use themis_abi::synthetic_exits::THEMIS_EXIT_DOORBELL;
 
     let caller_id = caller.read().data.id;
     let caller_arc = match platform.domain_arc(caller_id) {
         Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
     };
 
     let (doorbell_id, parent_id) = {
@@ -2667,18 +2669,18 @@ fn do_ring_doorbell(
         });
         let db_id = match entry {
             Some(e) => e.doorbell_id,
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+            None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
         };
         let parent = match pd.parent {
             Some(p) => p,
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
+            None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
         };
         (db_id, parent)
     };
 
     let parent_arc = match platform.domain_arc(parent_id) {
         Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
+        None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
     };
     let mut parent_pd = parent_arc.lock();
 
@@ -2697,8 +2699,12 @@ fn do_ring_doorbell(
         )
     };
     parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
+    drop(parent_pd);
 
-    HypercallResult::success()
+    // Context-switch back to parent so thhv can drain the DomainComm RX ring.
+    // forward_child_exit advances child RIP (non-EPT path) and swaps VMCS.
+    forward_child_exit(vcpu, THEMIS_EXIT_DOORBELL);
+    None
 }
 
 /// SET_THEMIC_VECTOR (0x17): configure the notify_vector in the caller's

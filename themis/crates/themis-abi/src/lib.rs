@@ -172,6 +172,15 @@ pub mod opcodes {
     pub const THEMIS_RING_DOORBELL: u64 = 0x23;
 }
 
+/// Synthetic exit reasons (high bit set to distinguish from VMX hardware exits).
+pub mod synthetic_exits {
+    /// Child rang a doorbell via RING_DOORBELL VMCALL.
+    /// The capavisor enqueued a DOORBELL_NOTIFY on the parent's DomainComm RX
+    /// ring and switched back to the parent.  thhv should drain the RX ring
+    /// and signal matching ioeventfds.
+    pub const THEMIS_EXIT_DOORBELL: u32 = 0x8000_0001;
+}
+
 /// Policy-kind discriminants for `THEMIS_SET_POLICY`.
 ///
 /// Each constant maps 1:1 to a `PolicyIdentifier` variant in the capability engine.

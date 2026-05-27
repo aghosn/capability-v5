@@ -27,10 +27,10 @@
  * This ensures the only path for register exposure is read_set — the
  * intercept message itself carries no register values.
  */
-static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
+static void thhv_read_intercept_msg(struct thhv_vp *vp,
+				    struct themic_intercept_message *msg)
 {
 	struct themic_slim_intercept slim;
-	struct themic_intercept_message *msg = (struct themic_intercept_message *)out_buf;
 	const struct thhv_vp_comm_page *comm =
 		(const struct thhv_vp_comm_page *)vp->comm_kaddr;
 
@@ -91,10 +91,18 @@ static void thhv_read_intercept_msg(struct thhv_vp *vp, void *out_buf)
  *
  * Returns 0 on success (intercept message copied to @uarg), negative errno on error.
  */
+
 static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 {
 	struct thhv_partition *part = vp->partition;
-	u8 msg_buf[THEMIC_MSG_SLOT_SIZE];
+	/* The userspace ABI is a fixed THEMIC_MSG_SLOT_SIZE (256) byte buffer;
+	 * the live layout is struct themic_intercept_message. Use a union so
+	 * the kernel works with a typed struct and userspace still gets the
+	 * full slot-sized buffer via copy_to_user. */
+	union {
+		struct themic_intercept_message msg;
+		u8 raw[THEMIC_MSG_SLOT_SIZE];
+	} slot = {0};
 	int ret;
 
 	if (!part->sealed)
@@ -152,43 +160,47 @@ retry_switch:
 			 * but short enough not to hurt throughput. */
 			usleep_range(50, 100);
 		} while (true);
-
 		if (ret) {
 			mutex_unlock(&vp->run_lock);
 			return ret;
 		}
 
-		thhv_read_intercept_msg(vp, msg_buf);
+		thhv_read_intercept_msg(vp, &slot.msg);
 
 		/* HLT exit: guest is idle, waiting for an interrupt.
 		 * Block here until an interrupt is injected (via irqfd
 		 * or THHV_INJECT_INTERRUPT), then retry the SWITCH so
 		 * the capavisor can inject the pending PIR vector and
 		 * re-enter the child.  This prevents busy-spinning. */
-		{
-			struct themic_intercept_message *msg =
-				(struct themic_intercept_message *)msg_buf;
-			if (msg->exit_reason == THHV_EXIT_REASON_HLT /* EXIT_REASON_HLT */) {
-				atomic_set(&vp->halted, 1);
-				smp_mb(); /* pair with smp_mb in thhv_wake_vp */
-				/* Check if an inject arrived during the race
-				 * window between reading HLT and setting halted. */
-				if (atomic_read(&vp->pending_inject) > 0) {
-					atomic_set(&vp->halted, 0);
-					atomic_set(&vp->pending_inject, 0);
-					goto retry_switch;
-				}
-				thhv_drain_domcomm_rx(part);
-				ret = wait_event_interruptible(vp->halt_wq,
-					!atomic_read(&vp->halted) || signal_pending(current));
+		if (slot.msg.exit_reason == THHV_EXIT_REASON_HLT) {
+			atomic_set(&vp->halted, 1);
+			smp_mb(); /* pair with smp_mb in thhv_wake_vp */
+			/* Check if an inject arrived during the race
+			 * window between reading HLT and setting halted. */
+			if (atomic_read(&vp->pending_inject) > 0) {
 				atomic_set(&vp->halted, 0);
-				if (signal_pending(current)) {
-					mutex_unlock(&vp->run_lock);
-					return -EINTR;
-				}
 				atomic_set(&vp->pending_inject, 0);
 				goto retry_switch;
 			}
+			thhv_drain_domcomm_rx(part);
+			ret = wait_event_interruptible(vp->halt_wq,
+				!atomic_read(&vp->halted) || signal_pending(current));
+			atomic_set(&vp->halted, 0);
+			if (signal_pending(current)) {
+				mutex_unlock(&vp->run_lock);
+				return -EINTR;
+			}
+			atomic_set(&vp->pending_inject, 0);
+			goto retry_switch;
+		}
+
+		/* DOORBELL exit: child rang a doorbell via VMCALL.
+		 * The capavisor already enqueued a DOORBELL_NOTIFY
+		 * on our DomainComm RX ring.  Drain it (signals
+		 * matching ioeventfds) and forward to userspace
+		 * so CHV can log the event. */
+		if (slot.msg.exit_reason == THHV_EXIT_REASON_DOORBELL) {
+			thhv_drain_domcomm_rx(part);
 		}
 
 		/* Drain the DomainComm RX ring: signal any ioeventfds whose
@@ -213,12 +225,12 @@ retry_switch:
 		}
 
 		atomic_set(&vp->exit_pending, 0);
-		thhv_read_intercept_msg(vp, msg_buf);
+		thhv_read_intercept_msg(vp, &slot.msg);
 	}
 
 	mutex_unlock(&vp->run_lock);
 
-	if (copy_to_user(uarg, msg_buf, THEMIC_MSG_SLOT_SIZE))
+	if (copy_to_user(uarg, slot.raw, THEMIC_MSG_SLOT_SIZE))
 		return -EFAULT;
 
 	return 0;

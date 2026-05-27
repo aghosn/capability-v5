@@ -7,7 +7,7 @@
 
 ---
 
-## Current State (2026-05-22)
+## Current State (2026-05-26)
 
 ### What works
 
@@ -18,10 +18,11 @@
 - **Eunomia as dom1**: ✅ boots under full Themis stack (capavisor + dom0 + CHV).
   All 33/33 tests pass (incl. timer via TSC-deadline, CPUID). 7 workloads.
   `cargo build-bins` now rebuilds Eunomia workloads before packaging.
-- **ivshmem doorbell pipeline**: CHV ivshmem multi-device, CPUID discovery,
-  deferred IOEVENTFD, shmem ALIAS mapping, DomainComm doorbell notification.
-  Doorbell registration and matching works. Pending: RING_DOORBELL VMCALL
-  needs to context-switch to parent (synthetic exit reason).
+- **ivshmem doorbell pipeline**: ✅ **end-to-end working (2026-05-26)**. CHV
+  ivshmem multi-device, CPUID discovery, deferred IOEVENTFD (with fd-clone
+  fix), shmem ALIAS mapping, RING_DOORBELL VMCALL → synthetic exit →
+  DomainComm notify → thhv RX drain → CHV listener. All 5 eunomia
+  doorbell rings delivered, clean ACPI shutdown.
 - **Platform modularization**: complete. Opaque ArchDomainState/ArchPlatformState,
   aarch64 cross-check 0 errors. Generic monitor loop with SemanticExit dispatch.
 - **AArch64 M1–M5c**: boot → memory → EL2 → GICv3 → guest → PSCI → Linux initramfs.
@@ -111,6 +112,15 @@ GPA and HPA fields — fixed by using `mapped_gpas` via structured attestation A
 (3) `send_chan` vs `send` confusion in bounce_buffer_send — corrected.
 
 ---
+
+## Tech Debt (must address)
+
+- **capavisor/src/hypercall.rs cleanup**: `forward_child_exit`, `do_switch`,
+  and `forward_interrupt_to_handler` have grown into multi-hundred-line
+  functions mixing capa-engine calls, COMM-page marshaling, I/O-qual decoding,
+  VMCS swap, and ad-hoc debug instrumentation. Extract helpers (COMM-page
+  marshal, IO exit-qual decode, VMCS swap) and rip out the DB-* trace
+  scaffolding once the doorbell bug is fixed. Quality is not acceptable as-is.
 
 ## Active Work Streams
 
@@ -262,27 +272,27 @@ mmap which gives scattered 4K pages.  This matters for:
 - [x] CHV doorbell eventfd listener thread
 - [x] Doorbell registration reaches capavisor (doorbells matched correctly)
 - [x] CHV squashed to 2 logical commits (CoCo gating + doorbell pipeline)
+- [x] RING_DOORBELL VMCALL → synthetic exit → context switch to parent
+- [x] **End-to-end doorbell pipeline working (2026-05-26)**:
+      eunomia rings → capavisor exits to dom0 → thhv drains DomainComm RX →
+      signals matching eventfd → CHV listener fires → all 5 rings (0x42..0x46)
+      delivered. All 5 eunomia tests pass, clean ACPI shutdown.
 
-**Current blocker**: RING_DOORBELL VMCALL returns to child instead of
-switching back to parent. Dom0's thhv poller can't drain DomainComm
-while child owns the core (sync switch model).
+**Root cause of the multi-week shutdown bug (fixed 2026-05-26)**:
+In `cloud-hypervisor/hypervisor/src/themis/mod.rs::register_ioevent` deferred
+path, `ThhvIoeventfd.fd` stored the *original* caller-supplied raw fd. The
+caller (e.g. `add_ivshmem_device`) dropped its `EventFd` immediately on
+return, closing that fd number. During the ~600 ms window before
+`ensure_initialized()` flushed pending ioeventfds, the closed fd number got
+reassigned to a clone of `exit_evt`. At flush time, `THHV_IOEVENTFD` ioctl
+did `eventfd_ctx_fdget(stale_fd)` and registered the doorbell against
+`exit_evt`'s `eventfd_ctx`. First doorbell ring → `eventfd_signal()` on
+`exit_evt` → `EpollDispatch::Exit` → `Vm::shutdown` → vcpu killed.
 
-**Next steps (in order)**:
-- [ ] Add synthetic `THEMIS_EXIT_DOORBELL` exit reason to themis-abi
-      (high bit set, e.g. 0x8000_0001, to distinguish from hardware exits)
-- [ ] `do_ring_doorbell`: after enqueuing DomainComm notification, call
-      `forward_child_exit(vcpu, THEMIS_EXIT_DOORBELL)` and return `None`
-      (same pattern as SWITCH — context switch back to parent)
-- [ ] thhv: handle `THEMIS_EXIT_DOORBELL` after SCHED_SYNC returns —
-      DomainComm poller drains RX ring, signals matching eventfd
-- [ ] Verify end-to-end: eunomia rings doorbell → capavisor switches to
-      dom0 → thhv poller → eventfd → CHV listener prints "doorbell rang"
-- [ ] Cleanup: remove debug serial_println!, squash main repo commits
-
-**Key insight (2026-05-22)**: `VMEXIT_INSTRUCTION_LEN` is NOT reliable
-for EPT violation or EPT misconfig under KVM nested virtualization.
-The field contains stale values. VMCALL-based doorbell avoids this
-entirely — VMCALL always has valid instruction length.
+**Fix**: store `fd_clone.as_raw_fd()` in `ioevent.fd` for the deferred path.
+The clone is kept alive in `pending_ioeventfds._owner` until flush, so its
+fd number remains valid. Diagnosed via strace timing (600 ms gap between
+defer and flush) + thhv-side `ctx` pointer logging.
 
 ### 6. AArch64 backend (blocked on hardware)
 
