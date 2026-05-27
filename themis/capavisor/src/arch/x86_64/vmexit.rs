@@ -10,6 +10,7 @@ use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 
 use crate::vcpu::{ActiveVcpu, Reg};
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::{serial_debug, serial_println};
 
 use capability_engine::Platform;
@@ -430,7 +431,7 @@ pub(crate) fn handle_local_exit(
         EXIT_REASON_EXCEPTION_NMI => reinject_exception(vcpu),
         EXIT_REASON_EPT_VIOLATION => {
             // No special local handling; advance RIP and return.
-            next_instruction(vcpu);
+            vcpu.next_rip();
         }
         EXIT_REASON_SIPI => {
             // AP bootstrap — only fires for dom0 (children use virtual LAPIC).
@@ -441,7 +442,7 @@ pub(crate) fn handle_local_exit(
                 vcpu.set(vmcs::guest::CS_BASE, cs_base);
                 vcpu.set(vmcs::guest::CS_LIMIT, REALMODE_SEG_LIMIT);
                 vcpu.set(vmcs::guest::CS_ACCESS_RIGHTS, SIPI_CS_ACCESS_RIGHTS);
-                vcpu.set(vmcs::guest::RIP, 0);
+                vcpu.set_rip(0);
                 vcpu.set(vmcs::guest::CR0, unsafe {
                     crate::arch::vmcs::vmcs_adjust_cr0(SIPI_CR0_INITIAL)
                 });
@@ -457,8 +458,8 @@ pub(crate) fn handle_local_exit(
                 );
             }
         }
-        EXIT_REASON_HLT | EXIT_REASON_IO_INSTRUCTION => next_instruction(vcpu),
-        _ => next_instruction(vcpu),
+        EXIT_REASON_HLT | EXIT_REASON_IO_INSTRUCTION => vcpu.next_rip(),
+        _ => vcpu.next_rip(),
     }
     sync_ia32e_mode_guest(vcpu);
 }
@@ -496,7 +497,7 @@ fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
             );
         }
     }
-    next_instruction(vcpu);
+    vcpu.next_rip();
 }
 
 /// Stub HOST_RIP target — halts if reached without going through `vcpu.run()`.
@@ -558,7 +559,7 @@ fn handle_cr_access(vcpu: &mut ActiveVcpu) {
         };
         set_gpr_by_index(vcpu, reg_idx, val);
     }
-    next_instruction(vcpu);
+    vcpu.next_rip();
 }
 
 // ── Fatal exit dump helpers ───────────────────────────────────────────────── //
@@ -578,9 +579,9 @@ fn dump_vmentry_failure(
     let cr0 = vcpu.get(vmcs::guest::CR0);
     let cr4 = vcpu.get(vmcs::guest::CR4);
     let cr3 = vcpu.get(vmcs::guest::CR3);
-    let rip = vcpu.get(vmcs::guest::RIP);
-    let rsp = vcpu.get(vmcs::guest::RSP);
-    let rflags = vcpu.get(vmcs::guest::RFLAGS);
+    let rip = vcpu.rip();
+    let rsp = vcpu.rsp();
+    let rflags = vcpu.rflags();
     let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
     let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
     let cs_base = vcpu.get(vmcs::guest::CS_BASE);
@@ -657,13 +658,13 @@ fn dump_triple_fault(vcpu: &ActiveVcpu) {
     while crate::SERIAL_LOCK.swap(true, core::sync::atomic::Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    let rip = vcpu.get(vmcs::guest::RIP);
-    let rsp = vcpu.get(vmcs::guest::RSP);
+    let rip = vcpu.rip();
+    let rsp = vcpu.rsp();
     let cr0 = vcpu.get(vmcs::guest::CR0);
     let cr3 = vcpu.get(vmcs::guest::CR3);
     let cr4 = vcpu.get(vmcs::guest::CR4);
     let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-    let rflags = vcpu.get(vmcs::guest::RFLAGS);
+    let rflags = vcpu.rflags();
     let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
     let cs_base = vcpu.get(vmcs::guest::CS_BASE);
     let cs_ar = vcpu.get(vmcs::guest::CS_ACCESS_RIGHTS);
@@ -736,7 +737,7 @@ fn dump_ept_misconfig(vcpu: &ActiveVcpu) {
         core::hint::spin_loop();
     }
     let gpa = vcpu.get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
-    let rip = vcpu.get(vmcs::guest::RIP);
+    let rip = vcpu.rip();
     serial_println!(
         "[VMEXIT] EPT misconfig vpid={} GPA={:#x} RIP={:#x}",
         vcpu.vpid(),
@@ -762,7 +763,7 @@ fn reinject_exception(vcpu: &mut ActiveVcpu) {
     let has_error_code = (info >> 11) & 1;
 
     if vector == 6 || vector == 8 {
-        let rip = vcpu.get(vmcs::guest::RIP);
+        let rip = vcpu.rip();
         let name = match vector {
             6 => "#UD",
             8 => "#DF",
@@ -915,7 +916,7 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisP
     vcpu.set_reg(Reg::Rbx, ebx as u64);
     vcpu.set_reg(Reg::Rcx, ecx as u64);
     vcpu.set_reg(Reg::Rdx, edx as u64);
-    next_instruction(vcpu);
+    vcpu.next_rip();
 }
 
 /// Handle RDMSR locally (exit reason 31).
@@ -928,20 +929,20 @@ fn handle_rdmsr_local(vcpu: &mut ActiveVcpu) {
         let value = vcpu.get(vmcs::guest::IA32_EFER_FULL);
         vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
         vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
-        next_instruction(vcpu);
+        vcpu.next_rip();
     } else {
         match crate::arch::msr_virt::handle_rdmsr(ecx) {
             crate::arch::msr_virt::MsrResult::Emulated(v) => {
                 vcpu.set_reg(Reg::Rax, v & MSR_LOW_MASK);
                 vcpu.set_reg(Reg::Rdx, (v >> 32) & MSR_LOW_MASK);
-                next_instruction(vcpu);
+                vcpu.next_rip();
             }
             crate::arch::msr_virt::MsrResult::Passthrough => {
                 if crate::arch::msr_virt::in_bitmap_range(ecx) {
                     let value = unsafe { msr::rdmsr(ecx) };
                     vcpu.set_reg(Reg::Rax, value & MSR_LOW_MASK);
                     vcpu.set_reg(Reg::Rdx, (value >> 32) & MSR_LOW_MASK);
-                    next_instruction(vcpu);
+                    vcpu.next_rip();
                 } else {
                     inject_gp(vcpu);
                 }
@@ -959,16 +960,16 @@ fn handle_wrmsr_local(vcpu: &mut ActiveVcpu) {
     let value = ((vcpu.reg(Reg::Rdx) & MSR_LOW_MASK) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
     if ecx == msr::IA32_EFER {
         vcpu.set(vmcs::guest::IA32_EFER_FULL, value);
-        next_instruction(vcpu);
+        vcpu.next_rip();
     } else {
         match crate::arch::msr_virt::handle_wrmsr(ecx, value) {
             crate::arch::msr_virt::MsrResult::Emulated(_) => {
-                next_instruction(vcpu);
+                vcpu.next_rip();
             }
             crate::arch::msr_virt::MsrResult::Passthrough => {
                 if crate::arch::msr_virt::in_bitmap_range(ecx) {
                     unsafe { msr::wrmsr(ecx, value) };
-                    next_instruction(vcpu);
+                    vcpu.next_rip();
                 } else {
                     inject_gp(vcpu);
                 }
@@ -1050,7 +1051,7 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
             );
         }
     }
-    next_instruction(vcpu);
+    vcpu.next_rip();
 }
 
 /// Decode the faulting MOV instruction at guest RIP to extract the 32-bit
@@ -1066,7 +1067,7 @@ fn decode_apic_write_value(
     use crate::hypercall::{ept_gpa_to_hpa, guest_gva_to_gpa};
 
     let hhdm = platform.hhdm_offset();
-    let guest_rip = vcpu.get(vmcs::guest::RIP);
+    let guest_rip = vcpu.rip();
     let guest_cr3 = vcpu.get(vmcs::guest::CR3);
     let ept_root = vcpu.get(x86::vmx::vmcs::control::EPTP_FULL);
 
@@ -1182,13 +1183,6 @@ fn inject_gp(vcpu: &mut ActiveVcpu) {
     vcpu.set(control::VMENTRY_INSTRUCTION_LEN, 0);
 }
 
-/// Advance guest RIP by the instruction length that caused the VMEXIT.
-pub(crate) fn next_instruction(vcpu: &mut ActiveVcpu) {
-    let len = vcpu.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN);
-    let rip = vcpu.get(vmcs::guest::RIP);
-    vcpu.set(vmcs::guest::RIP, rip + len);
-}
-
 /// Read a guest GPR by the register index encoded in the CR-access exit
 /// qualification (SDM Table 27-3: 0=RAX,1=RCX,2=RDX,3=RBX,4=RSP,5=RBP,
 /// 6=RSI,7=RDI,8–15=R8–R15).
@@ -1198,7 +1192,7 @@ fn gpr_by_index(vcpu: &ActiveVcpu, idx: u64) -> u64 {
         1 => vcpu.reg(Reg::Rcx),
         2 => vcpu.reg(Reg::Rdx),
         3 => vcpu.reg(Reg::Rbx),
-        4 => vcpu.get(vmcs::guest::RSP), // RSP lives in VMCS
+        4 => vcpu.rsp(), // RSP lives in VMCS
         5 => vcpu.reg(Reg::Rbp),
         6 => vcpu.reg(Reg::Rsi),
         7 => vcpu.reg(Reg::Rdi),
@@ -1221,7 +1215,7 @@ fn set_gpr_by_index(vcpu: &mut ActiveVcpu, idx: u64, val: u64) {
         1 => vcpu.set_reg(Reg::Rcx, val),
         2 => vcpu.set_reg(Reg::Rdx, val),
         3 => vcpu.set_reg(Reg::Rbx, val),
-        4 => vcpu.set(vmcs::guest::RSP, val),
+        4 => vcpu.set_rsp(val),
         5 => vcpu.set_reg(Reg::Rbp, val),
         6 => vcpu.set_reg(Reg::Rsi, val),
         7 => vcpu.set_reg(Reg::Rdi, val),

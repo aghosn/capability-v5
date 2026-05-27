@@ -16,7 +16,6 @@ use capability_engine::{
 use themis_abi::{errors, opcodes};
 
 #[cfg(target_arch = "x86_64")]
-use crate::arch::vmexit::next_instruction;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::layout::{
     APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE,
@@ -26,6 +25,7 @@ use crate::arch::x86_64::vmexit::EXIT_REASON_EPT_VIOLATION;
 use crate::platform::ThemisPlatform;
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::{serial_debug, serial_println};
 
 // ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
@@ -1202,6 +1202,13 @@ fn do_switch(
     }
 
     // ── 6. Deactivate parent → InactiveVcpu → store in parent slot ──
+    // Invariant: a VP stored in its VcpuSlot always has RIP positioned at
+    // the next instruction it should execute — never AT a VMCALL it has
+    // already taken.  Advance the parent's RIP past the SWITCH VMCALL here,
+    // while the parent VMCS is still loaded and VMEXIT_INSTRUCTION_LEN is
+    // valid; the subsequent VMCLEAR commits the new RIP to the saved VMCS.
+    // No resume path needs to re-advance this RIP.
+    vcpu.next_rip();
     // SAFETY: we take ownership via ptr::read and will ptr::write the child
     // ActiveVcpu back before returning.  Between read and write, `vcpu`
     // is logically moved-from and must not be used.
@@ -1276,7 +1283,7 @@ fn do_switch(
             unsafe { (*on_ptr).store(0, Ordering::Release) };
 
             if any_set {
-                let rflags = child_active.get(x86::vmx::vmcs::guest::RFLAGS);
+                let rflags = child_active.rflags();
                 let interruptibility =
                     child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
                 let if_set = rflags & RFLAGS_IF != 0;
@@ -1339,16 +1346,18 @@ fn do_switch(
         apply_vmcs_reg(&mut child_active, *reg, *val);
     }
 
-    // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop interrupt
-    // unwind), its RIP is sitting AT its own SWITCH VMCALL.  Deliver a synthetic
-    // SWITCH return result so the domain sees "my callee was preempted by interrupt V".
+    // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop
+    // interrupt unwind), deliver a synthetic SWITCH return result so the
+    // domain sees "my callee was preempted by interrupt V".
+    //
+    // Per the VcpuSlot RIP invariant (see step 6 of do_switch), the target
+    // VP's saved RIP is already past its SWITCH VMCALL, so no RIP advance
+    // is needed here — only the result registers.
     if let Some(vector) = switch_ctx.interrupt_return {
         child_active.set_reg(Reg::Rax, errors::SUCCESS);
         child_active.set_reg(Reg::Rdi, vector as u64);
         child_active.set_reg(Reg::Rsi, 0);
         child_active.set_reg(Reg::Rdx, 0);
-        // Advance RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN.
-        next_instruction(&mut child_active);
     }
 
     // ── 9. Replace the monitor loop's ActiveVcpu ──
@@ -1576,7 +1585,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         // For EPT violations, supply the raw instruction bytes so CHV's
         // iced-x86 emulator can decode and emulate the faulting instruction.
         if exit_reason == EXIT_REASON_EPT_VIOLATION {
-            let guest_rip = vcpu.get(vmcs::guest::RIP);
+            let guest_rip = vcpu.rip();
             let ept_root = {
                 let cd = child_arc.lock();
                 cd.arch.ept().map(|e| e.root_phys())
@@ -1622,7 +1631,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     // decodes the instruction, emulates it, and advances RIP itself.
     // We must NOT advance RIP here for EPT violations.
     if !is_ept_violation {
-        next_instruction(vcpu);
+        vcpu.next_rip();
     }
 
     // ── Deactivate child → store in child's VcpuSlot ──
@@ -1660,12 +1669,9 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     parent_active.set_reg(Reg::Rsi, 0);
     parent_active.set_reg(Reg::Rdx, 0);
 
-    // Advance parent RIP past the SWITCH VMCALL instruction.
-    let parent_rip = parent_active.get(vmcs::guest::RIP);
-    let parent_instr_len = parent_active
-        .try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN)
-        .unwrap_or(3); // VMCALL is 3 bytes
-    parent_active.set(vmcs::guest::RIP, parent_rip + parent_instr_len);
+    // NB: parent RIP was advanced past the SWITCH VMCALL in `do_switch`
+    // before VMCLEAR-ing the parent VMCS (while VMEXIT_INSTRUCTION_LEN was
+    // still valid for that exit). No RIP fix-up is needed here.
 
     // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
     // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
@@ -1676,7 +1682,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         if let Some(vec) = platform.take_deferred(core_id as usize) {
             // Check that parent can accept an external interrupt injection.
             // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-            let rflags = parent_active.get(x86::vmx::vmcs::guest::RFLAGS);
+            let rflags = parent_active.rflags();
             let interruptibility = parent_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
             let if_set = (rflags & (1 << 9)) != 0;
             let blocking = (interruptibility & 0x3) != 0; // STI or MOV-SS blocking
@@ -2143,7 +2149,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
     // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
     {
-        let rflags = handler_active.get(vmcs::guest::RFLAGS);
+        let rflags = handler_active.rflags();
         let interruptibility = handler_active.get(vmcs::guest::INTERRUPTIBILITY_STATE);
         let if_set = (rflags & (1 << 9)) != 0;
         let blocking = (interruptibility & 0x3) != 0;
@@ -2153,9 +2159,9 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     }
 
-    // Advance handler's RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN
-    // and return ERR_RETRY with the preempting vector in RDI (per A3 contract).
-    next_instruction(&mut handler_active);
+    // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
+    // Per the VcpuSlot RIP invariant (see do_switch step 6), the handler's
+    // saved RIP is already past its SWITCH VMCALL — no advance needed here.
     handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
     handler_active.set_reg(Reg::Rdi, vector as u64);
     handler_active.set_reg(Reg::Rsi, 0);

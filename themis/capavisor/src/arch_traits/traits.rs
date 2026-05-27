@@ -48,9 +48,6 @@ pub trait ArchVpOps {
     /// when ExitPolicy says `trap=false` for a `PolicyDriven` exit.
     fn handle_local(&mut self, vp: &mut Self::VpHandle, reason: u32, info: &ExitInfo);
 
-    /// Advance the guest instruction pointer past the current instruction.
-    fn advance_ip(&mut self, vp: &mut Self::VpHandle, len: u32);
-
     /// Read hypercall arguments from the VP's register state.
     fn get_hypercall_args(&self, vp: &Self::VpHandle) -> HypercallArgs;
 

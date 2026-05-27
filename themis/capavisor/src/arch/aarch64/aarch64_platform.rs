@@ -67,13 +67,6 @@ impl ArchVpOps for Aarch64Platform {
         unimplemented!("aarch64: handle_local")
     }
 
-    fn advance_ip(&mut self, _vp: &mut Self::VpHandle, _len: u32) {
-        // On ARM, trapped instructions have a fixed encoding width (4 bytes
-        // for A64). ELR_EL2 += 4 for most traps. IL bit in ESR_EL2 indicates
-        // 16-bit vs 32-bit instruction.
-        unimplemented!("aarch64: advance_ip")
-    }
-
     fn get_hypercall_args(&self, _vp: &Self::VpHandle) -> HypercallArgs {
         // ARM SMCCC: X0=function ID, X1–X5=args.
         // Map to HypercallArgs { opcode: X0, arg0: X1, ... arg4: X5 }.

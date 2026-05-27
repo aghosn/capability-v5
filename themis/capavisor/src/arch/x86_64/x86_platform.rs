@@ -23,6 +23,7 @@ use crate::arch_traits::types::{
 };
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, Reg};
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 
 // ── X86Platform ──────────────────────────────────────────────────────────── //
 
@@ -102,14 +103,6 @@ impl ArchVpOps for X86Platform {
         vmexit::handle_local_exit(vp, reason, info, self.platform());
     }
 
-    fn advance_ip(&mut self, vp: &mut Self::VpHandle, _len: u32) {
-        // Use the hardware-reported instruction length from the VMCS,
-        // which is more reliable than the caller-provided len.
-        let len = vp.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN);
-        let rip = vp.get(vmcs::guest::RIP);
-        vp.set(vmcs::guest::RIP, rip + len);
-    }
-
     fn get_hypercall_args(&self, vp: &Self::VpHandle) -> HypercallArgs {
         HypercallArgs {
             opcode: vp.reg(Reg::Rax),
@@ -145,7 +138,7 @@ impl ArchVpOps for X86Platform {
             vp.set_reg(Reg::Rdi, result.rdi);
             vp.set_reg(Reg::Rsi, result.rsi);
             vp.set_reg(Reg::Rdx, result.rdx);
-            vmexit::next_instruction(vp);
+            vp.next_rip();
         }
         // None → SWITCH swapped the VP handle in-place; no writeback needed.
     }
@@ -174,13 +167,13 @@ impl ArchVpOps for X86Platform {
         vp.set_reg(Reg::Rbx, result.v1 as u64);
         vp.set_reg(Reg::Rcx, result.v2 as u64);
         vp.set_reg(Reg::Rdx, result.v3 as u64);
-        vmexit::next_instruction(vp);
+        vp.next_rip();
     }
 
     fn emulate_rdmsr(&mut self, vp: &mut Self::VpHandle, value: u64) {
         vp.set_reg(Reg::Rax, value & 0xFFFF_FFFF);
         vp.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
-        vmexit::next_instruction(vp);
+        vp.next_rip();
     }
 }
 
