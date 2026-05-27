@@ -18,6 +18,10 @@ use limine::mp::Cpu;
 
 use crate::arch::acpi::AcpiInfo;
 use crate::arch::pci::PciDevice;
+use crate::arch::x86_64::layout::{
+    HPET_MMIO_BASE, IOAPIC_MMIO_BASE, ISA_HOLE_BASE, ISA_HOLE_LEN, LAPIC_MMIO_BASE,
+    MMIO_PAGE_SIZE,
+};
 use crate::domain::Domain;
 use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, PhysicalInventory, UncacheableRanges};
@@ -195,9 +199,7 @@ pub fn platform(
     // must map it — otherwise page-table walks that touch GPA 0xC0000 (VGA BIOS)
     // cause an EPT violation.  Also add it to e820 as RESERVED so Linux knows.
     {
-        const ISA_HOLE_BASE: u64 = 0xA0000;
-        const ISA_HOLE_LEN: u64 = 0x100000 - 0xA0000; // 384 KiB
-                                                      // Only add if not already covered by an existing region.
+        // Only add if not already covered by an existing region.
         let covered = passthrough_regions
             .iter()
             .any(|r| r.base <= ISA_HOLE_BASE && r.base + r.length >= ISA_HOLE_BASE + ISA_HOLE_LEN);
@@ -219,9 +221,9 @@ pub fn platform(
     // map.  Linux accesses these directly; without EPT mappings the accesses
     // cause EPT violations.  Map them as passthrough.
     for &(base, len) in &[
-        (0xFEC0_0000u64, 0x1000u64), // I/O APIC (4 KiB)
-        (0xFED0_0000u64, 0x1000u64), // HPET (4 KiB)
-        (0xFEE0_0000u64, 0x1000u64), // Local APIC (4 KiB)
+        (IOAPIC_MMIO_BASE, MMIO_PAGE_SIZE),
+        (HPET_MMIO_BASE, MMIO_PAGE_SIZE),
+        (LAPIC_MMIO_BASE, MMIO_PAGE_SIZE),
     ] {
         let covered = passthrough_regions
             .iter()

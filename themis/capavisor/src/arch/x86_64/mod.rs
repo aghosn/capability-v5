@@ -9,6 +9,7 @@ pub mod arch_state;
 pub mod boot;
 pub mod gdt;
 pub mod iommu_ir;
+pub mod layout;
 pub mod msr_virt;
 pub mod pci;
 pub mod vmcs;

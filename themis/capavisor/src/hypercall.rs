@@ -17,6 +17,12 @@ use themis_abi::{errors, opcodes};
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch::vmexit::next_instruction;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::layout::{
+    APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE,
+};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::vmexit::EXIT_REASON_EPT_VIOLATION;
 use crate::platform::ThemisPlatform;
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
@@ -1342,7 +1348,7 @@ fn do_switch(
         child_active.set_reg(Reg::Rsi, 0);
         child_active.set_reg(Reg::Rdx, 0);
         // Advance RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN.
-        crate::arch::x86_64::vmexit::next_instruction(&mut child_active);
+        next_instruction(&mut child_active);
     }
 
     // ── 9. Replace the monitor loop's ActiveVcpu ──
@@ -1497,7 +1503,6 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         .copied()
         .unwrap_or(0);
 
-    const EXIT_REASON_EPT_VIOLATION: u32 = 48;
     let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
     if comm_hpa != 0 {
         let hhdm = platform.hhdm_offset();
@@ -1861,10 +1866,10 @@ unsafe fn pid_set_ndst(pid_phys: u64, hhdm: u64, lapic_id: u32) {
 /// calling so the target core correctly processes the PID on VMENTRY.
 #[cfg(target_arch = "x86_64")]
 unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
-    let apic_base = hhdm + 0xFEE0_0000u64;
+    let apic_base = hhdm + LAPIC_MMIO_BASE;
     unsafe {
-        let icr_hi = (apic_base + 0x310) as *mut u32;
-        let icr_lo = (apic_base + 0x300) as *mut u32;
+        let icr_hi = (apic_base + APIC_REG_ICR_HIGH) as *mut u32;
+        let icr_lo = (apic_base + APIC_REG_ICR_LOW) as *mut u32;
         core::ptr::write_volatile(icr_hi, ndst_lapic_id << 24);
         // Fixed delivery mode (0), level assert (bit 14), edge trigger.
         core::ptr::write_volatile(icr_lo, (1u32 << 14) | (vector as u32));
@@ -2150,7 +2155,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Advance handler's RIP past the SWITCH VMCALL using VMEXIT_INSTRUCTION_LEN
     // and return ERR_RETRY with the preempting vector in RDI (per A3 contract).
-    crate::arch::x86_64::vmexit::next_instruction(&mut handler_active);
+    next_instruction(&mut handler_active);
     handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
     handler_active.set_reg(Reg::Rdi, vector as u64);
     handler_active.set_reg(Reg::Rsi, 0);

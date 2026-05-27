@@ -84,6 +84,10 @@ use capability_engine::{
 };
 
 use crate::arch::{ArchDomainState, ArchPlatformState};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::layout::{
+    APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE, MMIO_PAGE_SIZE,
+};
 use crate::serial_println;
 #[cfg(target_arch = "x86_64")]
 use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
@@ -1535,13 +1539,13 @@ impl Platform for ThemisPlatform {
                     .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
             };
             let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-            let apic_base = hhdm + 0xFEE0_0000u64;
+            let apic_base = hhdm + LAPIC_MMIO_BASE;
             unsafe {
                 // ICR high: destination APIC ID in bits 24-31
-                let icr_hi = (apic_base + 0x310) as *mut u32;
+                let icr_hi = (apic_base + APIC_REG_ICR_HIGH) as *mut u32;
                 core::ptr::write_volatile(icr_hi, lapic_id << 24);
                 // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14)
-                let icr_lo = (apic_base + 0x300) as *mut u32;
+                let icr_lo = (apic_base + APIC_REG_ICR_LOW) as *mut u32;
                 core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
             }
         }
@@ -1641,7 +1645,7 @@ impl Platform for ThemisPlatform {
                 // Child domain mapping GPA 0xFEE00000 (LAPIC base): record the HPA
                 // so ADD_VP can set APIC_ACCESS_ADDR in the child VMCS, enabling
                 // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
-                if is_child && *address == 0xFEE0_0000 && *size == 0x1000 {
+                if is_child && *address == LAPIC_MMIO_BASE && *size == MMIO_PAGE_SIZE {
                     d.arch.set_apic_access_phys(*physical);
 
                     // When hardware does not support VIRTUALIZE_APIC_ACCESSES
