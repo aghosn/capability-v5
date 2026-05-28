@@ -15,6 +15,17 @@ use x86::vmx::vmcs;
 
 use crate::vcpu::ActiveVcpu;
 
+// ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
+
+/// RFLAGS bit 9: Interrupt Flag. Guest can accept interrupts when set.
+const RFLAGS_IF: u64 = 1 << 9;
+/// Interruptibility-state bits [1:0]: blocking by STI (bit 0) or MOV SS (bit 1).
+const INTERRUPTIBILITY_STI_MOV_SS: u64 = 0x3;
+/// PRIMARY_PROCBASED_EXEC_CONTROLS bit 2: interrupt-window exiting (Intel SDM §24.6.2).
+const PRIMARY_INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
+/// VMENTRY_INTERRUPTION_INFO_FIELD: bit 31 = valid, bits [10:8] = type (0 = external).
+const VMENTRY_INTR_INFO_VALID: u64 = 1 << 31;
+
 pub trait ActiveVcpuExt {
     fn rip(&self) -> u64;
     fn set_rip(&mut self, value: u64);
@@ -27,6 +38,23 @@ pub trait ActiveVcpuExt {
     /// Advance guest RIP past the instruction that caused the current
     /// VMEXIT, using VMCS field `VMEXIT_INSTRUCTION_LEN`.
     fn next_rip(&mut self);
+
+    /// Schedule an external-interrupt injection for the next VM entry by
+    /// writing `VMENTRY_INTERRUPTION_INFO_FIELD` (type=external, valid=1).
+    ///
+    /// Caller is responsible for any guest-acceptability gate; the processor
+    /// will fail VM entry if RFLAGS.IF=0 or STI/MOV-SS blocking is active.
+    /// See [`guest_can_accept_external`](Self::guest_can_accept_external).
+    fn inject_external_vector(&mut self, vector: u8);
+
+    /// Returns `true` iff the guest currently has RFLAGS.IF=1 and is not
+    /// blocked by STI or MOV-SS interruptibility shadows — i.e. it would
+    /// accept a freshly-injected external interrupt at the next VM entry.
+    fn guest_can_accept_external(&self) -> bool;
+
+    /// Toggle interrupt-window exiting in `PRIMARY_PROCBASED_EXEC_CONTROLS`
+    /// so the processor exits as soon as the guest can accept an interrupt.
+    fn set_interrupt_window_exit(&mut self, enabled: bool);
 }
 
 impl ActiveVcpuExt for ActiveVcpu {
@@ -65,5 +93,30 @@ impl ActiveVcpuExt for ActiveVcpu {
         let len = self.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN);
         let rip = self.get(vmcs::guest::RIP);
         self.set(vmcs::guest::RIP, rip + len);
+    }
+
+    #[inline]
+    fn inject_external_vector(&mut self, vector: u8) {
+        let intr_info = VMENTRY_INTR_INFO_VALID | (vector as u64);
+        self.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+    }
+
+    #[inline]
+    fn guest_can_accept_external(&self) -> bool {
+        let if_set = self.get(vmcs::guest::RFLAGS) & RFLAGS_IF != 0;
+        let blocking =
+            self.get(vmcs::guest::INTERRUPTIBILITY_STATE) & INTERRUPTIBILITY_STI_MOV_SS != 0;
+        if_set && !blocking
+    }
+
+    #[inline]
+    fn set_interrupt_window_exit(&mut self, enabled: bool) {
+        let primary = self.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+        let new = if enabled {
+            primary | PRIMARY_INTERRUPT_WINDOW_EXITING
+        } else {
+            primary & !PRIMARY_INTERRUPT_WINDOW_EXITING
+        };
+        self.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, new);
     }
 }

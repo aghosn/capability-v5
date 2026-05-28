@@ -28,18 +28,6 @@ use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::{serial_debug, serial_println};
 
-// ── Guest interruptibility constants (Intel SDM Vol 3C §24.4.2, §27.2.1) ── //
-
-/// RFLAGS bit 9: Interrupt Flag. Guest can accept interrupts when set.
-#[cfg(target_arch = "x86_64")]
-const RFLAGS_IF: u64 = 1 << 9;
-/// Interruptibility-state bits [1:0]: blocking by STI (bit 0) or MOV SS (bit 1).
-#[cfg(target_arch = "x86_64")]
-const INTERRUPTIBILITY_STI_MOV_SS: u64 = 0x3;
-/// PRIMARY_PROCBASED_EXEC_CONTROLS bit 2: interrupt-window exiting (Intel SDM §24.6.2).
-#[cfg(target_arch = "x86_64")]
-const PRIMARY_INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
-
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
 /// Return values written back to guest registers after a hypercall.
@@ -1233,13 +1221,7 @@ fn do_switch(
             unsafe { (*on_ptr).store(0, Ordering::Release) };
 
             if any_set {
-                let rflags = vcpu.rflags();
-                let interruptibility =
-                    vcpu.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
-                let if_set = rflags & RFLAGS_IF != 0;
-                let sti_mov_ss_block = interruptibility & INTERRUPTIBILITY_STI_MOV_SS != 0;
-
-                if if_set && !sti_mov_ss_block {
+                if vcpu.guest_can_accept_external() {
                     // Guest can accept interrupts — find the LOWEST pending
                     // vector to prioritize device interrupts over timer.
                     let mut inject_vec: Option<u8> = None;
@@ -1253,11 +1235,7 @@ fn do_switch(
                     }
 
                     if let Some(vector) = inject_vec {
-                        let intr_info = (1u64 << 31) | (vector as u64);
-                        vcpu.set(
-                            x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                            intr_info,
-                        );
+                        vcpu.inject_external_vector(vector);
                     }
                 }
 
@@ -1272,21 +1250,8 @@ fn do_switch(
 
                 // If vectors remain in PIR (IF=0 or multiple pending), enable
                 // interrupt-window exiting so we get a VMEXIT when guest IF
-                // becomes 1 and we can inject then.
-                let primary =
-                    vcpu.get(x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
-                if remaining {
-                    vcpu.set(
-                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                        primary | PRIMARY_INTERRUPT_WINDOW_EXITING,
-                    );
-                } else {
-                    // No more pending — clear interrupt-window exiting.
-                    vcpu.set(
-                        x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-                        primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
-                    );
-                }
+                // becomes 1 and we can inject then. Otherwise clear it.
+                vcpu.set_interrupt_window_exit(remaining);
             }
         }
     }
@@ -1329,16 +1294,11 @@ pub fn drain_pir_on_interrupt_window(
     platform: &crate::platform::ThemisPlatform,
 ) {
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-    use x86::vmx::vmcs;
 
     let pid_phys = vcpu.pid_phys();
     if pid_phys == 0 {
         // No PID — just clear the interrupt-window exiting bit.
-        let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
-        vcpu.set(
-            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
-        );
+        vcpu.set_interrupt_window_exit(false);
         return;
     }
 
@@ -1372,8 +1332,7 @@ pub fn drain_pir_on_interrupt_window(
         }
 
         if let Some(vector) = inject_vec {
-            let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.inject_external_vector(vector);
         }
     }
 
@@ -1386,19 +1345,8 @@ pub fn drain_pir_on_interrupt_window(
         }
     }
 
-    // Clear interrupt-window exiting if no more pending vectors.
-    let primary = vcpu.get(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
-    if remaining {
-        vcpu.set(
-            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary | PRIMARY_INTERRUPT_WINDOW_EXITING,
-        );
-    } else {
-        vcpu.set(
-            vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-            primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
-        );
-    }
+    // Toggle interrupt-window exiting based on whether vectors still pend.
+    vcpu.set_interrupt_window_exit(remaining);
 }
 
 /// Forward a child-domain VM exit to its parent (dom0).
@@ -1615,16 +1563,8 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         if let Some(vec) = platform.take_deferred(core_id as usize) {
             // Check that parent can accept an external interrupt injection.
             // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-            let rflags = vcpu.rflags();
-            let interruptibility = vcpu.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
-            let if_set = (rflags & (1 << 9)) != 0;
-            let blocking = (interruptibility & 0x3) != 0; // STI or MOV-SS blocking
-            if if_set && !blocking {
-                let intr_info = (1u64 << 31) | (vec as u64);
-                vcpu.set(
-                    x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                    intr_info,
-                );
+            if vcpu.guest_can_accept_external() {
+                vcpu.inject_external_vector(vec as u8);
             }
             // If IF=0 or blocking, silently drop — dom0 gets its own timers anyway.
         }
@@ -2003,8 +1943,6 @@ fn do_set_reg(
 /// to dom0 via lazy-unwind.
 #[cfg(target_arch = "x86_64")]
 pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
-    use x86::vmx::vmcs;
-
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
     assert!(!platform_ptr.is_null());
     let platform = unsafe { &*platform_ptr };
@@ -2054,11 +1992,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
             unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
             return;
         } else {
-            let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(
-                x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
-                intr_info,
-            );
+            vcpu.inject_external_vector(vector as u8);
             return;
         }
     }
@@ -2071,8 +2005,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
         Err(_e) => {
             serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, _e);
-            let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.inject_external_vector(vector as u8);
             return;
         }
     };
@@ -2100,8 +2033,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
                 "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",
                 _e
             );
-            let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.inject_external_vector(vector as u8);
             return;
         }
     };
@@ -2153,15 +2085,8 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
     // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-    {
-        let rflags = vcpu.rflags();
-        let interruptibility = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
-        let if_set = (rflags & (1 << 9)) != 0;
-        let blocking = (interruptibility & 0x3) != 0;
-        if if_set && !blocking {
-            let intr_info = (1u64 << 31) | (vector as u64);
-            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
-        }
+    if vcpu.guest_can_accept_external() {
+        vcpu.inject_external_vector(vector as u8);
     }
 
     // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
