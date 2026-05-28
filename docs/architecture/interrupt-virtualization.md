@@ -198,6 +198,40 @@ Dom0 owns the physical APIC. Its vTPR, vISR, vIRR reflect the real LAPIC state.
 
 ### Child Domains
 
+> **⚠ Design intent vs current implementation (2026-05-28)**
+>
+> The table below describes the **intended** VMCS configuration. The
+> capavisor currently disables `APIC_REGISTER_VIRT` and `VID` for
+> child VMs and instead emulates the child LAPIC in software via
+> `handle_apic_access_exit` + `decode_apic_write_value` in
+> `arch/x86_64/vmexit.rs` (introduced by commit `d21dc8241` "fix:
+> child APIC virtualization for multi-vCPU dom1").
+>
+> Per that commit's own message, the bits were disabled because
+> *"CHV doesn't yet provide VAPIC page state synchronisation"* — i.e.
+> a missing-feature workaround, **not** a fundamental hardware or
+> guest-kernel limitation.  The workaround forces capavisor to decode
+> the guest's MOV instruction at RIP to recover the value being
+> written (since `EXIT_REASON_APIC_ACCESS` fires *before* the
+> instruction executes), maintain a full VAPIC mirror including ISR
+> walking on EOI, and run a CR-access decoder as well.  This is
+> instruction emulation inside capavisor and violates the design
+> principle that decoding belongs in CHV.
+>
+> **Plan to restore the intended design:** enable bit 8 (and
+> conditionally bit 9, gated by `EXTERNAL_INTERRUPT_EXITING=1`),
+> implement VAPIC state synchronisation on child VP create / restore
+> (the VAPIC page already lives in HHDM so this is cheap), and delete
+> `handle_apic_access_exit`, `decode_apic_write_value`, the page-walk
+> helpers used only by it, and the `gpr_by_index` CR-decode helper.
+> Once bit 8 is on, the processor handles most LAPIC reads, EOI, and
+> TPR writes with no exit at all, and the remaining ICR-write path
+> can ship raw bytes + offset to CHV which decodes on the host side.
+> The result is **fewer** L0↔L1 round trips than today, not more.
+>
+> Tracked in `todo.md` under "Tech Debt — APIC virtualization
+> regression to design intent".
+
 | Setting | Value | Rationale |
 |---|---|---|
 | `EXTERNAL_INTERRUPT_EXITING` | **1** | All physical interrupts exit for routing. |

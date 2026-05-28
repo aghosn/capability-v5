@@ -115,6 +115,73 @@ GPA and HPA fields — fixed by using `mapped_gpas` via structured attestation A
 
 ## Tech Debt (must address)
 
+- **Coco isolation test — host access attempt after CARVE+SEND**:
+  add a eunomia test (or extend `eunomia/workloads/coco/`) where dom0
+  deliberately tries to read/write the guest RAM after CARVE+SEND has
+  transferred ownership to the confidential child.  The original mmap
+  pointers in CHV/dom0 are still valid VAs, but the underlying physical
+  pages must no longer be reachable from dom0's EPT (that's the whole
+  point of CARVE — see `docs/architecture/confidential-vm.md`).
+  Expected outcome: dom0 access faults / EPT violation, child memory
+  contents remain confidential.  Without this test we have no automated
+  proof that CARVE actually revokes dom0 access end-to-end (capa-engine
+  `send_region` → capavisor `apply_update` → EPT unmap → IOMMU mirror
+  update).  Should also verify: (a) reads return zero/fault, not stale
+  data; (b) writes don't leak into child; (c) IOMMU side is updated so
+  a dom0-controlled device can't DMA into the carved region either.
+
+- **APIC virtualization regression to design intent (child VMs)**:
+  the intended design (`docs/architecture/interrupt-virtualization.md`
+  §Child Domains) is `APIC_REGISTER_VIRT=1` + `VID=1`, leaving the
+  hardware to handle most LAPIC accesses and shipping only ICR-IPI
+  policy to CHV.  Commit `d21dc8241` ("fix: child APIC virtualization
+  for multi-vCPU dom1", 2026-04-03) disabled both bits as a workaround
+  because *"CHV doesn't yet provide VAPIC page state synchronisation"*
+  and added a child-side software LAPIC emulator in capavisor.  This
+  emulator (`arch/x86_64/vmexit.rs::handle_apic_access_exit` plus
+  `decode_apic_write_value`) requires capavisor to decode the guest's
+  MOV instruction at RIP every time the child touches the LAPIC, plus
+  maintain a full software VAPIC mirror (read/write/EOI ISR walk).
+  Decoding guest instructions in capavisor violates the design
+  principle that decoding belongs in CHV (host-side `iced-x86`).
+
+  **What needs to be done**, in order:
+    1. Re-enable `APIC_REGISTER_VIRT` (sec bit 8) and `VID` (sec bit 9)
+       for child VMs in `arch/x86_64/vmcs.rs`.
+    2. Implement VAPIC-page state synchronisation on the
+       capavisor↔CHV boundary — initial state at child VP create, and
+       any state CHV needs at SWITCH-in / SWITCH-out.  The page lives
+       in HHDM on the capavisor side and is already mapped into dom0
+       via thhv, so this is cheap.
+    3. For ICR writes that still need exit-based policy: ship the
+       raw instruction bytes + access offset to CHV (same path as the
+       EPT-MMIO forward today), let CHV decode using iced-x86 and
+       forward the IPI request back through the normal hypercall ABI.
+    4. Delete from capavisor: `handle_apic_access_exit`,
+       `decode_apic_write_value`, and the `gpr_by_index` CR-decode
+       helper in `arch/x86_64/vmexit.rs`; the page-walk helpers
+       (`ept_gpa_to_hpa`, `guest_gva_to_gpa`) and instruction-byte
+       fetch in `hypercall.rs` *stay* — they support the
+       EPT-violation forward path, which is honest forwarding (CHV
+       does the decode).
+    5. Verify dom1 multi-vCPU boot (the workload that motivated
+       `d21dc8241` in the first place) still works after the change.
+
+  **Security and performance considerations** (raised when this debt
+  was identified, 2026-05-28):
+    - *Security*: CHV already maps the guest's physical memory via
+      thhv (the EPT-MMIO forward path reads `instruction_bytes` and
+      ships them to CHV today), so giving CHV the few bytes needed to
+      decode an ICR write is no new authority.
+    - *Performance*: with bits 8 + 9 enabled, most LAPIC accesses
+      (reads, EOI, TPR writes) take **no exit at all** instead of one
+      capavisor round-trip per access.  Only ICR / unhandled-offset
+      writes still exit, and those go to CHV — fewer L0↔L1
+      ping-pongs than today, not more.
+
+  Doc updated 2026-05-28: see warning callout in
+  `docs/architecture/interrupt-virtualization.md` §Child Domains.
+
 - **capavisor/src/hypercall.rs cleanup**: `forward_child_exit`, `do_switch`,
   and `forward_interrupt_to_handler` have grown into multi-hundred-line
   functions mixing capa-engine calls, COMM-page marshaling, I/O-qual decoding,
