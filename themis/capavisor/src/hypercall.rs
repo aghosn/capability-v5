@@ -1165,80 +1165,30 @@ fn do_switch(
     let parent_domain_id: DomainId = switch_ctx.from_domain;
     let parent_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
 
-    // ── 3. Look up child PlatformDomain ──
-    let child_arc = match platform.domain_arc(child_domain_id) {
-        Some(a) => a,
-        None => {
-            let _ = Capability::switch(caller, 0, 0, platform);
-            return Some(HypercallResult::error(errors::ERR_NOTFOUND));
-        }
-    };
-
-    // ── 4. Take child InactiveVcpu from its slot ──
-    let mut child_inactive = {
-        let d = child_arc.lock();
-        match d.arch.vps().get(vp_idx).and_then(|s| s.take()) {
-            Some(v) => v,
-            None => {
-                serial_debug!(
-                    "[SWITCH] VP slot empty dom={} vp={}",
-                    child_domain_id,
-                    vp_idx
-                );
-                let _ = Capability::switch(caller, 0, 0, platform);
-                return Some(HypercallResult::error(errors::ERR_BUSY));
-            }
-        }
-    };
-
-    // ── 5. Apply GPRs to child InactiveVcpu (before VMPTRLD) ──
-    let mut vmcs_pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
-    for (reg, val) in pending {
-        if is_gpr(reg) {
-            apply_reg_to_vcpu(reg, val, &mut child_inactive);
-        } else {
-            vmcs_pending.push((reg, val));
-        }
-    }
-
-    // ── 6. Deactivate parent → InactiveVcpu → store in parent slot ──
+    // ── 3. Advance parent RIP past SWITCH VMCALL (while parent VMCS is
+    //       still loaded and VMEXIT_INSTRUCTION_LEN is valid).
+    //
     // Invariant: a VP stored in its VcpuSlot always has RIP positioned at
     // the next instruction it should execute — never AT a VMCALL it has
-    // already taken.  Advance the parent's RIP past the SWITCH VMCALL here,
-    // while the parent VMCS is still loaded and VMEXIT_INSTRUCTION_LEN is
-    // valid; the subsequent VMCLEAR commits the new RIP to the saved VMCS.
-    // No resume path needs to re-advance this RIP.
+    // already taken.  No resume path needs to re-advance this RIP.
     vcpu.next_rip();
-    // SAFETY: we take ownership via ptr::read and will ptr::write the child
-    // ActiveVcpu back before returning.  Between read and write, `vcpu`
-    // is logically moved-from and must not be used.
-    let parent_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let parent_inactive = parent_active
-        .deactivate()
-        .expect("[SWITCH] parent deactivate (VMCLEAR) failed");
 
-    let parent_arc = platform
-        .domain_arc(parent_domain_id)
-        .expect("[SWITCH] parent PlatformDomain not found");
-    parent_arc.lock().arch.vps_mut()[parent_vp_id].put(parent_inactive);
-
-    // ── 7. Activate child (VMPTRLD) ──
-    // activate() consumes child_inactive.  VMPTRLD failure is fatal since
-    // the parent is already deactivated and stored.
-    let mut child_active = child_inactive
-        .activate()
-        .expect("[SWITCH] child activate (VMPTRLD) failed — fatal");
-    // Update PID.NDST so the software injection path (inject_via_pid) targets
-    // this core.  Also update IRTE.NDST so hardware-posted device interrupts
-    // for Deliver vectors are routed here by the IOMMU.
+    // ── 4. Swap parent → child via the shared helper.
+    //       Cap-engine validated the transition, so the dst slot / domain
+    //       must exist; helper panics otherwise.
     let current_lapic = current_lapic_id();
     unsafe {
-        pid_set_ndst(
-            child_active.pid_phys(),
-            platform.hhdm_offset(),
-            current_lapic,
-        )
-    };
+        swap_active_vp(
+            vcpu,
+            platform,
+            (parent_domain_id, parent_vp_id),
+            (child_domain_id, vp_idx),
+            "SWITCH",
+        );
+    }
+
+    // ── 5. Sync IRTE.NDST so hardware-posted device interrupts for Deliver
+    //       vectors are routed to this core by the IOMMU.
     {
         let child_ref = caller
             .read()
@@ -1250,12 +1200,12 @@ fn do_switch(
         }
     }
 
-    // ── 7c. (VMX preemption timer is NOT reset here.) ──
+    // ── 6. (VMX preemption timer is NOT reset here.) ──
     // The timer counts down across child re-entries.  It is only
     // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
     // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
 
-    // ── 7b. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
+    // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
     // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs), so the processor
     // ignores the PID page on VMENTRY.  inject_via_pid() writes PIR bits as a
     // software queue.  We atomically snapshot-and-clear ALL PIR words, inject
@@ -1263,7 +1213,7 @@ fn do_switch(
     // VMENTRY_INTR_INFO, and put remaining vectors back in PIR for next switch.
     {
         use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-        let pid_phys = child_active.pid_phys();
+        let pid_phys = vcpu.pid_phys();
         if pid_phys != 0 {
             let hhdm = platform.hhdm_offset();
             let pir_base = (pid_phys + hhdm) as *const AtomicU64;
@@ -1283,9 +1233,9 @@ fn do_switch(
             unsafe { (*on_ptr).store(0, Ordering::Release) };
 
             if any_set {
-                let rflags = child_active.rflags();
+                let rflags = vcpu.rflags();
                 let interruptibility =
-                    child_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
+                    vcpu.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
                 let if_set = rflags & RFLAGS_IF != 0;
                 let sti_mov_ss_block = interruptibility & INTERRUPTIBILITY_STI_MOV_SS != 0;
 
@@ -1304,7 +1254,7 @@ fn do_switch(
 
                     if let Some(vector) = inject_vec {
                         let intr_info = (1u64 << 31) | (vector as u64);
-                        child_active.set(
+                        vcpu.set(
                             x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
                             intr_info,
                         );
@@ -1324,15 +1274,15 @@ fn do_switch(
                 // interrupt-window exiting so we get a VMEXIT when guest IF
                 // becomes 1 and we can inject then.
                 let primary =
-                    child_active.get(x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+                    vcpu.get(x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
                 if remaining {
-                    child_active.set(
+                    vcpu.set(
                         x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
                         primary | PRIMARY_INTERRUPT_WINDOW_EXITING,
                     );
                 } else {
                     // No more pending — clear interrupt-window exiting.
-                    child_active.set(
+                    vcpu.set(
                         x86::vmx::vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
                         primary & !PRIMARY_INTERRUPT_WINDOW_EXITING,
                     );
@@ -1341,28 +1291,24 @@ fn do_switch(
         }
     }
 
-    // ── 8. Apply VMCS-field registers (child VMCS is now loaded) ──
-    for (reg, val) in &vmcs_pending {
-        apply_vmcs_reg(&mut child_active, *reg, *val);
+    // ── 8. Apply all pending COMM-page registers to the now-active child.
+    //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
+    for (reg, val) in &pending {
+        apply_pending_reg(vcpu, *reg, *val);
     }
 
-    // ── 8b. Interrupt return: if the target VP was Suspended (multi-hop
+    // ── 9. Interrupt return: if the target VP was Suspended (multi-hop
     // interrupt unwind), deliver a synthetic SWITCH return result so the
     // domain sees "my callee was preempted by interrupt V".
     //
-    // Per the VcpuSlot RIP invariant (see step 6 of do_switch), the target
-    // VP's saved RIP is already past its SWITCH VMCALL, so no RIP advance
-    // is needed here — only the result registers.
+    // Per the VcpuSlot RIP invariant (step 3 above), the target VP's saved
+    // RIP is already past its SWITCH VMCALL, so no RIP advance is needed
+    // here — only the result registers.
     if let Some(vector) = switch_ctx.interrupt_return {
-        child_active.set_reg(Reg::Rax, errors::SUCCESS);
-        child_active.set_reg(Reg::Rdi, vector as u64);
-        child_active.set_reg(Reg::Rsi, 0);
-        child_active.set_reg(Reg::Rdx, 0);
-    }
-
-    // ── 9. Replace the monitor loop's ActiveVcpu ──
-    unsafe {
-        core::ptr::write(vcpu, child_active);
+        vcpu.set_reg(Reg::Rax, errors::SUCCESS);
+        vcpu.set_reg(Reg::Rdi, vector as u64);
+        vcpu.set_reg(Reg::Rsi, 0);
+        vcpu.set_reg(Reg::Rdx, 0);
     }
 
     // Return None: skip result-writeback + RIP-advance.
@@ -1634,40 +1580,27 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         vcpu.next_rip();
     }
 
-    // ── Deactivate child → store in child's VcpuSlot ──
-    let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let child_inactive = child_active
-        .deactivate()
-        .expect("[CHILD_EXIT] child deactivate failed");
-    child_arc.lock().arch.vps_mut()[child_vp_id].put(child_inactive);
-
-    // ── Take parent → activate → replace vcpu ──
-    let parent_arc = platform
-        .domain_arc(parent_domain_id)
-        .expect("[CHILD_EXIT] parent PlatformDomain not found");
-    let parent_inactive = parent_arc.lock().arch.vps()[parent_vp_id]
-        .take()
-        .expect("[CHILD_EXIT] parent VcpuSlot empty");
-    let mut parent_active = parent_inactive
-        .activate()
-        .expect("[CHILD_EXIT] parent activate failed");
-    // Update PID.NDST so remote cores can send notification IPIs to this core.
+    // ── Swap child → parent via the shared helper. ──
+    // Cap-engine validated the return switch, so dst slot/domain must exist;
+    // helper panics otherwise.
+    unsafe {
+        swap_active_vp(
+            vcpu,
+            platform,
+            (child_domain_id, child_vp_id),
+            (parent_domain_id, parent_vp_id),
+            "CHILD_EXIT",
+        );
+    }
     // IRTE.NDST sync is not needed here: the parent (dom0) uses remapped IRTEs
     // (not posted), so its interrupts are not routed via posted-interrupt NDST.
-    unsafe {
-        pid_set_ndst(
-            parent_active.pid_phys(),
-            platform.hhdm_offset(),
-            current_lapic_id(),
-        )
-    };
 
     // To the parent, this is a return from SWITCH VMCALL.
     // RAX = SUCCESS, RDI = exit_reason.
-    parent_active.set_reg(Reg::Rax, errors::SUCCESS);
-    parent_active.set_reg(Reg::Rdi, exit_reason as u64);
-    parent_active.set_reg(Reg::Rsi, 0);
-    parent_active.set_reg(Reg::Rdx, 0);
+    vcpu.set_reg(Reg::Rax, errors::SUCCESS);
+    vcpu.set_reg(Reg::Rdi, exit_reason as u64);
+    vcpu.set_reg(Reg::Rsi, 0);
+    vcpu.set_reg(Reg::Rdx, 0);
 
     // NB: parent RIP was advanced past the SWITCH VMCALL in `do_switch`
     // before VMCLEAR-ing the parent VMCS (while VMEXIT_INSTRUCTION_LEN was
@@ -1682,24 +1615,19 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         if let Some(vec) = platform.take_deferred(core_id as usize) {
             // Check that parent can accept an external interrupt injection.
             // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-            let rflags = parent_active.rflags();
-            let interruptibility = parent_active.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
+            let rflags = vcpu.rflags();
+            let interruptibility = vcpu.get(x86::vmx::vmcs::guest::INTERRUPTIBILITY_STATE);
             let if_set = (rflags & (1 << 9)) != 0;
             let blocking = (interruptibility & 0x3) != 0; // STI or MOV-SS blocking
             if if_set && !blocking {
                 let intr_info = (1u64 << 31) | (vec as u64);
-                parent_active.set(
+                vcpu.set(
                     x86::vmx::vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
                     intr_info,
                 );
             }
             // If IF=0 or blocking, silently drop — dom0 gets its own timers anyway.
         }
-    }
-
-    // Replace the monitor loop's ActiveVcpu with the parent's.
-    unsafe {
-        core::ptr::write(vcpu, parent_active);
     }
 }
 
@@ -1887,6 +1815,95 @@ unsafe fn send_notification_ipi(ndst_lapic_id: u32, vector: u8, hhdm: u64) {
 fn current_lapic_id() -> u32 {
     let cpuid = core::arch::x86_64::__cpuid(1);
     (cpuid.ebx >> 24) as u32
+}
+
+// ── Active-VP swap helper ──────────────────────────────────────────────── //
+
+/// Switch the monitor loop's `*vcpu` from a src VP to a dst VP.
+///
+/// Performs, in order:
+///   1. `take(dst)` — fetch the dst InactiveVcpu from its slot.
+///   2. VMCLEAR src → `put(src)` — deactivate the currently-active src VP
+///      and return it to its slot.
+///   3. VMPTRLD dst → `ptr::write(vcpu, dst_active)` — install dst as the
+///      monitor loop's active VP in place.
+///   4. Update `PID.NDST` to this core so cross-core notification IPIs
+///      target us.
+///
+/// Caller obligations:
+///  - The capability engine must have already transitioned dst → `Running`
+///    and src → a non-`Running` state.  This helper does not touch
+///    cap-engine state.
+///  - All pre-work on the src VP (RIP advance, COMM-page marshalling, …)
+///    must be done before calling.  Post-work on the dst VP runs on
+///    `*vcpu` directly after this call returns.
+///  - For VPs that are posted-interrupt targets, caller must additionally
+///    invoke `sync_irte_ndst` after this returns (handles IRTE routing).
+///
+/// # Panics
+/// Panics if dst's `PlatformDomain` is missing or its `VcpuSlot` is empty:
+/// these are bug-equivalent invariant violations after the cap-engine has
+/// validated the transition.  VMCLEAR/VMPTRLD failures also panic.
+///
+/// # Safety
+/// `vcpu` must point to a valid, owned, currently-VMPTRLD'd `ActiveVcpu`.
+/// On return, `*vcpu` is the dst VP.
+#[cfg(target_arch = "x86_64")]
+unsafe fn swap_active_vp(
+    vcpu: &mut ActiveVcpu,
+    platform: &ThemisPlatform,
+    src: (DomainId, usize),
+    dst: (DomainId, usize),
+    tag: &'static str,
+) {
+    let (src_dom, src_vp) = src;
+    let (dst_dom, dst_vp) = dst;
+
+    // 1. Take dst from its slot.  Cap-engine guarantees it is populated.
+    let dst_inactive = platform.take_vcpu(dst_dom, dst_vp).unwrap_or_else(|| {
+        panic!(
+            "[{}] dst VcpuSlot empty dom={} vp={} (cap-engine/platform out of sync)",
+            tag, dst_dom, dst_vp
+        )
+    });
+
+    // 2. VMCLEAR src → return to its slot.
+    // SAFETY: caller guarantees `vcpu` is a valid owned ActiveVcpu.  We
+    // immediately move it out via deactivate(); the matching ptr::write
+    // below restores the &mut to a valid VP before returning.
+    let src_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
+    let src_inactive = src_active
+        .deactivate()
+        .unwrap_or_else(|_| panic!("[{}] src deactivate (VMCLEAR) failed", tag));
+    platform.return_vcpu(src_dom, src_vp, src_inactive);
+
+    // 3. VMPTRLD dst → install as new *vcpu.
+    let dst_active = dst_inactive
+        .activate()
+        .unwrap_or_else(|_| panic!("[{}] dst activate (VMPTRLD) failed", tag));
+    // SAFETY: matching write for the ptr::read above.
+    unsafe { core::ptr::write(vcpu, dst_active) };
+
+    // 4. Update PID.NDST so notifications target this core.
+    unsafe {
+        pid_set_ndst(vcpu.pid_phys(), platform.hhdm_offset(), current_lapic_id());
+    }
+}
+
+/// Apply a pending register value to a currently-active VCPU.
+///
+/// Dispatches by register kind:
+///  - GPRs go to the software register file via `ActiveVcpu::set_reg`.
+///  - VMCS-backed fields go through `apply_vmcs_reg`, which handles
+///    CR0/CR4 reserved-bit adjustment, the LDTR null-AR fix-up, and the
+///    EFER.LMA → `VMENTRY_CONTROLS.IA32E_MODE_GUEST` mirror.
+#[cfg(target_arch = "x86_64")]
+fn apply_pending_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val: u64) {
+    if let Some(gpr) = vp_reg_to_gpr(reg) {
+        vcpu.set_reg(gpr, val);
+    } else {
+        apply_vmcs_reg(vcpu, reg, val);
+    }
 }
 
 /// Inject interrupt `vector` into the VP whose PID is at `pid_phys`.
@@ -2120,57 +2137,40 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         }
     }
 
-    // Deactivate child (VMCLEAR) → store InactiveVcpu in child's VcpuSlot.
-    let child_active = unsafe { core::ptr::read(vcpu as *const ActiveVcpu) };
-    let child_inactive = child_active
-        .deactivate()
-        .expect("[INTR_FWD] child deactivate failed");
-    child_arc.lock().arch.vps_mut()[intr_ctx.interrupted_vp_id as usize].put(child_inactive);
-
-    // Activate handler (VMPTRLD) from handler's VcpuSlot.
-    let handler_arc = platform
-        .domain_arc(intr_ctx.handler_domain_id)
-        .expect("[INTR_FWD] handler domain not found");
-    let handler_inactive = handler_arc.lock().arch.vps()[intr_ctx.handler_vp_id as usize]
-        .take()
-        .expect("[INTR_FWD] handler VcpuSlot empty");
-    let mut handler_active = handler_inactive
-        .activate()
-        .expect("[INTR_FWD] handler activate (VMPTRLD) failed");
+    // ── Swap child → handler via the shared helper. ──
+    // Cap-engine's deliver_interrupt_vp transitioned the handler to Running,
+    // so dst slot/domain must exist; helper panics otherwise.
     unsafe {
-        pid_set_ndst(
-            handler_active.pid_phys(),
-            platform.hhdm_offset(),
-            current_lapic_id(),
-        )
-    };
+        swap_active_vp(
+            vcpu,
+            platform,
+            (intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id as usize),
+            (intr_ctx.handler_domain_id, intr_ctx.handler_vp_id as usize),
+            "INTR_FWD",
+        );
+    }
 
     // Inject the interrupt via VM-entry event injection.
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
     // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
     {
-        let rflags = handler_active.rflags();
-        let interruptibility = handler_active.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+        let rflags = vcpu.rflags();
+        let interruptibility = vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE);
         let if_set = (rflags & (1 << 9)) != 0;
         let blocking = (interruptibility & 0x3) != 0;
         if if_set && !blocking {
             let intr_info = (1u64 << 31) | (vector as u64);
-            handler_active.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
+            vcpu.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, intr_info);
         }
     }
 
     // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
-    // Per the VcpuSlot RIP invariant (see do_switch step 6), the handler's
+    // Per the VcpuSlot RIP invariant (see do_switch step 4), the handler's
     // saved RIP is already past its SWITCH VMCALL — no advance needed here.
-    handler_active.set_reg(Reg::Rax, errors::ERR_RETRY);
-    handler_active.set_reg(Reg::Rdi, vector as u64);
-    handler_active.set_reg(Reg::Rsi, 0);
-    handler_active.set_reg(Reg::Rdx, 0);
-
-    // Replace the monitor loop's ActiveVcpu with the handler's.
-    unsafe {
-        core::ptr::write(vcpu, handler_active);
-    }
+    vcpu.set_reg(Reg::Rax, errors::ERR_RETRY);
+    vcpu.set_reg(Reg::Rdi, vector as u64);
+    vcpu.set_reg(Reg::Rsi, 0);
+    vcpu.set_reg(Reg::Rdx, 0);
 }
 
 // ── VpRegister ↔ VMCS / GPR mapping (reusable) ──────────────────────────── //
@@ -2304,32 +2304,6 @@ fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val:
         if new_entry != entry {
             vcpu.set(x86::vmx::vmcs::control::VMENTRY_CONTROLS, new_entry);
         }
-    }
-}
-
-/// Apply a register value to an InactiveVcpu.
-/// GPRs go to the register file; VMCS fields require the VMCS to be loaded.
-#[cfg(target_arch = "x86_64")]
-fn apply_reg_to_vcpu(reg: themis_abi::regs::VpRegister, val: u64, vcpu: &mut InactiveVcpu) {
-    if let Some(gpr) = vp_reg_to_gpr(reg) {
-        vcpu.set_reg(gpr, val);
-    } else if let Some(field) = vp_reg_to_vmcs_field(reg) {
-        vmwrite(field, val);
-    }
-}
-
-/// Returns true if the register is a GPR (stored in register file, not VMCS).
-#[cfg(target_arch = "x86_64")]
-fn is_gpr(reg: themis_abi::regs::VpRegister) -> bool {
-    vp_reg_to_gpr(reg).is_some()
-}
-
-/// Helper: VMWRITE with panic on failure.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn vmwrite(field: u32, val: u64) {
-    unsafe {
-        x86::bits64::vmx::vmwrite(field, val).expect("VMWRITE failed");
     }
 }
 

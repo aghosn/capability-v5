@@ -122,6 +122,48 @@ GPA and HPA fields — fixed by using `mapped_gpas` via structured attestation A
   marshal, IO exit-qual decode, VMCS swap) and rip out the DB-* trace
   scaffolding once the doorbell bug is fixed. Quality is not acceptable as-is.
 
+- **Dom1 cross-core IPI delivery slowdown after VcpuSwap refactor**
+  (Phase 4 of capavisor cleanup): after extracting `swap_active_vp` and
+  unifying the three swap sites in `themis/capavisor/src/hypercall.rs`,
+  dom1 boot reaches PCI BAR 0 enumeration and then progresses extremely
+  slowly. Symptom seen via SSH into dom0, tail of `/tmp/chv-stdout.log`
+  (guest printk) vs `/tmp/chv-stderr.log` (CHV diags):
+    * Guest stdout frozen for many minutes mid-PCI-probe.
+    * CHV stderr keeps spinning: `[LAPIC-IPI] vp=1 ... vector=0xfd ...
+      dest_apic=0` (Linux RESCHEDULE_VECTOR), `[THEMIS-MSR] WRMSR
+      msr=0x6e0` (TSC_DEADLINE) at same RIP repeatedly, many
+      `[THEMIS-TIMER] delta_tsc=0` (deadlines already past).
+    * CHV process at 99% CPU; counters keep incrementing (#11000 →
+      #14800 over ~8 min) so it's slow, not deadlocked.
+  Hypothesis: cross-core notification IPI / PIR-drain latency increased
+  for resched IPI delivery to vp0 (the BSP doing PCI probe), so vp0
+  doesn't wake from idle promptly and vp1 spins reprogramming the
+  TSC-deadline. Smoke tests and Eunomia got FASTER; only dom1's
+  long-running cross-core workload exposes this. Code review of the
+  refactor diff shows: `pid_set_ndst` still called on every swap (3 sites
+  → helper), `sync_irte_ndst` unchanged (still only in `do_switch`), PIR
+  drain logic byte-identical, register dispatch identical. The only
+  ordering change is that `swap_active_vp` does `take(dst)` BEFORE
+  `VMCLEAR src` (vs OLD which did `VMCLEAR src` → `put(src)` →
+  `take(dst)`); intuitively this should not affect IPI latency but is
+  worth checking under instrumentation. Investigation plan: defer until
+  the rest of the refactor (phases 5–10) is in, then add timing probes
+  around `inject_via_pid`, the PIR drain block, and `swap_active_vp`
+  step boundaries; compare against pre-refactor commit `f95148ece`.
+  See also session checkpoint `011-designing-vcpuswap-helper-api`.
+
+- **Cleanup / teardown invariants need real tests**: after the capavisor
+  refactor (VcpuSwap helper, RIP invariant, etc.), we observed that
+  re-running dom1 after Eunomia in the same boot causes unexpected CHV
+  exits; a fresh reboot fixes it. This strongly suggests leftover state on
+  domain destroy — candidates: IRTE entries not torn down, PID/PIR words
+  retaining bits, shmem pages still mapped in dom0, thhv refcounts, child
+  VcpuSlot not emptied, EPT pages not reclaimed. We need tests that
+  exercise create→destroy→create cycles on the same boot for each domain
+  type (smoke child, Eunomia, dom1 with CHV) and assert all per-domain
+  resources are released. Without these, refactor regressions in the
+  cleanup path will keep surfacing as flaky integration runs.
+
 ## Active Work Streams
 
 ### 1. Eunomia — minimal micro-kernel guest ✅ Phase A complete

@@ -1324,7 +1324,6 @@ impl ThemisPlatform {
     }
 
     /// Return an InactiveVcpu to a domain's VP slot after deactivation.
-    #[allow(dead_code)]
     #[cfg(target_arch = "x86_64")]
     pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
         let arc = self
