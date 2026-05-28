@@ -25,6 +25,10 @@ const INTERRUPTIBILITY_STI_MOV_SS: u64 = 0x3;
 const PRIMARY_INTERRUPT_WINDOW_EXITING: u64 = 1 << 2;
 /// VMENTRY_INTERRUPTION_INFO_FIELD: bit 31 = valid, bits [10:8] = type (0 = external).
 const VMENTRY_INTR_INFO_VALID: u64 = 1 << 31;
+/// PIN_BASED_EXEC_CONTROLS bit 7: process posted interrupts (Intel SDM §24.6.1).
+const PINBASED_PROCESS_POSTED_INTR: u64 = 1 << 7;
+/// VMENTRY_CONTROLS bit 9: IA-32e mode guest (Intel SDM §24.8.1).
+const VMENTRY_IA32E_MODE_GUEST: u64 = 1 << 9;
 
 pub trait ActiveVcpuExt {
     fn rip(&self) -> u64;
@@ -55,6 +59,16 @@ pub trait ActiveVcpuExt {
     /// Toggle interrupt-window exiting in `PRIMARY_PROCBASED_EXEC_CONTROLS`
     /// so the processor exits as soon as the guest can accept an interrupt.
     fn set_interrupt_window_exit(&mut self, enabled: bool);
+
+    /// Returns `true` iff posted-interrupt processing is enabled on this VP
+    /// (`PIN_BASED_EXEC_CONTROLS` bit 7). When set, callers should route
+    /// notifications via the PID; otherwise fall back to VM-entry injection.
+    fn posted_interrupts_enabled(&self) -> bool;
+
+    /// Track guest EFER.LMA in `VMENTRY_CONTROLS.IA32E_MODE_GUEST` (bit 9).
+    /// VM entry consistency requires this bit to match EFER.LMA — see
+    /// Intel SDM Vol 3C §26.3.1.1. Used by `SET_REG(EFER)`.
+    fn set_long_mode_guest(&mut self, lma: bool);
 }
 
 impl ActiveVcpuExt for ActiveVcpu {
@@ -118,5 +132,23 @@ impl ActiveVcpuExt for ActiveVcpu {
             primary & !PRIMARY_INTERRUPT_WINDOW_EXITING
         };
         self.set(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, new);
+    }
+
+    #[inline]
+    fn posted_interrupts_enabled(&self) -> bool {
+        self.get(vmcs::control::PINBASED_EXEC_CONTROLS) & PINBASED_PROCESS_POSTED_INTR != 0
+    }
+
+    #[inline]
+    fn set_long_mode_guest(&mut self, lma: bool) {
+        let entry = self.get(vmcs::control::VMENTRY_CONTROLS);
+        let new = if lma {
+            entry | VMENTRY_IA32E_MODE_GUEST
+        } else {
+            entry & !VMENTRY_IA32E_MODE_GUEST
+        };
+        if new != entry {
+            self.set(vmcs::control::VMENTRY_CONTROLS, new);
+        }
     }
 }

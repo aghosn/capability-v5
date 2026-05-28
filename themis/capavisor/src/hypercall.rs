@@ -1984,9 +1984,7 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.
-        use x86::vmx::vmcs::control::PINBASED_EXEC_CONTROLS;
-        let pin_val = vcpu.get(PINBASED_EXEC_CONTROLS);
-        if pin_val & (1 << 7) != 0 {
+        if vcpu.posted_interrupts_enabled() {
             let pid_phys = vcpu.pid_phys();
             let hhdm = platform.hhdm_offset();
             unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
@@ -2218,17 +2216,7 @@ fn apply_vmcs_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, val:
     // in 32-bit compatibility mode on re-entry → 64-bit code decoded as 32-bit
     // → triple fault.
     if reg == VpRegister::Efer {
-        let lma = (val >> 10) & 1;
-        let entry = vcpu.get(x86::vmx::vmcs::control::VMENTRY_CONTROLS);
-        const IA32E_MODE_GUEST: u64 = 1 << 9;
-        let new_entry = if lma == 1 {
-            entry | IA32E_MODE_GUEST
-        } else {
-            entry & !IA32E_MODE_GUEST
-        };
-        if new_entry != entry {
-            vcpu.set(x86::vmx::vmcs::control::VMENTRY_CONTROLS, new_entry);
-        }
+        vcpu.set_long_mode_guest((val >> 10) & 1 == 1);
     }
 }
 
