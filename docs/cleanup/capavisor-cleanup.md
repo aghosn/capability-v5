@@ -212,11 +212,59 @@ Functions exceeding 100 lines in `themis/capavisor/src/`:
 ### `hypercall.rs::do_attest_self` — lines 522-713, 192 lines
 
 - **What it does:** Builds unsigned or signed structured attestation, dequeues an `AttestRequest`, signs digest, optionally TPM-quotes, and enqueues report chunks through DomainComm.
-- **Extraction proposal:**
-  - `build_attest_header(attest)` (~552-564): construct wire header.
-  - `dequeue_attest_request(platform, domain_id, expected_seq)` (~566-614): parse and validate request.
-  - `build_signed_attestation_payload(attest, req)` (~616-677): hash/sign and optionally add TPM quote.
-  - `enqueue_attestation_chunk(platform, domain_id, payload, offset)` (~678-711): common chunking/enqueue path for signed and unsigned.
+- **New target — common-base wire format with signed-as-extension:**
+
+  ```
+  Common base (= today's unsigned, unchanged for parser compatibility):
+    [AttestReport hdr 40B]    — flags |= DOMCOMM_ATTEST_F_SEALED on signed path
+    [MemCapEntry × nr_mem_caps]
+    [DomCapEntry × nr_dom_caps]
+    [PaMapEntry  × nr_pa_entries]
+
+  Signed payload = common base + signed envelope tail:
+    [ … common base above, unchanged … ]
+    [SignedEnvelope 98B] {
+        signature[64]   — Ed25519 over (common_base ‖ nonce ‖ user_pub_key)
+        pub_key[32]
+        nonce[32]
+        user_pub_key[32]
+        tpm_quote_size u16 | tpm_sig_size u16 | ak_pub_size u16 | reserved u16
+    }
+    [tpm_quote] [tpm_sig] [ak_pub]
+  ```
+
+  Discriminator: `flags & DOMCOMM_ATTEST_F_SEALED` (in-band, no more total-size guessing). Envelope offset is computed from header counts: `40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24`.
+
+- **Why this shape:**
+  - **Single source of truth** for header serialization (`StructuredAttestation::to_bytes()` already exists in `capa-engine/src/attest.rs:105`); kills the manual hypercall-side struct-literal duplicate at `hypercall.rs:538-549`.
+  - **Signature now covers the cap inventory** — today's Ed25519 only signs the 40-byte header + nonce + user_pub_key; cap entries and TPM blobs are *not* under the signature (security gap).
+  - **`DOMCOMM_ATTEST_F_SEALED` becomes live** — defined in `domcomm.rs:48`, never set anywhere today; receiver currently discriminates by total payload size (brittle).
+  - **`SignedAttestReport` (208 B fused struct) goes away**; `AttestReport` is the one true header. `SignedEnvelope` (98 B) is the per-signature appendix.
+  - **Unsigned parser unchanged** — critical because dom0's `thhv_translate.c:516 thhv_pa_map_init_from_attestation` walks `[mem_caps → dom_caps → pa_map]` at boot to learn its capability handles. Without that report dom0 cannot CARVE memory to create dom1.
+
+- **Helper extraction inside `do_attest_self` (~200 LOC → ~60 LOC):**
+  - `build_attest_header(attest, sealed: bool) -> domcomm::AttestReport`.
+  - `serialize_common_base(attest, out: &mut Vec<u8>)` — wraps `to_bytes()`.
+  - `consume_attest_request(platform, domain_id, expected_seq)` — TX dequeue + validation.
+  - `build_signed_envelope(common_base_bytes, attest_req, tpm_result) -> Vec<u8>`.
+  - `with_locked_domcomm<R>(platform, domain_id, f)` — replaces the dup at L552-559 / L684-691.
+  - `enqueue_attest_chunk(pd, payload, offset) -> HypercallResult` — shared chunking tail.
+
+- **Coordinated cross-component update (single phase, one commit per crate):**
+  1. `themis-abi/src/domcomm.rs`: drop `SignedAttestReport`, add `SignedEnvelope` (98 B), update size-assertions, document SEALED semantics.
+  2. `capa-engine/src/attest.rs`: keep `to_bytes()` (it's already correct); add `to_bytes_into(&self, out: &mut Vec<u8>)` if useful for the envelope-hash-input path.
+  3. `themis/capavisor/src/hypercall.rs`: rewrite `do_attest_self` per the helpers above.
+  4. `thhv/inc/thhv.h`: add `struct domcomm_signed_envelope`; remove the stale "168 bytes" comment at L927; clarify `domcomm_attest_report` doc to note the optional envelope tail.
+  5. `thhv/test/test_attestation.c`: update verifier — envelope offset is computed from the header, signature input is `entire_common_base || nonce || user_pub_key`.
+  6. **No kernel-driver changes** (`thhv_main.c` is pure pass-through to userspace).
+
+- **Critical preservation:** the dom0 bootstrap path in `thhv/src/thhv_translate.c:516 thhv_pa_map_init_from_attestation` uses the **unsigned** attestation today and parses `[hdr][mem_caps][dom_caps][pa_map]` by hardcoded order. This refactor preserves that exact unsigned wire format. Any change to the entry order or header layout breaks dom0 boot and therefore dom1 creation.
+
+- **Three side-issues to flag separately (NOT blocking this refactor):**
+  1. **Kernel does not reassemble multi-chunk reports.** `thhv_pa_map_init_from_attestation` calls `domcomm_rx_dequeue` once into a 4080 B buffer (`thhv_translate.c:553`); same for `thhv_main.c:196`. The capavisor's offset-chunking in `do_attest_self` is therefore functionally dead today. Either wire reassembly into the kernel or document/assert a hard 4080 B cap. For typical dom0 sizing (~5-10 mem_caps + a few pa_map ranges) this is silently fine, but it's a brittle assumption that will break the first time a dom0 has many capabilities.
+  2. **`chunk_index`/`total_chunks` are dead fields.** Hardcoded `(0, 1)` in `capa-engine/src/attest.rs:127-128` and in the signed branch. Either wire to (1) or remove from the wire format.
+  3. **`DOMCOMM_ATTEST_F_SEALED` never set today.** Fixed by this refactor.
+
 - **Smells:** Cryptographic envelope construction, TPM operations, DomainComm queue I/O, and hypercall return conventions are mixed. TPM quote buffers are fixed-size magic arrays.
 
 ### `main.rs::_start` — lines 223-405, 183 lines

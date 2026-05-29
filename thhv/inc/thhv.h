@@ -749,19 +749,23 @@ struct domcomm_pa_map_entry {
 };  /* 24 bytes */
 
 /*
- * Binary attestation report header.
+ * Binary attestation report header (common base).
  *
- * Variable-length: the header is followed by three arrays packed
- * contiguously: mem_caps[], dom_caps[], pa_map[].
+ * Followed by three arrays packed contiguously: mem_caps[], dom_caps[], pa_map[].
+ * When `flags & DOMCOMM_ATTEST_F_SEALED`, a `domcomm_signed_envelope` (plus
+ * optional TPM blobs) follows the cap entries — see THHV_ATTEST_SELF docs.
  *
- * Total payload size = sizeof(domcomm_attest_report)
- *                    + nr_mem_caps * sizeof(domcomm_mem_cap_entry)
- *                    + nr_dom_caps * sizeof(domcomm_dom_cap_entry)
- *                    + nr_pa_entries * sizeof(domcomm_pa_map_entry)
+ * Common-base total size = sizeof(domcomm_attest_report)
+ *                        + nr_mem_caps   * sizeof(domcomm_mem_cap_entry)
+ *                        + nr_dom_caps   * sizeof(domcomm_dom_cap_entry)
+ *                        + nr_pa_entries * sizeof(domcomm_pa_map_entry)
  *
  * If the total exceeds DOMCOMM_MAX_PAYLOAD (4080 bytes), the report
- * is split across multiple DOMCOMM_MSG_ATTEST messages.  Each chunk
- * carries a chunk_index/total_chunks pair for reassembly.
+ * is split across multiple DOMCOMM_MSG_ATTEST messages.
+ *
+ * NOTE: `chunk_index` / `total_chunks` are currently dead — the capavisor
+ * hardcodes (0, 1) and the kernel does not reassemble multi-chunk reports.
+ * Today's reports must fit in a single 4080-byte message.
  */
 struct domcomm_attest_report {
 	__u64 domain_id;
@@ -923,9 +927,21 @@ struct thhv_query {
 /*
  * THHV_ATTEST_SELF — request a signed self-attestation from the capavisor.
  *
- * The capavisor signs an AttestReport with its Ed25519 private key and
- * delivers the SignedAttestReport (168 bytes) to dom0's DomainComm RX ring.
- * The nonce is a 32-byte verifier-supplied challenge.
+ * Wire format of the report delivered to dom0's DomainComm RX ring:
+ *
+ *   [ domcomm_attest_report (40B)  ]   ← flags |= DOMCOMM_ATTEST_F_SEALED
+ *   [ mem_cap entries (40B each)   ]   \
+ *   [ dom_cap entries (16B each)   ]    > common base (parsed by the
+ *   [ pa_map  entries (24B each)   ]   /  unsigned path too)
+ *   ─────────── signed-only tail ───────────
+ *   [ domcomm_signed_envelope (168B) ]
+ *   [ tpm_quote (variable)         ]   (optional, if TPM is provisioned)
+ *   [ tpm_sig   (variable)         ]
+ *   [ ak_pub    (variable)         ]
+ *
+ * The Ed25519 signature in the envelope covers
+ *   SHA-256(common_base ‖ nonce ‖ user_pub_key)
+ * — every byte of the common base (header + cap entries) is bound.
  *
  * Returns: report_size (bytes written to DomainComm RX ring) in result field.
  */
@@ -938,6 +954,25 @@ struct thhv_attest_self {
 
 #define THHV_ATTEST_SELF \
 	_IOWR(THHV_IOCTL_MAGIC, 0x05, struct thhv_attest_self)
+
+/*
+ * Signed attestation envelope (168 bytes) — appended after the common base
+ * when the report is sealed.  Matches `themis_abi::domcomm::SignedEnvelope`.
+ *
+ * The envelope is located at byte offset
+ *   40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24
+ * in `report_buf` (i.e. immediately after the common-base entries).
+ */
+struct domcomm_signed_envelope {
+	__u8  signature[64];     /* Ed25519 signature */
+	__u8  pub_key[32];       /* capavisor Ed25519 pub key */
+	__u8  nonce[32];         /* echoed nonce */
+	__u8  user_pub_key[32];  /* echoed user pub key */
+	__u16 tpm_quote_size;
+	__u16 tpm_sig_size;
+	__u16 ak_pub_size;
+	__u16 reserved;
+};  /* 168 bytes */
 
 /*
  * THHV_READ_PCR — read a TPM PCR value via the capavisor.

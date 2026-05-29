@@ -44,14 +44,10 @@ struct thhv_attest_self {
 #define THHV_ATTEST_SELF \
 	_IOWR(THHV_IOCTL_MAGIC, 0x05, struct thhv_attest_self)
 
-/* AttestReport (40 bytes, matches domcomm.rs) */
-#define ATTEST_REPORT_SIZE 40
-
-/* SignedAttestReport fixed header (208 bytes, matches domcomm.rs) */
-struct signed_attest_hdr {
-	/* AttestReport (40 bytes) */
+/* AttestReport common-base header (40 bytes, matches domcomm.rs). */
+struct attest_report {
 	uint64_t domain_id;
-	uint32_t flags;
+	uint32_t flags;            /* DOMCOMM_ATTEST_F_* */
 	uint32_t num_vps;
 	uint32_t api_flags;
 	uint32_t nr_mem_caps;
@@ -59,20 +55,51 @@ struct signed_attest_hdr {
 	uint32_t nr_pa_entries;
 	uint16_t chunk_index;
 	uint16_t total_chunks;
-	uint32_t reserved_report;
+	uint32_t reserved;
+};
+#define ATTEST_REPORT_SIZE  sizeof(struct attest_report)
 
-	/* Signature + keys */
+#define DOMCOMM_ATTEST_F_SEALED  (1U << 0)
+
+/* SignedEnvelope (168 bytes, matches domcomm.rs).
+ *
+ * Wire layout of a signed attestation message:
+ *   [ attest_report (40B) ]                                   ← flags |= SEALED
+ *   [ mem_cap_entry × nr_mem_caps (40B each) ]
+ *   [ dom_cap_entry × nr_dom_caps (16B each) ]
+ *   [ pa_map_entry  × nr_pa_entries (24B each) ]
+ *   ─────────────── common base ends here ───────────────
+ *   [ signed_envelope (168B) ]
+ *   [ tpm_quote (variable, tpm_quote_size bytes) ]   (optional, if TPM)
+ *   [ tpm_sig   (variable, tpm_sig_size bytes)   ]
+ *   [ ak_pub    (variable, ak_pub_size bytes)    ]
+ *
+ * Signature scope: SHA-256(common_base || nonce || user_pub_key) —
+ * the entire common base (header + cap entries) is bound.
+ */
+struct signed_envelope {
 	uint8_t  signature[64];       /* Ed25519 signature */
 	uint8_t  pub_key[32];         /* capavisor Ed25519 pub key */
 	uint8_t  nonce[32];           /* echoed nonce */
 	uint8_t  user_pub_key[32];    /* echoed user pub key */
-
-	/* TPM quote sizes */
 	uint16_t tpm_quote_size;
 	uint16_t tpm_sig_size;
 	uint16_t ak_pub_size;
 	uint16_t reserved;
 };
+
+/* Common-base byte sizes (must match domcomm.rs). */
+#define MEM_CAP_ENTRY_SIZE  40
+#define DOM_CAP_ENTRY_SIZE  16
+#define PA_MAP_ENTRY_SIZE   24
+
+static size_t common_base_size(const struct attest_report *hdr)
+{
+	return ATTEST_REPORT_SIZE
+		+ (size_t)hdr->nr_mem_caps  * MEM_CAP_ENTRY_SIZE
+		+ (size_t)hdr->nr_dom_caps  * DOM_CAP_ENTRY_SIZE
+		+ (size_t)hdr->nr_pa_entries * PA_MAP_ENTRY_SIZE;
+}
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -96,10 +123,14 @@ static void hexdump(const char *label, const uint8_t *buf, size_t len)
 /* ── Ed25519 verification ────────────────────────────────────────────────── */
 
 /*
- * Capavisor signs: ed25519_sign(SHA-256(report[40] || nonce[32] || user_pub_key[32]))
+ * Capavisor signs: ed25519_sign(SHA-256(common_base || nonce || user_pub_key))
+ * where common_base = report_buf[0 .. envelope_offset]
+ *   = [attest_report 40B][mem_caps][dom_caps][pa_map].
+ *
  * So the "message" for Ed25519 verify is the 32-byte SHA-256 digest.
  */
-static int verify_ed25519(const struct signed_attest_hdr *hdr)
+static int verify_ed25519(const uint8_t *common_base, size_t common_base_len,
+			   const struct signed_envelope *env)
 {
 	EVP_PKEY *pkey = NULL;
 	EVP_MD_CTX *ctx = NULL;
@@ -108,19 +139,19 @@ static int verify_ed25519(const struct signed_attest_hdr *hdr)
 	EVP_MD_CTX *sha_ctx = NULL;
 	int ret = 0;
 
-	/* Reconstruct: SHA-256(report || nonce || user_pub_key) */
+	/* Reconstruct: SHA-256(common_base || nonce || user_pub_key) */
 	sha_ctx = EVP_MD_CTX_new();
 	if (!sha_ctx) return -1;
 	EVP_DigestInit_ex(sha_ctx, EVP_sha256(), NULL);
-	EVP_DigestUpdate(sha_ctx, hdr, ATTEST_REPORT_SIZE);
-	EVP_DigestUpdate(sha_ctx, hdr->nonce, 32);
-	EVP_DigestUpdate(sha_ctx, hdr->user_pub_key, 32);
+	EVP_DigestUpdate(sha_ctx, common_base, common_base_len);
+	EVP_DigestUpdate(sha_ctx, env->nonce, 32);
+	EVP_DigestUpdate(sha_ctx, env->user_pub_key, 32);
 	EVP_DigestFinal_ex(sha_ctx, digest, &digest_len);
 	EVP_MD_CTX_free(sha_ctx);
 
 	/* Create Ed25519 public key from raw bytes. */
 	pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL,
-					   hdr->pub_key, 32);
+					   env->pub_key, 32);
 	if (!pkey) {
 		printf("  FAIL: EVP_PKEY_new_raw_public_key failed\n");
 		ERR_print_errors_fp(stdout);
@@ -143,7 +174,7 @@ static int verify_ed25519(const struct signed_attest_hdr *hdr)
 	 * Ed25519 verify: the "message" is the 32-byte SHA-256 digest
 	 * (that's what the capavisor passed to ed25519_dalek::sign).
 	 */
-	if (EVP_DigestVerify(ctx, hdr->signature, 64,
+	if (EVP_DigestVerify(ctx, env->signature, 64,
 			     digest, sizeof(digest)) != 1) {
 		printf("  FAIL: Ed25519 signature INVALID\n");
 		hexdump("digest", digest, 32);
@@ -302,7 +333,9 @@ static int test_unsigned(int fd)
 static int test_signed(int fd)
 {
 	struct thhv_attest_self as;
-	struct signed_attest_hdr *hdr;
+	struct attest_report *hdr;
+	struct signed_envelope *env;
+	size_t base_len;
 	int ret;
 	uint8_t test_nonce[32];
 	uint8_t test_pubkey[32];
@@ -329,60 +362,76 @@ static int test_signed(int fd)
 
 	printf("  report_size = %lu bytes\n", (unsigned long)as.report_size);
 
-	if (as.report_size < sizeof(struct signed_attest_hdr)) {
-		printf("  FAIL: report too small (%lu < %zu)\n",
-		       (unsigned long)as.report_size,
-		       sizeof(struct signed_attest_hdr));
+	if (as.report_size < ATTEST_REPORT_SIZE) {
+		printf("  FAIL: report too small for AttestReport header (%lu < %zu)\n",
+		       (unsigned long)as.report_size, ATTEST_REPORT_SIZE);
 		return 1;
 	}
 
-	hdr = (struct signed_attest_hdr *)as.report_buf;
+	hdr = (struct attest_report *)as.report_buf;
+	base_len = common_base_size(hdr);
 
-	/* Check domain_id is sane (dom0 = 0). */
-	printf("  domain_id = %lu\n", (unsigned long)hdr->domain_id);
-	if (hdr->domain_id != 0) {
-		printf("  WARN: expected domain_id=0 for dom0\n");
+	printf("  domain_id=%lu flags=%#x num_vps=%u mem_caps=%u dom_caps=%u pa_entries=%u\n",
+	       (unsigned long)hdr->domain_id, hdr->flags, hdr->num_vps,
+	       hdr->nr_mem_caps, hdr->nr_dom_caps, hdr->nr_pa_entries);
+	printf("  common_base size = %zu bytes (header + cap entries)\n", base_len);
+
+	if (!(hdr->flags & DOMCOMM_ATTEST_F_SEALED)) {
+		printf("  FAIL: DOMCOMM_ATTEST_F_SEALED not set on signed report\n");
+		return 1;
+	}
+	printf("  PASS: DOMCOMM_ATTEST_F_SEALED set\n");
+
+	if (as.report_size < base_len + sizeof(struct signed_envelope)) {
+		printf("  FAIL: report too small for common base + envelope (%lu < %zu)\n",
+		       (unsigned long)as.report_size,
+		       base_len + sizeof(struct signed_envelope));
+		return 1;
 	}
 
+	env = (struct signed_envelope *)(as.report_buf + base_len);
+
 	/* Verify nonce is echoed back. */
-	if (memcmp(hdr->nonce, test_nonce, 32) != 0) {
+	if (memcmp(env->nonce, test_nonce, 32) != 0) {
 		printf("  FAIL: nonce mismatch!\n");
 		hexdump("sent    ", test_nonce, 32);
-		hexdump("received", hdr->nonce, 32);
+		hexdump("received", env->nonce, 32);
 		return 1;
 	}
 	printf("  PASS: nonce echoed correctly\n");
 
 	/* Verify user_pub_key is echoed back. */
-	if (memcmp(hdr->user_pub_key, test_pubkey, 32) != 0) {
+	if (memcmp(env->user_pub_key, test_pubkey, 32) != 0) {
 		printf("  FAIL: user_pub_key mismatch!\n");
 		hexdump("sent    ", test_pubkey, 32);
-		hexdump("received", hdr->user_pub_key, 32);
+		hexdump("received", env->user_pub_key, 32);
 		return 1;
 	}
 	printf("  PASS: user_pub_key echoed correctly\n");
 
 	/* Verify Ed25519 signature cryptographically. */
-	printf("  Verifying Ed25519 signature...\n");
-	hexdump("signature", hdr->signature, 64);
-	hexdump("capavisor_pub_key", hdr->pub_key, 32);
+	printf("  Verifying Ed25519 signature over %zu-byte common base...\n",
+	       base_len);
+	hexdump("signature", env->signature, 64);
+	hexdump("capavisor_pub_key", env->pub_key, 32);
 
-	if (verify_ed25519(hdr) != 0) {
+	if (verify_ed25519(as.report_buf, base_len, env) != 0) {
 		printf("  FAIL: Ed25519 signature verification failed\n");
 		return 1;
 	}
-	printf("  PASS: Ed25519 signature VALID\n");
+	printf("  PASS: Ed25519 signature VALID (covers cap inventory)\n");
 
 	/* Check TPM quote fields. */
-	printf("  tpm_quote_size = %u\n", hdr->tpm_quote_size);
-	printf("  tpm_sig_size   = %u\n", hdr->tpm_sig_size);
-	printf("  ak_pub_size    = %u\n", hdr->ak_pub_size);
+	printf("  tpm_quote_size = %u\n", env->tpm_quote_size);
+	printf("  tpm_sig_size   = %u\n", env->tpm_sig_size);
+	printf("  ak_pub_size    = %u\n", env->ak_pub_size);
 
-	if (hdr->tpm_quote_size > 0) {
-		size_t expected_total = sizeof(struct signed_attest_hdr)
-			+ hdr->tpm_quote_size
-			+ hdr->tpm_sig_size
-			+ hdr->ak_pub_size;
+	if (env->tpm_quote_size > 0) {
+		size_t expected_total = base_len
+			+ sizeof(struct signed_envelope)
+			+ env->tpm_quote_size
+			+ env->tpm_sig_size
+			+ env->ak_pub_size;
 
 		printf("  TPM quote present! total expected = %zu, got = %lu\n",
 		       expected_total, (unsigned long)as.report_size);
@@ -392,19 +441,20 @@ static int test_signed(int fd)
 			return 1;
 		}
 
-		uint8_t *tpm_quote = as.report_buf + sizeof(struct signed_attest_hdr);
-		uint8_t *tpm_sig = tpm_quote + hdr->tpm_quote_size;
-		uint8_t *ak_pub = tpm_sig + hdr->tpm_sig_size;
+		uint8_t *tpm_quote = as.report_buf + base_len
+			+ sizeof(struct signed_envelope);
+		uint8_t *tpm_sig = tpm_quote + env->tpm_quote_size;
+		uint8_t *ak_pub = tpm_sig + env->tpm_sig_size;
 
-		hexdump("tpm_quote", tpm_quote, hdr->tpm_quote_size);
-		hexdump("tpm_sig  ", tpm_sig, hdr->tpm_sig_size);
-		hexdump("ak_pub   ", ak_pub, hdr->ak_pub_size);
+		hexdump("tpm_quote", tpm_quote, env->tpm_quote_size);
+		hexdump("tpm_sig  ", tpm_sig, env->tpm_sig_size);
+		hexdump("ak_pub   ", ak_pub, env->ak_pub_size);
 
 		/* Verify TPM RSA-2048 signature cryptographically. */
 		printf("  Verifying TPM RSA-2048 signature...\n");
-		if (verify_tpm_quote(tpm_quote, hdr->tpm_quote_size,
-				     tpm_sig, hdr->tpm_sig_size,
-				     ak_pub, hdr->ak_pub_size) != 0) {
+		if (verify_tpm_quote(tpm_quote, env->tpm_quote_size,
+				     tpm_sig, env->tpm_sig_size,
+				     ak_pub, env->ak_pub_size) != 0) {
 			printf("  FAIL: TPM RSA signature verification failed\n");
 			return 1;
 		}

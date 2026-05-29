@@ -45,6 +45,12 @@ pub const DOMCOMM_FLAG_TX_READY: u32 = 1 << 1;
 
 // ── Attestation flags ────────────────────────────────────────────────────── //
 
+/// Set in `AttestReport.flags` when the report is followed by a
+/// [`SignedEnvelope`] (and optionally TPM blobs). When clear, the report is
+/// an unsigned domain-config dump consumed by `thhv` at module init.
+///
+/// Receivers use this bit to distinguish unsigned vs signed reports without
+/// guessing from total payload size.
 pub const DOMCOMM_ATTEST_F_SEALED: u32 = 1 << 0;
 
 // ── Error codes ──────────────────────────────────────────────────────────── //
@@ -227,7 +233,7 @@ pub struct EnumCapReq {
     pub handle: u64,
 }
 
-// ── Signed attestation report + request ──────────────────────────────────── //
+// ── Signed attestation envelope + request ────────────────────────────────── //
 
 /// Attestation request payload (TX ring, domain → capavisor).
 ///
@@ -242,25 +248,38 @@ pub struct AttestRequest {
     pub user_pub_key: [u8; ATTEST_KEY_SIZE],
 }
 
-/// Signed attestation report with user binding and optional TPM quote.
+/// Signed attestation envelope, appended after the common-base attestation
+/// payload (the same `[AttestReport][MemCapEntry[]][DomCapEntry[]][PaMapEntry[]]`
+/// that the unsigned path produces) when the caller asked for a signed report.
 ///
-/// The signature covers `SHA-256(report_bytes ‖ nonce ‖ user_pub_key)`.
-/// If a TPM is available, the response also includes a TPM2_Quote
-/// (TPM-signed proof of PCR values).
+/// Wire layout of a signed attestation message:
 ///
-/// Variable-length: the fixed header is followed by TPM data blobs
-/// when `tpm_quote_size > 0`.
+/// ```text
+/// [ AttestReport (40B) ]       ← flags |= DOMCOMM_ATTEST_F_SEALED on signed path
+/// [ MemCapEntry × nr_mem_caps ]
+/// [ DomCapEntry × nr_dom_caps ]
+/// [ PaMapEntry  × nr_pa_entries ]
+/// ─────── common base ends here ───────
+/// [ SignedEnvelope (168B) ]
+/// [ tpm_quote (tpm_quote_size bytes) ]   (optional, 0 if no TPM)
+/// [ tpm_sig   (tpm_sig_size bytes)   ]
+/// [ ak_pub    (ak_pub_size bytes)    ]
+/// ```
 ///
-/// A remote verifier checks:
-/// 1. `Ed25519_verify(pub_key, SHA-256(report_bytes ‖ nonce ‖ user_pub_key), signature)`
-/// 2. TPM quote signature valid under `ak_pub`
-/// 3. PCR[11] in quote == SHA-256(capavisor_binary ‖ pub_key)
-/// 4. `nonce` and `user_pub_key` match what was sent
+/// The `signature` field is `Ed25519(SHA-256(common_base ‖ nonce ‖ user_pub_key))`
+/// — every byte of the common base is bound (cap inventory included).
+///
+/// Verification steps (see `thhv/test/test_attestation.c`):
+/// 1. Locate envelope at offset
+///    `40 + nr_mem_caps*40 + nr_dom_caps*16 + nr_pa_entries*24`.
+/// 2. Verify `Ed25519_verify(pub_key, SHA-256(base_bytes ‖ nonce ‖ user_pub_key), signature)`.
+/// 3. If `tpm_quote_size > 0`: verify TPM quote signature under `ak_pub` and
+///    that `PCR[11]` in the quote matches `SHA-256(capavisor_binary ‖ pub_key)`.
+/// 4. Confirm `nonce` and `user_pub_key` echo back what the verifier sent.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct SignedAttestReport {
-    pub report: AttestReport,
-    /// Ed25519 signature (64 bytes) over SHA-256(report ‖ nonce ‖ user_pub_key).
+pub struct SignedEnvelope {
+    /// Ed25519 signature (64 bytes) over `SHA-256(common_base ‖ nonce ‖ user_pub_key)`.
     pub signature: [u8; ATTEST_SIG_SIZE],
     /// Capavisor's attestation public key (Ed25519, 32 bytes).
     pub pub_key: [u8; ATTEST_KEY_SIZE],
@@ -268,7 +287,7 @@ pub struct SignedAttestReport {
     pub nonce: [u8; ATTEST_NONCE_SIZE],
     /// Verifier's public key (32 bytes, bound into the signature).
     pub user_pub_key: [u8; ATTEST_KEY_SIZE],
-    /// Size of the TPMS_ATTEST blob following this header (0 if no TPM).
+    /// Size of the TPMS_ATTEST blob following this envelope (0 if no TPM).
     pub tpm_quote_size: u16,
     /// Size of the TPM signature blob following the quote (0 if no TPM).
     pub tpm_sig_size: u16,
@@ -337,7 +356,7 @@ const _: () = {
     assert!(core::mem::size_of::<ErrorMsg>() == 16);
     assert!(core::mem::size_of::<EnumCapReq>() == 8);
     assert!(core::mem::size_of::<AttestRequest>() == 64);
-    assert!(core::mem::size_of::<SignedAttestReport>() == 208);
+    assert!(core::mem::size_of::<SignedEnvelope>() == 168);
     assert!(core::mem::size_of::<BootAttestation>() == 128);
 };
 
