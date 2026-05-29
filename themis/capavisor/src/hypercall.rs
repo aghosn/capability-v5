@@ -1075,7 +1075,7 @@ fn do_switch(
     vp_id: u64,
     vcpu: &mut ActiveVcpu,
 ) -> Option<HypercallResult> {
-    use themis_abi::regs::{VpCommPage, VpRegister, ALL_VP_REGISTERS};
+    use themis_abi::regs::VpRegister;
 
     let vp_idx = vp_id as usize;
 
@@ -1103,41 +1103,31 @@ fn do_switch(
     };
 
     // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
-    let mut pending: alloc::vec::Vec<(VpRegister, u64)> = alloc::vec::Vec::new();
-
-    if comm_hpa != 0 {
+    // Use VpCommView to encapsulate the unsafe page mapping; then capability-
+    // check each register (we cannot call set_register, which would re-mark
+    // the dirty bit and cause infinite replay).
+    let pending: alloc::vec::Vec<(VpRegister, u64)> = {
         let hhdm = platform.hhdm_offset();
-        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
-        let dirty: [u64; 3] = [comm.dirty_mask[0], comm.dirty_mask[1], comm.dirty_mask[2]];
-
-        if !dirty.iter().all(|w| *w == 0) {
-            // Clear dirty bits atomically before validation so we don't replay them.
-            for i in 0..3 {
-                comm.dirty_mask[i] &= !dirty[i];
-            }
-            for reg in ALL_VP_REGISTERS {
-                let (w, b) = VpCommPage::mask_bit(*reg);
-                if dirty[w] & (1 << b) == 0 {
-                    continue;
-                }
-                let val = comm.read_reg(*reg);
-                // Validate via capability engine (write access check only —
-                // do NOT call set_register which would call set_vp_register and
-                // re-mark the dirty bit, causing infinite replay on every run).
-                let check_ok = Capability::check_register_write(
-                    caller,
-                    child_domain_handle,
-                    vp_id,
-                    *reg as u64,
-                    platform,
-                )
-                .is_ok();
-                if check_ok {
-                    pending.push((*reg, val));
-                }
-            }
+        // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP and
+        // no other view is held on this code path.
+        match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            None => alloc::vec::Vec::new(),
+            Some(mut view) => view
+                .take_dirty()
+                .into_iter()
+                .filter(|(reg, _)| {
+                    Capability::check_register_write(
+                        caller,
+                        child_domain_handle,
+                        vp_id,
+                        *reg as u64,
+                        platform,
+                    )
+                    .is_ok()
+                })
+                .collect(),
         }
-    }
+    };
 
     // ── 2. Capability engine: forward switch (run-state transitions) ──
     // Child VP transitions Available → Running here; must be after COMM read above.
@@ -1194,66 +1184,20 @@ fn do_switch(
     // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
 
     // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
-    // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs), so the processor
-    // ignores the PID page on VMENTRY.  inject_via_pid() writes PIR bits as a
-    // software queue.  We atomically snapshot-and-clear ALL PIR words, inject
-    // the LOWEST pending vector (device interrupts before timer) via
-    // VMENTRY_INTR_INFO, and put remaining vectors back in PIR for next switch.
+    // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs and A3), so the
+    // processor never auto-delivers from the PID — capavisor uses PIR as a
+    // software queue and drains it here under capability control.  Helper
+    // injects the LOWEST pending vector (device IRQs before timer) via the
+    // legacy VM-entry path and returns whether vectors remain.  Set the
+    // interrupt-window-exiting bit accordingly so we retry on the next
+    // IF=1 transition.
+    //
+    // Note: this also clears interrupt-window-exiting in the
+    // nothing-pending case; the old code skipped that branch, but it is
+    // safe (and arguably correct) to clear it whenever PIR is empty.
     {
-        use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-        let pid_phys = vcpu.pid_phys();
-        if pid_phys != 0 {
-            let hhdm = platform.hhdm_offset();
-            let pir_base = (pid_phys + hhdm) as *const AtomicU64;
-
-            // Atomically swap out all PIR words to get a consistent snapshot.
-            let mut pir_snapshot = [0u64; 4];
-            let mut any_set = false;
-            for i in 0..4 {
-                pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
-                if pir_snapshot[i] != 0 {
-                    any_set = true;
-                }
-            }
-
-            // Clear the ON (Outstanding Notification) bit.
-            let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
-            unsafe { (*on_ptr).store(0, Ordering::Release) };
-
-            if any_set {
-                if vcpu.guest_can_accept_external() {
-                    // Guest can accept interrupts — find the LOWEST pending
-                    // vector to prioritize device interrupts over timer.
-                    let mut inject_vec: Option<u8> = None;
-                    for i in 0..4usize {
-                        if pir_snapshot[i] != 0 {
-                            let bit = pir_snapshot[i].trailing_zeros();
-                            inject_vec = Some((i * 64 + bit as usize) as u8);
-                            pir_snapshot[i] &= !(1u64 << bit);
-                            break;
-                        }
-                    }
-
-                    if let Some(vector) = inject_vec {
-                        vcpu.inject_external_vector(vector);
-                    }
-                }
-
-                // Put remaining (un-injected) vectors back in PIR for next switch.
-                let mut remaining = false;
-                for i in 0..4usize {
-                    if pir_snapshot[i] != 0 {
-                        remaining = true;
-                        unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
-                    }
-                }
-
-                // If vectors remain in PIR (IF=0 or multiple pending), enable
-                // interrupt-window exiting so we get a VMEXIT when guest IF
-                // becomes 1 and we can inject then. Otherwise clear it.
-                vcpu.set_interrupt_window_exit(remaining);
-            }
-        }
+        let remaining = drain_pir_inject_lowest(vcpu, platform);
+        vcpu.set_interrupt_window_exit(remaining);
     }
 
     // ── 8. Apply all pending COMM-page registers to the now-active child.
@@ -1283,6 +1227,76 @@ fn do_switch(
 
 // ── Child exit forwarding ────────────────────────────────────────────────── //
 
+/// Atomically drain the VP's posted-interrupt request (PIR) array, inject the
+/// lowest pending vector via legacy VM-entry injection, and put remaining
+/// vectors back for next time.  Returns `true` if any vectors remain in PIR
+/// after this call (so the caller can enable interrupt-window exiting).
+///
+/// The PIR is used purely as a software queue (see A3, A8): remote cores drop
+/// vectors via `inject_via_pid`, and the next SWITCH or interrupt-window exit
+/// drains them here under capability/policy control.  Lowest vector first so
+/// device IRQs are prioritised over the timer.
+///
+/// Skips injection if `vcpu` cannot accept an external interrupt
+/// (IF=0 or STI/MOV-SS blocking) — the snapshot is then OR'd back into PIR
+/// untouched so it can be retried on the next interrupt-window exit.
+///
+/// Returns `false` if the VP has no PID (legacy / non-posted setup).
+#[cfg(target_arch = "x86_64")]
+pub fn drain_pir_inject_lowest(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+) -> bool {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    let pid_phys = vcpu.pid_phys();
+    if pid_phys == 0 {
+        return false;
+    }
+    let hhdm = platform.hhdm_offset();
+    let pir_base = (pid_phys + hhdm) as *const AtomicU64;
+
+    let mut pir_snapshot = [0u64; 4];
+    let mut any_set = false;
+    for i in 0..4 {
+        pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
+        if pir_snapshot[i] != 0 {
+            any_set = true;
+        }
+    }
+
+    // Clear ON (Outstanding Notification).
+    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+    unsafe { (*on_ptr).store(0, Ordering::Release) };
+
+    if !any_set {
+        return false;
+    }
+
+    if vcpu.guest_can_accept_external() {
+        // Find lowest pending vector (device-first).
+        for i in 0..4usize {
+            if pir_snapshot[i] != 0 {
+                let bit = pir_snapshot[i].trailing_zeros();
+                let vector = (i * 64 + bit as usize) as u8;
+                pir_snapshot[i] &= !(1u64 << bit);
+                vcpu.inject_external_vector(vector);
+                break;
+            }
+        }
+    }
+
+    // Put any remaining (or all, if IF blocked) vectors back in PIR.
+    let mut remaining = false;
+    for i in 0..4usize {
+        if pir_snapshot[i] != 0 {
+            remaining = true;
+            unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
+        }
+    }
+    remaining
+}
+
 /// Called from `handle_vmexit` when the current domain is not dom0.
 ///
 /// Called on EXIT_REASON_INTERRUPT_WINDOW (7): the guest's IF just became 1.
@@ -1293,59 +1307,7 @@ pub fn drain_pir_on_interrupt_window(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
 ) {
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
-    let pid_phys = vcpu.pid_phys();
-    if pid_phys == 0 {
-        // No PID — just clear the interrupt-window exiting bit.
-        vcpu.set_interrupt_window_exit(false);
-        return;
-    }
-
-    let hhdm = platform.hhdm_offset();
-    let pir_base = (pid_phys + hhdm) as *const AtomicU64;
-
-    // Atomically swap out all PIR words.
-    let mut pir_snapshot = [0u64; 4];
-    let mut any_set = false;
-    for i in 0..4 {
-        pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
-        if pir_snapshot[i] != 0 {
-            any_set = true;
-        }
-    }
-
-    // Clear ON bit.
-    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
-    unsafe { (*on_ptr).store(0, Ordering::Release) };
-
-    if any_set {
-        // Find lowest pending vector (device-first).
-        let mut inject_vec: Option<u8> = None;
-        for i in 0..4usize {
-            if pir_snapshot[i] != 0 {
-                let bit = pir_snapshot[i].trailing_zeros();
-                inject_vec = Some((i * 64 + bit as usize) as u8);
-                pir_snapshot[i] &= !(1u64 << bit);
-                break;
-            }
-        }
-
-        if let Some(vector) = inject_vec {
-            vcpu.inject_external_vector(vector);
-        }
-    }
-
-    // Put remaining vectors back.
-    let mut remaining = false;
-    for i in 0..4usize {
-        if pir_snapshot[i] != 0 {
-            remaining = true;
-            unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
-        }
-    }
-
-    // Toggle interrupt-window exiting based on whether vectors still pend.
+    let remaining = drain_pir_inject_lowest(vcpu, platform);
     vcpu.set_interrupt_window_exit(remaining);
 }
 
@@ -1358,10 +1320,7 @@ pub fn drain_pir_on_interrupt_window(
 /// in rdi.
 #[cfg(target_arch = "x86_64")]
 pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
-    use themis_abi::regs::{
-        InterceptMessage, ThemicMessageHeader, VpCommPage, ALL_VP_REGISTERS,
-        THEMIC_MSG_VP_INTERCEPT, VP_COMM_INTERCEPT_OFFSET,
-    };
+    use themis_abi::regs::{InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT};
     use x86::vmx::vmcs;
 
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
@@ -1409,24 +1368,17 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
     if comm_hpa != 0 {
         let hhdm = platform.hhdm_offset();
-        let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
+        // SAFETY: comm_hpa was registered for this child VP via THHV_CREATE_VP
+        // and no other VpCommView is held on this code path.
+        let mut view = match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            Some(v) => v,
+            None => unreachable!("comm_hpa != 0 already checked"),
+        };
 
-        // Copy register values into the COMM page register area.
-        for reg in ALL_VP_REGISTERS {
-            if !read_set.is_set(*reg as u64) {
-                continue;
-            }
-            let val = if let Some(gpr) = vp_reg_to_gpr(*reg) {
-                vcpu.reg(gpr)
-            } else if let Some(field) = vp_reg_to_vmcs_field(*reg) {
-                vcpu.try_get(field).unwrap_or(0)
-            } else {
-                continue;
-            };
-            comm.write_reg(*reg, val);
-        }
+        // Copy read_set-selected register values into the COMM page.
+        view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
 
-        // Write the slim intercept message at offset 512.
+        // Build the slim intercept message at offset 512.
         // Register values stay in the COMM page register area (gated by read_set);
         // thhv reads them from there per exit_reason.
         let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
@@ -1512,10 +1464,7 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             }
         }
 
-        let msg_ptr = (comm_hpa + hhdm + VP_COMM_INTERCEPT_OFFSET as u64) as *mut InterceptMessage;
-        unsafe {
-            core::ptr::write_volatile(msg_ptr, msg);
-        }
+        view.write_intercept(&msg);
     }
 
     // Advance the child's RIP past the faulting instruction while the
@@ -2041,29 +1990,16 @@ pub fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         .domain_arc(intr_ctx.interrupted_domain_id)
         .expect("[INTR_FWD] child domain not found");
     {
-        use themis_abi::regs::{VpCommPage, ALL_VP_REGISTERS};
         let comm_hpa = child_arc
             .lock()
             .comm_hpas
             .get(intr_ctx.interrupted_vp_id as usize)
             .copied()
             .unwrap_or(0);
-        if comm_hpa != 0 {
-            let hhdm = platform.hhdm_offset();
-            let comm = unsafe { &mut *((comm_hpa + hhdm) as *mut VpCommPage) };
-            for reg in ALL_VP_REGISTERS {
-                if !read_set.is_set(*reg as u64) {
-                    continue;
-                }
-                let val = if let Some(gpr) = vp_reg_to_gpr(*reg) {
-                    vcpu.reg(gpr)
-                } else if let Some(field) = vp_reg_to_vmcs_field(*reg) {
-                    vcpu.try_get(field).unwrap_or(0)
-                } else {
-                    continue;
-                };
-                comm.write_reg(*reg, val);
-            }
+        let hhdm = platform.hhdm_offset();
+        // SAFETY: comm_hpa registered for this child VP; no concurrent view.
+        if let Some(mut view) = unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
         }
     }
 
