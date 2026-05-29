@@ -713,9 +713,12 @@ fn build_signed_tail(
 }
 
 /// Enqueue `payload[offset..]` onto the caller's RX ring as a single
-/// `DOMCOMM_MSG_ATTEST` message (capped at the single-page payload limit).
+/// `DOMCOMM_MSG_ATTEST` message.
 ///
-/// Returns `RDI = total_size, RSI = bytes written this call`.
+/// Returns `RDI = total_size`, `RSI = payload bytes written this call`.
+/// Both values are in **payload bytes** (the ring's per-message MsgHeader and
+/// 8-byte alignment padding are not exposed to the caller), so the caller can
+/// simply `offset += wrote` and loop while `offset < total_size`.
 #[cfg(target_arch = "x86_64")]
 fn enqueue_attest_chunk(
     pd: &mut crate::platform::PlatformDomain,
@@ -728,11 +731,15 @@ fn enqueue_attest_chunk(
     if offset >= total_size {
         return HypercallResult::success_2(total_size as u64, 0);
     }
-    let wrote = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, &payload[offset..]);
-    if wrote == 0 {
+    let slice = &payload[offset..];
+    let ring_bytes = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
+    if ring_bytes == 0 {
         return HypercallResult::error(errors::ERR_BUSY);
     }
-    HypercallResult::success_2(total_size as u64, wrote as u64)
+    // Whole `slice` was enqueued as one message (rx_enqueue is all-or-nothing);
+    // report progress in payload bytes so the caller can compare against
+    // total_size directly.
+    HypercallResult::success_2(total_size as u64, slice.len() as u64)
 }
 
 

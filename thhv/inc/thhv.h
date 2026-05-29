@@ -1299,9 +1299,8 @@ int themis_switch(u64 target_domain, u64 vp_id);
 int themis_get_chan(u64 domain, u64 *out_handle);
 int themis_send_chan(u64 chan, u64 receiver, u64 attrs);
 int themis_accept_chan(u64 pending_id, u64 *out_handle);
-int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
-		       u64 *out_size);
-int themis_attest_self_signed(u64 tx_sequence, u64 *out_size);
+int themis_attest_self(u32 mode, u64 offset, u64 tx_sequence,
+		       u64 *out_total, u64 *out_wrote);
 int themis_read_pcr(u32 pcr_index, u64 *out_r0, u64 *out_r1, u64 *out_r2);
 int themis_attest(u64 domain, u64 *out_lo, u64 *out_hi);
 int themis_get_reg(u64 domain, u64 vp_id, u64 reg, u64 *out_val);

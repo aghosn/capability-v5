@@ -130,9 +130,12 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 
 	case THHV_ATTEST_SELF: {
 		struct thhv_attest_self *as;
-		u64 report_size;
+		u64 total_size = 0;
+		u64 offset = 0;
+		u64 wrote = 0;
 		u32 rx_msg_type;
-		u32 rx_payload_size;
+		u32 rx_chunk_size;
+		u64 tx_sequence = 0;
 		int is_signed = 0;
 		int ret, i;
 
@@ -152,68 +155,74 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 			}
 		}
 
+		mutex_lock(&attest_lock);
+
 		if (is_signed) {
-			/* Signed path: enqueue request on TX, VMCALL,
-			 * dequeue response from RX. */
+			/* Signed path: enqueue AttestRequest on TX before
+			 * the first hypercall — capavisor consumes it to
+			 * build the signed envelope. */
 			u8 req_payload[64];
-			u64 tx_sequence;
 
 			memcpy(req_payload, as->nonce, 32);
 			memcpy(req_payload + 32, as->user_pub_key, 32);
-
-			mutex_lock(&attest_lock);
 
 			ret = domcomm_tx_enqueue(&thhv_domcomm.tx,
 						DOMCOMM_MSG_ATTEST_REQ,
 						req_payload, 64,
 						&tx_sequence);
-			if (ret) {
-				mutex_unlock(&attest_lock);
-				kfree(as);
-				return ret;
-			}
-
-			ret = themis_attest_self_signed(tx_sequence,
-						       &report_size);
-			if (ret) {
-				mutex_unlock(&attest_lock);
-				kfree(as);
-				return ret;
-			}
-		} else {
-			/* Unsigned path: register-based VMCALL. */
-			mutex_lock(&attest_lock);
-
-			ret = themis_attest_self(0, 0, 0, 0, &report_size);
-			if (ret) {
-				mutex_unlock(&attest_lock);
-				kfree(as);
-				return ret;
-			}
+			if (ret)
+				goto attest_unlock_err;
 		}
 
-		/* Both paths enqueue the report on the RX ring. */
-		ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
-					as->report_buf,
-					sizeof(as->report_buf),
-					&rx_msg_type,
-					&rx_payload_size);
+		/* First hypercall: discover total size + enqueue first chunk. */
+		ret = themis_attest_self(is_signed ? 1 : 0, 0, tx_sequence,
+					 &total_size, &wrote);
+		if (ret)
+			goto attest_unlock_err;
+
+		if (total_size == 0 || total_size > sizeof(as->report_buf)) {
+			pr_err("thhv: ATTEST_SELF total %llu does not fit user buffer (%zu)\n",
+			       total_size, sizeof(as->report_buf));
+			ret = -EMSGSIZE;
+			goto attest_unlock_err;
+		}
+
+		/* Reassemble chunks into the userspace buffer.  The signed
+		 * path's AttestRequest is consumed by the first hypercall
+		 * call only; subsequent chunk calls pass tx_sequence=0. */
+		for (;;) {
+			ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
+						 as->report_buf + offset,
+						 (u32)(total_size - offset),
+						 &rx_msg_type,
+						 &rx_chunk_size);
+			if (ret)
+				goto attest_unlock_err;
+			if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
+				ret = -EPROTO;
+				goto attest_unlock_err;
+			}
+			offset += rx_chunk_size;
+			if (offset >= total_size)
+				break;
+			ret = themis_attest_self(is_signed ? 1 : 0, offset, 0,
+						 &total_size, &wrote);
+			if (ret)
+				goto attest_unlock_err;
+		}
+
 		mutex_unlock(&attest_lock);
 
-		if (ret) {
-			kfree(as);
-			return ret;
-		}
-		if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
-			kfree(as);
-			return -EPROTO;
-		}
-
-		as->report_size = rx_payload_size;
+		as->report_size = total_size;
 
 		if (copy_to_user(uarg, as, sizeof(*as)))
 			ret = -EFAULT;
 
+		kfree(as);
+		return ret;
+
+attest_unlock_err:
+		mutex_unlock(&attest_lock);
 		kfree(as);
 		return ret;
 	}

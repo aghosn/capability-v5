@@ -515,14 +515,17 @@ int thhv_find_parent_handle(u64 hpa, u64 size, u64 *out_handle)
  */
 int thhv_pa_map_init_from_attestation(void)
 {
-	u8 *buf;
-	u32 msg_type, payload_size;
+	u8 *buf = NULL;
+	u32 msg_type, chunk_size;
 	struct domcomm_attest_report *report;
 	struct domcomm_mem_cap_entry *mem_caps;
 	struct domcomm_pa_map_entry *pa_entries;
 	u8 *cursor;
 	unsigned int i;
 	int ret;
+	u64 total_size = 0;
+	u64 offset = 0;
+	u64 wrote = 0;
 
 	ret = domcomm_init();
 	if (ret == -ENODEV) {
@@ -532,41 +535,64 @@ int thhv_pa_map_init_from_attestation(void)
 	if (ret)
 		return ret;
 
-	/* Request attestation from the capavisor (on-demand, not pre-populated). */
-	{
-		u64 attest_size = 0;
-
-		ret = themis_attest_self(0, 0, 0, 0, &attest_size);
-		if (ret) {
-			pr_err("thhv: ATTEST_SELF hypercall failed (%d)\n", ret);
-			return ret;
-		}
-		pr_info("thhv: ATTEST_SELF ok — %llu bytes enqueued\n", attest_size);
+	/* First hypercall: discover the full report size, also enqueues
+	 * the first chunk on the RX ring. */
+	ret = themis_attest_self(0, 0, 0, &total_size, &wrote);
+	if (ret) {
+		pr_err("thhv: ATTEST_SELF hypercall failed (%d)\n", ret);
+		return ret;
 	}
+	if (total_size == 0 || total_size > (16ULL << 20)) {
+		pr_err("thhv: ATTEST_SELF returned implausible total %llu\n",
+		       total_size);
+		return -EPROTO;
+	}
+	pr_info("thhv: ATTEST_SELF — %llu bytes total (first chunk %llu)\n",
+		total_size, wrote);
 
-	/* Allocate buffer for the attestation message payload. */
-	buf = kzalloc(DOMCOMM_MAX_PAYLOAD, GFP_KERNEL);
+	buf = kvzalloc(total_size, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	/* Dequeue the attestation message that ATTEST_SELF just enqueued. */
-	ret = domcomm_rx_dequeue(&thhv_domcomm.rx, buf, DOMCOMM_MAX_PAYLOAD,
-				 &msg_type, &payload_size);
-	if (ret) {
-		pr_err("thhv: no attestation message on RX ring (%d)\n", ret);
-		goto out_free;
+	/* Dequeue chunks one at a time; re-issue ATTEST_SELF with the
+	 * running offset until the whole report is reassembled. */
+	for (;;) {
+		ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
+					 buf + offset,
+					 (u32)(total_size - offset),
+					 &msg_type, &chunk_size);
+		if (ret) {
+			pr_err("thhv: ATTEST dequeue failed at offset %llu (%d)\n",
+			       offset, ret);
+			goto out_free;
+		}
+		if (msg_type != DOMCOMM_MSG_ATTEST) {
+			pr_err("thhv: unexpected msg type %#x at offset %llu (expected ATTEST %#x)\n",
+			       msg_type, offset, DOMCOMM_MSG_ATTEST);
+			ret = -EPROTO;
+			goto out_free;
+		}
+		offset += chunk_size;
+		if (offset >= total_size)
+			break;
+		ret = themis_attest_self(0, offset, 0, &total_size, &wrote);
+		if (ret) {
+			pr_err("thhv: ATTEST_SELF chunk@%llu failed (%d)\n",
+			       offset, ret);
+			goto out_free;
+		}
 	}
 
-	if (msg_type != DOMCOMM_MSG_ATTEST) {
-		pr_err("thhv: unexpected first message type %#x (expected ATTEST %#x)\n",
-		       msg_type, DOMCOMM_MSG_ATTEST);
+	if (offset != total_size) {
+		pr_err("thhv: ATTEST reassembly mismatch (%llu vs %llu)\n",
+		       offset, total_size);
 		ret = -EPROTO;
 		goto out_free;
 	}
 
-	if (payload_size < sizeof(struct domcomm_attest_report)) {
-		pr_err("thhv: attestation payload too small (%u < %zu)\n",
-		       payload_size, sizeof(struct domcomm_attest_report));
+	if (total_size < sizeof(struct domcomm_attest_report)) {
+		pr_err("thhv: attestation payload too small (%llu < %zu)\n",
+		       total_size, sizeof(struct domcomm_attest_report));
 		ret = -EPROTO;
 		goto out_free;
 	}
@@ -584,9 +610,9 @@ int thhv_pa_map_init_from_attestation(void)
 			+ (size_t)report->nr_mem_caps * sizeof(struct domcomm_mem_cap_entry)
 			+ (size_t)report->nr_dom_caps * sizeof(struct domcomm_dom_cap_entry)
 			+ (size_t)report->nr_pa_entries * sizeof(struct domcomm_pa_map_entry);
-		if (payload_size < expected) {
+		if (total_size < expected) {
 			pr_err("thhv: attestation payload too small for declared entries "
-			       "(%u < %zu)\n", payload_size, expected);
+			       "(%llu < %zu)\n", total_size, expected);
 			ret = -EPROTO;
 			goto out_free;
 		}
@@ -687,7 +713,7 @@ int thhv_pa_map_init_from_attestation(void)
 	ret = 0;
 
 out_free:
-	kfree(buf);
+	kvfree(buf);
 	return ret;
 }
 

@@ -150,22 +150,25 @@ int themis_accept_chan(u64 pending_id, u64 *out_handle)
 	return __themis_to_errno(status);
 }
 
-int themis_attest_self(u64 nonce_0, u64 nonce_1, u64 nonce_2, u64 nonce_3,
-		       u64 *out_size)
+/*
+ * Request a self-attestation chunk from the capavisor.
+ *
+ *   mode        — 0 = unsigned, 1 = signed (reads AttestRequest from TX ring)
+ *   offset      — byte offset into the report to start at (0 on first call)
+ *   tx_sequence — TX-ring sequence of the enqueued AttestRequest message
+ *                 (signed mode only; ignored when mode == 0)
+ *   out_total   — full payload size, in bytes (same on every call)
+ *   out_wrote   — bytes enqueued to the RX ring this call
+ *
+ * Callers MUST loop until offset >= *out_total, dequeuing one ATTEST chunk
+ * from the RX ring between calls and concatenating into the final buffer.
+ */
+int themis_attest_self(u32 mode, u64 offset, u64 tx_sequence,
+		       u64 *out_total, u64 *out_wrote)
 {
 	u64 status = __themis_vmcall(THEMIS_OP_ATTEST_SELF,
-				     nonce_0, nonce_1, nonce_2, nonce_3, 0,
-				     out_size, NULL, NULL);
-	return __themis_to_errno(status);
-}
-
-int themis_attest_self_signed(u64 tx_sequence, u64 *out_size)
-{
-	u64 status = __themis_vmcall(THEMIS_OP_ATTEST_SELF,
-				     1,            /* arg0 = signed mode flag */
-				     tx_sequence,  /* arg1 = TX ring msg sequence */
-				     0, 0, 0,
-				     out_size, NULL, NULL);
+				     (u64)mode, offset, tx_sequence, 0, 0,
+				     out_total, out_wrote, NULL);
 	return __themis_to_errno(status);
 }
 
