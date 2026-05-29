@@ -29,8 +29,12 @@ inductive Action where
       fresh handle to `cap` is appended to `receiver`. The cap's `owner`
       field is updated to `receiver`. -/
   | send (caller : DomId) (receiver : DomId) (cap : MemCapId)
+  /-- `caller` seals the domain referenced by domain-cap `cap`. The cap
+      must be owned by `caller`, the target domain must be currently
+      unsealed, and its `owned` policy must allow `SEAL`. -/
+  | seal (caller : DomId) (cap : DomCapId)
   -- Future:
-  -- | accept … | reject … | create … | seal …
+  -- | accept … | reject … | create …
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr
 

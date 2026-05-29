@@ -1657,5 +1657,134 @@ theorem send_preserves_wellformed
     have := hwf.parentChild id cpre hcpre pid' hcparPre ppre hppre
     rw [hPpChildren] at this; exact this
 
+/-! ### Seal preserves WellFormed
+
+Seal mutates only one field of one domain (`status`). Memory caps and
+the handle lists are completely untouched, so every reference-class
+invariant reduces to its pre-state counterpart. -/
+
+theorem seal_apply_getMem (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : MemCapId) :
+    (seal_apply s caller cap).getMem id = s.getMem id := by
+  unfold seal_apply
+  rcases s.getDomCap cap with _ | dc
+  · rfl
+  · simp [SpecState.getMem, SpecState.updDomain]
+
+theorem seal_apply_getDom (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (dc : DomCap) (hdc : s.getDomCap cap = some dc) (did : DomId) :
+    (seal_apply s caller cap).getDom did =
+      (if did = dc.targetDom then
+        (s.getDom did).map (fun d => { d with status := .sealed })
+       else s.getDom did) := by
+  show ((seal_apply s caller cap).domains).find? did = _
+  unfold seal_apply
+  rw [hdc]
+  simp only [SpecState.updDomain]
+  by_cases h : did = dc.targetDom
+  · subst h
+    rw [Arena.find?_update_eq_map]
+    simp; rfl
+  · rw [Arena.find?_update_other _ _ _ _ h]
+    rw [if_neg h]; rfl
+
+theorem seal_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {cap : DomCapId}
+    (hwf : WellFormed s)
+    (hstep : step s (.seal caller cap) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  rcases hdc : s.getDomCap cap with _ | dc
+  · exact absurd guard.capExists (by simp [hdc])
+  -- Post-state lookups: memcaps unchanged; domains differ only at targetDom.
+  have hMemEq : ∀ id, (seal_apply s caller cap).getMem id = s.getMem id :=
+    seal_apply_getMem s caller cap
+  have hDomEq := seal_apply_getDom s caller cap dc hdc
+  -- Key fact for HandleOwner / handleInArena: only `status` changes on
+  -- targetDom; `memHandles` are identical.
+  have hHandles : ∀ did d',
+      (seal_apply s caller cap).getDom did = some d' →
+      ∃ d, s.getDom did = some d ∧ d.memHandles = d'.memHandles := by
+    intro did d' hd'
+    rw [hDomEq] at hd'
+    by_cases h : did = dc.targetDom
+    · rw [if_pos h] at hd'
+      rcases hpre : s.getDom did with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        exact ⟨dpre, rfl, by rw [← hd']⟩
+    · rw [if_neg h] at hd'
+      exact ⟨d', hd', rfl⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((seal_apply s caller cap).memcaps).UniqueKeys
+      unfold seal_apply; rw [hdc]
+      simp [SpecState.updDomain]
+      exact hwf.unique.memcaps
+    case dc =>
+      show ((seal_apply s caller cap).domcaps).UniqueKeys
+      unfold seal_apply; rw [hdc]
+      simp [SpecState.updDomain]
+      exact hwf.unique.domcaps
+    case ds =>
+      show ((seal_apply s caller cap).domains).UniqueKeys
+      unfold seal_apply; rw [hdc]
+      simp only [SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _ hwf.unique.domains
+  case refs =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c' hc' pid' hcpar
+      rw [hMemEq] at hc'
+      have := hwf.refs.parentInArena id c' hc' pid' hcpar
+      rw [hMemEq]; exact this
+    case cia =>
+      intro id c' hc' cid hcid
+      rw [hMemEq] at hc'
+      have := hwf.refs.childInArena id c' hc' cid hcid
+      rw [hMemEq]; exact this
+    case hia =>
+      intro did d' hd' ph hph
+      obtain ⟨d, hd, hHeq⟩ := hHandles did d' hd'
+      rw [← hHeq] at hph
+      have := hwf.refs.handleInArena did d hd ph hph
+      rw [hMemEq]; exact this
+  case cdtMono =>
+    intro id c' hc' cid hcid ch hch
+    rw [hMemEq] at hc' hch
+    exact hwf.cdtMonotonic id c' hc' cid hcid ch hch
+  case cdtBidi =>
+    intro id c' hc' cid hcid ch hch
+    rw [hMemEq] at hc' hch
+    exact hwf.cdtBidirectional id c' hc' cid hcid ch hch
+  case fresh =>
+    intro id hid
+    have hKeys : id ∈ s.memcaps.keys := by
+      have heq : ((seal_apply s caller cap).memcaps).keys
+                  = s.memcaps.keys := by
+        unfold seal_apply; rw [hdc]
+        simp [SpecState.updDomain]
+      rw [heq] at hid; exact hid
+    have hnext : ((seal_apply s caller cap).nextMemCapId)
+                  = s.nextMemCapId := by
+      unfold seal_apply; rw [hdc]
+      simp [SpecState.updDomain]
+    rw [hnext]; exact hwf.freshMemCounter id hKeys
+  case ho =>
+    intro did d' hd' ph hph
+    obtain ⟨d, hd, hHeq⟩ := hHandles did d' hd'
+    rw [← hHeq] at hph
+    obtain ⟨cc, hccM, hcco⟩ := hwf.handleOwner did d hd ph hph
+    refine ⟨cc, ?_, hcco⟩
+    rw [hMemEq]; exact hccM
+  case pca =>
+    intro id c' hc' pid' hcpar pp hpp
+    rw [hMemEq] at hc' hpp
+    exact hwf.parentChild id c' hc' pid' hcpar pp hpp
+
 end ThemisCapa
 

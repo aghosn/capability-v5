@@ -215,7 +215,42 @@ def send_apply (s : SpecState) (caller : DomId) (receiver : DomId)
   let s₃ := s₂.updMem cap (fun c => { c with owner := receiver })
   s₃
 
-/-! ### Step relation -/
+/-! ### Seal operation
+
+Seal flips a domain's `status` from `unsealed` to `sealed`. The caller
+must hold a domain-cap (`cap : DomCapId`) referencing the target. -/
+
+/-- Preconditions for `seal(caller, cap)`. -/
+structure SealGuard (s : SpecState) (caller : DomId) (cap : DomCapId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  /-- Caller domain itself must already be sealed (only sealed domains
+      issue hypercalls). -/
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  /-- The domain-cap exists. -/
+  capExists         : (s.getDomCap cap).isSome
+  /-- The domain-cap is held by the caller. -/
+  capOwnedByCaller  : ∀ dc, s.getDomCap cap = some dc → dc.owner = caller
+  /-- The target domain (referenced by `cap`) exists. -/
+  targetExists      :
+    ∀ dc, s.getDomCap cap = some dc → (s.getDom dc.targetDom).isSome
+  /-- The target domain is currently unsealed. -/
+  targetUnsealed    :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td → td.isUnsealed
+  /-- The target's `owned` policy permits `SEAL`. Mirrors the engine
+      `cap_ref.read().owned.validate_operation(MonitorAPI::SEAL)` check. -/
+  hasPermission     :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td → td.policy.api.canSeal = true
+
+/-- Pure state update for a successful `seal`: flip the target domain's
+    `status` field to `.sealed`. Everything else unchanged. -/
+def seal_apply (s : SpecState) (caller : DomId) (cap : DomCapId) : SpecState :=
+  match s.getDomCap cap with
+  | none    => s
+  | some dc => s.updDomain dc.targetDom (fun d => { d with status := .sealed })
+
+
 
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
@@ -234,5 +269,8 @@ inductive step : SpecState → Action → SpecState → Prop
   | send {s : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
     (guard : SendGuard s caller receiver cap) :
     step s (.send caller receiver cap) (send_apply s caller receiver cap)
+  | seal {s : SpecState} {caller : DomId} {cap : DomCapId}
+    (guard : SealGuard s caller cap) :
+    step s (.seal caller cap) (seal_apply s caller cap)
 
 end ThemisCapa
