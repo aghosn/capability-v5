@@ -2332,13 +2332,7 @@ fn handle_grow(
         status: 0,
         reserved: 0,
     };
-    let ack_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &ack as *const domcomm::GrowAck as *const u8,
-            core::mem::size_of::<domcomm::GrowAck>(),
-        )
-    };
-    pd.domcomm_rx_enqueue(domcomm::msg_types::GROW_ACK, ack_bytes);
+    pd.enqueue_rx(&ack);
 }
 
 /// Send a GROW_ACK with an error status.
@@ -2351,13 +2345,7 @@ fn send_grow_ack(pd: &mut crate::platform::PlatformDomain, status: u32) {
         status,
         reserved: 0,
     };
-    let ack_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &ack as *const domcomm::GrowAck as *const u8,
-            core::mem::size_of::<domcomm::GrowAck>(),
-        )
-    };
-    pd.domcomm_rx_enqueue(domcomm::msg_types::GROW_ACK, ack_bytes);
+    pd.enqueue_rx(&ack);
 }
 
 // ── ThemIC VMCALLs ───────────────────────────────────────────────────────── //
@@ -2526,13 +2514,7 @@ fn do_ring_doorbell(
         size: 0,
         reserved2: 0,
     };
-    let notify_bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(
-            &notify as *const domcomm::DoorbellNotify as *const u8,
-            core::mem::size_of::<domcomm::DoorbellNotify>(),
-        )
-    };
-    parent_pd.domcomm_rx_enqueue(domcomm::msg_types::DOORBELL_NOTIFY, notify_bytes);
+    parent_pd.enqueue_rx(&notify);
     drop(parent_pd);
 
     // Context-switch back to parent so thhv can drain the DomainComm RX ring.

@@ -340,3 +340,27 @@ const _: () = {
     assert!(core::mem::size_of::<SignedAttestReport>() == 208);
     assert!(core::mem::size_of::<BootAttestation>() == 128);
 };
+
+// ── Typed RX-ring messages ───────────────────────────────────────────────── //
+
+/// Marker for a fixed-size POD payload that the capavisor enqueues on a
+/// domain's RX ring with a fixed message type.
+///
+/// Pinning `MSG_TYPE` to the struct via the trait makes it impossible to call
+/// `enqueue_rx::<GrowAck>` with `MSG_TYPE = DOORBELL_NOTIFY` (or any other
+/// mismatched tag) — the type system catches the error at compile time.
+///
+/// Only implement this for `#[repr(C)] Copy` payloads: the capavisor will
+/// cast `&Self` to a byte slice of length `size_of::<Self>()` when copying
+/// into the shared-memory ring.
+pub trait DomCommMessage: Copy {
+    const MSG_TYPE: u32;
+}
+
+impl DomCommMessage for GrowAck {
+    const MSG_TYPE: u32 = msg_types::GROW_ACK;
+}
+
+impl DomCommMessage for DoorbellNotify {
+    const MSG_TYPE: u32 = msg_types::DOORBELL_NOTIFY;
+}

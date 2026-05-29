@@ -641,6 +641,25 @@ impl PlatformDomain {
         total_size
     }
 
+    /// Typed enqueue: serialise a fixed-size `DomCommMessage` POD payload onto
+    /// the RX ring with the message type that the trait pins to its struct.
+    ///
+    /// This concentrates the `&T → &[u8]` cast in one place and makes it
+    /// impossible to enqueue a payload struct with the wrong `msg_type` tag.
+    /// For variable-size payloads (e.g. attestation chunks), use
+    /// [`domcomm_rx_enqueue`] directly with raw bytes.
+    pub fn enqueue_rx<M: themis_abi::domcomm::DomCommMessage>(&mut self, msg: &M) -> usize {
+        // SAFETY: `M: DomCommMessage` requires `Copy`, all impls are
+        // `#[repr(C)]` POD payloads with no padding interpreted by the parent.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                msg as *const M as *const u8,
+                core::mem::size_of::<M>(),
+            )
+        };
+        self.domcomm_rx_enqueue(M::MSG_TYPE, bytes)
+    }
+
     /// Read one message from the TX ring (domain→capavisor, we are consumer).
     ///
     /// Returns `Some((msg_type, payload_size))` on success, `None` if ring is empty.
