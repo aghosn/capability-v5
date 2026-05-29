@@ -62,6 +62,19 @@ def CdtBidirectional (s : SpecState) : Prop :=
 def FreshMemCounter (s : SpecState) : Prop :=
   ∀ id, id ∈ s.memcaps.keys → id < s.nextMemCapId
 
+/-- Every memory-capability handle held by a domain points to a cap whose
+    `owner` field equals that domain. This is Themis's exclusive-ownership
+    invariant: a memcap is held by *exactly* its declared owner.
+
+    Carve/alias preserve it by construction (the new handle is given to
+    `caller` and the new cap's `owner` is set to `caller`). Send/accept
+    (when implemented) will preserve it by transferring both the handle
+    and the `owner` field atomically. -/
+def HandleOwner (s : SpecState) : Prop :=
+  ∀ did d, s.getDom did = some d →
+    ∀ p ∈ d.memHandles,
+      ∃ c, s.getMem p.2 = some c ∧ c.owner = did
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique           : UniqueArenas s
@@ -69,5 +82,6 @@ structure WellFormed (s : SpecState) : Prop where
   cdtMonotonic     : CdtMonotonic s
   cdtBidirectional : CdtBidirectional s
   freshMemCounter  : FreshMemCounter s
+  handleOwner      : HandleOwner s
 
 end ThemisCapa

@@ -121,6 +121,19 @@ theorem update_unique_keys (a : Arena α β) (k : α) (f : β → β)
   rw [keys_update]
   exact hu
 
+theorem find?_update_eq_map (a : Arena α β) (k : α) (f : β → β) :
+    (a.update k f).find? k = (a.find? k).map f := by
+  obtain ⟨es⟩ := a
+  simp only [find?, update]
+  induction es with
+  | nil => simp [assocLookup, assocUpdate]
+  | cons p ps ih =>
+    rcases p with ⟨kp, vp⟩
+    simp only [assocUpdate, assocLookup]
+    by_cases hp : kp = k
+    · simp [hp]
+    · simp [hp]; exact ih
+
 /-- If `find?` returns `some v` at key `k`, then `k` appears in `keys`. -/
 theorem mem_keys_of_find?_some (a : Arena α β) (k : α) (v : β)
     (h : a.find? k = some v) : k ∈ a.keys := by
@@ -137,6 +150,73 @@ theorem mem_keys_of_find?_some (a : Arena α β) (k : α) (v : β)
       exact List.mem_cons_self
     · rename_i hk
       exact List.mem_cons.mpr (Or.inr (ih h))
+
+/-! ### Remove -/
+
+/-- Drop every entry whose key matches. Preserves order of survivors. -/
+def assocRemove {α β : Type} [DecidableEq α] (k : α) :
+    List (α × β) → List (α × β)
+  | [] => []
+  | (k', v) :: rest =>
+    if k' = k then assocRemove k rest
+    else (k', v) :: assocRemove k rest
+
+def remove (a : Arena α β) (k : α) : Arena α β := ⟨assocRemove k a.entries⟩
+
+theorem find?_remove_same (a : Arena α β) (k : α) :
+    (a.remove k).find? k = none := by
+  obtain ⟨es⟩ := a
+  show assocLookup (assocRemove k es) k = none
+  induction es with
+  | nil => simp [assocRemove, assocLookup]
+  | cons p ps ih =>
+    rcases p with ⟨k', v⟩
+    simp only [assocRemove]
+    by_cases hp : k' = k
+    · simp [hp, ih]
+    · simp [hp, assocLookup, ih]
+
+theorem find?_remove_other (a : Arena α β) (k k' : α) (h : k' ≠ k) :
+    (a.remove k).find? k' = a.find? k' := by
+  obtain ⟨es⟩ := a
+  show assocLookup (assocRemove k es) k' = assocLookup es k'
+  induction es with
+  | nil => simp [assocRemove, assocLookup]
+  | cons p ps ih =>
+    rcases p with ⟨kp, vp⟩
+    simp only [assocRemove, assocLookup]
+    by_cases hp : kp = k
+    · subst hp
+      have : ¬ kp = k' := fun heq => h heq.symm
+      simp [this, ih]
+    · simp only [hp, if_false, assocLookup]
+      by_cases hp' : kp = k'
+      · simp [hp']
+      · simp [hp']; exact ih
+
+theorem keys_remove (a : Arena α β) (k : α) :
+    (a.remove k).keys = a.keys.filter (· ≠ k) := by
+  obtain ⟨es⟩ := a
+  show List.map Prod.fst (assocRemove k es) = (List.map Prod.fst es).filter (· ≠ k)
+  induction es with
+  | nil => simp [assocRemove]
+  | cons p ps ih =>
+    rcases p with ⟨kp, vp⟩
+    simp only [assocRemove, List.map_cons, List.filter_cons]
+    by_cases hp : kp = k
+    · simp [hp, ih]
+    · simp [hp, ih]
+
+theorem remove_unique_keys (a : Arena α β) (k : α) (hu : a.UniqueKeys) :
+    (a.remove k).UniqueKeys := by
+  show ((a.remove k).keys).Nodup
+  rw [keys_remove]
+  exact hu.filter _
+
+theorem mem_keys_remove_iff (a : Arena α β) (k k' : α) :
+    k' ∈ (a.remove k).keys ↔ k' ≠ k ∧ k' ∈ a.keys := by
+  rw [keys_remove, List.mem_filter]
+  simp [And.comm]
 
 end Arena
 end ThemisCapa

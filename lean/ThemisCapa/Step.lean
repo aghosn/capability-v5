@@ -129,6 +129,64 @@ def alias_apply (s : SpecState) (caller : DomId) (parent : MemCapId)
                nextHandle := d.nextHandle + 1 })
     s₃
 
+/-! ### Revoke
+
+Slice scope: leaf revocation only. The Rust `revoke` deletes a whole
+subtree recursively; the spec version requires `target.childrenIds = []`
+so the proof can focus on the single-cap removal. Full subtree revocation
+will be added later by iterating leaf revoke (postorder) or by
+strengthening the guard. -/
+
+/-- Preconditions for `revoke(caller, target)`. -/
+structure RevokeGuard (s : SpecState) (caller : DomId) (target : MemCapId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  targetExists      : (s.getMem target).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canRevoke = true
+  /-- Slice restriction: `target` must be a leaf. -/
+  targetIsLeaf      : ∀ t, s.getMem target = some t → t.childrenIds = []
+  /-- `target` must have a parent (root caps are not revocable through this op). -/
+  targetHasParent   : ∀ t, s.getMem target = some t → t.parent.isSome
+  /-- The caller owns the parent cap (mirrors Rust's `p.owned.owner != owner_id` check). -/
+  callerOwnsParent  :
+    ∀ t, s.getMem target = some t →
+      ∀ pid, t.parent = some pid →
+        ∀ p, s.getMem pid = some p → p.owner = caller
+  /-- META regions cannot be revoked. -/
+  notMeta           :
+    ∀ t, s.getMem target = some t → t.region.attributes.meta = false
+  /-- No self-parent loop on `target`. This is a runtime check we assert
+      explicitly for now; it follows from the (currently unproven) stronger
+      invariant `ParentLessThanChild` — every child id is strictly greater
+      than its parent id (true by construction since `carve`/`alias` always
+      allocate a fresh `nextMemCapId` > all existing ids). When that
+      invariant is added to `WellFormed`, this guard hypothesis becomes
+      derivable and can be dropped. -/
+  pidNotSelf        :
+    ∀ t, s.getMem target = some t → ∀ pid, t.parent = some pid → pid ≠ target
+
+/-- Pure state update for a successful leaf `revoke`.
+
+    1. Remove `target` from the memcap arena.
+    2. Strip `target` from its parent's `childrenIds` list.
+    3. Strip any handle to `target` from the owner domain's `memHandles`.
+
+    The `HandleOwner` invariant guarantees that *only* `t.owner` holds a
+    handle to `target`, so step 3 is local to a single domain. -/
+def revoke_apply (s : SpecState) (caller : DomId) (target : MemCapId) : SpecState :=
+  match s.getMem target with
+  | none => s
+  | some t =>
+    match t.parent with
+    | none => s
+    | some pid =>
+      let s₁ : SpecState := { s with memcaps := s.memcaps.remove target }
+      let s₂ := s₁.updMem pid (fun p =>
+        { p with childrenIds := p.childrenIds.filter (· ≠ target) })
+      let s₃ := s₂.updDomain t.owner (fun d =>
+        { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ target) })
+      s₃
+
 /-! ### Step relation -/
 
 inductive step : SpecState → Action → SpecState → Prop
@@ -142,5 +200,8 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : AliasGuard s caller parent access) :
     step s (.alias caller parent access)
          (alias_apply s caller parent access)
+  | revoke {s : SpecState} {caller : DomId} {target : MemCapId}
+    (guard : RevokeGuard s caller target) :
+    step s (.revoke caller target) (revoke_apply s caller target)
 
 end ThemisCapa

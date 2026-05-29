@@ -134,7 +134,7 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho⟩
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -386,6 +386,59 @@ theorem carve_preserves_wellformed
     rcases hid with rfl | hid
     · exact Nat.lt_succ_self _
     · exact Nat.lt_succ_of_lt (hwf.freshMemCounter _ hid)
+  case ho =>
+    -- HandleOwner: every handle held by every domain points to a cap whose
+    -- owner equals that domain. Carve creates one new handle (in caller's
+    -- domain, pointing to childCap whose owner is caller) and may touch
+    -- the parent cap's `childrenIds`/`nextChildSub` but never its `owner`.
+    intro did d hd ph hph
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+    simp only at hgetD
+    -- Helper: for any pre-state cap, post-state lookup at the same id yields
+    -- a cap with the same `owner` field.
+    have owner_preserved : ∀ k v, s.getMem k = some v →
+        ∃ c', (carve_apply s caller parent access attrs).getMem k = some c' ∧
+              c'.owner = v.owner := by
+      intro k v hk
+      have hgk := carve_apply_getMem s caller parent access attrs p hpOpt
+        hwf.freshMemCounter k
+      simp only at hgk
+      have hkNF : k ≠ s.nextMemCapId := by
+        intro heq
+        have : k < s.nextMemCapId := existing_lt_fresh s hwf.freshMemCounter hk
+        exact Nat.lt_irrefl _ (heq ▸ this)
+      rw [hgk, if_neg hkNF]
+      by_cases hkPar : k = parent
+      · subst hkPar
+        rw [if_pos rfl]
+        rw [hk] at hpOpt; cases hpOpt
+        exact ⟨_, rfl, rfl⟩
+      · rw [if_neg hkPar, hk]
+        exact ⟨v, rfl, rfl⟩
+    by_cases hdid : did = caller
+    · rw [hgetD, if_pos hdid] at hd
+      cases hd
+      simp only [List.mem_append, List.mem_singleton] at hph
+      rcases hph with hOld | hNew
+      · obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner caller dc hdc ph hOld
+        obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
+        rw [hdid]
+        exact ⟨c', hpc, hco.trans hwfO⟩
+      · rw [hNew]
+        have hgN := carve_apply_getMem s caller parent access attrs p hpOpt
+          hwf.freshMemCounter s.nextMemCapId
+        simp only at hgN
+        refine ⟨{ parent := some parent, owner := caller,
+                  region := MemoryRegion.mk' .carve p.region.status access attrs,
+                  childrenIds := [], nextChildSub := 0 }, ?_, ?_⟩
+        · rw [hgN]; simp
+        · simp [hdid]
+    · rw [hgetD, if_neg hdid] at hd
+      obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner did d hd ph hph
+      obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
+      exact ⟨c', hpc, hco.trans hwfO⟩
 
 /-! ## Alias
 
@@ -479,7 +532,7 @@ theorem alias_preserves_wellformed
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -683,6 +736,142 @@ theorem alias_preserves_wellformed
     rcases hid with rfl | hid
     · exact Nat.lt_succ_self _
     · exact Nat.lt_succ_of_lt (hwf.freshMemCounter _ hid)
+  case ho =>
+    intro did d hd ph hph
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+    simp only at hgetD
+    have owner_preserved : ∀ k v, s.getMem k = some v →
+        ∃ c', (alias_apply s caller parent access).getMem k = some c' ∧
+              c'.owner = v.owner := by
+      intro k v hk
+      have hgk := alias_apply_getMem s caller parent access p hpOpt
+        hwf.freshMemCounter k
+      simp only at hgk
+      have hkNF : k ≠ s.nextMemCapId := by
+        intro heq
+        have : k < s.nextMemCapId := existing_lt_fresh s hwf.freshMemCounter hk
+        exact Nat.lt_irrefl _ (heq ▸ this)
+      rw [hgk, if_neg hkNF]
+      by_cases hkPar : k = parent
+      · subst hkPar
+        rw [if_pos rfl]
+        rw [hk] at hpOpt; cases hpOpt
+        exact ⟨_, rfl, rfl⟩
+      · rw [if_neg hkPar, hk]
+        exact ⟨v, rfl, rfl⟩
+    by_cases hdid : did = caller
+    · rw [hgetD, if_pos hdid] at hd
+      cases hd
+      simp only [List.mem_append, List.mem_singleton] at hph
+      rcases hph with hOld | hNew
+      · obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner caller dc hdc ph hOld
+        obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
+        rw [hdid]
+        exact ⟨c', hpc, hco.trans hwfO⟩
+      · rw [hNew]
+        have hgN := alias_apply_getMem s caller parent access p hpOpt
+          hwf.freshMemCounter s.nextMemCapId
+        simp only at hgN
+        refine ⟨{ parent := some parent, owner := caller,
+                  region := MemoryRegion.mk' .alias .aliased access p.region.attributes,
+                  childrenIds := [], nextChildSub := 0 }, ?_, ?_⟩
+        · rw [hgN]; simp
+        · simp [hdid]
+    · rw [hgetD, if_neg hdid] at hd
+      obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner did d hd ph hph
+      obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
+      exact ⟨c', hpc, hco.trans hwfO⟩
+
+/-! ## Revoke
+
+Leaf revocation. Unlike carve/alias, revoke *shrinks* the arena: it
+removes `target`, strips `target` from its parent's children list, and
+strips the matching handle from the owner domain.
+
+The proof structure mirrors carve/alias: prove a 3-way characterization
+`revoke_apply_getMem` (none / updP / unchanged) and a 2-way
+`revoke_apply_getDom`, then discharge each WellFormed sub-goal by
+case-splitting on the lookup key.
+
+The 6-way invariant proof (`revoke_preserves_wellformed`) is **deferred**.
+It requires adding a 7th invariant to `WellFormed`:
+
+  ParentChildAgreement : ∀ id c, getMem id = some c →
+    ∀ pid, c.parent = some pid →
+      ∀ p, getMem pid = some p → id ∈ p.childrenIds
+
+This is the *dual* of `CdtBidirectional` (which only gives child→parent).
+Without it, revoke cannot rule out cases like "another cap's parent =
+target" — needed to argue `target` is mentioned nowhere as a parent
+once it's removed. Adding it requires extending the carve and alias
+proofs with one new sub-goal each (both trivial: carve/alias make the
+new child a child of `parent` and set its parent to `parent`, matching
+trivially). -/
+
+private theorem revoke_apply_getMem
+    (s : SpecState) (caller : DomId) (target : MemCapId)
+    (t : MemCap) (ht : s.getMem target = some t)
+    (pid : MemCapId) (htp : t.parent = some pid)
+    (p : MemCap) (hp : s.getMem pid = some p)
+    (hpne : pid ≠ target) (id : MemCapId) :
+    let updP : MemCap :=
+      { p with childrenIds := p.childrenIds.filter (· ≠ target) }
+    (revoke_apply s caller target).getMem id =
+      if id = target then none
+      else if id = pid then some updP
+      else s.getMem id := by
+  show ((revoke_apply s caller target).memcaps).find? id = _
+  simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+  let f : MemCap → MemCap := fun q =>
+    { q with childrenIds := q.childrenIds.filter (· ≠ target) }
+  show ((s.memcaps.remove target).update pid f).find? id = _
+  by_cases hidT : id = target
+  · subst hidT
+    rw [Arena.find?_update_other _ pid id f (Ne.symm hpne)]
+    rw [Arena.find?_remove_same]
+    simp
+  · by_cases hidP : id = pid
+    · subst hidP
+      have hpinr : (s.memcaps.remove target).find? id = some p := by
+        rw [Arena.find?_remove_other _ target id hpne]
+        exact hp
+      rw [Arena.find?_update_same _ id f hpinr]
+      simp [hidT, f]
+    · rw [Arena.find?_update_other _ pid id f hidP]
+      rw [Arena.find?_remove_other _ target id hidT]
+      simp [hidT, hidP]
+      rfl
+
+private theorem revoke_apply_getDom
+    (s : SpecState) (caller : DomId) (target : MemCapId)
+    (t : MemCap) (ht : s.getMem target = some t)
+    (pid : MemCapId) (htp : t.parent = some pid)
+    (did : DomId) :
+    let fupd : Domain → Domain := fun d =>
+      { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ target) }
+    (revoke_apply s caller target).getDom did =
+      if did = t.owner then (s.getDom t.owner).map fupd
+      else s.getDom did := by
+  show ((revoke_apply s caller target).domains).find? did = _
+  simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+  by_cases hdid : did = t.owner
+  · subst hdid
+    rw [Arena.find?_update_eq_map]
+    simp [SpecState.getDom]
+  · rw [Arena.find?_update_other _ t.owner did _ hdid]
+    simp [hdid]
+    rfl
+
+/-- **Deferred.** Requires adding `ParentChildAgreement` to `WellFormed`
+    and extending carve/alias proofs. See section docstring above for plan. -/
+theorem revoke_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {target : MemCapId}
+    (hwf : WellFormed s)
+    (hstep : step s (.revoke caller target) s') :
+    WellFormed s' := by
+  sorry
 
 end ThemisCapa
 
