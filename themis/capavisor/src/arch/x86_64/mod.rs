@@ -15,6 +15,7 @@ pub mod pci;
 pub mod vcpu_ext;
 pub mod vmcs;
 pub mod vmexit;
+pub mod vmexit_decode;
 pub mod x86_platform;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.

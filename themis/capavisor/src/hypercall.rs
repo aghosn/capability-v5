@@ -1434,23 +1434,15 @@ pub fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
             .unwrap_or(0);
 
         // For I/O instruction exits (exit reason 30), extract port/size/direction
-        // from the exit qualification (SDM Vol 3C §27.2.1 Table 27-5):
-        //   bits  2:0  = size encoding (0=1B, 1=2B, 3=4B)
-        //   bit   3    = direction (0=OUT/write, 1=IN/read)
-        //   bit   6    = operand encoding (0=port in DX, 1=port in qual[31:16])
-        //   bits 31:16 = port number if bit 6 = 1
+        // from the exit qualification via the typed decoder.
         const IO_EXIT_REASON: u32 = 30;
         let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
-            let size = ((exit_qual & 0b111) as u8) + 1;
-            let is_in = (exit_qual >> 3) & 1; // 1=IN(read), 0=OUT(write)
-            let imm = (exit_qual >> 6) & 1;
-            let port = if imm != 0 {
-                (exit_qual >> 16) as u16
-            } else {
-                (vcpu.reg(Reg::Rdx) & 0xFFFF) as u16
-            };
-            let write = if is_in == 0 { 1u8 } else { 0u8 };
-            (port, size, write)
+            let info = crate::arch::x86_64::vmexit_decode::ExitQualification(exit_qual).io();
+            (
+                info.port_or_dx(vcpu),
+                info.size,
+                if info.is_write { 1u8 } else { 0u8 },
+            )
         } else {
             (0u16, 0u8, 0u8)
         };

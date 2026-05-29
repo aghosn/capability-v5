@@ -67,6 +67,7 @@ name = "capavisor"
 version = "0.1.0"
 dependencies = [
  "acpi",
+ "bitflags 2.11.0",
  "capa-engine",
  "capavisor-pt",
  "ed25519-dalek",

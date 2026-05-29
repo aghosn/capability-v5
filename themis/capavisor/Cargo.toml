@@ -33,6 +33,7 @@ zeroize               = { workspace = true }
 limine                = { workspace = true }
 acpi                  = { workspace = true }
 pci_types             = { workspace = true }
+bitflags              = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 fdt                   = { workspace = true }

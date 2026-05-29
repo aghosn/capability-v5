@@ -5,12 +5,17 @@
 //! `monitor_loop` calls `run()` in a loop and dispatches exits through
 //! `handle_vmexit`.
 
+use x86::controlregs::{Cr0, Cr4};
+use x86::vmx::vmcs::control::EntryControls;
 use x86::msr;
 use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 
 use crate::vcpu::{ActiveVcpu, Reg};
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
+use crate::arch::x86_64::vmexit_decode::{
+    intr_type, ApicAccessType, ControlReg, CrAccessInfo, ExitQualification, IntrInfo,
+};
 use crate::{serial_debug, serial_println};
 
 use capability_engine::Platform;
@@ -102,20 +107,15 @@ const APIC_REG_ICR_LOW: usize = 0x300;
 const APIC_REG_ICR_HIGH: usize = 0x310;
 const APIC_REG_ISR_BASE: usize = 0x100; // ISR: 8 × 32-bit words at 0x100–0x170
 
-// ── VMEXIT interruption info field (Intel SDM Vol 3C §24.9.2) ────────────── //
-
-const INTR_INFO_VECTOR_MASK: u64 = 0xFF;
-const INTR_INFO_TYPE_SHIFT: u32 = 8;
-const INTR_INFO_TYPE_MASK: u64 = 0x7;
-const INTR_INFO_VALID: u64 = 1 << 31;
-const INTR_TYPE_NMI: u64 = 2;
+// ── VMEXIT / VMENTRY interruption info field ─────────────────────────────── //
+//
+// Bit layout and `intr_type::*` constants live in `vmexit_decode::IntrInfo`
+// (SDM Vol 3C §24.9.2).  Callers wrap the raw word in `IntrInfo(word)` and
+// use its named accessors / builder, never raw masks here.
 
 // ── APIC-access exit qualification (Intel SDM Vol 3C §27.2.1) ────────────── //
-
-const APIC_ACCESS_OFFSET_MASK: u64 = 0xFFF;
-const APIC_ACCESS_TYPE_SHIFT: u32 = 12;
-const APIC_ACCESS_TYPE_MASK: u64 = 0xF;
-const APIC_ACCESS_TYPE_WRITE: u64 = 1;
+//
+// (Decoded via `vmexit_decode::ApicAccessInfo`; no raw masks needed here.)
 
 // ── Themis CPUID hypervisor leaves (§ custom ABI) ─────────────────────────── //
 
@@ -142,6 +142,23 @@ const SIPI_CS_ACCESS_RIGHTS: u64 = 0x009B;
 const SIPI_CR0_INITIAL: u64 = 0x30;
 /// Real-mode segment limit (64 KiB).
 const REALMODE_SEG_LIMIT: u64 = 0xFFFF;
+
+// ── EFER bit definitions (Intel SDM Vol 3A §2.2.1) ───────────────────────── //
+// Not exposed as bitflags by the `x86` crate; mirror the same shape as
+// `x86::controlregs::{Cr0,Cr4}` so callers can write `Ia32Efer::LME.bits()`.
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Ia32Efer: u64 {
+        /// System Call Extensions (SYSCALL/SYSRET enable in 64-bit mode).
+        const SCE = 1 << 0;
+        /// Long Mode Enable.
+        const LME = 1 << 8;
+        /// Long Mode Active (set by CPU when paging is enabled with LME).
+        const LMA = 1 << 10;
+        /// No-Execute Enable.
+        const NXE = 1 << 11;
+    }
+}
 
 // ── MSR value split (Intel SDM Vol 2B §RDMSR/WRMSR) ──────────────────────── //
 
@@ -234,24 +251,22 @@ pub(crate) fn classify_and_handle_internal(
         EXIT_REASON_VMCALL => SemanticExit::Hypercall,
 
         EXIT_REASON_EXTERNAL_INTERRUPT => {
-            let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-            let vector = (info & INTR_INFO_VECTOR_MASK) as u32;
-            SemanticExit::ExternalInterrupt { vector }
+            let info = IntrInfo(vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO));
+            SemanticExit::ExternalInterrupt { vector: info.vector() as u32 }
         }
 
         EXIT_REASON_VMX_PREEMPTION_TIMER => SemanticExit::TimerExpired,
 
         // ── EXCEPTION_NMI: split NMI (→ interrupt routing) vs exception (→ policy) ──
         EXIT_REASON_EXCEPTION_NMI => {
-            let intr_info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-            let exc_type = ((intr_info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
-            if exc_type as u64 == INTR_TYPE_NMI {
+            let intr_info = IntrInfo(vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO));
+            if intr_info.intr_type() == intr_type::NMI {
                 // NMI → route like an interrupt (vector 2).
-                SemanticExit::ExternalInterrupt { vector: 2 }
+                SemanticExit::ExternalInterrupt {
+                    vector: x86::irq::NONMASKABLE_INTERRUPT_VECTOR as u32,
+                }
             } else {
-                let vector = (intr_info & INTR_INFO_VECTOR_MASK) as u8;
-                let has_error = (intr_info >> 11) & 1;
-                let error_code = if has_error == 1 {
+                let error_code = if intr_info.delivers_error_code() {
                     Some(vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE) as u32)
                 } else {
                     None
@@ -259,7 +274,7 @@ pub(crate) fn classify_and_handle_internal(
                 SemanticExit::PolicyDriven {
                     reason,
                     info: ExitInfo::Exception {
-                        vector,
+                        vector: intr_info.vector(),
                         error_code,
                         is_nmi: false,
                     },
@@ -282,10 +297,10 @@ pub(crate) fn classify_and_handle_internal(
 
         // ── APIC access/write: ICR writes → policy (parent needs for SIPI), others → local ──
         EXIT_REASON_APIC_ACCESS => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let offset = qual & APIC_ACCESS_OFFSET_MASK;
-            let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
-            if offset == APIC_REG_ICR_LOW as u64 && acc_type == APIC_ACCESS_TYPE_WRITE {
+            let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).apic();
+            let is_icr_write = info.access == ApicAccessType::DataWrite
+                && info.offset == Some(APIC_REG_ICR_LOW);
+            if is_icr_write {
                 // ICR write — decode value for parent.
                 let icr_low =
                     decode_apic_write_value(vcpu, platform).unwrap_or(vcpu.reg(Reg::Rax) as u32);
@@ -304,9 +319,8 @@ pub(crate) fn classify_and_handle_internal(
             }
         }
         EXIT_REASON_APIC_WRITE => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let offset = qual & APIC_ACCESS_OFFSET_MASK;
-            if offset == APIC_REG_ICR_LOW as u64 {
+            let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).apic();
+            if info.offset == Some(APIC_REG_ICR_LOW) {
                 let hhdm = platform.hhdm_offset();
                 let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
                 let icr_low = unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
@@ -338,18 +352,14 @@ pub(crate) fn classify_and_handle_internal(
         }
 
         EXIT_REASON_IO_INSTRUCTION => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let port = ((qual >> 16) & 0xFFFF) as u16;
-            let size = ((qual & 0x7) + 1) as u8;
-            let is_write = (qual & 0x8) == 0;
-            let value = vcpu.reg(Reg::Rax) as u32;
+            let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).io();
             SemanticExit::PolicyDriven {
                 reason,
                 info: ExitInfo::IoInstruction {
-                    port,
-                    size,
-                    is_write,
-                    value,
+                    port: info.port_or_dx(vcpu),
+                    size: info.size,
+                    is_write: info.is_write,
+                    value: vcpu.reg(Reg::Rax) as u32,
                 },
             }
         }
@@ -391,8 +401,8 @@ pub(crate) fn classify_and_handle_internal(
         }
 
         EXIT_REASON_SIPI => {
-            let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-            let vector_page = (qual & 0xFF) as u8;
+            let vector_page =
+                ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).sipi_vector_page();
             SemanticExit::PolicyDriven {
                 reason,
                 info: ExitInfo::Sipi { vector_page },
@@ -516,48 +526,56 @@ pub unsafe extern "C" fn host_rip_stub() -> ! {
 ///
 /// Emulates MOV to/from CR0/CR3/CR4/CR8.
 fn handle_cr_access(vcpu: &mut ActiveVcpu) {
-    let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-    let cr_num = (qual & 0xF) as u32;
-    let acc = (qual >> 4) & 0x3;
-    let reg_idx = (qual >> 8) & 0xF;
+    let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).cr();
 
-    if acc == 0 {
-        // MOV to CR
-        let val = gpr_by_index(vcpu, reg_idx);
-        match cr_num {
-            0 => {
-                let cr0_mask = vcpu.get(control::CR0_GUEST_HOST_MASK);
-                let old_cr0 = vcpu.get(vmcs::guest::CR0);
-                let new_cr0 = (old_cr0 & cr0_mask) | (val & !cr0_mask);
-                vcpu.set(vmcs::guest::CR0, new_cr0);
+    match info {
+        CrAccessInfo::MovToCr { cr, src } => {
+            let val = src.read(vcpu);
+            match cr {
+                ControlReg::Cr0 => {
+                    let cr0_mask = vcpu.get(control::CR0_GUEST_HOST_MASK);
+                    let old_cr0 = vcpu.get(vmcs::guest::CR0);
+                    let new_cr0 = (old_cr0 & cr0_mask) | (val & !cr0_mask);
+                    vcpu.set(vmcs::guest::CR0, new_cr0);
 
-                let pg = 1u64 << 31;
-                if (old_cr0 & pg) == 0 && (new_cr0 & pg) != 0 {
-                    let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-                    if efer & (1 << 8) != 0 {
-                        vcpu.set(vmcs::guest::IA32_EFER_FULL, efer | (1 << 10));
+                    // Entering paging with EFER.LME set => transition to long
+                    // mode; mirror by setting EFER.LMA (SDM Vol 3A §9.8.5).
+                    let pg = Cr0::CR0_ENABLE_PAGING.bits() as u64;
+                    if (old_cr0 & pg) == 0 && (new_cr0 & pg) != 0 {
+                        let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
+                        if efer & Ia32Efer::LME.bits() != 0 {
+                            vcpu.set(
+                                vmcs::guest::IA32_EFER_FULL,
+                                efer | Ia32Efer::LMA.bits(),
+                            );
+                        }
                     }
                 }
-            }
-            3 => vcpu.set(vmcs::guest::CR3, val),
-            4 => {
-                let val = val | (1u64 << 13); // keep VMXE
-                vcpu.set(vmcs::guest::CR4, val);
-            }
-            8 => { /* CR8 / TPR — ignore for now */ }
-            _ => {
-                serial_debug!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", cr_num, val);
+                ControlReg::Cr3 => vcpu.set(vmcs::guest::CR3, val),
+                ControlReg::Cr4 => {
+                    // Keep VMXE forced on — the guest cannot clear it without
+                    // immediate vmentry failure.
+                    let val = val | (Cr4::CR4_ENABLE_VMX.bits() as u64);
+                    vcpu.set(vmcs::guest::CR4, val);
+                }
+                ControlReg::Cr8 => { /* CR8 / TPR — ignore for now */ }
+                ControlReg::Other(_n) => {
+                    serial_debug!("[VMEXIT] MOV to CR{} val={:#x} (unexpected)", _n, val);
+                }
             }
         }
-    } else if acc == 1 {
-        // MOV from CR
-        let val = match cr_num {
-            0 => vcpu.get(vmcs::guest::CR0),
-            3 => vcpu.get(vmcs::guest::CR3),
-            4 => vcpu.get(vmcs::guest::CR4),
-            _ => 0,
-        };
-        set_gpr_by_index(vcpu, reg_idx, val);
+        CrAccessInfo::MovFromCr { cr, dst } => {
+            let val = match cr {
+                ControlReg::Cr0 => vcpu.get(vmcs::guest::CR0),
+                ControlReg::Cr3 => vcpu.get(vmcs::guest::CR3),
+                ControlReg::Cr4 => vcpu.get(vmcs::guest::CR4),
+                _ => 0,
+            };
+            dst.write(vcpu, val);
+        }
+        CrAccessInfo::Clts | CrAccessInfo::LmswRegister { .. } | CrAccessInfo::LmswMemory { .. } => {
+            // CLTS/LMSW unhandled today; just advance RIP.
+        }
     }
     vcpu.next_rip();
 }
@@ -757,27 +775,23 @@ fn dump_ept_misconfig(vcpu: &ActiveVcpu) {
 /// field, and copies the error code if present.  Used by both the dom0 path
 /// and child domains with `trap=false` for EXCEPTION_NMI.
 fn reinject_exception(vcpu: &mut ActiveVcpu) {
-    let info = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO);
-    let vector = (info & INTR_INFO_VECTOR_MASK) as u8;
-    let exc_type = ((info >> INTR_INFO_TYPE_SHIFT) & INTR_INFO_TYPE_MASK) as u8;
-    let has_error_code = (info >> 11) & 1;
+    let info = IntrInfo(vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_INFO));
+    let vector = info.vector();
+    let has_error_code = info.delivers_error_code();
 
-    if vector == 6 || vector == 8 {
+    if vector == x86::irq::INVALID_OPCODE_VECTOR || vector == x86::irq::DOUBLE_FAULT_VECTOR {
         let rip = vcpu.rip();
         let name = match vector {
-            6 => "#UD",
-            8 => "#DF",
+            x86::irq::INVALID_OPCODE_VECTOR => "#UD",
+            x86::irq::DOUBLE_FAULT_VECTOR => "#DF",
             _ => "??",
         };
         serial_println!("[VMEXIT] exception {} at RIP={:#018x}", name, rip);
     }
 
-    let inject = INTR_INFO_VALID
-        | ((exc_type as u64) << INTR_INFO_TYPE_SHIFT)
-        | (vector as u64)
-        | (has_error_code << 11);
+    let inject = IntrInfo::encode(vector, info.intr_type(), has_error_code);
     vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, inject);
-    if has_error_code == 1 {
+    if has_error_code {
         let err = vcpu.get(vmcs::ro::VMEXIT_INTERRUPTION_ERR_CODE);
         vcpu.set(control::VMENTRY_EXCEPTION_ERR_CODE, err);
     }
@@ -1000,23 +1014,29 @@ fn handle_wrmsr_local(vcpu: &mut ActiveVcpu) {
 ///   bits[15:12] — access type: 0=data-read, 1=data-write, 2=instr-fetch,
 ///                              3=read-during-event-delivery, 10=GPA-read
 fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisPlatform) {
-    let qual = vcpu.get(vmcs::ro::EXIT_QUALIFICATION);
-    let offset = (qual & APIC_ACCESS_OFFSET_MASK) as usize; // byte offset within APIC page
-    let acc_type = (qual >> APIC_ACCESS_TYPE_SHIFT) & APIC_ACCESS_TYPE_MASK;
+    let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).apic();
+    let offset = match info.offset {
+        Some(off) => off,
+        None => {
+            // GPA-mode access — nothing meaningful to do, advance RIP.
+            vcpu.next_rip();
+            return;
+        }
+    };
 
     let hhdm = platform.hhdm_offset();
 
     let vapic_phys = vcpu.vapic_phys();
     let vapic_virt = (vapic_phys + hhdm) as *mut u32;
 
-    match acc_type {
-        0 | 3 => {
+    match info.access {
+        ApicAccessType::DataRead | ApicAccessType::EventDeliveryLinear => {
             // Data read or read during event delivery: return VAPIC page value.
             let word_idx = offset / 4;
             let val = unsafe { vapic_virt.add(word_idx).read_volatile() };
             vcpu.set_reg(Reg::Rax, val as u64);
         }
-        1 => {
+        ApicAccessType::DataWrite => {
             // Data write: decode instruction to find source register value,
             // then mirror into VAPIC page.
             let val = decode_apic_write_value(vcpu, platform).unwrap_or(vcpu.reg(Reg::Rax) as u32);
@@ -1045,8 +1065,8 @@ fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::platform::Th
         }
         _ => {
             serial_println!(
-                "[APIC_ACCESS] unhandled access type {} offset={:#x} — advancing RIP",
-                acc_type,
+                "[APIC_ACCESS] unhandled access type {:?} offset={:#x} — advancing RIP",
+                info.access,
                 offset
             );
         }
@@ -1177,71 +1197,27 @@ fn decode_apic_write_value(
 /// Caller must hold the VP lock.
 /// Inject #GP(0) into the guest.
 fn inject_gp(vcpu: &mut ActiveVcpu) {
-    let info: u64 = INTR_INFO_VALID | (3 << INTR_INFO_TYPE_SHIFT) | 13 | (1 << 11);
+    let info = IntrInfo::encode(
+        x86::irq::GENERAL_PROTECTION_FAULT_VECTOR,
+        intr_type::HARDWARE_EXCEPTION,
+        true, // #GP delivers an error code
+    );
     vcpu.set(control::VMENTRY_INTERRUPTION_INFO_FIELD, info);
     vcpu.set(control::VMENTRY_EXCEPTION_ERR_CODE, 0);
     vcpu.set(control::VMENTRY_INSTRUCTION_LEN, 0);
 }
 
-/// Read a guest GPR by the register index encoded in the CR-access exit
-/// qualification (SDM Table 27-3: 0=RAX,1=RCX,2=RDX,3=RBX,4=RSP,5=RBP,
-/// 6=RSI,7=RDI,8–15=R8–R15).
-fn gpr_by_index(vcpu: &ActiveVcpu, idx: u64) -> u64 {
-    match idx {
-        0 => vcpu.reg(Reg::Rax),
-        1 => vcpu.reg(Reg::Rcx),
-        2 => vcpu.reg(Reg::Rdx),
-        3 => vcpu.reg(Reg::Rbx),
-        4 => vcpu.rsp(), // RSP lives in VMCS
-        5 => vcpu.reg(Reg::Rbp),
-        6 => vcpu.reg(Reg::Rsi),
-        7 => vcpu.reg(Reg::Rdi),
-        8 => vcpu.reg(Reg::R8),
-        9 => vcpu.reg(Reg::R9),
-        10 => vcpu.reg(Reg::R10),
-        11 => vcpu.reg(Reg::R11),
-        12 => vcpu.reg(Reg::R12),
-        13 => vcpu.reg(Reg::R13),
-        14 => vcpu.reg(Reg::R14),
-        15 => vcpu.reg(Reg::R15),
-        _ => 0,
-    }
-}
-
-/// Write a guest GPR by the register index (same encoding as `gpr_by_index`).
-fn set_gpr_by_index(vcpu: &mut ActiveVcpu, idx: u64, val: u64) {
-    match idx {
-        0 => vcpu.set_reg(Reg::Rax, val),
-        1 => vcpu.set_reg(Reg::Rcx, val),
-        2 => vcpu.set_reg(Reg::Rdx, val),
-        3 => vcpu.set_reg(Reg::Rbx, val),
-        4 => vcpu.set_rsp(val),
-        5 => vcpu.set_reg(Reg::Rbp, val),
-        6 => vcpu.set_reg(Reg::Rsi, val),
-        7 => vcpu.set_reg(Reg::Rdi, val),
-        8 => vcpu.set_reg(Reg::R8, val),
-        9 => vcpu.set_reg(Reg::R9, val),
-        10 => vcpu.set_reg(Reg::R10, val),
-        11 => vcpu.set_reg(Reg::R11, val),
-        12 => vcpu.set_reg(Reg::R12, val),
-        13 => vcpu.set_reg(Reg::R13, val),
-        14 => vcpu.set_reg(Reg::R14, val),
-        15 => vcpu.set_reg(Reg::R15, val),
-        _ => {}
-    }
-}
-
 /// Keep the IA32E_MODE_GUEST entry control in sync with guest EFER.LMA.
 fn sync_ia32e_mode_guest(vcpu: &mut ActiveVcpu) {
     let efer = vcpu.get(vmcs::guest::IA32_EFER_FULL);
-    let lma = (efer >> 10) & 1;
+    let lma = efer & Ia32Efer::LMA.bits() != 0;
 
     let entry = vcpu.get(control::VMENTRY_CONTROLS);
-    let ia32e_bit = 1u64 << 9;
-    let current = (entry >> 9) & 1;
+    let ia32e_bit = EntryControls::IA32E_MODE_GUEST.bits() as u64;
+    let current = entry & ia32e_bit != 0;
 
     if lma != current {
-        let new_entry = if lma == 1 {
+        let new_entry = if lma {
             entry | ia32e_bit
         } else {
             entry & !ia32e_bit
