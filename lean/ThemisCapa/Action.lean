@@ -34,13 +34,10 @@ inductive Action where
       unsealed, and its `owned` policy must allow `SEAL`. -/
   | seal (caller : DomId) (cap : DomCapId)
   /-- `receiver` accepts the pending memcap identified by `pendingId`.
-      Models the sealed-send completion: transfers cap ownership and the
-      handle from the sender (recorded in the pending entry) to receiver,
-      plus removes the pending entry and unfreezes the sender's handle.
-      Slice scope: requires the sender to still have `canSend` and the
-      cap to be non-META (matching the original sealed-send guard) —
-      these will be lifted when the spec carries policy-revocation
-      bookkeeping. -/
+      Models the sealed-send completion: transfers cap ownership and
+      installs a fresh handle on the receiver (using `send_apply`),
+      then removes the pending entry and unfreezes the sender's
+      handle. -/
   | accept (receiver : DomId) (pendingId : PendingId)
   /-- `receiver` rejects the pending memcap identified by `pendingId`.
       Removes the pending entry and unfreezes the sender's handle.

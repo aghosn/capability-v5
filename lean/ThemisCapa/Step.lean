@@ -252,11 +252,12 @@ def seal_apply (s : SpecState) (caller : DomId) (cap : DomCapId) : SpecState :=
 
 /-! ### Accept / Reject (sealed-path completion) -/
 
-/-- Preconditions for `accept(receiver, pid)`. Over-restricted in v2:
-    inherits the original sealed-send guards (sender sealed, `canSend`,
-    cap non-META, sender ≠ receiver) so we can delegate WF preservation
-    to `send_preserves_wellformed`. A later refactor will drop these
-    by extracting a shared `transfer_apply` lemma. -/
+/-- Preconditions for `accept(receiver, pid)`. Minimal: only the facts
+    actually needed by `send_apply_preserves_wellformed` (cap exists,
+    owned by sender, sender ≠ receiver) plus pending-resolution
+    obligations. The earlier over-restrictions (`senderSealed`,
+    `senderCanSend`, `notMeta`) have been dropped now that the WF lemma
+    no longer depends on `SendGuard`'s policy fields. -/
 structure AcceptGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
     : Prop where
   receiverExists    : (s.getDom receiver).isSome
@@ -266,13 +267,6 @@ structure AcceptGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
   senderExists      : ∀ d pe, s.getDom receiver = some d →
                       d.lookupPending pendingId = some pe →
                       (s.getDom pe.senderDomainId).isSome
-  senderSealed      : ∀ d pe, s.getDom receiver = some d →
-                      d.lookupPending pendingId = some pe →
-                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isSealed
-  senderCanSend     : ∀ d pe, s.getDom receiver = some d →
-                      d.lookupPending pendingId = some pe →
-                      ∀ sd, s.getDom pe.senderDomainId = some sd →
-                      sd.policy.api.canSend = true
   capExists         : ∀ d pe, s.getDom receiver = some d →
                       d.lookupPending pendingId = some pe →
                       (s.getMem pe.capId).isSome
@@ -282,10 +276,6 @@ structure AcceptGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
   notSelf           : ∀ d pe, s.getDom receiver = some d →
                       d.lookupPending pendingId = some pe →
                       pe.senderDomainId ≠ receiver
-  notMeta           : ∀ d pe, s.getDom receiver = some d →
-                      d.lookupPending pendingId = some pe →
-                      ∀ c, s.getMem pe.capId = some c →
-                      c.region.attributes.meta = false
 
 /-- Pure state update for `accept`. No-op when receiver / pending lookup
     fails (well-formedness then preserved trivially). -/

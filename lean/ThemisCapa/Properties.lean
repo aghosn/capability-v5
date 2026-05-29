@@ -1399,17 +1399,22 @@ private theorem send_apply_getDom
       rw [Arena.find?_update_other _ caller did _ hCdid]
       simp [hdidC, hdidR]; rfl
 
-theorem send_preserves_wellformed
-    {s s' : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
+/-- Raw-hypothesis version of `send_preserves_wellformed`. Drops the
+    policy fields (`callerSealed`, `hasPermission`, `notMeta`) of
+    `SendGuard` which were never used in the WF preservation proof:
+    only `capExists`, `notSelf`, and `callerOwnsCap` are needed. This
+    is the lemma used by `accept_preserves_wellformed` so that
+    `AcceptGuard` doesn't have to carry policy fields. -/
+theorem send_apply_preserves_wellformed
+    {s : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
     (hwf : WellFormed s)
-    (hstep : step s (.send caller receiver cap) s') :
-    WellFormed s' := by
-  cases hstep
-  rename_i guard
+    (hcapExists : (s.getMem cap).isSome)
+    (hne : caller ≠ receiver)
+    (hown : ∀ c, s.getMem cap = some c → c.owner = caller) :
+    WellFormed (send_apply s caller receiver cap) := by
   rcases hc : s.getMem cap with _ | c
-  · exact absurd guard.capExists (by simp [hc])
-  have hne := guard.notSelf
-  have hCowner : c.owner = caller := guard.callerOwnsCap c hc
+  · exact absurd hcapExists (by simp [hc])
+  have hCowner : c.owner = caller := hown c hc
   -- For any did ≠ caller, any handle held by did has .2 ≠ cap.
   -- (HandleOwner gives owner = did; if .2 = cap, owner = caller; contradiction.)
   have notHoldsCap :
@@ -1657,6 +1662,19 @@ theorem send_preserves_wellformed
     have := hwf.parentChild id cpre hcpre pid' hcparPre ppre hppre
     rw [hPpChildren] at this; exact this
 
+/-- Thin wrapper: `send_preserves_wellformed` discharges WF preservation
+    for the labelled step by forwarding to `send_apply_preserves_wellformed`.
+    The `SendGuard` provides exactly the three raw hypotheses needed. -/
+theorem send_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
+    (hwf : WellFormed s)
+    (hstep : step s (.send caller receiver cap) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  exact send_apply_preserves_wellformed hwf
+          guard.capExists guard.notSelf guard.callerOwnsCap
+
 /-! ### Seal preserves WellFormed
 
 Seal mutates only one field of one domain (`status`). Memory caps and
@@ -1903,17 +1921,11 @@ theorem accept_preserves_wellformed
     · rw [hrd] at hb; simp at hb
     have hpe : d.lookupPending pendingId = some pe := by
       rw [hrd, Option.bind_some] at hb; exact hb
-    have sg : SendGuard s pe.senderDomainId receiver pe.capId :=
-    { callerExists      := guard.senderExists d pe hrd hpe
-      receiverExists    := guard.receiverExists
-      callerSealed      := fun sd hsd => guard.senderSealed d pe hrd hpe sd hsd
-      hasPermission     := fun sd hsd => guard.senderCanSend d pe hrd hpe sd hsd
-      capExists         := guard.capExists d pe hrd hpe
-      callerOwnsCap     := fun c hc => guard.capOwnedBySender d pe hrd hpe c hc
-      notSelf           := guard.notSelf d pe hrd hpe
-      notMeta           := fun c hc => guard.notMeta d pe hrd hpe c hc }
     have hwfSend : WellFormed (send_apply s pe.senderDomainId receiver pe.capId) :=
-      send_preserves_wellformed hwf (step.send sg)
+      send_apply_preserves_wellformed hwf
+        (guard.capExists d pe hrd hpe)
+        (guard.notSelf d pe hrd hpe)
+        (fun c hc => guard.capOwnedBySender d pe hrd hpe c hc)
     have hwf₂ : WellFormed
         ((send_apply s pe.senderDomainId receiver pe.capId).updDomain receiver
           (fun d' => { d' with pendingMemCaps :=
