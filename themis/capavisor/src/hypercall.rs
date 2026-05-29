@@ -549,7 +549,7 @@ fn do_attest_self(
         };
 
         // Dequeue AttestRequest from the caller's TX ring.
-        let pd = match platform.get_platform_domain(domain_id) {
+        let pd = match platform.domain_arc(domain_id) {
             Some(pd) => pd,
             None => return HypercallResult::success_1(0),
         };
@@ -681,7 +681,7 @@ fn do_attest_self(
 
         let slice = &payload[offset..];
 
-        let pd = match platform.get_platform_domain(domain_id) {
+        let pd = match platform.domain_arc(domain_id) {
             Some(pd) => pd,
             None => return HypercallResult::success_2(0, 0),
         };
@@ -2229,7 +2229,7 @@ fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRef<Domain>) 
 
     let domain_id = caller.read().data.id;
 
-    let pd = match platform.get_platform_domain(domain_id) {
+    let pd = match platform.domain_arc(domain_id) {
         Some(pd) => pd,
         None => return HypercallResult::error(errors::ERR_NOTFOUND),
     };

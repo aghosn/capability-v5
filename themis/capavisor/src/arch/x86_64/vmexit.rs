@@ -854,7 +854,7 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisP
             let mut found = false;
             if let Some(core_id) = platform.get_current_core() {
                 let dom_id = platform.core_domain_id(core_id as usize);
-                if let Some(arc) = platform.get_platform_domain(dom_id) {
+                if let Some(arc) = platform.domain_arc(dom_id) {
                     let pd = arc.lock();
                     if let Some(ref dc) = pd.domcomm {
                         eax = dc.header_hpa as u32;

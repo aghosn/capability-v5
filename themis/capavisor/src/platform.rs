@@ -1414,14 +1414,6 @@ impl ThemisPlatform {
         self.cores[core_id].domain_id.load(Ordering::Acquire)
     }
 
-    /// Get the `PlatformDomain` for a given domain ID.
-    pub fn get_platform_domain(
-        &self,
-        id: DomainId,
-    ) -> Option<alloc::sync::Arc<Mutex<PlatformDomain>>> {
-        self.domains.get(id)
-    }
-
     /// Get the VP index currently running on `core_id`.
     #[allow(dead_code)]
     pub fn get_core_vp(&self, core_id: usize) -> u32 {
