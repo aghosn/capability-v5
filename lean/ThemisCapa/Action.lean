@@ -4,9 +4,6 @@
   Each constructor corresponds to one externally-observable engine
   operation. The `step` relation in `ThemisCapa.Step` defines when each
   action is enabled and what state change it produces.
-
-  Vertical slice: only `.carve` is populated. Other constructors will be
-  added incrementally as the v2 spec is fleshed out.
 -/
 import ThemisCapa.Basic
 import ThemisCapa.State
@@ -18,8 +15,12 @@ inductive Action where
       requested `access` and `attrs`. -/
   | carve (caller : DomId) (parent : MemCapId)
           (access : Access) (attrs : Attributes)
+  /-- `caller` creates an aliased view of `parent` over `access`.
+      Unlike carve, the parent's region is not consumed; multiple aliases
+      may overlap each other but must not overlap a carved child. -/
+  | alias (caller : DomId) (parent : MemCapId) (access : Access)
   -- Future:
-  -- | alias … | send … | accept … | reject … | revoke … | create … | seal …
+  -- | send … | accept … | reject … | revoke … | create … | seal …
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr
 

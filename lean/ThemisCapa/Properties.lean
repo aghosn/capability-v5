@@ -387,5 +387,302 @@ theorem carve_preserves_wellformed
     · exact Nat.lt_succ_self _
     · exact Nat.lt_succ_of_lt (hwf.freshMemCounter _ hid)
 
+/-! ## Alias
+
+The alias proofs mirror `carve` exactly: same post-state shape (insert fresh
+child, update parent children list, append a handle to the caller).  Only
+the child's `region.kind`/`region.status`/`attributes` differ, and none of
+these fields participate in any invariant.  The characterization lemma and
+its 3-way case split are therefore identical in structure. -/
+
+/-- 3-way characterization of `s'.getMem` after `alias_apply`. -/
+private theorem alias_apply_getMem
+    (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
+    (p : MemCap) (hp : s.getMem parent = some p) (hfc : FreshMemCounter s)
+    (id : MemCapId) :
+    let childCap : MemCap :=
+      { parent := some parent, owner := caller,
+        region := MemoryRegion.mk' .alias .aliased access p.region.attributes,
+        childrenIds := [], nextChildSub := 0 }
+    let updP : MemCap :=
+      { p with childrenIds := p.childrenIds ++ [s.nextMemCapId],
+               nextChildSub := p.nextChildSub + 1 }
+    (alias_apply s caller parent access).getMem id =
+      if id = s.nextMemCapId then some childCap
+      else if id = parent then some updP
+      else s.getMem id := by
+  have hpne : parent ≠ s.nextMemCapId :=
+    Nat.ne_of_lt (existing_lt_fresh s hfc hp)
+  show ((alias_apply s caller parent access).memcaps).find? id = _
+  simp only [alias_apply, hp, SpecState.freshMem, SpecState.updMem,
+             SpecState.updDomain]
+  let fupd : MemCap → MemCap := fun pc =>
+    { pc with childrenIds := pc.childrenIds ++ [s.nextMemCapId],
+              nextChildSub := pc.nextChildSub + 1 }
+  let child : MemCap :=
+    { parent := some parent, owner := caller,
+      region := MemoryRegion.mk' .alias .aliased access p.region.attributes,
+      childrenIds := [], nextChildSub := 0 }
+  show ((s.memcaps.insert s.nextMemCapId child).update parent fupd).find? id = _
+  by_cases hidNew : id = s.nextMemCapId
+  · subst hidNew
+    rw [Arena.find?_update_other
+          (s.memcaps.insert s.nextMemCapId child) parent s.nextMemCapId fupd (Ne.symm hpne)]
+    rw [Arena.find?_insert_same s.memcaps s.nextMemCapId child]
+    simp [child]
+  · by_cases hidPar : id = parent
+    · subst hidPar
+      have hins : (s.memcaps.insert s.nextMemCapId child).find? id = some p := by
+        rw [Arena.find?_insert_other s.memcaps s.nextMemCapId id child hpne]
+        exact hp
+      rw [Arena.find?_update_same (s.memcaps.insert s.nextMemCapId child) id fupd hins]
+      simp [hidNew, fupd]
+    · rw [Arena.find?_update_other
+            (s.memcaps.insert s.nextMemCapId child) parent id fupd hidPar]
+      rw [Arena.find?_insert_other s.memcaps s.nextMemCapId id child hidNew]
+      simp [hidNew, hidPar]
+      rfl
+
+/-- Characterization of `getDom` after `alias_apply` when caller exists. -/
+private theorem alias_apply_getDom
+    (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
+    (p : MemCap) (dc : Domain)
+    (hp : s.getMem parent = some p) (hd : s.getDom caller = some dc)
+    (did : DomId) :
+    let fupd' : Domain → Domain := fun d =>
+      { d with memHandles := d.memHandles ++ [(d.nextHandle, s.nextMemCapId)],
+               nextHandle := d.nextHandle + 1 }
+    (alias_apply s caller parent access).getDom did =
+      if did = caller then some (fupd' dc)
+      else s.getDom did := by
+  show ((alias_apply s caller parent access).domains).find? did = _
+  simp only [alias_apply, hp, SpecState.freshMem, SpecState.updMem,
+             SpecState.updDomain]
+  let fupd' : Domain → Domain := fun d =>
+    { d with memHandles := d.memHandles ++ [(d.nextHandle, s.nextMemCapId)],
+             nextHandle := d.nextHandle + 1 }
+  show (s.domains.update caller fupd').find? did = _
+  by_cases hdid : did = caller
+  · subst hdid
+    rw [Arena.find?_update_same _ _ _ hd]
+    simp [fupd']
+  · rw [Arena.find?_update_other _ caller did _ hdid]
+    simp [hdid]
+    rfl
+
+theorem alias_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {parent : MemCapId} {access : Access}
+    (hwf : WellFormed s)
+    (hstep : step s (.alias caller parent access) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  rcases hpOpt : s.getMem parent with _ | p
+  · exact absurd guard.parentExists (by simp [hpOpt])
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((alias_apply s caller parent access).memcaps).UniqueKeys
+      simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain]
+      apply Arena.update_unique_keys
+      apply Arena.insert_unique_keys
+      · exact hwf.unique.memcaps
+      · exact fresh_not_in_keys s hwf.freshMemCounter
+    case dc =>
+      show ((alias_apply s caller parent access).domcaps).UniqueKeys
+      simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain]
+      exact hwf.unique.domcaps
+    case ds =>
+      show ((alias_apply s caller parent access).domains).UniqueKeys
+      simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _ hwf.unique.domains
+  case cdtMono =>
+    intro id c hc cid hcid ch hch
+    have hgetC := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter id
+    have hgetCh := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter cid
+    simp only at hgetC hgetCh
+    have child_existing : ∀ {pid pc}, s.getMem pid = some pc →
+        ∀ {kid}, kid ∈ pc.childrenIds → kid ≠ s.nextMemCapId := by
+      intro pid pc hpid kid hkid heq; subst heq
+      have hin := hwf.refs.childInArena _ _ hpid _ hkid
+      rcases hkid' : s.getMem s.nextMemCapId with _ | _
+      · simp [hkid'] at hin
+      · exact Nat.lt_irrefl _ (hwf.freshMemCounter _
+          (Arena.mem_keys_of_find?_some _ _ _ hkid'))
+    by_cases hidNew : id = s.nextMemCapId
+    · rw [hgetC, if_pos hidNew] at hc; cases hc; simp at hcid
+    · by_cases hidPar : id = parent
+      · rw [hgetC, if_neg hidNew, if_pos hidPar] at hc
+        cases hc
+        rw [List.mem_append, List.mem_singleton] at hcid
+        rcases hcid with hOld | hNew
+        · have hcidNF : cid ≠ s.nextMemCapId := child_existing hpOpt hOld
+          rw [hgetCh, if_neg hcidNF] at hch
+          by_cases hcidPar : cid = parent
+          · rw [if_pos hcidPar] at hch; cases hch
+            exact hwf.cdtMonotonic parent p hpOpt parent (hcidPar ▸ hOld) p hpOpt
+          · rw [if_neg hcidPar] at hch
+            exact hwf.cdtMonotonic parent p hpOpt cid hOld ch hch
+        · -- cid = nextMemCapId, ch = childCap with region.access = access.
+          -- updP.region = p.region. Need access.contained p.region.access — guard.
+          rw [hgetCh, if_pos hNew] at hch
+          cases hch
+          show Access.contained _ _
+          exact guard.accessContained p hpOpt
+      · rw [hgetC, if_neg hidNew, if_neg hidPar] at hc
+        have hcidNF : cid ≠ s.nextMemCapId := child_existing hc hcid
+        rw [hgetCh, if_neg hcidNF] at hch
+        by_cases hcidPar : cid = parent
+        · rw [if_pos hcidPar] at hch; cases hch
+          exact hwf.cdtMonotonic id c hc parent (hcidPar ▸ hcid) p hpOpt
+        · rw [if_neg hcidPar] at hch
+          exact hwf.cdtMonotonic id c hc cid hcid ch hch
+  case refs =>
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    have hpne : parent ≠ s.nextMemCapId :=
+      Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hpOpt)
+    have getMem_preserved : ∀ k v, s.getMem k = some v →
+        ((alias_apply s caller parent access).getMem k).isSome := by
+      intro k v hk
+      have hgk := alias_apply_getMem s caller parent access p hpOpt
+        hwf.freshMemCounter k
+      simp only at hgk
+      rw [hgk]
+      by_cases hkNew : k = s.nextMemCapId
+      · simp [hkNew]
+      · by_cases hkPar : k = parent
+        · subst hkPar; simp [hkNew]
+        · simp [hkNew, hkPar, hk]
+    have getMem_fresh : ((alias_apply s caller parent access).getMem
+        s.nextMemCapId).isSome := by
+      have h := alias_apply_getMem s caller parent access p hpOpt
+        hwf.freshMemCounter s.nextMemCapId
+      simp only at h
+      rw [h]; simp
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c hc pid hcpar
+      have hgetC := alias_apply_getMem s caller parent access p hpOpt
+        hwf.freshMemCounter id
+      simp only at hgetC
+      by_cases hidNew : id = s.nextMemCapId
+      · rw [hgetC, if_pos hidNew] at hc
+        cases hc; cases hcpar
+        exact getMem_preserved _ _ hpOpt
+      · by_cases hidPar : id = parent
+        · rw [hgetC, if_neg hidNew, if_pos hidPar] at hc
+          cases hc
+          have hpid := hwf.refs.parentInArena parent p hpOpt pid hcpar
+          rcases hk : s.getMem pid with _ | v
+          · simp [hk] at hpid
+          · exact getMem_preserved _ _ hk
+        · rw [hgetC, if_neg hidNew, if_neg hidPar] at hc
+          have hpid := hwf.refs.parentInArena id c hc pid hcpar
+          rcases hk : s.getMem pid with _ | v
+          · simp [hk] at hpid
+          · exact getMem_preserved _ _ hk
+    case cia =>
+      intro id c hc cid hcid
+      have hgetC := alias_apply_getMem s caller parent access p hpOpt
+        hwf.freshMemCounter id
+      simp only at hgetC
+      by_cases hidNew : id = s.nextMemCapId
+      · rw [hgetC, if_pos hidNew] at hc; cases hc; simp at hcid
+      · by_cases hidPar : id = parent
+        · rw [hgetC, if_neg hidNew, if_pos hidPar] at hc
+          cases hc
+          rw [List.mem_append, List.mem_singleton] at hcid
+          rcases hcid with hOld | hNew
+          · have := hwf.refs.childInArena parent p hpOpt cid hOld
+            rcases hk : s.getMem cid with _ | v
+            · simp [hk] at this
+            · exact getMem_preserved _ _ hk
+          · subst hNew
+            exact getMem_fresh
+        · rw [hgetC, if_neg hidNew, if_neg hidPar] at hc
+          have := hwf.refs.childInArena id c hc cid hcid
+          rcases hk : s.getMem cid with _ | v
+          · simp [hk] at this
+          · exact getMem_preserved _ _ hk
+    case hia =>
+      intro did d hd ph hph
+      have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      by_cases hdid : did = caller
+      · rw [hgetD, if_pos hdid] at hd
+        cases hd
+        rw [List.mem_append, List.mem_singleton] at hph
+        rcases hph with hOld | hNew
+        · have := hwf.refs.handleInArena caller dc hdc ph hOld
+          rcases hk : s.getMem ph.2 with _ | v
+          · simp [hk] at this
+          · exact getMem_preserved _ _ hk
+        · rw [hNew]
+          exact getMem_fresh
+      · rw [hgetD, if_neg hdid] at hd
+        have := hwf.refs.handleInArena did d hd ph hph
+        rcases hk : s.getMem ph.2 with _ | v
+        · simp [hk] at this
+        · exact getMem_preserved _ _ hk
+  case cdtBidi =>
+    intro id c hc cid hcid ch hch
+    have hgetC := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter id
+    have hgetCh := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter cid
+    simp only at hgetC hgetCh
+    have child_existing : ∀ {pid pc}, s.getMem pid = some pc →
+        ∀ {kid}, kid ∈ pc.childrenIds → kid ≠ s.nextMemCapId := by
+      intro pid pc hpid kid hkid heq; subst heq
+      have hin := hwf.refs.childInArena _ _ hpid _ hkid
+      rcases hkid' : s.getMem s.nextMemCapId with _ | _
+      · simp [hkid'] at hin
+      · exact Nat.lt_irrefl _ (hwf.freshMemCounter _
+          (Arena.mem_keys_of_find?_some _ _ _ hkid'))
+    by_cases hidNew : id = s.nextMemCapId
+    · rw [hgetC, if_pos hidNew] at hc; cases hc; simp at hcid
+    · by_cases hidPar : id = parent
+      · rw [hgetC, if_neg hidNew, if_pos hidPar] at hc
+        cases hc
+        rw [List.mem_append, List.mem_singleton] at hcid
+        rcases hcid with hOld | hNew
+        · have hcidNF : cid ≠ s.nextMemCapId := child_existing hpOpt hOld
+          rw [hgetCh, if_neg hcidNF] at hch
+          by_cases hcidPar : cid = parent
+          · rw [if_pos hcidPar] at hch; cases hch
+            have := hwf.cdtBidirectional parent p hpOpt parent (hcidPar ▸ hOld) p hpOpt
+            rw [hidPar]; exact this
+          · rw [if_neg hcidPar] at hch
+            rw [hidPar]
+            exact hwf.cdtBidirectional parent p hpOpt cid hOld ch hch
+        · rw [hgetCh, if_pos hNew] at hch
+          cases hch
+          show some parent = some id
+          rw [hidPar]
+      · rw [hgetC, if_neg hidNew, if_neg hidPar] at hc
+        have hcidNF : cid ≠ s.nextMemCapId := child_existing hc hcid
+        rw [hgetCh, if_neg hcidNF] at hch
+        by_cases hcidPar : cid = parent
+        · rw [if_pos hcidPar] at hch; cases hch
+          exact hwf.cdtBidirectional id c hc parent (hcidPar ▸ hcid) p hpOpt
+        · rw [if_neg hcidPar] at hch
+          exact hwf.cdtBidirectional id c hc cid hcid ch hch
+  case fresh =>
+    intro id hid
+    simp only [alias_apply, hpOpt, SpecState.freshMem,
+               SpecState.updMem, SpecState.updDomain] at hid ⊢
+    rw [Arena.keys_update, Arena.keys_insert] at hid
+    simp only [List.mem_cons] at hid
+    rcases hid with rfl | hid
+    · exact Nat.lt_succ_self _
+    · exact Nat.lt_succ_of_lt (hwf.freshMemCounter _ hid)
+
 end ThemisCapa
 
