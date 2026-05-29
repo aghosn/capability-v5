@@ -121,5 +121,22 @@ theorem update_unique_keys (a : Arena α β) (k : α) (f : β → β)
   rw [keys_update]
   exact hu
 
+/-- If `find?` returns `some v` at key `k`, then `k` appears in `keys`. -/
+theorem mem_keys_of_find?_some (a : Arena α β) (k : α) (v : β)
+    (h : a.find? k = some v) : k ∈ a.keys := by
+  obtain ⟨es⟩ := a
+  show k ∈ List.map Prod.fst es
+  simp only [find?] at h
+  induction es with
+  | nil => simp [assocLookup] at h
+  | cons p ps ih =>
+    rcases p with ⟨k', v'⟩
+    simp only [assocLookup] at h
+    split at h
+    · rename_i hk; subst hk
+      exact List.mem_cons_self
+    · rename_i hk
+      exact List.mem_cons.mpr (Or.inr (ih h))
+
 end Arena
 end ThemisCapa
