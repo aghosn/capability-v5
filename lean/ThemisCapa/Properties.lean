@@ -134,7 +134,7 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -439,6 +439,67 @@ theorem carve_preserves_wellformed
       obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner did d hd ph hph
       obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
       exact ⟨c', hpc, hco.trans hwfO⟩
+  case pca =>
+    -- ParentChildAgreement: dual of cdtBidi. If c.parent = some pid', then
+    -- c.id ∈ p.childrenIds (with p = getMem pid'). Carve sets new child's
+    -- parent to `parent` and appends new child to parent's childrenIds —
+    -- so the new edge is trivially in the agreement. Existing edges are
+    -- preserved because the only mutation to a childrenIds list is the
+    -- append to parent's list (no deletions).
+    intro id c hc pid' hcpar pp hpp
+    have hgetC := carve_apply_getMem s caller parent access attrs p hpOpt
+      hwf.freshMemCounter id
+    have hgetP := carve_apply_getMem s caller parent access attrs p hpOpt
+      hwf.freshMemCounter pid'
+    simp only at hgetC hgetP
+    have hparNF : parent ≠ s.nextMemCapId :=
+      Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hpOpt)
+    by_cases hidN : id = s.nextMemCapId
+    · rw [hgetC, if_pos hidN] at hc
+      cases hc
+      -- c.parent = some parent ⇒ pid' = parent
+      simp at hcpar; subst hcpar
+      rw [hgetP, if_neg hparNF, if_pos rfl] at hpp
+      cases hpp
+      simp [hidN]
+    · rw [hgetC, if_neg hidN] at hc
+      by_cases hidP : id = parent
+      · rw [if_pos hidP] at hc; cases hc
+        -- c = updP. c.parent = p.parent. So hcpar : p.parent = some pid'.
+        simp only at hcpar
+        have hppPreSome := hwf.refs.parentInArena parent p hpOpt pid' hcpar
+        rcases hppPre : s.getMem pid' with _ | pPre
+        · simp [hppPre] at hppPreSome
+        have pre := hwf.parentChild parent p hpOpt pid' hcpar pPre hppPre
+        have hpid'NF : pid' ≠ s.nextMemCapId :=
+          Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hppPre)
+        rw [hgetP, if_neg hpid'NF] at hpp
+        by_cases hpidPar : pid' = parent
+        · subst hpidPar
+          rw [if_pos rfl] at hpp; cases hpp
+          rw [hppPre] at hpOpt
+          obtain rfl : pPre = p := by cases hpOpt; rfl
+          rw [List.mem_append]; exact Or.inl (hidP ▸ pre)
+        · rw [if_neg hpidPar, hppPre] at hpp
+          cases hpp
+          rw [hidP]; exact pre
+      · rw [if_neg hidP] at hc
+        -- c preserved
+        have hppPreSome := hwf.refs.parentInArena id c hc pid' hcpar
+        rcases hppPre : s.getMem pid' with _ | pPre
+        · simp [hppPre] at hppPreSome
+        have pre := hwf.parentChild id c hc pid' hcpar pPre hppPre
+        have hpid'NF : pid' ≠ s.nextMemCapId :=
+          Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hppPre)
+        rw [hgetP, if_neg hpid'NF] at hpp
+        by_cases hpidPar : pid' = parent
+        · subst hpidPar
+          rw [if_pos rfl] at hpp; cases hpp
+          rw [hppPre] at hpOpt
+          obtain rfl : pPre = p := by cases hpOpt; rfl
+          rw [List.mem_append]; exact Or.inl pre
+        · rw [if_neg hpidPar, hppPre] at hpp
+          cases hpp; exact pre
 
 /-! ## Alias
 
@@ -532,7 +593,7 @@ theorem alias_preserves_wellformed
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -783,6 +844,61 @@ theorem alias_preserves_wellformed
       obtain ⟨c, hwfM, hwfO⟩ := hwf.handleOwner did d hd ph hph
       obtain ⟨c', hpc, hco⟩ := owner_preserved _ _ hwfM
       exact ⟨c', hpc, hco.trans hwfO⟩
+  case pca =>
+    -- Identical shape to carve: only mutation to childrenIds is the
+    -- append at `parent`; existing edges are preserved; the new child's
+    -- edge is in p.childrenIds ++ [nextMemCapId].
+    intro id c hc pid' hcpar pp hpp
+    have hgetC := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter id
+    have hgetP := alias_apply_getMem s caller parent access p hpOpt
+      hwf.freshMemCounter pid'
+    simp only at hgetC hgetP
+    have hparNF : parent ≠ s.nextMemCapId :=
+      Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hpOpt)
+    by_cases hidN : id = s.nextMemCapId
+    · rw [hgetC, if_pos hidN] at hc
+      cases hc
+      simp at hcpar; subst hcpar
+      rw [hgetP, if_neg hparNF, if_pos rfl] at hpp
+      cases hpp
+      simp [hidN]
+    · rw [hgetC, if_neg hidN] at hc
+      by_cases hidP : id = parent
+      · rw [if_pos hidP] at hc; cases hc
+        simp only at hcpar
+        have hppPreSome := hwf.refs.parentInArena parent p hpOpt pid' hcpar
+        rcases hppPre : s.getMem pid' with _ | pPre
+        · simp [hppPre] at hppPreSome
+        have pre := hwf.parentChild parent p hpOpt pid' hcpar pPre hppPre
+        have hpid'NF : pid' ≠ s.nextMemCapId :=
+          Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hppPre)
+        rw [hgetP, if_neg hpid'NF] at hpp
+        by_cases hpidPar : pid' = parent
+        · subst hpidPar
+          rw [if_pos rfl] at hpp; cases hpp
+          rw [hppPre] at hpOpt
+          obtain rfl : pPre = p := by cases hpOpt; rfl
+          rw [List.mem_append]; exact Or.inl (hidP ▸ pre)
+        · rw [if_neg hpidPar, hppPre] at hpp
+          cases hpp
+          rw [hidP]; exact pre
+      · rw [if_neg hidP] at hc
+        have hppPreSome := hwf.refs.parentInArena id c hc pid' hcpar
+        rcases hppPre : s.getMem pid' with _ | pPre
+        · simp [hppPre] at hppPreSome
+        have pre := hwf.parentChild id c hc pid' hcpar pPre hppPre
+        have hpid'NF : pid' ≠ s.nextMemCapId :=
+          Nat.ne_of_lt (existing_lt_fresh s hwf.freshMemCounter hppPre)
+        rw [hgetP, if_neg hpid'NF] at hpp
+        by_cases hpidPar : pid' = parent
+        · subst hpidPar
+          rw [if_pos rfl] at hpp; cases hpp
+          rw [hppPre] at hpOpt
+          obtain rfl : pPre = p := by cases hpOpt; rfl
+          rw [List.mem_append]; exact Or.inl pre
+        · rw [if_neg hpidPar, hppPre] at hpp
+          cases hpp; exact pre
 
 /-! ## Revoke
 
@@ -864,14 +980,359 @@ private theorem revoke_apply_getDom
     simp [hdid]
     rfl
 
-/-- **Deferred.** Requires adding `ParentChildAgreement` to `WellFormed`
-    and extending carve/alias proofs. See section docstring above for plan. -/
+/-- `revoke_preserves_wellformed` — full proof using ParentChildAgreement.
+
+    The 7-way invariant proof reuses `revoke_apply_getMem` / `getDom`
+    characterization lemmas and PCA to dispatch the cases where a cap
+    other than the parent could mention `target`: PCA + `targetIsLeaf`
+    rules those out by yielding `target ∈ target.childrenIds = []`. -/
 theorem revoke_preserves_wellformed
     {s s' : SpecState} {caller : DomId} {target : MemCapId}
     (hwf : WellFormed s)
     (hstep : step s (.revoke caller target) s') :
     WellFormed s' := by
-  sorry
+  cases hstep
+  rename_i guard
+  -- Unpack target.
+  rcases ht : s.getMem target with _ | t
+  · exact absurd guard.targetExists (by simp [ht])
+  -- Target has a parent.
+  rcases htp : t.parent with _ | pid
+  · have := guard.targetHasParent t ht; rw [htp] at this; cases this
+  -- Parent exists in arena.
+  have hpSome : (s.getMem pid).isSome :=
+    hwf.refs.parentInArena target t ht pid htp
+  rcases hp : s.getMem pid with _ | p
+  · simp [hp] at hpSome
+  -- Derive `pid ≠ target` from PCA + targetIsLeaf.
+  have hpne : pid ≠ target := by
+    intro heq
+    have hleaf := guard.targetIsLeaf t ht
+    have : pid ∈ t.childrenIds := by
+      have := hwf.parentChild target t ht pid htp
+      have hpt : s.getMem pid = some t := heq ▸ ht
+      have := hwf.parentChild target t ht pid htp t hpt
+      simpa [heq] using this
+    rw [hleaf] at this; cases this
+  -- Helper: every cap c (≠ t) cannot have `target` as its parent.
+  -- If it did, then by PCA, the cap's id ∈ t.childrenIds = []. ⊥.
+  have notParentTarget :
+      ∀ id c, s.getMem id = some c → c.parent = some target → False := by
+    intro id c hc hcpar
+    have := hwf.parentChild id c hc target hcpar t ht
+    rw [guard.targetIsLeaf t ht] at this; cases this
+  -- Now show the post-state.
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((revoke_apply s caller target).memcaps).UniqueKeys
+      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      exact Arena.update_unique_keys _ pid _
+        (Arena.remove_unique_keys _ target hwf.unique.memcaps)
+    case dc =>
+      show ((revoke_apply s caller target).domcaps).UniqueKeys
+      simp [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      exact hwf.unique.domcaps
+    case ds =>
+      show ((revoke_apply s caller target).domains).UniqueKeys
+      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _ hwf.unique.domains
+  case refs =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c hc pid' hcpar
+      have hgetC := revoke_apply_getMem s caller target t ht pid htp p hp hpne id
+      have hgetP := revoke_apply_getMem s caller target t ht pid htp p hp hpne pid'
+      simp only at hgetC hgetP
+      by_cases hidT : id = target
+      · rw [hgetC, if_pos hidT] at hc; cases hc
+      · rw [hgetC, if_neg hidT] at hc
+        -- pid' ≠ target.
+        have hpidT : pid' ≠ target := by
+          intro heqT
+          by_cases hidP : id = pid
+          · rw [if_pos hidP] at hc; cases hc
+            -- c = updP, c.parent = p.parent. hcpar : p.parent = some target.
+            exact notParentTarget pid p hp (heqT ▸ hcpar)
+          · rw [if_neg hidP] at hc
+            exact notParentTarget id c hc (heqT ▸ hcpar)
+        rw [hgetP, if_neg hpidT]
+        by_cases hpidP : pid' = pid
+        · rw [if_pos hpidP]; simp
+        · rw [if_neg hpidP]
+          by_cases hidP : id = pid
+          · rw [if_pos hidP] at hc; cases hc
+            exact hwf.refs.parentInArena pid p hp pid' hcpar
+          · rw [if_neg hidP] at hc
+            exact hwf.refs.parentInArena id c hc pid' hcpar
+    case cia =>
+      intro id c hc cid hcid
+      have hgetC := revoke_apply_getMem s caller target t ht pid htp p hp hpne id
+      have hgetCid := revoke_apply_getMem s caller target t ht pid htp p hp hpne cid
+      simp only at hgetC hgetCid
+      by_cases hidT : id = target
+      · rw [hgetC, if_pos hidT] at hc; cases hc
+      · rw [hgetC, if_neg hidT] at hc
+        -- cid ≠ target.
+        have hcidT : cid ≠ target := by
+          intro heq
+          by_cases hidP : id = pid
+          · rw [if_pos hidP] at hc; cases hc
+            -- cid ∈ p.childrenIds.filter (≠target). cid = target ⇒ ⊥.
+            have := List.mem_filter.mp hcid
+            exact absurd heq (by simpa using this.2)
+          · rw [if_neg hidP] at hc
+            -- By pre-cdtBidi: getMem cid (= t since cid=target) has parent = some id.
+            -- t.parent = some pid. So id = pid. Contradiction with hidP.
+            have hcidSome := hwf.refs.childInArena id c hc cid hcid
+            rcases hch : s.getMem cid with _ | ch
+            · simp [hch] at hcidSome
+            have hbi := hwf.cdtBidirectional id c hc cid hcid ch hch
+            rw [heq, ht] at hch; cases hch
+            rw [htp] at hbi
+            exact hidP (Option.some.inj hbi).symm
+        rw [hgetCid, if_neg hcidT]
+        by_cases hcidP : cid = pid
+        · rw [if_pos hcidP]; simp
+        · rw [if_neg hcidP]
+          by_cases hidP : id = pid
+          · rw [if_pos hidP] at hc; cases hc
+            -- c = updP, c.childrenIds = p.childrenIds.filter (≠target).
+            have := List.mem_filter.mp hcid
+            exact hwf.refs.childInArena pid p hp cid this.1
+          · rw [if_neg hidP] at hc
+            exact hwf.refs.childInArena id c hc cid hcid
+    case hia =>
+      intro did d hd ph hph
+      have hgetD := revoke_apply_getDom s caller target t ht pid htp did
+      simp only at hgetD
+      by_cases hdid : did = t.owner
+      · rw [hgetD, if_pos hdid] at hd
+        rcases hdpre : s.getDom t.owner with _ | dpre
+        · rw [hdpre] at hd; simp at hd
+        rw [hdpre] at hd; simp at hd
+        rw [← hd] at hph
+        simp at hph
+        -- ph.2 ≠ target from filter.
+        have hphT : ph.2 ≠ target := hph.2
+        have hpre := hwf.refs.handleInArena (t.owner) dpre hdpre ph hph.1
+        have hgetH := revoke_apply_getMem s caller target t ht pid htp p hp hpne ph.2
+        simp only at hgetH
+        rw [hgetH, if_neg hphT]
+        by_cases hphP : ph.2 = pid
+        · rw [if_pos hphP]; simp
+        · rw [if_neg hphP]; exact hpre
+      · rw [hgetD, if_neg hdid] at hd
+        have hpre := hwf.refs.handleInArena did d hd ph hph
+        -- ph.2 ≠ target via HandleOwner.
+        have hphT : ph.2 ≠ target := by
+          intro heq
+          obtain ⟨c, hcM, hco⟩ := hwf.handleOwner did d hd ph hph
+          rw [heq, ht] at hcM; cases hcM
+          exact hdid hco.symm
+        have hgetH := revoke_apply_getMem s caller target t ht pid htp p hp hpne ph.2
+        simp only at hgetH
+        rw [hgetH, if_neg hphT]
+        by_cases hphP : ph.2 = pid
+        · rw [if_pos hphP]; simp
+        · rw [if_neg hphP]; exact hpre
+  case cdtMono =>
+    intro id c hc cid hcid ch hch
+    have hgetC := revoke_apply_getMem s caller target t ht pid htp p hp hpne id
+    have hgetCh := revoke_apply_getMem s caller target t ht pid htp p hp hpne cid
+    simp only at hgetC hgetCh
+    by_cases hidT : id = target
+    · rw [hgetC, if_pos hidT] at hc; cases hc
+    rw [hgetC, if_neg hidT] at hc
+    -- cid ≠ target (same arg as `cia`).
+    have hcidT : cid ≠ target := by
+      intro heq
+      by_cases hidP : id = pid
+      · rw [if_pos hidP] at hc; cases hc
+        have := List.mem_filter.mp hcid
+        exact absurd heq (by simpa using this.2)
+      · rw [if_neg hidP] at hc
+        have hcidSome := hwf.refs.childInArena id c hc cid hcid
+        rcases hch' : s.getMem cid with _ | ch'
+        · simp [hch'] at hcidSome
+        have hbi := hwf.cdtBidirectional id c hc cid hcid ch' hch'
+        rw [heq, ht] at hch'; cases hch'
+        rw [htp] at hbi
+        exact hidP (Option.some.inj hbi).symm
+    rw [hgetCh, if_neg hcidT] at hch
+    by_cases hidP : id = pid
+    · rw [if_pos hidP] at hc; cases hc
+      -- c = updP. c.region = p.region. cid ∈ p.childrenIds.filter (≠target).
+      have hcidIn := (List.mem_filter.mp hcid).1
+      by_cases hcidP : cid = pid
+      · rw [if_pos hcidP] at hch; cases hch
+        -- ch = updP. updP.region = p.region.
+        exact hwf.cdtMonotonic pid p hp cid hcidIn p (hcidP ▸ hp)
+      · rw [if_neg hcidP] at hch
+        exact hwf.cdtMonotonic pid p hp cid hcidIn ch hch
+    · rw [if_neg hidP] at hc
+      by_cases hcidP : cid = pid
+      · rw [if_pos hcidP] at hch; cases hch
+        -- ch = updP. updP.region = p.region.
+        exact hwf.cdtMonotonic id c hc cid hcid p (hcidP ▸ hp)
+      · rw [if_neg hcidP] at hch
+        exact hwf.cdtMonotonic id c hc cid hcid ch hch
+  case cdtBidi =>
+    intro id c hc cid hcid ch hch
+    have hgetC := revoke_apply_getMem s caller target t ht pid htp p hp hpne id
+    have hgetCh := revoke_apply_getMem s caller target t ht pid htp p hp hpne cid
+    simp only at hgetC hgetCh
+    by_cases hidT : id = target
+    · rw [hgetC, if_pos hidT] at hc; cases hc
+    rw [hgetC, if_neg hidT] at hc
+    have hcidT : cid ≠ target := by
+      intro heq
+      by_cases hidP : id = pid
+      · rw [if_pos hidP] at hc; cases hc
+        have := List.mem_filter.mp hcid
+        exact absurd heq (by simpa using this.2)
+      · rw [if_neg hidP] at hc
+        have hcidSome := hwf.refs.childInArena id c hc cid hcid
+        rcases hch' : s.getMem cid with _ | ch'
+        · simp [hch'] at hcidSome
+        have hbi := hwf.cdtBidirectional id c hc cid hcid ch' hch'
+        rw [heq, ht] at hch'; cases hch'
+        rw [htp] at hbi
+        exact hidP (Option.some.inj hbi).symm
+    rw [hgetCh, if_neg hcidT] at hch
+    by_cases hidP : id = pid
+    · rw [if_pos hidP] at hc; cases hc
+      have hcidIn := (List.mem_filter.mp hcid).1
+      by_cases hcidP : cid = pid
+      · rw [if_pos hcidP] at hch; cases hch
+        -- ch = updP. updP.parent = p.parent. Need = some id (= some pid).
+        -- By pre-cdtBidi on (pid, p, hp, cid=pid, hcidIn, p, hp): p.parent = some pid.
+        exact hidP ▸ hwf.cdtBidirectional pid p hp cid hcidIn p (hcidP ▸ hp)
+      · rw [if_neg hcidP] at hch
+        exact hidP ▸ hwf.cdtBidirectional pid p hp cid hcidIn ch hch
+    · rw [if_neg hidP] at hc
+      by_cases hcidP : cid = pid
+      · rw [if_pos hcidP] at hch; cases hch
+        -- ch = updP. updP.parent = p.parent. Pre: p.parent = some id.
+        exact hwf.cdtBidirectional id c hc cid hcid p (hcidP ▸ hp)
+      · rw [if_neg hcidP] at hch
+        exact hwf.cdtBidirectional id c hc cid hcid ch hch
+  case fresh =>
+    -- s'.nextMemCapId = s.nextMemCapId. s'.memcaps.keys ⊆ s.memcaps.keys.
+    intro id hid
+    have hKeys : id ∈ s.memcaps.keys := by
+      have heq : ((revoke_apply s caller target).memcaps).keys
+                  = (s.memcaps.remove target).keys := by
+        simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain,
+                   Arena.keys_update]
+      rw [heq] at hid
+      exact ((Arena.mem_keys_remove_iff _ _ _).mp hid).2
+    have : ((revoke_apply s caller target).nextMemCapId) = s.nextMemCapId := by
+      simp [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    rw [this]
+    exact hwf.freshMemCounter id hKeys
+  case ho =>
+    intro did d hd ph hph
+    have hgetD := revoke_apply_getDom s caller target t ht pid htp did
+    simp only at hgetD
+    by_cases hdid : did = t.owner
+    · rw [hgetD, if_pos hdid] at hd
+      rcases hdpre : s.getDom t.owner with _ | dpre
+      · rw [hdpre] at hd; simp at hd
+      rw [hdpre] at hd; simp at hd
+      rw [← hd] at hph
+      simp at hph
+      have hphT : ph.2 ≠ target := hph.2
+      obtain ⟨c, hcM, hco⟩ :=
+        hwf.handleOwner (t.owner) dpre hdpre ph hph.1
+      have hgetH := revoke_apply_getMem s caller target t ht pid htp p hp hpne ph.2
+      simp only at hgetH
+      by_cases hphP : ph.2 = pid
+      · refine ⟨{ p with childrenIds := p.childrenIds.filter (· ≠ target) }, ?_, ?_⟩
+        · rw [hgetH, if_neg hphT, if_pos hphP]
+        · -- ph.2 = pid, so c = p (from pre lookup at pid). p.owner = t.owner = did.
+          have hcEq : c = p := by
+            have := hcM; rw [hphP, hp] at this; cases this; rfl
+          subst hcEq
+          rw [hdid]; exact hco
+      · refine ⟨c, ?_, ?_⟩
+        · rw [hgetH, if_neg hphT, if_neg hphP]; exact hcM
+        · rw [hdid]; exact hco
+    · rw [hgetD, if_neg hdid] at hd
+      obtain ⟨c, hcM, hco⟩ := hwf.handleOwner did d hd ph hph
+      have hphT : ph.2 ≠ target := by
+        intro heq; rw [heq, ht] at hcM; cases hcM
+        exact hdid hco.symm
+      have hgetH := revoke_apply_getMem s caller target t ht pid htp p hp hpne ph.2
+      simp only at hgetH
+      by_cases hphP : ph.2 = pid
+      · refine ⟨{ p with childrenIds := p.childrenIds.filter (· ≠ target) }, ?_, ?_⟩
+        · rw [hgetH, if_neg hphT, if_pos hphP]
+        · have hcEq : c = p := by
+            have := hcM; rw [hphP, hp] at this; cases this; rfl
+          subst hcEq; exact hco
+      · refine ⟨c, ?_, ?_⟩
+        · rw [hgetH, if_neg hphT, if_neg hphP]; exact hcM
+        · exact hco
+  case pca =>
+    intro id c hc pid' hcpar pp hpp
+    have hgetC := revoke_apply_getMem s caller target t ht pid htp p hp hpne id
+    have hgetP := revoke_apply_getMem s caller target t ht pid htp p hp hpne pid'
+    simp only at hgetC hgetP
+    by_cases hidT : id = target
+    · rw [hgetC, if_pos hidT] at hc; cases hc
+    rw [hgetC, if_neg hidT] at hc
+    -- pid' ≠ target.
+    have hpidT : pid' ≠ target := by
+      intro heq
+      by_cases hidP : id = pid
+      · rw [if_pos hidP] at hc; cases hc
+        exact notParentTarget pid p hp (heq ▸ hcpar)
+      · rw [if_neg hidP] at hc
+        exact notParentTarget id c hc (heq ▸ hcpar)
+    rw [hgetP, if_neg hpidT] at hpp
+    by_cases hidP : id = pid
+    · -- c = updP. Derive p.parent = some pid' and pre-PCA.
+      have hcEq : c = { p with childrenIds := p.childrenIds.filter (· ≠ target) } := by
+        have hc' := hc
+        rw [if_pos hidP] at hc'
+        exact (Option.some.inj hc').symm
+      have hcpar' : p.parent = some pid' := by
+        have := hcpar; rw [hcEq] at this; exact this
+      have hpidSome := hwf.refs.parentInArena pid p hp pid' hcpar'
+      rcases hpidPre : s.getMem pid' with _ | ppre
+      · simp [hpidPre] at hpidSome
+      have hpreM : pid ∈ ppre.childrenIds :=
+        hwf.parentChild pid p hp pid' hcpar' ppre hpidPre
+      by_cases hpidPid : pid' = pid
+      · subst hpidPid
+        rw [hp] at hpidPre; cases hpidPre
+        rw [if_pos rfl] at hpp; cases hpp
+        rw [hidP]
+        show pid' ∈ (p.childrenIds.filter _)
+        rw [List.mem_filter]
+        exact ⟨hpreM, by simpa using hpne⟩
+      · rw [if_neg hpidPid, hpidPre] at hpp
+        cases hpp
+        rw [hidP]; exact hpreM
+    · -- c preserved.
+      have hcPre : s.getMem id = some c := by
+        have hc' := hc; rw [if_neg hidP] at hc'; exact hc'
+      have hpidSome := hwf.refs.parentInArena id c hcPre pid' hcpar
+      rcases hpidPre : s.getMem pid' with _ | ppre
+      · simp [hpidPre] at hpidSome
+      have hpreM : id ∈ ppre.childrenIds :=
+        hwf.parentChild id c hcPre pid' hcpar ppre hpidPre
+      by_cases hpidPid : pid' = pid
+      · subst hpidPid
+        rw [hp] at hpidPre; cases hpidPre
+        rw [if_pos rfl] at hpp; cases hpp
+        show id ∈ (p.childrenIds.filter _)
+        rw [List.mem_filter]
+        exact ⟨hpreM, by simpa using hidT⟩
+      · rw [if_neg hpidPid, hpidPre] at hpp
+        cases hpp; exact hpreM
 
 end ThemisCapa
 

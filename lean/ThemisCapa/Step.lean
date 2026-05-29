@@ -155,15 +155,6 @@ structure RevokeGuard (s : SpecState) (caller : DomId) (target : MemCapId) : Pro
   /-- META regions cannot be revoked. -/
   notMeta           :
     ∀ t, s.getMem target = some t → t.region.attributes.meta = false
-  /-- No self-parent loop on `target`. This is a runtime check we assert
-      explicitly for now; it follows from the (currently unproven) stronger
-      invariant `ParentLessThanChild` — every child id is strictly greater
-      than its parent id (true by construction since `carve`/`alias` always
-      allocate a fresh `nextMemCapId` > all existing ids). When that
-      invariant is added to `WellFormed`, this guard hypothesis becomes
-      derivable and can be dropped. -/
-  pidNotSelf        :
-    ∀ t, s.getMem target = some t → ∀ pid, t.parent = some pid → pid ≠ target
 
 /-- Pure state update for a successful leaf `revoke`.
 

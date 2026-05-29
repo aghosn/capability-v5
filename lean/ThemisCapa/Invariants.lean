@@ -62,6 +62,18 @@ def CdtBidirectional (s : SpecState) : Prop :=
 def FreshMemCounter (s : SpecState) : Prop :=
   ∀ id, id ∈ s.memcaps.keys → id < s.nextMemCapId
 
+/-- Dual of `CdtBidirectional`: if a cap declares a parent, that parent
+    actually lists it as a child. Together with `CdtBidirectional` this
+    pins down a true bijection between the parent-pointer view and the
+    children-list view of the CDT — no orphan pointers, no phantom
+    children. Used by revoke to derive: if no cap can have `target` as
+    parent (since `target.childrenIds = []`), then removing `target`
+    doesn't dangle any `parent` pointer. -/
+def ParentChildAgreement (s : SpecState) : Prop :=
+  ∀ id c, s.getMem id = some c →
+    ∀ pid, c.parent = some pid →
+      ∀ p, s.getMem pid = some p → id ∈ p.childrenIds
+
 /-- Every memory-capability handle held by a domain points to a cap whose
     `owner` field equals that domain. This is Themis's exclusive-ownership
     invariant: a memcap is held by *exactly* its declared owner.
@@ -83,5 +95,6 @@ structure WellFormed (s : SpecState) : Prop where
   cdtBidirectional : CdtBidirectional s
   freshMemCounter  : FreshMemCounter s
   handleOwner      : HandleOwner s
+  parentChild      : ParentChildAgreement s
 
 end ThemisCapa
