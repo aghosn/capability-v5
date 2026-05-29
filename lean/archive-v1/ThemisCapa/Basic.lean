@@ -47,36 +47,16 @@ end Rights
 -- ════════════════════════════════════════════════════════════════════
 
 structure Attributes where
-  hash  : Bool   -- content hashed for attestation (HASH)
-  clean : Bool   -- zeroed on revocation (CLEAN)
-  vital : Bool   -- revoking region also revokes owning domain (VITAL)
-  «meta»  : Bool   -- monitor-only memory; excluded from guest address space (META)
-  comm  : Bool   -- parent-owned communication buffer bound to a child VP (COMM)
+  hash  : Bool   -- content hashed for attestation
+  clean : Bool   -- zeroed on revocation
+  vital : Bool   -- revoking region also revokes owning domain
+  «meta»  : Bool   -- monitor-only memory; excluded from guest address space
+  comm  : Bool   -- parent-owned communication buffer
 deriving DecidableEq, Repr
 
 namespace Attributes
 def empty : Attributes := ⟨false, false, false, false, false⟩
-
-/-- Canonicalize: META implies CLEAN + VITAL; COMM implies CLEAN.
-    Mirrors `capa-engine/src/memory.rs::Attributes::canonicalize`. -/
-def canonicalize (a : Attributes) : Attributes :=
-  if a.meta then
-    { a with clean := true, vital := true }
-  else if a.comm then
-    { a with clean := true }
-  else a
 end Attributes
-
--- ════════════════════════════════════════════════════════════════════
--- § CommBinding — pinning of a COMM page to a child domain's VP
--- ════════════════════════════════════════════════════════════════════
-
-/-- Describes which child domain + VP a COMM capability is bound to.
-    Mirrors `capa-engine/src/memory.rs::CommBinding`. -/
-structure CommBinding where
-  targetDomainId : Nat   -- u64 in Rust
-  vpId           : Nat   -- u32 in Rust
-deriving DecidableEq, Repr
 
 -- ════════════════════════════════════════════════════════════════════
 -- § Access — address range + rights
@@ -138,16 +118,6 @@ abbrev SubHandle   := Nat
 abbrev CoreId      := Nat
 abbrev VpId        := Nat
 
-/-- Identifier for a memory capability cell in the arena. -/
-abbrev MemCapId := Nat
-/-- Identifier for a domain capability cell in the arena. -/
-abbrev DomCapId := Nat
-/-- Identifier for a domain. (Alias of `DomainId`; kept for parity with
-    the arena-indexed naming convention.) -/
-abbrev DomId    := Nat
-/-- Identifier for a pending (in-transit) capability slot within a domain. -/
-abbrev PendingId := Nat
-
 -- ════════════════════════════════════════════════════════════════════
 -- § Region metadata
 -- ════════════════════════════════════════════════════════════════════
@@ -193,5 +163,47 @@ inductive CapaError where
 deriving DecidableEq, Repr
 
 abbrev CapaResult (α : Type) := Except CapaError α
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Alternative
+-- ════════════════════════════════════════════════════════════════════
+
+namespace Alternative
+
+  structure MonitorAPI where
+    canCreate           : Bool
+    canSet              : Bool
+    canGet              : Bool
+    canSend             : Bool
+    canSeal             : Bool
+    canAttest           : Bool
+    canEnumerate        : Bool
+    canSwitch           : Bool
+    canAlias            : Bool
+    canCarve            : Bool
+    canRevoke           : Bool
+    canGetChan          : Bool
+    canReceiveAfterSeal : Bool
+
+  /- Well-formedness:
+  - all ids are unique
+  - a capa is uniquely owned by a domain
+  - conditions on children
+  -/
+  structure MemCapa where
+    id : Nat
+    attributes : Attributes
+    access : Access
+    kind : RegionKind
+    children : List MemCapa
+
+  -- TODO: interrupts
+  structure DomCapa where
+    id : Nat
+    monitorAPI : MonitorAPI
+    memCaps : List Nat
+    children : List DomCapa
+
+end Alternative
 
 end ThemisCapa
