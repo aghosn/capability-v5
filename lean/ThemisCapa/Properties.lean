@@ -1786,5 +1786,145 @@ theorem seal_preserves_wellformed
     rw [hMemEq] at hc' hpp
     exact hwf.parentChild id c' hc' pid' hcpar pp hpp
 
+/-! ### Reject / Accept preserve WellFormed -/
+
+/-- Reusable helper: any `updDomain` that doesn't touch `memHandles`
+    preserves every `WellFormed` invariant. `pendingMemCaps`,
+    `frozenHandles`, `addressMap`, etc. are outside `WellFormed`, so
+    `f` may freely permute them. -/
+private theorem wf_preserved_under_handle_invariant_updDomain
+    {s : SpecState} (hwf : WellFormed s)
+    (did : DomId) (f : Domain → Domain)
+    (hHandles : ∀ d, (f d).memHandles = d.memHandles) :
+    WellFormed (s.updDomain did f) := by
+  have hMem : ∀ id, (s.updDomain did f).getMem id = s.getMem id := by
+    intro id; rfl
+  have hHandlesBridge : ∀ did' d',
+      (s.updDomain did f).getDom did' = some d' →
+      ∃ d, s.getDom did' = some d ∧ d.memHandles = d'.memHandles := by
+    intro did' d' hd'
+    by_cases h : did = did'
+    · subst h
+      have : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+        change ((s.domains.update did f)).find? did = _
+        rw [Arena.find?_update_eq_map]; rfl
+      rw [this] at hd'
+      rcases hpre : s.getDom did with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        refine ⟨dpre, rfl, ?_⟩
+        rw [← hd', hHandles]
+    · have hne : did' ≠ did := fun heq => h heq.symm
+      have : (s.updDomain did f).getDom did' = s.getDom did' := by
+        change ((s.domains.update did f)).find? did' = _
+        exact Arena.find?_update_other _ _ _ _ hne
+      rw [this] at hd'
+      exact ⟨d', hd', rfl⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca⟩
+  case u =>
+    refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
+    show ((s.updDomain did f).domains).UniqueKeys
+    simp only [SpecState.updDomain]
+    exact Arena.update_unique_keys _ _ _ hwf.unique.domains
+  case r =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c' hc' pid' hcpar
+      rw [hMem] at hc'
+      rw [hMem]; exact hwf.refs.parentInArena id c' hc' pid' hcpar
+    case cia =>
+      intro id c' hc' cid hcid
+      rw [hMem] at hc'
+      rw [hMem]; exact hwf.refs.childInArena id c' hc' cid hcid
+    case hia =>
+      intro did' d' hd' ph hph
+      obtain ⟨d, hd, hHeq⟩ := hHandlesBridge did' d' hd'
+      rw [← hHeq] at hph
+      rw [hMem]; exact hwf.refs.handleInArena did' d hd ph hph
+  case cm =>
+    intro id c' hc' cid hcid ch hch
+    rw [hMem] at hc' hch
+    exact hwf.cdtMonotonic id c' hc' cid hcid ch hch
+  case cb =>
+    intro id c' hc' cid hcid ch hch
+    rw [hMem] at hc' hch
+    exact hwf.cdtBidirectional id c' hc' cid hcid ch hch
+  case fr =>
+    intro id hid
+    show id < (s.updDomain did f).nextMemCapId
+    have heqKeys : ((s.updDomain did f).memcaps).keys = s.memcaps.keys := rfl
+    rw [heqKeys] at hid
+    exact hwf.freshMemCounter id hid
+  case ho =>
+    intro did' d' hd' ph hph
+    obtain ⟨d, hd, hHeq⟩ := hHandlesBridge did' d' hd'
+    rw [← hHeq] at hph
+    obtain ⟨cc, hccM, hcco⟩ := hwf.handleOwner did' d hd ph hph
+    refine ⟨cc, ?_, hcco⟩
+    rw [hMem]; exact hccM
+  case pca =>
+    intro id c' hc' pid' hcpar pp hpp
+    rw [hMem] at hc' hpp
+    exact hwf.parentChild id c' hc' pid' hcpar pp hpp
+
+theorem reject_preserves_wellformed
+    {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (hwf : WellFormed s)
+    (hstep : step s (.reject receiver pendingId) s') :
+    WellFormed s' := by
+  cases hstep
+  unfold reject_apply
+  have hwf₁ : WellFormed (s.updDomain receiver
+      (fun d => { d with pendingMemCaps :=
+                          d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
+    wf_preserved_under_handle_invariant_updDomain hwf receiver _ (fun _ => rfl)
+  rcases h : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
+    with _ | pe
+  · simp only [h]; exact hwf₁
+  · simp only [h]
+    exact wf_preserved_under_handle_invariant_updDomain hwf₁
+            pe.senderDomainId _ (fun _ => rfl)
+
+theorem accept_preserves_wellformed
+    {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (hwf : WellFormed s)
+    (hstep : step s (.accept receiver pendingId) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  unfold accept_apply
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
+    with _ | pe
+  · simp only [hb]; exact hwf
+  ·
+    -- Recover receiver lookup and pending lookup from the bind.
+    rcases hrd : s.getDom receiver with _ | d
+    · rw [hrd] at hb; simp at hb
+    have hpe : d.lookupPending pendingId = some pe := by
+      rw [hrd, Option.bind_some] at hb; exact hb
+    have sg : SendGuard s pe.senderDomainId receiver pe.capId :=
+    { callerExists      := guard.senderExists d pe hrd hpe
+      receiverExists    := guard.receiverExists
+      callerSealed      := fun sd hsd => guard.senderSealed d pe hrd hpe sd hsd
+      hasPermission     := fun sd hsd => guard.senderCanSend d pe hrd hpe sd hsd
+      capExists         := guard.capExists d pe hrd hpe
+      callerOwnsCap     := fun c hc => guard.capOwnedBySender d pe hrd hpe c hc
+      notSelf           := guard.notSelf d pe hrd hpe
+      notMeta           := fun c hc => guard.notMeta d pe hrd hpe c hc }
+    have hwfSend : WellFormed (send_apply s pe.senderDomainId receiver pe.capId) :=
+      send_preserves_wellformed hwf (step.send sg)
+    have hwf₂ : WellFormed
+        ((send_apply s pe.senderDomainId receiver pe.capId).updDomain receiver
+          (fun d' => { d' with pendingMemCaps :=
+                              d'.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
+      wf_preserved_under_handle_invariant_updDomain hwfSend
+        receiver _ (fun _ => rfl)
+    exact wf_preserved_under_handle_invariant_updDomain hwf₂
+                    pe.senderDomainId
+                    (fun d' => { d' with frozenHandles :=
+                              d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+                    (fun _ => rfl)
+
 end ThemisCapa
 

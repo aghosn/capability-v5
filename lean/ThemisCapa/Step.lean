@@ -250,7 +250,80 @@ def seal_apply (s : SpecState) (caller : DomId) (cap : DomCapId) : SpecState :=
   | none    => s
   | some dc => s.updDomain dc.targetDom (fun d => { d with status := .sealed })
 
+/-! ### Accept / Reject (sealed-path completion) -/
 
+/-- Preconditions for `accept(receiver, pid)`. Over-restricted in v2:
+    inherits the original sealed-send guards (sender sealed, `canSend`,
+    cap non-META, sender ≠ receiver) so we can delegate WF preservation
+    to `send_preserves_wellformed`. A later refactor will drop these
+    by extracting a shared `transfer_apply` lemma. -/
+structure AcceptGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    : Prop where
+  receiverExists    : (s.getDom receiver).isSome
+  receiverSealed    : ∀ d, s.getDom receiver = some d → d.isSealed
+  pendingFound      : ∀ d, s.getDom receiver = some d →
+                      (d.lookupPending pendingId).isSome
+  senderExists      : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      (s.getDom pe.senderDomainId).isSome
+  senderSealed      : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isSealed
+  senderCanSend     : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd →
+                      sd.policy.api.canSend = true
+  capExists         : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      (s.getMem pe.capId).isSome
+  capOwnedBySender  : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ c, s.getMem pe.capId = some c → c.owner = pe.senderDomainId
+  notSelf           : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      pe.senderDomainId ≠ receiver
+  notMeta           : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ c, s.getMem pe.capId = some c →
+                      c.region.attributes.meta = false
+
+/-- Pure state update for `accept`. No-op when receiver / pending lookup
+    fails (well-formedness then preserved trivially). -/
+def accept_apply (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    : SpecState :=
+  match (s.getDom receiver).bind (fun d => d.lookupPending pendingId) with
+  | none    => s
+  | some pe =>
+    ((send_apply s pe.senderDomainId receiver pe.capId).updDomain receiver
+      (fun d' =>
+        { d' with pendingMemCaps :=
+                    d'.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })).updDomain
+      pe.senderDomainId
+      (fun d' =>
+        { d' with frozenHandles :=
+                    d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+
+/-- Preconditions for `reject(receiver, pid)`. -/
+structure RejectGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    : Prop where
+  receiverExists    : (s.getDom receiver).isSome
+  pendingFound      : ∀ d, s.getDom receiver = some d →
+                      (d.lookupPending pendingId).isSome
+
+/-- Pure state update for `reject`: remove pending from receiver and
+    unfreeze sender's handle. Both affected fields are outside
+    `WellFormed`, so this is a no-op at the invariant level. -/
+def reject_apply (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    : SpecState :=
+  let s₁ := s.updDomain receiver (fun d =>
+    { d with pendingMemCaps :=
+              d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })
+  match (s.getDom receiver).bind (fun d => d.lookupPending pendingId) with
+  | none    => s₁
+  | some pe =>
+    s₁.updDomain pe.senderDomainId (fun d =>
+      { d with frozenHandles :=
+                d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
 
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
@@ -272,5 +345,11 @@ inductive step : SpecState → Action → SpecState → Prop
   | seal {s : SpecState} {caller : DomId} {cap : DomCapId}
     (guard : SealGuard s caller cap) :
     step s (.seal caller cap) (seal_apply s caller cap)
+  | accept {s : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (guard : AcceptGuard s receiver pendingId) :
+    step s (.accept receiver pendingId) (accept_apply s receiver pendingId)
+  | reject {s : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (guard : RejectGuard s receiver pendingId) :
+    step s (.reject receiver pendingId) (reject_apply s receiver pendingId)
 
 end ThemisCapa

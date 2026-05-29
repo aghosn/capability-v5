@@ -117,6 +117,10 @@ def lookupMemHandle (d : Domain) (h : LocalHandle) : Option MemCapId :=
 def lookupDomHandle (d : Domain) (h : LocalHandle) : Option DomCapId :=
   (d.domHandles.find? (fun p => p.1 = h)).map Prod.snd
 
+/-- Resolve a pending-memcap id to the pending entry. -/
+def lookupPending (d : Domain) (pid : PendingId) : Option PendingMemCap :=
+  (d.pendingMemCaps.find? (fun p => p.1 = pid)).map Prod.snd
+
 end Domain
 
 /-- Per-core scheduling state. Mirrors `capa-engine/src/switch.rs::CoreState`. -/
