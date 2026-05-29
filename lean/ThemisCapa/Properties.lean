@@ -1334,5 +1334,328 @@ theorem revoke_preserves_wellformed
       · rw [if_neg hpidPid, hpidPre] at hpp
         cases hpp; exact hpreM
 
+/-! ## Send (unsealed path)
+
+Unlike carve/alias/revoke, send doesn't touch the CDT (parent/children/
+region are unchanged). It only:
+  * updates `cap.owner` to `receiver`;
+  * drops *all* caller handles to `cap`;
+  * appends a fresh `(nextHandle, cap)` to receiver's handle list.
+
+Hence CdtBidi, CdtMono, PCA, and freshMemCounter are trivially preserved.
+The interesting invariant is `HandleOwner`: the receiver gains a new handle
+whose `cap.owner` is now `receiver` (matching the new ownership). Any
+*pre-existing* receiver handle to `cap` would contradict pre-`HandleOwner`
+(since pre `cap.owner = caller ≠ receiver`), so we don't double-up. -/
+
+/-- Characterization of `send_apply` on the memcap arena: only `cap` changes. -/
+private theorem send_apply_getMem
+    (s : SpecState) (caller : DomId) (receiver : DomId) (cap : MemCapId)
+    (id : MemCapId) :
+    (send_apply s caller receiver cap).getMem id =
+      if id = cap then (s.getMem cap).map (fun c => { c with owner := receiver })
+      else s.getMem id := by
+  show ((send_apply s caller receiver cap).memcaps).find? id = _
+  simp only [send_apply, SpecState.updMem, SpecState.updDomain]
+  by_cases hidC : id = cap
+  · subst hidC
+    rw [Arena.find?_update_eq_map]; simp; rfl
+  · rw [Arena.find?_update_other _ cap id _ hidC]
+    simp [hidC]; rfl
+
+/-- Characterization of `send_apply` on the domain arena: caller and
+    receiver are updated independently; everyone else is unchanged. -/
+private theorem send_apply_getDom
+    (s : SpecState) (caller : DomId) (receiver : DomId) (cap : MemCapId)
+    (hne : caller ≠ receiver) (did : DomId) :
+    let fc : Domain → Domain := fun d =>
+      { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ cap) }
+    let fr : Domain → Domain := fun d =>
+      { d with memHandles := d.memHandles ++ [(d.nextHandle, cap)],
+               nextHandle := d.nextHandle + 1 }
+    (send_apply s caller receiver cap).getDom did =
+      if did = caller then (s.getDom caller).map fc
+      else if did = receiver then (s.getDom receiver).map fr
+      else s.getDom did := by
+  show ((send_apply s caller receiver cap).domains).find? did = _
+  simp only [send_apply, SpecState.updMem, SpecState.updDomain]
+  by_cases hdidC : did = caller
+  · subst hdidC
+    -- did = caller. Peel receiver (outer), then caller (inner).
+    have hRdid : did ≠ receiver := hne
+    rw [Arena.find?_update_other _ receiver did _ hRdid]
+    rw [Arena.find?_update_eq_map]
+    simp; rfl
+  · by_cases hdidR : did = receiver
+    · subst hdidR
+      -- did = receiver. Peel receiver (outer = map), then caller (inner; ≠).
+      rw [Arena.find?_update_eq_map]
+      have hCdid : did ≠ caller := hdidC
+      rw [Arena.find?_update_other _ caller did _ hCdid]
+      simp [hdidC]; rfl
+    · have hCdid : did ≠ caller := hdidC
+      have hRdid : did ≠ receiver := hdidR
+      rw [Arena.find?_update_other _ receiver did _ hRdid]
+      rw [Arena.find?_update_other _ caller did _ hCdid]
+      simp [hdidC, hdidR]; rfl
+
+theorem send_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
+    (hwf : WellFormed s)
+    (hstep : step s (.send caller receiver cap) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  rcases hc : s.getMem cap with _ | c
+  · exact absurd guard.capExists (by simp [hc])
+  have hne := guard.notSelf
+  have hCowner : c.owner = caller := guard.callerOwnsCap c hc
+  -- For any did ≠ caller, any handle held by did has .2 ≠ cap.
+  -- (HandleOwner gives owner = did; if .2 = cap, owner = caller; contradiction.)
+  have notHoldsCap :
+      ∀ did d, s.getDom did = some d → ∀ ph ∈ d.memHandles,
+        did ≠ caller → ph.2 ≠ cap := by
+    intro did d hd ph hph hdidC heq
+    obtain ⟨cc, hccM, hcco⟩ := hwf.handleOwner did d hd ph hph
+    rw [heq, hc] at hccM; cases hccM
+    exact hdidC (hcco.symm.trans hCowner)
+  -- Helper: bridging post and pre lookups when id ≠ cap.
+  have getMem_pre_of_ne :
+      ∀ id, id ≠ cap →
+        (send_apply s caller receiver cap).getMem id = s.getMem id := by
+    intro id hidC
+    rw [send_apply_getMem, if_neg hidC]
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((send_apply s caller receiver cap).memcaps).UniqueKeys
+      simp only [send_apply, SpecState.updMem, SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _ hwf.unique.memcaps
+    case dc =>
+      show ((send_apply s caller receiver cap).domcaps).UniqueKeys
+      simp [send_apply, SpecState.updMem, SpecState.updDomain]
+      exact hwf.unique.domcaps
+    case ds =>
+      show ((send_apply s caller receiver cap).domains).UniqueKeys
+      simp only [send_apply, SpecState.updMem, SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _
+              (Arena.update_unique_keys _ _ _ hwf.unique.domains)
+  case refs =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c' hc' pid' hcpar
+      -- Pre cap whose parent pointer is the same as c'.parent.
+      have ⟨cpre, hcpre, hParent⟩ :
+          ∃ cpre, s.getMem id = some cpre ∧ cpre.parent = c'.parent := by
+        by_cases hidC : id = cap
+        · subst hidC
+          rw [send_apply_getMem, if_pos rfl, hc] at hc'
+          refine ⟨c, hc, ?_⟩
+          have : c' = { c with owner := receiver } := by
+            simp at hc'; exact hc'.symm
+          rw [this]
+        · refine ⟨c', ?_, rfl⟩
+          rw [← getMem_pre_of_ne id hidC]; exact hc'
+      have hcparPre : cpre.parent = some pid' := hParent.trans hcpar
+      have hsome := hwf.refs.parentInArena id cpre hcpre pid' hcparPre
+      -- Post lookup at pid' is also isSome.
+      rw [send_apply_getMem]
+      by_cases hpidC : pid' = cap
+      · rw [if_pos hpidC]
+        rw [hpidC] at hsome
+        rcases hh : s.getMem cap with _ | _
+        · rw [hh] at hsome; simp at hsome
+        · simp
+      · rw [if_neg hpidC]; exact hsome
+    case cia =>
+      intro id c' hc' cid hcid
+      have ⟨cpre, hcpre, hChildren⟩ :
+          ∃ cpre, s.getMem id = some cpre ∧ cpre.childrenIds = c'.childrenIds := by
+        by_cases hidC : id = cap
+        · subst hidC
+          rw [send_apply_getMem, if_pos rfl, hc] at hc'
+          refine ⟨c, hc, ?_⟩
+          have : c' = { c with owner := receiver } := by simp at hc'; exact hc'.symm
+          rw [this]
+        · refine ⟨c', ?_, rfl⟩
+          rw [← getMem_pre_of_ne id hidC]; exact hc'
+      have hcidPre : cid ∈ cpre.childrenIds := hChildren ▸ hcid
+      have hsome := hwf.refs.childInArena id cpre hcpre cid hcidPre
+      rw [send_apply_getMem]
+      by_cases hcidC : cid = cap
+      · rw [if_pos hcidC]
+        rw [hcidC] at hsome
+        rcases hh : s.getMem cap with _ | _
+        · rw [hh] at hsome; simp at hsome
+        · simp
+      · rw [if_neg hcidC]; exact hsome
+    case hia =>
+      intro did d hd ph hph
+      have hgetD := send_apply_getDom s caller receiver cap hne did
+      simp only at hgetD
+      -- Three cases for did.
+      by_cases hdidC : did = caller
+      · rw [hgetD, if_pos hdidC] at hd
+        rcases hcp : s.getDom caller with _ | dcaller
+        · rw [hcp] at hd; simp at hd
+        rw [hcp] at hd; simp at hd
+        rw [← hd] at hph; simp at hph
+        have hphC : ph.2 ≠ cap := by simpa using hph.2
+        rw [send_apply_getMem, if_neg hphC]
+        exact hwf.refs.handleInArena caller dcaller hcp ph hph.1
+      · by_cases hdidR : did = receiver
+        · rw [hgetD, if_neg hdidC, if_pos hdidR] at hd
+          rcases hrp : s.getDom receiver with _ | drecv
+          · rw [hrp] at hd; simp at hd
+          rw [hrp] at hd; simp at hd
+          rw [← hd] at hph; simp at hph
+          rcases hph with hph_in | hph_new
+          · -- Old handle: by HO on receiver, ph.2 ≠ cap.
+            have hphC : ph.2 ≠ cap :=
+              notHoldsCap receiver drecv hrp ph hph_in hne.symm
+            rw [send_apply_getMem, if_neg hphC]
+            exact hwf.refs.handleInArena receiver drecv hrp ph hph_in
+          · -- New (nh, cap) handle: ph.2 = cap, post.getMem cap = some updC.
+            rw [send_apply_getMem]
+            have hpheq : ph.2 = cap := by rw [hph_new]
+            rw [if_pos hpheq, hc]; simp
+        · rw [hgetD, if_neg hdidC, if_neg hdidR] at hd
+          have hpre := hwf.refs.handleInArena did d hd ph hph
+          have hphC : ph.2 ≠ cap := notHoldsCap did d hd ph hph hdidC
+          rw [send_apply_getMem, if_neg hphC]; exact hpre
+  case cdtMono =>
+    intro id c' hc' cid hcid ch hch
+    -- Reduce both to pre-state.
+    have ⟨cpre, hcpre, hRegion, hChildren⟩ :
+        ∃ cpre, s.getMem id = some cpre ∧
+          cpre.region = c'.region ∧ cpre.childrenIds = c'.childrenIds := by
+      by_cases hidC : id = cap
+      · subst hidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hc'
+        have hceq : c' = { c with owner := receiver } := by
+          simp at hc'; exact hc'.symm
+        refine ⟨c, hc, ?_, ?_⟩
+        · rw [hceq]
+        · rw [hceq]
+      · refine ⟨c', ?_, rfl, rfl⟩
+        rw [← getMem_pre_of_ne id hidC]; exact hc'
+    have ⟨chpre, hchpre, hChRegion⟩ :
+        ∃ chpre, s.getMem cid = some chpre ∧ chpre.region = ch.region := by
+      by_cases hcidC : cid = cap
+      · subst hcidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hch
+        refine ⟨c, hc, ?_⟩
+        have : ch = { c with owner := receiver } := by simp at hch; exact hch.symm
+        rw [this]
+      · refine ⟨ch, ?_, rfl⟩
+        rw [← getMem_pre_of_ne cid hcidC]; exact hch
+    have hcidPre : cid ∈ cpre.childrenIds := hChildren ▸ hcid
+    have := hwf.cdtMonotonic id cpre hcpre cid hcidPre chpre hchpre
+    rw [hChRegion, hRegion] at this; exact this
+  case cdtBidi =>
+    intro id c' hc' cid hcid ch hch
+    have ⟨cpre, hcpre, hChildren⟩ :
+        ∃ cpre, s.getMem id = some cpre ∧ cpre.childrenIds = c'.childrenIds := by
+      by_cases hidC : id = cap
+      · subst hidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hc'
+        refine ⟨c, hc, ?_⟩
+        have : c' = { c with owner := receiver } := by simp at hc'; exact hc'.symm
+        rw [this]
+      · refine ⟨c', ?_, rfl⟩
+        rw [← getMem_pre_of_ne id hidC]; exact hc'
+    have ⟨chpre, hchpre, hChParent⟩ :
+        ∃ chpre, s.getMem cid = some chpre ∧ chpre.parent = ch.parent := by
+      by_cases hcidC : cid = cap
+      · subst hcidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hch
+        refine ⟨c, hc, ?_⟩
+        have : ch = { c with owner := receiver } := by simp at hch; exact hch.symm
+        rw [this]
+      · refine ⟨ch, ?_, rfl⟩
+        rw [← getMem_pre_of_ne cid hcidC]; exact hch
+    have hcidPre : cid ∈ cpre.childrenIds := hChildren ▸ hcid
+    have := hwf.cdtBidirectional id cpre hcpre cid hcidPre chpre hchpre
+    rw [hChParent] at this; exact this
+  case fresh =>
+    intro id hid
+    have hKeys : id ∈ s.memcaps.keys := by
+      have heq : ((send_apply s caller receiver cap).memcaps).keys
+                  = s.memcaps.keys := by
+        simp only [send_apply, SpecState.updMem, SpecState.updDomain,
+                   Arena.keys_update]
+      rw [heq] at hid; exact hid
+    have hnext : ((send_apply s caller receiver cap).nextMemCapId)
+                  = s.nextMemCapId := by
+      simp [send_apply, SpecState.updMem, SpecState.updDomain]
+    rw [hnext]; exact hwf.freshMemCounter id hKeys
+  case ho =>
+    intro did d hd ph hph
+    have hgetD := send_apply_getDom s caller receiver cap hne did
+    simp only at hgetD
+    by_cases hdidC : did = caller
+    · rw [hgetD, if_pos hdidC] at hd
+      rcases hcp : s.getDom caller with _ | dcaller
+      · rw [hcp] at hd; simp at hd
+      rw [hcp] at hd; simp at hd
+      rw [← hd] at hph; simp at hph
+      have hphC : ph.2 ≠ cap := by simpa using hph.2
+      obtain ⟨cc, hccM, hcco⟩ := hwf.handleOwner caller dcaller hcp ph hph.1
+      refine ⟨cc, ?_, ?_⟩
+      · rw [send_apply_getMem, if_neg hphC]; exact hccM
+      · rw [hdidC]; exact hcco
+    · by_cases hdidR : did = receiver
+      · rw [hgetD, if_neg hdidC, if_pos hdidR] at hd
+        rcases hrp : s.getDom receiver with _ | drecv
+        · rw [hrp] at hd; simp at hd
+        rw [hrp] at hd; simp at hd
+        rw [← hd] at hph; simp at hph
+        rcases hph with hph_in | hph_new
+        · have hphC : ph.2 ≠ cap :=
+            notHoldsCap receiver drecv hrp ph hph_in hne.symm
+          obtain ⟨cc, hccM, hcco⟩ :=
+            hwf.handleOwner receiver drecv hrp ph hph_in
+          refine ⟨cc, ?_, ?_⟩
+          · rw [send_apply_getMem, if_neg hphC]; exact hccM
+          · rw [hdidR]; exact hcco
+        · refine ⟨{ c with owner := receiver }, ?_, ?_⟩
+          · rw [send_apply_getMem]
+            have hpheq : ph.2 = cap := by rw [hph_new]
+            rw [if_pos hpheq, hc]; rfl
+          · rw [hdidR]
+      · rw [hgetD, if_neg hdidC, if_neg hdidR] at hd
+        have hphC : ph.2 ≠ cap := notHoldsCap did d hd ph hph hdidC
+        obtain ⟨cc, hccM, hcco⟩ := hwf.handleOwner did d hd ph hph
+        refine ⟨cc, ?_, ?_⟩
+        · rw [send_apply_getMem, if_neg hphC]; exact hccM
+        · exact hcco
+  case pca =>
+    intro id c' hc' pid' hcpar pp hpp
+    -- Reduce to pre.
+    have ⟨cpre, hcpre, hParent⟩ :
+        ∃ cpre, s.getMem id = some cpre ∧ cpre.parent = c'.parent := by
+      by_cases hidC : id = cap
+      · subst hidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hc'
+        refine ⟨c, hc, ?_⟩
+        have : c' = { c with owner := receiver } := by simp at hc'; exact hc'.symm
+        rw [this]
+      · refine ⟨c', ?_, rfl⟩
+        rw [← getMem_pre_of_ne id hidC]; exact hc'
+    have ⟨ppre, hppre, hPpChildren⟩ :
+        ∃ ppre, s.getMem pid' = some ppre ∧ ppre.childrenIds = pp.childrenIds := by
+      by_cases hpidC : pid' = cap
+      · subst hpidC
+        rw [send_apply_getMem, if_pos rfl, hc] at hpp
+        refine ⟨c, hc, ?_⟩
+        have : pp = { c with owner := receiver } := by simp at hpp; exact hpp.symm
+        rw [this]
+      · refine ⟨pp, ?_, rfl⟩
+        rw [← getMem_pre_of_ne pid' hpidC]; exact hpp
+    have hcparPre : cpre.parent = some pid' := hParent.trans hcpar
+    have := hwf.parentChild id cpre hcpre pid' hcparPre ppre hppre
+    rw [hPpChildren] at this; exact this
+
 end ThemisCapa
 

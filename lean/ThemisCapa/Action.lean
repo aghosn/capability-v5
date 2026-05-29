@@ -23,8 +23,14 @@ inductive Action where
       `target` must be a leaf (no children). Full subtree revocation is
       future work. -/
   | revoke (caller : DomId) (target : MemCapId)
+  /-- `caller` sends memory capability `cap` to `receiver`. Slice scope:
+      models the **unsealed** path only (immediate ownership transfer with
+      no pending queue). All of `caller`'s handles to `cap` are dropped; a
+      fresh handle to `cap` is appended to `receiver`. The cap's `owner`
+      field is updated to `receiver`. -/
+  | send (caller : DomId) (receiver : DomId) (cap : MemCapId)
   -- Future:
-  -- | send … | accept … | reject … | create … | seal …
+  -- | accept … | reject … | create … | seal …
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr
 

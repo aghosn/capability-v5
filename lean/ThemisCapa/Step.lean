@@ -178,6 +178,43 @@ def revoke_apply (s : SpecState) (caller : DomId) (target : MemCapId) : SpecStat
         { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ target) })
       s₃
 
+/-- Preconditions for `send(caller, receiver, cap)`. Slice scope: models
+    only the **unsealed** path (immediate ownership transfer). -/
+structure SendGuard (s : SpecState) (caller : DomId) (receiver : DomId)
+                    (cap : MemCapId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  receiverExists    : (s.getDom receiver).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canSend = true
+  capExists         : (s.getMem cap).isSome
+  /-- Caller currently owns `cap`. -/
+  callerOwnsCap     : ∀ c, s.getMem cap = some c → c.owner = caller
+  /-- Send-to-self forbidden (would require a more delicate post-state). -/
+  notSelf           : caller ≠ receiver
+  /-- META regions cannot be sent (matches Rust `send_at` check). -/
+  notMeta           :
+    ∀ c, s.getMem cap = some c → c.region.attributes.meta = false
+
+/-- Pure state update for a successful unsealed `send`.
+
+    1. Drop *all* handles to `cap` from caller's `memHandles`.
+    2. Append a fresh handle `(d.nextHandle, cap)` to receiver's
+       `memHandles` and bump `nextHandle`.
+    3. Update `cap.owner` to `receiver`.
+
+    Note: caller might hold multiple handles to the same `cap`; we drop
+    them all to keep `HandleOwner` simple. The Rust engine in practice
+    enforces single-handle-per-cap-per-domain via fresh handle allocation. -/
+def send_apply (s : SpecState) (caller : DomId) (receiver : DomId)
+               (cap : MemCapId) : SpecState :=
+  let s₁ := s.updDomain caller (fun d =>
+    { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ cap) })
+  let s₂ := s₁.updDomain receiver (fun d =>
+    { d with memHandles := d.memHandles ++ [(d.nextHandle, cap)],
+             nextHandle := d.nextHandle + 1 })
+  let s₃ := s₂.updMem cap (fun c => { c with owner := receiver })
+  s₃
+
 /-! ### Step relation -/
 
 inductive step : SpecState → Action → SpecState → Prop
@@ -194,5 +231,8 @@ inductive step : SpecState → Action → SpecState → Prop
   | revoke {s : SpecState} {caller : DomId} {target : MemCapId}
     (guard : RevokeGuard s caller target) :
     step s (.revoke caller target) (revoke_apply s caller target)
+  | send {s : SpecState} {caller : DomId} {receiver : DomId} {cap : MemCapId}
+    (guard : SendGuard s caller receiver cap) :
+    step s (.send caller receiver cap) (send_apply s caller receiver cap)
 
 end ThemisCapa
