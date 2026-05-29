@@ -1926,5 +1926,26 @@ theorem accept_preserves_wellformed
                               d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
                     (fun _ => rfl)
 
+/-! ### Sealed send preserves WellFormed -/
+
+theorem sealedSend_preserves_wellformed
+    {s s' : SpecState} {caller receiver : DomId} {handle : LocalHandle}
+    {gpaHint : Option Nat}
+    (hwf : WellFormed s)
+    (hstep : step s (.sealedSend caller receiver handle gpaHint) s') :
+    WellFormed s' := by
+  cases hstep
+  unfold sealedSend_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupMemHandle handle)
+    with _ | capId
+  · exact hwf
+  · -- Step 1: freeze handle on caller.
+    have hwf₁ : WellFormed (s.updDomain caller
+        (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })) :=
+      wf_preserved_under_handle_invariant_updDomain hwf caller _ (fun _ => rfl)
+    -- Step 2: enqueue pending entry on receiver.
+    exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
+            (fun _ => rfl)
+
 end ThemisCapa
 

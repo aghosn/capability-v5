@@ -325,6 +325,71 @@ def reject_apply (s : SpecState) (receiver : DomId) (pendingId : PendingId)
       { d with frozenHandles :=
                 d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
 
+/-! ### Sealed send
+
+The sealed-send path mirrors the engine's `send_memory_sealed`: the cap
+is *not* transferred. Instead the sender's handle is frozen and a
+`PendingMemCap` entry is enqueued on the receiver. Receiver later calls
+`accept` (completes the transfer) or `reject` (rolls back).
+
+Only invariant-invisible fields (`frozenHandles`, `pendingMemCaps`,
+`nextPendingId`) are touched, so WF preservation falls out of the
+generic `wf_preserved_under_handle_invariant_updDomain` helper. -/
+
+/-- Preconditions for `sealedSend(caller, receiver, handle, gpaHint)`. -/
+structure SealedSendGuard (s : SpecState) (caller : DomId) (receiver : DomId)
+                          (handle : LocalHandle) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  receiverExists    : (s.getDom receiver).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canSend = true
+  receiverPermits   : ∀ rd, s.getDom receiver = some rd →
+                            rd.policy.api.canReceiveAfterSeal = true
+  /-- The local handle resolves to some memcap held by the caller. -/
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupMemHandle handle).isSome
+  /-- The resolved cap exists in the arena. -/
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ capId, d.lookupMemHandle handle = some capId →
+                            (s.getMem capId).isSome
+  /-- The caller actually owns the resolved cap. -/
+  callerOwnsCap     : ∀ d, s.getDom caller = some d →
+                            ∀ capId, d.lookupMemHandle handle = some capId →
+                            ∀ c, s.getMem capId = some c → c.owner = caller
+  /-- Send-to-self forbidden (matches `send_at`). -/
+  notSelf           : caller ≠ receiver
+  /-- META regions cannot be sent. -/
+  notMeta           : ∀ d, s.getDom caller = some d →
+                            ∀ capId, d.lookupMemHandle handle = some capId →
+                            ∀ c, s.getMem capId = some c →
+                            c.region.attributes.meta = false
+  /-- The handle is not already frozen (mirrors the engine's
+      `is_memory_handle_frozen` check). -/
+  notFrozen         : ∀ d, s.getDom caller = some d → handle ∉ d.frozenHandles
+
+/-- Pure state update for `sealedSend`.
+
+    1. Append `handle` to the caller's `frozenHandles`.
+    2. Append a fresh `(nextPendingId, PendingMemCap{..})` to the
+       receiver's `pendingMemCaps` and bump `nextPendingId`.
+
+    No memcap or handle ownership changes. Returns `s` unchanged when
+    handle resolution fails. -/
+def sealedSend_apply (s : SpecState) (caller receiver : DomId)
+                     (handle : LocalHandle) (gpaHint : Option Nat) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupMemHandle handle) with
+  | none       => s
+  | some capId =>
+    let s₁ := s.updDomain caller (fun d =>
+      { d with frozenHandles := d.frozenHandles ++ [handle] })
+    s₁.updDomain receiver (fun d =>
+      let pid := d.nextPendingId
+      let pe  : PendingMemCap :=
+        { capId := capId, senderDomainId := caller,
+          senderHandle := handle, gpaHint := gpaHint }
+      { d with pendingMemCaps := d.pendingMemCaps ++ [(pid, pe)],
+               nextPendingId  := pid + 1 })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -351,5 +416,10 @@ inductive step : SpecState → Action → SpecState → Prop
   | reject {s : SpecState} {receiver : DomId} {pendingId : PendingId}
     (guard : RejectGuard s receiver pendingId) :
     step s (.reject receiver pendingId) (reject_apply s receiver pendingId)
+  | sealedSend {s : SpecState} {caller : DomId} {receiver : DomId}
+               {handle : LocalHandle} {gpaHint : Option Nat}
+    (guard : SealedSendGuard s caller receiver handle) :
+    step s (.sealedSend caller receiver handle gpaHint)
+         (sealedSend_apply s caller receiver handle gpaHint)
 
 end ThemisCapa

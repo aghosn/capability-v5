@@ -46,6 +46,12 @@ inductive Action where
       Removes the pending entry and unfreezes the sender's handle.
       No transfer takes place. -/
   | reject (receiver : DomId) (pendingId : PendingId)
+  /-- `caller` sends memory handle `handle` to a sealed `receiver` via the
+      pending-queue path. The handle is frozen on the sender and a
+      `PendingMemCap` entry is appended to the receiver. No ownership
+      transfer happens until `accept`. -/
+  | sealedSend (caller : DomId) (receiver : DomId) (handle : LocalHandle)
+               (gpaHint : Option Nat)
   -- Future:
   -- | create …
   -- | switchFwd … | switchRet … | interrupt …
