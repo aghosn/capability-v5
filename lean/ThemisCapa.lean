@@ -17,3 +17,4 @@ import ThemisCapa.Invariants
 import ThemisCapa.Properties
 import ThemisCapa.Locality
 import ThemisCapa.Provenance
+import ThemisCapa.NonInterference
