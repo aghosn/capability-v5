@@ -1108,7 +1108,7 @@ fn decode_apic_write_value(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
 ) -> Option<u32> {
-    use crate::hypercall::{ept_gpa_to_hpa, guest_gva_to_gpa};
+    use crate::arch::x86_64::page_walk::{ept_gpa_to_hpa, guest_gva_to_gpa};
 
     let hhdm = platform.hhdm_offset();
     let guest_rip = vcpu.rip();

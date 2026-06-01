@@ -133,14 +133,7 @@ impl ArchVpOps for X86Platform {
     // ── Monitor-level operations ─────────────────────────────────────────── //
 
     fn dispatch_hypercall(&mut self, vp: &mut Self::VpHandle) {
-        if let Some(result) = crate::hypercall::handle_vmcall(vp) {
-            vp.set_reg(Reg::Rax, result.rax);
-            vp.set_reg(Reg::Rdi, result.rdi);
-            vp.set_reg(Reg::Rsi, result.rsi);
-            vp.set_reg(Reg::Rdx, result.rdx);
-            vp.next_rip();
-        }
-        // None → SWITCH swapped the VP handle in-place; no writeback needed.
+        crate::hypercall::handle_vmcall(vp);
     }
 
     fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32) {

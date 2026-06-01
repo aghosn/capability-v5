@@ -73,6 +73,10 @@ impl HypercallResult {
             val2: 0,
         }
     }
+
+    pub fn unimpl() -> Self {
+        Self::error(themis_abi::errors::ERR_UNIMPL)
+    }
 }
 
 // ── Semantic exit events ─────────────────────────────────────────────────── //

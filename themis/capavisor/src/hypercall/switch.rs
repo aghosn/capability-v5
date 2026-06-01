@@ -1,0 +1,672 @@
+//! VP-switching pipeline. Three triggers, one mechanism:
+//!
+//!   1. Explicit  — guest issues SWITCH VMCALL          → `do_switch`
+//!   2. Exit-driven — child raises exit dom0 must see   → `forward_child_exit`
+//!   3. Intr-driven — external interrupt to Deliver-policy handler
+//!                                                      → `forward_interrupt_to_handler`
+//!
+//! All three converge on `arch::vcpu_switch::swap_active_vp` (the
+//! VMCLEAR/VMPTRLD primitive) plus posted-interrupt drain helpers
+//! (`drain_pir_*`) for the destination VP.
+
+extern crate alloc;
+
+use core::sync::atomic::Ordering;
+
+use capability_engine::{
+    Capability, CapabilityRef, Domain, DomainId, InterruptVisibility, Platform,
+};
+use themis_abi::errors;
+
+use super::{map_error, write_reply, HypercallResult};
+use crate::arch::x86_64::apic::current_lapic_id;
+use crate::arch::x86_64::iommu_ir::sync_irte_ndst;
+use crate::arch::x86_64::pid::inject_via_pid;
+use crate::arch::x86_64::reg_apply::apply_pending_reg;
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
+use crate::arch::x86_64::vcpu_switch::swap_active_vp;
+use crate::arch::x86_64::vmexit::EXIT_REASON_EPT_VIOLATION;
+use crate::platform::ThemisPlatform;
+use crate::{serial_debug, serial_println};
+use crate::vcpu::{ActiveVcpu, Reg};
+
+
+// ── SWITCH (sync mode) ───────────────────────────────────────────────────── //
+
+/// SWITCH (0x0A): swap the current ActiveVcpu for a child domain's VP.
+///
+/// The monitor loop's `vcpu` is replaced: the parent is deactivated and
+/// stored in its VcpuSlot; the child is taken from its slot, activated,
+/// and becomes the new `vcpu`.  The next `vcpu.run()` in the monitor loop
+/// enters the child guest.
+///
+/// On success the active VP has been swapped; the caller (handle_vmcall)
+/// must NOT write a reply or advance RIP — the parent's RIP was already
+/// advanced past the SWITCH VMCALL in step 3 below before the swap, and
+/// the now-active child has its own register state.
+///
+/// On early error (before the swap), this function writes the error reply
+/// and advances the parent's RIP itself, then returns.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn do_switch(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    child_domain_handle: u64,
+    vp_id: u64,
+    vcpu: &mut ActiveVcpu,
+) {
+    use themis_abi::regs::VpRegister;
+
+    let vp_idx = vp_id as usize;
+
+    // ── 1a. Resolve child domain ID + COMM HPA (before Capability::switch) ──
+    // MUST happen before Capability::switch transitions the child VP to Running,
+    // because set_register (used to validate the dirty COMM page registers)
+    // rejects writes to a VP that is already in Running state.
+    let (_child_domain_id_pre, comm_hpa) = {
+        let c = caller.read();
+        let child_weak = match c.data.get_domain_capability(child_domain_handle) {
+            Some(w) => w.clone(),
+            None => {
+                write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
+                vcpu.next_rip();
+                return;
+            }
+        };
+        drop(c);
+        let child_ref = match child_weak.upgrade() {
+            Some(r) => r,
+            None => {
+                write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
+                vcpu.next_rip();
+                return;
+            }
+        };
+        let child_id = child_ref.read().data.id;
+        // Invariant: child is alive in the capa-engine (weak upgrade succeeded
+        // just above), so it must also be in the platform map. A miss = capa/
+        // platform desync, almost certainly a registration ordering bug.
+        let hpa = platform
+            .domain_arc(child_id)
+            .expect("[do_switch] child PlatformDomain missing (capa/platform desync)")
+            .lock()
+            .comm_hpas
+            .get(vp_idx)
+            .copied()
+            .unwrap_or(0);
+        (child_id, hpa)
+    };
+
+    // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
+    // Use VpCommView to encapsulate the unsafe page mapping; then capability-
+    // check each register (we cannot call set_register, which would re-mark
+    // the dirty bit and cause infinite replay).
+    let pending: alloc::vec::Vec<(VpRegister, u64)> = {
+        let hhdm = platform.hhdm_offset();
+        // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP and
+        // no other view is held on this code path.
+        match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            None => alloc::vec::Vec::new(),
+            Some(mut view) => view
+                .take_dirty()
+                .into_iter()
+                .filter(|(reg, _)| {
+                    Capability::check_register_write(
+                        caller,
+                        child_domain_handle,
+                        vp_id,
+                        *reg as u64,
+                        platform,
+                    )
+                    .is_ok()
+                })
+                .collect(),
+        }
+    };
+
+    // ── 2. Capability engine: forward switch (run-state transitions) ──
+    // Child VP transitions Available → Running here; must be after COMM read above.
+    let switch_ctx = match Capability::switch(caller, child_domain_handle, vp_id, platform) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            serial_debug!("[SWITCH] validation failed: {:?}", e);
+            write_reply(vcpu, HypercallResult::error(map_error(&e)));
+            vcpu.next_rip();
+            return;
+        }
+    };
+
+    let child_domain_id: DomainId = switch_ctx.to_domain;
+    let parent_domain_id: DomainId = switch_ctx.from_domain;
+    let parent_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
+
+    // ── 3. Advance parent RIP past SWITCH VMCALL (while parent VMCS is
+    //       still loaded and VMEXIT_INSTRUCTION_LEN is valid).
+    //
+    // Invariant: a VP stored in its VcpuSlot always has RIP positioned at
+    // the next instruction it should execute — never AT a VMCALL it has
+    // already taken.  No resume path needs to re-advance this RIP.
+    vcpu.next_rip();
+
+    // ── 4. Swap parent → child via the shared helper.
+    //       Cap-engine validated the transition, so the dst slot / domain
+    //       must exist; helper panics otherwise.
+    let current_lapic = current_lapic_id();
+    unsafe {
+        swap_active_vp(
+            vcpu,
+            platform,
+            (parent_domain_id, parent_vp_id),
+            (child_domain_id, vp_idx),
+            "SWITCH",
+        );
+    }
+
+    // ── 5. Sync IRTE.NDST so hardware-posted device interrupts for Deliver
+    //       vectors are routed to this core by the IOMMU.
+    {
+        let child_ref = caller
+            .read()
+            .data
+            .get_domain_capability(child_domain_handle)
+            .and_then(|w| w.upgrade());
+        if let Some(child_cap) = child_ref {
+            sync_irte_ndst(platform, &child_cap, current_lapic);
+        }
+    }
+
+    // ── 6. (VMX preemption timer is NOT reset here.) ──
+    // The timer counts down across child re-entries.  It is only
+    // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
+    // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
+
+    // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
+    // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs and A3), so the
+    // processor never auto-delivers from the PID — capavisor uses PIR as a
+    // software queue and drains it here under capability control.  Helper
+    // injects the LOWEST pending vector (device IRQs before timer) via the
+    // legacy VM-entry path and returns whether vectors remain.  Set the
+    // interrupt-window-exiting bit accordingly so we retry on the next
+    // IF=1 transition.
+    //
+    // Note: this also clears interrupt-window-exiting in the
+    // nothing-pending case; the old code skipped that branch, but it is
+    // safe (and arguably correct) to clear it whenever PIR is empty.
+    {
+        let remaining = drain_pir_inject_lowest(vcpu, platform);
+        vcpu.set_interrupt_window_exit(remaining);
+    }
+
+    // ── 8. Apply all pending COMM-page registers to the now-active child.
+    //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
+    for (reg, val) in &pending {
+        apply_pending_reg(vcpu, *reg, *val);
+    }
+
+    // ── 9. Interrupt return: if the target VP was Suspended (multi-hop
+    // interrupt unwind), deliver a synthetic SWITCH return result so the
+    // domain sees "my callee was preempted by interrupt V".
+    //
+    // Per the VcpuSlot RIP invariant (step 3 above), the target VP's saved
+    // RIP is already past its SWITCH VMCALL, so no RIP advance is needed
+    // here — only the result registers.
+    if let Some(vector) = switch_ctx.interrupt_return {
+        vcpu.set_reg(Reg::Rax, errors::SUCCESS);
+        vcpu.set_reg(Reg::Rdi, vector as u64);
+        vcpu.set_reg(Reg::Rsi, 0);
+        vcpu.set_reg(Reg::Rdx, 0);
+    }
+
+    // Active VP is now the child; handle_vmcall returns without writing a
+    // reply or advancing RIP. The monitor loop will call vcpu.run() on the
+    // child next.
+}
+
+// ── Child exit forwarding ────────────────────────────────────────────────── //
+
+/// Atomically drain the VP's posted-interrupt request (PIR) array, inject the
+/// lowest pending vector via legacy VM-entry injection, and put remaining
+/// vectors back for next time.  Returns `true` if any vectors remain in PIR
+/// after this call (so the caller can enable interrupt-window exiting).
+///
+/// The PIR is used purely as a software queue (see A3, A8): remote cores drop
+/// vectors via `inject_via_pid`, and the next SWITCH or interrupt-window exit
+/// drains them here under capability/policy control.  Lowest vector first so
+/// device IRQs are prioritised over the timer.
+///
+/// Skips injection if `vcpu` cannot accept an external interrupt
+/// (IF=0 or STI/MOV-SS blocking) — the snapshot is then OR'd back into PIR
+/// untouched so it can be retried on the next interrupt-window exit.
+///
+/// Returns `false` if the VP has no PID (legacy / non-posted setup).
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn drain_pir_inject_lowest(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+) -> bool {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    let pid_phys = vcpu.pid_phys();
+    if pid_phys == 0 {
+        return false;
+    }
+    let hhdm = platform.hhdm_offset();
+    let pir_base = (pid_phys + hhdm) as *const AtomicU64;
+
+    let mut pir_snapshot = [0u64; 4];
+    let mut any_set = false;
+    for i in 0..4 {
+        pir_snapshot[i] = unsafe { (*pir_base.add(i)).swap(0, Ordering::AcqRel) };
+        if pir_snapshot[i] != 0 {
+            any_set = true;
+        }
+    }
+
+    // Clear ON (Outstanding Notification).
+    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
+    unsafe { (*on_ptr).store(0, Ordering::Release) };
+
+    if !any_set {
+        return false;
+    }
+
+    if vcpu.guest_can_accept_external() {
+        // Find lowest pending vector (device-first).
+        for i in 0..4usize {
+            if pir_snapshot[i] != 0 {
+                let bit = pir_snapshot[i].trailing_zeros();
+                let vector = (i * 64 + bit as usize) as u8;
+                pir_snapshot[i] &= !(1u64 << bit);
+                vcpu.inject_external_vector(vector);
+                break;
+            }
+        }
+    }
+
+    // Put any remaining (or all, if IF blocked) vectors back in PIR.
+    let mut remaining = false;
+    for i in 0..4usize {
+        if pir_snapshot[i] != 0 {
+            remaining = true;
+            unsafe { (*pir_base.add(i)).fetch_or(pir_snapshot[i], Ordering::AcqRel) };
+        }
+    }
+    remaining
+}
+
+/// Called from `handle_vmexit` when the current domain is not dom0.
+///
+/// Called on EXIT_REASON_INTERRUPT_WINDOW (7): the guest's IF just became 1.
+/// Drain PIR, inject lowest pending vector, and manage the interrupt-window
+/// exiting bit based on whether vectors remain.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn drain_pir_on_interrupt_window(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+) {
+    let remaining = drain_pir_inject_lowest(vcpu, platform);
+    vcpu.set_interrupt_window_exit(remaining);
+}
+
+/// Forward a child-domain VM exit to its parent (dom0).
+///
+/// Reads the child's interrupt policy for this exit reason to determine
+/// which registers to copy back to the child's COMM page (so the parent
+/// can read them).  Then swaps back to the parent — to the parent this
+/// looks like a normal return from the SWITCH VMCALL with the exit reason
+/// in rdi.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
+    use themis_abi::regs::{InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT};
+    use x86::vmx::vmcs;
+
+    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null());
+    let platform = unsafe { &*platform_ptr };
+
+    let core_id = platform
+        .get_current_core()
+        .expect("[CHILD_EXIT] get_current_core failed");
+
+    // Get child's cap BEFORE the return switch (core is still assigned to child).
+    let child_cap = platform
+        .get_core_cap(core_id as usize)
+        .expect("[CHILD_EXIT] get_core_cap failed");
+
+    // Look up the exit policy for the forwarded exit reason.
+    let read_set = {
+        let c = child_cap.read();
+        let action = c.data.policy.exits.get_action(exit_reason);
+        action.read_set
+    };
+
+    // ── Capa engine: return switch (child → parent) ──
+    // Records exit_reason in the child VP's Available state so that the resume
+    // path (register_access_check) uses the correct ExitPolicy write_set.
+    let return_ctx = Capability::switch_return_with_exit(&child_cap, exit_reason, platform)
+        .expect("[CHILD_EXIT] return switch failed");
+
+    let child_domain_id = return_ctx.from_domain;
+    let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
+    let parent_domain_id = return_ctx.to_domain;
+    let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
+
+    // ── Copy reported registers + intercept message to child's COMM page ──
+    let child_arc = platform
+        .domain_arc(child_domain_id)
+        .expect("[CHILD_EXIT] child PlatformDomain not found");
+    let comm_hpa = child_arc
+        .lock()
+        .comm_hpas
+        .get(child_vp_id)
+        .copied()
+        .unwrap_or(0);
+
+    let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
+    if comm_hpa != 0 {
+        let hhdm = platform.hhdm_offset();
+        // SAFETY: comm_hpa was registered for this child VP via THHV_CREATE_VP
+        // and no other VpCommView is held on this code path.
+        let mut view = match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            Some(v) => v,
+            None => unreachable!("comm_hpa != 0 already checked"),
+        };
+
+        // Copy read_set-selected register values into the COMM page.
+        view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
+
+        // Build the slim intercept message at offset 512.
+        // Register values stay in the COMM page register area (gated by read_set);
+        // thhv reads them from there per exit_reason.
+        let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+        let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
+        let guest_phys = vcpu
+            .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
+            .unwrap_or(0);
+
+        // For I/O instruction exits (exit reason 30), extract port/size/direction
+        // from the exit qualification via the typed decoder.
+        const IO_EXIT_REASON: u32 = 30;
+        let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
+            let info = crate::arch::x86_64::vmexit_decode::ExitQualification(exit_qual).io();
+            (
+                info.port_or_dx(vcpu),
+                info.size,
+                if info.is_write { 1u8 } else { 0u8 },
+            )
+        } else {
+            (0u16, 0u8, 0u8)
+        };
+
+        let mut msg = InterceptMessage {
+            header: ThemicMessageHeader {
+                message_type: THEMIC_MSG_VP_INTERCEPT,
+                payload_size: (core::mem::size_of::<InterceptMessage>()
+                    - core::mem::size_of::<ThemicMessageHeader>())
+                    as u32,
+                sequence: 0,
+            },
+            exit_reason,
+            instruction_length: instr_len,
+            exit_qualification: exit_qual,
+            guest_physical_address: guest_phys,
+            port_number: io_port,
+            access_size: io_size,
+            is_write: io_is_write,
+            ..InterceptMessage::default()
+        };
+
+        // ── MMIO instruction decode for EPT violations ──
+        // For EPT violations, supply the raw instruction bytes so CHV's
+        // iced-x86 emulator can decode and emulate the faulting instruction.
+        if exit_reason == EXIT_REASON_EPT_VIOLATION {
+            let guest_rip = vcpu.rip();
+            let ept_root = {
+                let cd = child_arc.lock();
+                cd.arch.ept().map(|e| e.root_phys())
+            };
+            if let Some(ept_root) = ept_root {
+                let guest_cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
+                if let Some(insn_gpa) = crate::arch::x86_64::page_walk::guest_gva_to_gpa(ept_root, hhdm, guest_cr3, guest_rip) {
+                    if let Some(insn_hpa) = crate::arch::x86_64::page_walk::ept_gpa_to_hpa(ept_root, hhdm, insn_gpa) {
+                        let insn_ptr = (insn_hpa + hhdm) as *const u8;
+                        let mut insn_bytes = [0u8; 16];
+                        // Read up to 16 bytes (safe: kernel .text is always resident)
+                        let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                insn_ptr,
+                                insn_bytes.as_mut_ptr(),
+                                avail,
+                            );
+                        }
+                        msg.instruction_bytes = insn_bytes;
+                        // Instruction decode + RIP advancement is handled by
+                        // CHV's iced-x86 emulator (P16.6i).  We only need to
+                        // supply the raw instruction bytes above.
+                    } else {
+                        serial_println!("[MMIO-DECODE] EPT fail GPA {:#x}", insn_gpa);
+                    }
+                } else {
+                    serial_println!("[MMIO-DECODE] GVA fail RIP {:#x}", guest_rip);
+                }
+            }
+        }
+
+        view.write_intercept(&msg);
+    }
+
+    // Advance the child's RIP past the faulting instruction while the
+    // child VMCS is still loaded.
+    //
+    // EPT violations are handled differently: CHV's iced-x86 emulator
+    // decodes the instruction, emulates it, and advances RIP itself.
+    // We must NOT advance RIP here for EPT violations.
+    if !is_ept_violation {
+        vcpu.next_rip();
+    }
+
+    // ── Swap child → parent via the shared helper. ──
+    // Cap-engine validated the return switch, so dst slot/domain must exist;
+    // helper panics otherwise.
+    unsafe {
+        swap_active_vp(
+            vcpu,
+            platform,
+            (child_domain_id, child_vp_id),
+            (parent_domain_id, parent_vp_id),
+            "CHILD_EXIT",
+        );
+    }
+    // IRTE.NDST sync is not needed here: the parent (dom0) uses remapped IRTEs
+    // (not posted), so its interrupts are not routed via posted-interrupt NDST.
+
+    // To the parent, this is a return from SWITCH VMCALL.
+    // RAX = SUCCESS, RDI = exit_reason.
+    vcpu.set_reg(Reg::Rax, errors::SUCCESS);
+    vcpu.set_reg(Reg::Rdi, exit_reason as u64);
+    vcpu.set_reg(Reg::Rsi, 0);
+    vcpu.set_reg(Reg::Rdx, 0);
+
+    // NB: parent RIP was advanced past the SWITCH VMCALL in `do_switch`
+    // before VMCLEAR-ing the parent VMCS (while VMEXIT_INSTRUCTION_LEN was
+    // still valid for that exit). No RIP fix-up is needed here.
+
+    // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
+    // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
+    // Injecting here (rather than in do_switch with a stale VMCS) avoids
+    // RCU stalls under nested virtualisation.
+    #[cfg(feature = "quantum-sched")]
+    {
+        if let Some(vec) = platform.take_deferred(core_id as usize) {
+            // Check that parent can accept an external interrupt injection.
+            // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
+            if vcpu.guest_can_accept_external() {
+                vcpu.inject_external_vector(vec as u8);
+            }
+            // If IF=0 or blocking, silently drop — dom0 gets its own timers anyway.
+        }
+    }
+}
+
+
+// ── Interrupt forwarding ─────────────────────────────────────────────────── //
+/// child domain VP is running on this core.
+///
+/// Routes the interrupt to the handler (Deliver-policy ancestor, which in Phase 1
+/// is always dom0) using the lazy-unwind model:
+///
+/// 1. `deliver_interrupt_vp`: transitions child VP → Available, dom0 VP → Running.
+/// 2. VMCLEAR child → store InactiveVcpu in child's VcpuSlot.
+/// 3. Take dom0's InactiveVcpu from dom0's VcpuSlot → VMPTRLD dom0.
+/// 4. Set `VMENTRY_INTERRUPTION_INFO_FIELD` = external interrupt V (type=0, valid).
+/// 5. Dom0 RIP is left unchanged (stays AT the SWITCH VMCALL, since `do_switch`
+///    does not advance RIP before storing dom0 to its slot).  After the interrupt
+///    fires and `iret` returns, dom0 re-executes SWITCH → finds child VP Available
+///    → VMLAUNCH resumes child from its saved VMCS state.
+///
+/// Routing uses `InterruptPolicy`: if the running child domain has `Deliver`
+/// visibility for this vector, the interrupt is injected directly into the child
+/// (it owns the vector).  Otherwise (Report/NotReport) the interrupt is forwarded
+/// to dom0 via lazy-unwind.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
+    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null());
+    let platform = unsafe { &*platform_ptr };
+
+    let core_id = platform
+        .get_current_core()
+        .expect("[INTR_FWD] get_current_core failed") as u64;
+
+    // Currently-running domain cap (the child that was interrupted).
+    let child_cap = platform
+        .get_core_cap(core_id as usize)
+        .expect("[INTR_FWD] get_core_cap failed");
+
+    // Consult the child's interrupt policy for this vector.
+    let child_visibility = child_cap
+        .read()
+        .data
+        .policy
+        .interrupts
+        .get_policy(vector)
+        .visibility;
+
+    // Diagnostic: log first 20 + every 500th call to trace interrupt routing.
+    {
+        use core::sync::atomic::{AtomicU64, Ordering as O};
+        static FWD_COUNT: AtomicU64 = AtomicU64::new(0);
+        let n = FWD_COUNT.fetch_add(1, O::Relaxed);
+        if n < 20 || n % 500 == 0 {
+            serial_rtdbg!(
+                "[INTR_FWD] #{} vec={:#x} vis={:?} core={}",
+                n,
+                vector,
+                child_visibility,
+                core_id
+            );
+        }
+    }
+
+    serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
+    if child_visibility == InterruptVisibility::Deliver {
+        // Child owns this vector — inject directly without context switch.
+        if vcpu.posted_interrupts_enabled() {
+            let pid_phys = vcpu.pid_phys();
+            let hhdm = platform.hhdm_offset();
+            unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+            return;
+        } else {
+            vcpu.inject_external_vector(vector as u8);
+            return;
+        }
+    }
+
+    // Route via SwitchManager (A9): walk domain hierarchy per InterruptPolicy.
+    let handler_domain_id = match platform.route_interrupt(vector, &child_cap, core_id) {
+        Ok((id, _reported)) => {
+            serial_rtdbg!("[INTR_FWD] route vec={} → handler_dom={}", vector, id);
+            id
+        }
+        Err(_e) => {
+            serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, _e);
+            vcpu.inject_external_vector(vector as u8);
+            return;
+        }
+    };
+
+    // Look up the interrupt policy read_set for register filtering.
+    let read_set = child_cap
+        .read()
+        .data
+        .policy
+        .interrupts
+        .get_policy(vector)
+        .read_set;
+
+    // Lazy-unwind: child VP → Interrupted, handler VP → Running.
+    let intr_ctx = match Capability::deliver_interrupt_vp(
+        &child_cap,
+        handler_domain_id,
+        core_id,
+        vector,
+        platform,
+    ) {
+        Ok(ctx) => ctx,
+        Err(_e) => {
+            serial_debug!(
+                "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",
+                _e
+            );
+            vcpu.inject_external_vector(vector as u8);
+            return;
+        }
+    };
+
+    // Copy child registers allowed by InterruptPolicy.read_set into comm page.
+    let child_arc = platform
+        .domain_arc(intr_ctx.interrupted_domain_id)
+        .expect("[INTR_FWD] child domain not found");
+    {
+        let comm_hpa = child_arc
+            .lock()
+            .comm_hpas
+            .get(intr_ctx.interrupted_vp_id as usize)
+            .copied()
+            .unwrap_or(0);
+        let hhdm = platform.hhdm_offset();
+        // SAFETY: comm_hpa registered for this child VP; no concurrent view.
+        if let Some(mut view) = unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
+            view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
+        }
+    }
+
+    // ── Swap child → handler via the shared helper. ──
+    // Cap-engine's deliver_interrupt_vp transitioned the handler to Running,
+    // so dst slot/domain must exist; helper panics otherwise.
+    unsafe {
+        swap_active_vp(
+            vcpu,
+            platform,
+            (intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id as usize),
+            (intr_ctx.handler_domain_id, intr_ctx.handler_vp_id as usize),
+            "INTR_FWD",
+        );
+    }
+
+    // Inject the interrupt via VM-entry event injection.
+    // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
+    // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
+    if vcpu.guest_can_accept_external() {
+        vcpu.inject_external_vector(vector as u8);
+    }
+
+    // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
+    // Per the VcpuSlot RIP invariant (see do_switch step 4), the handler's
+    // saved RIP is already past its SWITCH VMCALL — no advance needed here.
+    vcpu.set_reg(Reg::Rax, errors::ERR_RETRY);
+    vcpu.set_reg(Reg::Rdi, vector as u64);
+    vcpu.set_reg(Reg::Rsi, 0);
+    vcpu.set_reg(Reg::Rdx, 0);
+}
