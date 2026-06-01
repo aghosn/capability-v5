@@ -433,6 +433,78 @@ def create_apply (s : SpecState) (caller : DomId)
              nextHandle   := d.nextHandle + 1,
              childrenDoms := d.childrenDoms ++ [newDomId] })
 
+/-! ### RevokeDomain (leaf-only)
+
+Slice scope: leaf domain revocation only. The Rust `revoke_domain`
+deletes a whole subtree recursively; the spec version requires the
+target to have no children, no held memcaps, and no held domcaps,
+so the proof reduces to removing one domain + one dom-cap and
+patching the caller's `domHandles` / `childrenDoms`. Full subtree
+revocation is future work.
+
+Target must differ from caller (you can't revoke yourself through
+this op). -/
+
+/-- Preconditions for `revokeDomain(caller, handle)`. -/
+structure RevokeDomainGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canRevoke = true
+  /-- The local handle resolves to some dom-cap held by the caller. -/
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupDomHandle handle).isSome
+  /-- The resolved dom-cap exists in the arena. -/
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            (s.getDomCap dcId).isSome
+  /-- Caller owns the resolved dom-cap. -/
+  capOwnedByCaller  : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
+  /-- The target domain (referenced by the dom-cap) exists. -/
+  targetExists      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            (s.getDom dc.targetDom).isSome
+  /-- You cannot revoke yourself. -/
+  notSelf           : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            dc.targetDom ≠ caller
+  /-- Slice restriction: target is a leaf with no held caps. -/
+  targetIsLeaf      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            ∀ t, s.getDom dc.targetDom = some t →
+                            t.childrenDoms = [] ∧ t.memHandles = [] ∧
+                            t.domHandles = []
+
+/-- Pure state update for a successful leaf `revokeDomain`.
+
+    1. Remove the target domain from the `domains` arena.
+    2. Remove the dom-cap from the `domcaps` arena.
+    3. Strip every handle to the dom-cap from caller's `domHandles`
+       and strip the target id from caller's `childrenDoms`. -/
+def revokeDomain_apply (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    : SpecState :=
+  match s.getDom caller with
+  | none   => s
+  | some d =>
+    match d.lookupDomHandle handle with
+    | none      => s
+    | some dcId =>
+      match s.getDomCap dcId with
+      | none    => s
+      | some dc =>
+        let target := dc.targetDom
+        let s₁ : SpecState :=
+          { s with domains := s.domains.remove target,
+                   domcaps := s.domcaps.remove dcId }
+        s₁.updDomain caller (fun d =>
+          { d with domHandles   := d.domHandles.filter (fun h => h.2 ≠ dcId),
+                   childrenDoms := d.childrenDoms.filter (· ≠ target) })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -467,5 +539,8 @@ inductive step : SpecState → Action → SpecState → Prop
   | create {s : SpecState} {caller : DomId} {policy : DomainPolicy}
     (guard : CreateGuard s caller policy) :
     step s (.create caller policy) (create_apply s caller policy)
+  | revokeDomain {s : SpecState} {caller : DomId} {handle : LocalHandle}
+    (guard : RevokeDomainGuard s caller handle) :
+    step s (.revokeDomain caller handle) (revokeDomain_apply s caller handle)
 
 end ThemisCapa

@@ -2239,5 +2239,193 @@ theorem create_preserves_wellformed
     · exact Nat.lt_succ_self _
     · exact Nat.lt_succ_of_lt (hwf.freshDomCapCounter id hid)
 
+/-! ### RevokeDomain preserves WellFormed
+
+Leaf-only domain revocation. Removes the target domain and the
+dom-cap, plus strips the handle and `childrenDoms` entry on caller.
+Memcaps are entirely untouched, so the seven memcap-side invariants
+reduce to their pre-state via `getMem` equality. The interesting
+sub-goals are:
+
+* `unique.domains` / `unique.domcaps`: `Arena.remove` preserves
+  uniqueness; `update` on top of `remove` likewise.
+* `freshDomCounter` / `freshDomCapCounter`: removing a key only
+  shrinks the key set; counters unchanged.
+
+`handleInArena` and `handleOwner` reduce by case-split on `did`:
+the target case is impossible (its `getDom` is now `none`), the
+caller case uses the fact that the caller update doesn't touch
+`memHandles`, and the default case is the pre-state. -/
+
+theorem revokeDomain_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {handle : LocalHandle}
+    (hwf : WellFormed s)
+    (hstep : step s (.revokeDomain caller handle) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  obtain ⟨dcaller, hdcaller⟩ := Option.isSome_iff_exists.mp guard.callerExists
+  obtain ⟨dcId, hdcId⟩ :=
+    Option.isSome_iff_exists.mp (guard.handleResolves dcaller hdcaller)
+  obtain ⟨dc, hdc⟩ :=
+    Option.isSome_iff_exists.mp (guard.capExists dcaller hdcaller dcId hdcId)
+  have hTNeC : dc.targetDom ≠ caller :=
+    guard.notSelf dcaller hdcaller dcId hdcId dc hdc
+  -- Memcaps and counters untouched.
+  have hMemEq : ∀ id, (revokeDomain_apply s caller handle).getMem id = s.getMem id := by
+    intro id
+    show ((revokeDomain_apply s caller handle).memcaps).find? id = _
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+    rfl
+  have hNextMem :
+      (revokeDomain_apply s caller handle).nextMemCapId = s.nextMemCapId := by
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+  have hNextDom :
+      (revokeDomain_apply s caller handle).nextDomId = s.nextDomId := by
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+  have hNextDomCap :
+      (revokeDomain_apply s caller handle).nextDomCapId = s.nextDomCapId := by
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+  -- 3-way characterization of `getDom`.
+  have hDomEq : ∀ id, (revokeDomain_apply s caller handle).getDom id =
+      (if id = dc.targetDom then none
+       else if id = caller then
+         (s.getDom id).map (fun d =>
+           { d with domHandles   := d.domHandles.filter (fun h => h.2 ≠ dcId),
+                    childrenDoms := d.childrenDoms.filter (· ≠ dc.targetDom) })
+       else s.getDom id) := by
+    intro id
+    show ((revokeDomain_apply s caller handle).domains).find? id = _
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+    by_cases h1 : id = dc.targetDom
+    · rw [h1, Arena.find?_update_other _ caller dc.targetDom _ hTNeC,
+          Arena.find?_remove_same, if_pos rfl]
+    · by_cases h2 : id = caller
+      · subst h2
+        rw [Arena.find?_update_eq_map]
+        have : (s.domains.remove dc.targetDom).find? id =
+               s.getDom id :=
+          Arena.find?_remove_other _ _ _ h1
+        rw [this, if_neg h1, if_pos rfl]
+      · rw [Arena.find?_update_other _ caller id _ h2,
+            Arena.find?_remove_other _ dc.targetDom id h1,
+            if_neg h1, if_neg h2]
+        rfl
+  -- 2-way characterization of `getDomCap`.
+  have hDomCapEq : ∀ id, (revokeDomain_apply s caller handle).getDomCap id =
+      (if id = dcId then none else s.getDomCap id) := by
+    intro id
+    show ((revokeDomain_apply s caller handle).domcaps).find? id = _
+    simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+    by_cases h : id = dcId
+    · rw [h, Arena.find?_remove_same, if_pos rfl]
+    · rw [Arena.find?_remove_other _ _ _ h, if_neg h]
+      rfl
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((revokeDomain_apply s caller handle).memcaps).UniqueKeys
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+      exact hwf.unique.memcaps
+    case dc =>
+      show ((revokeDomain_apply s caller handle).domcaps).UniqueKeys
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+      exact Arena.remove_unique_keys _ _ hwf.unique.domcaps
+    case ds =>
+      show ((revokeDomain_apply s caller handle).domains).UniqueKeys
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+      exact Arena.update_unique_keys _ _ _
+        (Arena.remove_unique_keys _ _ hwf.unique.domains)
+  case refs =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c hc pid hcpar
+      rw [hMemEq] at hc; rw [hMemEq]
+      exact hwf.refs.parentInArena id c hc pid hcpar
+    case cia =>
+      intro id c hc cid hcid
+      rw [hMemEq] at hc; rw [hMemEq]
+      exact hwf.refs.childInArena id c hc cid hcid
+    case hia =>
+      intro did d hd p hp
+      rw [hMemEq]
+      rw [hDomEq] at hd
+      by_cases h1 : did = dc.targetDom
+      · rw [if_pos h1] at hd; cases hd
+      · rw [if_neg h1] at hd
+        by_cases h2 : did = caller
+        · subst h2
+          rw [if_pos rfl, hdcaller] at hd
+          have hdEq : d.memHandles = dcaller.memHandles := by
+            have hd' : d = { dcaller with
+                domHandles   := dcaller.domHandles.filter (fun h => h.2 ≠ dcId),
+                childrenDoms := dcaller.childrenDoms.filter
+                                  (· ≠ dc.targetDom) } := by
+              injection hd with h; exact h.symm
+            rw [hd']
+          rw [hdEq] at hp
+          exact hwf.refs.handleInArena did dcaller hdcaller p hp
+        · rw [if_neg h2] at hd
+          exact hwf.refs.handleInArena did d hd p hp
+  case cdtMono =>
+    intro id c hc cid hcid ch hch
+    rw [hMemEq] at hc hch
+    exact hwf.cdtMonotonic id c hc cid hcid ch hch
+  case cdtBidi =>
+    intro id c hc cid hcid ch hch
+    rw [hMemEq] at hc hch
+    exact hwf.cdtBidirectional id c hc cid hcid ch hch
+  case fresh =>
+    intro id hid
+    rw [hNextMem]
+    have heqKeys :
+        ((revokeDomain_apply s caller handle).memcaps).keys = s.memcaps.keys := by
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+    rw [heqKeys] at hid
+    exact hwf.freshMemCounter id hid
+  case ho =>
+    intro did d hd p hp
+    rw [hMemEq]
+    rw [hDomEq] at hd
+    by_cases h1 : did = dc.targetDom
+    · rw [if_pos h1] at hd; cases hd
+    · rw [if_neg h1] at hd
+      by_cases h2 : did = caller
+      · subst h2
+        rw [if_pos rfl, hdcaller] at hd
+        have hdEq : d.memHandles = dcaller.memHandles := by
+          have hd' : d = { dcaller with
+              domHandles   := dcaller.domHandles.filter (fun h => h.2 ≠ dcId),
+              childrenDoms := dcaller.childrenDoms.filter
+                                (· ≠ dc.targetDom) } := by
+            injection hd with h; exact h.symm
+          rw [hd']
+        rw [hdEq] at hp
+        exact hwf.handleOwner did dcaller hdcaller p hp
+      · rw [if_neg h2] at hd
+        exact hwf.handleOwner did d hd p hp
+  case pca =>
+    intro id c hc pid hcpar pp hpp
+    rw [hMemEq] at hc hpp
+    exact hwf.parentChild id c hc pid hcpar pp hpp
+  case fDom =>
+    intro id hid
+    rw [hNextDom]
+    have hKeys : ((revokeDomain_apply s caller handle).domains).keys =
+                  (s.domains.remove dc.targetDom).keys := by
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain,
+                 Arena.keys_update]
+    rw [hKeys, Arena.mem_keys_remove_iff] at hid
+    exact hwf.freshDomCounter id hid.2
+  case fDomCap =>
+    intro id hid
+    rw [hNextDomCap]
+    have hKeys : ((revokeDomain_apply s caller handle).domcaps).keys =
+                  (s.domcaps.remove dcId).keys := by
+      simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
+    rw [hKeys, Arena.mem_keys_remove_iff] at hid
+    exact hwf.freshDomCapCounter id hid.2
+
 end ThemisCapa
 

@@ -55,6 +55,13 @@ inductive Action where
       fresh handle to that dom-cap on caller's `domHandles`. Caller's
       `childrenDoms` is updated to include the new domain. -/
   | create (caller : DomId) (policy : DomainPolicy)
+  /-- `caller` revokes a child domain referenced by `handle` (a
+      `LocalHandle` into caller's `domHandles`). Slice scope: the
+      target must be a **leaf** domain — no children, no held memory
+      capabilities, no held domain capabilities. Full subtree
+      revocation is future work (analogous to memcap `revoke`).
+      Target must not be the caller. -/
+  | revokeDomain (caller : DomId) (handle : LocalHandle)
   -- Future:
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr
