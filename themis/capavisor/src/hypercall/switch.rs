@@ -33,25 +33,30 @@ use crate::vcpu::{ActiveVcpu, Reg};
 
 // ── SWITCH (sync mode) ───────────────────────────────────────────────────── //
 
-/// SWITCH (0x0A): swap the current ActiveVcpu for a child domain's VP.
+/// SWITCH (0x0A): swap the current ActiveVcpu for the target (callee) VP.
 ///
-/// The monitor loop's `vcpu` is replaced: the parent is deactivated and
-/// stored in its VcpuSlot; the child is taken from its slot, activated,
-/// and becomes the new `vcpu`.  The next `vcpu.run()` in the monitor loop
-/// enters the child guest.
+/// SWITCH is symmetric — the target may be a child (descent into a
+/// subdomain), a parent (return from a child), or any other domain the
+/// caller holds a capability to. The capa-engine validates the transition;
+/// this function performs the platform-level swap.
 ///
-/// On success the active VP has been swapped; the caller (handle_vmcall)
-/// must NOT write a reply or advance RIP — the parent's RIP was already
-/// advanced past the SWITCH VMCALL in step 3 below before the swap, and
-/// the now-active child has its own register state.
+/// The monitor loop's `vcpu` is replaced: the caller (`from`) is deactivated
+/// and stored in its VcpuSlot; the target (`to`) is taken from its slot,
+/// activated, and becomes the new `vcpu`. The next `vcpu.run()` in the
+/// monitor loop enters the target guest.
+///
+/// On success the active VP has been swapped; the dispatcher
+/// (`handle_vmcall`) must NOT write a reply or advance RIP — the caller's
+/// RIP was already advanced past the SWITCH VMCALL in step 3 below before
+/// the swap, and the now-active target has its own register state.
 ///
 /// On early error (before the swap), this function writes the error reply
-/// and advances the parent's RIP itself, then returns.
+/// and advances the caller's RIP itself, then returns.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn do_switch(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
-    child_domain_handle: u64,
+    to_domain_handle: u64,
     vp_id: u64,
     vcpu: &mut ActiveVcpu,
 ) {
@@ -59,13 +64,13 @@ pub(super) fn do_switch(
 
     let vp_idx = vp_id as usize;
 
-    // ── 1a. Resolve child domain ID + COMM HPA (before Capability::switch) ──
-    // MUST happen before Capability::switch transitions the child VP to Running,
+    // ── 1a. Resolve target domain ID + COMM HPA (before Capability::switch) ──
+    // MUST happen before Capability::switch transitions the target VP to Running,
     // because set_register (used to validate the dirty COMM page registers)
     // rejects writes to a VP that is already in Running state.
-    let (_child_domain_id_pre, comm_hpa) = {
+    let (_to_domain_id_pre, comm_hpa) = {
         let c = caller.read();
-        let child_weak = match c.data.get_domain_capability(child_domain_handle) {
+        let to_weak = match c.data.get_domain_capability(to_domain_handle) {
             Some(w) => w.clone(),
             None => {
                 write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
@@ -74,7 +79,7 @@ pub(super) fn do_switch(
             }
         };
         drop(c);
-        let child_ref = match child_weak.upgrade() {
+        let to_ref = match to_weak.upgrade() {
             Some(r) => r,
             None => {
                 write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
@@ -82,22 +87,22 @@ pub(super) fn do_switch(
                 return;
             }
         };
-        let child_id = child_ref.read().data.id;
-        // Invariant: child is alive in the capa-engine (weak upgrade succeeded
+        let to_id = to_ref.read().data.id;
+        // Invariant: target is alive in the capa-engine (weak upgrade succeeded
         // just above), so it must also be in the platform map. A miss = capa/
         // platform desync, almost certainly a registration ordering bug.
         let hpa = platform
-            .domain_arc(child_id)
-            .expect("[do_switch] child PlatformDomain missing (capa/platform desync)")
+            .domain_arc(to_id)
+            .expect("[do_switch] target PlatformDomain missing (capa/platform desync)")
             .lock()
             .comm_hpas
             .get(vp_idx)
             .copied()
             .unwrap_or(0);
-        (child_id, hpa)
+        (to_id, hpa)
     };
 
-    // ── 1b. Snapshot COMM page dirty registers while child VP is Available ──
+    // ── 1b. Snapshot COMM page dirty registers while target VP is Available ──
     // Use VpCommView to encapsulate the unsafe page mapping; then capability-
     // check each register (we cannot call set_register, which would re-mark
     // the dirty bit and cause infinite replay).
@@ -113,7 +118,7 @@ pub(super) fn do_switch(
                 .filter(|(reg, _)| {
                     Capability::check_register_write(
                         caller,
-                        child_domain_handle,
+                        to_domain_handle,
                         vp_id,
                         *reg as u64,
                         platform,
@@ -125,8 +130,8 @@ pub(super) fn do_switch(
     };
 
     // ── 2. Capability engine: forward switch (run-state transitions) ──
-    // Child VP transitions Available → Running here; must be after COMM read above.
-    let switch_ctx = match Capability::switch(caller, child_domain_handle, vp_id, platform) {
+    // Target VP transitions Available → Running here; must be after COMM read above.
+    let switch_ctx = match Capability::switch(caller, to_domain_handle, vp_id, platform) {
         Ok(ctx) => ctx,
         Err(e) => {
             serial_debug!("[SWITCH] validation failed: {:?}", e);
@@ -136,19 +141,19 @@ pub(super) fn do_switch(
         }
     };
 
-    let child_domain_id: DomainId = switch_ctx.to_domain;
-    let parent_domain_id: DomainId = switch_ctx.from_domain;
-    let parent_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
+    let to_domain_id: DomainId = switch_ctx.to_domain;
+    let from_domain_id: DomainId = switch_ctx.from_domain;
+    let from_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
 
-    // ── 3. Advance parent RIP past SWITCH VMCALL (while parent VMCS is
-    //       still loaded and VMEXIT_INSTRUCTION_LEN is valid).
+    // ── 3. Advance caller (from-VP) RIP past SWITCH VMCALL (while its VMCS
+    //       is still loaded and VMEXIT_INSTRUCTION_LEN is valid).
     //
     // Invariant: a VP stored in its VcpuSlot always has RIP positioned at
     // the next instruction it should execute — never AT a VMCALL it has
     // already taken.  No resume path needs to re-advance this RIP.
     vcpu.next_rip();
 
-    // ── 4. Swap parent → child via the shared helper.
+    // ── 4. Swap from → to via the shared helper.
     //       Cap-engine validated the transition, so the dst slot / domain
     //       must exist; helper panics otherwise.
     let current_lapic = current_lapic_id();
@@ -156,8 +161,8 @@ pub(super) fn do_switch(
         swap_active_vp(
             vcpu,
             platform,
-            (parent_domain_id, parent_vp_id),
-            (child_domain_id, vp_idx),
+            (from_domain_id, from_vp_id),
+            (to_domain_id, vp_idx),
             "SWITCH",
         );
     }
@@ -165,18 +170,18 @@ pub(super) fn do_switch(
     // ── 5. Sync IRTE.NDST so hardware-posted device interrupts for Deliver
     //       vectors are routed to this core by the IOMMU.
     {
-        let child_ref = caller
+        let to_ref = caller
             .read()
             .data
-            .get_domain_capability(child_domain_handle)
+            .get_domain_capability(to_domain_handle)
             .and_then(|w| w.upgrade());
-        if let Some(child_cap) = child_ref {
-            sync_irte_ndst(platform, &child_cap, current_lapic);
+        if let Some(to_cap) = to_ref {
+            sync_irte_ndst(platform, &to_cap, current_lapic);
         }
     }
 
     // ── 6. (VMX preemption timer is NOT reset here.) ──
-    // The timer counts down across child re-entries.  It is only
+    // The timer counts down across target re-entries.  It is only
     // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
     // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
 
@@ -197,7 +202,7 @@ pub(super) fn do_switch(
         vcpu.set_interrupt_window_exit(remaining);
     }
 
-    // ── 8. Apply all pending COMM-page registers to the now-active child.
+    // ── 8. Apply all pending COMM-page registers to the now-active target.
     //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
     for (reg, val) in &pending {
         apply_pending_reg(vcpu, *reg, *val);
@@ -217,7 +222,7 @@ pub(super) fn do_switch(
         vcpu.set_reg(Reg::Rdx, 0);
     }
 
-    // Active VP is now the child; handle_vmcall returns without writing a
+    // Active VP is now the target; handle_vmcall returns without writing a
     // reply or advancing RIP. The monitor loop will call vcpu.run() on the
     // child next.
 }
@@ -488,9 +493,10 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     vcpu.set_reg(Reg::Rsi, 0);
     vcpu.set_reg(Reg::Rdx, 0);
 
-    // NB: parent RIP was advanced past the SWITCH VMCALL in `do_switch`
-    // before VMCLEAR-ing the parent VMCS (while VMEXIT_INSTRUCTION_LEN was
-    // still valid for that exit). No RIP fix-up is needed here.
+    // NB: the parent's RIP was advanced past the SWITCH VMCALL in `do_switch`
+    // (step 3, then known as the "from-VP") before VMCLEAR-ing its VMCS
+    // (while VMEXIT_INSTRUCTION_LEN was still valid for that exit). No RIP
+    // fix-up is needed here.
 
     // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
     // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
