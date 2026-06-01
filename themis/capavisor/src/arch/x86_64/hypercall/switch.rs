@@ -18,7 +18,8 @@ use capability_engine::{
 };
 use themis_abi::errors;
 
-use super::{map_error, write_reply, HypercallResult};
+use super::write_reply;
+use crate::hypercall::{map_error, HypercallResult};
 use crate::arch::x86_64::apic::current_lapic_id;
 use crate::arch::x86_64::iommu_ir::sync_irte_ndst;
 use crate::arch::x86_64::pid::inject_via_pid;
@@ -52,7 +53,6 @@ use crate::vcpu::{ActiveVcpu, Reg};
 ///
 /// On early error (before the swap), this function writes the error reply
 /// and advances the caller's RIP itself, then returns.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn do_switch(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -244,7 +244,6 @@ pub(crate) fn do_switch(
 /// untouched so it can be retried on the next interrupt-window exit.
 ///
 /// Returns `false` if the VP has no PID (legacy / non-posted setup).
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn drain_pir_inject_lowest(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
@@ -304,7 +303,6 @@ pub(crate) fn drain_pir_inject_lowest(
 /// Called on EXIT_REASON_INTERRUPT_WINDOW (7): the guest's IF just became 1.
 /// Drain PIR, inject lowest pending vector, and manage the interrupt-window
 /// exiting bit based on whether vectors remain.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn drain_pir_on_interrupt_window(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
@@ -320,7 +318,6 @@ pub(crate) fn drain_pir_on_interrupt_window(
 /// can read them).  Then swaps back to the parent — to the parent this
 /// looks like a normal return from the SWITCH VMCALL with the exit reason
 /// in rdi.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     use themis_abi::regs::{InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT};
     use x86::vmx::vmcs;
@@ -535,7 +532,6 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
 /// visibility for this vector, the interrupt is injected directly into the child
 /// (it owns the vector).  Otherwise (Report/NotReport) the interrupt is forwarded
 /// to dom0 via lazy-unwind.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
     assert!(!platform_ptr.is_null());

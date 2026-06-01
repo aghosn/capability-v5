@@ -46,7 +46,6 @@ use crate::serial_println;
 /// IN:  RDI = mode (0=unsigned, 1=signed), RSI = byte offset, RDX = tx_sequence (if signed)
 /// OUT: Report delivered to caller's DomainComm RX ring.
 ///      RDI = total payload size, RSI = bytes written this call.
-#[cfg(target_arch = "x86_64")]
 pub(super) fn do_attest_self(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -97,7 +96,6 @@ pub(super) fn do_attest_self(
 ///
 /// Returns the parsed request (`nonce`, `user_pub_key`) on success, or an
 /// already-formed `HypercallResult` error on TX-ring/sequence/type failures.
-#[cfg(target_arch = "x86_64")]
 fn consume_attest_request(
     pd: &mut crate::platform::PlatformDomain,
     expected_seq: u64,
@@ -153,7 +151,6 @@ fn consume_attest_request(
 /// envelope's `signature` field is `Ed25519(SHA-256(common_base ‖ nonce ‖
 /// user_pub_key))` — every byte of the common base (header + cap entries)
 /// is under the signature.
-#[cfg(target_arch = "x86_64")]
 fn build_signed_tail(
     common_base: &[u8],
     pd: &mut crate::platform::PlatformDomain,
@@ -248,7 +245,6 @@ fn build_signed_tail(
 /// Both values are in **payload bytes** (the ring's per-message MsgHeader and
 /// 8-byte alignment padding are not exposed to the caller), so the caller can
 /// simply `offset += wrote` and loop while `offset < total_size`.
-#[cfg(target_arch = "x86_64")]
 fn enqueue_attest_chunk(
     pd: &mut crate::platform::PlatformDomain,
     payload: &[u8],
@@ -277,7 +273,6 @@ fn enqueue_attest_chunk(
 /// IN:  RDI = pcr_index
 /// OUT: RDI..RCX = PCR value (4 × u64 = 32 bytes, big-endian packed)
 ///      RAX = SUCCESS if TPM available, ERR_NOTFOUND if no TPM
-#[cfg(target_arch = "x86_64")]
 pub(super) fn do_read_pcr(pcr_index: u32) -> HypercallResult {
     if !crate::attestation::tpm_available() {
         return HypercallResult::error(errors::ERR_NOTFOUND);

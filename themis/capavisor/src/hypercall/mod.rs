@@ -3,6 +3,11 @@
 //! The VMCALL handler in `vmexit.rs` delegates here.  The dispatch reads the
 //! calling core's `CoreContext` to obtain the `CapabilityRef<Domain>`, then
 //! routes each opcode to the appropriate `Capability::` method via `execute()`.
+//!
+//! All code in this module is architecture-neutral. Opcodes that require
+//! raw hardware-VP access (VMCS reads, posted-interrupt mechanics, swap
+//! mechanics) are routed through the `ArchHypercall` trait whose impls
+//! live under `crate::arch::<isa>::hypercall::`.
 
 extern crate alloc;
 
@@ -10,32 +15,15 @@ mod attest;
 mod capa;
 mod domcomm;
 mod doorbell;
-mod switch;
 mod vp;
-
-pub(crate) use switch::{
-    drain_pir_on_interrupt_window, forward_child_exit, forward_interrupt_to_handler,
-};
-
-// Re-export the x86-locked per-opcode handlers so the arch impl of
-// `ArchHypercall` (under `arch/x86_64/hypercall.rs`) can reach them
-// without poking into the private submodules.
-#[cfg(target_arch = "x86_64")]
-pub(crate) use doorbell::do_ring_doorbell;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use switch::do_switch;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use vp::do_add_vp;
 
 use core::sync::atomic::Ordering;
 
-use capability_engine::{CapabilityRef, Domain, CapaError, Platform};
+use capability_engine::{CapaError, CapabilityRef, Domain, Platform};
 use themis_abi::{errors, opcodes};
 
 use crate::arch_traits::traits::ArchVpOps;
 use crate::platform::ThemisPlatform;
-#[cfg(target_arch = "x86_64")]
-use crate::vcpu::{ActiveVcpu, Reg};
 use crate::{serial_debug, serial_println};
 
 // ── Hypercall flow-control helpers ───────────────────────────────────────── //
@@ -86,20 +74,6 @@ pub(super) use execute_or_return;
 // writes it back via the arch-trait `set_hypercall_result`.
 pub(super) use crate::arch_traits::types::HypercallResult;
 
-/// Write a hypercall result back to the caller's x86 guest registers.
-///
-/// Does NOT advance RIP — callers must invoke `vcpu.next_rip()` separately.
-/// Used by swap-handler early-error paths in `switch.rs` / `doorbell.rs`
-/// which are inherently x86-locked and operate directly on `ActiveVcpu`
-/// (rather than going through the `ArchVpOps` trait).
-#[cfg(target_arch = "x86_64")]
-pub(super) fn write_reply(vcpu: &mut ActiveVcpu, r: HypercallResult) {
-    vcpu.set_reg(Reg::Rax, r.status);
-    vcpu.set_reg(Reg::Rdi, r.val0);
-    vcpu.set_reg(Reg::Rsi, r.val1);
-    vcpu.set_reg(Reg::Rdx, r.val2);
-}
-
 // ── CapaError → ABI error mapping ────────────────────────────────────────── //
 
 pub(super) fn map_error(e: &CapaError) -> u64 {
@@ -134,14 +108,14 @@ pub(super) fn map_error(e: &CapaError) -> u64 {
 // ── Arch-locked hypercall extension ──────────────────────────────────────── //
 
 /// Hypercall operations that need direct access to the VP's hardware state
-/// (raw VMCS reads, swap mechanics) and so cannot be expressed against the
-/// neutral `ArchVpOps` interface alone.
+/// (raw VMCS reads, swap mechanics, posted-interrupt mechanics) and so cannot
+/// be expressed against the neutral `ArchVpOps` interface alone.
 ///
 /// `ArchHypercall` lives here (in the `hypercall/` module) rather than in
 /// `arch_traits/` because its method signatures reference `ThemisPlatform`
 /// and `CapabilityRef<Domain>` — capavisor-internal types that the arch
 /// boundary deliberately stays free of. The trait is implemented per-arch
-/// in `hypercall/<arch>_arch.rs`.
+/// under `crate::arch::<isa>::hypercall::`.
 pub(crate) trait ArchHypercall: ArchVpOps {
     /// `THEMIS_ADD_VP` opcode — allocates VMCS/VAPIC/PID for a new child VP.
     /// Returns a `HypercallResult`; the generic dispatcher writes it back.
@@ -176,6 +150,21 @@ pub(crate) trait ArchHypercall: ArchVpOps {
         gpa: u64,
         value: u64,
     );
+
+    /// `THEMIS_INJECT_INTERRUPT` opcode — post a vector into a (typically
+    /// stopped) target VP. On x86 this writes the VP's Posted-Interrupt
+    /// Descriptor; on ARM it would push into the LR/ICH state. Does NOT
+    /// touch the calling VP (the `vp` handle is supplied only for symmetry
+    /// and so the impl can advance RIP itself if it wishes).
+    fn h_inject_interrupt(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        platform: &ThemisPlatform,
+        caller: &CapabilityRef<Domain>,
+        child_domain_handle: u64,
+        vp_id: u32,
+        vector: u8,
+    ) -> HypercallResult;
 }
 
 // ── Opcode dispatch ──────────────────────────────────────────────────────── //
@@ -274,7 +263,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
             doorbell::do_set_themic_vector(platform, &caller, arg0)
         }
         opcodes::THEMIS_INJECT_INTERRUPT => {
-            doorbell::do_inject_interrupt(platform, &caller, arg0, arg1 as u32, arg2 as u8)
+            arch.h_inject_interrupt(vp, platform, &caller, arg0, arg1 as u32, arg2 as u8)
         }
 
         opcodes::THEMIS_DBG_PRINT => {

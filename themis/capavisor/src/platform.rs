@@ -1297,6 +1297,26 @@ impl ThemisPlatform {
         self.hhdm_offset.load(Ordering::Relaxed)
     }
 
+    /// Program the IOMMU's IRTEs for a sealed child domain.
+    ///
+    /// Architecture-neutral wrapper: the actual implementation lives under
+    /// `arch/x86_64/iommu_ir` (VT-d Interrupt Remapping). On non-x86 builds
+    /// this is a no-op (will be replaced with an SMMU implementation).
+    pub fn program_domain_irtes(&self, child: &capability_engine::CapabilityRef<capability_engine::Domain>) {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::x86_64::iommu_ir::program_domain_irtes(self, child);
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = child;
+    }
+
+    /// Invalidate all IRTEs that were programmed for a (now-revoked) domain.
+    pub fn invalidate_domain_irtes(&self, domain_id: DomainId) {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::x86_64::iommu_ir::invalidate_domain_irtes(self, domain_id);
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = domain_id;
+    }
+
     /// Allocate the next globally unique VPID (1, 2, 3, ...).
     /// VPID 0 is reserved (means "current VPID" in INVVPID).
     pub fn next_vpid(&self) -> u16 {

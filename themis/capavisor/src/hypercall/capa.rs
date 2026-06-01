@@ -19,8 +19,6 @@ use capability_engine::{
 use themis_abi::errors;
 
 use super::{execute_or_return, map_error, HypercallResult};
-#[cfg(target_arch = "x86_64")]
-use crate::arch::x86_64::iommu_ir::{invalidate_domain_irtes, program_domain_irtes};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
 
@@ -203,11 +201,8 @@ pub(super) fn do_seal(
             }
 
             // intr-p3g: program IRTEs for the newly-sealed child domain.
-            #[cfg(target_arch = "x86_64")]
-            {
-                if let Some(child) = &child_cap {
-                    program_domain_irtes(platform, child);
-                }
+            if let Some(child) = &child_cap {
+                platform.program_domain_irtes(child);
             }
             HypercallResult::success()
         }
@@ -248,9 +243,8 @@ pub(super) fn do_revoke_domain(
         Capability::revoke_domain(&caller, child_handle).map(|batch| ((), batch))
     });
     // intr-p3g: clear all IRTEs that were programmed for this domain.
-    #[cfg(target_arch = "x86_64")]
     if let Some(id) = child_domain_id {
-        invalidate_domain_irtes(platform, id);
+        platform.invalidate_domain_irtes(id);
     }
     HypercallResult::success()
 }
@@ -364,7 +358,6 @@ pub(super) fn do_set_policy(
 ///
 /// IN:  RDI = domain_handle (u64)
 ///      RSI = pci_bdf (u16 — bus[15:8] | device[7:3] | function[2:0])
-#[cfg(target_arch = "x86_64")]
 pub(super) fn do_assign_device(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
@@ -388,7 +381,6 @@ pub(super) fn do_assign_device(
 /// RELEASE_DEVICE (0x1a): return a PCI device to dom0 passthrough.
 ///
 /// IN:  RDI = pci_bdf (u16)
-#[cfg(target_arch = "x86_64")]
 pub(super) fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> HypercallResult {
     let bdf = bdf_arg as u16;
     platform.release_device(bdf);

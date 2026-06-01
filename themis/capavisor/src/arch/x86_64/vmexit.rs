@@ -241,7 +241,7 @@ pub(crate) fn classify_and_handle_internal(
             SemanticExit::ArchHandled
         }
         EXIT_REASON_INTERRUPT_WINDOW => {
-            crate::hypercall::drain_pir_on_interrupt_window(vcpu, platform);
+            crate::arch::x86_64::hypercall::switch::drain_pir_on_interrupt_window(vcpu, platform);
             SemanticExit::ArchHandled
         }
         EXIT_REASON_EOI_INDUCED => {

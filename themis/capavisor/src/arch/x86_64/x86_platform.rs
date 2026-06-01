@@ -141,11 +141,11 @@ impl ArchVpOps for X86Platform {
     }
 
     fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32) {
-        crate::hypercall::forward_child_exit(vp, reason);
+        crate::arch::x86_64::hypercall::switch::forward_child_exit(vp, reason);
     }
 
     fn forward_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32) {
-        crate::hypercall::forward_interrupt_to_handler(vp, vector as u8);
+        crate::arch::x86_64::hypercall::switch::forward_interrupt_to_handler(vp, vector as u8);
     }
 
     fn reset_timer(&mut self, vp: &mut Self::VpHandle) {
