@@ -380,6 +380,59 @@ def sealedSend_apply (s : SpecState) (caller receiver : DomId)
       { d with pendingMemCaps := d.pendingMemCaps ++ [(pid, pe)],
                nextPendingId  := pid + 1 })
 
+/-! ### Create
+
+Allocates a new child domain. Two arena inserts (`Domain` and `DomCap`)
+plus one `updDomain` on the caller (new dom-handle + childrenDoms). -/
+
+/-- Preconditions for `create(caller, policy)`. -/
+structure CreateGuard (s : SpecState) (caller : DomId) (policy : DomainPolicy)
+    : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canCreate = true
+  /-- Engine's policy-monotonicity check: child policy's API is a
+      subset of the parent's. -/
+  policyApiSubset   : ∀ d, s.getDom caller = some d → policy.api ≤ d.policy.api
+
+/-- Construct the freshly-allocated child domain (unsealed, no caps yet,
+    parent = caller). -/
+def freshChildDomain (caller : DomId) (policy : DomainPolicy) : Domain :=
+  { parent          := some caller,
+    status          := .unsealed,
+    policy          := policy,
+    vps             := [],
+    memHandles      := [],
+    domHandles      := [],
+    frozenHandles   := [],
+    childrenDoms    := [],
+    pendingMemCaps  := [],
+    pendingDomCaps  := [],
+    commBindings    := [],
+    addressMap      := Translation.AddressMap.empty,
+    mappedGpas      := [],
+    nextHandle      := 0,
+    nextPendingId   := 0 }
+
+/-- Pure state update for `create(caller, policy)`.
+
+    1. Allocate a fresh `Domain` at `s.nextDomId` via `freshDom`.
+    2. Allocate a fresh `DomCap` at the (bumped) `nextDomCapId` via
+       `freshDomCap`, with `owner := caller` and
+       `targetDom := newDomId`.
+    3. Append a fresh `(d.nextHandle, newCapId)` to caller's
+       `domHandles` and append `newDomId` to caller's `childrenDoms`. -/
+def create_apply (s : SpecState) (caller : DomId)
+                 (policy : DomainPolicy) : SpecState :=
+  let (newDomId, s₁) := s.freshDom (freshChildDomain caller policy)
+  let newDomCap : DomCap :=
+    { parent := none, owner := caller, targetDom := newDomId }
+  let (newCapId, s₂) := s₁.freshDomCap newDomCap
+  s₂.updDomain caller (fun d =>
+    { d with domHandles   := d.domHandles ++ [(d.nextHandle, newCapId)],
+             nextHandle   := d.nextHandle + 1,
+             childrenDoms := d.childrenDoms ++ [newDomId] })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -411,5 +464,8 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : SealedSendGuard s caller receiver handle) :
     step s (.sealedSend caller receiver handle gpaHint)
          (sealedSend_apply s caller receiver handle gpaHint)
+  | create {s : SpecState} {caller : DomId} {policy : DomainPolicy}
+    (guard : CreateGuard s caller policy) :
+    step s (.create caller policy) (create_apply s caller policy)
 
 end ThemisCapa

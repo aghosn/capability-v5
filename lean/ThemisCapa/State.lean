@@ -162,6 +162,22 @@ def freshMem (s : SpecState) (c : MemCap) : MemCapId × SpecState :=
     nextMemCapId := id + 1 }
   (id, s')
 
+/-- Insert a fresh domain and bump the `nextDomId` counter. -/
+def freshDom (s : SpecState) (d : Domain) : DomId × SpecState :=
+  let id := s.nextDomId
+  let s' := { s with
+    domains  := s.domains.insert id d,
+    nextDomId := id + 1 }
+  (id, s')
+
+/-- Insert a fresh domain-capability and bump the `nextDomCapId` counter. -/
+def freshDomCap (s : SpecState) (dc : DomCap) : DomCapId × SpecState :=
+  let id := s.nextDomCapId
+  let s' := { s with
+    domcaps      := s.domcaps.insert id dc,
+    nextDomCapId := id + 1 }
+  (id, s')
+
 /-- Functionally update a memory capability in place. -/
 def updMem (s : SpecState) (id : MemCapId) (f : MemCap → MemCap) : SpecState :=
   { s with memcaps := s.memcaps.update id f }

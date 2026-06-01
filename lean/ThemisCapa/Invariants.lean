@@ -62,6 +62,16 @@ def CdtBidirectional (s : SpecState) : Prop :=
 def FreshMemCounter (s : SpecState) : Prop :=
   ∀ id, id ∈ s.memcaps.keys → id < s.nextMemCapId
 
+/-- Same as `FreshMemCounter` for the domain arena. Required so
+    `create` can allocate a fresh `DomId` and preserve `UniqueArenas.domains`. -/
+def FreshDomCounter (s : SpecState) : Prop :=
+  ∀ id, id ∈ s.domains.keys → id < s.nextDomId
+
+/-- Same as `FreshMemCounter` for the domain-capability arena. Required so
+    `create` can allocate a fresh `DomCapId` and preserve `UniqueArenas.domcaps`. -/
+def FreshDomCapCounter (s : SpecState) : Prop :=
+  ∀ id, id ∈ s.domcaps.keys → id < s.nextDomCapId
+
 /-- Dual of `CdtBidirectional`: if a cap declares a parent, that parent
     actually lists it as a child. Together with `CdtBidirectional` this
     pins down a true bijection between the parent-pointer view and the
@@ -89,12 +99,14 @@ def HandleOwner (s : SpecState) : Prop :=
 
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
-  unique           : UniqueArenas s
-  refs             : MemRefsResolved s
-  cdtMonotonic     : CdtMonotonic s
-  cdtBidirectional : CdtBidirectional s
-  freshMemCounter  : FreshMemCounter s
-  handleOwner      : HandleOwner s
-  parentChild      : ParentChildAgreement s
+  unique             : UniqueArenas s
+  refs               : MemRefsResolved s
+  cdtMonotonic       : CdtMonotonic s
+  cdtBidirectional   : CdtBidirectional s
+  freshMemCounter    : FreshMemCounter s
+  handleOwner        : HandleOwner s
+  parentChild        : ParentChildAgreement s
+  freshDomCounter    : FreshDomCounter s
+  freshDomCapCounter : FreshDomCapCounter s
 
 end ThemisCapa

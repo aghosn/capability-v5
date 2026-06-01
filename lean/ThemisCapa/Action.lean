@@ -49,8 +49,13 @@ inductive Action where
       transfer happens until `accept`. -/
   | sealedSend (caller : DomId) (receiver : DomId) (handle : LocalHandle)
                (gpaHint : Option Nat)
+  /-- `caller` creates a fresh child domain bound by `policy`.
+      Allocates a new `Domain` (status `.unsealed`, parent = caller),
+      a new `DomCap` (owner = caller, targetDom = newDomId), and a
+      fresh handle to that dom-cap on caller's `domHandles`. Caller's
+      `childrenDoms` is updated to include the new domain. -/
+  | create (caller : DomId) (policy : DomainPolicy)
   -- Future:
-  -- | create …
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr
 

@@ -14,6 +14,34 @@ import ThemisCapa.Invariants
 namespace ThemisCapa
 open Arena
 
+/-! ### Helpers for domain-side fresh counters
+
+Every operation in the current vertical slice (carve, alias, revoke,
+send, seal, accept, reject, sealedSend) leaves `nextDomId`,
+`nextDomCapId`, `domains.keys`, and `domcaps.keys` unchanged. The
+following helpers discharge `FreshDomCounter` and `FreshDomCapCounter`
+preservation from those facts, avoiding boilerplate in every proof. -/
+
+private theorem freshDomCounter_of_keys_eq
+    {s s' : SpecState} (hwf : WellFormed s)
+    (hKeys : s'.domains.keys = s.domains.keys)
+    (hNext : s'.nextDomId = s.nextDomId) :
+    FreshDomCounter s' := by
+  intro id hid
+  rw [hKeys] at hid
+  rw [hNext]
+  exact hwf.freshDomCounter id hid
+
+private theorem freshDomCapCounter_of_keys_eq
+    {s s' : SpecState} (hwf : WellFormed s)
+    (hKeys : s'.domcaps.keys = s.domcaps.keys)
+    (hNext : s'.nextDomCapId = s.nextDomCapId) :
+    FreshDomCapCounter s' := by
+  intro id hid
+  rw [hKeys] at hid
+  rw [hNext]
+  exact hwf.freshDomCapCounter id hid
+
 /-- Concrete form of `carve_apply` when the parent lookup succeeds. -/
 private theorem carve_apply_eq_of_parent
     (s : SpecState) (caller : DomId) (parent : MemCapId)
@@ -134,7 +162,7 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -500,6 +528,14 @@ theorem carve_preserves_wellformed
           rw [List.mem_append]; exact Or.inl pre
         · rw [if_neg hpidPar, hppPre] at hpp
           cases hpp; exact pre
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [carve_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain, Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [carve_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain]
 
 /-! ## Alias
 
@@ -593,7 +629,7 @@ theorem alias_preserves_wellformed
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -899,6 +935,14 @@ theorem alias_preserves_wellformed
           rw [List.mem_append]; exact Or.inl pre
         · rw [if_neg hpidPar, hppPre] at hpp
           cases hpp; exact pre
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain, Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
+                 SpecState.updDomain]
 
 /-! ## Revoke
 
@@ -1022,7 +1066,7 @@ theorem revoke_preserves_wellformed
     have := hwf.parentChild id c hc target hcpar t ht
     rw [guard.targetIsLeaf t ht] at this; cases this
   -- Now show the post-state.
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1333,6 +1377,13 @@ theorem revoke_preserves_wellformed
         exact ⟨hpreM, by simpa using hidT⟩
       · rw [if_neg hpidPid, hpidPre] at hpp
         cases hpp; exact hpreM
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain,
+                 Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
 
 /-! ## Send (unsealed path)
 
@@ -1430,7 +1481,7 @@ theorem send_apply_preserves_wellformed
         (send_apply s caller receiver cap).getMem id = s.getMem id := by
     intro id hidC
     rw [send_apply_getMem, if_neg hidC]
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1661,6 +1712,13 @@ theorem send_apply_preserves_wellformed
     have hcparPre : cpre.parent = some pid' := hParent.trans hcpar
     have := hwf.parentChild id cpre hcpre pid' hcparPre ppre hppre
     rw [hPpChildren] at this; exact this
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [send_apply, SpecState.updMem, SpecState.updDomain,
+                 Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [send_apply, SpecState.updMem, SpecState.updDomain]
 
 /-- Thin wrapper: `send_preserves_wellformed` discharges WF preservation
     for the labelled step by forwarding to `send_apply_preserves_wellformed`.
@@ -1735,7 +1793,7 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1803,6 +1861,12 @@ theorem seal_preserves_wellformed
     intro id c' hc' pid' hcpar pp hpp
     rw [hMemEq] at hc' hpp
     exact hwf.parentChild id c' hc' pid' hcpar pp hpp
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [seal_apply, hdc, SpecState.updDomain, Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [seal_apply, hdc, SpecState.updDomain]
 
 /-! ### Reject / Accept preserve WellFormed -/
 
@@ -1839,7 +1903,7 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case u =>
     refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
     show ((s.updDomain did f).domains).UniqueKeys
@@ -1885,6 +1949,12 @@ private theorem wf_preserved_under_handle_invariant_updDomain
     intro id c' hc' pid' hcpar pp hpp
     rw [hMem] at hc' hpp
     exact hwf.parentChild id c' hc' pid' hcpar pp hpp
+  case fDom =>
+    apply freshDomCounter_of_keys_eq hwf <;>
+      simp only [SpecState.updDomain, Arena.keys_update]
+  case fDomCap =>
+    apply freshDomCapCounter_of_keys_eq hwf <;>
+      simp only [SpecState.updDomain]
 
 theorem reject_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -1958,6 +2028,216 @@ theorem sealedSend_preserves_wellformed
     -- Step 2: enqueue pending entry on receiver.
     exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
             (fun _ => rfl)
+
+/-! ### Create preserves WellFormed
+
+Allocates a new domain and a new dom-cap, plus updates caller's
+`domHandles`/`childrenDoms`. Memcaps are entirely untouched, so the
+seven memcap-side invariants reduce to their pre-state via
+`getMem` equality. The two interesting cases are:
+
+* `unique.domains` and `unique.domcaps`: the fresh inserts go at keys
+  `s.nextDomId` and `s.nextDomCapId`, which by `FreshDomCounter` /
+  `FreshDomCapCounter` are not in the respective key sets.
+* `freshDomCounter` and `freshDomCapCounter`: the new keys are
+  `< nextDomId + 1` and `< nextDomCapId + 1`; existing keys satisfied
+  by pre-state freshness.
+
+`handleInArena` and `handleOwner` for the new domain are trivial
+(its `memHandles = []`); for caller they reduce to the pre-state
+because we only modified `domHandles` / `childrenDoms` / `nextHandle`,
+not `memHandles`. -/
+
+theorem create_preserves_wellformed
+    {s s' : SpecState} {caller : DomId} {policy : DomainPolicy}
+    (hwf : WellFormed s)
+    (hstep : step s (.create caller policy) s') :
+    WellFormed s' := by
+  cases hstep
+  rename_i guard
+  -- Caller exists, so caller ∈ s.domains.keys, so caller < s.nextDomId.
+  obtain ⟨dcaller, hdcaller⟩ := Option.isSome_iff_exists.mp guard.callerExists
+  have hcallerLt : caller < s.nextDomId :=
+    hwf.freshDomCounter _ (Arena.mem_keys_of_find?_some _ _ _ hdcaller)
+  have hcallerNeFresh : caller ≠ s.nextDomId := Nat.ne_of_lt hcallerLt
+  -- Memcaps lookup unchanged.
+  have hMemEq : ∀ id, (create_apply s caller policy).getMem id = s.getMem id := by
+    intro id; rfl
+  -- Convenience: name the new domain and the new dom-cap.
+  let newDom : Domain := freshChildDomain caller policy
+  let newCap : DomCap := { parent := none, owner := caller,
+                           targetDom := s.nextDomId }
+  -- Characterization of `getDom`.
+  have hDomEq : ∀ id, (create_apply s caller policy).getDom id =
+      (if id = s.nextDomId then some newDom
+       else if id = caller then
+         (s.getDom id).map (fun d =>
+           { d with domHandles   := d.domHandles ++
+                                      [(d.nextHandle, s.nextDomCapId)],
+                    nextHandle   := d.nextHandle + 1,
+                    childrenDoms := d.childrenDoms ++ [s.nextDomId] })
+       else s.getDom id) := by
+    intro id
+    show ((create_apply s caller policy).domains).find? id = _
+    simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+               SpecState.updDomain]
+    by_cases h1 : id = caller
+    · rw [h1]
+      have hneFreshC : caller ≠ s.nextDomId := hcallerNeFresh
+      rw [Arena.find?_update_eq_map,
+          Arena.find?_insert_other _ _ _ _ hneFreshC]
+      have hnotFreshEqCaller : ¬ caller = s.nextDomId := hneFreshC
+      rw [if_neg hnotFreshEqCaller, if_pos rfl]
+      rfl
+    · rw [Arena.find?_update_other _ _ _ _ h1]
+      by_cases h2 : id = s.nextDomId
+      · rw [h2, Arena.find?_insert_same]
+        rw [if_pos rfl]
+      · rw [Arena.find?_insert_other _ _ _ _ h2]
+        rw [if_neg h2, if_neg h1]; rfl
+  -- Characterization of `getDomCap`.
+  have hDomCapEq : ∀ id, (create_apply s caller policy).getDomCap id =
+      (if id = s.nextDomCapId then some newCap else s.getDomCap id) := by
+    intro id
+    show ((create_apply s caller policy).domcaps).find? id = _
+    simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+               SpecState.updDomain]
+    by_cases h : id = s.nextDomCapId
+    · rw [h, Arena.find?_insert_same, if_pos rfl]
+    · rw [Arena.find?_insert_other _ _ _ _ h, if_neg h]; rfl
+  -- Counters.
+  have hNextMem : (create_apply s caller policy).nextMemCapId = s.nextMemCapId := rfl
+  have hNextDom : (create_apply s caller policy).nextDomId = s.nextDomId + 1 := rfl
+  have hNextDomCap :
+      (create_apply s caller policy).nextDomCapId = s.nextDomCapId + 1 := rfl
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  case unique =>
+    refine ⟨?mc, ?dc, ?ds⟩
+    case mc =>
+      show ((create_apply s caller policy).memcaps).UniqueKeys
+      exact hwf.unique.memcaps
+    case dc =>
+      show ((create_apply s caller policy).domcaps).UniqueKeys
+      simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+                 SpecState.updDomain]
+      apply Arena.insert_unique_keys _ _ _ hwf.unique.domcaps
+      intro hin
+      exact Nat.lt_irrefl _ (hwf.freshDomCapCounter _ hin)
+    case ds =>
+      show ((create_apply s caller policy).domains).UniqueKeys
+      simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+                 SpecState.updDomain]
+      apply Arena.update_unique_keys
+      apply Arena.insert_unique_keys _ _ _ hwf.unique.domains
+      intro hin
+      exact Nat.lt_irrefl _ (hwf.freshDomCounter _ hin)
+  case refs =>
+    refine ⟨?pia, ?cia, ?hia⟩
+    case pia =>
+      intro id c hc pid hcpar
+      rw [hMemEq] at hc; rw [hMemEq]
+      exact hwf.refs.parentInArena id c hc pid hcpar
+    case cia =>
+      intro id c hc cid hcid
+      rw [hMemEq] at hc; rw [hMemEq]
+      exact hwf.refs.childInArena id c hc cid hcid
+    case hia =>
+      intro did d hd p hp
+      rw [hMemEq]
+      rw [hDomEq] at hd
+      by_cases h1 : did = s.nextDomId
+      · rw [if_pos h1] at hd
+        -- hd : some (freshChildDomain caller policy) = some d
+        have hdNew : d = freshChildDomain caller policy := by
+          injection hd with h; exact h.symm
+        rw [hdNew] at hp
+        -- p ∈ (freshChildDomain ...).memHandles = []  → False
+        exact absurd hp (by intro h; cases h)
+      · rw [if_neg h1] at hd
+        by_cases h2 : did = caller
+        · rw [h2] at hd
+          rw [if_pos rfl, hdcaller] at hd
+          have hdEq : d.memHandles = dcaller.memHandles := by
+            have : d = { dcaller with
+                domHandles   := dcaller.domHandles ++
+                                  [(dcaller.nextHandle, s.nextDomCapId)],
+                nextHandle   := dcaller.nextHandle + 1,
+                childrenDoms := dcaller.childrenDoms ++ [s.nextDomId] } := by
+              injection hd with h; exact h.symm
+            rw [this]
+          rw [hdEq] at hp
+          exact hwf.refs.handleInArena caller dcaller hdcaller p hp
+        · rw [if_neg h2] at hd
+          exact hwf.refs.handleInArena did d hd p hp
+  case cdtMono =>
+    intro id c hc cid hcid ch hch
+    rw [hMemEq] at hc hch
+    exact hwf.cdtMonotonic id c hc cid hcid ch hch
+  case cdtBidi =>
+    intro id c hc cid hcid ch hch
+    rw [hMemEq] at hc hch
+    exact hwf.cdtBidirectional id c hc cid hcid ch hch
+  case fresh =>
+    intro id hid
+    rw [hNextMem]
+    -- memcaps.keys unchanged.
+    have : ((create_apply s caller policy).memcaps).keys = s.memcaps.keys := rfl
+    rw [this] at hid
+    exact hwf.freshMemCounter id hid
+  case ho =>
+    intro did d hd p hp
+    rw [hMemEq]
+    rw [hDomEq] at hd
+    by_cases h1 : did = s.nextDomId
+    · rw [if_pos h1] at hd
+      have hdNew : d = freshChildDomain caller policy := by
+        injection hd with h; exact h.symm
+      rw [hdNew] at hp
+      exact absurd hp (by intro h; cases h)
+    · rw [if_neg h1] at hd
+      by_cases h2 : did = caller
+      · rw [h2] at hd ⊢
+        rw [if_pos rfl, hdcaller] at hd
+        have hdEq : d.memHandles = dcaller.memHandles := by
+          have : d = { dcaller with
+              domHandles   := dcaller.domHandles ++
+                                [(dcaller.nextHandle, s.nextDomCapId)],
+              nextHandle   := dcaller.nextHandle + 1,
+              childrenDoms := dcaller.childrenDoms ++ [s.nextDomId] } := by
+            injection hd with h; exact h.symm
+          rw [this]
+        rw [hdEq] at hp
+        exact hwf.handleOwner caller dcaller hdcaller p hp
+      · rw [if_neg h2] at hd
+        exact hwf.handleOwner did d hd p hp
+  case pca =>
+    intro id c hc pid hcpar pp hpp
+    rw [hMemEq] at hc hpp
+    exact hwf.parentChild id c hc pid hcpar pp hpp
+  case fDom =>
+    intro id hid
+    rw [hNextDom]
+    have hKeys : ((create_apply s caller policy).domains).keys =
+                 s.nextDomId :: s.domains.keys := by
+      simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+                 SpecState.updDomain, Arena.keys_update, Arena.keys_insert]
+    rw [hKeys] at hid
+    simp only [List.mem_cons] at hid
+    rcases hid with rfl | hid
+    · exact Nat.lt_succ_self _
+    · exact Nat.lt_succ_of_lt (hwf.freshDomCounter id hid)
+  case fDomCap =>
+    intro id hid
+    rw [hNextDomCap]
+    have hKeys : ((create_apply s caller policy).domcaps).keys =
+                 s.nextDomCapId :: s.domcaps.keys := by
+      simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+                 SpecState.updDomain, Arena.keys_insert]
+    rw [hKeys] at hid
+    simp only [List.mem_cons] at hid
+    rcases hid with rfl | hid
+    · exact Nat.lt_succ_self _
+    · exact Nat.lt_succ_of_lt (hwf.freshDomCapCounter id hid)
 
 end ThemisCapa
 
