@@ -199,6 +199,25 @@ private theorem addVp_mem_isSome
         · simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
           exact Arena.find?_update_isSome _ c mid _ h
 
+private theorem registerComm_mem_isSome
+    (s : SpecState) (caller : DomId) (cm ch : LocalHandle) (vp : VpId)
+    (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((registerComm_apply s caller cm ch vp).getMem c).isSome := by
+  show ((registerComm_apply s caller cm ch vp).memcaps).find? c |>.isSome
+  unfold registerComm_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle ch)
+    with _ | cid
+  · simp only [hb]; exact h
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; exact h
+    · rcases hcd : s.getDom dc.targetDom with _ | cd
+      · simp only [hb, hdcap, hcd]; exact h
+      · rcases hmb : (s.getDom caller).bind (fun d => d.lookupMemHandle cm)
+          with _ | mid
+        · simp only [hb, hdcap, hcd, hmb]; exact h
+        · simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
+          exact Arena.find?_update_isSome _ c mid _ h
+
 /-! ### Provenance — Removal -/
 
 /-- The only way a memcap can disappear from one step to the next is
@@ -300,6 +319,11 @@ theorem provenance_removal
     rename_i caller ch cm
     exfalso
     have h := addVp_mem_isSome s caller ch cm c hPre
+    rw [hPost] at h; cases h
+  | registerComm guard =>
+    rename_i caller cm ch vp
+    exfalso
+    have h := registerComm_mem_isSome s caller cm ch vp c hPre
     rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
@@ -444,6 +468,25 @@ private theorem addVp_mem_isNone
     (addVp_apply s caller ch cm).getMem c = none := by
   show ((addVp_apply s caller ch cm).memcaps).find? c = none
   unfold addVp_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle ch)
+    with _ | cid
+  · simp only [hb]; exact h
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; exact h
+    · rcases hcd : s.getDom dc.targetDom with _ | cd
+      · simp only [hb, hdcap, hcd]; exact h
+      · rcases hmb : (s.getDom caller).bind (fun d => d.lookupMemHandle cm)
+          with _ | mid
+        · simp only [hb, hdcap, hcd, hmb]; exact h
+        · simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
+          exact Arena.find?_update_of_none _ c mid _ h
+
+private theorem registerComm_mem_isNone
+    (s : SpecState) (caller : DomId) (cm ch : LocalHandle) (vp : VpId)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (registerComm_apply s caller cm ch vp).getMem c = none := by
+  show ((registerComm_apply s caller cm ch vp).memcaps).find? c = none
+  unfold registerComm_apply
   rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle ch)
     with _ | cid
   · simp only [hb]; exact h
@@ -624,6 +667,11 @@ theorem provenance_creation
     rename_i caller ch cm
     exfalso
     have h := addVp_mem_isNone s caller ch cm c hPre
+    rw [hPost] at h; cases h
+  | registerComm guard =>
+    rename_i caller cm ch vp
+    exfalso
+    have h := registerComm_mem_isNone s caller cm ch vp c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -917,6 +965,55 @@ private theorem addVp_owner_preserved
             rw [this, hPre] at hPost
             injection hPost with h; rw [h]
 
+private theorem registerComm_owner_preserved
+    (s : SpecState) (caller : DomId) (cm ch : LocalHandle) (vp : VpId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (registerComm_apply s caller cm ch vp).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle ch)
+    with _ | cid
+  · have : (registerComm_apply s caller cm ch vp).getMem c = s.getMem c := by
+      show ((registerComm_apply s caller cm ch vp).memcaps).find? c = _
+      simp only [registerComm_apply, hb]; rfl
+    rw [this, hPre] at hPost
+    injection hPost with h; rw [h]
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · have : (registerComm_apply s caller cm ch vp).getMem c = s.getMem c := by
+        show ((registerComm_apply s caller cm ch vp).memcaps).find? c = _
+        simp only [registerComm_apply, hb, hdcap]; rfl
+      rw [this, hPre] at hPost
+      injection hPost with h; rw [h]
+    · rcases hcd : s.getDom dc.targetDom with _ | cd
+      · have : (registerComm_apply s caller cm ch vp).getMem c = s.getMem c := by
+          show ((registerComm_apply s caller cm ch vp).memcaps).find? c = _
+          simp only [registerComm_apply, hb, hdcap, hcd]; rfl
+        rw [this, hPre] at hPost
+        injection hPost with h; rw [h]
+      · rcases hmb : (s.getDom caller).bind (fun d => d.lookupMemHandle cm)
+          with _ | mid
+        · have : (registerComm_apply s caller cm ch vp).getMem c = s.getMem c := by
+            show ((registerComm_apply s caller cm ch vp).memcaps).find? c = _
+            simp only [registerComm_apply, hb, hdcap, hcd, hmb]; rfl
+          rw [this, hPre] at hPost
+          injection hPost with h; rw [h]
+        · by_cases hcmid : c = mid
+          · subst hcmid
+            have hF : s.memcaps.find? c = some capPre := hPre
+            have hPostF : ((registerComm_apply s caller cm ch vp).memcaps).find? c
+                          = some capPost := hPost
+            simp only [registerComm_apply, hb, hdcap, hcd, hmb,
+                       SpecState.updMem, SpecState.updDomain] at hPostF
+            rw [Arena.find?_update_same _ _ _ hF] at hPostF
+            injection hPostF with h; rw [← h]
+          · have : (registerComm_apply s caller cm ch vp).getMem c = s.getMem c := by
+              show ((registerComm_apply s caller cm ch vp).memcaps).find? c = _
+              simp only [registerComm_apply, hb, hdcap, hcd, hmb,
+                         SpecState.updMem, SpecState.updDomain]
+              exact Arena.find?_update_other _ mid c _ hcmid
+            rw [this, hPre] at hPost
+            injection hPost with h; rw [h]
+
 /-! ### `send` and `accept`: characterize the owner change. -/
 
 /-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
@@ -1085,5 +1182,10 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (addVp_owner_preserved s caller ch cm c capPre capPost hPre hPost)
+  | registerComm guard =>
+    rename_i caller cm ch vp
+    exfalso
+    exact hOwnerChange
+      (registerComm_owner_preserved s caller cm ch vp c capPre capPost hPre hPost)
 
 end ThemisCapa

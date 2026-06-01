@@ -50,7 +50,8 @@ case where the modified cap's owner — the caller — is not in
 def Action.affectsView (s : SpecState) (a : Action) (did : DomId) : Prop :=
   a.affectsDom s did ∨
     (∃ caller target, a = .revoke caller target ∧ did = caller) ∨
-    (∃ caller ch cm, a = .addVp caller ch cm ∧ did = caller)
+    (∃ caller ch cm, a = .addVp caller ch cm ∧ did = caller) ∨
+    (∃ caller cm ch vp, a = .registerComm caller cm ch vp ∧ did = caller)
 
 private theorem not_affectsDom_of_not_affectsView
     {s : SpecState} {a : Action} {did : DomId}
@@ -198,7 +199,22 @@ theorem step_view_preservation
   | addVp guard =>
     rename_i caller ch cm
     have hBcaller : B ≠ caller :=
-      fun he => hB (Or.inr (Or.inr ⟨caller, ch, cm, rfl, he⟩))
+      fun he => hB (Or.inr (Or.inr (Or.inl ⟨caller, ch, cm, rfl, he⟩)))
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨mid, hmid⟩ :=
+      Option.isSome_iff_exists.mp (guard.commHandleResolves d hd)
+    obtain ⟨cp, hcp⟩ :=
+      Option.isSome_iff_exists.mp (guard.commCapExists d hd mid hmid)
+    intro hmem
+    have hc_eq : c = mid := hmem d hd mid hmid
+    have hown_caller : capPre.owner = caller := by
+      rw [hc_eq, hcp] at hPre; injection hPre with hpe
+      rw [← hpe]; exact guard.commCapOwned d hd mid hmid cp hcp
+    exact hBcaller (hown.symm.trans hown_caller)
+  | registerComm guard =>
+    rename_i caller cm ch vp
+    have hBcaller : B ≠ caller :=
+      fun he => hB (Or.inr (Or.inr (Or.inr ⟨caller, cm, ch, vp, rfl, he⟩)))
     obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
     obtain ⟨mid, hmid⟩ :=
       Option.isSome_iff_exists.mp (guard.commHandleResolves d hd)

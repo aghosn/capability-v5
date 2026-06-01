@@ -619,6 +619,67 @@ theorem addVp_frame_mem (s : SpecState) (caller : DomId)
             simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
             exact Arena.find?_update_other _ mid id _ hne
 
+/-! ### registerComm -/
+
+/-- `registerComm` updates one domain (the resolved child) and one
+    memcap (the resolved comm cap); any other domain id is preserved. -/
+theorem registerComm_frame_dom (s : SpecState) (caller : DomId)
+    (commHandle childHandle : LocalHandle) (vpId : VpId) (did : DomId)
+    (h : ∀ d, s.getDom caller = some d →
+          ∀ cid, d.lookupDomHandle childHandle = some cid →
+          ∀ dc, s.getDomCap cid = some dc →
+          did ≠ dc.targetDom) :
+    (registerComm_apply s caller commHandle childHandle vpId).getDom did
+      = s.getDom did := by
+  show ((registerComm_apply s caller commHandle childHandle vpId).domains).find?
+        did = _
+  unfold registerComm_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hcd : s.getDom dc.targetDom with _ | cd
+      · simp only [hb, hdcap, hcd]; rfl
+      · rcases hmb : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle)
+          with _ | mid
+        · simp only [hb, hdcap, hcd, hmb]; rfl
+        · rcases hdc : s.getDom caller with _ | d
+          · simp [hdc] at hb
+          · have hh : d.lookupDomHandle childHandle = some cid := by
+              rw [hdc] at hb; simpa using hb
+            have hne : did ≠ dc.targetDom := h d hdc cid hh dc hdcap
+            simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
+            exact Arena.find?_update_other _ dc.targetDom did _ hne
+
+theorem registerComm_frame_mem (s : SpecState) (caller : DomId)
+    (commHandle childHandle : LocalHandle) (vpId : VpId) (id : MemCapId)
+    (h : ∀ d, s.getDom caller = some d →
+          ∀ mid, d.lookupMemHandle commHandle = some mid →
+          id ≠ mid) :
+    (registerComm_apply s caller commHandle childHandle vpId).getMem id
+      = s.getMem id := by
+  show ((registerComm_apply s caller commHandle childHandle vpId).memcaps).find?
+        id = _
+  unfold registerComm_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hcd : s.getDom dc.targetDom with _ | cd
+      · simp only [hb, hdcap, hcd]; rfl
+      · rcases hmb : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle)
+          with _ | mid
+        · simp only [hb, hdcap, hcd, hmb]; rfl
+        · rcases hdc : s.getDom caller with _ | d
+          · simp [hdc] at hmb
+          · have hh : d.lookupMemHandle commHandle = some mid := by
+              rw [hdc] at hmb; simpa using hmb
+            have hne : id ≠ mid := h d hdc mid hh
+            simp only [hb, hdcap, hcd, hmb, SpecState.updMem, SpecState.updDomain]
+            exact Arena.find?_update_other _ mid id _ hne
+
 /-! ## Action footprints (state-dependent)
 
 `Action.affectsDom s a did` says that the action `a` *may* modify the
@@ -685,6 +746,11 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       ∀ cid, d.lookupDomHandle childHandle = some cid →
       ∀ dc, s.getDomCap cid = some dc →
       did = dc.targetDom
+  | .registerComm caller _ childHandle _, did =>
+      ∀ d, s.getDom caller = some d →
+      ∀ cid, d.lookupDomHandle childHandle = some cid →
+      ∀ dc, s.getDomCap cid = some dc →
+      did = dc.targetDom
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -711,6 +777,10 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .switch _ _ _ _,     _  => False
   | .deliverInterrupt _ _ _ _ _, _ => False
   | .addVp caller _ commHandle, id =>
+      ∀ d, s.getDom caller = some d →
+      ∀ mid, d.lookupMemHandle commHandle = some mid →
+      id = mid
+  | .registerComm caller commHandle _ _, id =>
       ∀ d, s.getDom caller = some d →
       ∀ mid, d.lookupMemHandle commHandle = some mid →
       id = mid
@@ -878,6 +948,25 @@ theorem step_locality_dom
     rw [hcid] at hcid2; injection hcid2 with k2; subst k2
     rw [hdc] at hdc2; injection hdc2 with k3; subst k3
     exact heq
+  | registerComm guard =>
+    rename_i caller commHandle childHandle vpId
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨cid, hcid⟩ :=
+      Option.isSome_iff_exists.mp (guard.childHandleResolves d hd)
+    obtain ⟨dc, hdc⟩ :=
+      Option.isSome_iff_exists.mp (guard.childCapExists d hd cid hcid)
+    apply registerComm_frame_dom
+    intro d' hd' cid' hcid' dc' hdc'
+    rw [hd] at hd'; injection hd' with hh; subst hh
+    rw [hcid] at hcid'; injection hcid' with hhh; subst hhh
+    rw [hdc] at hdc'; injection hdc' with hhhh; subst hhhh
+    intro heq
+    apply h
+    intro d2 hd2 cid2 hcid2 dc2 hdc2
+    rw [hd] at hd2; injection hd2 with k1; subst k1
+    rw [hcid] at hcid2; injection hcid2 with k2; subst k2
+    rw [hdc] at hdc2; injection hdc2 with k3; subst k3
+    exact heq
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -936,6 +1025,21 @@ theorem step_locality_mem
     obtain ⟨mid, hmid⟩ :=
       Option.isSome_iff_exists.mp (guard.commHandleResolves d hd)
     apply addVp_frame_mem
+    intro d' hd' mid' hmid'
+    rw [hd] at hd'; injection hd' with hh; subst hh
+    rw [hmid] at hmid'; injection hmid' with hhh; subst hhh
+    intro heq
+    apply h
+    intro d2 hd2 mid2 hmid2
+    rw [hd] at hd2; injection hd2 with k1; subst k1
+    rw [hmid] at hmid2; injection hmid2 with k2; subst k2
+    exact heq
+  | registerComm guard =>
+    rename_i caller commHandle childHandle vpId
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨mid, hmid⟩ :=
+      Option.isSome_iff_exists.mp (guard.commHandleResolves d hd)
+    apply registerComm_frame_mem
     intro d' hd' mid' hmid'
     rw [hd] at hd'; injection hd' with hh; subst hh
     rw [hmid] at hmid'; injection hmid' with hhh; subst hhh

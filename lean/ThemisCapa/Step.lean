@@ -902,6 +902,104 @@ def addVp_apply (s : SpecState) (caller : DomId)
                   commBinding := some
                     { targetDomainId := dc.targetDom, vpId := vpId } } })
 
+/-! ### `registerComm`
+
+Binds an existing child VP to a parent-owned COMM memory cap. Mirrors
+`capa-engine/src/capability.rs::register_comm`. -/
+
+/-- Preconditions for `registerComm(caller, commHandle, childHandle, vpId)`. -/
+structure RegisterCommGuard (s : SpecState) (caller : DomId)
+                            (commHandle childHandle : LocalHandle)
+                            (vpId : VpId) : Prop where
+  callerExists       : (s.getDom caller).isSome
+  childHandleResolves : ∀ d, s.getDom caller = some d →
+                        (d.lookupDomHandle childHandle).isSome
+  childCapExists     : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       (s.getDomCap cid).isSome
+  childExists        : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       (s.getDom dc.targetDom).isSome
+  vpIdInRange        : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       ∀ cd, s.getDom dc.targetDom = some cd →
+                       vpId < cd.policy.numVps
+  noExistingBinding  : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       ∀ cd, s.getDom dc.targetDom = some cd →
+                       ∀ mid' ∈ cd.commBindings,
+                       ∀ c', s.getMem mid' = some c' →
+                       ∀ b, c'.region.commBinding = some b →
+                       b.vpId ≠ vpId
+  commHandleResolves : ∀ d, s.getDom caller = some d →
+                       (d.lookupMemHandle commHandle).isSome
+  commHandleNotFrozen : ∀ d, s.getDom caller = some d →
+                        commHandle ∉ d.frozenHandles
+  commCapExists      : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       (s.getMem mid).isSome
+  commCapOwned       : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c → c.owner = caller
+  commCapKindCarve   : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.kind = RegionKind.carve
+  commCapExclusive   : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.status = RegionStatus.exclusive
+  commCapLeaf        : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.childrenIds = []
+  commCapNotMeta     : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.attributes.meta = false
+  commCapNotComm     : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.attributes.comm = false
+
+/-- Pure state update for `registerComm`. Identical to `addVp_apply`
+    *except* no new VP is added to the child domain.
+
+    1. Resolve childHandle → childCapId → childDomId (= dc.targetDom).
+    2. Resolve commHandle → commCapId.
+    3. Append commCapId to child's `commBindings` (no `vps` change).
+    4. Update commCap: set `attributes.comm/clean := true` and
+       `commBinding := some {childDomId, vpId}`.
+
+    Returns `s` unchanged if any resolution fails. -/
+def registerComm_apply (s : SpecState) (caller : DomId)
+                       (commHandle childHandle : LocalHandle)
+                       (vpId : VpId) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle) with
+  | none     => s
+  | some cid =>
+    match s.getDomCap cid with
+    | none    => s
+    | some dc =>
+      match s.getDom dc.targetDom with
+      | none   => s
+      | some _ =>
+        match (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle) with
+        | none     => s
+        | some mid =>
+          let s₁ := s.updDomain dc.targetDom (fun d =>
+            { d with commBindings := d.commBindings ++ [mid] })
+          s₁.updMem mid (fun c =>
+            { c with region :=
+                { c.region with
+                  attributes :=
+                    { c.region.attributes with comm := true, clean := true },
+                  commBinding := some
+                    { targetDomainId := dc.targetDom, vpId := vpId } } })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -977,5 +1075,10 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : AddVpGuard s caller childHandle commHandle) :
     step s (.addVp caller childHandle commHandle)
          (addVp_apply s caller childHandle commHandle)
+  | registerComm {s : SpecState} {caller : DomId}
+                 {commHandle childHandle : LocalHandle} {vpId : VpId}
+    (guard : RegisterCommGuard s caller commHandle childHandle vpId) :
+    step s (.registerComm caller commHandle childHandle vpId)
+         (registerComm_apply s caller commHandle childHandle vpId)
 
 end ThemisCapa

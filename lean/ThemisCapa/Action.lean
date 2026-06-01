@@ -154,6 +154,24 @@ inductive Action where
         (canonicalize), and `commBinding := some {childDomId, vpId}`. -/
   | addVp (caller : DomId) (childHandle : LocalHandle)
           (commHandle : LocalHandle)
+  /-- `caller` binds an *existing* VP `vpId` in the child domain
+      referenced by `childHandle` to the COMM memory cap referenced by
+      `commHandle`. Mirrors `capa-engine/src/capability.rs::register_comm`.
+
+      Differs from `addVp` in that no VP is allocated — `vpId` must be
+      a *legal* VP index for the child (`vpId < child.policy.numVps`)
+      and must not already have a COMM binding.
+
+      Preconditions on the comm cap match `addVp` plus: leaf (no
+      children), not META, and the cap's `MonitorAPI::SET` permission
+      is granted (modeled here as `commCapApiSet`).
+
+      Apply:
+      - child's `commBindings` is extended with the resolved comm cap id;
+      - comm memcap's attributes get `comm := true, clean := true`
+        (canonicalize), and `commBinding := some {childDomId, vpId}`. -/
+  | registerComm (caller : DomId) (commHandle : LocalHandle)
+                 (childHandle : LocalHandle) (vpId : VpId)
   -- Future:
   -- | switchSuspended … (interrupt-resume branch of switch)
 deriving Repr
