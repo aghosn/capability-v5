@@ -14,7 +14,7 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 
 use capability_engine::{
-    Capability, CapabilityRef, Domain, DomainId, InterruptVisibility, Platform,
+    Capability, CapabilityRef, Domain, DomainId, InterruptVisibility, Platform, RegBitmap,
 };
 use themis_abi::errors;
 
@@ -311,6 +311,74 @@ pub(crate) fn drain_pir_on_interrupt_window(
     vcpu.set_interrupt_window_exit(remaining);
 }
 
+// ── Swap-back helpers (shared by forward_child_exit and ────────────────── //
+// forward_interrupt_to_handler) ─────────────────────────────────────────── //
+
+/// Shared prefix: load PLATFORM_PTR, look up the running core, and fetch the
+/// capability for the currently-running child domain on that core. Returns
+/// `(platform, core_id, child_cap)`. Panics with the supplied `tag` on any
+/// missing entry — both call sites already treat these as invariants.
+fn current_core_child_cap(
+    tag: &'static str,
+) -> (&'static ThemisPlatform, u64, CapabilityRef<Domain>) {
+    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
+    assert!(!platform_ptr.is_null(), "[{}] PLATFORM_PTR null", tag);
+    let platform: &'static ThemisPlatform = unsafe { &*platform_ptr };
+    let core_id = platform
+        .get_current_core()
+        .unwrap_or_else(|| panic!("[{}] get_current_core failed", tag));
+    let child_cap = platform
+        .get_core_cap(core_id as usize)
+        .unwrap_or_else(|| panic!("[{}] get_core_cap failed", tag));
+    (platform, core_id as u64, child_cap)
+}
+
+/// Copy the `read_set`-filtered subset of vcpu registers to the from-VP's COMM
+/// page and, when `intercept_msg` is supplied, write it at the intercept slot.
+/// Returns `true` iff a COMM page was mapped (i.e. `comm_hpa != 0` and map
+/// succeeded). No-op when the from-VP has no COMM page registered.
+fn copy_filtered_regs_to_comm(
+    platform: &ThemisPlatform,
+    vcpu: &mut ActiveVcpu,
+    from_domain_id: DomainId,
+    from_vp_id: usize,
+    read_set: RegBitmap,
+    intercept_msg: Option<&themis_abi::regs::InterceptMessage>,
+) -> bool {
+    let from_arc = platform
+        .domain_arc(from_domain_id)
+        .expect("[SWAP_BACK] from-domain PlatformDomain not found");
+    let comm_hpa = from_arc
+        .lock()
+        .comm_hpas
+        .get(from_vp_id)
+        .copied()
+        .unwrap_or(0);
+    if comm_hpa == 0 {
+        return false;
+    }
+    let hhdm = platform.hhdm_offset();
+    // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP and no
+    // other VpCommView is held on this code path.
+    let Some(mut view) = (unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) }) else {
+        return false;
+    };
+    view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
+    if let Some(msg) = intercept_msg {
+        view.write_intercept(msg);
+    }
+    true
+}
+
+/// Write the 4-register swap-back reply: Rax=status, Rdi=val1, Rsi=0, Rdx=0.
+/// Used by both swap-back paths to hand control back to the destination VP.
+fn write_swap_reply(vcpu: &mut ActiveVcpu, status: u64, val1: u64) {
+    vcpu.set_reg(Reg::Rax, status);
+    vcpu.set_reg(Reg::Rdi, val1);
+    vcpu.set_reg(Reg::Rsi, 0);
+    vcpu.set_reg(Reg::Rdx, 0);
+}
+
 /// Forward a child-domain VM exit to its parent (dom0).
 ///
 /// Reads the child's interrupt policy for this exit reason to determine
@@ -322,18 +390,7 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     use themis_abi::regs::{InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT};
     use x86::vmx::vmcs;
 
-    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
-    assert!(!platform_ptr.is_null());
-    let platform = unsafe { &*platform_ptr };
-
-    let core_id = platform
-        .get_current_core()
-        .expect("[CHILD_EXIT] get_current_core failed");
-
-    // Get child's cap BEFORE the return switch (core is still assigned to child).
-    let child_cap = platform
-        .get_core_cap(core_id as usize)
-        .expect("[CHILD_EXIT] get_core_cap failed");
+    let (platform, _core_id, child_cap) = current_core_child_cap("CHILD_EXIT");
 
     // Look up the exit policy for the forwarded exit reason.
     let read_set = {
@@ -353,124 +410,102 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     let parent_domain_id = return_ctx.to_domain;
     let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
 
-    // ── Copy reported registers + intercept message to child's COMM page ──
-    let child_arc = platform
-        .domain_arc(child_domain_id)
-        .expect("[CHILD_EXIT] child PlatformDomain not found");
-    let comm_hpa = child_arc
-        .lock()
-        .comm_hpas
-        .get(child_vp_id)
-        .copied()
+    // ── Build the slim intercept message (with optional MMIO bytes) ──
+    let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
+    let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+    let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
+    let guest_phys = vcpu
+        .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
         .unwrap_or(0);
 
-    let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
-    if comm_hpa != 0 {
+    // For I/O instruction exits (exit reason 30), extract port/size/direction
+    // from the exit qualification via the typed decoder.
+    const IO_EXIT_REASON: u32 = 30;
+    let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
+        let info = crate::arch::x86_64::vmexit_decode::ExitQualification(exit_qual).io();
+        (
+            info.port_or_dx(vcpu),
+            info.size,
+            if info.is_write { 1u8 } else { 0u8 },
+        )
+    } else {
+        (0u16, 0u8, 0u8)
+    };
+
+    let mut msg = InterceptMessage {
+        header: ThemicMessageHeader {
+            message_type: THEMIC_MSG_VP_INTERCEPT,
+            payload_size: (core::mem::size_of::<InterceptMessage>()
+                - core::mem::size_of::<ThemicMessageHeader>())
+                as u32,
+            sequence: 0,
+        },
+        exit_reason,
+        instruction_length: instr_len,
+        exit_qualification: exit_qual,
+        guest_physical_address: guest_phys,
+        port_number: io_port,
+        access_size: io_size,
+        is_write: io_is_write,
+        ..InterceptMessage::default()
+    };
+
+    // ── MMIO instruction decode for EPT violations ──
+    // Supply the raw instruction bytes so CHV's iced-x86 emulator can decode
+    // and emulate the faulting instruction.
+    if is_ept_violation {
+        let guest_rip = vcpu.rip();
         let hhdm = platform.hhdm_offset();
-        // SAFETY: comm_hpa was registered for this child VP via THHV_CREATE_VP
-        // and no other VpCommView is held on this code path.
-        let mut view = match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
-            Some(v) => v,
-            None => unreachable!("comm_hpa != 0 already checked"),
+        let ept_root = {
+            let child_arc = platform
+                .domain_arc(child_domain_id)
+                .expect("[CHILD_EXIT] child PlatformDomain not found");
+            let cd = child_arc.lock();
+            cd.arch.ept().map(|e| e.root_phys())
         };
-
-        // Copy read_set-selected register values into the COMM page.
-        view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
-
-        // Build the slim intercept message at offset 512.
-        // Register values stay in the COMM page register area (gated by read_set);
-        // thhv reads them from there per exit_reason.
-        let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
-        let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
-        let guest_phys = vcpu
-            .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
-            .unwrap_or(0);
-
-        // For I/O instruction exits (exit reason 30), extract port/size/direction
-        // from the exit qualification via the typed decoder.
-        const IO_EXIT_REASON: u32 = 30;
-        let (io_port, io_size, io_is_write) = if exit_reason == IO_EXIT_REASON {
-            let info = crate::arch::x86_64::vmexit_decode::ExitQualification(exit_qual).io();
-            (
-                info.port_or_dx(vcpu),
-                info.size,
-                if info.is_write { 1u8 } else { 0u8 },
-            )
-        } else {
-            (0u16, 0u8, 0u8)
-        };
-
-        let mut msg = InterceptMessage {
-            header: ThemicMessageHeader {
-                message_type: THEMIC_MSG_VP_INTERCEPT,
-                payload_size: (core::mem::size_of::<InterceptMessage>()
-                    - core::mem::size_of::<ThemicMessageHeader>())
-                    as u32,
-                sequence: 0,
-            },
-            exit_reason,
-            instruction_length: instr_len,
-            exit_qualification: exit_qual,
-            guest_physical_address: guest_phys,
-            port_number: io_port,
-            access_size: io_size,
-            is_write: io_is_write,
-            ..InterceptMessage::default()
-        };
-
-        // ── MMIO instruction decode for EPT violations ──
-        // For EPT violations, supply the raw instruction bytes so CHV's
-        // iced-x86 emulator can decode and emulate the faulting instruction.
-        if exit_reason == EXIT_REASON_EPT_VIOLATION {
-            let guest_rip = vcpu.rip();
-            let ept_root = {
-                let cd = child_arc.lock();
-                cd.arch.ept().map(|e| e.root_phys())
-            };
-            if let Some(ept_root) = ept_root {
-                let guest_cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
-                if let Some(insn_gpa) = crate::arch::x86_64::page_walk::guest_gva_to_gpa(ept_root, hhdm, guest_cr3, guest_rip) {
-                    if let Some(insn_hpa) = crate::arch::x86_64::page_walk::ept_gpa_to_hpa(ept_root, hhdm, insn_gpa) {
-                        let insn_ptr = (insn_hpa + hhdm) as *const u8;
-                        let mut insn_bytes = [0u8; 16];
-                        // Read up to 16 bytes (safe: kernel .text is always resident)
-                        let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                insn_ptr,
-                                insn_bytes.as_mut_ptr(),
-                                avail,
-                            );
-                        }
-                        msg.instruction_bytes = insn_bytes;
-                        // Instruction decode + RIP advancement is handled by
-                        // CHV's iced-x86 emulator (P16.6i).  We only need to
-                        // supply the raw instruction bytes above.
-                    } else {
-                        serial_println!("[MMIO-DECODE] EPT fail GPA {:#x}", insn_gpa);
+        if let Some(ept_root) = ept_root {
+            let guest_cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
+            if let Some(insn_gpa) = crate::arch::x86_64::page_walk::guest_gva_to_gpa(ept_root, hhdm, guest_cr3, guest_rip) {
+                if let Some(insn_hpa) = crate::arch::x86_64::page_walk::ept_gpa_to_hpa(ept_root, hhdm, insn_gpa) {
+                    let insn_ptr = (insn_hpa + hhdm) as *const u8;
+                    let mut insn_bytes = [0u8; 16];
+                    let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            insn_ptr,
+                            insn_bytes.as_mut_ptr(),
+                            avail,
+                        );
                     }
+                    msg.instruction_bytes = insn_bytes;
                 } else {
-                    serial_println!("[MMIO-DECODE] GVA fail RIP {:#x}", guest_rip);
+                    serial_println!("[MMIO-DECODE] EPT fail GPA {:#x}", insn_gpa);
                 }
+            } else {
+                serial_println!("[MMIO-DECODE] GVA fail RIP {:#x}", guest_rip);
             }
         }
-
-        view.write_intercept(&msg);
     }
 
+    // ── Copy filtered regs + intercept message into child's COMM page ──
+    copy_filtered_regs_to_comm(
+        platform,
+        vcpu,
+        child_domain_id,
+        child_vp_id,
+        read_set,
+        Some(&msg),
+    );
+
     // Advance the child's RIP past the faulting instruction while the
-    // child VMCS is still loaded.
-    //
-    // EPT violations are handled differently: CHV's iced-x86 emulator
-    // decodes the instruction, emulates it, and advances RIP itself.
-    // We must NOT advance RIP here for EPT violations.
+    // child VMCS is still loaded. EPT violations are handled differently:
+    // CHV's iced-x86 emulator decodes the instruction, emulates it, and
+    // advances RIP itself. We must NOT advance RIP here for EPT violations.
     if !is_ept_violation {
         vcpu.next_rip();
     }
 
     // ── Swap child → parent via the shared helper. ──
-    // Cap-engine validated the return switch, so dst slot/domain must exist;
-    // helper panics otherwise.
     unsafe {
         swap_active_vp(
             vcpu,
@@ -484,16 +519,9 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     // (not posted), so its interrupts are not routed via posted-interrupt NDST.
 
     // To the parent, this is a return from SWITCH VMCALL.
-    // RAX = SUCCESS, RDI = exit_reason.
-    vcpu.set_reg(Reg::Rax, errors::SUCCESS);
-    vcpu.set_reg(Reg::Rdi, exit_reason as u64);
-    vcpu.set_reg(Reg::Rsi, 0);
-    vcpu.set_reg(Reg::Rdx, 0);
-
-    // NB: the parent's RIP was advanced past the SWITCH VMCALL in `do_switch`
-    // (step 3, then known as the "from-VP") before VMCLEAR-ing its VMCS
-    // (while VMEXIT_INSTRUCTION_LEN was still valid for that exit). No RIP
-    // fix-up is needed here.
+    // RAX = SUCCESS, RDI = exit_reason. (The parent's RIP was advanced past
+    // the SWITCH VMCALL in `do_switch` before VMCLEAR-ing its VMCS.)
+    write_swap_reply(vcpu, errors::SUCCESS, exit_reason as u64);
 
     // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
     // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
@@ -501,6 +529,9 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     // RCU stalls under nested virtualisation.
     #[cfg(feature = "quantum-sched")]
     {
+        let core_id = platform
+            .get_current_core()
+            .expect("[CHILD_EXIT] get_current_core failed (quantum-sched drain)");
         if let Some(vec) = platform.take_deferred(core_id as usize) {
             // Check that parent can accept an external interrupt injection.
             // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
@@ -533,18 +564,7 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
 /// (it owns the vector).  Otherwise (Report/NotReport) the interrupt is forwarded
 /// to dom0 via lazy-unwind.
 pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
-    let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
-    assert!(!platform_ptr.is_null());
-    let platform = unsafe { &*platform_ptr };
-
-    let core_id = platform
-        .get_current_core()
-        .expect("[INTR_FWD] get_current_core failed") as u64;
-
-    // Currently-running domain cap (the child that was interrupted).
-    let child_cap = platform
-        .get_core_cap(core_id as usize)
-        .expect("[INTR_FWD] get_core_cap failed");
+    let (platform, core_id, child_cap) = current_core_child_cap("INTR_FWD");
 
     // Consult the child's interrupt policy for this vector.
     let child_visibility = child_cap
@@ -627,26 +647,16 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     };
 
     // Copy child registers allowed by InterruptPolicy.read_set into comm page.
-    let child_arc = platform
-        .domain_arc(intr_ctx.interrupted_domain_id)
-        .expect("[INTR_FWD] child domain not found");
-    {
-        let comm_hpa = child_arc
-            .lock()
-            .comm_hpas
-            .get(intr_ctx.interrupted_vp_id as usize)
-            .copied()
-            .unwrap_or(0);
-        let hhdm = platform.hhdm_offset();
-        // SAFETY: comm_hpa registered for this child VP; no concurrent view.
-        if let Some(mut view) = unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
-            view.copy_regs_from_vcpu(vcpu, |r| read_set.is_set(r as u64));
-        }
-    }
+    copy_filtered_regs_to_comm(
+        platform,
+        vcpu,
+        intr_ctx.interrupted_domain_id,
+        intr_ctx.interrupted_vp_id as usize,
+        read_set,
+        None,
+    );
 
     // ── Swap child → handler via the shared helper. ──
-    // Cap-engine's deliver_interrupt_vp transitioned the handler to Running,
-    // so dst slot/domain must exist; helper panics otherwise.
     unsafe {
         swap_active_vp(
             vcpu,
@@ -667,8 +677,5 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
     // Per the VcpuSlot RIP invariant (see do_switch step 4), the handler's
     // saved RIP is already past its SWITCH VMCALL — no advance needed here.
-    vcpu.set_reg(Reg::Rax, errors::ERR_RETRY);
-    vcpu.set_reg(Reg::Rdi, vector as u64);
-    vcpu.set_reg(Reg::Rsi, 0);
-    vcpu.set_reg(Reg::Rdx, 0);
+    write_swap_reply(vcpu, errors::ERR_RETRY, vector as u64);
 }
