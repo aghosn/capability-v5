@@ -130,10 +130,14 @@ impl ArchVpOps for X86Platform {
         Ok(())
     }
 
+    fn next_rip(&mut self, vp: &mut Self::VpHandle) {
+        vp.next_rip();
+    }
+
     // ── Monitor-level operations ─────────────────────────────────────────── //
 
     fn dispatch_hypercall(&mut self, vp: &mut Self::VpHandle) {
-        crate::hypercall::handle_vmcall(vp);
+        crate::hypercall::handle_vmcall(self, vp);
     }
 
     fn forward_exit(&mut self, vp: &mut Self::VpHandle, reason: u32) {

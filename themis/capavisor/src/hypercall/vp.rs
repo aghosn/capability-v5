@@ -47,7 +47,7 @@ pub(super) fn do_register_comm(
 /// IN:  RDI = child_domain_handle, RSI = comm_cap_handle, RDX = vp_index
 /// OUT: RDI = vp_index on success
 #[cfg(target_arch = "x86_64")]
-pub(super) fn do_add_vp(
+pub(crate) fn do_add_vp(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     child_domain_handle: u64,

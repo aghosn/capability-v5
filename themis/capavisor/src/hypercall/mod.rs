@@ -17,13 +17,23 @@ pub(crate) use switch::{
     drain_pir_on_interrupt_window, forward_child_exit, forward_interrupt_to_handler,
 };
 
+// Re-export the x86-locked per-opcode handlers so the arch impl of
+// `ArchHypercall` (under `arch/x86_64/hypercall.rs`) can reach them
+// without poking into the private submodules.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use doorbell::do_ring_doorbell;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use switch::do_switch;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use vp::do_add_vp;
+
 use core::sync::atomic::Ordering;
 
-use capability_engine::{CapaError, Platform};
+use capability_engine::{CapabilityRef, Domain, CapaError, Platform};
 use themis_abi::{errors, opcodes};
 
-#[cfg(target_arch = "x86_64")]
-use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
+use crate::arch_traits::traits::ArchVpOps;
+use crate::platform::ThemisPlatform;
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::{ActiveVcpu, Reg};
 use crate::{serial_debug, serial_println};
@@ -73,15 +83,15 @@ pub(super) use execute_or_return;
 
 // Re-export the architecture-neutral hypercall result type from the arch_traits
 // boundary. Per-opcode handlers in the submodules return this; `handle_vmcall`
-// writes it back to the caller's registers via `write_reply`.
+// writes it back via the arch-trait `set_hypercall_result`.
 pub(super) use crate::arch_traits::types::HypercallResult;
 
-/// Write a hypercall result back to the caller's guest registers.
+/// Write a hypercall result back to the caller's x86 guest registers.
 ///
-/// Does NOT advance RIP — callers must invoke `vcpu.next_rip()` separately
-/// after this when they want to step past the `VMCALL` instruction. Keeping
-/// the two operations distinct lets swap-handler error paths reuse this
-/// helper without taking an implicit IP-advance contract.
+/// Does NOT advance RIP — callers must invoke `vcpu.next_rip()` separately.
+/// Used by swap-handler early-error paths in `switch.rs` / `doorbell.rs`
+/// which are inherently x86-locked and operate directly on `ActiveVcpu`
+/// (rather than going through the `ArchVpOps` trait).
 #[cfg(target_arch = "x86_64")]
 pub(super) fn write_reply(vcpu: &mut ActiveVcpu, r: HypercallResult) {
     vcpu.set_reg(Reg::Rax, r.status);
@@ -121,50 +131,95 @@ pub(super) fn map_error(e: &CapaError) -> u64 {
     }
 }
 
+// ── Arch-locked hypercall extension ──────────────────────────────────────── //
+
+/// Hypercall operations that need direct access to the VP's hardware state
+/// (raw VMCS reads, swap mechanics) and so cannot be expressed against the
+/// neutral `ArchVpOps` interface alone.
+///
+/// `ArchHypercall` lives here (in the `hypercall/` module) rather than in
+/// `arch_traits/` because its method signatures reference `ThemisPlatform`
+/// and `CapabilityRef<Domain>` — capavisor-internal types that the arch
+/// boundary deliberately stays free of. The trait is implemented per-arch
+/// in `hypercall/<arch>_arch.rs`.
+pub(crate) trait ArchHypercall: ArchVpOps {
+    /// `THEMIS_ADD_VP` opcode — allocates VMCS/VAPIC/PID for a new child VP.
+    /// Returns a `HypercallResult`; the generic dispatcher writes it back.
+    fn h_add_vp(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        platform: &ThemisPlatform,
+        caller: &CapabilityRef<Domain>,
+        child_domain_handle: u64,
+        comm_cap_handle: u64,
+    ) -> HypercallResult;
+
+    /// `THEMIS_SWITCH` opcode — swaps the active VP to a different domain.
+    /// On success the active VP is replaced underneath us, so the handler
+    /// owns the full reply protocol (no generic writeback follows).
+    fn h_switch(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        platform: &ThemisPlatform,
+        caller: &CapabilityRef<Domain>,
+        to_domain_handle: u64,
+        vp_id: u64,
+    );
+
+    /// `THEMIS_RING_DOORBELL` opcode — signals a parent / sibling domain.
+    /// Like `h_switch`, may swap the active VP, so the handler owns reply.
+    fn h_ring_doorbell(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        platform: &ThemisPlatform,
+        caller: &CapabilityRef<Domain>,
+        gpa: u64,
+        value: u64,
+    );
+}
+
 // ── Opcode dispatch ──────────────────────────────────────────────────────── //
 
-#[cfg(target_arch = "x86_64")]
-/// Handle a VMCALL from the guest.
+/// Handle a hypercall from the guest, architecture-neutral.
 ///
-/// Reads the opcode and arguments from guest registers, dispatches to the
-/// per-opcode handler, and writes the reply back to the caller's registers
-/// (plus advancing RIP past the VMCALL instruction). The two swap opcodes
-/// (`THEMIS_SWITCH` and the synthesized `THEMIS_RING_DOORBELL` path) take
-/// `vcpu` directly and perform their own bookkeeping — on success they have
-/// swapped the active VP underneath us, on early error they write the error
-/// reply themselves before returning.
-pub fn handle_vmcall(vcpu: &mut ActiveVcpu) {
+/// Reads opcode + args via the `ArchVpOps` accessors, dispatches each opcode
+/// to either a generic handler (capa/vp/attest/domcomm/simple doorbell) or
+/// an architecture-locked handler (`ArchHypercall::h_add_vp` / `h_switch` /
+/// `h_ring_doorbell`), then writes the reply and advances the IP.
+///
+/// The two swap opcodes (`THEMIS_SWITCH` and `THEMIS_RING_DOORBELL`) may
+/// swap the active VP underneath us. They own their own reply protocol:
+/// on success they've swapped, on early error they've written the reply
+/// themselves.  This function returns early without touching the (possibly
+/// new) VP's registers in those cases.
+pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
     let platform_ptr = crate::PLATFORM_PTR.load(Ordering::Relaxed);
     if platform_ptr.is_null() {
         serial_println!("[VMCALL] platform_ptr null!");
-        write_reply(vcpu, HypercallResult::error(errors::ERR_INVALID));
-        vcpu.next_rip();
+        arch.set_hypercall_result(vp, HypercallResult::error(errors::ERR_INVALID));
+        arch.next_rip(vp);
         return;
     }
     let platform = unsafe { &*platform_ptr };
 
     let Some(core_id) = platform.get_current_core() else {
         serial_println!("[VMCALL] get_current_core returned None");
-        write_reply(vcpu, HypercallResult::error(errors::ERR_INVALID));
-        vcpu.next_rip();
+        arch.set_hypercall_result(vp, HypercallResult::error(errors::ERR_INVALID));
+        arch.next_rip(vp);
         return;
     };
 
     let Some(caller) = platform.get_core_cap(core_id as usize) else {
         serial_println!("[VMCALL] get_core_cap({}) returned None", core_id);
-        write_reply(vcpu, HypercallResult::error(errors::ERR_INVALID));
-        vcpu.next_rip();
+        arch.set_hypercall_result(vp, HypercallResult::error(errors::ERR_INVALID));
+        arch.next_rip(vp);
         return;
     };
 
-    let opcode = vcpu.reg(Reg::Rax);
-    let arg0 = vcpu.reg(Reg::Rdi);
-    let arg1 = vcpu.reg(Reg::Rsi);
-    let arg2 = vcpu.reg(Reg::Rdx);
-    let arg3 = vcpu.reg(Reg::Rcx);
-    let arg4 = vcpu.reg(Reg::R8);
+    let args = arch.get_hypercall_args(vp);
+    let (arg0, arg1, arg2, arg3, arg4) = (args.arg0, args.arg1, args.arg2, args.arg3, args.arg4);
 
-    let result = match opcode {
+    let result = match args.opcode {
         opcodes::THEMIS_CARVE => capa::do_carve(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_ALIAS => capa::do_alias(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_SEND => capa::do_send(platform, &caller, arg0, arg1, arg2, arg3),
@@ -179,15 +234,17 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) {
         }
         opcodes::THEMIS_REGISTER_COMM => vp::do_register_comm(platform, &caller, arg0, arg1, arg2),
         opcodes::THEMIS_DOMCOMM_NOTIFY => domcomm::do_domcomm_notify(platform, &caller),
-        opcodes::THEMIS_ADD_VP => vp::do_add_vp(platform, &caller, arg0, arg1, vcpu.vmcs_phys()),
+
+        // Arch-locked opcode: needs raw VP state (VMCS PA on x86).
+        opcodes::THEMIS_ADD_VP => arch.h_add_vp(vp, platform, &caller, arg0, arg1),
 
         // Swap handlers: own their writeback (success → swapped, early error → wrote reply).
         opcodes::THEMIS_SWITCH => {
-            switch::do_switch(platform, &caller, arg0, arg1, vcpu);
+            arch.h_switch(vp, platform, &caller, arg0, arg1);
             return;
         }
         opcodes::THEMIS_RING_DOORBELL => {
-            doorbell::do_ring_doorbell(platform, &caller, arg0, arg1, vcpu);
+            arch.h_ring_doorbell(vp, platform, &caller, arg0, arg1);
             return;
         }
 
@@ -249,13 +306,12 @@ pub fn handle_vmcall(vcpu: &mut ActiveVcpu) {
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => HypercallResult::unimpl(),
 
-        _ => {
-            serial_debug!("[VMCALL] unknown opcode {:#x}", opcode);
+        _unknown_opcode => {
+            serial_debug!("[VMCALL] unknown opcode {:#x}", _unknown_opcode);
             HypercallResult::error(errors::ERR_INVALID)
         }
     };
 
-    write_reply(vcpu, result);
-    vcpu.next_rip();
+    arch.set_hypercall_result(vp, result);
+    arch.next_rip(vp);
 }
-

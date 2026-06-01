@@ -22,6 +22,7 @@ pub mod vmcs;
 pub mod vmexit;
 pub mod vmexit_decode;
 pub mod x86_platform;
+pub mod hypercall;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{ArchDomainState, ArchPlatformState};

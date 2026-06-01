@@ -136,7 +136,7 @@ pub(super) fn do_unregister_doorbell(
 /// must NOT write a reply or advance the (now-parent) VP's RIP. On early
 /// error this function writes the error reply to the caller (still active)
 /// and advances its RIP itself.
-pub(super) fn do_ring_doorbell(
+pub(crate) fn do_ring_doorbell(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     gpa: u64,

@@ -265,6 +265,22 @@ impl<A: ArchVpOps> Vp<A> {
         self.arch.dispatch_hypercall(&mut self.handle);
     }
 
+    /// Read hypercall arguments from the VP's register state.
+    pub fn get_args(&self) -> super::types::HypercallArgs {
+        self.arch.get_hypercall_args(&self.handle)
+    }
+
+    /// Write a hypercall result back to the VP's register state.
+    /// Does NOT advance the instruction pointer — call `next_rip` after.
+    pub fn write_reply(&mut self, result: super::types::HypercallResult) {
+        self.arch.set_hypercall_result(&mut self.handle, result);
+    }
+
+    /// Advance the VP's instruction pointer past the trap that caused the exit.
+    pub fn next_rip(&mut self) {
+        self.arch.next_rip(&mut self.handle);
+    }
+
     /// Forward an exit to the parent domain.
     pub fn forward_exit(&mut self, reason: u32) {
         self.arch.forward_exit(&mut self.handle, reason);

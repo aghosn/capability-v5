@@ -57,6 +57,11 @@ pub trait ArchVpOps {
     /// Inject an interrupt into the VP (posted interrupt on x86, LR on ARM).
     fn inject_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32) -> Result<(), CapaError>;
 
+    /// Advance the VP's instruction pointer past the current trap instruction.
+    /// On x86, this advances RIP by `VMEXIT_INSTRUCTION_LEN` (the VMCALL length).
+    /// On ARM, this would bump ELR_EL2 past the HVC.
+    fn next_rip(&mut self, vp: &mut Self::VpHandle);
+
     // ── Monitor-level operations ─────────────────────────────────────────── //
     //
     // These methods are used by the generic monitor loop (via the `Vp<A>`

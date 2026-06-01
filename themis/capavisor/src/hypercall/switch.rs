@@ -53,7 +53,7 @@ use crate::vcpu::{ActiveVcpu, Reg};
 /// On early error (before the swap), this function writes the error reply
 /// and advances the caller's RIP itself, then returns.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn do_switch(
+pub(crate) fn do_switch(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     to_domain_handle: u64,
