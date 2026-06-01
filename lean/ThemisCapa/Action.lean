@@ -68,6 +68,23 @@ inductive Action where
       Mirrors `capa-engine/src/capability.rs::set_policy`. -/
   | setPolicy (caller : DomId) (cap : DomCapId)
               (id : PolicyIdentifier) (value : Nat)
+  /-- `caller` transfers a channel domain-cap `cap` to `receiver`
+      via the **unsealed** path (immediate ownership transfer).
+      `cap` must have `isChannel = true` and be owned by caller; receiver
+      must be unsealed. Mirrors `send_channel` (unsealed branch). All
+      caller handles to `cap` are dropped; a fresh handle is appended to
+      `receiver`; the cap's `owner` field is updated to `receiver`. -/
+  | sendChannel (caller : DomId) (receiver : DomId) (cap : DomCapId)
+  /-- `receiver` accepts a pending channel domain-cap (referenced by
+      `pendingId`) — completes the sealed-path channel transfer:
+      transfers cap ownership to `receiver`, removes the pending entry,
+      installs a fresh handle on `receiver`, and unfreezes the sender's
+      domain handle. Mirrors `accept_channel`. -/
+  | acceptChannel (receiver : DomId) (pendingId : PendingId)
+  /-- `receiver` rejects a pending channel domain-cap. Removes the
+      pending entry and unfreezes the sender's domain handle.
+      Mirrors `reject_channel`. No ownership transfer. -/
+  | rejectChannel (receiver : DomId) (pendingId : PendingId)
   -- Future:
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr

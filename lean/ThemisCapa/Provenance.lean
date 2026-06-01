@@ -142,6 +142,24 @@ private theorem setPolicy_mem_isSome
     ((setPolicy_apply s caller cap id value).getMem c).isSome := by
   rw [setPolicy_frame_mem]; exact h
 
+private theorem sendChannel_mem_isSome
+    (s : SpecState) (caller receiver : DomId) (cap : DomCapId) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((sendChannel_apply s caller receiver cap).getMem c).isSome := by
+  rw [sendChannel_frame_mem]; exact h
+
+private theorem acceptChannel_mem_isSome
+    (s : SpecState) (receiver : DomId) (pid : PendingId) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((acceptChannel_apply s receiver pid).getMem c).isSome := by
+  rw [acceptChannel_frame_mem]; exact h
+
+private theorem rejectChannel_mem_isSome
+    (s : SpecState) (receiver : DomId) (pid : PendingId) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((rejectChannel_apply s receiver pid).getMem c).isSome := by
+  rw [rejectChannel_frame_mem]; exact h
+
 /-! ### Provenance — Removal -/
 
 /-- The only way a memcap can disappear from one step to the next is
@@ -208,6 +226,21 @@ theorem provenance_removal
     rename_i caller cap id value
     exfalso
     have h := setPolicy_mem_isSome s caller cap id value c hPre
+    rw [hPost] at h; cases h
+  | sendChannel guard =>
+    rename_i caller receiver cap
+    exfalso
+    have h := sendChannel_mem_isSome s caller receiver cap c hPre
+    rw [hPost] at h; cases h
+  | acceptChannel guard =>
+    rename_i receiver pid
+    exfalso
+    have h := acceptChannel_mem_isSome s receiver pid c hPre
+    rw [hPost] at h; cases h
+  | rejectChannel guard =>
+    rename_i receiver pid
+    exfalso
+    have h := rejectChannel_mem_isSome s receiver pid c hPre
     rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
@@ -307,6 +340,24 @@ private theorem setPolicy_mem_isNone
     (h : s.getMem c = none) :
     (setPolicy_apply s caller cap id value).getMem c = none := by
   rw [setPolicy_frame_mem]; exact h
+
+private theorem sendChannel_mem_isNone
+    (s : SpecState) (caller receiver : DomId) (cap : DomCapId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (sendChannel_apply s caller receiver cap).getMem c = none := by
+  rw [sendChannel_frame_mem]; exact h
+
+private theorem acceptChannel_mem_isNone
+    (s : SpecState) (receiver : DomId) (pid : PendingId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (acceptChannel_apply s receiver pid).getMem c = none := by
+  rw [acceptChannel_frame_mem]; exact h
+
+private theorem rejectChannel_mem_isNone
+    (s : SpecState) (receiver : DomId) (pid : PendingId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (rejectChannel_apply s receiver pid).getMem c = none := by
+  rw [rejectChannel_frame_mem]; exact h
 
 /-! ### Per-action: characterization of the freshly-created cap. -/
 
@@ -440,6 +491,21 @@ theorem provenance_creation
     rename_i caller cap id value
     exfalso
     have h := setPolicy_mem_isNone s caller cap id value c hPre
+    rw [hPost] at h; cases h
+  | sendChannel guard =>
+    rename_i caller receiver cap
+    exfalso
+    have h := sendChannel_mem_isNone s caller receiver cap c hPre
+    rw [hPost] at h; cases h
+  | acceptChannel guard =>
+    rename_i receiver pid
+    exfalso
+    have h := acceptChannel_mem_isNone s receiver pid c hPre
+    rw [hPost] at h; cases h
+  | rejectChannel guard =>
+    rename_i receiver pid
+    exfalso
+    have h := rejectChannel_mem_isNone s receiver pid c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -624,6 +690,33 @@ private theorem setPolicy_owner_preserved
   rw [setPolicy_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
+private theorem sendChannel_owner_preserved
+    (s : SpecState) (caller receiver : DomId) (cap : DomCapId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (sendChannel_apply s caller receiver cap).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [sendChannel_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem acceptChannel_owner_preserved
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (acceptChannel_apply s receiver pid).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [acceptChannel_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem rejectChannel_owner_preserved
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (rejectChannel_apply s receiver pid).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [rejectChannel_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
 /-! ### `send` and `accept`: characterize the owner change. -/
 
 /-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
@@ -756,5 +849,20 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (setPolicy_owner_preserved s caller cap id value c capPre capPost hPre hPost)
+  | sendChannel guard =>
+    rename_i caller receiver cap
+    exfalso
+    exact hOwnerChange
+      (sendChannel_owner_preserved s caller receiver cap c capPre capPost hPre hPost)
+  | acceptChannel guard =>
+    rename_i receiver pid
+    exfalso
+    exact hOwnerChange
+      (acceptChannel_owner_preserved s receiver pid c capPre capPost hPre hPost)
+  | rejectChannel guard =>
+    rename_i receiver pid
+    exfalso
+    exact hOwnerChange
+      (rejectChannel_owner_preserved s receiver pid c capPre capPost hPre hPost)
 
 end ThemisCapa

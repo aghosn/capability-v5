@@ -283,6 +283,83 @@ theorem revokeDomain_frame_mem (s : SpecState) (caller : DomId) (handle : LocalH
       · rfl
       · simp only [SpecState.updDomain]; rfl
 
+/-! ### Channels (sendChannel / acceptChannel / rejectChannel)
+
+`sendChannel` mutates a DomCap (owner field); Locality currently does
+not track DomCap-level frames, so these lemmas only cover Domain/MemCap
+preservation. -/
+
+theorem sendChannel_frame_dom (s : SpecState) (caller receiver : DomId)
+    (cap : DomCapId) (did : DomId)
+    (h1 : did ≠ caller) (h2 : did ≠ receiver) :
+    (sendChannel_apply s caller receiver cap).getDom did = s.getDom did := by
+  show ((sendChannel_apply s caller receiver cap).domains).find? did = _
+  simp only [sendChannel_apply, SpecState.updDomCap, SpecState.updDomain]
+  rw [Arena.find?_update_other _ receiver did _ h2,
+      Arena.find?_update_other _ caller did _ h1]
+  rfl
+
+theorem sendChannel_frame_mem (s : SpecState) (caller receiver : DomId)
+    (cap : DomCapId) (id : MemCapId) :
+    (sendChannel_apply s caller receiver cap).getMem id = s.getMem id := by
+  show ((sendChannel_apply s caller receiver cap).memcaps).find? id = _
+  simp only [sendChannel_apply, SpecState.updDomCap, SpecState.updDomain]
+  rfl
+
+theorem acceptChannel_frame_dom (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (dr : Domain) (hdr : s.getDom receiver = some dr)
+    (pe : PendingDomCap) (hpe : dr.lookupPendingDom pid = some pe)
+    (did : DomId) (h1 : did ≠ receiver) (h2 : did ≠ pe.senderDomainId) :
+    (acceptChannel_apply s receiver pid).getDom did = s.getDom did := by
+  show ((acceptChannel_apply s receiver pid).domains).find? did = _
+  have hbind : (s.getDom receiver).bind (fun d => d.lookupPendingDom pid) = some pe := by
+    rw [hdr]; exact hpe
+  simp only [acceptChannel_apply, hbind, SpecState.updDomain,
+             sendChannel_apply, SpecState.updDomCap]
+  rw [Arena.find?_update_other _ pe.senderDomainId did _ h2,
+      Arena.find?_update_other _ receiver did _ h1,
+      Arena.find?_update_other _ receiver did _ h1,
+      Arena.find?_update_other _ pe.senderDomainId did _ h2]
+  rfl
+
+theorem acceptChannel_frame_mem (s : SpecState) (receiver : DomId)
+    (pid : PendingId) (id : MemCapId) :
+    (acceptChannel_apply s receiver pid).getMem id = s.getMem id := by
+  show ((acceptChannel_apply s receiver pid).memcaps).find? id = _
+  unfold acceptChannel_apply
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPendingDom pid) with _ | pe
+  · simp only [hb]; rfl
+  · simp only [hb, SpecState.updDomain, sendChannel_apply, SpecState.updDomCap]
+    rfl
+
+theorem rejectChannel_frame_dom (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (did : DomId) (h1 : did ≠ receiver)
+    (hSender :
+      ∀ dr, s.getDom receiver = some dr →
+      ∀ pe, dr.lookupPendingDom pid = some pe → did ≠ pe.senderDomainId) :
+    (rejectChannel_apply s receiver pid).getDom did = s.getDom did := by
+  show ((rejectChannel_apply s receiver pid).domains).find? did = _
+  unfold rejectChannel_apply
+  rcases hdr : s.getDom receiver with _ | dr
+  · simp only [hdr, Option.bind_none, SpecState.updDomain]
+    exact Arena.find?_update_other _ receiver did _ h1
+  · rcases hpe : dr.lookupPendingDom pid with _ | pe
+    · simp only [hdr, hpe, Option.bind_some, SpecState.updDomain]
+      exact Arena.find?_update_other _ receiver did _ h1
+    · have h2 := hSender dr hdr pe hpe
+      simp only [hdr, hpe, Option.bind_some, SpecState.updDomain]
+      rw [Arena.find?_update_other _ pe.senderDomainId did _ h2,
+          Arena.find?_update_other _ receiver did _ h1]
+      rfl
+
+theorem rejectChannel_frame_mem (s : SpecState) (receiver : DomId)
+    (pid : PendingId) (id : MemCapId) :
+    (rejectChannel_apply s receiver pid).getMem id = s.getMem id := by
+  show ((rejectChannel_apply s receiver pid).memcaps).find? id = _
+  unfold rejectChannel_apply
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPendingDom pid) with _ | _ <;>
+    simp [SpecState.updDomain, hb] <;> rfl
+
 /-! ## Action footprints (state-dependent)
 
 `Action.affectsDom s a did` says that the action `a` *may* modify the
@@ -324,6 +401,15 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
        ∀ d, s.getDomCap dcId = some d → did = d.targetDom)
   | .setPolicy _ cap _ _,        did =>
       ∀ dc, s.getDomCap cap = some dc → did = dc.targetDom
+  | .sendChannel caller receiver _, did => did = caller ∨ did = receiver
+  | .acceptChannel receiver pid, did =>
+      did = receiver ∨
+      (∀ dr, s.getDom receiver = some dr →
+       ∀ pe, dr.lookupPendingDom pid = some pe → did = pe.senderDomainId)
+  | .rejectChannel receiver pid, did =>
+      did = receiver ∨
+      (∀ dr, s.getDom receiver = some dr →
+       ∀ pe, dr.lookupPendingDom pid = some pe → did = pe.senderDomainId)
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -343,6 +429,9 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .create _ _,         _  => False
   | .revokeDomain _ _,   _  => False
   | .setPolicy _ _ _ _,  _  => False
+  | .sendChannel _ _ _,  _  => False
+  | .acceptChannel _ _,  _  => False
+  | .rejectChannel _ _,  _  => False
 
 /-! ## Top-level locality theorems.
 
@@ -425,6 +514,32 @@ theorem step_locality_dom
     have hne : did ≠ dc.targetDom := fun heq => h (fun dc' hdc' => by
       rw [hdc'] at hdc; injection hdc with h'; rw [h']; exact heq)
     exact setPolicy_frame_dom _ _ _ _ _ _ hdc _ hne
+  | sendChannel guard =>
+    have h1 : did ≠ _ := fun e => h (Or.inl e)
+    have h2 : did ≠ _ := fun e => h (Or.inr e)
+    exact sendChannel_frame_dom _ _ _ _ _ h1 h2
+  | acceptChannel guard =>
+    rename_i receiver pid
+    obtain ⟨dr, hdr⟩ := Option.isSome_iff_exists.mp guard.receiverExists
+    obtain ⟨pe, hpe⟩ :=
+      Option.isSome_iff_exists.mp (guard.pendingFound dr hdr)
+    have h1 : did ≠ receiver := fun e => h (Or.inl e)
+    have h2 : did ≠ pe.senderDomainId := fun e => h (Or.inr (fun dr' hdr' pe' hpe' => by
+      rw [hdr] at hdr'; injection hdr' with hh
+      rw [← hh] at hpe'
+      rw [hpe] at hpe'; injection hpe' with hh'
+      rw [← hh']; exact e))
+    exact acceptChannel_frame_dom _ _ _ _ hdr _ hpe _ h1 h2
+  | rejectChannel guard =>
+    rename_i receiver pid
+    have h1 : did ≠ receiver := fun e => h (Or.inl e)
+    apply rejectChannel_frame_dom _ _ _ _ h1
+    intro dr hdr pe hpe heq
+    exact h (Or.inr (fun dr' hdr' pe' hpe' => by
+      rw [hdr] at hdr'; injection hdr' with hh
+      rw [← hh] at hpe'
+      rw [hpe] at hpe'; injection hpe' with hh'
+      rw [← hh']; exact heq))
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -471,5 +586,8 @@ theorem step_locality_mem
   | create guard => exact create_frame_mem _ _ _ _
   | revokeDomain guard => exact revokeDomain_frame_mem _ _ _ _
   | setPolicy guard => exact setPolicy_frame_mem _ _ _ _ _ _
+  | sendChannel guard => exact sendChannel_frame_mem _ _ _ _ _
+  | acceptChannel guard => exact acceptChannel_frame_mem _ _ _ _
+  | rejectChannel guard => exact rejectChannel_frame_mem _ _ _ _
 
 end ThemisCapa

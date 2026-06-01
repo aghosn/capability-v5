@@ -188,5 +188,8 @@ theorem step_view_preservation
   | create _ => exact id
   | revokeDomain _ => exact id
   | setPolicy _ => exact id
+  | sendChannel _ => exact id
+  | acceptChannel _ => exact id
+  | rejectChannel _ => exact id
 
 end ThemisCapa

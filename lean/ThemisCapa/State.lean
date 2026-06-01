@@ -64,6 +64,10 @@ structure DomCap where
   parent     : Option DomCapId
   owner      : DomId        -- holder of this dom-cap
   targetDom  : DomId        -- domain the cap points to
+  /-- A *channel* dom-cap can be transferred via `sendChannel` and
+      received via `acceptChannel`. Plain (non-channel) dom-caps are
+      created by `create` and removed by `revokeDomain`. -/
+  isChannel  : Bool := false
 
 /-- A memory cap that has been sent but not yet accepted.
     Mirrors `capa-engine/src/domain.rs::PendingCapability`. -/
@@ -120,6 +124,10 @@ def lookupDomHandle (d : Domain) (h : LocalHandle) : Option DomCapId :=
 /-- Resolve a pending-memcap id to the pending entry. -/
 def lookupPending (d : Domain) (pid : PendingId) : Option PendingMemCap :=
   (d.pendingMemCaps.find? (fun p => p.1 = pid)).map Prod.snd
+
+/-- Resolve a pending-domcap (channel) id to the pending entry. -/
+def lookupPendingDom (d : Domain) (pid : PendingId) : Option PendingDomCap :=
+  (d.pendingDomCaps.find? (fun p => p.1 = pid)).map Prod.snd
 
 end Domain
 
@@ -185,6 +193,10 @@ def updMem (s : SpecState) (id : MemCapId) (f : MemCap → MemCap) : SpecState :
 /-- Functionally update a domain in place. -/
 def updDomain (s : SpecState) (id : DomId) (f : Domain → Domain) : SpecState :=
   { s with domains := s.domains.update id f }
+
+/-- Functionally update a domain-capability in place. -/
+def updDomCap (s : SpecState) (id : DomCapId) (f : DomCap → DomCap) : SpecState :=
+  { s with domcaps := s.domcaps.update id f }
 
 end SpecState
 

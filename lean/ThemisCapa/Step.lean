@@ -552,6 +552,100 @@ def revokeDomain_apply (s : SpecState) (caller : DomId) (handle : LocalHandle)
           { d with domHandles   := d.domHandles.filter (fun h => h.2 ≠ dcId),
                    childrenDoms := d.childrenDoms.filter (· ≠ target) })
 
+/-! ### Channels (sendChannel / acceptChannel / rejectChannel)
+
+    Mirrors the channel-cap (DomCap with `isChannel = true`) transfer
+    family in `capa-engine/src/capability.rs::send_channel` /
+    `accept_channel` / `reject_channel`. Only the **unsealed** path of
+    `sendChannel` is modeled here; the sealed path (which freezes the
+    sender's dom-handle and enqueues a `PendingDomCap` on the receiver)
+    is future work (`sealedSendChannel`). -/
+
+/-- Preconditions for `sendChannel(caller, receiver, cap)` — unsealed
+    path: receiver must be currently unsealed; cap is a channel cap
+    owned by caller. -/
+structure SendChannelGuard (s : SpecState) (caller : DomId) (receiver : DomId)
+                            (cap : DomCapId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  receiverExists    : (s.getDom receiver).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canSend = true
+  capExists         : (s.getDomCap cap).isSome
+  capIsChannel      : ∀ dc, s.getDomCap cap = some dc → dc.isChannel = true
+  capOwnedByCaller  : ∀ dc, s.getDomCap cap = some dc → dc.owner = caller
+  receiverUnsealed  : ∀ d, s.getDom receiver = some d → d.isUnsealed
+  notSelf           : caller ≠ receiver
+
+/-- Pure state update for the unsealed `sendChannel`:
+
+    1. Drop all caller handles to `cap`.
+    2. Append a fresh handle to receiver's `domHandles`.
+    3. Update `cap.owner` to `receiver`. -/
+def sendChannel_apply (s : SpecState) (caller : DomId) (receiver : DomId)
+                       (cap : DomCapId) : SpecState :=
+  let s₁ := s.updDomain caller (fun d =>
+    { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ cap) })
+  let s₂ := s₁.updDomain receiver (fun d =>
+    { d with domHandles := d.domHandles ++ [(d.nextHandle, cap)],
+             nextHandle := d.nextHandle + 1 })
+  s₂.updDomCap cap (fun c => { c with owner := receiver })
+
+/-- Preconditions for `acceptChannel(receiver, pendingId)`. -/
+structure AcceptChannelGuard (s : SpecState) (receiver : DomId)
+                              (pendingId : PendingId) : Prop where
+  receiverExists    : (s.getDom receiver).isSome
+  pendingFound      : ∀ d, s.getDom receiver = some d →
+                      (d.lookupPendingDom pendingId).isSome
+  senderExists      : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPendingDom pendingId = some pe →
+                      (s.getDom pe.senderDomainId).isSome
+  capExists         : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPendingDom pendingId = some pe →
+                      (s.getDomCap pe.capId).isSome
+  notSelf           : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPendingDom pendingId = some pe →
+                      pe.senderDomainId ≠ receiver
+
+/-- Pure state update for `acceptChannel`:
+
+    1. Transfer dom-cap ownership to receiver and append a fresh handle.
+    2. Remove the pending entry from receiver.
+    3. Unfreeze sender's domain handle. -/
+def acceptChannel_apply (s : SpecState) (receiver : DomId)
+                         (pendingId : PendingId) : SpecState :=
+  match (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId) with
+  | none    => s
+  | some pe =>
+    let s₁ := (sendChannel_apply s pe.senderDomainId receiver pe.capId).updDomain
+      receiver
+      (fun d =>
+        { d with pendingDomCaps :=
+                  d.pendingDomCaps.filter (fun p => p.1 ≠ pendingId) })
+    s₁.updDomain pe.senderDomainId (fun d =>
+      { d with frozenHandles :=
+                d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+
+/-- Preconditions for `rejectChannel(receiver, pendingId)`. -/
+structure RejectChannelGuard (s : SpecState) (receiver : DomId)
+                              (pendingId : PendingId) : Prop where
+  receiverExists    : (s.getDom receiver).isSome
+  pendingFound      : ∀ d, s.getDom receiver = some d →
+                      (d.lookupPendingDom pendingId).isSome
+
+/-- Pure state update for `rejectChannel`: remove pending from receiver
+    and unfreeze sender's handle. -/
+def rejectChannel_apply (s : SpecState) (receiver : DomId)
+                         (pendingId : PendingId) : SpecState :=
+  let s₁ := s.updDomain receiver (fun d =>
+    { d with pendingDomCaps :=
+              d.pendingDomCaps.filter (fun p => p.1 ≠ pendingId) })
+  match (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId) with
+  | none    => s₁
+  | some pe =>
+    s₁.updDomain pe.senderDomainId (fun d =>
+      { d with frozenHandles :=
+                d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -594,5 +688,18 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : SetPolicyGuard s caller cap id value) :
     step s (.setPolicy caller cap id value)
          (setPolicy_apply s caller cap id value)
+  | sendChannel {s : SpecState} {caller : DomId} {receiver : DomId}
+                {cap : DomCapId}
+    (guard : SendChannelGuard s caller receiver cap) :
+    step s (.sendChannel caller receiver cap)
+         (sendChannel_apply s caller receiver cap)
+  | acceptChannel {s : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (guard : AcceptChannelGuard s receiver pendingId) :
+    step s (.acceptChannel receiver pendingId)
+         (acceptChannel_apply s receiver pendingId)
+  | rejectChannel {s : SpecState} {receiver : DomId} {pendingId : PendingId}
+    (guard : RejectChannelGuard s receiver pendingId) :
+    step s (.rejectChannel receiver pendingId)
+         (rejectChannel_apply s receiver pendingId)
 
 end ThemisCapa
