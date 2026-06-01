@@ -192,5 +192,6 @@ theorem step_view_preservation
   | acceptChannel _ => exact id
   | rejectChannel _ => exact id
   | switchReturn _ => exact id
+  | switch _ => exact id
 
 end ThemisCapa

@@ -688,6 +688,83 @@ def switchReturn_apply (s : SpecState) (caller : DomId) (core : CoreId)
       | other                => { vp with runState := other }))
     s₂.updCore core (fun _ => .runningDomain pctx.domainId pctx.vpId)
 
+/-- Preconditions for forward `switch(caller, toHandle, toVpId, core)`.
+
+    Mirrors `switch_domain_forward` (Available branch only): caller
+    sealed with SWITCH perm; `toHandle` resolves to a non-channel
+    dom-cap pointing at a sealed target whose policy includes `core`;
+    target VP must exist and be in `.available _`; caller must have a
+    VP currently in `.running` on `core`. -/
+structure SwitchGuard (s : SpecState) (caller : DomId)
+                      (toHandle : LocalHandle) (toVpId : VpId)
+                      (core : CoreId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d →
+                      d.policy.api.canSwitch = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                      (d.lookupDomHandle toHandle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      (s.getDomCap cid).isSome
+  capNotChannel     : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      dc.isChannel = false
+  targetExists      : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      (s.getDom dc.targetDom).isSome
+  targetSealed      : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      td.isSealed
+  coreAllowed       : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      core ∈ td.policy.cores
+  targetVpExists    : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      (td.lookupVp toVpId).isSome
+  targetVpAvailable : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      ∀ tvp, td.lookupVp toVpId = some tvp →
+                      ∃ ler, tvp.runState = .available ler
+  callerVpOnCore    : ∀ d, s.getDom caller = some d →
+                      (d.vpAndOptPrevOnCore core).isSome
+  notSelf           : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      dc.targetDom ≠ caller
+
+/-- Pure state update for forward `switch`:
+    1. Target's VP `toVpId` runState ← `.running core (some {caller, callerVpId})`.
+    2. Caller's running VP on `core` runState ← `.locked target toVpId callerPrev`.
+    3. Core's CoreState ← `.runningDomain target toVpId`. -/
+def switch_apply (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+                  (toVpId : VpId) (core : CoreId) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle) with
+  | none     => s
+  | some cid =>
+    match s.getDomCap cid with
+    | none    => s
+    | some dc =>
+      match (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core) with
+      | none                  => s
+      | some (callerVpId, callerPrev) =>
+        let cctx : VpCallContext := { domainId := caller, vpId := callerVpId }
+        let s₁ := s.updDomain dc.targetDom (fun d => d.updVp toVpId (fun vp =>
+          { vp with runState := .running core (some cctx) }))
+        let s₂ := s₁.updDomain caller (fun d => d.updVp callerVpId (fun vp =>
+          { vp with runState := .locked dc.targetDom toVpId callerPrev }))
+        s₂.updCore core (fun _ => .runningDomain dc.targetDom toVpId)
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -748,5 +825,10 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : SwitchReturnGuard s caller core) :
     step s (.switchReturn caller core exitReason)
          (switchReturn_apply s caller core exitReason)
+  | switch {s : SpecState} {caller : DomId} {toHandle : LocalHandle}
+           {toVpId : VpId} {core : CoreId}
+    (guard : SwitchGuard s caller toHandle toVpId core) :
+    step s (.switch caller toHandle toVpId core)
+         (switch_apply s caller toHandle toVpId core)
 
 end ThemisCapa

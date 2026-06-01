@@ -99,8 +99,22 @@ inductive Action where
       - the core's `CoreState` is set to
         `.runningDomain prevCtx.domainId prevCtx.vpId`. -/
   | switchReturn (caller : DomId) (core : CoreId) (exitReason : Option Nat)
+  /-- Forward switch: `caller` switches into VP `toVpId` of the domain
+      referenced by `toHandle` on `core`. Mirrors
+      `capa-engine/src/capability.rs::switch_domain_forward`.
+
+      Scope: models the **Available → Running** branch only (the
+      Suspended → Running interrupt-resume branch and Interrupted-callee
+      cleanup are deferred to a later batch).
+
+      Apply:
+      - target VP becomes `.running core (some {domainId := caller, vpId := callerVpId})`
+      - caller VP becomes `.locked targetDom toVpId callerPrevCaller`
+      - core's CoreState → `.runningDomain targetDom toVpId`. -/
+  | switch (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId)
+           (core : CoreId)
   -- Future:
-  -- | switchFwd … | interrupt …
+  -- | switchSuspended … | interrupt …
 deriving Repr
 
 end ThemisCapa

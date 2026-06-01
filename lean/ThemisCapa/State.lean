@@ -158,6 +158,18 @@ def vpAndPrevCallerOnCore (d : Domain) (core : CoreId) :
     | .running _ (some pctx) => some (vp.id, pctx)
     | _                      => none)
 
+/-- The (VP id, optional saved-caller) of the VP currently running on
+    `core` in this domain. Differs from `vpAndPrevCallerOnCore` in that
+    it allows the running VP to have `caller = none`. Used by the
+    forward-`switch` path which only requires the VP to be in `.running`
+    (any prev-caller chain). -/
+def vpAndOptPrevOnCore (d : Domain) (core : CoreId) :
+    Option (VpId × Option VpCallContext) :=
+  (d.findVpOnCore core).bind (fun vp =>
+    match vp.runState with
+    | .running _ optPrev => some (vp.id, optPrev)
+    | _                  => none)
+
 end Domain
 
 /-- Per-core scheduling state. Mirrors `capa-engine/src/switch.rs::CoreState`. -/

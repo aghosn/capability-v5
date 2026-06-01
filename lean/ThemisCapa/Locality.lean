@@ -393,6 +393,50 @@ theorem switchReturn_frame_mem (s : SpecState) (caller : DomId) (core : CoreId)
   · simp only [hb, SpecState.updCore, SpecState.updDomain]
     rfl
 
+theorem switch_frame_dom (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+    (toVpId : VpId) (core : CoreId) (did : DomId)
+    (h1 : did ≠ caller)
+    (h2 : ∀ d, s.getDom caller = some d →
+          ∀ cid, d.lookupDomHandle toHandle = some cid →
+          ∀ dc, s.getDomCap cid = some dc →
+          did ≠ dc.targetDom) :
+    (switch_apply s caller toHandle toVpId core).getDom did = s.getDom did := by
+  show ((switch_apply s caller toHandle toVpId core).domains).find? did = _
+  unfold switch_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hvp : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | ⟨callerVpId, callerPrev⟩
+      · simp only [hb, hdcap, hvp]; rfl
+      · rcases hdc : s.getDom caller with _ | d
+        · simp [hdc] at hb
+        · have hh : d.lookupDomHandle toHandle = some cid := by
+            rw [hdc] at hb; simpa using hb
+          have hne2 : did ≠ dc.targetDom := h2 d hdc cid hh dc hdcap
+          simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
+          rw [Arena.find?_update_other _ caller did _ h1,
+              Arena.find?_update_other _ dc.targetDom did _ hne2]
+          rfl
+
+theorem switch_frame_mem (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+    (toVpId : VpId) (core : CoreId) (id : MemCapId) :
+    (switch_apply s caller toHandle toVpId core).getMem id = s.getMem id := by
+  show ((switch_apply s caller toHandle toVpId core).memcaps).find? id = _
+  unfold switch_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hvp : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | ⟨callerVpId, callerPrev⟩
+      · simp only [hb, hdcap, hvp]; rfl
+      · simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
+        rfl
+
 /-! ## Action footprints (state-dependent)
 
 `Action.affectsDom s a did` says that the action `a` *may* modify the
@@ -447,6 +491,11 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       did = caller ∨
       (∀ dc, s.getDom caller = some dc →
        ∀ p, dc.vpAndPrevCallerOnCore core = some p → did = p.2.domainId)
+  | .switch caller toHandle _ _, did =>
+      did = caller ∨
+      (∀ d, s.getDom caller = some d →
+       ∀ cid, d.lookupDomHandle toHandle = some cid →
+       ∀ dc, s.getDomCap cid = some dc → did = dc.targetDom)
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -470,6 +519,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .acceptChannel _ _,  _  => False
   | .rejectChannel _ _,  _  => False
   | .switchReturn _ _ _, _  => False
+  | .switch _ _ _ _,     _  => False
 
 /-! ## Top-level locality theorems.
 
@@ -588,6 +638,28 @@ theorem step_locality_dom
       rw [← hh] at hp'
       rw [hp] at hp'; injection hp' with hh'
       rw [← hh']; exact heq))
+  | switch guard =>
+    rename_i caller toHandle toVpId core
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨cid, hcid⟩ := Option.isSome_iff_exists.mp (guard.handleResolves d hd)
+    obtain ⟨dc, hdc⟩ := Option.isSome_iff_exists.mp (guard.capExists d hd cid hcid)
+    have h1 : did ≠ caller := fun e => h (Or.inl e)
+    have h2 : did ≠ dc.targetDom := fun e =>
+      h (Or.inr (fun d' hd' cid' hcid' dc' hdc' => by
+        rw [hd] at hd'; injection hd' with hh
+        rw [← hh] at hcid'
+        rw [hcid] at hcid'; injection hcid' with hhh
+        rw [← hhh] at hdc'
+        rw [hdc] at hdc'; injection hdc' with hhhh
+        rw [← hhhh]; exact e))
+    apply switch_frame_dom _ _ _ _ _ _ h1
+    intro d' hd' cid' hcid' dc' hdc'
+    rw [hd] at hd'; injection hd' with hh
+    rw [← hh] at hcid'
+    rw [hcid] at hcid'; injection hcid' with hhh
+    rw [← hhh] at hdc'
+    rw [hdc] at hdc'; injection hdc' with hhhh
+    rw [← hhhh]; exact h2
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -638,5 +710,6 @@ theorem step_locality_mem
   | acceptChannel guard => exact acceptChannel_frame_mem _ _ _ _
   | rejectChannel guard => exact rejectChannel_frame_mem _ _ _ _
   | switchReturn guard => exact switchReturn_frame_mem _ _ _ _ _
+  | switch guard => exact switch_frame_mem _ _ _ _ _ _
 
 end ThemisCapa
