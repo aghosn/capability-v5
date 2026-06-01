@@ -418,4 +418,304 @@ theorem provenance_creation
     have h := revokeDomain_mem_isNone s caller handle c hPre
     rw [hPost] at h; cases h
 
+/-! ### Per-action: owner preserved (or characterized for send/accept). -/
+
+/-- `carve` doesn't change the owner of any pre-existing cap. -/
+private theorem carve_owner_preserved
+    (s : SpecState) (caller : DomId) (parent : MemCapId)
+    (access : Access) (attrs : Attributes) (hfc : FreshMemCounter s)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (carve_apply s caller parent access attrs).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rcases hp : s.getMem parent with _ | p
+  · have h : (carve_apply s caller parent access attrs).getMem c = s.getMem c := by
+      show ((carve_apply s caller parent access attrs).memcaps).find? c = _
+      simp only [carve_apply, hp]; rfl
+    rw [h, hPre] at hPost
+    injection hPost with hpc
+    rw [hpc]
+  · have hgetC := carve_apply_getMem s caller parent access attrs p hp hfc c
+    simp only at hgetC
+    have hidNew : c ≠ s.nextMemCapId := by
+      intro hidNew
+      have hlt := existing_lt_fresh s hfc hPre
+      rw [hidNew] at hlt; exact absurd hlt (Nat.lt_irrefl _)
+    rw [hgetC] at hPost
+    by_cases hidPar : c = parent
+    · simp only [if_neg hidNew, if_pos hidPar] at hPost
+      injection hPost with hpc
+      rw [hidPar, hp] at hPre
+      injection hPre with hpre
+      rw [← hpc, ← hpre]
+    · simp only [if_neg hidNew, if_neg hidPar] at hPost
+      rw [hPre] at hPost
+      injection hPost with hpc
+      rw [hpc]
+
+private theorem alias_owner_preserved
+    (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
+    (hfc : FreshMemCounter s) (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (alias_apply s caller parent access).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rcases hp : s.getMem parent with _ | p
+  · have h : (alias_apply s caller parent access).getMem c = s.getMem c := by
+      show ((alias_apply s caller parent access).memcaps).find? c = _
+      simp only [alias_apply, hp]; rfl
+    rw [h, hPre] at hPost
+    injection hPost with hpc
+    rw [hpc]
+  · have hgetC := alias_apply_getMem s caller parent access p hp hfc c
+    simp only at hgetC
+    have hidNew : c ≠ s.nextMemCapId := by
+      intro hidNew
+      have hlt := existing_lt_fresh s hfc hPre
+      rw [hidNew] at hlt; exact absurd hlt (Nat.lt_irrefl _)
+    rw [hgetC] at hPost
+    by_cases hidPar : c = parent
+    · simp only [if_neg hidNew, if_pos hidPar] at hPost
+      injection hPost with hpc
+      rw [hidPar, hp] at hPre
+      injection hPre with hpre
+      rw [← hpc, ← hpre]
+    · simp only [if_neg hidNew, if_neg hidPar] at hPost
+      rw [hPre] at hPost
+      injection hPost with hpc
+      rw [hpc]
+
+private theorem revoke_owner_preserved
+    (s : SpecState) (caller : DomId) (target : MemCapId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (revoke_apply s caller target).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rcases ht : s.getMem target with _ | t
+  · have h : (revoke_apply s caller target).getMem c = s.getMem c := by
+      show ((revoke_apply s caller target).memcaps).find? c = _
+      simp only [revoke_apply, ht]; rfl
+    rw [h, hPre] at hPost
+    injection hPost with hpc; rw [hpc]
+  · rcases htp : t.parent with _ | pid
+    · have h : (revoke_apply s caller target).getMem c = s.getMem c := by
+        show ((revoke_apply s caller target).memcaps).find? c = _
+        simp only [revoke_apply, ht, htp]; rfl
+      rw [h, hPre] at hPost
+      injection hPost with hpc; rw [hpc]
+    · have h : ((revoke_apply s caller target).memcaps).find? c =
+               ((s.memcaps.remove target).update pid
+                  (fun p => { p with
+                    childrenIds := p.childrenIds.filter (· ≠ target) })).find? c := by
+        simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      have hcne : c ≠ target := by
+        intro he
+        subst he
+        have hnone :
+            ((s.memcaps.remove c).update pid
+                (fun p => { p with
+                  childrenIds := p.childrenIds.filter (· ≠ c) })).find? c = none :=
+          Arena.find?_update_of_none _ c pid _ (Arena.find?_remove_same _ _)
+        have hpostNone : (revoke_apply s caller c).getMem c = none := by
+          show ((revoke_apply s caller c).memcaps).find? c = _
+          rw [h]; exact hnone
+        rw [hpostNone] at hPost; cases hPost
+      by_cases hcp : c = pid
+      · subst hcp
+        have hrem : (s.memcaps.remove target).find? c = some capPre := by
+          rw [Arena.find?_remove_other _ target c hcne]; exact hPre
+        have hupd : ((s.memcaps.remove target).update c
+                      (fun p => { p with
+                        childrenIds := p.childrenIds.filter (· ≠ target) })).find? c
+                    = some { capPre with
+                        childrenIds := capPre.childrenIds.filter (· ≠ target) } := by
+          rw [Arena.find?_update_eq_map, hrem]; rfl
+        have hpc : (revoke_apply s caller target).getMem c =
+                   some { capPre with
+                     childrenIds := capPre.childrenIds.filter (· ≠ target) } := by
+          show ((revoke_apply s caller target).memcaps).find? c = _
+          rw [h]; exact hupd
+        rw [hpc] at hPost
+        injection hPost with heq; rw [← heq]
+      · have hpc : (revoke_apply s caller target).getMem c = s.getMem c := by
+          show ((revoke_apply s caller target).memcaps).find? c = _
+          rw [h]
+          rw [Arena.find?_update_other _ pid c _ hcp]
+          rw [Arena.find?_remove_other _ target c hcne]
+          rfl
+        rw [hpc, hPre] at hPost
+        injection hPost with heq; rw [heq]
+
+private theorem seal_owner_preserved
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (seal_apply s caller cap).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [seal_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem reject_owner_preserved
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (reject_apply s receiver pid).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [reject_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem sealedSend_owner_preserved
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (gpaHint : Option Nat) (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (sealedSend_apply s caller receiver handle gpaHint).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [sealedSend_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem create_owner_preserved
+    (s : SpecState) (caller : DomId) (policy : DomainPolicy)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (create_apply s caller policy).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [create_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem revokeDomain_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (revokeDomain_apply s caller handle).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [revokeDomain_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+/-! ### `send` and `accept`: characterize the owner change. -/
+
+/-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
+private theorem send_owner_change
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (send_apply s caller receiver cap).getMem c = some capPost) :
+    (c = cap ∧ capPost.owner = receiver) ∨ capPre.owner = capPost.owner := by
+  rw [send_apply_getMem] at hPost
+  by_cases hidC : c = cap
+  · left
+    refine ⟨hidC, ?_⟩
+    rw [hidC] at hPre
+    simp only [if_pos hidC, hPre, Option.map_some] at hPost
+    injection hPost with hpc
+    rw [← hpc]
+  · right
+    rw [if_neg hidC, hPre] at hPost
+    injection hPost with hpc
+    rw [hpc]
+
+/-- `accept`'s memcap arena update is exactly a `send_apply` with the
+    receiver as the new owner; so any owner change pins the new owner
+    to the accepting domain. -/
+private theorem accept_owner_change
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (accept_apply s receiver pid).getMem c = some capPost) :
+    capPost.owner = receiver ∨ capPre.owner = capPost.owner := by
+  -- Reduce accept_apply to expose send_apply on the memcap arena.
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPending pid) with _ | pe
+  · have hmem : (accept_apply s receiver pid).memcaps = s.memcaps := by
+      simp only [accept_apply, hb]
+    have hp : (accept_apply s receiver pid).getMem c = s.getMem c := by
+      show ((accept_apply s receiver pid).memcaps).find? c = _; rw [hmem]; rfl
+    rw [hp, hPre] at hPost
+    injection hPost with hpc
+    right; rw [hpc]
+  · have hmem :
+        (accept_apply s receiver pid).memcaps =
+        (send_apply s pe.senderDomainId receiver pe.capId).memcaps := by
+      simp only [accept_apply, hb, SpecState.updDomain]
+    have hp :
+        (accept_apply s receiver pid).getMem c =
+        (send_apply s pe.senderDomainId receiver pe.capId).getMem c := by
+      show ((accept_apply s receiver pid).memcaps).find? c = _; rw [hmem]; rfl
+    rw [hp] at hPost
+    rcases send_owner_change s pe.senderDomainId receiver pe.capId c capPre capPost
+            hPre hPost with ⟨_, hown⟩ | hown
+    · left; exact hown
+    · right; exact hown
+
+/-! ### Provenance — Transfer -/
+
+/-- The only way the owner of an existing memcap can change is via
+    `send` (where `caller = old owner, receiver = new owner`) or
+    `accept` (where the accepting domain is the new owner). -/
+theorem provenance_transfer
+    {s s' : SpecState} {a : Action} (hwf : WellFormed s) (hstep : step s a s')
+    {c : MemCapId} {capPre capPost : MemCap}
+    (hPre : s.getMem c = some capPre)
+    (hPost : s'.getMem c = some capPost)
+    (hOwnerChange : capPre.owner ≠ capPost.owner) :
+    (∃ caller, a = .send caller capPost.owner c) ∨
+    (∃ pid, a = .accept capPost.owner pid) := by
+  cases hstep with
+  | carve guard =>
+    rename_i caller parent access attrs
+    exfalso
+    exact hOwnerChange
+      (carve_owner_preserved s caller parent access attrs hwf.freshMemCounter
+        c capPre capPost hPre hPost)
+  | alias guard =>
+    rename_i caller parent access
+    exfalso
+    exact hOwnerChange
+      (alias_owner_preserved s caller parent access hwf.freshMemCounter
+        c capPre capPost hPre hPost)
+  | revoke guard =>
+    rename_i caller target
+    exfalso
+    exact hOwnerChange
+      (revoke_owner_preserved s caller target c capPre capPost hPre hPost)
+  | send guard =>
+    rename_i caller receiver cap
+    rcases send_owner_change s caller receiver cap c capPre capPost hPre hPost with
+      ⟨hcEq, hOwn⟩ | hPres
+    · left
+      refine ⟨caller, ?_⟩
+      rw [hcEq, hOwn]
+    · exfalso; exact hOwnerChange hPres
+  | «seal» guard =>
+    rename_i caller cap
+    exfalso
+    exact hOwnerChange
+      (seal_owner_preserved s caller cap c capPre capPost hPre hPost)
+  | accept guard =>
+    rename_i receiver pid
+    rcases accept_owner_change s receiver pid c capPre capPost hPre hPost with
+      hOwn | hPres
+    · right
+      refine ⟨pid, ?_⟩
+      rw [hOwn]
+    · exfalso; exact hOwnerChange hPres
+  | reject guard =>
+    rename_i receiver pid
+    exfalso
+    exact hOwnerChange
+      (reject_owner_preserved s receiver pid c capPre capPost hPre hPost)
+  | sealedSend guard =>
+    rename_i caller receiver handle gpaHint
+    exfalso
+    exact hOwnerChange
+      (sealedSend_owner_preserved s caller receiver handle gpaHint
+        c capPre capPost hPre hPost)
+  | create guard =>
+    rename_i caller policy
+    exfalso
+    exact hOwnerChange
+      (create_owner_preserved s caller policy c capPre capPost hPre hPost)
+  | revokeDomain guard =>
+    rename_i caller handle
+    exfalso
+    exact hOwnerChange
+      (revokeDomain_owner_preserved s caller handle c capPre capPost hPre hPost)
+
 end ThemisCapa

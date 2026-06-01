@@ -69,7 +69,7 @@ private theorem fresh_not_in_keys (s : SpecState) (hfc : FreshMemCounter s) :
   Nat.lt_irrefl _ (hfc _ h)
 
 /-- An existing parent's id is strictly less than `nextMemCapId`. -/
-private theorem existing_lt_fresh (s : SpecState) (hfc : FreshMemCounter s)
+theorem existing_lt_fresh (s : SpecState) (hfc : FreshMemCounter s)
     {k : MemCapId} {v : MemCap} (h : s.getMem k = some v) :
     k < s.nextMemCapId :=
   hfc _ (Arena.mem_keys_of_find?_some _ _ _ h)
@@ -970,7 +970,7 @@ proofs with one new sub-goal each (both trivial: carve/alias make the
 new child a child of `parent` and set its parent to `parent`, matching
 trivially). -/
 
-private theorem revoke_apply_getMem
+theorem revoke_apply_getMem
     (s : SpecState) (caller : DomId) (target : MemCapId)
     (t : MemCap) (ht : s.getMem target = some t)
     (pid : MemCapId) (htp : t.parent = some pid)
@@ -1400,7 +1400,7 @@ whose `cap.owner` is now `receiver` (matching the new ownership). Any
 (since pre `cap.owner = caller ≠ receiver`), so we don't double-up. -/
 
 /-- Characterization of `send_apply` on the memcap arena: only `cap` changes. -/
-private theorem send_apply_getMem
+theorem send_apply_getMem
     (s : SpecState) (caller : DomId) (receiver : DomId) (cap : MemCapId)
     (id : MemCapId) :
     (send_apply s caller receiver cap).getMem id =
