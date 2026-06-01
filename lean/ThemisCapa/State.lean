@@ -147,6 +147,17 @@ def updVp (d : Domain) (vpId : VpId) (f : VProcessor → VProcessor) : Domain :=
   { d with vps := d.vps.map (fun vp =>
               if vp.id = vpId then f vp else vp) }
 
+/-- The (caller-VP id, saved previous-caller context) of the VP currently
+    running on `core` in this domain, if any. Returns `none` if no VP is
+    on this core or that VP is not in `.running _ (some _)`. Used as the
+    `affectsDom` projection for `switchReturn`. -/
+def vpAndPrevCallerOnCore (d : Domain) (core : CoreId) :
+    Option (VpId × VpCallContext) :=
+  (d.findVpOnCore core).bind (fun vp =>
+    match vp.runState with
+    | .running _ (some pctx) => some (vp.id, pctx)
+    | _                      => none)
+
 end Domain
 
 /-- Per-core scheduling state. Mirrors `capa-engine/src/switch.rs::CoreState`. -/

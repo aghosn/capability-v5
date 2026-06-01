@@ -360,6 +360,39 @@ theorem rejectChannel_frame_mem (s : SpecState) (receiver : DomId)
   rcases hb : (s.getDom receiver).bind (fun d => d.lookupPendingDom pid) with _ | _ <;>
     simp [SpecState.updDomain, hb] <;> rfl
 
+theorem switchReturn_frame_dom (s : SpecState) (caller : DomId) (core : CoreId)
+    (exitReason : Option Nat) (did : DomId)
+    (h1 : did ≠ caller)
+    (h2 : ∀ dc, s.getDom caller = some dc →
+          ∀ p, dc.vpAndPrevCallerOnCore core = some p →
+          did ≠ p.2.domainId) :
+    (switchReturn_apply s caller core exitReason).getDom did = s.getDom did := by
+  show ((switchReturn_apply s caller core exitReason).domains).find? did = _
+  unfold switchReturn_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.vpAndPrevCallerOnCore core)
+    with _ | ⟨vpId, pctx⟩
+  · simp only [hb]; rfl
+  · rcases hdc : s.getDom caller with _ | dc
+    · simp [hdc] at hb
+    · have hv : dc.vpAndPrevCallerOnCore core = some (vpId, pctx) := by
+        rw [hdc] at hb; simpa using hb
+      have hne2 : did ≠ pctx.domainId := h2 dc hdc (vpId, pctx) hv
+      simp only [hb, SpecState.updCore, SpecState.updDomain]
+      rw [Arena.find?_update_other _ pctx.domainId did _ hne2,
+          Arena.find?_update_other _ caller did _ h1]
+      rfl
+
+theorem switchReturn_frame_mem (s : SpecState) (caller : DomId) (core : CoreId)
+    (exitReason : Option Nat) (id : MemCapId) :
+    (switchReturn_apply s caller core exitReason).getMem id = s.getMem id := by
+  show ((switchReturn_apply s caller core exitReason).memcaps).find? id = _
+  unfold switchReturn_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.vpAndPrevCallerOnCore core)
+    with _ | ⟨vpId, pctx⟩
+  · simp only [hb]; rfl
+  · simp only [hb, SpecState.updCore, SpecState.updDomain]
+    rfl
+
 /-! ## Action footprints (state-dependent)
 
 `Action.affectsDom s a did` says that the action `a` *may* modify the
@@ -410,6 +443,10 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       did = receiver ∨
       (∀ dr, s.getDom receiver = some dr →
        ∀ pe, dr.lookupPendingDom pid = some pe → did = pe.senderDomainId)
+  | .switchReturn caller core _, did =>
+      did = caller ∨
+      (∀ dc, s.getDom caller = some dc →
+       ∀ p, dc.vpAndPrevCallerOnCore core = some p → did = p.2.domainId)
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -432,6 +469,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .sendChannel _ _ _,  _  => False
   | .acceptChannel _ _,  _  => False
   | .rejectChannel _ _,  _  => False
+  | .switchReturn _ _ _, _  => False
 
 /-! ## Top-level locality theorems.
 
@@ -540,6 +578,16 @@ theorem step_locality_dom
       rw [← hh] at hpe'
       rw [hpe] at hpe'; injection hpe' with hh'
       rw [← hh']; exact heq))
+  | switchReturn guard =>
+    rename_i caller core exitReason
+    have h1 : did ≠ caller := fun e => h (Or.inl e)
+    apply switchReturn_frame_dom _ _ _ _ _ h1
+    intro dc hdc p hp heq
+    exact h (Or.inr (fun dc' hdc' p' hp' => by
+      rw [hdc] at hdc'; injection hdc' with hh
+      rw [← hh] at hp'
+      rw [hp] at hp'; injection hp' with hh'
+      rw [← hh']; exact heq))
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -589,5 +637,6 @@ theorem step_locality_mem
   | sendChannel guard => exact sendChannel_frame_mem _ _ _ _ _
   | acceptChannel guard => exact acceptChannel_frame_mem _ _ _ _
   | rejectChannel guard => exact rejectChannel_frame_mem _ _ _ _
+  | switchReturn guard => exact switchReturn_frame_mem _ _ _ _ _
 
 end ThemisCapa

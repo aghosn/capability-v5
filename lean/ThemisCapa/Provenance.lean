@@ -160,6 +160,12 @@ private theorem rejectChannel_mem_isSome
     ((rejectChannel_apply s receiver pid).getMem c).isSome := by
   rw [rejectChannel_frame_mem]; exact h
 
+private theorem switchReturn_mem_isSome
+    (s : SpecState) (caller : DomId) (core : CoreId) (er : Option Nat)
+    (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((switchReturn_apply s caller core er).getMem c).isSome := by
+  rw [switchReturn_frame_mem]; exact h
+
 /-! ### Provenance — Removal -/
 
 /-- The only way a memcap can disappear from one step to the next is
@@ -241,6 +247,11 @@ theorem provenance_removal
     rename_i receiver pid
     exfalso
     have h := rejectChannel_mem_isSome s receiver pid c hPre
+    rw [hPost] at h; cases h
+  | switchReturn guard =>
+    rename_i caller core er
+    exfalso
+    have h := switchReturn_mem_isSome s caller core er c hPre
     rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
@@ -358,6 +369,12 @@ private theorem rejectChannel_mem_isNone
     (h : s.getMem c = none) :
     (rejectChannel_apply s receiver pid).getMem c = none := by
   rw [rejectChannel_frame_mem]; exact h
+
+private theorem switchReturn_mem_isNone
+    (s : SpecState) (caller : DomId) (core : CoreId) (er : Option Nat)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (switchReturn_apply s caller core er).getMem c = none := by
+  rw [switchReturn_frame_mem]; exact h
 
 /-! ### Per-action: characterization of the freshly-created cap. -/
 
@@ -506,6 +523,11 @@ theorem provenance_creation
     rename_i receiver pid
     exfalso
     have h := rejectChannel_mem_isNone s receiver pid c hPre
+    rw [hPost] at h; cases h
+  | switchReturn guard =>
+    rename_i caller core er
+    exfalso
+    have h := switchReturn_mem_isNone s caller core er c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -717,6 +739,15 @@ private theorem rejectChannel_owner_preserved
   rw [rejectChannel_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
+private theorem switchReturn_owner_preserved
+    (s : SpecState) (caller : DomId) (core : CoreId) (er : Option Nat)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (switchReturn_apply s caller core er).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [switchReturn_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
 /-! ### `send` and `accept`: characterize the owner change. -/
 
 /-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
@@ -864,5 +895,10 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (rejectChannel_owner_preserved s receiver pid c capPre capPost hPre hPost)
+  | switchReturn guard =>
+    rename_i caller core er
+    exfalso
+    exact hOwnerChange
+      (switchReturn_owner_preserved s caller core er c capPre capPost hPre hPost)
 
 end ThemisCapa

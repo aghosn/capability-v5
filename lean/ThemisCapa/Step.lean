@@ -646,6 +646,48 @@ def rejectChannel_apply (s : SpecState) (receiver : DomId)
       { d with frozenHandles :=
                 d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
 
+/-- Preconditions for `switchReturn(caller, core, exitReason)`.
+
+    Mirrors `switch_domain_return` in Rust: caller must be sealed, must
+    have a VP on this core in `Running` state with a saved caller
+    context, and the previous-caller VP must be in `Locked` state
+    waiting for *this* callee. -/
+structure SwitchReturnGuard (s : SpecState) (caller : DomId) (core : CoreId) :
+    Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  vpAndPrevFound    : ∀ d, s.getDom caller = some d →
+                      (d.vpAndPrevCallerOnCore core).isSome
+  prevDomExists     : ∀ d, s.getDom caller = some d →
+                      ∀ p, d.vpAndPrevCallerOnCore core = some p →
+                      (s.getDom p.2.domainId).isSome
+  prevVpLocked      : ∀ d, s.getDom caller = some d →
+                      ∀ p, d.vpAndPrevCallerOnCore core = some p →
+                      ∀ pd, s.getDom p.2.domainId = some pd →
+                      ∀ pvp, pd.lookupVp p.2.vpId = some pvp →
+                      ∃ ppc, pvp.runState = .locked caller p.1 ppc
+  notSelf           : ∀ d, s.getDom caller = some d →
+                      ∀ p, d.vpAndPrevCallerOnCore core = some p →
+                      p.2.domainId ≠ caller
+
+/-- Pure state update for `switchReturn`:
+    1. Caller's running VP on `core` → `.available exitReason`.
+    2. Previous caller's locked VP → `.running core prevPrevCaller`
+       (lifted out of the `Locked` state).
+    3. Core's `CoreState` is rebound to the previous-caller VP. -/
+def switchReturn_apply (s : SpecState) (caller : DomId) (core : CoreId)
+                        (exitReason : Option Nat) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.vpAndPrevCallerOnCore core) with
+  | none           => s
+  | some (vpId, pctx) =>
+    let s₁ := s.updDomain caller (fun d => d.updVp vpId (fun vp =>
+      { vp with runState := .available exitReason }))
+    let s₂ := s₁.updDomain pctx.domainId (fun d => d.updVp pctx.vpId (fun vp =>
+      match vp.runState with
+      | .locked _ _ prevPrev => { vp with runState := .running core prevPrev }
+      | other                => { vp with runState := other }))
+    s₂.updCore core (fun _ => .runningDomain pctx.domainId pctx.vpId)
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -701,5 +743,10 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : RejectChannelGuard s receiver pendingId) :
     step s (.rejectChannel receiver pendingId)
          (rejectChannel_apply s receiver pendingId)
+  | switchReturn {s : SpecState} {caller : DomId} {core : CoreId}
+                 {exitReason : Option Nat}
+    (guard : SwitchReturnGuard s caller core) :
+    step s (.switchReturn caller core exitReason)
+         (switchReturn_apply s caller core exitReason)
 
 end ThemisCapa

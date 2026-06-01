@@ -85,8 +85,22 @@ inductive Action where
       pending entry and unfreezes the sender's domain handle.
       Mirrors `reject_channel`. No ownership transfer. -/
   | rejectChannel (receiver : DomId) (pendingId : PendingId)
+  /-- `caller` returns from a previously-forwarded switch on `core`.
+      Mirrors `capa-engine/src/capability.rs::switch_return_with_exit`
+      (which delegates to `switch_domain_return`). The VP currently
+      running on `core` for `caller` must be in
+      `.running core (Some prevCtx)`, and the previous caller's VP
+      (identified by `prevCtx`) must be in
+      `.locked caller callerVp.id prevPrevCaller`.
+
+      Apply:
+      - caller's running VP becomes `.available exitReason`
+      - previous caller's VP resumes as `.running core prevPrevCaller`
+      - the core's `CoreState` is set to
+        `.runningDomain prevCtx.domainId prevCtx.vpId`. -/
+  | switchReturn (caller : DomId) (core : CoreId) (exitReason : Option Nat)
   -- Future:
-  -- | switchFwd … | switchRet … | interrupt …
+  -- | switchFwd … | interrupt …
 deriving Repr
 
 end ThemisCapa
