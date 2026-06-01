@@ -553,6 +553,95 @@ theorems.
 - We do not aim to verify the **`Platform` trait implementation**. It is
   the trust boundary between verified engine and unverified hardware.
 
+### 11.5 Themis-beyond-seL4 theorems (novel territory)
+
+Tiers 1–3 above are "catch up to seL4." This subsection is the part of
+the agenda that **seL4 cannot phrase**, because the relevant objects
+(parent-child cap tree, attestation, multicore policies, scheduling
+authority, interrupt routing) are not in seL4's model. These are the
+theorems that justify Themis as a research contribution, not just an
+engineering re-implementation.
+
+#### Why seL4's confidentiality result does not cover this ground
+
+The Murray et al. 2013 confidentiality proof is widely cited but has
+hard scope limits:
+
+- **Static partitioning.** Subjects and the access-control policy are
+  fixed at boot. Dynamic capability transfer between security domains
+  is excluded.
+- **Custom deterministic scheduler.** The proof replaces seL4's real
+  scheduler with a deterministic round-robin one; the production
+  scheduler is *not* covered.
+- **Single core.** No reasoning about cross-core leakage, IPIs, or
+  cache/scheduler interference.
+- **Excludes async IPC and shared frames.** Two of seL4's most-used
+  features are outside the verified subset.
+- **Configuration-specific.** The theorem is about *a particular system*
+  built on seL4, not seL4 itself.
+
+Subsequent multicore work (MCS, clustered multikernel) gives spatial
+isolation but **no verified cross-core non-interference theorem.**
+
+#### Outer-layer theorems (Tier 4 — Themis-specific)
+
+| # | Theorem | Statement (informal) | Why it needs Themis design |
+|---|---|---|---|
+| **O1** | **Attestation correctness** | The attestation measurement of a domain `d` uniquely and deterministically identifies the reachable CDT subtree rooted at `d`, including its policy, sealed capabilities, and code/data measurements. | Requires a capability-tree model with measurement-bearing nodes. seL4 has no attestation primitive. |
+| **O2** | **Hierarchical encapsulation (directed NI)** | For parent `P` and child `D` in the CDT: `P` may observe `D` (full transparency), but `D` cannot observe `P` except through capabilities explicitly granted by `P`. | Requires parent-child structure as a first-class object; seL4's flat partition model cannot state "encapsulation." |
+| **O3** | **Nested confidentiality composition** | If capavisor encapsulates dom0, and dom0 encapsulates a guest `G`, then `G` is confidential against any sibling of dom0 and against any sibling of the capavisor — composed from O2 applied at each level. | Theorem about *nesting*; seL4 has one flat trust level. Matches the confidential-computing trust story (host ⊃ guest VM ⊃ enclave) at the OS level. |
+| **O4** | **Core-affinity non-interference** | If `policy.cores(D) ∩ policy.cores(D') = ∅`, then under arbitrary scheduling no action by `D'` is observable to `D`. | Requires `policy_cores` as a first-class engine-state field. seL4 has no notion of "policy-bounded affinity." |
+| **O5** | **Scheduling-authority confinement** | The `runState` of a VP belonging to `D` can be modified by a step only if the initiating domain holds an authority capability over `D`'s scheduling (today: parent-in-CDT, or holder of a `switch`-granting capability). | seL4's verified scheduler is a fixed round-robin replacement; it has no concept of "domain X has scheduling authority over Y." |
+| **O6** | **Interrupt-routing integrity** | `deliver_interrupt_vp(src, vec)` can land in a VP of `D` only if `D` is the policy-designated target for `vec` (and `src` is authorized to raise `vec`). | Requires interrupt-target policy as engine state. seL4's IRQ caps come close but lack a routing-policy object. |
+| **O7** | **Cross-core leakage bound** | If two domains `D ≠ D'` share no core (per `policy_cores`) and no interrupt source (per `policy_interrupts`), then their observable timelines are independent modulo enumerated platform side channels (cache, branch predictor, etc., which we declare out-of-model). | Composition of O4 + O6 + a "side-channel axiom." No analogue in any verified kernel today. |
+| **O8** | **Policy-as-flow-lattice refinement** | The 13-way `PolicyIdentifier` lattice *is* the information-flow lattice used by the NI proofs; no separate IFC abstraction is maintained. | seL4 maintains the security policy as a separate proof-time object disjoint from kernel state. Themis collapses the two. |
+
+#### What this unlocks
+
+O1+O2+O3 give the **confidential-computing story at the OS level**: a
+verified statement that capavisor / dom0 / guest each form an
+encapsulation boundary with cryptographically-attestable identity.
+This is the OS-level analogue of what SEV-SNP / TDX promise at the
+hardware level, but proven against an engine spec rather than assumed
+from a hardware manual.
+
+O4+O5+O6+O7 give a **multicore non-interference result that is
+genuinely multicore** (not "single-core proof + multicore engineering").
+The key trick is that the policies are *part of the verified state*, so
+"core D ↛ core D' under this policy" is a theorem about engine state,
+not a meta-theorem about an external configuration. seL4's multicore
+story cannot say this.
+
+O8 is a meta-observation but matters for proof engineering: every
+NI theorem above is stated in terms of `getPolicy` projections of
+state, not against an external `Policy` parameter. This is what makes
+dynamic capability transfer (forbidden in Murray 2013) tractable: a
+`send` that changes the lattice and a `step` that respects the new
+lattice are the same proof obligation.
+
+#### Provability ranking
+
+| Outer thm | Realism | Depends on |
+|---|---|---|
+| O2 (hierarchical encap.) | High — extends today's `step_non_interference` with a directed observation function. | Batches 4–6 complete; `affectsDomCap` infra. |
+| O4 (core-affinity NI) | High — `policy_cores` already in state; only needs scheduling actions modeled. | Batch 4 (switch / switch_return / deliver_interrupt_vp). |
+| O5 (sched authority) | High — typed precondition on switch actions. | Batch 4. |
+| O6 (IRQ routing) | High — typed precondition on `deliver_interrupt_vp`. | Batch 4c. |
+| O8 (lattice refinement) | High — meta theorem; proof engineering. | Already true by construction; needs a statement. |
+| O1 (attestation correctness) | Medium — needs measurement function over CDT subtree + cryptographic axiom. | Spec extension + axiomatized hash. |
+| O3 (nested composition) | Medium — composition of O2 at multiple levels; requires nesting modeled in state. | After O2. |
+| O7 (cross-core leakage) | Medium — composition theorem + side-channel axiom. | After O4 + O6. |
+
+#### What this does *not* claim
+
+- We do not prove **absence of timing side channels.** Like seL4, those
+  are out of model.
+- We do not prove anything about **the capavisor or hardware platform.**
+  These are the TCB.
+- We do not claim Themis is "more secure" than seL4 in deployments —
+  only that its design admits formally stating and proving guarantees
+  that are structurally outside seL4's reach.
+
 ---
 
 ## 12 — Abstracting `Arc<RwLock<…>>` away from Aeneas — **deferred**
