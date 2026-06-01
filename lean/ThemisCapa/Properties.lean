@@ -75,7 +75,7 @@ private theorem existing_lt_fresh (s : SpecState) (hfc : FreshMemCounter s)
   hfc _ (Arena.mem_keys_of_find?_some _ _ _ h)
 
 /-- 3-way characterization of `s'.getMem` after `carve_apply`. -/
-private theorem carve_apply_getMem
+theorem carve_apply_getMem
     (s : SpecState) (caller : DomId) (parent : MemCapId)
     (access : Access) (attrs : Attributes) (p : MemCap)
     (hp : s.getMem parent = some p) (hfc : FreshMemCounter s) (id : MemCapId) :
@@ -546,7 +546,7 @@ these fields participate in any invariant.  The characterization lemma and
 its 3-way case split are therefore identical in structure. -/
 
 /-- 3-way characterization of `s'.getMem` after `alias_apply`. -/
-private theorem alias_apply_getMem
+theorem alias_apply_getMem
     (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
     (p : MemCap) (hp : s.getMem parent = some p) (hfc : FreshMemCounter s)
     (id : MemCapId) :
