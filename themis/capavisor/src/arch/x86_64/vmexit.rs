@@ -819,20 +819,42 @@ fn handle_cpuid_local(vcpu: &mut ActiveVcpu, platform: &crate::platform::ThemisP
             ecx &= !(1u32 << 31); // hide hypervisor-present bit
         }
         (0x7, 0) => {
-            const AVX512_EBX: u32 = (1 << 16)
-                | (1 << 17)
-                | (1 << 21)
-                | (1 << 26)
-                | (1 << 27)
-                | (1 << 28)
-                | (1 << 30)
-                | (1 << 31);
-            const AVX512_ECX: u32 =
-                (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 11) | (1 << 12) | (1 << 14);
-            const AVX512_EDX: u32 = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 23);
-            ebx &= !AVX512_EBX;
-            ecx &= !AVX512_ECX;
-            edx &= !AVX512_EDX;
+            // AVX-512 feature bits in CPUID.07H:0H (Intel SDM Vol 2A §3.2).
+            // Hiding all of them coerces guests onto AVX2 ISA, avoiding
+            // XSAVE-area sizing issues and FPU state corruption risks for
+            // domains we don't expose AVX-512 to.
+            bitflags::bitflags! {
+                struct Avx512Ebx: u32 {
+                    const AVX512F          = 1 << 16;
+                    const AVX512DQ         = 1 << 17;
+                    const AVX512_IFMA      = 1 << 21;
+                    const AVX512PF         = 1 << 26;
+                    const AVX512ER         = 1 << 27;
+                    const AVX512CD         = 1 << 28;
+                    const AVX512BW         = 1 << 30;
+                    const AVX512VL         = 1 << 31;
+                }
+                struct Avx512Ecx: u32 {
+                    const AVX512_VBMI       = 1 << 1;
+                    const AVX512_VBMI2      = 1 << 6;
+                    const AVX512_VNNI       = 1 << 11;
+                    const AVX512_BITALG     = 1 << 12;
+                    const AVX512_VPOPCNTDQ  = 1 << 14;
+                    // Bits 4 and 5 in this mask are reserved/AVX-512-adjacent
+                    // (kept for parity with the pre-bitflags mask).
+                    const RESERVED_BIT_4    = 1 << 4;
+                    const RESERVED_BIT_5    = 1 << 5;
+                }
+                struct Avx512Edx: u32 {
+                    const AVX512_4VNNIW       = 1 << 2;
+                    const AVX512_4FMAPS       = 1 << 3;
+                    const AVX512_VP2INTERSECT = 1 << 8;
+                    const AVX512_FP16         = 1 << 23;
+                }
+            }
+            ebx &= !Avx512Ebx::all().bits();
+            ecx &= !Avx512Ecx::all().bits();
+            edx &= !Avx512Edx::all().bits();
         }
         (0xD, 0) => {
             eax = 0x7; // x87 + SSE + AVX

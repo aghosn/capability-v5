@@ -17,6 +17,7 @@
 
 use x86::bits64::vmx;
 use x86::msr;
+use x86::controlregs::{Cr0, Cr4};
 use x86::vmx::vmcs::{control, guest, host};
 
 // ── VMCS constraint helpers (public — used by hypercall.rs apply_vmcs_reg) ── //
@@ -29,7 +30,8 @@ use x86::vmx::vmcs::{control, guest, host};
 /// guest::CR0 before VMLAUNCH or the VMCS consistency check fails (exit 33).
 pub unsafe fn cr0_required_bits() -> u64 {
     let fixed0 = msr::rdmsr(msr::IA32_VMX_CR0_FIXED0);
-    fixed0 & !((1u64 << 0) | (1u64 << 31)) // exclude PE and PG
+    let exempt = (Cr0::CR0_PROTECTED_MODE | Cr0::CR0_ENABLE_PAGING).bits() as u64;
+    fixed0 & !exempt
 }
 
 /// Adjust a guest CR0 value so it satisfies IA32_VMX_CR0_FIXED0.
@@ -46,7 +48,7 @@ pub unsafe fn vmcs_adjust_cr0(val: u64) -> u64 {
 /// The CR4 guest/host mask owns this bit, so the guest never clears it,
 /// but the VMCS field must have it set for the consistency check.
 pub fn vmcs_adjust_cr4(val: u64) -> u64 {
-    val | (1u64 << 13) // VMXE
+    val | Cr4::CR4_ENABLE_VMX.bits() as u64
 }
 
 use crate::arch::vmexit::host_rip_stub;
