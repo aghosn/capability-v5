@@ -113,3 +113,32 @@ impl PidPage {
         unsafe { core::ptr::read_volatile(ndst) }
     }
 }
+
+/// Inject interrupt `vector` into the VP whose Posted-Interrupt
+/// Descriptor (PID) is at `pid_phys`.
+///
+/// - `is_remote = false` (Case A/B): VP is on this core or not running.
+///   Set Posted-Interrupt Requests bit (PIR[V]) only; the processor
+///   moves PIR → virtual Interrupt Request Register (vIRR) on VMENTRY
+///   automatically.
+/// - `is_remote = true` (Case C): VP is Running on a different core.
+///   Set PIR[V], then conditionally set Outstanding-Notification (ON) = 1
+///   and send a notification Inter-Processor Interrupt (IPI; vector
+///   `POSTED_INTR_NOTIFY_VEC`) to that core so it processes the PID
+///   without a VM exit.
+///
+/// # Safety
+/// `pid_phys` must be a valid 64-byte aligned PID page accessible via HHDM.
+pub(crate) unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) {
+    let pid = PidPage::new(pid_phys, hhdm);
+    unsafe { pid.set_pir(vector) };
+    // Always set ON so the processor processes PIR→vIRR on the next VMENTRY
+    // (SDM §29.6: hardware only merges PIR into vIRR when ON=1).
+    let on_already_set = unsafe { pid.test_and_set_on() };
+    if is_remote && !on_already_set {
+        // Remote VP: send the notification IPI to wake that core out of guest mode.
+        let ndst = unsafe { pid.read_ndst() };
+        let notify_vec = crate::arch::vmcs::POSTED_INTR_NOTIFY_VEC;
+        unsafe { crate::arch::x86_64::apic::send_notification_ipi(ndst, notify_vec, hhdm) };
+    }
+}

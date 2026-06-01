@@ -88,9 +88,9 @@ impl<'a> VpCommView<'a> {
             if !is_set(*reg) {
                 continue;
             }
-            let val = if let Some(gpr) = crate::hypercall::vp_reg_to_gpr(*reg) {
+            let val = if let Some(gpr) = crate::arch::x86_64::reg_apply::vp_reg_to_gpr(*reg) {
                 vcpu.reg(gpr)
-            } else if let Some(field) = crate::hypercall::vp_reg_to_vmcs_field(*reg) {
+            } else if let Some(field) = crate::arch::x86_64::reg_apply::vp_reg_to_vmcs_field(*reg) {
                 vcpu.try_get(field).unwrap_or(0)
             } else {
                 continue;
