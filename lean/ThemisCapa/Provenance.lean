@@ -173,6 +173,13 @@ private theorem switch_mem_isSome
     ((switch_apply s caller toHandle toVpId core).getMem c).isSome := by
   rw [switch_frame_mem]; exact h
 
+private theorem switchSuspended_mem_isSome
+    (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+    (toVpId : VpId) (core : CoreId) (calleeDom : DomId) (calleeVp : VpId)
+    (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem c).isSome := by
+  rw [switchSuspended_frame_mem]; exact h
+
 private theorem deliverInterrupt_mem_isSome
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
     (chain : List (DomId × VpId)) (c : MemCapId)
@@ -325,6 +332,11 @@ theorem provenance_removal
     exfalso
     have h := registerComm_mem_isSome s caller cm ch vp c hPre
     rw [hPost] at h; cases h
+  | switchSuspended guard =>
+    rename_i caller toHandle toVpId core calleeDom calleeVp
+    exfalso
+    have h := switchSuspended_mem_isSome s caller toHandle toVpId core calleeDom calleeVp c hPre
+    rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
 
@@ -454,6 +466,13 @@ private theorem switch_mem_isNone
     (h : s.getMem c = none) :
     (switch_apply s caller toHandle toVpId core).getMem c = none := by
   rw [switch_frame_mem]; exact h
+
+private theorem switchSuspended_mem_isNone
+    (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+    (toVpId : VpId) (core : CoreId) (calleeDom : DomId) (calleeVp : VpId)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem c = none := by
+  rw [switchSuspended_frame_mem]; exact h
 
 private theorem deliverInterrupt_mem_isNone
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
@@ -672,6 +691,11 @@ theorem provenance_creation
     rename_i caller cm ch vp
     exfalso
     have h := registerComm_mem_isNone s caller cm ch vp c hPre
+    rw [hPost] at h; cases h
+  | switchSuspended guard =>
+    rename_i caller toHandle toVpId core calleeDom calleeVp
+    exfalso
+    have h := switchSuspended_mem_isNone s caller toHandle toVpId core calleeDom calleeVp c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -900,6 +924,17 @@ private theorem switch_owner_preserved
     (hPost : (switch_apply s caller toHandle toVpId core).getMem c = some capPost) :
     capPre.owner = capPost.owner := by
   rw [switch_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem switchSuspended_owner_preserved
+    (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+    (toVpId : VpId) (core : CoreId) (calleeDom : DomId) (calleeVp : VpId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem c
+              = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [switchSuspended_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
 private theorem deliverInterrupt_owner_preserved
@@ -1187,5 +1222,11 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (registerComm_owner_preserved s caller cm ch vp c capPre capPost hPre hPost)
+  | switchSuspended guard =>
+    rename_i caller toHandle toVpId core calleeDom calleeVp
+    exfalso
+    exact hOwnerChange
+      (switchSuspended_owner_preserved s caller toHandle toVpId core calleeDom calleeVp
+        c capPre capPost hPre hPost)
 
 end ThemisCapa

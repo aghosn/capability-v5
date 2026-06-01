@@ -437,6 +437,58 @@ theorem switch_frame_mem (s : SpecState) (caller : DomId) (toHandle : LocalHandl
       · simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
         rfl
 
+/-! ### switchSuspended -/
+
+theorem switchSuspended_frame_dom (s : SpecState) (caller : DomId)
+    (toHandle : LocalHandle) (toVpId : VpId) (core : CoreId)
+    (calleeDom : DomId) (calleeVp : VpId) (did : DomId)
+    (h1 : did ≠ caller)
+    (h2 : ∀ d, s.getDom caller = some d →
+          ∀ cid, d.lookupDomHandle toHandle = some cid →
+          ∀ dc, s.getDomCap cid = some dc →
+          did ≠ dc.targetDom)
+    (h3 : did ≠ calleeDom) :
+    (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getDom did
+      = s.getDom did := by
+  show ((switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).domains).find? did = _
+  unfold switchSuspended_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hvp : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | ⟨callerVpId, callerPrev⟩
+      · simp only [hb, hdcap, hvp]; rfl
+      · rcases hdc : s.getDom caller with _ | d
+        · simp [hdc] at hb
+        · have hh : d.lookupDomHandle toHandle = some cid := by
+            rw [hdc] at hb; simpa using hb
+          have hne2 : did ≠ dc.targetDom := h2 d hdc cid hh dc hdcap
+          simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
+          rw [Arena.find?_update_other _ caller did _ h1,
+              Arena.find?_update_other _ calleeDom did _ h3,
+              Arena.find?_update_other _ dc.targetDom did _ hne2]
+          rfl
+
+theorem switchSuspended_frame_mem (s : SpecState) (caller : DomId)
+    (toHandle : LocalHandle) (toVpId : VpId) (core : CoreId)
+    (calleeDom : DomId) (calleeVp : VpId) (id : MemCapId) :
+    (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem id
+      = s.getMem id := by
+  show ((switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).memcaps).find? id = _
+  unfold switchSuspended_apply
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [hb]; rfl
+  · rcases hdcap : s.getDomCap cid with _ | dc
+    · simp only [hb, hdcap]; rfl
+    · rcases hvp : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | ⟨callerVpId, callerPrev⟩
+      · simp only [hb, hdcap, hvp]; rfl
+      · simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
+        rfl
+
 /-! ### deliverInterrupt -/
 
 /-- Per-element preservation: `applyMidsAndHandler` preserves `getDom did`
@@ -751,6 +803,11 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       ∀ cid, d.lookupDomHandle childHandle = some cid →
       ∀ dc, s.getDomCap cid = some dc →
       did = dc.targetDom
+  | .switchSuspended caller toHandle _ _ calleeDom _, did =>
+      did = caller ∨ did = calleeDom ∨
+      (∀ d, s.getDom caller = some d →
+       ∀ cid, d.lookupDomHandle toHandle = some cid →
+       ∀ dc, s.getDomCap cid = some dc → did = dc.targetDom)
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -784,6 +841,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
       ∀ d, s.getDom caller = some d →
       ∀ mid, d.lookupMemHandle commHandle = some mid →
       id = mid
+  | .switchSuspended _ _ _ _ _ _, _ => False
 
 /-! ## Top-level locality theorems.
 
@@ -967,6 +1025,29 @@ theorem step_locality_dom
     rw [hcid] at hcid2; injection hcid2 with k2; subst k2
     rw [hdc] at hdc2; injection hdc2 with k3; subst k3
     exact heq
+  | switchSuspended guard =>
+    rename_i caller toHandle toVpId core calleeDom calleeVp
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨cid, hcid⟩ := Option.isSome_iff_exists.mp (guard.handleResolves d hd)
+    obtain ⟨dc, hdc⟩ := Option.isSome_iff_exists.mp (guard.capExists d hd cid hcid)
+    have h1 : did ≠ caller := fun e => h (Or.inl e)
+    have h3 : did ≠ calleeDom := fun e => h (Or.inr (Or.inl e))
+    have h2 : did ≠ dc.targetDom := fun e =>
+      h (Or.inr (Or.inr (fun d' hd' cid' hcid' dc' hdc' => by
+        rw [hd] at hd'; injection hd' with hh
+        rw [← hh] at hcid'
+        rw [hcid] at hcid'; injection hcid' with hhh
+        rw [← hhh] at hdc'
+        rw [hdc] at hdc'; injection hdc' with hhhh
+        rw [← hhhh]; exact e)))
+    apply switchSuspended_frame_dom _ _ _ _ _ _ _ _ h1 _ h3
+    intro d' hd' cid' hcid' dc' hdc'
+    rw [hd] at hd'; injection hd' with hh
+    rw [← hh] at hcid'
+    rw [hcid] at hcid'; injection hcid' with hhh
+    rw [← hhh] at hdc'
+    rw [hdc] at hdc'; injection hdc' with hhhh
+    rw [← hhhh]; exact h2
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -1049,5 +1130,6 @@ theorem step_locality_mem
     rw [hd] at hd2; injection hd2 with k1; subst k1
     rw [hmid] at hmid2; injection hmid2 with k2; subst k2
     exact heq
+  | switchSuspended guard => exact switchSuspended_frame_mem _ _ _ _ _ _ _ _
 
 end ThemisCapa

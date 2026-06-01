@@ -765,6 +765,94 @@ def switch_apply (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
           { vp with runState := .locked dc.targetDom toVpId callerPrev }))
         s₂.updCore core (fun _ => .runningDomain dc.targetDom toVpId)
 
+/-! ### `switchSuspended` (interrupt-resume branch of `switch`) -/
+
+/-- Preconditions for `switchSuspended(caller, toHandle, toVpId, core, calleeDom, calleeVp)`.
+    Mirrors `SwitchGuard` but requires the target VP to be in `.suspended`
+    state (instead of `.available`), and pins the witness `(calleeDom,
+    calleeVp)` to the values inside that `.suspended` state. -/
+structure SwitchSuspendedGuard (s : SpecState) (caller : DomId)
+                               (toHandle : LocalHandle) (toVpId : VpId)
+                               (core : CoreId)
+                               (calleeDom : DomId) (calleeVp : VpId) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d →
+                      d.policy.api.canSwitch = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                      (d.lookupDomHandle toHandle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      (s.getDomCap cid).isSome
+  capNotChannel     : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      dc.isChannel = false
+  targetExists      : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      (s.getDom dc.targetDom).isSome
+  targetSealed      : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      td.isSealed
+  coreAllowed       : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      core ∈ td.policy.cores
+  targetVpExists    : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      (td.lookupVp toVpId).isSome
+  targetVpSuspended : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      ∀ td, s.getDom dc.targetDom = some td →
+                      ∀ tvp, td.lookupVp toVpId = some tvp →
+                      ∃ vec, tvp.runState = .suspended calleeDom calleeVp vec
+  callerVpOnCore    : ∀ d, s.getDom caller = some d →
+                      (d.vpAndOptPrevOnCore core).isSome
+  notSelf           : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      dc.targetDom ≠ caller
+  calleeDistinctFromCaller : calleeDom ≠ caller
+  calleeDistinctFromTarget : ∀ d, s.getDom caller = some d →
+                      ∀ cid, d.lookupDomHandle toHandle = some cid →
+                      ∀ dc, s.getDomCap cid = some dc →
+                      calleeDom ≠ dc.targetDom
+
+/-- Pure state update for Suspended-resume `switch`:
+    1. Target VP `toVpId` (`.suspended _ _ _`) ← `.running core (some {caller, callerVpId})`.
+    2. Callee VP (`.interrupted vec`) ← `.available none` (no-op otherwise).
+    3. Caller VP on `core` ← `.locked target toVpId callerPrev`.
+    4. Core's CoreState ← `.runningDomain target toVpId`. -/
+def switchSuspended_apply (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
+                           (toVpId : VpId) (core : CoreId)
+                           (calleeDom : DomId) (calleeVp : VpId) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle) with
+  | none     => s
+  | some cid =>
+    match s.getDomCap cid with
+    | none    => s
+    | some dc =>
+      match (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core) with
+      | none                  => s
+      | some (callerVpId, callerPrev) =>
+        let cctx : VpCallContext := { domainId := caller, vpId := callerVpId }
+        let s₁ := s.updDomain dc.targetDom (fun d => d.updVp toVpId (fun vp =>
+          { vp with runState := .running core (some cctx) }))
+        let s₂ := s₁.updDomain calleeDom (fun d => d.updVp calleeVp (fun vp =>
+          match vp.runState with
+          | .interrupted _ => { vp with runState := .available none }
+          | _              => vp))
+        let s₃ := s₂.updDomain caller (fun d => d.updVp callerVpId (fun vp =>
+          { vp with runState := .locked dc.targetDom toVpId callerPrev }))
+        s₃.updCore core (fun _ => .runningDomain dc.targetDom toVpId)
+
 /-! ### `deliverInterrupt` -/
 
 /-- Walk the chain tail applying `Locked → Suspended` to each intermediate
@@ -1080,5 +1168,11 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : RegisterCommGuard s caller commHandle childHandle vpId) :
     step s (.registerComm caller commHandle childHandle vpId)
          (registerComm_apply s caller commHandle childHandle vpId)
+  | switchSuspended {s : SpecState} {caller : DomId} {toHandle : LocalHandle}
+                    {toVpId : VpId} {core : CoreId}
+                    {calleeDom : DomId} {calleeVp : VpId}
+    (guard : SwitchSuspendedGuard s caller toHandle toVpId core calleeDom calleeVp) :
+    step s (.switchSuspended caller toHandle toVpId core calleeDom calleeVp)
+         (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp)
 
 end ThemisCapa

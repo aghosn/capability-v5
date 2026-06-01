@@ -172,8 +172,28 @@ inductive Action where
         (canonicalize), and `commBinding := some {childDomId, vpId}`. -/
   | registerComm (caller : DomId) (commHandle : LocalHandle)
                  (childHandle : LocalHandle) (vpId : VpId)
+  /-- Switch into a target VP that is in the `.suspended` state (resume
+      after a previous interrupt-delivery). Mirrors the Suspended branch
+      of `capa-engine/src/capability.rs::switch_domain_forward`.
+
+      Parameters mirror `switch`, plus the `(calleeDom, calleeVp)`
+      witness that must equal the data in target's `.suspended` state.
+
+      Apply:
+      - target VP becomes `.running core (some {caller, callerVpId})`
+        (lifted from `.suspended calleeDom calleeVp _`);
+      - if the callee VP is `.interrupted vector`, it transitions to
+        `.available none` (freeing the lazy-unwind leaf);
+      - caller VP becomes `.locked targetDom toVpId callerPrev`;
+      - core's CoreState → `.runningDomain targetDom toVpId`.
+
+      Guard requires callee distinct from caller and from targetDom
+      to keep frame proofs clean (three distinct domain updates). -/
+  | switchSuspended (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId)
+                    (core : CoreId)
+                    (calleeDom : DomId) (calleeVp : VpId)
   -- Future:
-  -- | switchSuspended … (interrupt-resume branch of switch)
+  -- | mapSelf … (translation map mutation)
 deriving Repr
 
 end ThemisCapa
