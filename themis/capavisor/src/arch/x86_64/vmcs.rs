@@ -65,13 +65,8 @@ use crate::serial_println;
 /// kernels). Validated at capavisor init against the running kernel's IDT.
 pub const POSTED_INTR_NOTIFY_VEC: u8 = 0xF2;
 
-/// VMCS encoding for the 16-bit Posted-Interrupt Notification Vector field.
-/// Intel SDM Vol 3C Table B-1, offset 0x0002.
-const VMCS_POSTED_INTR_NOTIFICATION_VECTOR: u32 = 0x0002;
-
-/// VMCS encoding for the 64-bit Posted-Interrupt Descriptor Address (full).
-/// Intel SDM Vol 3C Table B-1, offset 0x2016.
-const VMCS_POSTED_INTR_DESCRIPTOR_ADDR: u32 = 0x2016;
+// VMCS encodings for the Posted-Interrupt notification vector (16-bit) and
+// descriptor address (64-bit full) come from `x86::vmx::vmcs::control`.
 
 // ── MSR-capability–adjusted control helper ───────────────────────────────── //
 
@@ -445,12 +440,12 @@ unsafe fn write_control_fields(
     if child && (pin_val & (1 << 7)) != 0 {
         // Notification vector: sent as IPI to the VP's core for cross-core injection.
         vmx::vmwrite(
-            VMCS_POSTED_INTR_NOTIFICATION_VECTOR,
+            control::POSTED_INTERRUPT_NOTIFICATION_VECTOR,
             POSTED_INTR_NOTIFY_VEC as u64,
         )
         .expect("vmwrite posted-intr notification vector");
         // Physical address of the 64-byte aligned Posted-Interrupt Descriptor.
-        vmx::vmwrite(VMCS_POSTED_INTR_DESCRIPTOR_ADDR, pid_phys)
+        vmx::vmwrite(control::POSTED_INTERRUPT_DESC_ADDR_FULL, pid_phys)
             .expect("vmwrite posted-intr descriptor addr");
     } else if child {
         serial_println!("  [INFO] Posted interrupts disabled — using software PIR drain fallback");
