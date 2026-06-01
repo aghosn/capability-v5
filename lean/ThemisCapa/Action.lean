@@ -62,6 +62,12 @@ inductive Action where
       revocation is future work (analogous to memcap `revoke`).
       Target must not be the caller. -/
   | revokeDomain (caller : DomId) (handle : LocalHandle)
+  /-- `caller` updates one field of a child domain's policy, identified by
+      `id` with new `value`. The child is referenced by `cap` (a DomCap
+      owned by caller targeting the child). Child must be unsealed.
+      Mirrors `capa-engine/src/capability.rs::set_policy`. -/
+  | setPolicy (caller : DomId) (cap : DomCapId)
+              (id : PolicyIdentifier) (value : Nat)
   -- Future:
   -- | switchFwd … | switchRet … | interrupt …
 deriving Repr

@@ -250,6 +250,53 @@ def seal_apply (s : SpecState) (caller : DomId) (cap : DomCapId) : SpecState :=
   | none    => s
   | some dc => s.updDomain dc.targetDom (fun d => { d with status := .sealed })
 
+/-! ### Set policy -/
+
+/-- Pointwise update on a `DomainPolicy` keyed by `PolicyIdentifier`.
+
+    **Stub.** Mirrors the *structure* of `set_policy` faithfully (the
+    update is keyed by the identifier and value), but the per-identifier
+    semantics are intentionally left as no-ops for now: locality and
+    provenance theorems are insensitive to the exact field update, since
+    they only observe *which* domain record is modified. Refining the
+    per-case lattice (`cores` monotonicity, `apiMonitor` subset, etc.)
+    is independent follow-up work.
+
+    Future refinement: replicate the 13-way case match from
+    `capa-engine/src/capability.rs::set_policy`. -/
+def applyPolicyValue (p : DomainPolicy) (_id : PolicyIdentifier)
+                     (_value : Nat) : DomainPolicy := p
+
+/-- Preconditions for `setPolicy(caller, cap, id, value)`. Mirrors
+    `capa-engine/src/capability.rs::set_policy`: caller must own the
+    DomCap, the target domain must be unsealed, caller's `MonitorAPI`
+    must include `canSet`. Per-identifier monotonicity (value ≤ parent
+    value) is intentionally deferred — see `applyPolicyValue`. -/
+structure SetPolicyGuard (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (_id : PolicyIdentifier) (_value : Nat) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     :
+    ∀ d, s.getDom caller = some d → d.policy.api.canSet = true
+  capExists         : (s.getDomCap cap).isSome
+  capOwnedByCaller  : ∀ dc, s.getDomCap cap = some dc → dc.owner = caller
+  targetExists      :
+    ∀ dc, s.getDomCap cap = some dc → (s.getDom dc.targetDom).isSome
+  targetUnsealed    :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td → td.isUnsealed
+
+/-- Pure state update for a successful `setPolicy`: replace the target
+    domain's `policy` with `applyPolicyValue old id value`. Everything
+    else unchanged. -/
+def setPolicy_apply (s : SpecState) (caller : DomId) (cap : DomCapId)
+                    (id : PolicyIdentifier) (value : Nat) : SpecState :=
+  match s.getDomCap cap with
+  | none    => s
+  | some dc =>
+      s.updDomain dc.targetDom
+        (fun d => { d with policy := applyPolicyValue d.policy id value })
+
 /-! ### Accept / Reject (sealed-path completion) -/
 
 /-- Preconditions for `accept(receiver, pid)`. Minimal: only the facts
@@ -542,5 +589,10 @@ inductive step : SpecState → Action → SpecState → Prop
   | revokeDomain {s : SpecState} {caller : DomId} {handle : LocalHandle}
     (guard : RevokeDomainGuard s caller handle) :
     step s (.revokeDomain caller handle) (revokeDomain_apply s caller handle)
+  | setPolicy {s : SpecState} {caller : DomId} {cap : DomCapId}
+              {id : PolicyIdentifier} {value : Nat}
+    (guard : SetPolicyGuard s caller cap id value) :
+    step s (.setPolicy caller cap id value)
+         (setPolicy_apply s caller cap id value)
 
 end ThemisCapa

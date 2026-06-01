@@ -135,6 +135,13 @@ private theorem revokeDomain_mem_isSome
     ((revokeDomain_apply s caller handle).getMem c).isSome := by
   rw [revokeDomain_frame_mem]; exact h
 
+private theorem setPolicy_mem_isSome
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((setPolicy_apply s caller cap id value).getMem c).isSome := by
+  rw [setPolicy_frame_mem]; exact h
+
 /-! ### Provenance — Removal -/
 
 /-- The only way a memcap can disappear from one step to the next is
@@ -196,6 +203,11 @@ theorem provenance_removal
     rename_i caller handle
     exfalso
     have h := revokeDomain_mem_isSome s caller handle c hPre
+    rw [hPost] at h; cases h
+  | setPolicy guard =>
+    rename_i caller cap id value
+    exfalso
+    have h := setPolicy_mem_isSome s caller cap id value c hPre
     rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
@@ -288,6 +300,13 @@ private theorem revokeDomain_mem_isNone
     (h : s.getMem c = none) :
     (revokeDomain_apply s caller handle).getMem c = none := by
   rw [revokeDomain_frame_mem]; exact h
+
+private theorem setPolicy_mem_isNone
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (setPolicy_apply s caller cap id value).getMem c = none := by
+  rw [setPolicy_frame_mem]; exact h
 
 /-! ### Per-action: characterization of the freshly-created cap. -/
 
@@ -416,6 +435,11 @@ theorem provenance_creation
     rename_i caller handle
     exfalso
     have h := revokeDomain_mem_isNone s caller handle c hPre
+    rw [hPost] at h; cases h
+  | setPolicy guard =>
+    rename_i caller cap id value
+    exfalso
+    have h := setPolicy_mem_isNone s caller cap id value c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -590,6 +614,16 @@ private theorem revokeDomain_owner_preserved
   rw [revokeDomain_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
+private theorem setPolicy_owner_preserved
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (setPolicy_apply s caller cap id value).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [setPolicy_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
 /-! ### `send` and `accept`: characterize the owner change. -/
 
 /-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
@@ -717,5 +751,10 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (revokeDomain_owner_preserved s caller handle c capPre capPost hPre hPost)
+  | setPolicy guard =>
+    rename_i caller cap id value
+    exfalso
+    exact hOwnerChange
+      (setPolicy_owner_preserved s caller cap id value c capPre capPost hPre hPost)
 
 end ThemisCapa

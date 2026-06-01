@@ -140,6 +140,26 @@ theorem seal_frame_mem (s : SpecState) (caller : DomId) (cap : DomCapId)
   · simp only [seal_apply, hdc, SpecState.updDomain]
     rfl
 
+/-! ### Set policy -/
+
+theorem setPolicy_frame_dom (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat)
+    (dc : DomCap) (hdc : s.getDomCap cap = some dc)
+    (did : DomId) (hdid : did ≠ dc.targetDom) :
+    (setPolicy_apply s caller cap id value).getDom did = s.getDom did := by
+  show ((setPolicy_apply s caller cap id value).domains).find? did = _
+  simp only [setPolicy_apply, hdc, SpecState.updDomain]
+  exact Arena.find?_update_other _ dc.targetDom did _ hdid
+
+theorem setPolicy_frame_mem (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat) (mid : MemCapId) :
+    (setPolicy_apply s caller cap id value).getMem mid = s.getMem mid := by
+  show ((setPolicy_apply s caller cap id value).memcaps).find? mid = _
+  rcases hdc : s.getDomCap cap with _ | dc
+  · simp [setPolicy_apply, hdc]; rfl
+  · simp only [setPolicy_apply, hdc, SpecState.updDomain]
+    rfl
+
 /-! ### Accept / Reject -/
 
 theorem accept_frame_dom (s : SpecState) (receiver : DomId) (pid : PendingId)
@@ -302,6 +322,8 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       (∀ dc, s.getDom caller = some dc →
        ∀ dcId, dc.lookupDomHandle handle = some dcId →
        ∀ d, s.getDomCap dcId = some d → did = d.targetDom)
+  | .setPolicy _ cap _ _,        did =>
+      ∀ dc, s.getDomCap cap = some dc → did = dc.targetDom
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -320,6 +342,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .sealedSend _ _ _ _, _  => False
   | .create _ _,         _  => False
   | .revokeDomain _ _,   _  => False
+  | .setPolicy _ _ _ _,  _  => False
 
 /-! ## Top-level locality theorems.
 
@@ -396,6 +419,12 @@ theorem step_locality_dom
         rw [hdc] at hdcap'; injection hdcap' with hhhh
         rw [← hhhh]; exact e))
     exact revokeDomain_frame_dom _ _ _ _ hdcaller _ hdcId _ hdc _ h1 h2
+  | setPolicy guard =>
+    rename_i caller cap id value
+    obtain ⟨dc, hdc⟩ := Option.isSome_iff_exists.mp guard.capExists
+    have hne : did ≠ dc.targetDom := fun heq => h (fun dc' hdc' => by
+      rw [hdc'] at hdc; injection hdc with h'; rw [h']; exact heq)
+    exact setPolicy_frame_dom _ _ _ _ _ _ hdc _ hne
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -441,5 +470,6 @@ theorem step_locality_mem
   | sealedSend guard => exact sealedSend_frame_mem _ _ _ _ _ _
   | create guard => exact create_frame_mem _ _ _ _
   | revokeDomain guard => exact revokeDomain_frame_mem _ _ _ _
+  | setPolicy guard => exact setPolicy_frame_mem _ _ _ _ _ _
 
 end ThemisCapa

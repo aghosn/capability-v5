@@ -187,5 +187,6 @@ theorem step_view_preservation
   | sealedSend _ => exact id
   | create _ => exact id
   | revokeDomain _ => exact id
+  | setPolicy _ => exact id
 
 end ThemisCapa
