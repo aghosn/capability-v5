@@ -129,6 +129,24 @@ def lookupPending (d : Domain) (pid : PendingId) : Option PendingMemCap :=
 def lookupPendingDom (d : Domain) (pid : PendingId) : Option PendingDomCap :=
   (d.pendingDomCaps.find? (fun p => p.1 = pid)).map Prod.snd
 
+/-- Find the VP (if any) currently bound to `core` according to its
+    `runState`. Mirrors `capa-engine/src/domain.rs::find_vp_on_core`. -/
+def findVpOnCore (d : Domain) (core : CoreId) : Option VProcessor :=
+  d.vps.find? (fun vp =>
+    match vp.runState with
+    | .running c _ => decide (c = core)
+    | _            => false)
+
+/-- Lookup a VP by its id within this domain. -/
+def lookupVp (d : Domain) (vpId : VpId) : Option VProcessor :=
+  d.vps.find? (fun vp => decide (vp.id = vpId))
+
+/-- Functionally update the VP with id `vpId` in place. Identity if no
+    such VP exists. -/
+def updVp (d : Domain) (vpId : VpId) (f : VProcessor → VProcessor) : Domain :=
+  { d with vps := d.vps.map (fun vp =>
+              if vp.id = vpId then f vp else vp) }
+
 end Domain
 
 /-- Per-core scheduling state. Mirrors `capa-engine/src/switch.rs::CoreState`. -/
@@ -197,6 +215,13 @@ def updDomain (s : SpecState) (id : DomId) (f : Domain → Domain) : SpecState :
 /-- Functionally update a domain-capability in place. -/
 def updDomCap (s : SpecState) (id : DomCapId) (f : DomCap → DomCap) : SpecState :=
   { s with domcaps := s.domcaps.update id f }
+
+/-- Look up the per-core scheduling state. -/
+def getCore (s : SpecState) (id : CoreId) : Option CoreState := s.cores.find? id
+
+/-- Functionally update a core's `CoreState` in place. -/
+def updCore (s : SpecState) (id : CoreId) (f : CoreState → CoreState) : SpecState :=
+  { s with cores := s.cores.update id f }
 
 end SpecState
 
