@@ -113,8 +113,30 @@ inductive Action where
       - core's CoreState → `.runningDomain targetDom toVpId`. -/
   | switch (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId)
            (core : CoreId)
+  /-- Deliver an external interrupt `vector` raised on `core` (currently
+      running a VP of `interrupted`) up the VP call chain to `handler`.
+      Mirrors `capa-engine/src/capability.rs::deliver_interrupt_vp`.
+
+      `chain` is the witness of the VP call chain from leaf to handler:
+      `chain.head = (interrupted, leafVpId)`, `chain.getLast = (handler,
+      handlerVpId)`, with each adjacent pair `(midDom, midVp) → (calleeDom,
+      calleeVp)` corresponding to a `Locked` VP. Length must be ≥ 2.
+
+      Scope simplifications vs Rust:
+      - Always sets leaf VP → `.interrupted vector` (Rust uses
+        `.available none` when chain length = 2; deferred).
+      - Short-circuit case `interrupted = handler` not modeled —
+        callers must use a no-op action then.
+
+      Apply:
+      - leaf VP (`chain[0]`) → `.interrupted vector`
+      - intermediates (`chain[1..n-2]`) → `.suspended calleeDom calleeVp vector`
+      - handler VP (`chain[n-1]`) → `.running core prev` (lifted from `.locked`)
+      - core's `CoreState` → `.runningDomain handlerDom handlerVp`. -/
+  | deliverInterrupt (interrupted : DomId) (handler : DomId) (core : CoreId)
+                     (vector : Nat) (chain : List (DomId × VpId))
   -- Future:
-  -- | switchSuspended … | interrupt …
+  -- | switchSuspended … (interrupt-resume branch of switch)
 deriving Repr
 
 end ThemisCapa

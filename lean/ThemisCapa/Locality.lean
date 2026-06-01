@@ -437,6 +437,131 @@ theorem switch_frame_mem (s : SpecState) (caller : DomId) (toHandle : LocalHandl
       · simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
         rfl
 
+/-! ### deliverInterrupt -/
+
+/-- Per-element preservation: `applyMidsAndHandler` preserves `getDom did`
+    when `did` is not in the list's domain projection. Proof by induction
+    on the chain. -/
+theorem applyMidsAndHandler_frame_dom (core : CoreId) (vector : Nat)
+    (prev : DomId × VpId) (chain : List (DomId × VpId))
+    (s : SpecState) (did : DomId)
+    (h : ∀ p ∈ chain, did ≠ p.1) :
+    (applyMidsAndHandler core vector prev chain s).getDom did = s.getDom did := by
+  induction chain generalizing s prev with
+  | nil => rfl
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      have hne : did ≠ x.1 := h x (List.mem_cons_self)
+      simp only [applyMidsAndHandler]
+      show ((s.updDomain x.1 _).domains).find? did = _
+      simp only [SpecState.updDomain]
+      exact Arena.find?_update_other _ x.1 did _ hne
+    | cons y ys =>
+      have hne : did ≠ x.1 := h x (List.mem_cons_self)
+      have hrest : ∀ p ∈ y :: ys, did ≠ p.1 :=
+        fun p hp => h p (List.mem_cons_of_mem _ hp)
+      simp only [applyMidsAndHandler]
+      rw [ih x (s.updDomain x.1 (fun d => d.updVp x.2 (fun vp =>
+            { vp with runState := .suspended prev.1 prev.2 vector }))) hrest]
+      show ((s.updDomain x.1 _).domains).find? did = _
+      simp only [SpecState.updDomain]
+      exact Arena.find?_update_other _ x.1 did _ hne
+
+theorem applyMidsAndHandler_frame_mem (core : CoreId) (vector : Nat)
+    (prev : DomId × VpId) (chain : List (DomId × VpId))
+    (s : SpecState) (id : MemCapId) :
+    (applyMidsAndHandler core vector prev chain s).getMem id = s.getMem id := by
+  induction chain generalizing s prev with
+  | nil => rfl
+  | cons x xs ih =>
+    cases xs with
+    | nil =>
+      simp only [applyMidsAndHandler]
+      show ((s.updDomain x.1 _).memcaps).find? id = _
+      simp only [SpecState.updDomain]; rfl
+    | cons y ys =>
+      simp only [applyMidsAndHandler]
+      rw [ih x (s.updDomain x.1 (fun d => d.updVp x.2 (fun vp =>
+            { vp with runState := .suspended prev.1 prev.2 vector })))]
+      show ((s.updDomain x.1 _).memcaps).find? id = _
+      simp only [SpecState.updDomain]; rfl
+
+/-- All domain ids touched by `deliverInterrupt` lie in the chain's
+    domain projection. Outside the chain, `getDom` is preserved. -/
+theorem deliverInterrupt_frame_dom
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId)) (did : DomId)
+    (h : ∀ p ∈ chain, did ≠ p.1) :
+    (deliverInterrupt_apply s interrupted handler core vector chain).getDom did
+      = s.getDom did := by
+  unfold deliverInterrupt_apply
+  match chain, h with
+  | [], _              => rfl
+  | [_], _             => rfl
+  | leaf :: m :: rest, h =>
+    have hLeaf : did ≠ leaf.1 := h leaf (List.mem_cons_self)
+    have hRest : ∀ p ∈ m :: rest, did ≠ p.1 :=
+      fun p hp => h p (List.mem_cons_of_mem _ hp)
+    rcases hgl : (leaf :: m :: rest).getLast? with _ | ⟨hDom, hVp⟩
+    · -- impossible since list is non-empty, but proof is uniform
+      rw [applyMidsAndHandler_frame_dom core vector leaf (m :: rest)
+            (s.updDomain leaf.1 _) did hRest]
+      show ((s.updDomain leaf.1 _).domains).find? did = _
+      simp only [SpecState.updDomain]
+      exact Arena.find?_update_other _ leaf.1 did _ hLeaf
+    · have hLastMem : (hDom, hVp) ∈ leaf :: m :: rest := by
+        have := List.getLast?_eq_some_iff.mp hgl
+        obtain ⟨pre, hpre⟩ := this
+        rw [hpre]
+        exact List.mem_append_right pre (List.mem_singleton.mpr rfl)
+      have hLast : did ≠ hDom := h (hDom, hVp) hLastMem
+      show ((((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 _))).updCore core _).getDom did) = _
+      show ((((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 _))).updCore core _).domains).find? did = _
+      simp only [SpecState.updCore]
+      rw [show ((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+                { vp with runState := .interrupted vector })))).domains.find? did) =
+            ((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+                { vp with runState := .interrupted vector })))).getDom did) from rfl]
+      rw [applyMidsAndHandler_frame_dom core vector leaf (m :: rest)
+            (s.updDomain leaf.1 _) did hRest]
+      show ((s.updDomain leaf.1 _).domains).find? did = _
+      simp only [SpecState.updDomain]
+      exact Arena.find?_update_other _ leaf.1 did _ hLeaf
+
+theorem deliverInterrupt_frame_mem
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId)) (id : MemCapId) :
+    (deliverInterrupt_apply s interrupted handler core vector chain).getMem id
+      = s.getMem id := by
+  unfold deliverInterrupt_apply
+  match chain with
+  | []                => rfl
+  | [_]               => rfl
+  | leaf :: m :: rest =>
+    rcases hgl : (leaf :: m :: rest).getLast? with _ | ⟨hDom, hVp⟩
+    · rw [applyMidsAndHandler_frame_mem core vector leaf (m :: rest)
+            (s.updDomain leaf.1 _) id]
+      show ((s.updDomain leaf.1 _).memcaps).find? id = _
+      simp only [SpecState.updDomain]; rfl
+    · show (((((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 _))).updCore core _).memcaps).find? id) = _
+      simp only [SpecState.updCore]
+      rw [show ((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+                { vp with runState := .interrupted vector })))).memcaps.find? id) =
+            ((applyMidsAndHandler core vector leaf (m :: rest)
+              (s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+                { vp with runState := .interrupted vector })))).getMem id) from rfl]
+      rw [applyMidsAndHandler_frame_mem core vector leaf (m :: rest)
+            (s.updDomain leaf.1 _) id]
+      show ((s.updDomain leaf.1 _).memcaps).find? id = _
+      simp only [SpecState.updDomain]; rfl
+
 /-! ## Action footprints (state-dependent)
 
 `Action.affectsDom s a did` says that the action `a` *may* modify the
@@ -496,6 +621,8 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       (∀ d, s.getDom caller = some d →
        ∀ cid, d.lookupDomHandle toHandle = some cid →
        ∀ dc, s.getDomCap cid = some dc → did = dc.targetDom)
+  | .deliverInterrupt _ _ _ _ chain, did =>
+      ∃ p ∈ chain, did = p.1
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -520,6 +647,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .rejectChannel _ _,  _  => False
   | .switchReturn _ _ _, _  => False
   | .switch _ _ _ _,     _  => False
+  | .deliverInterrupt _ _ _ _ _, _ => False
 
 /-! ## Top-level locality theorems.
 
@@ -660,6 +788,11 @@ theorem step_locality_dom
     rw [← hhh] at hdc'
     rw [hdc] at hdc'; injection hdc' with hhhh
     rw [← hhhh]; exact h2
+  | deliverInterrupt guard =>
+    rename_i interrupted handler core vector chain
+    apply deliverInterrupt_frame_dom
+    intro p hp heq
+    exact h ⟨p, hp, heq⟩
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -711,5 +844,6 @@ theorem step_locality_mem
   | rejectChannel guard => exact rejectChannel_frame_mem _ _ _ _
   | switchReturn guard => exact switchReturn_frame_mem _ _ _ _ _
   | switch guard => exact switch_frame_mem _ _ _ _ _ _
+  | deliverInterrupt guard => exact deliverInterrupt_frame_mem _ _ _ _ _ _ _
 
 end ThemisCapa

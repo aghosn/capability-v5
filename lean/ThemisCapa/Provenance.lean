@@ -173,6 +173,13 @@ private theorem switch_mem_isSome
     ((switch_apply s caller toHandle toVpId core).getMem c).isSome := by
   rw [switch_frame_mem]; exact h
 
+private theorem deliverInterrupt_mem_isSome
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId)) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((deliverInterrupt_apply s interrupted handler core vector chain).getMem c).isSome := by
+  rw [deliverInterrupt_frame_mem]; exact h
+
 /-! ### Provenance — Removal -/
 
 /-- The only way a memcap can disappear from one step to the next is
@@ -264,6 +271,11 @@ theorem provenance_removal
     rename_i caller toHandle toVpId core
     exfalso
     have h := switch_mem_isSome s caller toHandle toVpId core c hPre
+    rw [hPost] at h; cases h
+  | deliverInterrupt guard =>
+    rename_i interrupted handler core vector chain
+    exfalso
+    have h := deliverInterrupt_mem_isSome s interrupted handler core vector chain c hPre
     rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
@@ -394,6 +406,13 @@ private theorem switch_mem_isNone
     (h : s.getMem c = none) :
     (switch_apply s caller toHandle toVpId core).getMem c = none := by
   rw [switch_frame_mem]; exact h
+
+private theorem deliverInterrupt_mem_isNone
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId)) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (deliverInterrupt_apply s interrupted handler core vector chain).getMem c = none := by
+  rw [deliverInterrupt_frame_mem]; exact h
 
 /-! ### Per-action: characterization of the freshly-created cap. -/
 
@@ -552,6 +571,11 @@ theorem provenance_creation
     rename_i caller toHandle toVpId core
     exfalso
     have h := switch_mem_isNone s caller toHandle toVpId core c hPre
+    rw [hPost] at h; cases h
+  | deliverInterrupt guard =>
+    rename_i interrupted handler core vector chain
+    exfalso
+    have h := deliverInterrupt_mem_isNone s interrupted handler core vector chain c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -782,6 +806,17 @@ private theorem switch_owner_preserved
   rw [switch_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
+private theorem deliverInterrupt_owner_preserved
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId)) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (deliverInterrupt_apply s interrupted handler core vector chain).getMem c
+              = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [deliverInterrupt_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
 /-! ### `send` and `accept`: characterize the owner change. -/
 
 /-- `send` only changes the owner of `cap`, setting it to `receiver`. -/
@@ -939,5 +974,11 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (switch_owner_preserved s caller toHandle toVpId core c capPre capPost hPre hPost)
+  | deliverInterrupt guard =>
+    rename_i interrupted handler core vector chain
+    exfalso
+    exact hOwnerChange
+      (deliverInterrupt_owner_preserved s interrupted handler core vector chain
+        c capPre capPost hPre hPost)
 
 end ThemisCapa

@@ -765,6 +765,55 @@ def switch_apply (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
           { vp with runState := .locked dc.targetDom toVpId callerPrev }))
         s₂.updCore core (fun _ => .runningDomain dc.targetDom toVpId)
 
+/-! ### `deliverInterrupt` -/
+
+/-- Walk the chain tail applying `Locked → Suspended` to each intermediate
+    VP (using `prev` as the callee witness) and `Locked → Running` to the
+    handler at the end. `prev` is the predecessor of the next element to
+    be processed; for the first call after the leaf, pass `prev = leaf`. -/
+def applyMidsAndHandler (core : CoreId) (vector : Nat)
+    (prev : DomId × VpId) : List (DomId × VpId) → SpecState → SpecState
+  | [],         s => s
+  | [handler],  s =>
+    s.updDomain handler.1 (fun d => d.updVp handler.2 (fun vp =>
+      match vp.runState with
+      | .locked _ _ p => { vp with runState := .running core p }
+      | other         => { vp with runState := other }))
+  | mid :: rest, s =>
+    let s' := s.updDomain mid.1 (fun d => d.updVp mid.2 (fun vp =>
+      { vp with runState := .suspended prev.1 prev.2 vector }))
+    applyMidsAndHandler core vector mid rest s'
+
+/-- Preconditions for `deliverInterrupt(interrupted, handler, core, vector, chain)`.
+
+    Scope: structural-only. Engine refinement is responsible for proving
+    that `chain` matches the live Rust call chain. -/
+structure DeliverInterruptGuard
+    (s : SpecState) (interrupted handler : DomId) (_core : CoreId)
+    (_vector : Nat) (chain : List (DomId × VpId)) : Prop where
+  notSelf            : interrupted ≠ handler
+  chainLenGe2        : chain.length ≥ 2
+  chainHeadLeaf      : ∃ vpId, chain.head? = some (interrupted, vpId)
+  chainLastHandler   : ∃ vpId, chain.getLast? = some (handler, vpId)
+  interruptedExists  : (s.getDom interrupted).isSome
+  handlerExists      : (s.getDom handler).isSome
+
+/-- Pure state update for `deliverInterrupt`. Applies leaf → Interrupted,
+    then walks the chain tail with `applyMidsAndHandler` (intermediates
+    → Suspended, handler → Running), then rebinds the core. -/
+def deliverInterrupt_apply (s : SpecState) (_interrupted _handler : DomId)
+    (core : CoreId) (vector : Nat) (chain : List (DomId × VpId)) : SpecState :=
+  match chain with
+  | []       => s
+  | [_]      => s
+  | leaf :: tail =>
+    let s₀ := s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+      { vp with runState := .interrupted vector }))
+    let s₁ := applyMidsAndHandler core vector leaf tail s₀
+    match chain.getLast? with
+    | none             => s₁
+    | some (hDom, hVp) => s₁.updCore core (fun _ => .runningDomain hDom hVp)
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -830,5 +879,11 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : SwitchGuard s caller toHandle toVpId core) :
     step s (.switch caller toHandle toVpId core)
          (switch_apply s caller toHandle toVpId core)
+  | deliverInterrupt {s : SpecState} {interrupted handler : DomId}
+                     {core : CoreId} {vector : Nat}
+                     {chain : List (DomId × VpId)}
+    (guard : DeliverInterruptGuard s interrupted handler core vector chain) :
+    step s (.deliverInterrupt interrupted handler core vector chain)
+         (deliverInterrupt_apply s interrupted handler core vector chain)
 
 end ThemisCapa
