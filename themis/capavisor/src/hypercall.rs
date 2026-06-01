@@ -16,10 +16,11 @@ use capability_engine::{
 use themis_abi::{errors, opcodes};
 
 #[cfg(target_arch = "x86_64")]
-#[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::layout::{
     APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::pid::PidPage;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::vmexit::EXIT_REASON_EPT_VIOLATION;
 use crate::platform::ThemisPlatform;
@@ -27,6 +28,55 @@ use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, InactiveVcpu, Reg};
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::{serial_debug, serial_println};
+
+// ── Hypercall flow-control helpers ───────────────────────────────────────── //
+
+/// Look up a `PlatformDomain` by `DomainId` from the calling handler.
+///
+/// Returns the `Arc<Mutex<PlatformDomain>>` on hit; on miss, performs an
+/// early `return` from the enclosing function with `ERR_NOTFOUND`.
+///
+/// Variants:
+///   `try_domain!(platform, id)`        — for `fn -> HypercallResult`
+///   `try_domain!(platform, id, opt)`   — for `fn -> Option<HypercallResult>`
+macro_rules! try_domain {
+    ($platform:expr, $id:expr) => {
+        match $platform.domain_arc($id) {
+            Some(a) => a,
+            None => return HypercallResult::error(themis_abi::errors::ERR_NOTFOUND),
+        }
+    };
+    ($platform:expr, $id:expr, opt) => {
+        match $platform.domain_arc($id) {
+            Some(a) => a,
+            None => {
+                return Some(HypercallResult::error(
+                    themis_abi::errors::ERR_NOTFOUND,
+                ))
+            }
+        }
+    };
+}
+
+/// Wrap a `capability_engine::execute()` call: on `Ok(v)` evaluate to `v`;
+/// on `Err(e)` perform an early `return HypercallResult::error(map_error(&e))`
+/// from the enclosing function.
+///
+/// Eliminates the boilerplate `match execute(...) { Ok(_) => …, Err(e) => … }`
+/// that appears at every capability-engine handler site.  The two-argument
+/// form defaults the `sealed` flag to `false`; pass it explicitly for the
+/// signed-only handlers.
+macro_rules! execute_or_return {
+    ($platform:expr, $body:expr) => {
+        execute_or_return!($platform, false, $body)
+    };
+    ($platform:expr, $sealed:expr, $body:expr) => {
+        match execute($platform, $sealed, $body) {
+            Ok(v) => v,
+            Err(e) => return HypercallResult::error(map_error(&e)),
+        }
+    };
+}
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
@@ -246,12 +296,10 @@ fn do_carve(
 ) -> HypercallResult {
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
     let caller = caller.clone();
-    match execute(platform, false, || {
+    let ((handle, sub), _) = execute_or_return!(platform, || {
         Capability::carve(&caller, parent_handle, access).map(|(h, s, batch)| ((h, s), batch))
-    }) {
-        Ok(((handle, sub), _)) => HypercallResult::success_2(handle, sub),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success_2(handle, sub)
 }
 
 /// ALIAS (0x02): alias shared sub-region from parent memory capability.
@@ -265,17 +313,11 @@ fn do_alias(
 ) -> HypercallResult {
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
     let caller = caller.clone();
-    match execute(platform, false, || {
+    let ((handle, sub), _) = execute_or_return!(platform, || {
         Capability::alias(&caller, parent_handle, access)
             .map(|(h, s)| ((h, s), UpdateBatch::default()))
-    }) {
-        Ok(((handle, sub), _)) => {
-            HypercallResult::success_2(handle, sub)
-        }
-        Err(e) => {
-            HypercallResult::error(map_error(&e))
-        }
-    }
+    });
+    HypercallResult::success_2(handle, sub)
 }
 
 /// SEND (0x03): send memory capability to a receiver domain.
@@ -297,13 +339,11 @@ fn do_send(
         None
     };
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
             .map(|batch| ((), batch))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 /// ACCEPT (0x04): accept a pending memory capability.
@@ -313,10 +353,8 @@ fn do_accept(
     pending_id: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || Capability::accept(&caller, pending_id)) {
-        Ok((handle, _)) => HypercallResult::success_1(handle),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    let (handle, _) = execute_or_return!(platform, || Capability::accept(&caller, pending_id));
+    HypercallResult::success_1(handle)
 }
 
 /// REJECT (0x05): reject a pending memory capability.
@@ -326,12 +364,10 @@ fn do_reject(
     pending_id: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::reject(&caller, pending_id).map(|()| ((), Default::default()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 // ── Channel (domain capability transfer) handlers ────────────────────────── //
@@ -388,12 +424,10 @@ fn do_create_domain(
     let api = MonitorAPI::from_bits(api_flags as u16 & parent_api.bits());
     let policy = DomainPolicy::new_restricted(cores_bitmask & parent_cores, api);
     let caller = caller.clone();
-    match execute(platform, false, || {
+    let (handle, _) = execute_or_return!(platform, || {
         Capability::create(&caller, policy.clone())
-    }) {
-        Ok((handle, _)) => HypercallResult::success_1(handle),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success_1(handle)
 }
 
 /// SEAL (0x07): seal a domain (Unsealed → Sealed).
@@ -448,12 +482,10 @@ fn do_revoke_mem(
     child_sub: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, true, || {
+    execute_or_return!(platform, true, || {
         Capability::revoke(&caller, parent_handle, child_sub).map(|batch| ((), batch))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 /// REVOKE_DOMAIN (0x09): revoke an entire child domain.
@@ -471,19 +503,15 @@ fn do_revoke_domain(
         .map(|cap| cap.read().data.id);
 
     let caller = caller.clone();
-    match execute(platform, true, || {
+    execute_or_return!(platform, true, || {
         Capability::revoke_domain(&caller, child_handle).map(|batch| ((), batch))
-    }) {
-        Ok(_) => {
-            // intr-p3g: clear all IRTEs that were programmed for this domain.
-            #[cfg(target_arch = "x86_64")]
-            if let Some(id) = child_domain_id {
-                invalidate_domain_irtes(platform, id);
-            }
-            HypercallResult::success()
-        }
-        Err(e) => HypercallResult::error(map_error(&e)),
+    });
+    // intr-p3g: clear all IRTEs that were programmed for this domain.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(id) = child_domain_id {
+        invalidate_domain_irtes(platform, id);
     }
+    HypercallResult::success()
 }
 
 /// ATTEST_SELF (0x0C): self-attestation of the calling domain.
@@ -786,16 +814,10 @@ fn do_map_self(
     new_gpa: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::map_self(&caller, cap_handle, new_gpa).map(|batch| ((), batch))
-    }) {
-        Ok(_) => {
-            HypercallResult::success()
-        }
-        Err(e) => {
-            HypercallResult::error(map_error(&e))
-        }
-    }
+    });
+    HypercallResult::success()
 }
 
 /// REGISTER_COMM (0x18): register a COMM page bound to a child domain's VP.
@@ -809,13 +831,11 @@ fn do_register_comm(
     vp_id: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::register_comm(&caller, mem_cap_handle, child_domain_handle, vp_id as u32)
             .map(|batch| ((), batch))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 /// ADD_VP (0x14): add a virtual processor to a child domain.
@@ -874,10 +894,7 @@ fn do_add_vp(
     // to 2 pages, matching the original THHV_META_PAGES_PER_VP=2 budget.
     // Requires computing pid_phys = vapic_phys + 0x400 instead of
     // allocating a separate frame, and reverting THHV_META_PAGES_PER_VP to 2.
-    let arc = match platform.domain_arc(child_domain_id) {
-        Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let arc = try_domain!(platform, child_domain_id);
 
     let (
         vmcs_phys,
@@ -1631,13 +1648,11 @@ fn do_set_policy(
     };
 
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::set_policy(&caller, child_handle, id.clone(), value)
             .map(|()| ((), UpdateBatch::new()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 // ── Posted Interrupt Descriptor helpers ──────────────────────────────────── //
@@ -1669,53 +1684,8 @@ fn do_set_policy(
 //                            this vCPU; used for cross-core IPI targeting.
 //
 // The PID is referenced by the child VMCS via VMCS field 0x2016.
-
-/// Set bit `vector` in the Posted-Interrupt Requests (PIR) bitmap of the
-/// descriptor at physical address `pid_phys`.
-///
-/// The PIR is 256 bits = 4 × u64 starting at byte 0 of the PID page.
-/// Uses an atomic OR to avoid races with concurrent setters.
-///
-/// # Safety
-/// `pid_phys` must be a valid physical address of a zeroed 64-byte aligned
-/// PID page accessible via the HHDM.
-#[cfg(target_arch = "x86_64")]
-unsafe fn pid_set_pir(pid_phys: u64, hhdm: u64, vector: u8) {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    let word = (vector / 64) as usize;
-    let bit = vector % 64;
-    let pir_virt = (pid_phys + hhdm) as *const AtomicU64;
-    unsafe { (*pir_virt.add(word)).fetch_or(1u64 << bit, Ordering::Release) };
-}
-
-/// Atomically set the Outstanding Notification (ON) bit (byte 32, bit 0) of
-/// the PID.  Returns `true` if ON was already set (another sender beat us),
-/// `false` if we were the first setter (we must send the notification IPI).
-#[cfg(target_arch = "x86_64")]
-unsafe fn pid_test_and_set_on(pid_phys: u64, hhdm: u64) -> bool {
-    use core::sync::atomic::{AtomicU32, Ordering};
-    let on_ptr = ((pid_phys + hhdm) + 32) as *const AtomicU32;
-    let prev = unsafe { (*on_ptr).fetch_or(1, Ordering::AcqRel) };
-    prev & 1 != 0
-}
-
-/// Write the NDST (Notification Destination, bytes 40–43) field of the PID
-/// to `lapic_id`.  Called whenever a VP is activated on a core so remote
-/// senders know which LAPIC to address the notification IPI to.
-///
-/// No-op when `pid_phys == 0` (dom0 has no PID page).
-///
-/// # Safety
-/// `pid_phys` must be a valid physical PID page address accessible via HHDM,
-/// or 0 to skip (dom0).
-#[cfg(target_arch = "x86_64")]
-unsafe fn pid_set_ndst(pid_phys: u64, hhdm: u64, lapic_id: u32) {
-    if pid_phys == 0 {
-        return;
-    }
-    let ndst_ptr = ((pid_phys + hhdm) + 40) as *mut u32;
-    unsafe { core::ptr::write_volatile(ndst_ptr, lapic_id) };
-}
+//
+// All PID accessors are methods on `PidPage` in `arch::x86_64::pid`.
 
 /// Send a Fixed-delivery IPI with `vector` to the physical LAPIC identified
 /// by `ndst_lapic_id`, using xAPIC MMIO at `hhdm + 0xFEE0_0000`.
@@ -1813,7 +1783,7 @@ unsafe fn swap_active_vp(
 
     // 4. Update PID.NDST so notifications target this core.
     unsafe {
-        pid_set_ndst(vcpu.pid_phys(), platform.hhdm_offset(), current_lapic_id());
+        PidPage::new(vcpu.pid_phys(), platform.hhdm_offset()).set_ndst(current_lapic_id());
     }
 }
 
@@ -1845,13 +1815,14 @@ fn apply_pending_reg(vcpu: &mut ActiveVcpu, reg: themis_abi::regs::VpRegister, v
 /// `pid_phys` must be a valid 64-byte aligned PID page accessible via HHDM.
 #[cfg(target_arch = "x86_64")]
 unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_remote: bool) {
-    unsafe { pid_set_pir(pid_phys, hhdm, vector) };
+    let pid = PidPage::new(pid_phys, hhdm);
+    unsafe { pid.set_pir(vector) };
     // Always set ON so the processor processes PIR→vIRR on the next VMENTRY
     // (SDM §29.6: hardware only merges PIR into vIRR when ON=1).
-    let on_already_set = unsafe { pid_test_and_set_on(pid_phys, hhdm) };
+    let on_already_set = unsafe { pid.test_and_set_on() };
     if is_remote && !on_already_set {
         // Remote VP: send the notification IPI to wake that core out of guest mode.
-        let ndst = unsafe { core::ptr::read_volatile(((pid_phys + hhdm) + 40) as *const u32) };
+        let ndst = unsafe { pid.read_ndst() };
         let notify_vec = crate::arch::vmcs::POSTED_INTR_NOTIFY_VEC;
         unsafe { send_notification_ipi(ndst, notify_vec, hhdm) };
     }
@@ -1876,13 +1847,11 @@ fn do_get_reg(
     reg_id: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    let (value, _) = execute_or_return!(platform, || {
         Capability::get_register(&caller, domain_handle, vp_id, reg_id, platform)
             .map(|value| (value, Default::default()))
-    }) {
-        Ok((value, _)) => HypercallResult::success_1(value),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success_1(value)
 }
 
 /// SET_REG (0x0F): write a single VP register on a child domain VP.
@@ -1900,13 +1869,11 @@ fn do_set_reg(
     value: u64,
 ) -> HypercallResult {
     let caller = caller.clone();
-    match execute(platform, false, || {
+    execute_or_return!(platform, || {
         Capability::set_register(&caller, domain_handle, vp_id, reg_id, value, platform)
             .map(|()| ((), Default::default()))
-    }) {
-        Ok(_) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    });
+    HypercallResult::success()
 }
 
 // ── Interrupt forwarding ─────────────────────────────────────────────────── //
@@ -2203,10 +2170,7 @@ fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRef<Domain>) 
 
     let domain_id = caller.read().data.id;
 
-    let pd = match platform.domain_arc(domain_id) {
-        Some(pd) => pd,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let pd = try_domain!(platform, domain_id);
 
     let mut pd_locked = pd.lock();
     if pd_locked.domcomm.is_none() {
@@ -2424,10 +2388,7 @@ fn do_register_doorbell(
         id
     };
 
-    let child_arc = match platform.domain_arc(child_domain_id) {
-        Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let child_arc = try_domain!(platform, child_domain_id);
     let mut pd = child_arc.lock();
 
     if pd.doorbells.len() >= THEMIC_MAX_DOORBELLS {
@@ -2479,10 +2440,7 @@ fn do_unregister_doorbell(
         id
     };
 
-    let child_arc = match platform.domain_arc(child_domain_id) {
-        Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let child_arc = try_domain!(platform, child_domain_id);
     let mut pd = child_arc.lock();
 
     let before = pd.doorbells.len();
@@ -2513,10 +2471,7 @@ fn do_ring_doorbell(
     use themis_abi::synthetic_exits::THEMIS_EXIT_DOORBELL;
 
     let caller_id = caller.read().data.id;
-    let caller_arc = match platform.domain_arc(caller_id) {
-        Some(a) => a,
-        None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
-    };
+    let caller_arc = try_domain!(platform, caller_id, opt);
 
     let (doorbell_id, parent_id) = {
         let pd = caller_arc.lock();
@@ -2538,10 +2493,7 @@ fn do_ring_doorbell(
         (db_id, parent)
     };
 
-    let parent_arc = match platform.domain_arc(parent_id) {
-        Some(a) => a,
-        None => return Some(HypercallResult::error(errors::ERR_NOTFOUND)),
-    };
+    let parent_arc = try_domain!(platform, parent_id, opt);
     let mut parent_pd = parent_arc.lock();
 
     let notify = domcomm::DoorbellNotify {
@@ -2576,10 +2528,7 @@ fn do_set_themic_vector(
         return HypercallResult::error(errors::ERR_INVALID);
     }
     let caller_id = caller.read().data.id;
-    let arc = match platform.domain_arc(caller_id) {
-        Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let arc = try_domain!(platform, caller_id);
     arc.lock().set_notify_vector(vector as u32);
     HypercallResult::success()
 }
@@ -2629,10 +2578,7 @@ fn do_inject_interrupt(
         id
     };
 
-    let child_arc = match platform.domain_arc(child_domain_id) {
-        Some(a) => a,
-        None => return HypercallResult::error(errors::ERR_NOTFOUND),
-    };
+    let child_arc = try_domain!(platform, child_domain_id);
 
     let pid_phys = {
         let pd = child_arc.lock();

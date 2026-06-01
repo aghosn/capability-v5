@@ -12,6 +12,7 @@ pub mod iommu_ir;
 pub mod layout;
 pub mod msr_virt;
 pub mod pci;
+pub mod pid;
 pub mod vcpu_ext;
 pub mod vmcs;
 pub mod vmexit;
