@@ -135,6 +135,25 @@ inductive Action where
       - core's `CoreState` → `.runningDomain handlerDom handlerVp`. -/
   | deliverInterrupt (interrupted : DomId) (handler : DomId) (core : CoreId)
                      (vector : Nat) (chain : List (DomId × VpId))
+  /-- `caller` allocates a new VP in the child domain referenced by
+      `childHandle` (a local dom-handle in caller's `domHandles`) and
+      pins the COMM memory cap referenced by `commHandle` (a local
+      mem-handle in caller's `memHandles`) to that VP. Mirrors
+      `capa-engine/src/capability.rs::add_vp`.
+
+      Preconditions: child is unsealed and has `vps.length < numVps`;
+      comm cap is Carve + Exclusive, owned by caller, with COMM bit
+      not already set. The COMM cap is *parent-owned*: ownership stays
+      with the caller; only attributes + binding change.
+
+      Apply:
+      - child's `vps` is extended with `{id := childVps.length,
+        runState := .available none}`;
+      - child's `commBindings` is extended with the resolved comm cap id;
+      - comm memcap's attributes get `comm := true, clean := true`
+        (canonicalize), and `commBinding := some {childDomId, vpId}`. -/
+  | addVp (caller : DomId) (childHandle : LocalHandle)
+          (commHandle : LocalHandle)
   -- Future:
   -- | switchSuspended … (interrupt-resume branch of switch)
 deriving Repr

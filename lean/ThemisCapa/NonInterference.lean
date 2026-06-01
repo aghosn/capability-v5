@@ -49,7 +49,8 @@ case where the modified cap's owner — the caller — is not in
 
 def Action.affectsView (s : SpecState) (a : Action) (did : DomId) : Prop :=
   a.affectsDom s did ∨
-    (∃ caller target, a = .revoke caller target ∧ did = caller)
+    (∃ caller target, a = .revoke caller target ∧ did = caller) ∨
+    (∃ caller ch cm, a = .addVp caller ch cm ∧ did = caller)
 
 private theorem not_affectsDom_of_not_affectsView
     {s : SpecState} {a : Action} {did : DomId}
@@ -133,7 +134,7 @@ theorem step_view_preservation
   | revoke guard =>
     rename_i caller target
     have hBcaller : B ≠ caller :=
-      fun he => hB (Or.inr ⟨caller, target, rfl, he⟩)
+      fun he => hB (Or.inr (Or.inl ⟨caller, target, rfl, he⟩))
     obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp guard.targetExists
     obtain ⟨pid, htp⟩ :=
       Option.isSome_iff_exists.mp (guard.targetHasParent t ht)
@@ -194,5 +195,20 @@ theorem step_view_preservation
   | switchReturn _ => exact id
   | switch _ => exact id
   | deliverInterrupt _ => exact id
+  | addVp guard =>
+    rename_i caller ch cm
+    have hBcaller : B ≠ caller :=
+      fun he => hB (Or.inr (Or.inr ⟨caller, ch, cm, rfl, he⟩))
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨mid, hmid⟩ :=
+      Option.isSome_iff_exists.mp (guard.commHandleResolves d hd)
+    obtain ⟨cp, hcp⟩ :=
+      Option.isSome_iff_exists.mp (guard.commCapExists d hd mid hmid)
+    intro hmem
+    have hc_eq : c = mid := hmem d hd mid hmid
+    have hown_caller : capPre.owner = caller := by
+      rw [hc_eq, hcp] at hPre; injection hPre with hpe
+      rw [← hpe]; exact guard.commCapOwned d hd mid hmid cp hcp
+    exact hBcaller (hown.symm.trans hown_caller)
 
 end ThemisCapa

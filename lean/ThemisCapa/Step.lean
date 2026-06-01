@@ -814,6 +814,94 @@ def deliverInterrupt_apply (s : SpecState) (_interrupted _handler : DomId)
     | none             => s₁
     | some (hDom, hVp) => s₁.updCore core (fun _ => .runningDomain hDom hVp)
 
+/-! ### `addVp`
+
+Allocates a fresh VP in a child domain and pins a parent-owned COMM
+memory cap to it. Mirrors `capa-engine/src/capability.rs::add_vp`. -/
+
+/-- Preconditions for `addVp(caller, childHandle, commHandle)`. -/
+structure AddVpGuard (s : SpecState) (caller : DomId)
+                     (childHandle commHandle : LocalHandle) : Prop where
+  callerExists       : (s.getDom caller).isSome
+  childHandleResolves : ∀ d, s.getDom caller = some d →
+                        (d.lookupDomHandle childHandle).isSome
+  childCapExists     : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       (s.getDomCap cid).isSome
+  childExists        : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       (s.getDom dc.targetDom).isSome
+  childUnsealed      : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       ∀ cd, s.getDom dc.targetDom = some cd →
+                       cd.isUnsealed
+  childHasVpCapacity : ∀ d, s.getDom caller = some d →
+                       ∀ cid, d.lookupDomHandle childHandle = some cid →
+                       ∀ dc, s.getDomCap cid = some dc →
+                       ∀ cd, s.getDom dc.targetDom = some cd →
+                       cd.vps.length < cd.policy.numVps
+  commHandleResolves : ∀ d, s.getDom caller = some d →
+                       (d.lookupMemHandle commHandle).isSome
+  commHandleNotFrozen : ∀ d, s.getDom caller = some d →
+                        commHandle ∉ d.frozenHandles
+  commCapExists      : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       (s.getMem mid).isSome
+  commCapOwned       : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c → c.owner = caller
+  commCapKindCarve   : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.kind = RegionKind.carve
+  commCapExclusive   : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.status = RegionStatus.exclusive
+  commCapNotComm     : ∀ d, s.getDom caller = some d →
+                       ∀ mid, d.lookupMemHandle commHandle = some mid →
+                       ∀ c, s.getMem mid = some c →
+                       c.region.attributes.comm = false
+
+/-- Pure state update for `addVp`.
+
+    1. Resolve childHandle → childCapId → childDomId (= dc.targetDom).
+    2. Resolve commHandle → commCapId.
+    3. Append `{id := childVps.length, runState := .available none}` to
+       child's vps and append commCapId to child's `commBindings`.
+    4. Update commCap: set `attributes.comm := true, attributes.clean := true`
+       (canonicalize) and `commBinding := some {childDomId, vpId}`.
+
+    Returns `s` unchanged if any resolution fails. -/
+def addVp_apply (s : SpecState) (caller : DomId)
+                (childHandle commHandle : LocalHandle) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle) with
+  | none     => s
+  | some cid =>
+    match s.getDomCap cid with
+    | none    => s
+    | some dc =>
+      match s.getDom dc.targetDom with
+      | none    => s
+      | some cd =>
+        match (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle) with
+        | none     => s
+        | some mid =>
+          let vpId : VpId := cd.vps.length
+          let s₁ := s.updDomain dc.targetDom (fun d =>
+            { d with vps := d.vps ++
+                       [{ id := vpId, runState := .available none }],
+                     commBindings := d.commBindings ++ [mid] })
+          s₁.updMem mid (fun c =>
+            { c with region :=
+                { c.region with
+                  attributes :=
+                    { c.region.attributes with comm := true, clean := true },
+                  commBinding := some
+                    { targetDomainId := dc.targetDom, vpId := vpId } } })
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -885,5 +973,9 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : DeliverInterruptGuard s interrupted handler core vector chain) :
     step s (.deliverInterrupt interrupted handler core vector chain)
          (deliverInterrupt_apply s interrupted handler core vector chain)
+  | addVp {s : SpecState} {caller : DomId} {childHandle commHandle : LocalHandle}
+    (guard : AddVpGuard s caller childHandle commHandle) :
+    step s (.addVp caller childHandle commHandle)
+         (addVp_apply s caller childHandle commHandle)
 
 end ThemisCapa
