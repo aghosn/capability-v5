@@ -3,6 +3,31 @@
 //! On x86-64, re-exports from `arch::x86_64`. On AArch64, from `arch::aarch64`.
 //! The active arch is selected at compile time via `cfg(target_arch)`.
 //!
+//! # Cross-arch state pattern
+//!
+//! Cross-arch carrier types in the platform layer (`ThemisPlatform`,
+//! `PlatformDomain`) embed a per-arch state field whose type is a
+//! `cfg(target_arch)`-selected concrete struct:
+//!
+//! - `ThemisPlatform { arch: ArchPlatformState, ... }`
+//! - `PlatformDomain { arch: ArchDomainState, ... }`
+//!
+//! Each arch's `arch_state.rs` defines its own concrete `ArchPlatformState` /
+//! `ArchDomainState` with the same set of inherent method names. The cross-
+//! arch carrier calls `self.arch.foo(...)` and the compiler resolves to the
+//! per-arch implementation via cfg. There is intentionally **no `ArchPlatform`
+//! / `ArchDomain` trait** today — the contract is implicit, enforced by call
+//! sites in the cross-arch carrier (a missing method becomes a compile error
+//! on that arch).
+//!
+//! Trade-off: this matches `std::sys`-style HAL code (no virtual dispatch,
+//! no extra layer) at the cost of contract discoverability. A future
+//! migration to an explicit `ArchPlatform` / `ArchDomain` trait (Option A)
+//! is tracked as `arch-trait-migration` in the project todo list — revisit
+//! once the ARM backend has a non-stub implementation that exercises the
+//! cross-arch surface. If we migrate, do `ArchPlatformState` and
+//! `ArchDomainState` together for consistency.
+//!
 //! # Boot-pipeline contract
 //!
 //! `main.rs` is the platform-independent boot orchestrator. Each arch backend
