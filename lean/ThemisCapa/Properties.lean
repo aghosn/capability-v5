@@ -42,6 +42,26 @@ private theorem freshDomCapCounter_of_keys_eq
   rw [hNext]
   exact hwf.freshDomCapCounter id hid
 
+/-- Generic preservation: if every domain in the post-state has its
+    `addressMap` equal to that of some pre-state domain, the
+    `AddressMapsWf` invariant is preserved. The 19 actions that don't
+    mutate `addressMap` discharge `addrWf` via this helper. The
+    `create` and `mapSelf` arms supply their own discharge:
+    `create` because it adds a fresh domain with `AddressMap.empty`
+    (which is `Wf` by `Wf_empty`), `mapSelf` because it rewrites
+    one domain's map and needs `Wf_removeWithin` + `Wf_insert` with
+    its `noOverlap` guard. -/
+private theorem addressMapsWf_of_preimage
+    {s s' : SpecState}
+    (hwf : AddressMapsWf s)
+    (hAM : ∀ did d', s'.getDom did = some d' →
+           ∃ d, s.getDom did = some d ∧ d.addressMap = d'.addressMap) :
+    AddressMapsWf s' := by
+  intro did d' hd'
+  obtain ⟨d, hd, hAMeq⟩ := hAM did d' hd'
+  rw [← hAMeq]
+  exact hwf did d hd
+
 /-- Concrete form of `carve_apply` when the parent lookup succeeds. -/
 private theorem carve_apply_eq_of_parent
     (s : SpecState) (caller : DomId) (parent : MemCapId)
@@ -162,7 +182,7 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -536,6 +556,20 @@ theorem carve_preserves_wellformed
     apply freshDomCapCounter_of_keys_eq hwf <;>
       simp only [carve_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
                  SpecState.updDomain]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    · have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+      simp only at hgetD
+      by_cases hdid : did = caller
+      · rw [hgetD, if_pos hdid] at hd'
+        cases hd'
+        refine ⟨dc, ?_, rfl⟩
+        rw [hdid]; exact hdc
+      · rw [hgetD, if_neg hdid] at hd'
+        exact ⟨d', hd', rfl⟩
 
 /-! ## Alias
 
@@ -629,7 +663,7 @@ theorem alias_preserves_wellformed
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -943,6 +977,20 @@ theorem alias_preserves_wellformed
     apply freshDomCapCounter_of_keys_eq hwf <;>
       simp only [alias_apply, hpOpt, SpecState.freshMem, SpecState.updMem,
                  SpecState.updDomain]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    · have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      by_cases hdid : did = caller
+      · rw [hgetD, if_pos hdid] at hd'
+        cases hd'
+        refine ⟨dc, ?_, rfl⟩
+        rw [hdid]; exact hdc
+      · rw [hgetD, if_neg hdid] at hd'
+        exact ⟨d', hd', rfl⟩
 
 /-! ## Revoke
 
@@ -1108,7 +1156,7 @@ theorem revoke_preserves_wellformed
               (Arena.update_unique_keys _ _ _ hwf.unique.domains)
     · simp only [if_neg hv]
       exact Arena.update_unique_keys _ _ _ hwf.unique.domains
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1429,6 +1477,21 @@ theorem revoke_preserves_wellformed
       by_cases hv : t.region.attributes.vital <;> simp [hv]
     · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
       by_cases hv : t.region.attributes.vital <;> simp [hv]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rw [revoke_apply_getDom s caller target t ht pid htp did] at hd'
+    by_cases hdid : did = t.owner
+    · rw [if_pos hdid] at hd'
+      rcases hpre : s.getDom t.owner with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        refine ⟨dpre, ?_, ?_⟩
+        · rw [hdid]; exact hpre
+        · rw [← hd']
+    · rw [if_neg hdid] at hd'
+      exact ⟨d', hd', rfl⟩
 
 /-! ## Send (unsealed path)
 
@@ -1526,7 +1589,7 @@ theorem send_apply_preserves_wellformed
         (send_apply s caller receiver cap).getMem id = s.getMem id := by
     intro id hidC
     rw [send_apply_getMem, if_neg hidC]
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1764,6 +1827,31 @@ theorem send_apply_preserves_wellformed
   case fDomCap =>
     apply freshDomCapCounter_of_keys_eq hwf <;>
       simp only [send_apply, SpecState.updMem, SpecState.updDomain]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rw [send_apply_getDom s caller receiver cap hne did] at hd'
+    by_cases hdidC : did = caller
+    · rw [if_pos hdidC] at hd'
+      rcases hpre : s.getDom caller with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        refine ⟨dpre, ?_, ?_⟩
+        · rw [hdidC]; exact hpre
+        · rw [← hd']
+    · rw [if_neg hdidC] at hd'
+      by_cases hdidR : did = receiver
+      · rw [if_pos hdidR] at hd'
+        rcases hpre : s.getDom receiver with _ | dpre
+        · rw [hpre] at hd'; cases hd'
+        · rw [hpre] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          refine ⟨dpre, ?_, ?_⟩
+          · rw [hdidR]; exact hpre
+          · rw [← hd']
+      · rw [if_neg hdidR] at hd'
+        exact ⟨d', hd', rfl⟩
 
 /-- Thin wrapper: `send_preserves_wellformed` discharges WF preservation
     for the labelled step by forwarding to `send_apply_preserves_wellformed`.
@@ -1838,7 +1926,7 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1912,17 +2000,31 @@ theorem seal_preserves_wellformed
   case fDomCap =>
     apply freshDomCapCounter_of_keys_eq hwf <;>
       simp only [seal_apply, hdc, SpecState.updDomain]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rw [hDomEq] at hd'
+    by_cases h : did = dc.targetDom
+    · rw [if_pos h] at hd'
+      rcases hpre : s.getDom did with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        exact ⟨dpre, rfl, by rw [← hd']⟩
+    · rw [if_neg h] at hd'
+      exact ⟨d', hd', rfl⟩
 
 /-! ### Reject / Accept preserve WellFormed -/
 
 /-- Reusable helper: any `updDomain` that doesn't touch `memHandles`
-    preserves every `WellFormed` invariant. `pendingMemCaps`,
-    `frozenHandles`, `addressMap`, etc. are outside `WellFormed`, so
-    `f` may freely permute them. -/
+    or `addressMap` preserves every `WellFormed` invariant.
+    `pendingMemCaps`, `frozenHandles`, etc. are outside `WellFormed`,
+    so `f` may freely permute them. -/
 private theorem wf_preserved_under_handle_invariant_updDomain
     {s : SpecState} (hwf : WellFormed s)
     (did : DomId) (f : Domain → Domain)
-    (hHandles : ∀ d, (f d).memHandles = d.memHandles) :
+    (hHandles : ∀ d, (f d).memHandles = d.memHandles)
+    (hAddrMap : ∀ d, (f d).addressMap = d.addressMap) :
     WellFormed (s.updDomain did f) := by
   have hMem : ∀ id, (s.updDomain did f).getMem id = s.getMem id := by
     intro id; rfl
@@ -1948,7 +2050,7 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case u =>
     refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
     show ((s.updDomain did f).domains).UniqueKeys
@@ -2000,6 +2102,27 @@ private theorem wf_preserved_under_handle_invariant_updDomain
   case fDomCap =>
     apply freshDomCapCounter_of_keys_eq hwf <;>
       simp only [SpecState.updDomain]
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did' d' hd'
+    by_cases h : did = did'
+    · subst h
+      have : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+        change ((s.domains.update did f)).find? did = _
+        rw [Arena.find?_update_eq_map]; rfl
+      rw [this] at hd'
+      rcases hpre : s.getDom did with _ | dpre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        refine ⟨dpre, rfl, ?_⟩
+        rw [← hd', hAddrMap]
+    · have hne : did' ≠ did := fun heq => h heq.symm
+      have : (s.updDomain did f).getDom did' = s.getDom did' := by
+        change ((s.domains.update did f)).find? did' = _
+        exact Arena.find?_update_other _ _ _ _ hne
+      rw [this] at hd'
+      exact ⟨d', hd', rfl⟩
 
 theorem reject_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -2011,13 +2134,14 @@ theorem reject_preserves_wellformed
   have hwf₁ : WellFormed (s.updDomain receiver
       (fun d => { d with pendingMemCaps :=
                           d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
-    wf_preserved_under_handle_invariant_updDomain hwf receiver _ (fun _ => rfl)
+    wf_preserved_under_handle_invariant_updDomain hwf receiver _
+      (fun _ => rfl) (fun _ => rfl)
   rcases h : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
     with _ | pe
   · simp only [h]; exact hwf₁
   · simp only [h]
     exact wf_preserved_under_handle_invariant_updDomain hwf₁
-            pe.senderDomainId _ (fun _ => rfl)
+            pe.senderDomainId _ (fun _ => rfl) (fun _ => rfl)
 
 theorem accept_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -2046,12 +2170,12 @@ theorem accept_preserves_wellformed
           (fun d' => { d' with pendingMemCaps :=
                               d'.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
       wf_preserved_under_handle_invariant_updDomain hwfSend
-        receiver _ (fun _ => rfl)
+        receiver _ (fun _ => rfl) (fun _ => rfl)
     exact wf_preserved_under_handle_invariant_updDomain hwf₂
                     pe.senderDomainId
                     (fun d' => { d' with frozenHandles :=
                               d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
-                    (fun _ => rfl)
+                    (fun _ => rfl) (fun _ => rfl)
 
 /-! ### Sealed send preserves WellFormed -/
 
@@ -2069,10 +2193,11 @@ theorem sealedSend_preserves_wellformed
   · -- Step 1: freeze handle on caller.
     have hwf₁ : WellFormed (s.updDomain caller
         (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })) :=
-      wf_preserved_under_handle_invariant_updDomain hwf caller _ (fun _ => rfl)
+      wf_preserved_under_handle_invariant_updDomain hwf caller _
+        (fun _ => rfl) (fun _ => rfl)
     -- Step 2: enqueue pending entry on receiver.
     exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
-            (fun _ => rfl)
+            (fun _ => rfl) (fun _ => rfl)
 
 /-! ### Create preserves WellFormed
 
@@ -2155,7 +2280,7 @@ theorem create_preserves_wellformed
   have hNextDom : (create_apply s caller policy).nextDomId = s.nextDomId + 1 := rfl
   have hNextDomCap :
       (create_apply s caller policy).nextDomCapId = s.nextDomCapId + 1 := rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2283,6 +2408,25 @@ theorem create_preserves_wellformed
     rcases hid with rfl | hid
     · exact Nat.lt_succ_self _
     · exact Nat.lt_succ_of_lt (hwf.freshDomCapCounter id hid)
+  case addrWf =>
+    intro did d' hd'
+    rw [hDomEq] at hd'
+    by_cases h1 : did = s.nextDomId
+    · rw [if_pos h1] at hd'
+      cases hd'
+      exact Translation.AddressMap.Wf_empty
+    · rw [if_neg h1] at hd'
+      by_cases h2 : did = caller
+      · rw [if_pos h2] at hd'
+        rcases hpre : s.getDom did with _ | dpre
+        · rw [hpre] at hd'; cases hd'
+        · rw [hpre] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          have hAM : d'.addressMap = dpre.addressMap := by rw [← hd']
+          rw [hAM]
+          exact hwf.addressMapsWf did dpre hpre
+      · rw [if_neg h2] at hd'
+        exact hwf.addressMapsWf did d' hd'
 
 /-! ### RevokeDomain preserves WellFormed
 
@@ -2366,7 +2510,7 @@ theorem revokeDomain_preserves_wellformed
     · rw [h, Arena.find?_remove_same, if_pos rfl]
     · rw [Arena.find?_remove_other _ _ _ h, if_neg h]
       rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2471,6 +2615,21 @@ theorem revokeDomain_preserves_wellformed
       simp only [revokeDomain_apply, hdcaller, hdcId, hdc, SpecState.updDomain]
     rw [hKeys, Arena.mem_keys_remove_iff] at hid
     exact hwf.freshDomCapCounter id hid.2
+  case addrWf =>
+    apply addressMapsWf_of_preimage hwf.addressMapsWf
+    intro did d' hd'
+    rw [hDomEq] at hd'
+    by_cases h1 : did = dc.targetDom
+    · rw [if_pos h1] at hd'; cases hd'
+    · rw [if_neg h1] at hd'
+      by_cases h2 : did = caller
+      · subst h2
+        rw [if_pos rfl, hdcaller] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        refine ⟨dcaller, hdcaller, ?_⟩
+        rw [← hd']
+      · rw [if_neg h2] at hd'
+        exact ⟨d', hd', rfl⟩
 
 end ThemisCapa
 

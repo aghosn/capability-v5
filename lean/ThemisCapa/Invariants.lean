@@ -97,6 +97,13 @@ def HandleOwner (s : SpecState) : Prop :=
     ∀ p ∈ d.memHandles,
       ∃ c, s.getMem p.2 = some c ∧ c.owner = did
 
+/-- Every domain's `addressMap` is well-formed (pairwise GPA-disjoint).
+    Created domains start with `AddressMap.empty` (trivially `Wf`) and
+    only `mapSelf` mutates it; `mapSelf`'s guard supplies the disjointness
+    side-condition needed to preserve this invariant. -/
+def AddressMapsWf (s : SpecState) : Prop :=
+  ∀ did d, s.getDom did = some d → d.addressMap.Wf
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique             : UniqueArenas s
@@ -108,5 +115,6 @@ structure WellFormed (s : SpecState) : Prop where
   parentChild        : ParentChildAgreement s
   freshDomCounter    : FreshDomCounter s
   freshDomCapCounter : FreshDomCapCounter s
+  addressMapsWf      : AddressMapsWf s
 
 end ThemisCapa

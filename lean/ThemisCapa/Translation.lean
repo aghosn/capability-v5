@@ -215,6 +215,24 @@ theorem overlaps_insert_iff
     | inl h => exact overlaps_insert_self m e g sz h
     | inr h => exact overlaps_insert_of_overlaps m e g sz h
 
+/-- The empty map is trivially well-formed. -/
+@[simp] theorem Wf_empty : (empty : AddressMap).Wf := by
+  intro e₁ h₁ _ _ _
+  simp [empty] at h₁
+
+/-- `removeWithin g sz` only filters entries; it never adds, so
+    disjointness is preserved unconditionally. -/
+theorem Wf_removeWithin
+    (m : AddressMap) (g sz : Nat) (hwf : m.Wf) :
+    (m.removeWithin g sz).Wf := by
+  intro e₁ h₁ e₂ h₂ hne
+  -- entries of (m.removeWithin g sz) are ⊆ entries of m
+  have hsub : ∀ e, e ∈ (m.removeWithin g sz).entries → e ∈ m.entries := by
+    intro e he
+    simp [removeWithin] at he
+    exact he.1
+  exact hwf e₁ (hsub e₁ h₁) e₂ (hsub e₂ h₂) hne
+
 /-- The disjointness invariant is preserved by `insert e` provided `e`
     is itself disjoint from every existing entry. -/
 theorem Wf_insert
