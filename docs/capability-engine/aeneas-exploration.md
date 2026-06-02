@@ -642,6 +642,27 @@ lattice are the same proof obligation.
   only that its design admits formally stating and proving guarantees
   that are structurally outside seL4's reach.
 
+#### Status (Lean v2, last updated 2026-06-02)
+
+| Theorem | Status | Lean module(s) | Notes |
+|---|---|---|---|
+| **O1** Attestation correctness | not started | — | Needs measurement function over CDT subtree + axiomatized hash. |
+| **O2** Hierarchical encapsulation | 🟡 in progress | `DomainTree.lean`, `ParentStability.lean` | Foundations + sub-result `step_parent_immutable` ✅ (parent pointers are immutable across all 21 actions). Next: subtree-locality theorem A3 ("outsider steps leave the whole subtree state unchanged"). |
+| **O3** Nested confidentiality composition | not started | — | Blocked on O2. |
+| **O4** Core-affinity NI | not started | — | `policy_cores` already in state. |
+| **O5** Scheduling-authority confinement | not started | — | Switch-action precondition framing. |
+| **O6** Interrupt-routing integrity | not started | — | Precondition on `deliver_interrupt_vp`. |
+| **O7** Cross-core leakage bound | not started | — | Blocked on O4 + O6. |
+| **O8** Policy-as-flow-lattice refinement | not started | — | Meta-theorem; statement only. |
+
+Supporting infrastructure already in v2:
+- `Locality.lean` — per-action frame lemmas (`*_frame_dom`, `*_frame_mem`, `*_frame_dc`).
+- `Provenance.lean` — capability provenance theorem.
+- `NonInterference.lean` — base `step_non_interference` (existing 83-property baseline carried over).
+- `Invariants.lean` — `WellFormed` (9 invariants, including `FreshDomCounter`, `ParentChildAgreement`).
+- `ParentStability.lean` — combined `ParentStable = PreservesParents ∧ NeverRemovesDomain` framework, closed under composition; foundation for O2.
+- `DomainTree.lean` — `IsParentOf`, `IsAncestorOf`, `InSubtree`, `DomainTreeWf`. Not yet added to `WellFormed` (preservation across 21 actions deferred until first concrete subtree theorem validates the predicate shape).
+
 ---
 
 ## 12 — Abstracting `Arc<RwLock<…>>` away from Aeneas — **deferred**
