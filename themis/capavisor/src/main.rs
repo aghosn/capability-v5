@@ -62,6 +62,7 @@ mod hypercall;
 mod mem;
 mod monitor;
 mod platform;
+mod util;
 #[cfg(target_arch = "x86_64")]
 mod vmx {
     pub use ::vmx::features::*;

@@ -15,6 +15,7 @@ use limine::mp::Cpu;
 
 use crate::mem::{MemoryPartition, MetaBreakdown, PhysRegion, PhysicalInventory, UncacheableRanges};
 use crate::serial_println;
+use crate::util::fmt_kib;
 
 // ── QEMU virt machine GIC addresses (temporary bringup constants) ────────── //
 // These are fixed for `qemu-system-aarch64 -machine virt,gic-version=3`.
@@ -37,15 +38,6 @@ pub struct PlatformInfo {
     pub uc_ranges: Arc<UncacheableRanges>,
     /// Non-RAM regions to map in dom0's Stage-2 for device passthrough.
     pub passthrough_regions: Vec<PhysRegion>,
-}
-
-/// Format a byte count as a human-readable string.
-fn fmt_kib(bytes: u64) -> alloc::string::String {
-    if bytes >= 1024 * 1024 {
-        alloc::format!("{} MiB", bytes / (1024 * 1024))
-    } else {
-        alloc::format!("{} KiB", bytes / 1024)
-    }
 }
 
 // ── Phase 1: Platform discovery ───────────────────────────────────────────── //
