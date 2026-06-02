@@ -489,6 +489,41 @@ theorem switchSuspended_frame_mem (s : SpecState) (caller : DomId)
       · simp only [hb, hdcap, hvp, SpecState.updCore, SpecState.updDomain]
         rfl
 
+/-! ### mapSelf -/
+
+theorem mapSelf_frame_dom (s : SpecState) (caller : DomId)
+    (capHandle : LocalHandle) (newGpa : Nat) (did : DomId)
+    (h : did ≠ caller) :
+    (mapSelf_apply s caller capHandle newGpa).getDom did = s.getDom did := by
+  show ((mapSelf_apply s caller capHandle newGpa).domains).find? did = _
+  unfold mapSelf_apply
+  rcases hd : s.getDom caller with _ | d
+  · simp only [hd]; rfl
+  · rcases hmh : d.lookupMemHandle capHandle with _ | mid
+    · simp only [hd, hmh]; rfl
+    · rcases hm : s.getMem mid with _ | c
+      · simp only [hd, hmh, hm]; rfl
+      · rcases hg : d.lookupMappedGpa capHandle with _ | oldGpa
+        · simp only [hd, hmh, hm, hg]; rfl
+        · simp only [hd, hmh, hm, hg, SpecState.updDomain]
+          exact Arena.find?_update_other _ caller did _ h
+
+theorem mapSelf_frame_mem (s : SpecState) (caller : DomId)
+    (capHandle : LocalHandle) (newGpa : Nat) (id : MemCapId) :
+    (mapSelf_apply s caller capHandle newGpa).getMem id = s.getMem id := by
+  show ((mapSelf_apply s caller capHandle newGpa).memcaps).find? id = _
+  unfold mapSelf_apply
+  rcases hd : s.getDom caller with _ | d
+  · simp only [hd]; rfl
+  · rcases hmh : d.lookupMemHandle capHandle with _ | mid
+    · simp only [hd, hmh]; rfl
+    · rcases hm : s.getMem mid with _ | c
+      · simp only [hd, hmh, hm]; rfl
+      · rcases hg : d.lookupMappedGpa capHandle with _ | oldGpa
+        · simp only [hd, hmh, hm, hg]; rfl
+        · simp only [hd, hmh, hm, hg, SpecState.updDomain]
+          rfl
+
 /-! ### deliverInterrupt -/
 
 /-- Per-element preservation: `applyMidsAndHandler` preserves `getDom did`
@@ -808,6 +843,7 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       (∀ d, s.getDom caller = some d →
        ∀ cid, d.lookupDomHandle toHandle = some cid →
        ∀ dc, s.getDomCap cid = some dc → did = dc.targetDom)
+  | .mapSelf caller _ _, did => did = caller
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -842,6 +878,7 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
       ∀ mid, d.lookupMemHandle commHandle = some mid →
       id = mid
   | .switchSuspended _ _ _ _ _ _, _ => False
+  | .mapSelf _ _ _, _ => False
 
 /-! ## Top-level locality theorems.
 
@@ -1048,6 +1085,10 @@ theorem step_locality_dom
     rw [← hhh] at hdc'
     rw [hdc] at hdc'; injection hdc' with hhhh
     rw [← hhhh]; exact h2
+  | mapSelf guard =>
+    rename_i caller capHandle newGpa
+    have h1 : did ≠ caller := fun e => h e
+    exact mapSelf_frame_dom _ _ _ _ _ h1
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -1131,5 +1172,6 @@ theorem step_locality_mem
     rw [hmid] at hmid2; injection hmid2 with k2; subst k2
     exact heq
   | switchSuspended guard => exact switchSuspended_frame_mem _ _ _ _ _ _ _ _
+  | mapSelf guard => exact mapSelf_frame_mem _ _ _ _ _
 
 end ThemisCapa

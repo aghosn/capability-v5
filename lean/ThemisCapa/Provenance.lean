@@ -180,6 +180,12 @@ private theorem switchSuspended_mem_isSome
     ((switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem c).isSome := by
   rw [switchSuspended_frame_mem]; exact h
 
+private theorem mapSelf_mem_isSome
+    (s : SpecState) (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+    (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((mapSelf_apply s caller capHandle newGpa).getMem c).isSome := by
+  rw [mapSelf_frame_mem]; exact h
+
 private theorem deliverInterrupt_mem_isSome
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
     (chain : List (DomId × VpId)) (c : MemCapId)
@@ -337,6 +343,11 @@ theorem provenance_removal
     exfalso
     have h := switchSuspended_mem_isSome s caller toHandle toVpId core calleeDom calleeVp c hPre
     rw [hPost] at h; cases h
+  | mapSelf guard =>
+    rename_i caller capHandle newGpa
+    exfalso
+    have h := mapSelf_mem_isSome s caller capHandle newGpa c hPre
+    rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
 
@@ -473,6 +484,12 @@ private theorem switchSuspended_mem_isNone
     (c : MemCapId) (h : s.getMem c = none) :
     (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getMem c = none := by
   rw [switchSuspended_frame_mem]; exact h
+
+private theorem mapSelf_mem_isNone
+    (s : SpecState) (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (mapSelf_apply s caller capHandle newGpa).getMem c = none := by
+  rw [mapSelf_frame_mem]; exact h
 
 private theorem deliverInterrupt_mem_isNone
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
@@ -696,6 +713,11 @@ theorem provenance_creation
     rename_i caller toHandle toVpId core calleeDom calleeVp
     exfalso
     have h := switchSuspended_mem_isNone s caller toHandle toVpId core calleeDom calleeVp c hPre
+    rw [hPost] at h; cases h
+  | mapSelf guard =>
+    rename_i caller capHandle newGpa
+    exfalso
+    have h := mapSelf_mem_isNone s caller capHandle newGpa c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -935,6 +957,15 @@ private theorem switchSuspended_owner_preserved
               = some capPost) :
     capPre.owner = capPost.owner := by
   rw [switchSuspended_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem mapSelf_owner_preserved
+    (s : SpecState) (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (mapSelf_apply s caller capHandle newGpa).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [mapSelf_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
 private theorem deliverInterrupt_owner_preserved
@@ -1228,5 +1259,10 @@ theorem provenance_transfer
     exact hOwnerChange
       (switchSuspended_owner_preserved s caller toHandle toVpId core calleeDom calleeVp
         c capPre capPost hPre hPost)
+  | mapSelf guard =>
+    rename_i caller capHandle newGpa
+    exfalso
+    exact hOwnerChange
+      (mapSelf_owner_preserved s caller capHandle newGpa c capPre capPost hPre hPost)
 
 end ThemisCapa

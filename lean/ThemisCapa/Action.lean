@@ -192,8 +192,18 @@ inductive Action where
   | switchSuspended (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId)
                     (core : CoreId)
                     (calleeDom : DomId) (calleeVp : VpId)
-  -- Future:
-  -- | mapSelf … (translation map mutation)
+  /-- `caller` re-maps the memcap referenced by `capHandle` from its
+      current GPA to `newGpa` in the caller's own `AddressMap`.
+      Mirrors `capa-engine/src/capability.rs::map_self`.
+
+      Apply (caller-only mutation):
+      - caller's `addressMap` has the entry at the cap's current GPA
+        removed (`removeWithin oldGpa cap.size`) and a new entry
+        `{gpa := newGpa, hpa := cap.hpa, size := cap.size,
+          rights := cap.rights}` inserted.
+      - caller's `mappedGpas` mapping for `capHandle` is updated to
+        `newGpa`. -/
+  | mapSelf (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
 deriving Repr
 
 end ThemisCapa

@@ -227,5 +227,6 @@ theorem step_view_preservation
       rw [← hpe]; exact guard.commCapOwned d hd mid hmid cp hcp
     exact hBcaller (hown.symm.trans hown_caller)
   | switchSuspended _ => exact id
+  | mapSelf _ => exact id
 
 end ThemisCapa

@@ -1088,6 +1088,69 @@ def registerComm_apply (s : SpecState) (caller : DomId)
                   commBinding := some
                     { targetDomainId := dc.targetDom, vpId := vpId } } })
 
+/-! ### `mapSelf` (translation map mutation, caller-only) -/
+
+/-- Preconditions for `mapSelf(caller, capHandle, newGpa)`.
+    Mirrors `capa-engine/src/capability.rs::map_self` (structural-only —
+    semantic overlap-with-remaining-segments check is captured by
+    `noOverlap` after the conceptual `removeWithin`). -/
+structure MapSelfGuard (s : SpecState) (caller : DomId)
+                       (capHandle : LocalHandle) (newGpa : Nat) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  hasPermission     : ∀ d, s.getDom caller = some d →
+                      d.policy.api.canMapSelf = true
+  capHandleResolves : ∀ d, s.getDom caller = some d →
+                      (d.lookupMemHandle capHandle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                      ∀ mid, d.lookupMemHandle capHandle = some mid →
+                      (s.getMem mid).isSome
+  capOwned          : ∀ d, s.getDom caller = some d →
+                      ∀ mid, d.lookupMemHandle capHandle = some mid →
+                      ∀ c, s.getMem mid = some c →
+                      c.owner = caller
+  notMetaOrComm     : ∀ d, s.getDom caller = some d →
+                      ∀ mid, d.lookupMemHandle capHandle = some mid →
+                      ∀ c, s.getMem mid = some c →
+                      c.region.attributes.meta = false ∧
+                      c.region.attributes.comm = false
+  hasOldGpa         : ∀ d, s.getDom caller = some d →
+                      (d.lookupMappedGpa capHandle).isSome
+  /-- After conceptually removing the entry at `oldGpa`, no remaining
+      address-map entry overlaps `[newGpa, newGpa + cap.size)`. -/
+  noOverlap         : ∀ d, s.getDom caller = some d →
+                      ∀ mid, d.lookupMemHandle capHandle = some mid →
+                      ∀ c, s.getMem mid = some c →
+                      ∀ oldGpa, d.lookupMappedGpa capHandle = some oldGpa →
+                      ¬ (d.addressMap.removeWithin oldGpa c.region.access.size).overlaps
+                          newGpa c.region.access.size
+
+/-- Pure state update for `mapSelf`. Caller-only mutation: caller's
+    `addressMap` is rewritten and its `mappedGpas[capHandle]` updated. -/
+def mapSelf_apply (s : SpecState) (caller : DomId)
+                  (capHandle : LocalHandle) (newGpa : Nat) : SpecState :=
+  match s.getDom caller with
+  | none => s
+  | some d =>
+    match d.lookupMemHandle capHandle with
+    | none => s
+    | some mid =>
+      match s.getMem mid with
+      | none => s
+      | some c =>
+        match d.lookupMappedGpa capHandle with
+        | none => s
+        | some oldGpa =>
+          let newEntry : Translation.MapEntry :=
+            { gpa := newGpa,
+              hpa := c.region.access.start,
+              size := c.region.access.size,
+              rights := c.region.access.rights }
+          s.updDomain caller (fun d' =>
+            { d' with
+                addressMap :=
+                  (d'.addressMap.removeWithin oldGpa c.region.access.size).insert newEntry
+              }.updMappedGpa capHandle newGpa)
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -1174,5 +1237,10 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : SwitchSuspendedGuard s caller toHandle toVpId core calleeDom calleeVp) :
     step s (.switchSuspended caller toHandle toVpId core calleeDom calleeVp)
          (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp)
+  | mapSelf {s : SpecState} {caller : DomId} {capHandle : LocalHandle}
+            {newGpa : Nat}
+    (guard : MapSelfGuard s caller capHandle newGpa) :
+    step s (.mapSelf caller capHandle newGpa)
+         (mapSelf_apply s caller capHandle newGpa)
 
 end ThemisCapa

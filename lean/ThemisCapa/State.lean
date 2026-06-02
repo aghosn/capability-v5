@@ -117,6 +117,19 @@ def isUnsealed (d : Domain) : Prop := d.status = .unsealed
 def lookupMemHandle (d : Domain) (h : LocalHandle) : Option MemCapId :=
   (d.memHandles.find? (fun p => p.1 = h)).map Prod.snd
 
+/-- Resolve a domain-local memcap handle to its currently-mapped GPA. -/
+def lookupMappedGpa (d : Domain) (h : LocalHandle) : Option Nat :=
+  (d.mappedGpas.find? (fun p => p.1 = h)).map Prod.snd
+
+/-- Functionally update (or insert) the GPA bound to handle `h`. -/
+def updMappedGpa (d : Domain) (h : LocalHandle) (gpa : Nat) : Domain :=
+  let entries := d.mappedGpas.map (fun p =>
+    if p.1 = h then (p.1, gpa) else p)
+  if d.mappedGpas.any (fun p => p.1 = h) then
+    { d with mappedGpas := entries }
+  else
+    { d with mappedGpas := (h, gpa) :: d.mappedGpas }
+
 /-- Resolve a domain-local domain-capability handle to the global arena id. -/
 def lookupDomHandle (d : Domain) (h : LocalHandle) : Option DomCapId :=
   (d.domHandles.find? (fun p => p.1 = h)).map Prod.snd
