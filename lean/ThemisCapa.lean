@@ -20,3 +20,4 @@ import ThemisCapa.Provenance
 import ThemisCapa.NonInterference
 import ThemisCapa.DomainTree
 import ThemisCapa.ParentStability
+import ThemisCapa.RevokeCascade

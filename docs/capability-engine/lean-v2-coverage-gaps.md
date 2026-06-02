@@ -26,8 +26,9 @@ The classification:
 ## 🔴 Critical gaps (block O2 / O3 / O5 as currently framed)
 
 ### G1. VITAL cascade on memcap revocation
+- **Status (2026-06):** ✅ **Leaf-only path landed** in `Step.lean::revoke_apply` + `RevokeCascade.lean` (T1, T2, T4 proved; T3 sorry'd, see file). When `attributes.vital = true`, the owner domain's `status` flips to `.revoked`. **Still not modeled:** transitive cascade into the owner's children domains / root memcaps / channels — that's tracked by G3 below.
 - **Rust:** `capability.rs::revoke_subtree` lines 388–587. When a memcap with `attributes.vital = true` is revoked, the **owning domain is also revoked** (via `revoke_domain_subtree`). This cascades transitively: the dead domain's children domains are revoked, its memcaps are unmapped from parents, its channels are cancelled, COMM bindings cleaned up.
-- **Lean:** `Step.lean::revoke_apply` only removes the memcap and strips it from the owner's `memHandles`. The `vital` attribute is *defined* in `Basic.lean` but never *consulted*.
+- **Lean (pre-fix):** `Step.lean::revoke_apply` only removes the memcap and strips it from the owner's `memHandles`. The `vital` attribute was *defined* in `Basic.lean` but never *consulted*.
 - **Impact:** A sibling holding an ancestor memcap can today (in the spec) revoke a vital alias held by another sibling — the alias goes away, but the owning domain *does not die*, contrary to the engine's actual behavior. Any "subtree isolation" theorem proved against the current spec would be **vacuously false against the real engine** when the cascade fires.
 - **Fix size:** Medium. Need to add a recursive update step inside `revoke_apply` that mirrors `revoke_domain_subtree`. Need to extend the action's footprint significantly (touches the whole transitive child-domain tree).
 
@@ -44,8 +45,9 @@ The classification:
 - **Fix size:** Medium-large. Co-recursive with G1 (the cascade).
 
 ### G4. Domain "revoked" status
+- **Status (2026-06):** ✅ **Landed.** `DomainStatus.revoked` is now reachable via the G1 cascade; `Domain.isRevoked` / `isLive` predicates are available; 10 guards (`Revoke`, `Send`, `Accept`, `Reject`, `SealedSend`, `AcceptChannel`, `RejectChannel`, `SwitchReturn`, `SwitchSuspended`, `DeliverInterrupt`) have been hardened with `*Live` clauses. Other guards (`Carve`, `Alias`, `Seal`, `SendChannel`, `Switch`, `AddVp`, `RegisterComm`, `RevokeDomain`) already exclude revoked via existing `isSealed` / `isUnsealed` clauses.
 - **Rust:** `Domain::revoke` flips a state bit; the engine then treats the domain as a tombstone (skips ChangeRights into it, etc.). Multiple revocation paths converge through this bit.
-- **Lean:** No `revoked` state. Domains are either present in the arena or removed entirely. Cascades that would touch a "marked-but-not-yet-removed" domain are not representable.
+- **Lean (pre-fix):** No `revoked` state. Domains are either present in the arena or removed entirely. Cascades that would touch a "marked-but-not-yet-removed" domain are not representable.
 - **Impact:** Subtle but matters for any "ordering of effects within a single hypercall" reasoning. Less critical than G1–G3 but tied to them.
 - **Fix size:** Small (add a status variant) but ripples into every guard.
 

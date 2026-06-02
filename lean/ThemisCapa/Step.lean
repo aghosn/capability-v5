@@ -155,6 +155,11 @@ structure RevokeGuard (s : SpecState) (caller : DomId) (target : MemCapId) : Pro
   /-- META regions cannot be revoked. -/
   notMeta           :
     ∀ t, s.getMem target = some t → t.region.attributes.meta = false
+  /-- Owner of `target` must be live (not yet revoked). Prevents
+      double-cascade and re-entering the cascade on a tombstone. -/
+  targetOwnerLive   :
+    ∀ t, s.getMem target = some t →
+      ∀ d, s.getDom t.owner = some d → d.isLive
 
 /-- Pure state update for a successful leaf `revoke`.
 
@@ -205,6 +210,9 @@ structure SendGuard (s : SpecState) (caller : DomId) (receiver : DomId)
   /-- META regions cannot be sent (matches Rust `send_at` check). -/
   notMeta           :
     ∀ c, s.getMem cap = some c → c.region.attributes.meta = false
+  /-- Receiver must be live (not yet revoked). -/
+  receiverLive      :
+    ∀ d, s.getDom receiver = some d → d.isLive
 
 /-- Pure state update for a successful unsealed `send`.
 
@@ -334,6 +342,10 @@ structure AcceptGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
   notSelf           : ∀ d pe, s.getDom receiver = some d →
                       d.lookupPending pendingId = some pe →
                       pe.senderDomainId ≠ receiver
+  /-- Sender must be live (not yet revoked). -/
+  senderLive        : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isLive
 
 /-- Pure state update for `accept`. No-op when receiver / pending lookup
     fails (well-formedness then preserved trivially). -/
@@ -357,6 +369,12 @@ structure RejectGuard (s : SpecState) (receiver : DomId) (pendingId : PendingId)
   receiverExists    : (s.getDom receiver).isSome
   pendingFound      : ∀ d, s.getDom receiver = some d →
                       (d.lookupPending pendingId).isSome
+  /-- Receiver must be live (not yet revoked). -/
+  receiverLive      : ∀ d, s.getDom receiver = some d → d.isLive
+  /-- Sender must be live (not yet revoked). -/
+  senderLive        : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPending pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isLive
 
 /-- Pure state update for `reject`: remove pending from receiver and
     unfreeze sender's handle. Both affected fields are outside
@@ -414,6 +432,8 @@ structure SealedSendGuard (s : SpecState) (caller : DomId) (receiver : DomId)
   /-- The handle is not already frozen (mirrors the engine's
       `is_memory_handle_frozen` check). -/
   notFrozen         : ∀ d, s.getDom caller = some d → handle ∉ d.frozenHandles
+  /-- Receiver must be live (not yet revoked). -/
+  receiverLive      : ∀ d, s.getDom receiver = some d → d.isLive
 
 /-- Pure state update for `sealedSend`.
 
@@ -616,6 +636,12 @@ structure AcceptChannelGuard (s : SpecState) (receiver : DomId)
   notSelf           : ∀ d pe, s.getDom receiver = some d →
                       d.lookupPendingDom pendingId = some pe →
                       pe.senderDomainId ≠ receiver
+  /-- Receiver must be live. -/
+  receiverLive      : ∀ d, s.getDom receiver = some d → d.isLive
+  /-- Sender must be live. -/
+  senderLive        : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPendingDom pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isLive
 
 /-- Pure state update for `acceptChannel`:
 
@@ -642,6 +668,12 @@ structure RejectChannelGuard (s : SpecState) (receiver : DomId)
   receiverExists    : (s.getDom receiver).isSome
   pendingFound      : ∀ d, s.getDom receiver = some d →
                       (d.lookupPendingDom pendingId).isSome
+  /-- Receiver must be live. -/
+  receiverLive      : ∀ d, s.getDom receiver = some d → d.isLive
+  /-- Sender must be live. -/
+  senderLive        : ∀ d pe, s.getDom receiver = some d →
+                      d.lookupPendingDom pendingId = some pe →
+                      ∀ sd, s.getDom pe.senderDomainId = some sd → sd.isLive
 
 /-- Pure state update for `rejectChannel`: remove pending from receiver
     and unfreeze sender's handle. -/
@@ -680,6 +712,10 @@ structure SwitchReturnGuard (s : SpecState) (caller : DomId) (core : CoreId) :
   notSelf           : ∀ d, s.getDom caller = some d →
                       ∀ p, d.vpAndPrevCallerOnCore core = some p →
                       p.2.domainId ≠ caller
+  /-- Previous caller domain must be live. -/
+  prevDomLive       : ∀ d, s.getDom caller = some d →
+                      ∀ p, d.vpAndPrevCallerOnCore core = some p →
+                      ∀ pd, s.getDom p.2.domainId = some pd → pd.isLive
 
 /-- Pure state update for `switchReturn`:
     1. Caller's running VP on `core` → `.available exitReason`.
@@ -835,6 +871,8 @@ structure SwitchSuspendedGuard (s : SpecState) (caller : DomId)
                       ∀ cid, d.lookupDomHandle toHandle = some cid →
                       ∀ dc, s.getDomCap cid = some dc →
                       calleeDom ≠ dc.targetDom
+  /-- Callee domain must be live. -/
+  calleeLive        : ∀ cd, s.getDom calleeDom = some cd → cd.isLive
 
 /-- Pure state update for Suspended-resume `switch`:
     1. Target VP `toVpId` (`.suspended _ _ _`) ← `.running core (some {caller, callerVpId})`.
@@ -896,6 +934,9 @@ structure DeliverInterruptGuard
   chainLastHandler   : ∃ vpId, chain.getLast? = some (handler, vpId)
   interruptedExists  : (s.getDom interrupted).isSome
   handlerExists      : (s.getDom handler).isSome
+  /-- Both endpoints must be live (revoked tombstones cannot serve interrupts). -/
+  interruptedLive    : ∀ d, s.getDom interrupted = some d → d.isLive
+  handlerLive        : ∀ d, s.getDom handler = some d → d.isLive
 
 /-- Pure state update for `deliverInterrupt`. Applies leaf → Interrupted,
     then walks the chain tail with `applyMidsAndHandler` (intermediates

@@ -1010,7 +1010,7 @@ theorem revoke_apply_getMem
       simp [hidT, hidP]
       rfl
 
-private theorem revoke_apply_getDom
+theorem revoke_apply_getDom
     (s : SpecState) (caller : DomId) (target : MemCapId)
     (t : MemCap) (ht : s.getMem target = some t)
     (pid : MemCapId) (htp : t.parent = some pid)
