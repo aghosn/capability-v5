@@ -19,3 +19,4 @@ import ThemisCapa.Locality
 import ThemisCapa.Provenance
 import ThemisCapa.NonInterference
 import ThemisCapa.DomainTree
+import ThemisCapa.ParentStability
