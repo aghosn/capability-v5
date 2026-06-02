@@ -90,6 +90,32 @@ pub(super) fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::p
     vcpu.next_rip();
 }
 
+/// Map an x86 GPR register index (as encoded in ModRM.reg + REX.R) to its
+/// 64-bit value in the active VCPU. Returns `None` for `idx == 4` (RSP, not
+/// a valid APIC write source under our policy) and for `idx > 15`.
+fn reg_from_index(vcpu: &ActiveVcpu, idx: u8) -> Option<u64> {
+    let reg = match idx {
+        0 => Reg::Rax,
+        1 => Reg::Rcx,
+        2 => Reg::Rdx,
+        3 => Reg::Rbx,
+        4 => return None, // RSP — not a valid APIC write source
+        5 => Reg::Rbp,
+        6 => Reg::Rsi,
+        7 => Reg::Rdi,
+        8 => Reg::R8,
+        9 => Reg::R9,
+        10 => Reg::R10,
+        11 => Reg::R11,
+        12 => Reg::R12,
+        13 => Reg::R13,
+        14 => Reg::R14,
+        15 => Reg::R15,
+        _ => return None,
+    };
+    Some(vcpu.reg(reg))
+}
+
 /// Decode the faulting MOV instruction at guest RIP to extract the 32-bit
 /// value being written for an APIC-access write exit.
 ///
@@ -144,26 +170,7 @@ pub(super) fn decode_apic_write_value(
             // MOV r/m32, r32: source register in ModRM reg field (bits 5:3)
             let modrm = buf[i];
             let reg_idx = ((modrm >> 3) & 0x7) | (if rex & 0x4 != 0 { 0x8 } else { 0 });
-            let val = match reg_idx {
-                0 => vcpu.reg(Reg::Rax),
-                1 => vcpu.reg(Reg::Rcx),
-                2 => vcpu.reg(Reg::Rdx),
-                3 => vcpu.reg(Reg::Rbx),
-                4 => return None, // RSP — not a valid APIC write source
-                5 => vcpu.reg(Reg::Rbp),
-                6 => vcpu.reg(Reg::Rsi),
-                7 => vcpu.reg(Reg::Rdi),
-                8 => vcpu.reg(Reg::R8),
-                9 => vcpu.reg(Reg::R9),
-                10 => vcpu.reg(Reg::R10),
-                11 => vcpu.reg(Reg::R11),
-                12 => vcpu.reg(Reg::R12),
-                13 => vcpu.reg(Reg::R13),
-                14 => vcpu.reg(Reg::R14),
-                15 => vcpu.reg(Reg::R15),
-                _ => return None,
-            };
-            Some(val as u32)
+            reg_from_index(vcpu, reg_idx).map(|v| v as u32)
         }
         0xC7 => {
             // MOV r/m32, imm32: immediate follows ModRM (+SIB+disp)
