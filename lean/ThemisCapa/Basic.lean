@@ -170,7 +170,7 @@ deriving DecidableEq, Repr
 inductive DomainStatus where
   | unsealed
   | sealed
-  | revoked -- TODO: unclear whether needed for the spec
+  | revoked
 deriving DecidableEq, Repr
 
 -- ════════════════════════════════════════════════════════════════════

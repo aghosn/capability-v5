@@ -86,11 +86,18 @@ theorem revoke_frame_dom (s : SpecState) (caller : DomId) (target : MemCapId)
     (did : DomId) (hdid : did ≠ t.owner) :
     (revoke_apply s caller target).getDom did = s.getDom did := by
   show ((revoke_apply s caller target).domains).find? did = _
-  simp only [revoke_apply, ht, SpecState.updMem, SpecState.updDomain]
+  simp only [revoke_apply, ht]
   rcases htp : t.parent with _ | pid
   · rfl
   · simp only
-    exact Arena.find?_update_other _ t.owner did _ hdid
+    by_cases hv : t.region.attributes.vital
+    · simp only [if_pos hv, SpecState.updMem, SpecState.updDomain]
+      rw [Arena.find?_update_other _ t.owner did _ hdid,
+          Arena.find?_update_other _ t.owner did _ hdid]
+      rfl
+    · simp only [if_neg hv, SpecState.updMem, SpecState.updDomain]
+      rw [Arena.find?_update_other _ t.owner did _ hdid]
+      rfl
 
 theorem revoke_frame_mem (s : SpecState) (caller : DomId) (target : MemCapId)
     (t : MemCap) (ht : s.getMem target = some t)
@@ -98,10 +105,16 @@ theorem revoke_frame_mem (s : SpecState) (caller : DomId) (target : MemCapId)
     (id : MemCapId) (h1 : id ≠ target) (h2 : id ≠ pid) :
     (revoke_apply s caller target).getMem id = s.getMem id := by
   show ((revoke_apply s caller target).memcaps).find? id = _
-  simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
-  rw [Arena.find?_update_other _ pid id _ h2,
-      Arena.find?_remove_other _ target id h1]
-  rfl
+  simp only [revoke_apply, ht, htp]
+  by_cases hv : t.region.attributes.vital
+  · simp only [if_pos hv, SpecState.updMem, SpecState.updDomain]
+    rw [Arena.find?_update_other _ pid id _ h2,
+        Arena.find?_remove_other _ target id h1]
+    rfl
+  · simp only [if_neg hv, SpecState.updMem, SpecState.updDomain]
+    rw [Arena.find?_update_other _ pid id _ h2,
+        Arena.find?_remove_other _ target id h1]
+    rfl
 
 /-! ### Send -/
 

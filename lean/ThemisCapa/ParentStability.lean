@@ -261,12 +261,22 @@ theorem revoke_apply_preservesParents (caller : DomId) (target : MemCapId) :
     · have hp' : (revoke_apply s caller target).domains.find? did = some d' := hpost
       simp only [revoke_apply, ht, htp, SpecState.updMem,
                  SpecState.updDomain] at hp'
-      by_cases hdid : did = t.owner
-      · subst hdid
-        rw [Arena.find?_update_eq_map] at hp'
-        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
-      · rw [Arena.find?_update_other _ t.owner did _ hdid] at hp'
-        rw [hpre_d] at hp'; injection hp' with eq; rw [eq]
+      by_cases hv : t.region.attributes.vital
+      · simp only [if_pos hv] at hp'
+        by_cases hdid : did = t.owner
+        · subst hdid
+          rw [Arena.find?_update_eq_map, Arena.find?_update_eq_map] at hp'
+          rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+        · rw [Arena.find?_update_other _ t.owner did _ hdid,
+              Arena.find?_update_other _ t.owner did _ hdid] at hp'
+          rw [hpre_d] at hp'; injection hp' with eq; rw [eq]
+      · simp only [if_neg hv] at hp'
+        by_cases hdid : did = t.owner
+        · subst hdid
+          rw [Arena.find?_update_eq_map] at hp'
+          rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+        · rw [Arena.find?_update_other _ t.owner did _ hdid] at hp'
+          rw [hpre_d] at hp'; injection hp' with eq; rw [eq]
 
 /-- `seal_apply` preserves parents. -/
 theorem seal_apply_preservesParents (caller : DomId) (cap : DomCapId) :

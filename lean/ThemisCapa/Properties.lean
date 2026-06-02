@@ -983,10 +983,16 @@ theorem revoke_apply_getMem
       else if id = pid then some updP
       else s.getMem id := by
   show ((revoke_apply s caller target).memcaps).find? id = _
-  simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
   let f : MemCap → MemCap := fun q =>
     { q with childrenIds := q.childrenIds.filter (· ≠ target) }
-  show ((s.memcaps.remove target).update pid f).find? id = _
+  -- Reduce `(revoke_apply ...).memcaps` to a fixed expression independent of `vital`.
+  have hredm : (revoke_apply s caller target).memcaps =
+      (s.memcaps.remove target).update pid f := by
+    simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    by_cases hv : t.region.attributes.vital
+    · simp only [if_pos hv]; rfl
+    · simp only [if_neg hv]; rfl
+  rw [hredm]
   by_cases hidT : id = target
   · subst hidT
     rw [Arena.find?_update_other _ pid id f (Ne.symm hpne)]
@@ -1010,7 +1016,9 @@ private theorem revoke_apply_getDom
     (pid : MemCapId) (htp : t.parent = some pid)
     (did : DomId) :
     let fupd : Domain → Domain := fun d =>
-      { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ target) }
+      { d with
+        memHandles := d.memHandles.filter (fun h => h.2 ≠ target),
+        status := if t.region.attributes.vital then .revoked else d.status }
     (revoke_apply s caller target).getDom did =
       if did = t.owner then (s.getDom t.owner).map fupd
       else s.getDom did := by
@@ -1018,11 +1026,26 @@ private theorem revoke_apply_getDom
   simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
   by_cases hdid : did = t.owner
   · subst hdid
-    rw [Arena.find?_update_eq_map]
-    simp [SpecState.getDom]
-  · rw [Arena.find?_update_other _ t.owner did _ hdid]
-    simp [hdid]
-    rfl
+    by_cases hv : t.region.attributes.vital
+    · simp only [if_pos hv]
+      rw [Arena.find?_update_eq_map, Arena.find?_update_eq_map]
+      simp only [SpecState.getDom, Option.map_map]
+      congr 1
+    · simp only [if_neg hv]
+      rw [Arena.find?_update_eq_map]
+      simp only [SpecState.getDom]
+      rcases hod : s.domains.find? t.owner with _ | dpre
+      · rfl
+      · simp only [Option.map_some]
+        congr 1
+  · by_cases hv : t.region.attributes.vital
+    · simp only [if_pos hv, SpecState.updDomain]
+      rw [Arena.find?_update_other _ t.owner did _ hdid,
+          Arena.find?_update_other _ t.owner did _ hdid]
+      simp [hdid]; rfl
+    · simp only [if_neg hv, SpecState.updDomain]
+      rw [Arena.find?_update_other _ t.owner did _ hdid]
+      simp [hdid]; rfl
 
 /-- `revoke_preserves_wellformed` — full proof using ParentChildAgreement.
 
@@ -1066,22 +1089,37 @@ theorem revoke_preserves_wellformed
     have := hwf.parentChild id c hc target hcpar t ht
     rw [guard.targetIsLeaf t ht] at this; cases this
   -- Now show the post-state.
+  -- Reduce the three arena fields of `revoke_apply` to forms that
+  -- don't mention the vital case-split. Defined before `refine` so
+  -- they are in scope of all sub-goals.
+  have hMemcapsEq : (revoke_apply s caller target).memcaps =
+      (s.memcaps.remove target).update pid
+        (fun p => { p with childrenIds := p.childrenIds.filter (· ≠ target) }) := by
+    simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    by_cases hv : t.region.attributes.vital <;> simp [hv]
+  have hDomcapsEq : (revoke_apply s caller target).domcaps = s.domcaps := by
+    simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    by_cases hv : t.region.attributes.vital <;> simp [hv]
+  have hDomsUnique : (revoke_apply s caller target).domains.UniqueKeys := by
+    simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    by_cases hv : t.region.attributes.vital
+    · simp only [if_pos hv]
+      exact Arena.update_unique_keys _ _ _
+              (Arena.update_unique_keys _ _ _ hwf.unique.domains)
+    · simp only [if_neg hv]
+      exact Arena.update_unique_keys _ _ _ hwf.unique.domains
   refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
-      show ((revoke_apply s caller target).memcaps).UniqueKeys
-      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      rw [show ((revoke_apply s caller target).memcaps) = _ from hMemcapsEq]
       exact Arena.update_unique_keys _ pid _
         (Arena.remove_unique_keys _ target hwf.unique.memcaps)
     case dc =>
-      show ((revoke_apply s caller target).domcaps).UniqueKeys
-      simp [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      rw [show ((revoke_apply s caller target).domcaps) = _ from hDomcapsEq]
       exact hwf.unique.domcaps
     case ds =>
-      show ((revoke_apply s caller target).domains).UniqueKeys
-      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
-      exact Arena.update_unique_keys _ _ _ hwf.unique.domains
+      exact hDomsUnique
   case refs =>
     refine ⟨?pia, ?cia, ?hia⟩
     case pia =>
@@ -1268,12 +1306,12 @@ theorem revoke_preserves_wellformed
     have hKeys : id ∈ s.memcaps.keys := by
       have heq : ((revoke_apply s caller target).memcaps).keys
                   = (s.memcaps.remove target).keys := by
-        simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain,
-                   Arena.keys_update]
+        rw [hMemcapsEq]; exact Arena.keys_update _ _ _
       rw [heq] at hid
       exact ((Arena.mem_keys_remove_iff _ _ _).mp hid).2
     have : ((revoke_apply s caller target).nextMemCapId) = s.nextMemCapId := by
-      simp [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      by_cases hv : t.region.attributes.vital <;> simp [hv]
     rw [this]
     exact hwf.freshMemCounter id hKeys
   case ho =>
@@ -1378,12 +1416,19 @@ theorem revoke_preserves_wellformed
       · rw [if_neg hpidPid, hpidPre] at hpp
         cases hpp; exact hpreM
   case fDom =>
-    apply freshDomCounter_of_keys_eq hwf <;>
-      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain,
-                 Arena.keys_update]
+    apply freshDomCounter_of_keys_eq hwf
+    · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      by_cases hv : t.region.attributes.vital
+      · simp only [if_pos hv, Arena.keys_update]
+      · simp only [if_neg hv, Arena.keys_update]
+    · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      by_cases hv : t.region.attributes.vital <;> simp [hv]
   case fDomCap =>
-    apply freshDomCapCounter_of_keys_eq hwf <;>
-      simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+    apply freshDomCapCounter_of_keys_eq hwf
+    · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      by_cases hv : t.region.attributes.vital <;> simp [hv]
+    · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+      by_cases hv : t.region.attributes.vital <;> simp [hv]
 
 /-! ## Send (unsealed path)
 

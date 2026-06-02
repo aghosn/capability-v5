@@ -161,9 +161,17 @@ structure RevokeGuard (s : SpecState) (caller : DomId) (target : MemCapId) : Pro
     1. Remove `target` from the memcap arena.
     2. Strip `target` from its parent's `childrenIds` list.
     3. Strip any handle to `target` from the owner domain's `memHandles`.
+    4. **VITAL cascade (G1, leaf-only)**: if `target` carried
+       `attributes.vital = true`, mark the owning domain as
+       `revoked`. The full cascade (revoking the owner's children
+       domains, root memcaps, channels — G3) is not yet modeled;
+       the resulting state is a "tombstone with debris."
 
     The `HandleOwner` invariant guarantees that *only* `t.owner` holds a
-    handle to `target`, so step 3 is local to a single domain. -/
+    handle to `target`, so step 3 is local to a single domain.
+    Note: when `t.owner = caller`, step 3 and step 4 update the same
+    domain in sequence; this matches the engine, where a domain that
+    revokes its own vital memcap dies. -/
 def revoke_apply (s : SpecState) (caller : DomId) (target : MemCapId) : SpecState :=
   match s.getMem target with
   | none => s
@@ -176,7 +184,10 @@ def revoke_apply (s : SpecState) (caller : DomId) (target : MemCapId) : SpecStat
         { p with childrenIds := p.childrenIds.filter (· ≠ target) })
       let s₃ := s₂.updDomain t.owner (fun d =>
         { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ target) })
-      s₃
+      if t.region.attributes.vital then
+        s₃.updDomain t.owner (fun d => { d with status := .revoked })
+      else
+        s₃
 
 /-- Preconditions for `send(caller, receiver, cap)`. Slice scope: models
     only the **unsealed** path (immediate ownership transfer). -/

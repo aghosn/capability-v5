@@ -112,6 +112,19 @@ namespace Domain
 
 def isSealed   (d : Domain) : Prop := d.status = .sealed
 def isUnsealed (d : Domain) : Prop := d.status = .unsealed
+def isRevoked  (d : Domain) : Prop := d.status = .revoked
+/-- A domain is "live" if it has not been revoked. Revoked domains stay
+    in the arena as tombstones (see `docs/capability-engine/lean-v2-coverage-gaps.md`
+    G4) but are not legitimate participants in actions. -/
+def isLive     (d : Domain) : Prop := d.status ≠ .revoked
+
+theorem isSealed_isLive (d : Domain) (h : d.isSealed) : d.isLive := by
+  unfold isLive isSealed at *
+  intro hr; rw [hr] at h; cases h
+
+theorem isUnsealed_isLive (d : Domain) (h : d.isUnsealed) : d.isLive := by
+  unfold isLive isUnsealed at *
+  intro hr; rw [hr] at h; cases h
 
 /-- Resolve a domain-local memory-capability handle to the global arena id. -/
 def lookupMemHandle (d : Domain) (h : LocalHandle) : Option MemCapId :=

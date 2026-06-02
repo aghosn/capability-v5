@@ -81,10 +81,17 @@ private theorem revoke_mem_isSome_of_ne
   · rcases htp : t.parent with _ | pid
     · simp only [revoke_apply, ht, htp]; exact h
     · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
-      apply Arena.find?_update_isSome
-      show ((s.memcaps.remove target).find? c).isSome
-      rw [Arena.find?_remove_other _ target c hne]
-      exact h
+      by_cases hv : t.region.attributes.vital
+      · simp only [if_pos hv]
+        apply Arena.find?_update_isSome
+        show ((s.memcaps.remove target).find? c).isSome
+        rw [Arena.find?_remove_other _ target c hne]
+        exact h
+      · simp only [if_neg hv]
+        apply Arena.find?_update_isSome
+        show ((s.memcaps.remove target).find? c).isSome
+        rw [Arena.find?_remove_other _ target c hne]
+        exact h
 
 private theorem send_mem_isSome
     (s : SpecState) (caller receiver : DomId) (cap : MemCapId) (c : MemCapId)
@@ -388,8 +395,13 @@ private theorem revoke_mem_isNone
   · rcases htp : t.parent with _ | pid
     · simp only [revoke_apply, ht, htp]; exact h
     · simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
-      apply Arena.find?_update_of_none
-      exact Arena.find?_remove_of_none _ _ _ h
+      by_cases hv : t.region.attributes.vital
+      · simp only [if_pos hv]
+        apply Arena.find?_update_of_none
+        exact Arena.find?_remove_of_none _ _ _ h
+      · simp only [if_neg hv]
+        apply Arena.find?_update_of_none
+        exact Arena.find?_remove_of_none _ _ _ h
 
 private theorem send_mem_isNone
     (s : SpecState) (caller receiver : DomId) (cap : MemCapId) (c : MemCapId)
@@ -809,6 +821,7 @@ private theorem revoke_owner_preserved
                   (fun p => { p with
                     childrenIds := p.childrenIds.filter (· ≠ target) })).find? c := by
         simp only [revoke_apply, ht, htp, SpecState.updMem, SpecState.updDomain]
+        by_cases hv : t.region.attributes.vital <;> simp [hv]
       have hcne : c ≠ target := by
         intro he
         subst he
