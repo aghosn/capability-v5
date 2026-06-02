@@ -71,7 +71,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use spin::{Mutex, RwLock};
 
@@ -82,9 +81,8 @@ use capability_engine::{
 
 use crate::arch::ArchPlatformState;
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86_64::layout::{
-    APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE, MMIO_PAGE_SIZE,
-};
+use crate::arch::x86_64::layout::{LAPIC_MMIO_BASE, MMIO_PAGE_SIZE};
+use crate::arch_traits::ArchPlatform;
 use crate::serial_println;
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::InactiveVcpu;
@@ -173,11 +171,12 @@ pub struct ThemisPlatform {
     domains: DomainTable,
     // Tier 3: global routing
     routing: RwLock<RoutingMaps>,
-    // LAPIC IDs: written once at boot, immutable after — no lock needed.
-    lapic_ids: UnsafeCell<Vec<u32>>,
     // Tree root anchor — keeps dom0's capability tree alive.
     dom0_cap: Mutex<Option<CapabilityRef<Domain>>>,
-    /// Architecture-specific platform state (VMXON, DRHD on x86; GIC on ARM).
+    /// Architecture-specific platform state (VMXON, DRHD, LAPIC IDs on x86;
+    /// GIC, MPIDRs on ARM). Cross-arch operations on this state go through
+    /// the [`ArchPlatform`] trait; arch-specific accessors are inherent
+    /// methods on the concrete `ArchPlatformState`.
     pub arch: ArchPlatformState,
     /// Engine-level switch manager — owns per-core `CoreContext` for
     /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
@@ -185,9 +184,8 @@ pub struct ThemisPlatform {
     switch_mgr: SwitchManager,
 }
 
-// SAFETY: `lapic_ids` uses `UnsafeCell` but is only written once during
-// single-threaded boot (bootstrap_set_lapic_ids) and read-only after.
-// All other fields are already Sync (atomics, spin locks, etc.).
+// SAFETY: All fields are Sync (atomics, spin locks, ArchPlatformState which
+// owns its own UnsafeCell-protected boot-time data).
 unsafe impl Sync for ThemisPlatform {}
 
 impl ThemisPlatform {
@@ -219,7 +217,6 @@ impl ThemisPlatform {
             cores,
             domains: DomainTable::new(),
             routing: RwLock::new(RoutingMaps::new()),
-            lapic_ids: UnsafeCell::new(Vec::new()),
             dom0_cap: Mutex::new(None),
             arch: ArchPlatformState::new(),
             switch_mgr: SwitchManager::new(num_cores),
@@ -259,19 +256,14 @@ impl ThemisPlatform {
 
     #[cfg(target_arch = "x86_64")]
     pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
-        unsafe {
-            *self.lapic_ids.get() = ids;
-        }
+        self.arch.set_lapic_ids(ids);
     }
 
     /// Physical LAPIC ID of the BSP (core 0).
     /// Used as the remapped-IRTE destination for Report/NotReport vectors.
     #[cfg(target_arch = "x86_64")]
     pub fn bsp_lapic_id(&self) -> u32 {
-        unsafe { &*self.lapic_ids.get() }
-            .first()
-            .copied()
-            .unwrap_or(0)
+        self.arch.bsp_lapic_id()
     }
 
     /// Return the `Level` to use for IOMMU second-level page tables.
@@ -766,37 +758,10 @@ impl Platform for ThemisPlatform {
         // Set the flag so the target core (if polling) can respond.
         self.ipi_pending[core_id as usize].store(true, Ordering::Release);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Send INIT assert: delivery mode 0x5, level assert (bit 14), edge.
-            // INIT always causes VMEXIT(EXIT_REASON_INIT_SIGNAL = 3) from
-            // non-root mode, regardless of pin-based controls.
-            //
-            // Use xAPIC MMIO (0xFEE0_0000) because the capavisor never enables
-            // x2APIC mode and dom0 could regress it.  When we properly
-            // virtualise dom0's APIC access, we can switch to x2APIC MSRs.
-            let lapic_id = unsafe {
-                let ids = &*self.lapic_ids.get();
-                *ids.get(core_id as usize)
-                    .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
-            };
-            let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
-            let apic_base = hhdm + LAPIC_MMIO_BASE;
-            unsafe {
-                // ICR high: destination APIC ID in bits 24-31
-                let icr_hi = (apic_base + APIC_REG_ICR_HIGH) as *mut u32;
-                core::ptr::write_volatile(icr_hi, lapic_id << 24);
-                // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14)
-                let icr_lo = (apic_base + APIC_REG_ICR_LOW) as *mut u32;
-                core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
-            }
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let _ = core_id;
-            unimplemented!("send_ipi: arch backend not yet implemented")
-        }
+        // Delegate the actual cross-core wake to the arch backend
+        // (LAPIC ICR INIT on x86, GICv3 SGI on ARM).
+        self.arch
+            .send_ipi(core_id, self.hhdm_offset.load(Ordering::Relaxed));
     }
 
     fn sync_barrier(&self, id: u8, participants: usize) {
@@ -1205,20 +1170,6 @@ impl Platform for ThemisPlatform {
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Use CPUID leaf 1 (initial APIC ID in EBX[31:24]).
-            // Works regardless of xAPIC vs x2APIC mode.
-            let cpuid = core::arch::x86_64::__cpuid(1);
-            let lapic_id = (cpuid.ebx >> 24) as u32;
-            let ids = unsafe { &*self.lapic_ids.get() };
-            ids.iter()
-                .position(|&id| id == lapic_id)
-                .map(|i| i as CoreId)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            unimplemented!("get_current_core: arch backend not yet implemented")
-        }
+        self.arch.current_core_id()
     }
 }

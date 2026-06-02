@@ -9,5 +9,8 @@
 //! Many types and trait methods here define the API boundary for future
 //! arch backends (e.g., ARM AArch64) and are not yet fully wired.
 
+pub mod platform;
 pub mod traits;
 pub mod types;
+
+pub use platform::ArchPlatform;

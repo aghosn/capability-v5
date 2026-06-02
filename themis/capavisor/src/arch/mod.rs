@@ -12,21 +12,21 @@
 //! - `ThemisPlatform { arch: ArchPlatformState, ... }`
 //! - `PlatformDomain { arch: ArchDomainState, ... }`
 //!
-//! Each arch's `arch_state.rs` defines its own concrete `ArchPlatformState` /
-//! `ArchDomainState` with the same set of inherent method names. The cross-
-//! arch carrier calls `self.arch.foo(...)` and the compiler resolves to the
-//! per-arch implementation via cfg. There is intentionally **no `ArchPlatform`
-//! / `ArchDomain` trait** today — the contract is implicit, enforced by call
-//! sites in the cross-arch carrier (a missing method becomes a compile error
-//! on that arch).
+//! The contract for those state structs is expressed as **explicit traits**:
+//! [`crate::arch_traits::ArchPlatform`] and (forthcoming)
+//! `crate::arch_traits::ArchDomain`. Each arch's `arch_state.rs` defines a
+//! concrete struct AND implements the matching trait. The cross-arch carrier
+//! brings the trait into scope and calls trait methods on `self.arch` —
+//! compile-time selection of the concrete impl, no `dyn` overhead, but the
+//! cross-arch surface is discoverable in one place.
 //!
-//! Trade-off: this matches `std::sys`-style HAL code (no virtual dispatch,
-//! no extra layer) at the cost of contract discoverability. A future
-//! migration to an explicit `ArchPlatform` / `ArchDomain` trait (Option A)
-//! is tracked as `arch-trait-migration` in the project todo list — revisit
-//! once the ARM backend has a non-stub implementation that exercises the
-//! cross-arch surface. If we migrate, do `ArchPlatformState` and
-//! `ArchDomainState` together for consistency.
+//! Why a trait instead of inherent methods on cfg-selected concrete types?
+//! Adding a new method to `ArchPlatformState` on x86 without updating the
+//! ARM impl produces a far-flung "no method named foo" error at the call
+//! site. With a trait, the ARM impl is forced to provide a stub at impl
+//! definition time. The migration from the older inherent-method pattern
+//! is in progress — see Phase 11 in the plan; `ArchPlatform` already exists
+//! and `ArchDomain` lands as we lift more x86 work out of `platform/mod.rs`.
 //!
 //! # Boot-pipeline contract
 //!

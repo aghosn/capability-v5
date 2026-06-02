@@ -3,6 +3,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use capability_engine::CoreId;
+
+use crate::arch_traits::ArchPlatform;
+
 // ── Per-domain hardware state ────────────────────────────────────────────── //
 
 /// AArch64 per-domain hardware state.
@@ -46,5 +50,17 @@ impl ArchPlatformState {
             gicr_stride: 0,
             cpu_mpidrs: Vec::new(),
         }
+    }
+}
+
+impl ArchPlatform for ArchPlatformState {
+    fn send_ipi(&self, _core_id: CoreId, _hhdm_offset: u64) {
+        // TODO(arm): GICv3 SGI delivery.
+        unimplemented!("send_ipi: aarch64 backend not yet implemented")
+    }
+
+    fn current_core_id(&self) -> Option<CoreId> {
+        // TODO(arm): read MPIDR_EL1 + look up in cpu_mpidrs.
+        unimplemented!("current_core_id: aarch64 backend not yet implemented")
     }
 }

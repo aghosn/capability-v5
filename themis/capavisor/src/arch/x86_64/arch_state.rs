@@ -8,8 +8,13 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use core::cell::UnsafeCell;
+
+use capability_engine::CoreId;
 use ept::EptMapper;
 
+use crate::arch::x86_64::layout::{APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE};
+use crate::arch_traits::ArchPlatform;
 use crate::platform::VcpuSlot;
 
 use super::acpi::DhrdUnit;
@@ -148,20 +153,34 @@ impl ArchDomainState {
 
 /// x86-64 platform-level hardware state.
 ///
-/// Wraps VMXON region addresses and VT-d DRHD units.
-/// Generic code accesses this through methods only.
+/// Wraps VMXON region addresses, VT-d DRHD units, and per-core LAPIC IDs.
+/// Generic code accesses this through [`ArchPlatform`] (cross-arch contract)
+/// and inherent methods (x86-only data such as DRHD units / VMXON regions).
 pub struct ArchPlatformState {
     /// Per-core VMXON region physical addresses.
     vmxon_phys: Vec<u64>,
     /// VT-d DRHD units (IOMMU hardware units).
     drhd_units: Vec<DhrdUnit>,
+    /// Per-core LAPIC IDs, indexed by logical core ID.
+    ///
+    /// Written once at boot (single-threaded, before APs come online) via
+    /// [`set_lapic_ids`](Self::set_lapic_ids); read-only afterwards. The
+    /// `UnsafeCell` lets us write without `&mut self` during the boot
+    /// orchestrator's set-up sequence.
+    lapic_ids: UnsafeCell<Vec<u32>>,
 }
+
+// SAFETY: `lapic_ids` is written exactly once during single-threaded boot
+// (before APs are launched) and read-only afterwards. All other fields are
+// already Sync.
+unsafe impl Sync for ArchPlatformState {}
 
 impl ArchPlatformState {
     pub fn new() -> Self {
         Self {
             vmxon_phys: Vec::new(),
             drhd_units: Vec::new(),
+            lapic_ids: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -179,5 +198,60 @@ impl ArchPlatformState {
 
     pub fn drhd_units_mut(&mut self) -> &mut Vec<DhrdUnit> {
         &mut self.drhd_units
+    }
+
+    /// Install the per-core LAPIC ID table. Called once by the BSP during
+    /// boot, before APs are launched.
+    pub fn set_lapic_ids(&self, ids: Vec<u32>) {
+        // SAFETY: single-threaded boot context (see struct docs).
+        unsafe { *self.lapic_ids.get() = ids };
+    }
+
+    /// Physical LAPIC ID of the BSP (core 0). Used as the IRTE destination
+    /// for capavisor-owned vectors (Report / NotReport).
+    pub fn bsp_lapic_id(&self) -> u32 {
+        // SAFETY: read-only after boot (see struct docs).
+        unsafe { &*self.lapic_ids.get() }
+            .first()
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl ArchPlatform for ArchPlatformState {
+    fn send_ipi(&self, core_id: CoreId, hhdm_offset: u64) {
+        // SAFETY: `lapic_ids` is read-only after boot.
+        let lapic_id = unsafe {
+            let ids = &*self.lapic_ids.get();
+            *ids.get(core_id as usize)
+                .unwrap_or_else(|| panic!("send_ipi: unknown core {}", core_id))
+        };
+
+        // INIT-IPI via xAPIC MMIO (the capavisor never enables x2APIC mode).
+        // INIT always causes EXIT_REASON_INIT_SIGNAL (3) from non-root mode,
+        // regardless of pin-based controls — exactly the wakeup semantics
+        // we want here.
+        let apic_base = hhdm_offset + LAPIC_MMIO_BASE;
+        // SAFETY: HHDM-mapped LAPIC MMIO; capavisor owns it exclusively.
+        unsafe {
+            // ICR high: destination APIC ID in bits 24-31.
+            let icr_hi = (apic_base + APIC_REG_ICR_HIGH) as *mut u32;
+            core::ptr::write_volatile(icr_hi, lapic_id << 24);
+            // ICR low: delivery=INIT (0x5<<8), level=assert (1<<14), edge.
+            let icr_lo = (apic_base + APIC_REG_ICR_LOW) as *mut u32;
+            core::ptr::write_volatile(icr_lo, (1u32 << 14) | (0x5u32 << 8));
+        }
+    }
+
+    fn current_core_id(&self) -> Option<CoreId> {
+        // CPUID.01h:EBX[31:24] = initial APIC ID. Works in both xAPIC and
+        // x2APIC modes.
+        let cpuid = core::arch::x86_64::__cpuid(1);
+        let lapic_id = (cpuid.ebx >> 24) as u32;
+        // SAFETY: read-only after boot.
+        let ids = unsafe { &*self.lapic_ids.get() };
+        ids.iter()
+            .position(|&id| id == lapic_id)
+            .map(|i| i as CoreId)
     }
 }
