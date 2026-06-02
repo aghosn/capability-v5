@@ -970,10 +970,191 @@ private theorem switchSuspended_apply_preservesIsRevoked
             · rw [Arena.find?_update_other _ dc.targetDom did _ hd3] at hp'
               rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
 
-/-! For brevity, the `deliverInterrupt` cascade-preservation lemma is
-    deferred — it requires induction over the chain-walking
-    `applyMidsAndHandler` recursion, mirroring
-    `applyMidsAndHandler_parentStable` in `ParentStability.lean`. -/
+/-! ### IsRevokedStable predicate (analogue of `ParentStable`) -/
+
+/-- A state-transformer preserves `isRevoked`: a tombstoned domain stays
+    tombstoned. -/
+def PreservesIsRevoked (g : SpecState → SpecState) : Prop :=
+  ∀ s did d d',
+    s.getDom did = some d → d.isRevoked →
+    (g s).getDom did = some d' → d'.isRevoked
+
+theorem PreservesIsRevoked.id : PreservesIsRevoked (fun s => s) := by
+  intro s did d d' hpre hrev hpost
+  rw [hpre] at hpost; injection hpost with eq; rw [← eq]; exact hrev
+
+theorem PreservesIsRevoked.comp_no_remove
+    {g h : SpecState → SpecState}
+    (hgnr : NeverRemovesDomain g)
+    (hg : PreservesIsRevoked g) (hh : PreservesIsRevoked h) :
+    PreservesIsRevoked (fun s => h (g s)) := by
+  intro s did d d' hpre hrev hpost
+  have hmid : ((g s).getDom did).isSome := hgnr s did (by rw [hpre]; rfl)
+  rcases hmidcases : (g s).getDom did with _ | dmid
+  · rw [hmidcases] at hmid; cases hmid
+  · have e1 : dmid.isRevoked := hg s did d dmid hpre hrev hmidcases
+    exact hh (g s) did dmid d' hmidcases e1 hpost
+
+/-- Closed under composition combo: preserves `isRevoked` *and* never
+    removes a domain. -/
+structure IsRevokedStable (g : SpecState → SpecState) : Prop where
+  preserves    : PreservesIsRevoked g
+  neverRemoves : NeverRemovesDomain g
+
+theorem IsRevokedStable.id : IsRevokedStable (fun s => s) :=
+  ⟨PreservesIsRevoked.id, NeverRemovesDomain.id⟩
+
+theorem IsRevokedStable.comp {g h : SpecState → SpecState}
+    (hg : IsRevokedStable g) (hh : IsRevokedStable h) :
+    IsRevokedStable (fun s => h (g s)) :=
+  ⟨PreservesIsRevoked.comp_no_remove hg.neverRemoves hg.preserves hh.preserves,
+   fun s did hh' => hh.neverRemoves _ _ (hg.neverRemoves _ _ hh')⟩
+
+/-- `updDomain` is `IsRevokedStable` whenever `f` preserves `isRevoked`
+    pointwise. -/
+theorem updDomain_isRevokedStable (target : DomId) (f : Domain → Domain)
+    (hf : ∀ d, d.isRevoked → (f d).isRevoked) :
+    IsRevokedStable (fun s => s.updDomain target f) := by
+  refine ⟨?_, updDomain_neverRemoves target f⟩
+  intro s did d d' hpre hrev hpost
+  exact updDomain_preserves_isRevoked s target f hf did d d' hpre hrev hpost
+
+theorem updCore_isRevokedStable (id : CoreId) (f : CoreState → CoreState) :
+    IsRevokedStable (fun s => s.updCore id f) := by
+  refine ⟨?_, updCore_neverRemoves id f⟩
+  intro s did d d' hpre hrev hpost
+  have h0 : (s.updCore id f).getDom did = some d' := hpost
+  rw [updCore_getDom] at h0
+  rw [hpre] at h0; injection h0 with eq; rw [← eq]; exact hrev
+
+/-- `applyMidsAndHandler` is `IsRevokedStable` for any chain. -/
+theorem applyMidsAndHandler_isRevokedStable (core : CoreId) (vector : Nat) :
+    ∀ (chain : List (DomId × VpId)) (prev : DomId × VpId),
+      IsRevokedStable (fun s => applyMidsAndHandler core vector prev chain s) := by
+  intro chain
+  induction chain with
+  | nil =>
+    intro prev
+    refine ⟨?_, ?_⟩
+    · intro s did d d' hpre hrev hpost
+      simp [applyMidsAndHandler] at hpost
+      rw [hpre] at hpost; injection hpost with eq; rw [← eq]; exact hrev
+    · intro s did h
+      simp [applyMidsAndHandler]; exact h
+  | cons head tail ih =>
+    intro prev
+    cases tail with
+    | nil =>
+      have base :
+          IsRevokedStable (fun s => s.updDomain head.1
+            (fun d => d.updVp head.2 (fun vp =>
+              match vp.runState with
+              | .locked _ _ p => { vp with runState := .running core p }
+              | other         => { vp with runState := other }))) := by
+        apply updDomain_isRevokedStable
+        intro d hr
+        unfold Domain.isRevoked at *
+        rw [Domain.updVp_status]; exact hr
+      refine ⟨?_, ?_⟩
+      · intro s did d d' hpre hrev hpost
+        simp only [applyMidsAndHandler] at hpost
+        exact base.preserves s did d d' hpre hrev hpost
+      · intro s did h
+        simp only [applyMidsAndHandler]
+        exact base.neverRemoves s did h
+    | cons head' tail' =>
+      have base :
+          IsRevokedStable (fun s => s.updDomain head.1
+            (fun d => d.updVp head.2 (fun vp =>
+              { vp with runState := .suspended prev.1 prev.2 vector }))) := by
+        apply updDomain_isRevokedStable
+        intro d hr
+        unfold Domain.isRevoked at *
+        rw [Domain.updVp_status]; exact hr
+      have rec_step :
+          IsRevokedStable (fun s =>
+            applyMidsAndHandler core vector head (head' :: tail') s) :=
+        ih head
+      have combined : IsRevokedStable (fun s =>
+          applyMidsAndHandler core vector head (head' :: tail')
+            (s.updDomain head.1
+              (fun d => d.updVp head.2 (fun vp =>
+                { vp with runState := .suspended prev.1 prev.2 vector })))) :=
+        IsRevokedStable.comp base rec_step
+      refine ⟨?_, ?_⟩
+      · intro s did d d' hpre hrev hpost
+        simp only [applyMidsAndHandler] at hpost
+        exact combined.preserves s did d d' hpre hrev hpost
+      · intro s did h
+        simp only [applyMidsAndHandler]
+        exact combined.neverRemoves s did h
+
+/-- `deliverInterrupt_apply` preserves `isRevoked`. -/
+private theorem deliverInterrupt_apply_preservesIsRevoked
+    (interrupted handler : DomId) (core : CoreId) (vector : Nat)
+    (chain : List (DomId × VpId))
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (deliverInterrupt_apply s interrupted handler core vector chain).getDom
+              did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  cases chain with
+  | nil =>
+    have h0 :
+        (deliverInterrupt_apply s interrupted handler core vector []).domains.find?
+          did = some d' := hpost
+    simp [deliverInterrupt_apply] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  | cons head tail =>
+    cases tail with
+    | nil =>
+      have h0 :
+          (deliverInterrupt_apply s interrupted handler core vector [head]).domains.find?
+            did = some d' := hpost
+      simp [deliverInterrupt_apply] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    | cons head' tail' =>
+      let leaf := head
+      have leafStable :
+          IsRevokedStable (fun s => s.updDomain leaf.1
+            (fun d => d.updVp leaf.2 (fun vp =>
+              { vp with runState := .interrupted vector }))) := by
+        apply updDomain_isRevokedStable
+        intro d hr
+        unfold Domain.isRevoked at *
+        rw [Domain.updVp_status]; exact hr
+      have midsStable :
+          IsRevokedStable (fun s =>
+            applyMidsAndHandler core vector leaf (head' :: tail') s) :=
+        applyMidsAndHandler_isRevokedStable core vector (head' :: tail') leaf
+      have body : IsRevokedStable (fun s =>
+          applyMidsAndHandler core vector leaf (head' :: tail')
+            (s.updDomain leaf.1
+              (fun d => d.updVp leaf.2 (fun vp =>
+                { vp with runState := .interrupted vector })))) :=
+        IsRevokedStable.comp leafStable midsStable
+      have hp' :
+          (deliverInterrupt_apply s interrupted handler core vector
+            (leaf :: head' :: tail')).domains.find? did = some d' := hpost
+      simp only [deliverInterrupt_apply] at hp'
+      rcases hgl : (leaf :: head' :: tail' : List (DomId × VpId)).getLast? with _ | hpair
+      · rw [hgl] at hp'
+        exact body.preserves s did d d' hpre hrev hp'
+      · obtain ⟨hDom, hVp⟩ := hpair
+        rw [hgl] at hp'
+        have core_layer : IsRevokedStable (fun s => s.updCore core (fun _ =>
+            CoreState.runningDomain hDom hVp)) :=
+          updCore_isRevokedStable _ _
+        have full : IsRevokedStable (fun s =>
+            (applyMidsAndHandler core vector leaf (head' :: tail')
+              (s.updDomain leaf.1
+                (fun d => d.updVp leaf.2 (fun vp =>
+                  { vp with runState := .interrupted vector })))).updCore core
+                    (fun _ => CoreState.runningDomain hDom hVp)) :=
+          IsRevokedStable.comp body core_layer
+        exact full.preserves s did d d' hpre hrev hp'
 
 theorem step_preserves_revoked
     {s s' : SpecState} {a : Action} (hwf : WellFormed s) (h : step s a s')
@@ -1016,7 +1197,8 @@ theorem step_preserves_revoked
       exact switch_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
   | switchSuspended _ =>
       exact switchSuspended_apply_preservesIsRevoked _ _ _ _ _ _ s did d hpre hrev d' hpost
-  | deliverInterrupt _ => sorry
+  | deliverInterrupt _ =>
+      exact deliverInterrupt_apply_preservesIsRevoked _ _ _ _ _ s did d hpre hrev d' hpost
   | addVp _ =>
       exact addVp_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
   | registerComm _ =>
