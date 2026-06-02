@@ -11,6 +11,7 @@ pub mod el2_regs;
 pub mod fdt_patch;
 pub mod gicv3;
 pub mod mmu;
+pub mod paging;
 pub mod serial;
 pub mod stage2;
 pub mod vcpu;
