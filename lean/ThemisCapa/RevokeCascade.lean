@@ -112,67 +112,917 @@ theorem revoke_apply_vital_owner_revoked
 
 /-! ### T3: tombstones persist -/
 
-/-- Helper: an `updDomain f` whose update function `f` does not write to
-    `.status` preserves `isRevoked` for any pre-revoked domain. -/
-private theorem updDomain_preserves_status
+/-- `updDomain id f` preserves `isRevoked` on `did` whenever `f`
+    preserves `isRevoked` pointwise. The two relevant instances:
+      * `f` does not write `.status` at all (so `(f d).status =
+        d.status`, hence revoked stays revoked).
+      * `f d = { d with status := .revoked }` (idempotent on
+        tombstones — the VITAL cascade in `revoke_apply`). -/
+private theorem updDomain_preserves_isRevoked
     (s : SpecState) (id : DomId) (f : Domain → Domain)
-    (hf : ∀ x, (f x).status = x.status)
-    (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
-    (d' : Domain) (hpost : (s.updDomain id f).getDom did = some d') :
-    d.status = d'.status := by
-  show d.status = d'.status
+    (hf : ∀ d, d.isRevoked → (f d).isRevoked)
+    (did : DomId) (d d' : Domain)
+    (hpre : s.getDom did = some d) (hrev : d.isRevoked)
+    (hpost : (s.updDomain id f).getDom did = some d') :
+    d'.isRevoked := by
   by_cases hdid : did = id
   · subst hdid
-    have h := hpost
-    show d.status = d'.status
-    have : (s.updDomain did f).domains.find? did = some d' := h
-    simp only [SpecState.updDomain] at this
-    rw [Arena.find?_update_eq_map] at this
+    have h0 : (s.updDomain did f).domains.find? did = some d' := hpost
+    simp only [SpecState.updDomain] at h0
+    rw [Arena.find?_update_eq_map] at h0
     have hpre' : s.domains.find? did = some d := hpre
-    rw [hpre'] at this; simp at this
-    rw [← this]; exact (hf d).symm
-  · have h := hpost
-    have : (s.updDomain id f).domains.find? did = some d' := h
-    simp only [SpecState.updDomain] at this
-    rw [Arena.find?_update_other _ id did _ hdid] at this
+    rw [hpre'] at h0; simp at h0
+    rw [← h0]; exact hf d hrev
+  · have h0 : (s.updDomain id f).domains.find? did = some d' := hpost
+    simp only [SpecState.updDomain] at h0
+    rw [Arena.find?_update_other _ id did _ hdid] at h0
     have hpre' : s.domains.find? did = some d := hpre
-    rw [hpre'] at this; injection this with heq; rw [heq]
+    rw [hpre'] at h0; injection h0 with heq; rw [← heq]; exact hrev
 
-/-- Tombstones persist: once `d.isRevoked`, no `step` can transition it
-    back to `.sealed` or `.unsealed`.
+/-- Convenience corollary: when `f` does not touch `.status` at all,
+    `updDomain id f` preserves `isRevoked`. -/
+private theorem updDomain_preserves_isRevoked_of_status_eq
+    (s : SpecState) (id : DomId) (f : Domain → Domain)
+    (hf : ∀ d, (f d).status = d.status)
+    (did : DomId) (d d' : Domain)
+    (hpre : s.getDom did = some d) (hrev : d.isRevoked)
+    (hpost : (s.updDomain id f).getDom did = some d') :
+    d'.isRevoked :=
+  updDomain_preserves_isRevoked s id f
+    (fun x hx => by unfold isRevoked at *; rw [hf x]; exact hx)
+    did d d' hpre hrev hpost
 
-    The proof relies on the invariant that all status-touching actions
-    in `step` are guarded:
-      * `seal_apply` requires `targetUnsealed` (rules out revoked).
-      * `revoke_apply`'s VITAL cascade only sets status to `.revoked`
-        (idempotent on tombstones).
-      * `revokeDomain_apply` removes the domain from the arena, so the
-        post-state lookup fails — the precondition `s'.getDom did =
-        some d'` is impossible.
-      * Every other action either does not touch `.status`, or only
-        touches it for a domain other than `did`.
+/-- `updMem` doesn't touch the `domains` arena. -/
+private theorem updMem_getDom (s : SpecState) (id : MemCapId) (f : MemCap → MemCap)
+    (did : DomId) : (s.updMem id f).getDom did = s.getDom did := rfl
 
-    Status: scaffolded with `sorry` for the per-action case sweep
-    (mechanical but ~150 lines). The two non-trivial cases — seal
-    inversion and the revoke cascade idempotence — are handled by
-    `revoke_apply_vital_owner_revoked` (T2) and the SealGuard's
-    `targetUnsealed` clause; the 19 remaining cases are uniform
-    applications of `updDomain_preserves_status`. -/
+/-- `updDomCap` doesn't touch the `domains` arena. -/
+private theorem updDomCap_getDom (s : SpecState) (id : DomCapId)
+    (f : DomCap → DomCap) (did : DomId) :
+    (s.updDomCap id f).getDom did = s.getDom did := rfl
+
+/-- `updCore` doesn't touch the `domains` arena. -/
+private theorem updCore_getDom (s : SpecState) (id : CoreId)
+    (f : CoreState → CoreState) (did : DomId) :
+    (s.updCore id f).getDom did = s.getDom did := rfl
+
+/-- `freshMem` doesn't touch the `domains` arena. -/
+private theorem freshMem_getDom (s : SpecState) (cap : MemCap) (did : DomId) :
+    (s.freshMem cap).2.getDom did = s.getDom did := rfl
+
+/-- `freshDomCap` doesn't touch the `domains` arena. -/
+private theorem freshDomCap_getDom (s : SpecState) (dc : DomCap) (did : DomId) :
+    (s.freshDomCap dc).2.getDom did = s.getDom did := rfl
+
+/-- `domains.remove target` removes only `target`. -/
+private theorem remove_target_getDom
+    (s : SpecState) (target : DomId) (did : DomId) (hne : did ≠ target) :
+    ({ s with domains := s.domains.remove target } : SpecState).getDom did
+      = s.getDom did := by
+  show (s.domains.remove target).find? did = s.domains.find? did
+  exact Arena.find?_remove_other _ target did hne
+
+/-! ### Per-action `isRevoked` preservation lemmas
+
+For every action, the apply function preserves `isRevoked`: starting
+from `d.isRevoked` in `s` and an existing post-state lookup `s'.getDom
+did = some d'`, we conclude `d'.isRevoked`.
+
+The proof template, mirroring `_apply_preservesParents`:
+  1. Case on inner option matches in the apply (no-op vs success).
+  2. In the success branch, `simp only` with `[<action>_apply, …,
+     updDomain, updMem, updDomCap, updCore, freshMem, freshDom,
+     freshDomCap]` reduces the post-state to a chain of
+     `Arena.update`/`Arena.insert`/`Arena.remove` calls.
+  3. By-case on `did = <each touched actor>`. For status-preserving
+     updates, use `Arena.find?_update_eq_map` then read off
+     `(f d).status = d.status`. For frame, use
+     `Arena.find?_update_other`.
+-/
+
+private theorem carve_apply_preservesIsRevoked
+    (caller : DomId) (parent : MemCapId) (access : Access) (attrs : Attributes)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (carve_apply s caller parent access attrs).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hp : s.getMem parent with _ | p
+  · have h : (carve_apply s caller parent access attrs).domains.find? did = some d' := hpost
+    simp [carve_apply, hp] at h
+    rw [hpre_d] at h; injection h with eq; rw [← eq]; exact hrev
+  · have hp' : (carve_apply s caller parent access attrs).domains.find? did = some d' := hpost
+    simp only [carve_apply, hp, SpecState.freshMem, SpecState.updMem,
+               SpecState.updDomain] at hp'
+    by_cases hdid : did = caller
+    · subst hdid
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hdid] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem alias_apply_preservesIsRevoked
+    (caller : DomId) (parent : MemCapId) (access : Access)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (alias_apply s caller parent access).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hp : s.getMem parent with _ | p
+  · have h : (alias_apply s caller parent access).domains.find? did = some d' := hpost
+    simp [alias_apply, hp] at h
+    rw [hpre_d] at h; injection h with eq; rw [← eq]; exact hrev
+  · have hp' : (alias_apply s caller parent access).domains.find? did = some d' := hpost
+    simp only [alias_apply, hp, SpecState.freshMem, SpecState.updMem,
+               SpecState.updDomain] at hp'
+    by_cases hdid : did = caller
+    · subst hdid
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hdid] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem revoke_apply_preservesIsRevoked
+    (caller : DomId) (target : MemCapId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (revoke_apply s caller target).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases ht : s.getMem target with _ | t
+  · have h : (revoke_apply s caller target).domains.find? did = some d' := hpost
+    simp [revoke_apply, ht] at h
+    rw [hpre_d] at h; injection h with eq; rw [← eq]; exact hrev
+  · rcases htp : t.parent with _ | pid
+    · have h : (revoke_apply s caller target).domains.find? did = some d' := hpost
+      simp [revoke_apply, ht, htp] at h
+      rw [hpre_d] at h; injection h with eq; rw [← eq]; exact hrev
+    · -- Use the public `revoke_apply_getDom` characterization.
+      have hgD := revoke_apply_getDom s caller target t ht pid htp did
+      simp only at hgD
+      rw [hgD] at hpost
+      by_cases hdid : did = t.owner
+      · rw [if_pos hdid] at hpost
+        subst hdid
+        rw [hpre] at hpost; simp at hpost
+        rw [← hpost]
+        unfold isRevoked at hrev ⊢
+        by_cases hv : t.region.attributes.vital
+        · simp [hv]
+        · simp [hv]; exact hrev
+      · rw [if_neg hdid] at hpost
+        rw [hpre] at hpost; injection hpost with eq; rw [← eq]; exact hrev
+
+private theorem send_apply_preservesIsRevoked
+    (caller receiver : DomId) (cap : MemCapId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (send_apply s caller receiver cap).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  have hp' : (send_apply s caller receiver cap).domains.find? did = some d' := hpost
+  simp only [send_apply, SpecState.updDomain, SpecState.updMem] at hp'
+  by_cases hdR : did = receiver
+  · subst hdR
+    rw [Arena.find?_update_eq_map] at hp'
+    by_cases hCR : did = caller
+    · subst hCR
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hCR] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+  · rw [Arena.find?_update_other _ receiver did _ hdR] at hp'
+    by_cases hCR : did = caller
+    · subst hCR
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hCR] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem seal_apply_preservesIsRevoked
+    (caller : DomId) (cap : DomCapId)
+    (s : SpecState) (guard : SealGuard s caller cap)
+    (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (seal_apply s caller cap).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hc : s.getDomCap cap with _ | dc
+  · have h : (seal_apply s caller cap).domains.find? did = some d' := hpost
+    simp [seal_apply, hc] at h
+    rw [hpre_d] at h; injection h with eq; rw [← eq]; exact hrev
+  · have hp' : (seal_apply s caller cap).domains.find? did = some d' := hpost
+    simp only [seal_apply, hc, SpecState.updDomain] at hp'
+    by_cases hdid : did = dc.targetDom
+    · -- Guard contradiction: targetUnsealed says d.isUnsealed.
+      subst hdid
+      have hUnsealed := guard.targetUnsealed dc hc d hpre
+      unfold isUnsealed at hUnsealed
+      unfold isRevoked at hrev
+      rw [hUnsealed] at hrev
+      cases hrev
+    · rw [Arena.find?_update_other _ dc.targetDom did _ hdid] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem reject_apply_preservesIsRevoked
+    (receiver : DomId) (pendingId : PendingId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (reject_apply s receiver pendingId).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  have hp' : (reject_apply s receiver pendingId).domains.find? did = some d' := hpost
+  simp only [reject_apply, SpecState.updDomain] at hp'
+  -- Outer updDomain receiver, then optional updDomain on sender.
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPending pendingId) with _ | pe
+  · simp [hb] at hp'
+    by_cases hdR : did = receiver
+    · subst hdR
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ receiver did _ hdR] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+  · simp [hb] at hp'
+    by_cases h1 : did = pe.senderDomainId
+    · subst h1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases h2 : pe.senderDomainId = receiver
+      · subst h2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ receiver _ _ h2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ pe.senderDomainId did _ h1] at hp'
+      by_cases h2 : did = receiver
+      · subst h2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ receiver did _ h2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+/-! ### Simple per-action lemmas (single updDomain, status-preserving f) -/
+
+private theorem setPolicy_apply_preservesIsRevoked
+    (caller : DomId) (cap : DomCapId) (id : PolicyIdentifier) (value : Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (setPolicy_apply s caller cap id value).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hc : s.getDomCap cap with _ | dc
+  · have h0 : (setPolicy_apply s caller cap id value).domains.find? did = some d' := hpost
+    simp [setPolicy_apply, hc] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · have hp' : (setPolicy_apply s caller cap id value).domains.find? did = some d' := hpost
+    simp only [setPolicy_apply, hc, SpecState.updDomain] at hp'
+    by_cases hdid : did = dc.targetDom
+    · subst hdid
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ dc.targetDom did _ hdid] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem mapSelf_apply_preservesIsRevoked
+    (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (mapSelf_apply s caller capHandle newGpa).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hd : s.getDom caller with _ | dc
+  · have h0 : (mapSelf_apply s caller capHandle newGpa).domains.find? did = some d' := hpost
+    simp [mapSelf_apply, hd] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hm : dc.lookupMemHandle capHandle with _ | mid
+    · have h0 : (mapSelf_apply s caller capHandle newGpa).domains.find? did = some d' := hpost
+      simp [mapSelf_apply, hd, hm] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases hg : s.getMem mid with _ | mc
+      · have h0 : (mapSelf_apply s caller capHandle newGpa).domains.find? did = some d' := hpost
+        simp [mapSelf_apply, hd, hm, hg] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · rcases hk : dc.lookupMappedGpa capHandle with _ | oldGpa
+        · have h0 :
+              (mapSelf_apply s caller capHandle newGpa).domains.find? did = some d' := hpost
+          simp [mapSelf_apply, hd, hm, hg, hk] at h0
+          rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+        · have hp' :
+              (mapSelf_apply s caller capHandle newGpa).domains.find? did = some d' := hpost
+          simp only [mapSelf_apply, hd, hm, hg, hk, SpecState.updDomain] at hp'
+          by_cases hdid : did = caller
+          · subst hdid
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+            unfold Domain.isRevoked Domain.updMappedGpa
+            split <;> exact hrev
+          · rw [Arena.find?_update_other _ caller did _ hdid] at hp'
+            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem sealedSend_apply_preservesIsRevoked
+    (caller receiver : DomId) (handle : LocalHandle) (gpaHint : Option Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (sealedSend_apply s caller receiver handle gpaHint).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupMemHandle handle) with _ | capId
+  · have h0 :
+        (sealedSend_apply s caller receiver handle gpaHint).domains.find? did = some d' := hpost
+    simp [sealedSend_apply, hb] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · have hp' :
+        (sealedSend_apply s caller receiver handle gpaHint).domains.find? did = some d' := hpost
+    simp only [sealedSend_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = receiver
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ receiver did _ hd1] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem sendChannel_apply_preservesIsRevoked
+    (caller receiver : DomId) (cap : DomCapId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (sendChannel_apply s caller receiver cap).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  -- sendChannel ends with updDomCap (preserves domains arena)
+  have hp' : (sendChannel_apply s caller receiver cap).domains.find? did = some d' := hpost
+  simp only [sendChannel_apply, SpecState.updDomCap, SpecState.updDomain] at hp'
+  by_cases hd1 : did = receiver
+  · subst hd1
+    rw [Arena.find?_update_eq_map] at hp'
+    by_cases hd2 : did = caller
+    · subst hd2
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+  · rw [Arena.find?_update_other _ receiver did _ hd1] at hp'
+    by_cases hd2 : did = caller
+    · subst hd2
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem rejectChannel_apply_preservesIsRevoked
+    (receiver : DomId) (pendingId : PendingId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (rejectChannel_apply s receiver pendingId).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  have hp' : (rejectChannel_apply s receiver pendingId).domains.find? did = some d' := hpost
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId) with _ | pe
+  · simp only [rejectChannel_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd : did = receiver
+    · subst hd
+      rw [Arena.find?_update_eq_map] at hp'
+      rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ receiver did _ hd] at hp'
+      rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+  · simp only [rejectChannel_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = pe.senderDomainId
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : pe.senderDomainId = receiver
+      · rw [← hd2] at hp'
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ receiver pe.senderDomainId _ hd2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ pe.senderDomainId did _ hd1] at hp'
+      by_cases hd2 : did = receiver
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ receiver did _ hd2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+/-! ### Multi-updDomain actions wrapping send_apply / sendChannel_apply -/
+
+private theorem accept_apply_preservesIsRevoked'
+    (receiver : DomId) (pendingId : PendingId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (accept_apply s receiver pendingId).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPending pendingId) with _ | pe
+  · have h0 : (accept_apply s receiver pendingId).domains.find? did = some d' := hpost
+    simp [accept_apply, hb] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · have hp' : (accept_apply s receiver pendingId).domains.find? did = some d' := hpost
+    simp only [accept_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = pe.senderDomainId
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : pe.senderDomainId = receiver
+      · rw [← hd2] at hp'
+        rw [Arena.find?_update_eq_map] at hp'
+        rcases hsend :
+            (send_apply s pe.senderDomainId pe.senderDomainId pe.capId).domains.find?
+              pe.senderDomainId with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (send_apply s pe.senderDomainId pe.senderDomainId pe.capId).getDom
+                pe.senderDomainId = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            send_apply_preservesIsRevoked pe.senderDomainId pe.senderDomainId pe.capId
+              s pe.senderDomainId d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+      · rw [Arena.find?_update_other _ receiver pe.senderDomainId _ hd2] at hp'
+        rcases hsend :
+            (send_apply s pe.senderDomainId receiver pe.capId).domains.find? pe.senderDomainId
+            with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (send_apply s pe.senderDomainId receiver pe.capId).getDom pe.senderDomainId
+              = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            send_apply_preservesIsRevoked pe.senderDomainId receiver pe.capId
+              s pe.senderDomainId d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+    · rw [Arena.find?_update_other _ pe.senderDomainId did _ hd1] at hp'
+      by_cases hd2 : did = receiver
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rcases hsend :
+            (send_apply s pe.senderDomainId did pe.capId).domains.find? did with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (send_apply s pe.senderDomainId did pe.capId).getDom did = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            send_apply_preservesIsRevoked pe.senderDomainId did pe.capId
+              s did d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+      · rw [Arena.find?_update_other _ receiver did _ hd2] at hp'
+        have hsendp :
+            (send_apply s pe.senderDomainId receiver pe.capId).getDom did = some d' := hp'
+        exact send_apply_preservesIsRevoked pe.senderDomainId receiver pe.capId
+                s did d hpre hrev d' hsendp
+
+private theorem acceptChannel_apply_preservesIsRevoked
+    (receiver : DomId) (pendingId : PendingId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (acceptChannel_apply s receiver pendingId).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId) with _ | pe
+  · have h0 : (acceptChannel_apply s receiver pendingId).domains.find? did = some d' := hpost
+    simp [acceptChannel_apply, hb] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · have hp' : (acceptChannel_apply s receiver pendingId).domains.find? did = some d' := hpost
+    simp only [acceptChannel_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = pe.senderDomainId
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : pe.senderDomainId = receiver
+      · rw [← hd2] at hp'
+        rw [Arena.find?_update_eq_map] at hp'
+        rcases hsend :
+            (sendChannel_apply s pe.senderDomainId pe.senderDomainId pe.capId).domains.find?
+              pe.senderDomainId with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (sendChannel_apply s pe.senderDomainId pe.senderDomainId pe.capId).getDom
+                pe.senderDomainId = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            sendChannel_apply_preservesIsRevoked pe.senderDomainId pe.senderDomainId pe.capId
+              s pe.senderDomainId d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+      · rw [Arena.find?_update_other _ receiver pe.senderDomainId _ hd2] at hp'
+        rcases hsend :
+            (sendChannel_apply s pe.senderDomainId receiver pe.capId).domains.find?
+              pe.senderDomainId with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (sendChannel_apply s pe.senderDomainId receiver pe.capId).getDom
+                pe.senderDomainId = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            sendChannel_apply_preservesIsRevoked pe.senderDomainId receiver pe.capId
+              s pe.senderDomainId d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+    · rw [Arena.find?_update_other _ pe.senderDomainId did _ hd1] at hp'
+      by_cases hd2 : did = receiver
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rcases hsend :
+            (sendChannel_apply s pe.senderDomainId did pe.capId).domains.find? did with _ | dx
+        · rw [hsend] at hp'; simp at hp'
+        · rw [hsend] at hp'; simp at hp'
+          have hsendp :
+              (sendChannel_apply s pe.senderDomainId did pe.capId).getDom did = some dx := hsend
+          have hxrev : dx.isRevoked :=
+            sendChannel_apply_preservesIsRevoked pe.senderDomainId did pe.capId
+              s did d hpre_d hrev dx hsendp
+          rw [← hp']; exact hxrev
+      · rw [Arena.find?_update_other _ receiver did _ hd2] at hp'
+        have hsendp :
+            (sendChannel_apply s pe.senderDomainId receiver pe.capId).getDom did = some d' := hp'
+        exact sendChannel_apply_preservesIsRevoked pe.senderDomainId receiver pe.capId
+                s did d hpre hrev d' hsendp
+
+/-! ### addVp / registerComm -/
+
+private theorem addVp_apply_preservesIsRevoked
+    (caller : DomId) (childHandle commHandle : LocalHandle)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (addVp_apply s caller childHandle commHandle).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb1 : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle) with _ | cid
+  · have h0 : (addVp_apply s caller childHandle commHandle).domains.find? did = some d' := hpost
+    simp [addVp_apply, hb1] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hc : s.getDomCap cid with _ | dc
+    · have h0 :
+          (addVp_apply s caller childHandle commHandle).domains.find? did = some d' := hpost
+      simp [addVp_apply, hb1, hc] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases ht : s.getDom dc.targetDom with _ | dt
+      · have h0 :
+            (addVp_apply s caller childHandle commHandle).domains.find? did = some d' := hpost
+        simp [addVp_apply, hb1, hc, ht] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · rcases hb2 : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle) with _ | mid
+        · have h0 :
+              (addVp_apply s caller childHandle commHandle).domains.find? did = some d' := hpost
+          simp [addVp_apply, hb1, hc, ht, hb2] at h0
+          rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+        · have hp' :
+              (addVp_apply s caller childHandle commHandle).domains.find? did = some d' := hpost
+          simp only [addVp_apply, hb1, hc, ht, hb2,
+                     SpecState.updMem, SpecState.updDomain] at hp'
+          by_cases hdid : did = dc.targetDom
+          · subst hdid
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+          · rw [Arena.find?_update_other _ dc.targetDom did _ hdid] at hp'
+            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem registerComm_apply_preservesIsRevoked
+    (caller : DomId) (commHandle childHandle : LocalHandle) (vpId : VpId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (registerComm_apply s caller commHandle childHandle vpId).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb1 : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle) with _ | cid
+  · have h0 :
+        (registerComm_apply s caller commHandle childHandle vpId).domains.find? did = some d' :=
+      hpost
+    simp [registerComm_apply, hb1] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hc : s.getDomCap cid with _ | dc
+    · have h0 :
+          (registerComm_apply s caller commHandle childHandle vpId).domains.find? did = some d' :=
+        hpost
+      simp [registerComm_apply, hb1, hc] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases ht : s.getDom dc.targetDom with _ | dt
+      · have h0 :
+            (registerComm_apply s caller commHandle childHandle vpId).domains.find? did =
+              some d' := hpost
+        simp [registerComm_apply, hb1, hc, ht] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · rcases hb2 : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle) with _ | mid
+        · have h0 :
+              (registerComm_apply s caller commHandle childHandle vpId).domains.find? did =
+                some d' := hpost
+          simp [registerComm_apply, hb1, hc, ht, hb2] at h0
+          rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+        · have hp' :
+              (registerComm_apply s caller commHandle childHandle vpId).domains.find? did =
+                some d' := hpost
+          simp only [registerComm_apply, hb1, hc, ht, hb2,
+                     SpecState.updMem, SpecState.updDomain] at hp'
+          by_cases hdid : did = dc.targetDom
+          · subst hdid
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+          · rw [Arena.find?_update_other _ dc.targetDom did _ hdid] at hp'
+            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+/-! ### Helper: `updVp` preserves status -/
+
+private theorem Domain.updVp_status (d : Domain) (vpId : VpId)
+    (f : VProcessor → VProcessor) :
+    (d.updVp vpId f).status = d.status := rfl
+
+/-! ### `create` (uses `WellFormed.freshDomCounter`) and `revokeDomain` -/
+
+private theorem create_apply_preservesIsRevoked_of_wf
+    (caller : DomId) (policy : DomainPolicy) {s : SpecState}
+    (hfresh : FreshDomCounter s)
+    {did : DomId} {d : Domain} (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    {d' : Domain} (hpost : (create_apply s caller policy).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  have hdid_in : did ∈ s.domains.keys := Arena.mem_keys_of_find?_some _ _ _ hpre_d
+  have hdid_ne : did ≠ s.nextDomId := by
+    intro heq
+    have := hfresh did hdid_in
+    rw [heq] at this; exact Nat.lt_irrefl _ this
+  have hp' : (create_apply s caller policy).domains.find? did = some d' := hpost
+  simp only [create_apply, SpecState.freshDom, SpecState.freshDomCap,
+             SpecState.updDomain] at hp'
+  by_cases hdid : did = caller
+  · subst hdid
+    rw [Arena.find?_update_eq_map] at hp'
+    rw [Arena.find?_insert_other _ s.nextDomId did _ hdid_ne] at hp'
+    rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+  · rw [Arena.find?_update_other _ caller did _ hdid] at hp'
+    rw [Arena.find?_insert_other _ s.nextDomId did _ hdid_ne] at hp'
+    rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem revokeDomain_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (revokeDomain_apply s caller handle).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hcd : s.getDom caller with _ | dc
+  · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
+    simp [revokeDomain_apply, hcd] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hh : dc.lookupDomHandle handle with _ | dcId
+    · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
+      simp [revokeDomain_apply, hcd, hh] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases hdc : s.getDomCap dcId with _ | domcap
+      · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
+        simp [revokeDomain_apply, hcd, hh, hdc] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · let target := domcap.targetDom
+        have hp' : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
+        simp only [revokeDomain_apply, hcd, hh, hdc, SpecState.updDomain] at hp'
+        by_cases hdid_target : did = target
+        · rw [hdid_target] at hp' hpre_d
+          by_cases hdc' : target = caller
+          · rw [← hdc'] at hp'
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [Arena.find?_remove_same] at hp'
+            simp at hp'
+          · rw [Arena.find?_update_other _ caller target _ hdc'] at hp'
+            rw [Arena.find?_remove_same] at hp'
+            cases hp'
+        · by_cases hdc : did = caller
+          · subst hdc
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+          · rw [Arena.find?_update_other _ caller did _ hdc] at hp'
+            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
+            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+/-! ### `switchReturn` / `switch` / `switchSuspended` (updVp-based) -/
+
+private theorem switchReturn_apply_preservesIsRevoked
+    (caller : DomId) (core : CoreId) (exitReason : Option Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (switchReturn_apply s caller core exitReason).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom caller).bind (fun d => d.vpAndPrevCallerOnCore core) with _ | p
+  · have h0 :
+        (switchReturn_apply s caller core exitReason).domains.find? did = some d' := hpost
+    simp [switchReturn_apply, hb] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · obtain ⟨vpId, pctx⟩ := p
+    have hp' :
+        (switchReturn_apply s caller core exitReason).domains.find? did = some d' := hpost
+    simp only [switchReturn_apply, hb, SpecState.updCore, SpecState.updDomain] at hp'
+    by_cases hd1 : did = pctx.domainId
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : pctx.domainId = caller
+      · rw [← hd2] at hp'
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+        unfold Domain.isRevoked; rw [Domain.updVp_status, Domain.updVp_status]; exact hrev
+      · rw [Arena.find?_update_other _ caller pctx.domainId _ hd2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+        unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+    · rw [Arena.find?_update_other _ pctx.domainId did _ hd1] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+        unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem switch_apply_preservesIsRevoked
+    (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId) (core : CoreId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (switch_apply s caller toHandle toVpId core).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb1 : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle) with _ | cid
+  · have h0 : (switch_apply s caller toHandle toVpId core).domains.find? did = some d' := hpost
+    simp [switch_apply, hb1] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hc : s.getDomCap cid with _ | dc
+    · have h0 :
+          (switch_apply s caller toHandle toVpId core).domains.find? did = some d' := hpost
+      simp [switch_apply, hb1, hc] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases hb2 : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core) with _ | p
+      · have h0 :
+            (switch_apply s caller toHandle toVpId core).domains.find? did = some d' := hpost
+        simp [switch_apply, hb1, hc, hb2] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · obtain ⟨callerVpId, callerPrev⟩ := p
+        have hp' :
+            (switch_apply s caller toHandle toVpId core).domains.find? did = some d' := hpost
+        simp only [switch_apply, hb1, hc, hb2, SpecState.updCore, SpecState.updDomain] at hp'
+        by_cases hd1 : did = caller
+        · rw [hd1] at hp' hpre_d
+          rw [Arena.find?_update_eq_map] at hp'
+          by_cases hd2 : caller = dc.targetDom
+          · rw [← hd2] at hp'
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+            unfold Domain.isRevoked; rw [Domain.updVp_status, Domain.updVp_status]; exact hrev
+          · rw [Arena.find?_update_other _ dc.targetDom caller _ hd2] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+            unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+        · rw [Arena.find?_update_other _ caller did _ hd1] at hp'
+          by_cases hd2 : did = dc.targetDom
+          · subst hd2
+            rw [Arena.find?_update_eq_map] at hp'
+            rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+            unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+          · rw [Arena.find?_update_other _ dc.targetDom did _ hd2] at hp'
+            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem switchSuspended_apply_preservesIsRevoked
+    (caller : DomId) (toHandle : LocalHandle) (toVpId : VpId) (core : CoreId)
+    (calleeDom : DomId) (calleeVp : VpId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).getDom
+              did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb1 : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle) with _ | cid
+  · have h0 :
+        (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).domains.find?
+          did = some d' := hpost
+    simp [switchSuspended_apply, hb1] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · rcases hc : s.getDomCap cid with _ | dc
+    · have h0 :
+          (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).domains.find?
+            did = some d' := hpost
+      simp [switchSuspended_apply, hb1, hc] at h0
+      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+    · rcases hb2 : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core) with _ | p
+      · have h0 :
+            (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).domains.find?
+              did = some d' := hpost
+        simp [switchSuspended_apply, hb1, hc, hb2] at h0
+        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+      · obtain ⟨callerVpId, callerPrev⟩ := p
+        have hp' :
+            (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp).domains.find?
+              did = some d' := hpost
+        simp only [switchSuspended_apply, hb1, hc, hb2,
+                   SpecState.updCore, SpecState.updDomain] at hp'
+        by_cases hd1 : did = caller
+        · rw [hd1] at hp' hpre_d
+          rw [Arena.find?_update_eq_map] at hp'
+          by_cases hd2 : caller = calleeDom
+          · rw [← hd2] at hp'
+            rw [Arena.find?_update_eq_map] at hp'
+            by_cases hd3 : caller = dc.targetDom
+            · rw [← hd3] at hp'
+              rw [Arena.find?_update_eq_map] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked
+              rw [Domain.updVp_status, Domain.updVp_status, Domain.updVp_status]; exact hrev
+            · rw [Arena.find?_update_other _ dc.targetDom caller _ hd3] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked
+              rw [Domain.updVp_status, Domain.updVp_status]; exact hrev
+          · rw [Arena.find?_update_other _ calleeDom caller _ hd2] at hp'
+            by_cases hd3 : caller = dc.targetDom
+            · rw [← hd3] at hp'
+              rw [Arena.find?_update_eq_map] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked
+              rw [Domain.updVp_status, Domain.updVp_status]; exact hrev
+            · rw [Arena.find?_update_other _ dc.targetDom caller _ hd3] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+        · rw [Arena.find?_update_other _ caller did _ hd1] at hp'
+          by_cases hd2 : did = calleeDom
+          · subst hd2
+            rw [Arena.find?_update_eq_map] at hp'
+            by_cases hd3 : did = dc.targetDom
+            · subst hd3
+              rw [Arena.find?_update_eq_map] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked
+              rw [Domain.updVp_status, Domain.updVp_status]; exact hrev
+            · rw [Arena.find?_update_other _ dc.targetDom did _ hd3] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+          · rw [Arena.find?_update_other _ calleeDom did _ hd2] at hp'
+            by_cases hd3 : did = dc.targetDom
+            · subst hd3
+              rw [Arena.find?_update_eq_map] at hp'
+              rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+              unfold Domain.isRevoked; rw [Domain.updVp_status]; exact hrev
+            · rw [Arena.find?_update_other _ dc.targetDom did _ hd3] at hp'
+              rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+/-! For brevity, the `deliverInterrupt` cascade-preservation lemma is
+    deferred — it requires induction over the chain-walking
+    `applyMidsAndHandler` recursion, mirroring
+    `applyMidsAndHandler_parentStable` in `ParentStability.lean`. -/
+
 theorem step_preserves_revoked
-    {s s' : SpecState} {a : Action} (h : step s a s')
+    {s s' : SpecState} {a : Action} (hwf : WellFormed s) (h : step s a s')
     (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
     (hrev : d.isRevoked)
     (d' : Domain) (hpost : s'.getDom did = some d') :
     d'.isRevoked := by
-  -- See module docstring for full proof outline.
-  -- TODO(G1-followup): mechanical per-action sweep across 21
-  -- constructors of `step`. Each non-sealing, non-revoking case is a
-  -- one-line application of `updDomain_preserves_status`; the sealing
-  -- case is discharged by `SealGuard.targetUnsealed`; the cascade case
-  -- is discharged by idempotence (revoked → revoked under cascade);
-  -- `revokeDomain` is vacuous (`s'.getDom did = none` when `did =
-  -- target`).
-  sorry
+  cases h with
+  | carve _ =>
+      exact carve_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | alias _ =>
+      exact alias_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | revoke _ =>
+      exact revoke_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | send _ =>
+      exact send_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | «seal» guard =>
+      exact seal_apply_preservesIsRevoked _ _ s guard did d hpre hrev d' hpost
+  | accept _ =>
+      exact accept_apply_preservesIsRevoked' _ _ s did d hpre hrev d' hpost
+  | reject _ =>
+      exact reject_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | sealedSend _ =>
+      exact sealedSend_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | create _ =>
+      exact create_apply_preservesIsRevoked_of_wf _ _ hwf.freshDomCounter hpre hrev hpost
+  | revokeDomain _ =>
+      exact revokeDomain_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | setPolicy _ =>
+      exact setPolicy_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | sendChannel _ =>
+      exact sendChannel_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | acceptChannel _ =>
+      exact acceptChannel_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | rejectChannel _ =>
+      exact rejectChannel_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | switchReturn _ =>
+      exact switchReturn_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | switch _ =>
+      exact switch_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | switchSuspended _ =>
+      exact switchSuspended_apply_preservesIsRevoked _ _ _ _ _ _ s did d hpre hrev d' hpost
+  | deliverInterrupt _ => sorry
+  | addVp _ =>
+      exact addVp_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | registerComm _ =>
+      exact registerComm_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | mapSelf _ =>
+      exact mapSelf_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
 
 /-! ### T4: parent immutable across the cascade (corollary) -/
 
