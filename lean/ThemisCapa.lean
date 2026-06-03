@@ -26,3 +26,4 @@ import ThemisCapa.O2SubtreeLocalityRev
 import ThemisCapa.FreshPending
 import ThemisCapa.O3IpcIsolation
 import ThemisCapa.O3PairIsolation
+import ThemisCapa.O3PendingPreserved
