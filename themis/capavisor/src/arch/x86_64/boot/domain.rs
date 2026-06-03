@@ -1,20 +1,21 @@
-//! Domain representation.
+//! Per-domain x86 hardware-page tracking (boot-time).
 //!
-//! A domain is the unit of isolation in Themis.  Per-VP hardware structures
-//! (VMCS, VAPIC) are allocated from the domain's META pool, which lives
-//! entirely inside `ThemisPlatform`.  This struct just tracks the physical
-//! addresses that were allocated for this domain.
+//! Tracks the physical addresses of VT-x-specific per-VP pages (VMCS,
+//! VAPIC) and per-domain shared bitmaps (I/O, MSR) allocated from the
+//! domain's META pool.  This is x86 boot scaffolding — the cross-arch
+//! domain abstraction lives in [`capability_engine::Domain`], and the
+//! per-domain runtime state (META allocator, doorbells, VCPU slots,
+//! …) lives in [`crate::platform::PlatformDomain`].
 //!
 //! VMXON regions are per-physical-core (not per-domain) and live in
-//! `ThemisPlatform::vmxon_phys`.
+//! [`crate::arch::ArchPlatformState`].
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-/// Opaque domain identifier.
-pub type DomainId = u64;
+use capability_engine::DomainId;
 
-/// Tracking struct for a domain's allocated hardware-VP page addresses.
+/// Tracking struct for a domain's allocated x86 hardware-VP page addresses.
 ///
 /// The actual frame allocator lives in `ThemisPlatform::PlatformDomain::meta`.
 /// Allocation is done via `ThemisPlatform::alloc_meta_frame()`.

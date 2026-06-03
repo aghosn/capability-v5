@@ -32,12 +32,6 @@ pub trait ArchVpOps {
     /// On x86 this is VMX exit reason 1; on ARM it would be the ESR_EL2 EC value.
     const EXTERNAL_INTERRUPT_EXIT_REASON: u32;
 
-    /// Allocate and initialize a VP for `domain_id` on logical CPU `cpu`.
-    fn create_vp(&mut self, domain_id: u64, cpu: u32) -> Result<Self::VpHandle, CapaError>;
-
-    /// Tear down a VP and free its arch resources.
-    fn destroy_vp(&mut self, vp: &mut Self::VpHandle);
-
     /// Enter the guest, wait for an exit, and fully decode it into a
     /// [`SemanticExit`]. Arch-internal exits (x86 XSETBV, INIT signal,
     /// interrupt-window drain) are handled inside this call and return

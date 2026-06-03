@@ -21,13 +21,14 @@ use alloc::vec::Vec;
 
 use crate::arch::acpi::AcpiInfo;
 use crate::arch::pci::PciDevice;
-use crate::domain::Domain;
+use crate::arch::x86_64::boot::domain::Domain;
 use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, UncacheableRanges};
 use crate::vmx::CpuFeatures;
 
 mod ap;
 mod capa;
+mod domain;
 mod launch;
 mod linux;
 mod platform;

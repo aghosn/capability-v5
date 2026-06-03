@@ -55,8 +55,6 @@ mod arch_traits;
 
 mod attestation;
 mod comm;
-#[cfg(target_arch = "x86_64")]
-mod domain;
 mod guest;
 mod hypercall;
 mod mem;

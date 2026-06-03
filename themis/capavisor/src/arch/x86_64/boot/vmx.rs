@@ -3,7 +3,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::domain::Domain;
+use super::domain::Domain;
 use crate::serial_println;
 
 use super::{PlatformInfo, VmxState};

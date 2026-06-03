@@ -48,14 +48,6 @@ impl ArchVpOps for Aarch64Platform {
     // Use a sentinel value; real impl would define a proper exit reason space.
     const EXTERNAL_INTERRUPT_EXIT_REASON: u32 = 0x100;
 
-    fn create_vp(&mut self, _domain_id: u64, _cpu: u32) -> Result<Self::VpHandle, CapaError> {
-        unimplemented!("aarch64: create_vp")
-    }
-
-    fn destroy_vp(&mut self, _vp: &mut Self::VpHandle) {
-        unimplemented!("aarch64: destroy_vp")
-    }
-
     fn run(&mut self, _vp: &mut Self::VpHandle) -> SemanticExit {
         // Real impl: ERET to EL1, trap back to EL2, decode ESR_EL2.EC
         // into SemanticExit (HVC → Hypercall, IRQ → ExternalInterrupt,

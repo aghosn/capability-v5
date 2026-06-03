@@ -66,20 +66,6 @@ impl ArchVpOps for X86Platform {
 
     const EXTERNAL_INTERRUPT_EXIT_REASON: u32 = 1; // VMX basic exit reason 1
 
-    fn create_vp(&mut self, _domain_id: u64, _cpu: u32) -> Result<Self::VpHandle, CapaError> {
-        // VP creation involves META allocation (VMCS, VAPIC, PID pages),
-        // VMCS field setup (vmcs::setup_vmcs_for_vp), and VMPTRLD.
-        // Currently done across domain.rs + vmcs.rs + boot.rs.
-        // Will be consolidated here in Phase A7.
-        unimplemented!("create_vp: wire up in Phase A7")
-    }
-
-    fn destroy_vp(&mut self, _vp: &mut Self::VpHandle) {
-        // Deactivate (VMCLEAR) and free META pages.
-        // Currently handled by PlatformDomain cleanup in RevokeDomain.
-        unimplemented!("destroy_vp: wire up in Phase A7")
-    }
-
     fn run(&mut self, vp: &mut Self::VpHandle) -> SemanticExit {
         let exit_reason = match unsafe { vp.run() } {
             Ok(reason) => reason,
