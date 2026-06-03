@@ -84,4 +84,19 @@ impl ArchDomain for ArchDomainState {
         // TODO(arm): free Stage-2 + SMMU page-tables.
         unimplemented!("destroy: aarch64 backend not yet implemented")
     }
+
+    fn tlb_handle(&self) -> Option<u64> {
+        // TODO(arm): return VMID-derived handle once Stage-2 is wired.
+        None
+    }
+
+    fn flush_tlb(&self) {
+        // TODO(arm): TLBI VMALLS12E1 / VMALLE1 by VMID.
+        unimplemented!("flush_tlb: aarch64 backend not yet implemented")
+    }
+}
+
+/// Apply a TLB-flush handle on the *current* CPU (no-op stub on AArch64).
+pub fn flush_tlb_handle(_handle: u64) {
+    // TODO(arm): TLBI by VMID once Stage-2 is wired.
 }

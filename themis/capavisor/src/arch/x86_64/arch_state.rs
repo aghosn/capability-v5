@@ -335,6 +335,33 @@ impl ArchDomain for ArchDomainState {
             slpt.free_all(root_meta);
         }
     }
+
+    fn tlb_handle(&self) -> Option<u64> {
+        self.ept.as_ref().map(|e| e.eptp())
+    }
+
+    fn flush_tlb(&self) {
+        if let Some(ept) = self.ept.as_ref() {
+            unsafe {
+                crate::vmx::invept(crate::vmx::INVEPT_SINGLE_CONTEXT, ept.eptp());
+            }
+        }
+    }
+}
+
+/// Apply an INVEPT(single-context) on the *current* CPU using a previously
+/// snapshotted EPTP handle.  Handle must come from
+/// [`ArchDomain::tlb_handle`] (or zero, in which case this is a no-op).
+///
+/// Used by the cross-core `TlbShootdown` handler so the receiver can flush
+/// without holding any reference to the originating (possibly-revoked)
+/// `PlatformDomain`.
+pub fn flush_tlb_handle(handle: u64) {
+    if handle != 0 {
+        unsafe {
+            crate::vmx::invept(crate::vmx::INVEPT_SINGLE_CONTEXT, handle);
+        }
+    }
 }
 
 // ── Private EPT helpers (formerly platform/helpers.rs) ──────────────────── //

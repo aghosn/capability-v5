@@ -421,7 +421,7 @@ impl ThemisPlatform {
         self.hhdm_offset.store(hhdm_offset, Ordering::Relaxed);
         if !self.domains.contains(domain_id) {
             self.domains
-                .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
+                .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id, self.num_cores));
         }
     }
 
@@ -528,17 +528,16 @@ impl ThemisPlatform {
         d.arch.vps_mut()[vp_id].put(vcpu);
     }
 
-    /// Execute INVEPT(single-context) for the given domain's EPTP on the
-    /// current core.  If the domain has no EPT (not yet mapped), this is a
-    /// no-op since there can be no cached translations.
-    #[cfg(target_arch = "x86_64")]
-    pub(crate) fn invept_for_domain(&self, domain_id: DomainId) {
+    /// Flush this domain's per-LP translation cache on the *current* CPU.
+    /// Cross-arch wrapper around [`ArchDomain::flush_tlb`] that also
+    /// clears the cache-presence bit so subsequent shootdowns do not
+    /// redundantly target this LP.
+    pub(crate) fn flush_local(&self, domain_id: DomainId) {
         if let Some(arc) = self.domains.get(domain_id) {
-            let d = arc.lock();
-            if let Some(ept) = d.arch.ept() {
-                unsafe {
-                    crate::vmx::invept(crate::vmx::INVEPT_SINGLE_CONTEXT, ept.eptp());
-                }
+            let pd = arc.lock();
+            pd.arch.flush_tlb();
+            if let Some(core) = self.get_current_core() {
+                pd.clear_cached_on(core);
             }
         }
     }
@@ -567,6 +566,13 @@ impl ThemisPlatform {
     ///
     /// Called during bootstrap (BSP and AP init) and on domain switch.
     pub fn set_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
+        // Drain any pending cross-core flushes BEFORE re-entering non-root
+        // mode.  This catches stale TlbShootdowns queued for a core that
+        // was in root mode while another core mutated an EPT it had
+        // cached — the engine's IPI/barrier path cannot reach root-mode
+        // cores, so the queue is the asynchronous channel.
+        self.apply_local_core_updates(core_id as CoreId);
+
         let dom_id = cap.read().data.id;
         self.cores[core_id]
             .domain_id
@@ -590,6 +596,14 @@ impl ThemisPlatform {
             .entry(dom_id)
             .or_default()
             .insert(core_id as CoreId);
+        drop(routing);
+        // Cache-presence: mark this core as having (potentially) cached
+        // second-stage entries for the new domain.  Set BEFORE any guest
+        // code can run on this core so a concurrent ChangeRights on the
+        // same domain (under update_lock) cannot miss us.
+        if let Some(arc) = self.domains.get(dom_id) {
+            arc.lock().mark_cached_on(core_id as CoreId);
+        }
     }
 
     /// Get the `CapabilityRef<Domain>` for the domain running on `core_id`.
@@ -655,19 +669,19 @@ impl ThemisPlatform {
         let mut queue = self.core_updates[core_id as usize].lock();
         while let Some(update) = queue.pop_front() {
             match update {
-                CoreUpdate::TlbShootdown => {
-                    #[cfg(target_arch = "x86_64")]
-                    {
-                        let dom = self.cores[core_id as usize]
-                            .domain_id
-                            .load(Ordering::Relaxed);
-                        if dom != IDLE_DOMAIN {
-                            self.invept_for_domain(dom);
-                        }
-                    }
-                    #[cfg(not(target_arch = "x86_64"))]
-                    {
-                        unimplemented!("TlbShootdown: arch backend not yet implemented")
+                CoreUpdate::TlbShootdown { domain, handle } => {
+                    // Flush by snapshotted handle — domain may already be
+                    // revoked by the initiator's apply_update(RevokeDomain),
+                    // but the EPT structures it pointed to are still valid
+                    // until *all* affected cores have INVEPT'd, so this is
+                    // safe (the destroyed domain freed its EPT pages back
+                    // into META, and META re-use is gated on these flushes
+                    // completing — the engine's barrier-1 enforces this).
+                    crate::arch::flush_tlb_handle(handle);
+                    // Best-effort: clear our cache-presence bit now that
+                    // the LP no longer has stale entries for this domain.
+                    if let Some(arc) = self.domains.get(domain) {
+                        arc.lock().clear_cached_on(core_id);
                     }
                 }
                 CoreUpdate::Switch { .. } => {
@@ -699,8 +713,11 @@ impl Platform for ThemisPlatform {
     }
 
     fn send_ipi(&self, core_id: CoreId) {
-        // Push TlbShootdown to target's queue before signaling.
-        self.push_core_update(core_id, CoreUpdate::TlbShootdown);
+        // NOTE: this only signals the target core to enter the cross-core
+        // poll/barrier protocol.  Per-domain TLB-shootdown payloads are
+        // pushed by `domain_cores` (called earlier in `Platform::execute`)
+        // so each affected core has the correct, eptp-snapshotted flush
+        // commands queued before the IPI lands.
 
         // Set the flag so the target core (if polling) can respond.
         self.ipi_pending[core_id as usize].store(true, Ordering::Release);
@@ -779,7 +796,7 @@ impl Platform for ThemisPlatform {
                 size,
                 physical,
                 rights,
-                ..
+                shootdown_required,
             } => {
                 let is_child = *domain != ROOT_DOMAIN_ID;
                 let arc = self
@@ -813,6 +830,16 @@ impl Platform for ThemisPlatform {
                 };
                 pd.arch
                     .change_rights(&self.arch, *address, *physical, *size as usize, rights, &mut ctx);
+                // Local flush when this is a permission-reduction or unmap
+                // (the engine pushes shootdowns to remote cores via
+                // `domain_cores` already; the initiator flushes itself
+                // here so the next VMENTER on this LP sees the new EPT).
+                if *shootdown_required {
+                    pd.arch.flush_tlb();
+                    if let Some(core) = self.get_current_core() {
+                        pd.clear_cached_on(core);
+                    }
+                }
             }
 
             Update::RevokeDomain { domain, .. } => {
@@ -824,6 +851,12 @@ impl Platform for ThemisPlatform {
                         None
                     };
                     let mut root_guard = root_arc.as_ref().map(|a| a.lock());
+                    // Local flush BEFORE tearing down EPT structures —
+                    // otherwise the next VMENTER on this LP could TLB-hit
+                    // a freed EPT entry.  Remote-core flushes were queued
+                    // earlier by `domain_cores` with a snapshot of the
+                    // EPTP, so `destroy` freeing the EPT here is safe.
+                    d.arch.flush_tlb();
                     d.arch.destroy(
                         &mut d.meta,
                         root_guard.as_mut().map(|g| &mut g.meta),
@@ -837,14 +870,8 @@ impl Platform for ThemisPlatform {
                 unsafe { core::ptr::write_bytes(virt, 0, *size as usize) };
             }
 
-            #[cfg(target_arch = "x86_64")]
             Update::FlushTLB { domain } => {
-                self.invept_for_domain(*domain);
-            }
-
-            #[cfg(not(target_arch = "x86_64"))]
-            Update::FlushTLB { .. } => {
-                unimplemented!("FlushTLB: arch backend not yet implemented")
+                self.flush_local(*domain);
             }
 
             Update::CommRegion {
@@ -893,7 +920,7 @@ impl Platform for ThemisPlatform {
         if !self.domains.contains(domain_id) {
             let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
             self.domains
-                .insert(domain_id, PlatformDomain::new(hhdm, parent_id));
+                .insert(domain_id, PlatformDomain::new(hhdm, parent_id, self.num_cores));
         }
     }
 
@@ -920,6 +947,10 @@ impl Platform for ThemisPlatform {
     }
 
     fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
+        // Drain any pending cross-core flushes BEFORE re-entering non-root
+        // mode (see comment on inherent `set_core_context`).
+        self.apply_local_core_updates(core_id);
+
         let domain_id = domain_cap.read().data.id;
         // Tier 1: capavisor's lock-free per-core state
         self.cores[core_id as usize]
@@ -950,6 +981,12 @@ impl Platform for ThemisPlatform {
             .entry(domain_id)
             .or_default()
             .insert(core_id);
+        drop(routing);
+        // Cache-presence bitmap (used by domain_cores for flush dispatch).
+        // Set BEFORE any guest code runs on this core.
+        if let Some(arc) = self.domains.get(domain_id) {
+            arc.lock().mark_cached_on(core_id);
+        }
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
@@ -977,6 +1014,46 @@ impl Platform for ThemisPlatform {
     }
 
     fn domain_cores(&self, domain_id: DomainId) -> alloc::vec::Vec<CoreId> {
+        // Drives the engine's `Platform::execute` cross-core dispatch in
+        // two complementary ways:
+        //
+        // (a) Pushes per-domain `TlbShootdown { domain, handle }` payloads
+        //     to *every* core that may have cached second-stage entries
+        //     for this domain (the `cached_on` bitmap — set on entry via
+        //     `set_core_context`, cleared lazily after each per-LP
+        //     INVEPT).  Cores currently in non-root mode will drain the
+        //     queue when they take the engine's IPI; cores currently in
+        //     root mode (capavisor monitor) will drain it on their next
+        //     VMENTER via `set_core_context` BEFORE running guest code.
+        //
+        // (b) Returns only the cores currently RUNNING this domain
+        //     (the `routing.domain_to_cores` live mapping).  These are
+        //     the cores the engine will IPI and wait for at barrier 0;
+        //     cores in root mode cannot take INIT VMEXITs and would
+        //     deadlock the barrier if returned here.
+        //
+        // The two paths together ensure every cached LP gets an INVEPT
+        // before its next VMENTER, without making the barrier protocol
+        // wait on cores that aren't in non-root mode.
+        if let Some(arc) = self.domains.get(domain_id) {
+            let pd = arc.lock();
+            let cached = pd.snapshot_cached_on();
+            let handle = pd.arch.tlb_handle().unwrap_or(0);
+            drop(pd);
+            if handle != 0 {
+                let current = self.get_current_core();
+                for &c in &cached {
+                    if Some(c) == current {
+                        // Local flush is performed inline by `apply_update`.
+                        continue;
+                    }
+                    self.push_core_update(
+                        c,
+                        CoreUpdate::TlbShootdown { domain: domain_id, handle },
+                    );
+                }
+            }
+        }
         self.routing
             .read()
             .domain_to_cores

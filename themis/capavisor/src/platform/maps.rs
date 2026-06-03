@@ -21,8 +21,16 @@ use super::domain::PlatformDomain;
 /// stubs for Phase 9 (domain switching / revocation).
 #[derive(Clone)]
 pub enum CoreUpdate {
-    /// Flush EPT TLB (INVEPT single-context) for the domain on this core.
-    TlbShootdown,
+    /// Flush per-LP second-stage cache for `domain` using the provided
+    /// `handle` (arch-specific: x86 EPTP, ARM VMID-derived; see
+    /// [`crate::arch_traits::ArchDomain::tlb_handle`]).
+    ///
+    /// The handle is snapshotted at queue time so the receiver can flush
+    /// without holding any reference to (a possibly-revoked) `domain`.
+    /// `domain` is also carried so the receiver can clear its own bit in
+    /// `PlatformDomain::cached_on` after flushing — a best-effort cleanup
+    /// (silently skipped if the domain was already revoked).
+    TlbShootdown { domain: DomainId, handle: u64 },
     /// Switch this core to a different domain/VP (Phase 9).
     #[allow(dead_code)]
     Switch {
@@ -41,7 +49,11 @@ pub enum CoreUpdate {
 impl core::fmt::Debug for CoreUpdate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CoreUpdate::TlbShootdown => write!(f, "TlbShootdown"),
+            CoreUpdate::TlbShootdown { domain, handle } => write!(
+                f,
+                "TlbShootdown {{ domain: {:?}, handle: {:#x} }}",
+                domain, handle
+            ),
             CoreUpdate::Switch { vp_id, .. } => {
                 write!(f, "Switch {{ vp_id: {} }}", vp_id)
             }

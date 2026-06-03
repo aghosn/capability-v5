@@ -55,4 +55,20 @@ pub trait ArchDomain {
     ///
     /// `root_meta` is `None` for the root domain (no IOMMU SLPT to free).
     fn destroy(&mut self, meta: &mut MetaAllocator, root_meta: Option<&mut MetaAllocator>);
+
+    /// Snapshot of the per-LP translation-cache handle for this domain
+    /// (x86: the EPTP; ARM: a VMID-derived value).  Returned as a raw
+    /// `u64` so it can be queued in a cross-arch [`CoreUpdate`] and
+    /// applied later via [`flush_tlb_handle`](crate::arch::flush_tlb_handle)
+    /// without holding any reference to the (possibly-revoked) domain.
+    ///
+    /// Returns `None` when no second-stage tables exist yet (a domain
+    /// that has never been entered cannot have cached translations).
+    fn tlb_handle(&self) -> Option<u64>;
+
+    /// Flush this domain's per-LP translation cache on the *current*
+    /// CPU.  Convenience wrapper around `tlb_handle()` +
+    /// [`flush_tlb_handle`](crate::arch::flush_tlb_handle); a no-op when
+    /// no second-stage tables exist yet.
+    fn flush_tlb(&self);
 }

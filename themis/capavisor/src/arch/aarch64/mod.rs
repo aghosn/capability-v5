@@ -18,4 +18,4 @@ pub mod vcpu;
 pub mod vectors;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
-pub use arch_state::{ArchDomainState, ArchPlatformState};
+pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};

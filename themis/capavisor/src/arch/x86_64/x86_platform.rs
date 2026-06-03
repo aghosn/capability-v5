@@ -217,7 +217,7 @@ impl ArchGuestPhysMap for X86Platform {
     }
 
     fn flush(&mut self, domain_id: &Self::MapHandle) {
-        self.platform().invept_for_domain(*domain_id);
+        self.platform().flush_local(*domain_id);
     }
 }
 
@@ -226,15 +226,16 @@ impl ArchGuestPhysMap for X86Platform {
 impl ArchCoreSignaling for X86Platform {
     fn send_ipi(&self, target_core: u32) {
         // Delegates to ThemisPlatform's Platform::send_ipi (capability engine trait).
-        // That method pushes CoreUpdate::TlbShootdown and sends INIT IPI
-        // via xAPIC ICR.
+        // That method just signals the target core to enter the cross-core
+        // poll/barrier protocol; per-domain TlbShootdown payloads are
+        // queued separately by `Platform::domain_cores`.
         use capability_engine::Platform;
         self.platform()
             .send_ipi(target_core as capability_engine::CoreId);
     }
 
     fn broadcast_flush(&self, domain_id: u64) {
-        self.platform().invept_for_domain(domain_id);
+        self.platform().flush_local(domain_id);
     }
 
     fn logical_core_id(&self) -> u32 {
