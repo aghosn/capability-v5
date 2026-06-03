@@ -23,3 +23,4 @@ import ThemisCapa.ParentStability
 import ThemisCapa.RevokeCascade
 import ThemisCapa.O2SubtreeLocality
 import ThemisCapa.O2SubtreeLocalityRev
+import ThemisCapa.O3IpcIsolation
