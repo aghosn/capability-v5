@@ -10,6 +10,7 @@ pub mod arch_state;
 pub mod boot;
 pub mod gdt;
 pub mod iommu_ir;
+pub mod iommu_dev;
 pub mod layout;
 pub mod msr_virt;
 pub mod page_walk;
@@ -27,3 +28,5 @@ pub mod hypercall;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};
+pub use iommu_dev::{assign_device, release_device};
+pub use iommu_ir::{invalidate_domain_irtes, program_domain_irtes};

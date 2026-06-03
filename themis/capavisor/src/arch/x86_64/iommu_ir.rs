@@ -188,7 +188,7 @@ use crate::platform::ThemisPlatform;
 ///    same vector.
 ///
 /// No-op when no DRHD is IR-capable, or when the child has no VPs yet.
-pub(crate) fn program_domain_irtes(
+pub fn program_domain_irtes(
     platform: &ThemisPlatform,
     child_cap: &CapabilityRef<Domain>,
 ) {
@@ -265,7 +265,7 @@ pub(crate) fn sync_irte_ndst(
 ///
 /// Called from `do_revoke_domain` after the capability engine removes the
 /// domain.  Clears all 256 entries for every IR-capable DRHD unit.
-pub(crate) fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
+pub fn invalidate_domain_irtes(platform: &ThemisPlatform, _child_id: DomainId) {
     if platform.arch.drhd_units().is_empty() {
         return;
     }

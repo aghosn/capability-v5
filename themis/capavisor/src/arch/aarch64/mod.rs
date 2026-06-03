@@ -19,3 +19,19 @@ pub mod vectors;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
 pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};
+
+// IOMMU device-assignment stubs (no SMMU yet).
+#[allow(unused_variables)]
+pub fn assign_device(_p: &crate::platform::ThemisPlatform, bdf: u16, domain_id: capability_engine::DomainId) {}
+#[allow(unused_variables)]
+pub fn release_device(_p: &crate::platform::ThemisPlatform, bdf: u16) {}
+
+// IOMMU interrupt-remapping stubs (VT-d only on x86; SMMU MSI-translation TBD).
+#[allow(unused_variables)]
+pub fn program_domain_irtes(
+    _p: &crate::platform::ThemisPlatform,
+    child: &capability_engine::CapabilityRef<capability_engine::Domain>,
+) {
+}
+#[allow(unused_variables)]
+pub fn invalidate_domain_irtes(_p: &crate::platform::ThemisPlatform, domain_id: capability_engine::DomainId) {}
