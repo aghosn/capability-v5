@@ -2885,11 +2885,25 @@ impl Capability<Domain> {
             .get_current_core()
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
 
-        if to_handle == 0 {
-            Self::switch_domain_return(caller, core_id, platform, None)
-        } else {
-            Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)
-        }
+        // Switch participates in the engine's shared capability lock so it
+        // serializes against destructive operations (ChangeRights /
+        // RevokeDomain) which take the exclusive lock via `execute`. Without
+        // this, a switch INTO a domain D can race with a concurrent
+        // ChangeRights ON D: D's EPT is mutated while this core's VMENTER
+        // walks the EPT into a fresh TLB, with no INVEPT directed at this
+        // core (the initiator's `domain_cores(D)` snapshot taken before our
+        // `set_core_context` finishes does not include us). The empty
+        // UpdateBatch skips the cross-core IPI/barrier path and only takes
+        // the shared cap lock — exactly the synchronisation we need.
+        let (ctx, _batch) = crate::platform::execute(platform, false, || {
+            let ctx = if to_handle == 0 {
+                Self::switch_domain_return(caller, core_id, platform, None)?
+            } else {
+                Self::switch_domain_forward(caller, to_handle, to_vp_id, core_id, platform)?
+            };
+            Ok((ctx, UpdateBatch::new()))
+        })?;
+        Ok(ctx)
     }
 
     /// Return switch that records a non-interrupt exit reason on the caller VP.
@@ -2905,7 +2919,13 @@ impl Capability<Domain> {
         let core_id = platform
             .get_current_core()
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
-        Self::switch_domain_return(caller, core_id, platform, Some(exit_reason))
+        // See comment on `switch`: the empty-batch `execute` here serialises
+        // the return-path `set_core_context` against destructive engine ops.
+        let (ctx, _batch) = crate::platform::execute(platform, false, || {
+            let ctx = Self::switch_domain_return(caller, core_id, platform, Some(exit_reason))?;
+            Ok((ctx, UpdateBatch::new()))
+        })?;
+        Ok(ctx)
     }
 
     /// Return path: unwind the VP call chain one step.
