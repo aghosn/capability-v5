@@ -3,9 +3,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use capability_engine::CoreId;
+use capability_engine::{CoreId, Rights};
 
-use crate::arch_traits::ArchPlatform;
+use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
+use crate::mem::MetaAllocator;
 
 // ── Per-domain hardware state ────────────────────────────────────────────── //
 
@@ -62,5 +63,25 @@ impl ArchPlatform for ArchPlatformState {
     fn current_core_id(&self) -> Option<CoreId> {
         // TODO(arm): read MPIDR_EL1 + look up in cpu_mpidrs.
         unimplemented!("current_core_id: aarch64 backend not yet implemented")
+    }
+}
+
+impl ArchDomain for ArchDomainState {
+    fn change_rights(
+        &mut self,
+        _arch_plat: &ArchPlatformState,
+        _gpa: u64,
+        _hpa: u64,
+        _size: usize,
+        _rights: &Rights,
+        _ctx: &mut ChangeRightsCtx<'_>,
+    ) {
+        // TODO(arm): Stage-2 + SMMU programming.
+        unimplemented!("change_rights: aarch64 backend not yet implemented")
+    }
+
+    fn destroy(&mut self, _meta: &mut MetaAllocator, _root_meta: Option<&mut MetaAllocator>) {
+        // TODO(arm): free Stage-2 + SMMU page-tables.
+        unimplemented!("destroy: aarch64 backend not yet implemented")
     }
 }

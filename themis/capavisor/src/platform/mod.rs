@@ -80,22 +80,16 @@ use capability_engine::{
 };
 
 use crate::arch::ArchPlatformState;
-#[cfg(target_arch = "x86_64")]
-use crate::arch::x86_64::layout::{LAPIC_MMIO_BASE, MMIO_PAGE_SIZE};
-use crate::arch_traits::ArchPlatform;
+use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 use crate::serial_println;
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::InactiveVcpu;
-#[cfg(target_arch = "x86_64")]
-use ept::Level;
 
-use crate::mem::{MetaAllocator, PhysRegion, UncacheableRanges};
+use crate::mem::{PhysRegion, UncacheableRanges};
 
 // ── Submodules ────────────────────────────────────────────────────────────── //
 
 mod domain;
-#[cfg(target_arch = "x86_64")]
-mod helpers;
 mod maps;
 mod sync;
 mod vcpu_slot;
@@ -108,8 +102,6 @@ pub use vcpu_slot::{CoreContext, VcpuSlot};
 
 use maps::{DomainTable, RoutingMaps};
 use sync::{Barrier, ExclusiveGuard, SharedGuard};
-#[cfg(target_arch = "x86_64")]
-use helpers::{map_range_typed, rights_to_ept_flags};
 
 // ── Constants ─────────────────────────────────────────────────────────────── //
 
@@ -127,29 +119,6 @@ const IDLE_VP: u32 = u32::MAX;
 /// from this domain's META pool — not from child domains — so that child
 /// META budgets are not consumed by hypervisor-internal structures.
 pub const ROOT_DOMAIN_ID: DomainId = 0;
-
-/// A frame allocator that routes alloc/free to the **root domain**'s META pool.
-///
-/// Used by IOMMU SLPT operations in `apply_update` so that child domains'
-/// META budgets are not consumed by hypervisor page-table pages.
-#[cfg(target_arch = "x86_64")]
-struct RootMetaProxy<'a>(&'a ThemisPlatform);
-
-#[cfg(target_arch = "x86_64")]
-impl ept::FrameAllocator for RootMetaProxy<'_> {
-    fn allocate_frame(&mut self) -> Option<u64> {
-        let arc = self.0.domains.get(ROOT_DOMAIN_ID)?;
-        let mut d = arc.lock();
-        let phys = d.meta.alloc_frame();
-        Some(phys)
-    }
-
-    fn free_frame(&mut self, phys: u64) {
-        if let Some(arc) = self.0.domains.get(ROOT_DOMAIN_ID) {
-            arc.lock().meta.free_frame(phys);
-        }
-    }
-}
 
 /// The Themis `Platform` implementation.
 pub struct ThemisPlatform {
@@ -264,28 +233,6 @@ impl ThemisPlatform {
     #[cfg(target_arch = "x86_64")]
     pub fn bsp_lapic_id(&self) -> u32 {
         self.arch.bsp_lapic_id()
-    }
-
-    /// Return the `Level` to use for IOMMU second-level page tables.
-    ///
-    /// Derived from the minimum AW (adjusted guest-address width) across all
-    /// DRHD units: AW=1 → `Level::L3` (39-bit), AW=2 → `Level::L4` (48-bit).
-    /// Falls back to `Level::L3` if no DRHD units are present.
-    #[cfg(target_arch = "x86_64")]
-    pub fn iommu_pt_level(&self) -> Level {
-        let min_aw = self
-            .arch
-            .drhd_units()
-            .iter()
-            .filter(|u| u.aw > 0)
-            .map(|u| u.aw)
-            .min()
-            .unwrap_or(1);
-        if min_aw >= 2 {
-            Level::L4
-        } else {
-            Level::L3
-        }
     }
 
     /// Reprogram a PCI device's IOMMU context entry to use `domain_id`'s
@@ -826,7 +773,6 @@ impl Platform for ThemisPlatform {
                 // not DMA targets — no IOMMU PT mapping needed here.
             }
 
-            #[cfg(target_arch = "x86_64")]
             Update::ChangeRights {
                 domain,
                 address,
@@ -835,111 +781,54 @@ impl Platform for ThemisPlatform {
                 rights,
                 ..
             } => {
-                let uc_ranges = alloc::sync::Arc::clone(&self.uc_ranges);
-                let iommu_level = self.iommu_pt_level();
-                // Only child domains (domain != ROOT_DOMAIN_ID) get a SLPT.
-                // dom0 uses passthrough context entries and needs no IOMMU PT.
                 let is_child = *domain != ROOT_DOMAIN_ID;
                 let arc = self
                     .domains
                     .get(*domain)
                     .expect("ChangeRights: unknown domain");
-                let mut d = arc.lock();
-                // Split the MutexGuard borrow into a disjoint field pointer so the
-                // borrow checker accepts simultaneous &mut ept and &mut meta.
-                let meta_ptr: *mut MetaAllocator = &mut d.meta;
 
-                // Child domain mapping GPA 0xFEE00000 (LAPIC base): record the HPA
-                // so ADD_VP can set APIC_ACCESS_ADDR in the child VMCS, enabling
-                // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
-                if is_child && *address == LAPIC_MMIO_BASE && *size == MMIO_PAGE_SIZE {
-                    d.arch.set_apic_access_phys(*physical);
-
-                    // When hardware does not support VIRTUALIZE_APIC_ACCESSES
-                    // (bit 0 of IA32_VMX_PROCBASED_CTLS2 allowed-1 field),
-                    // skip the EPT mapping so LAPIC MMIO accesses cause EPT
-                    // violations that are forwarded to CHV for emulation.
-                    let secondary_msr =
-                        unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
-                    let virt_apic_supported = ((secondary_msr >> 32) & 1) != 0;
-                    if !virt_apic_supported {
-                        serial_println!(
-                            "[APIC] VIRTUALIZE_APIC_ACCESSES not supported — \
-                             skipping EPT map for {:#x} (LAPIC via EPT violations)",
-                            *address
-                        );
-                        return;
-                    }
-                }
-
-                if rights.bits() == 0 {
-                    if let Some(ept) = d.arch.ept_mut() {
-                        // SAFETY: `ept` and `meta` are disjoint fields of PlatformDomain.
-                        ept.unmap_range(unsafe { &mut *meta_ptr }, *address, *size as usize);
-                    }
-                    if is_child {
-                        if let Some(slpt) = d.arch.iommu_pt_mut() {
-                            // SLPT pages are owned by root's META; use RootMetaProxy.
-                            slpt.unmap_range(&mut RootMetaProxy(self), *address, *size as usize);
-                        }
-                    }
+                // Lock root before child for IOMMU SLPT page allocations.
+                // Skipped when target IS root (no SLPT) or there is no root yet
+                // (boot-time root self-mapping, before dom0 is registered).
+                let root_arc = if is_child {
+                    Some(
+                        self.domains
+                            .get(ROOT_DOMAIN_ID)
+                            .expect("ChangeRights on child requires root domain"),
+                    )
                 } else {
-                    d.ensure_ept();
-                    if is_child {
-                        // SAFETY: child domain lock held; root domain lock acquired
-                        // inside RootMetaProxy. update_lock serialises all apply_update
-                        // calls so no other thread can hold the root domain lock here.
-                        d.ensure_iommu_pt(iommu_level, &mut RootMetaProxy(self));
-                    }
-                    let flags = rights_to_ept_flags(rights);
-                    // SAFETY: ept and meta are disjoint fields of PlatformDomain.
-                    let ept = d.arch.ept_mut().unwrap();
-                    map_range_typed(
-                        ept,
-                        unsafe { &mut *meta_ptr },
-                        *address,
-                        *physical,
-                        *size as usize,
-                        flags,
-                        &uc_ranges,
-                    );
-                    if is_child {
-                        if let Some(slpt) = d.arch.iommu_pt_mut() {
-                            // VT-d SLPT: same GPA→HPA mapping; no memory-type bits needed.
-                            slpt.map_range(
-                                &mut RootMetaProxy(self),
-                                *address,
-                                *physical,
-                                *size as usize,
-                                flags,
-                                ept::EptMemoryType::WB,
-                            );
-                        }
-                    }
-                }
+                    None
+                };
+                let mut root_guard = root_arc.as_ref().map(|a| a.lock());
+                let mut d = arc.lock();
+                // Split MutexGuard's DerefMut so meta and arch can be borrowed
+                // disjointly (they are separate fields of PlatformDomain).
+                let pd: &mut PlatformDomain = &mut d;
+                let mut ctx = ChangeRightsCtx {
+                    meta: &mut pd.meta,
+                    root_meta: root_guard.as_mut().map(|g| &mut g.meta),
+                    uc_ranges: &self.uc_ranges,
+                    hhdm_offset: self.hhdm_offset.load(Ordering::Relaxed),
+                    is_child,
+                };
+                pd.arch
+                    .change_rights(&self.arch, *address, *physical, *size as usize, rights, &mut ctx);
             }
 
-            #[cfg(not(target_arch = "x86_64"))]
-            Update::ChangeRights { .. } => {
-                unimplemented!("ChangeRights: arch backend not yet implemented")
-            }
-
-            #[cfg(target_arch = "x86_64")]
             Update::RevokeDomain { domain, .. } => {
                 if let Some(mut d) = self.domains.remove(*domain) {
-                    if let Some(ept) = d.arch.take_ept() {
-                        ept.free_all(&mut d.meta);
-                    }
-                    if let Some(slpt) = d.arch.take_iommu_pt() {
-                        // SLPT pages were allocated from root's META; return them there.
-                        slpt.free_all(&mut RootMetaProxy(self));
-                    }
+                    let is_child = *domain != ROOT_DOMAIN_ID;
+                    let root_arc = if is_child {
+                        self.domains.get(ROOT_DOMAIN_ID)
+                    } else {
+                        None
+                    };
+                    let mut root_guard = root_arc.as_ref().map(|a| a.lock());
+                    d.arch.destroy(
+                        &mut d.meta,
+                        root_guard.as_mut().map(|g| &mut g.meta),
+                    );
                 }
-            }
-
-            #[cfg(not(target_arch = "x86_64"))]
-            Update::RevokeDomain { .. } => {
-                unimplemented!("RevokeDomain: arch backend not yet implemented")
             }
 
             Update::ZeroMemory { address, size } => {

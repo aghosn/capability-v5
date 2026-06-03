@@ -10,12 +10,14 @@ use alloc::vec::Vec;
 
 use core::cell::UnsafeCell;
 
-use capability_engine::CoreId;
-use ept::EptMapper;
+use capability_engine::{CoreId, Rights};
+use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 
-use crate::arch::x86_64::layout::{APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE};
-use crate::arch_traits::ArchPlatform;
+use crate::arch::x86_64::layout::{APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE, MMIO_PAGE_SIZE};
+use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
+use crate::mem::{MetaAllocator, UncacheableRanges};
 use crate::platform::VcpuSlot;
+use crate::serial_println;
 
 use super::acpi::DhrdUnit;
 
@@ -63,14 +65,6 @@ impl ArchDomainState {
         self.ept.as_ref()
     }
 
-    pub fn ept_mut(&mut self) -> Option<&mut EptMapper> {
-        self.ept.as_mut()
-    }
-
-    pub fn take_ept(&mut self) -> Option<EptMapper> {
-        self.ept.take()
-    }
-
     /// Ensure EPT root exists, allocating from the given allocator if needed.
     pub fn ensure_ept(&mut self, alloc: &mut impl ept::FrameAllocator, hhdm_offset: u64) {
         if self.ept.is_none() {
@@ -82,26 +76,6 @@ impl ArchDomainState {
 
     pub fn iommu_pt(&self) -> Option<&EptMapper> {
         self.iommu_pt.as_ref()
-    }
-
-    pub fn iommu_pt_mut(&mut self) -> Option<&mut EptMapper> {
-        self.iommu_pt.as_mut()
-    }
-
-    pub fn take_iommu_pt(&mut self) -> Option<EptMapper> {
-        self.iommu_pt.take()
-    }
-
-    /// Ensure IOMMU SLPT root exists at the given level.
-    pub fn ensure_iommu_pt(
-        &mut self,
-        level: ept::Level,
-        alloc: &mut impl ept::FrameAllocator,
-        hhdm_offset: u64,
-    ) {
-        if self.iommu_pt.is_none() {
-            self.iommu_pt = Some(EptMapper::alloc_root_at_level(alloc, hhdm_offset, level));
-        }
     }
 
     // ── VP slot accessors ────────────────────────────────────────────────── //
@@ -200,6 +174,26 @@ impl ArchPlatformState {
         &mut self.drhd_units
     }
 
+    /// Return the [`Level`] to use for IOMMU second-level page tables.
+    ///
+    /// Derived from the minimum AW (adjusted guest-address width) across all
+    /// DRHD units: AW=1 → `Level::L3` (39-bit), AW=2 → `Level::L4` (48-bit).
+    /// Falls back to `Level::L3` if no DRHD units are present.
+    pub fn iommu_pt_level(&self) -> Level {
+        let min_aw = self
+            .drhd_units
+            .iter()
+            .filter(|u| u.aw > 0)
+            .map(|u| u.aw)
+            .min()
+            .unwrap_or(1);
+        if min_aw >= 2 {
+            Level::L4
+        } else {
+            Level::L3
+        }
+    }
+
     /// Install the per-core LAPIC ID table. Called once by the BSP during
     /// boot, before APs are launched.
     pub fn set_lapic_ids(&self, ids: Vec<u32>) {
@@ -254,4 +248,148 @@ impl ArchPlatform for ArchPlatformState {
             .position(|&id| id == lapic_id)
             .map(|i| i as CoreId)
     }
+}
+
+// ── ArchDomain impl (per-domain second-stage / IOMMU operations) ────────── //
+
+impl ArchDomain for ArchDomainState {
+    fn change_rights(
+        &mut self,
+        arch_plat: &ArchPlatformState,
+        gpa: u64,
+        hpa: u64,
+        size: usize,
+        rights: &Rights,
+        ctx: &mut ChangeRightsCtx<'_>,
+    ) {
+        // LAPIC MMIO mapping in a child domain: record the HPA so ADD_VP can
+        // set APIC_ACCESS_ADDR in the child VMCS, enabling
+        // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
+        if ctx.is_child && gpa == LAPIC_MMIO_BASE && size as u64 == MMIO_PAGE_SIZE {
+            self.set_apic_access_phys(hpa);
+
+            // When hardware does not support VIRTUALIZE_APIC_ACCESSES (bit 0
+            // of IA32_VMX_PROCBASED_CTLS2 allowed-1 field), skip the EPT
+            // mapping so LAPIC MMIO accesses cause EPT violations forwarded
+            // to CHV for emulation.
+            let secondary_msr = unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
+            let virt_apic_supported = ((secondary_msr >> 32) & 1) != 0;
+            if !virt_apic_supported {
+                serial_println!(
+                    "[APIC] VIRTUALIZE_APIC_ACCESSES not supported — \
+                     skipping EPT map for {:#x} (LAPIC via EPT violations)",
+                    gpa
+                );
+                return;
+            }
+        }
+
+        if rights.bits() == 0 {
+            // Unmap.
+            if let Some(ept) = self.ept.as_mut() {
+                ept.unmap_range(ctx.meta, gpa, size);
+            }
+            if ctx.is_child {
+                if let (Some(slpt), Some(root_meta)) =
+                    (self.iommu_pt.as_mut(), ctx.root_meta.as_deref_mut())
+                {
+                    slpt.unmap_range(root_meta, gpa, size);
+                }
+            }
+        } else {
+            // Map. Lazily allocate EPT and SLPT roots.
+            if self.ept.is_none() {
+                self.ept = Some(EptMapper::alloc_root(ctx.meta, ctx.hhdm_offset));
+            }
+            if ctx.is_child && self.iommu_pt.is_none() {
+                let level = arch_plat.iommu_pt_level();
+                let root_meta = ctx
+                    .root_meta
+                    .as_deref_mut()
+                    .expect("ChangeRights on child requires root_meta for IOMMU SLPT");
+                self.iommu_pt =
+                    Some(EptMapper::alloc_root_at_level(root_meta, ctx.hhdm_offset, level));
+            }
+
+            let flags = rights_to_ept_flags(rights);
+            let ept = self.ept.as_mut().unwrap();
+            map_range_typed(ept, ctx.meta, gpa, hpa, size, flags, ctx.uc_ranges);
+            if ctx.is_child {
+                if let (Some(slpt), Some(root_meta)) =
+                    (self.iommu_pt.as_mut(), ctx.root_meta.as_deref_mut())
+                {
+                    // VT-d SLPT: same GPA→HPA mapping; no memory-type bits needed.
+                    slpt.map_range(root_meta, gpa, hpa, size, flags, EptMemoryType::WB);
+                }
+            }
+        }
+    }
+
+    fn destroy(&mut self, meta: &mut MetaAllocator, root_meta: Option<&mut MetaAllocator>) {
+        if let Some(ept) = self.ept.take() {
+            ept.free_all(meta);
+        }
+        if let Some(slpt) = self.iommu_pt.take() {
+            // SLPT pages were allocated from root's META; return them there.
+            let root_meta = root_meta.expect("destroy(): child domain requires root_meta");
+            slpt.free_all(root_meta);
+        }
+    }
+}
+
+// ── Private EPT helpers (formerly platform/helpers.rs) ──────────────────── //
+
+/// Map `[gpa, gpa+size)` → `[hpa, hpa+size)` into `ept`, splitting the range
+/// at UC boundaries so that MMIO sub-ranges use [`EptMemoryType::UC`] and all
+/// other sub-ranges use [`EptMemoryType::WB`].
+fn map_range_typed(
+    ept: &mut EptMapper,
+    meta: &mut MetaAllocator,
+    gpa: u64,
+    hpa: u64,
+    size: usize,
+    flags: EptEntryFlags,
+    uc_ranges: &UncacheableRanges,
+) {
+    let mut cur_gpa = gpa;
+    let mut cur_hpa = hpa;
+    let mut remaining = size;
+
+    while remaining > 0 {
+        match uc_ranges.first_overlap(cur_hpa, remaining as u64) {
+            None => {
+                ept.map_range(meta, cur_gpa, cur_hpa, remaining, flags, EptMemoryType::WB);
+                return;
+            }
+            Some((ov_start, ov_end)) => {
+                if ov_start > cur_hpa {
+                    let wb_size = (ov_start - cur_hpa) as usize;
+                    ept.map_range(meta, cur_gpa, cur_hpa, wb_size, flags, EptMemoryType::WB);
+                    cur_gpa += wb_size as u64;
+                    cur_hpa += wb_size as u64;
+                    remaining -= wb_size;
+                }
+                let uc_size = ((ov_end - cur_hpa) as usize).min(remaining);
+                ept.map_range(meta, cur_gpa, cur_hpa, uc_size, flags, EptMemoryType::UC);
+                cur_gpa += uc_size as u64;
+                cur_hpa += uc_size as u64;
+                remaining -= uc_size;
+            }
+        }
+    }
+}
+
+/// Convert capability-engine `Rights` to EPT entry permission flags.
+fn rights_to_ept_flags(rights: &Rights) -> EptEntryFlags {
+    let mut flags = EptEntryFlags::empty();
+    if rights.read() {
+        flags |= EptEntryFlags::READ;
+    }
+    if rights.write() {
+        flags |= EptEntryFlags::WRITE;
+    }
+    if rights.execute() {
+        flags |= EptEntryFlags::SUPERVISOR_EXECUTE | EptEntryFlags::USER_EXECUTE;
+    }
+    flags
 }

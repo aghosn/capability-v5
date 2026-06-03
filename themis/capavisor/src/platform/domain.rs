@@ -9,8 +9,6 @@ use alloc::vec::Vec;
 use capability_engine::DomainId;
 
 use crate::arch::ArchDomainState;
-#[cfg(target_arch = "x86_64")]
-use ept::Level;
 use crate::mem::MetaAllocator;
 use crate::serial_println;
 
@@ -435,14 +433,5 @@ impl PlatformDomain {
     #[cfg(target_arch = "x86_64")]
     pub fn ensure_ept(&mut self) {
         self.arch.ensure_ept(&mut self.meta, self.hhdm_offset);
-    }
-
-    /// Ensure an IOMMU second-level page table (SLPT) root exists for this domain.
-    ///
-    /// `alloc` should be backed by the **root domain's** META pool so that child
-    /// domain META budgets are not consumed by hypervisor page-table pages.
-    #[cfg(target_arch = "x86_64")]
-    pub(super) fn ensure_iommu_pt(&mut self, level: Level, alloc: &mut impl ept::FrameAllocator) {
-        self.arch.ensure_iommu_pt(level, alloc, self.hhdm_offset);
     }
 }
