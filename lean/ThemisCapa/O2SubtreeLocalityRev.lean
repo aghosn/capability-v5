@@ -31,6 +31,7 @@
     `step_subtree_membership_iff` — final results.
 -/
 import ThemisCapa.O2SubtreeLocality
+import ThemisCapa.ParentStability
 
 namespace ThemisCapa
 
@@ -86,41 +87,103 @@ private theorem updDomain_parent_stable
     rw [he]
 
 -- ════════════════════════════════════════════════════════════════════
--- § 2.  step_dom_parent_stable (TODO: per-action proof)
+-- § 2.  step_dom_parent_stable
 -- ════════════════════════════════════════════════════════════════════
 
-/-
-  The key structural lemma:
+/-- For any single step from a well-formed state, the `parent` field
+    of any pre-existing domain record is stable.
 
-      step s a s' →
-      s.getDom d = some d_pre → s'.getDom d = some d_post →
-      d_pre.parent = d_post.parent
+    Thin wrapper around `step_parent_immutable` from
+    `ParentStability.lean`, with the equation oriented for use in the
+    reverse-direction subtree-locality proofs. -/
+theorem step_dom_parent_stable
+    {s s' : SpecState} {a : Action}
+    (hwf : WellFormed s) (hstep : step s a s')
+    {d : DomId} {d_pre d_post : Domain}
+    (hpre : s.getDom d = some d_pre) (hpost : s'.getDom d = some d_post) :
+    d_pre.parent = d_post.parent :=
+  (step_parent_immutable hwf hstep hpre hpost).symm
 
-  Plan: `cases hstep` produces 21 action constructors. For each,
-  the apply function is structurally a chain of
-  `updMem` / `updDomCap` / `freshMem` / `freshDomCap` (transparent
-  to `getDom` — see § 1) and `updDomain` / `freshDom`.
+-- ════════════════════════════════════════════════════════════════════
+-- § 3.  Reverse direction: ancestor / subtree membership
+-- ════════════════════════════════════════════════════════════════════
 
-  - updDomain x f  — discharge with `updDomain_parent_stable` provided
-    that `f` does not rewrite the `parent` field. Inspection of every
-    spec apply in `Step.lean` confirms this for every action: the
-    closures only touch `memHandles`, `domHandles`, `childrenDoms`,
-    `pendingMemCaps`, `pendingDomCaps`, `commBindings`, `addressMap`,
-    `mappedGpas`, `nextHandle`, `nextPendingId`, `status`, `policy`,
-    `vps`, `frozenHandles` — never `parent`.
+/-- Auxiliary: `IsAncestorOf s' a d` lifts to `IsAncestorOf s a d` for
+    any pre-existing `d`, and additionally `a` itself pre-exists in
+    `s`. The induction simultaneously walks up the chain in `s'` and
+    propagates pre-existence using `DomainParentResolves` on `s`.
 
-  - freshDom dm  — only fires in `create_apply`. The fresh `nextDomId`
-    has `s.getDom nextDomId = none` pre, so the lemma's `hpre`
-    hypothesis cannot match for this id — the case is vacuously
-    discharged when d = nextDomId. For d ≠ nextDomId, the insert
-    is transparent (`Arena.find?_insert_other`).
+    This works for any step (no `hout` required) because parent edges
+    of pre-existing domains are stable across single steps. -/
+private theorem isAncestor_rev_aux
+    {s s' : SpecState} {a : Action}
+    (hwf : WellFormed s) (hstep : step s a s')
+    {root d : DomId} (h : IsAncestorOf s' root d) {d_pre : Domain}
+    (hpre : s.getDom d = some d_pre) :
+    IsAncestorOf s root d ∧ (s.getDom root).isSome := by
+  induction h with
+  | @direct p c hp =>
+    obtain ⟨d', hd', hpa⟩ := hp
+    have heq : d_pre.parent = some p := by
+      have hep := step_dom_parent_stable hwf hstep hpre hd'
+      rw [hep]; exact hpa
+    have hres : (s.getDom p).isSome :=
+      hwf.domainTreeWf.parentResolves c d_pre hpre p heq
+    exact ⟨.direct ⟨d_pre, hpre, heq⟩, hres⟩
+  | @step a' m c hpa hac ih =>
+    obtain ⟨hanc_s, hm_some⟩ := ih hpre
+    obtain ⟨m_pre, hm_pre⟩ := Option.isSome_iff_exists.mp hm_some
+    obtain ⟨m', hm', hpa_eq⟩ := hpa
+    have heq : m_pre.parent = some a' := by
+      have hep := step_dom_parent_stable hwf hstep hm_pre hm'
+      rw [hep]; exact hpa_eq
+    have hres : (s.getDom a').isSome :=
+      hwf.domainTreeWf.parentResolves m m_pre hm_pre a' heq
+    exact ⟨.step ⟨m_pre, hm_pre, heq⟩ hanc_s, hres⟩
 
-  - domains.remove target  — only fires in `revokeDomain_apply`.
-    Symmetric: for d = target, post-state's `getDom` returns `none`,
-    so `hpost` cannot match. For d ≠ target, transparent.
+/-- `IsAncestorOf` lifts back from `s'` to `s` for pre-existing
+    domains. -/
+theorem step_subtree_isAncestor_rev
+    {s s' : SpecState} {a : Action}
+    (hwf : WellFormed s) (hstep : step s a s')
+    {root d : DomId} (h : IsAncestorOf s' root d) {d_pre : Domain}
+    (hpre : s.getDom d = some d_pre) :
+    IsAncestorOf s root d :=
+  (isAncestor_rev_aux hwf hstep h hpre).1
 
-  Per-action proof sketches: ~10–15 LOC each, ~250 LOC total.
-  Deferred to a follow-up session.
--/
+/-- Subtree membership lifts back from `s'` to `s` for pre-existing
+    domains. -/
+theorem step_subtree_membership_rev
+    {s s' : SpecState} {a : Action}
+    (hwf : WellFormed s) (hstep : step s a s')
+    {root d : DomId} (h : InSubtree s' root d) {d_pre : Domain}
+    (hpre : s.getDom d = some d_pre) :
+    InSubtree s root d := by
+  rcases h with heq | hanc
+  · exact Or.inl heq
+  · exact Or.inr (step_subtree_isAncestor_rev hwf hstep hanc hpre)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § 4.  Set equality on the carrier of pre-existing domains
+-- ════════════════════════════════════════════════════════════════════
+
+/-- **Subtree-membership equality (pre-existing carrier).**
+
+    For any pre-existing domain `d` (i.e. `s.getDom d = some _`),
+    membership in `subtree(root)` agrees between `s` and `s'` across
+    a footprint-disjoint step. This is the full O2 set-equality
+    statement; together with the forward direction it gives the
+    natural symmetric formulation. -/
+theorem step_subtree_membership_iff
+    {s s' : SpecState} {a : Action}
+    (hwf : WellFormed s) (hstep : step s a s')
+    {root : DomId}
+    (hout : ∀ d, a.affectsDom s d → ¬ InSubtree s root d)
+    {d : DomId} {d_pre : Domain}
+    (hpre : s.getDom d = some d_pre) :
+    InSubtree s' root d ↔ InSubtree s root d := by
+  refine ⟨?_, ?_⟩
+  · intro h; exact step_subtree_membership_rev hwf hstep h hpre
+  · intro h; exact step_subtree_membership_fwd hstep hout h
 
 end ThemisCapa
