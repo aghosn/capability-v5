@@ -11,6 +11,7 @@
 import ThemisCapa.Basic
 import ThemisCapa.State
 import ThemisCapa.Arena
+import ThemisCapa.DomainTree
 
 namespace ThemisCapa
 
@@ -116,5 +117,6 @@ structure WellFormed (s : SpecState) : Prop where
   freshDomCounter    : FreshDomCounter s
   freshDomCapCounter : FreshDomCapCounter s
   addressMapsWf      : AddressMapsWf s
+  domainTreeWf       : DomainTreeWf s
 
 end ThemisCapa

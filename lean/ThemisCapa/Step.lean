@@ -557,6 +557,14 @@ structure RevokeDomainGuard (s : SpecState) (caller : DomId) (handle : LocalHand
                             ∀ t, s.getDom dc.targetDom = some t →
                             t.childrenDoms = [] ∧ t.memHandles = [] ∧
                             t.domHandles = []
+  /-- Engine semantics: caller is target's parent. The engine's
+      `revoke_child_domain` looks up the child via the caller's own
+      domain table, so the caller is necessarily the parent. -/
+  targetParentIsCaller : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            ∀ t, s.getDom dc.targetDom = some t →
+                            t.parent = some caller
 
 /-- Pure state update for a successful leaf `revokeDomain`.
 

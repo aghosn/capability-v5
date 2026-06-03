@@ -62,6 +62,55 @@ private theorem addressMapsWf_of_preimage
   rw [← hAMeq]
   exact hwf did d hd
 
+/-- Lift `DomainTreeWf` from `s` to `s'` when the post-state `getDom`
+    is a "preimage" of the pre-state: every post-domain has a matching
+    pre-domain with the same `parent` and `childrenDoms`, and the
+    `isSome` predicate moves both ways. -/
+private theorem domainTreeWf_of_preimage
+    {s s' : SpecState}
+    (hwf : DomainTreeWf s)
+    (hSomePost : ∀ did, (s'.getDom did).isSome → (s.getDom did).isSome)
+    (hSomePre  : ∀ did, (s.getDom did).isSome → (s'.getDom did).isSome)
+    (hParent   : ∀ did d d', s.getDom did = some d → s'.getDom did = some d' →
+                 d.parent = d'.parent)
+    (hChildren : ∀ did d d', s.getDom did = some d → s'.getDom did = some d' →
+                 d.childrenDoms = d'.childrenDoms) :
+    DomainTreeWf s' := by
+  refine ⟨?pres, ?chres, ?bidi, ?pc⟩
+  · intro did d' hd' pid hpar
+    have hsome : (s.getDom did).isSome := hSomePost did (by rw [hd']; rfl)
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp hsome
+    have hpEq := hParent did d d' hd hd'
+    have hpar' : d.parent = some pid := by rw [hpEq]; exact hpar
+    exact hSomePre pid (hwf.parentResolves did d hd pid hpar')
+  · intro did d' hd' cid hcid
+    have hsome : (s.getDom did).isSome := hSomePost did (by rw [hd']; rfl)
+    obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp hsome
+    have hcEq := hChildren did d d' hd hd'
+    have hcid' : cid ∈ d.childrenDoms := by rw [hcEq]; exact hcid
+    exact hSomePre cid (hwf.childResolves did d hd cid hcid')
+  · intro pid p' hp' cid hcid c' hc'
+    have hpsome : (s.getDom pid).isSome := hSomePost pid (by rw [hp']; rfl)
+    obtain ⟨p, hp⟩ := Option.isSome_iff_exists.mp hpsome
+    have hpcEq := hChildren pid p p' hp hp'
+    have hcid' : cid ∈ p.childrenDoms := by rw [hpcEq]; exact hcid
+    have hcsome : (s.getDom cid).isSome := hSomePost cid (by rw [hc']; rfl)
+    obtain ⟨c, hc⟩ := Option.isSome_iff_exists.mp hcsome
+    have hcpEq := hParent cid c c' hc hc'
+    have hcpre : c.parent = some pid := hwf.bidirectional pid p hp cid hcid' c hc
+    rw [← hcpEq]; exact hcpre
+  · intro cid c' hc' pid hcpar p' hp'
+    have hcsome : (s.getDom cid).isSome := hSomePost cid (by rw [hc']; rfl)
+    obtain ⟨c, hc⟩ := Option.isSome_iff_exists.mp hcsome
+    have hcpEq := hParent cid c c' hc hc'
+    have hcpar' : c.parent = some pid := by rw [hcpEq]; exact hcpar
+    have hpsome : (s.getDom pid).isSome := hSomePost pid (by rw [hp']; rfl)
+    obtain ⟨p, hp⟩ := Option.isSome_iff_exists.mp hpsome
+    have hpcEq := hChildren pid p p' hp hp'
+    have hpre : cid ∈ p.childrenDoms :=
+      hwf.parentChild cid c hc pid hcpar' p hp
+    rw [← hpcEq]; exact hpre
+
 /-- Concrete form of `carve_apply` when the parent lookup succeeds. -/
 private theorem carve_apply_eq_of_parent
     (s : SpecState) (caller : DomId) (parent : MemCapId)
@@ -182,7 +231,7 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -570,6 +619,48 @@ theorem carve_preserves_wellformed
         rw [hdid]; exact hdc
       · rw [hgetD, if_neg hdid] at hd'
         exact ⟨d', hd', rfl⟩
+  case dtw =>
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did h
+      have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at h
+      by_cases hdid : did = caller
+      · rw [hdid]; rw [hdc]; rfl
+      · rw [if_neg hdid] at h; exact h
+    · intro did h
+      have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD]
+      by_cases hdid : did = caller
+      · rw [if_pos hdid]; rfl
+      · rw [if_neg hdid]; exact h
+    · intro did d d' hd hd'
+      have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at hd'
+      by_cases hdid : did = caller
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hdc] at hd; injection hd with hd_eq
+        injection hd' with hd'_eq
+        rw [← hd_eq, ← hd'_eq]
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
+    · intro did d d' hd hd'
+      have hgetD := carve_apply_getDom s caller parent access attrs p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at hd'
+      by_cases hdid : did = caller
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hdc] at hd; injection hd with hd_eq
+        injection hd' with hd'_eq
+        rw [← hd_eq, ← hd'_eq]
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
 
 /-! ## Alias
 
@@ -663,7 +754,7 @@ theorem alias_preserves_wellformed
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -991,6 +1082,48 @@ theorem alias_preserves_wellformed
         rw [hdid]; exact hdc
       · rw [hgetD, if_neg hdid] at hd'
         exact ⟨d', hd', rfl⟩
+  case dtw =>
+    rcases hdc : s.getDom caller with _ | dc
+    · exact absurd guard.callerExists (by simp [hdc])
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did h
+      have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at h
+      by_cases hdid : did = caller
+      · rw [hdid]; rw [hdc]; rfl
+      · rw [if_neg hdid] at h; exact h
+    · intro did h
+      have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD]
+      by_cases hdid : did = caller
+      · rw [if_pos hdid]; rfl
+      · rw [if_neg hdid]; exact h
+    · intro did d d' hd hd'
+      have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at hd'
+      by_cases hdid : did = caller
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hdc] at hd; injection hd with hd_eq
+        injection hd' with hd'_eq
+        rw [← hd_eq, ← hd'_eq]
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
+    · intro did d d' hd hd'
+      have hgetD := alias_apply_getDom s caller parent access p dc hpOpt hdc did
+      simp only at hgetD
+      rw [hgetD] at hd'
+      by_cases hdid : did = caller
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hdc] at hd; injection hd with hd_eq
+        injection hd' with hd'_eq
+        rw [← hd_eq, ← hd'_eq]
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
 
 /-! ## Revoke
 
@@ -1156,7 +1289,7 @@ theorem revoke_preserves_wellformed
               (Arena.update_unique_keys _ _ _ hwf.unique.domains)
     · simp only [if_neg hv]
       exact Arena.update_unique_keys _ _ _ hwf.unique.domains
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1492,6 +1625,42 @@ theorem revoke_preserves_wellformed
         · rw [← hd']
     · rw [if_neg hdid] at hd'
       exact ⟨d', hd', rfl⟩
+  case dtw =>
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did h
+      rw [revoke_apply_getDom s caller target t ht pid htp did] at h
+      by_cases hdid : did = t.owner
+      · rw [hdid] at h ⊢
+        rw [if_pos rfl] at h
+        rcases hpre : s.getDom t.owner with _ | dpre <;> simp [hpre] at h ⊢
+      · rw [if_neg hdid] at h; exact h
+    · intro did h
+      rw [revoke_apply_getDom s caller target t ht pid htp did]
+      by_cases hdid : did = t.owner
+      · rw [hdid] at h ⊢
+        rw [if_pos rfl]
+        rcases hpre : s.getDom t.owner with _ | dpre <;> simp [hpre] at h ⊢
+      · rw [if_neg hdid]; exact h
+    · intro did d d' hd hd'
+      rw [revoke_apply_getDom s caller target t ht pid htp did] at hd'
+      by_cases hdid : did = t.owner
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
+    · intro did d d' hd hd'
+      rw [revoke_apply_getDom s caller target t ht pid htp did] at hd'
+      by_cases hdid : did = t.owner
+      · subst hdid; rw [if_pos rfl] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
 
 /-! ## Send (unsealed path)
 
@@ -1589,7 +1758,7 @@ theorem send_apply_preserves_wellformed
         (send_apply s caller receiver cap).getMem id = s.getMem id := by
     intro id hidC
     rw [send_apply_getMem, if_neg hidC]
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1852,6 +2021,64 @@ theorem send_apply_preserves_wellformed
           · rw [← hd']
       · rw [if_neg hdidR] at hd'
         exact ⟨d', hd', rfl⟩
+  case dtw =>
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did h
+      rw [send_apply_getDom s caller receiver cap hne did] at h
+      by_cases hdidC : did = caller
+      · rw [hdidC] at h ⊢
+        rw [if_pos rfl] at h
+        rcases hpre : s.getDom caller with _ | dpre <;> simp [hpre] at h ⊢
+      · rw [if_neg hdidC] at h
+        by_cases hdidR : did = receiver
+        · rw [hdidR] at h ⊢
+          rw [if_pos rfl] at h
+          rcases hpre : s.getDom receiver with _ | dpre <;> simp [hpre] at h ⊢
+        · rw [if_neg hdidR] at h; exact h
+    · intro did h
+      rw [send_apply_getDom s caller receiver cap hne did]
+      by_cases hdidC : did = caller
+      · rw [hdidC] at h ⊢
+        rw [if_pos rfl]
+        rcases hpre : s.getDom caller with _ | dpre <;> simp [hpre] at h ⊢
+      · rw [if_neg hdidC]
+        by_cases hdidR : did = receiver
+        · rw [hdidR] at h ⊢
+          rw [if_pos rfl]
+          rcases hpre : s.getDom receiver with _ | dpre <;> simp [hpre] at h ⊢
+        · rw [if_neg hdidR]; exact h
+    · intro did d d' hd hd'
+      rw [send_apply_getDom s caller receiver cap hne did] at hd'
+      by_cases hdidC : did = caller
+      · rw [hdidC] at hd; rw [if_pos hdidC] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdidC] at hd'
+        by_cases hdidR : did = receiver
+        · rw [hdidR] at hd; rw [if_pos hdidR] at hd'
+          rw [hd] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          rw [← hd']
+        · rw [if_neg hdidR] at hd'
+          rw [hd] at hd'; injection hd' with he
+          rw [← he]
+    · intro did d d' hd hd'
+      rw [send_apply_getDom s caller receiver cap hne did] at hd'
+      by_cases hdidC : did = caller
+      · rw [hdidC] at hd; rw [if_pos hdidC] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdidC] at hd'
+        by_cases hdidR : did = receiver
+        · rw [hdidR] at hd; rw [if_pos hdidR] at hd'
+          rw [hd] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          rw [← hd']
+        · rw [if_neg hdidR] at hd'
+          rw [hd] at hd'; injection hd' with he
+          rw [← he]
 
 /-- Thin wrapper: `send_preserves_wellformed` discharges WF preservation
     for the labelled step by forwarding to `send_apply_preserves_wellformed`.
@@ -1926,7 +2153,7 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2013,6 +2240,44 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
+  case dtw =>
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did h
+      rw [hDomEq] at h
+      by_cases hdid : did = dc.targetDom
+      · rw [if_pos hdid] at h
+        rcases hpre : s.getDom did with _ | dpre
+        · rw [hpre] at h; cases h
+        · rfl
+      · rw [if_neg hdid] at h; exact h
+    · intro did h
+      rw [hDomEq]
+      by_cases hdid : did = dc.targetDom
+      · rw [if_pos hdid]
+        rcases hpre : s.getDom did with _ | dpre
+        · rw [hpre] at h; cases h
+        · rfl
+      · rw [if_neg hdid]; exact h
+    · intro did d d' hd hd'
+      rw [hDomEq] at hd'
+      by_cases hdid : did = dc.targetDom
+      · rw [if_pos hdid] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
+    · intro did d d' hd hd'
+      rw [hDomEq] at hd'
+      by_cases hdid : did = dc.targetDom
+      · rw [if_pos hdid] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd']
+      · rw [if_neg hdid] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
 
 /-! ### Reject / Accept preserve WellFormed -/
 
@@ -2024,7 +2289,9 @@ private theorem wf_preserved_under_handle_invariant_updDomain
     {s : SpecState} (hwf : WellFormed s)
     (did : DomId) (f : Domain → Domain)
     (hHandles : ∀ d, (f d).memHandles = d.memHandles)
-    (hAddrMap : ∀ d, (f d).addressMap = d.addressMap) :
+    (hAddrMap : ∀ d, (f d).addressMap = d.addressMap)
+    (hParentF : ∀ d, (f d).parent = d.parent)
+    (hChildrenF : ∀ d, (f d).childrenDoms = d.childrenDoms) :
     WellFormed (s.updDomain did f) := by
   have hMem : ∀ id, (s.updDomain did f).getMem id = s.getMem id := by
     intro id; rfl
@@ -2050,7 +2317,7 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case u =>
     refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
     show ((s.updDomain did f).domains).UniqueKeys
@@ -2123,6 +2390,68 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
+  case dtw =>
+    apply domainTreeWf_of_preimage hwf.domainTreeWf
+    · intro did' h
+      by_cases hd : did = did'
+      · subst hd
+        have heq : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+          change ((s.domains.update did f)).find? did = _
+          rw [Arena.find?_update_eq_map]; rfl
+        rw [heq] at h
+        rcases hpre : s.getDom did with _ | dpre <;> simp [hpre] at h ⊢
+      · have hne : did' ≠ did := fun heq => hd heq.symm
+        have heq : (s.updDomain did f).getDom did' = s.getDom did' := by
+          change ((s.domains.update did f)).find? did' = _
+          exact Arena.find?_update_other _ _ _ _ hne
+        rw [heq] at h; exact h
+    · intro did' h
+      by_cases hd : did = did'
+      · subst hd
+        have heq : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+          change ((s.domains.update did f)).find? did = _
+          rw [Arena.find?_update_eq_map]; rfl
+        rw [heq]
+        rcases hpre : s.getDom did with _ | dpre <;> simp [hpre] at h ⊢
+      · have hne : did' ≠ did := fun heq => hd heq.symm
+        have heq : (s.updDomain did f).getDom did' = s.getDom did' := by
+          change ((s.domains.update did f)).find? did' = _
+          exact Arena.find?_update_other _ _ _ _ hne
+        rw [heq]; exact h
+    · intro did' d d' hd hd'
+      by_cases h : did = did'
+      · subst h
+        have heq : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+          change ((s.domains.update did f)).find? did = _
+          rw [Arena.find?_update_eq_map]; rfl
+        rw [heq] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd', hParentF]
+      · have hne : did' ≠ did := fun heq => h heq.symm
+        have heq : (s.updDomain did f).getDom did' = s.getDom did' := by
+          change ((s.domains.update did f)).find? did' = _
+          exact Arena.find?_update_other _ _ _ _ hne
+        rw [heq] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
+    · intro did' d d' hd hd'
+      by_cases h : did = did'
+      · subst h
+        have heq : (s.updDomain did f).getDom did = (s.getDom did).map f := by
+          change ((s.domains.update did f)).find? did = _
+          rw [Arena.find?_update_eq_map]; rfl
+        rw [heq] at hd'
+        rw [hd] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        rw [← hd', hChildrenF]
+      · have hne : did' ≠ did := fun heq => h heq.symm
+        have heq : (s.updDomain did f).getDom did' = s.getDom did' := by
+          change ((s.domains.update did f)).find? did' = _
+          exact Arena.find?_update_other _ _ _ _ hne
+        rw [heq] at hd'
+        rw [hd] at hd'; injection hd' with he
+        rw [← he]
 
 theorem reject_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -2135,13 +2464,13 @@ theorem reject_preserves_wellformed
       (fun d => { d with pendingMemCaps :=
                           d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
     wf_preserved_under_handle_invariant_updDomain hwf receiver _
-      (fun _ => rfl) (fun _ => rfl)
+      (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
   rcases h : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
     with _ | pe
   · simp only [h]; exact hwf₁
   · simp only [h]
     exact wf_preserved_under_handle_invariant_updDomain hwf₁
-            pe.senderDomainId _ (fun _ => rfl) (fun _ => rfl)
+            pe.senderDomainId _ (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
 theorem accept_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -2170,12 +2499,12 @@ theorem accept_preserves_wellformed
           (fun d' => { d' with pendingMemCaps :=
                               d'.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
       wf_preserved_under_handle_invariant_updDomain hwfSend
-        receiver _ (fun _ => rfl) (fun _ => rfl)
+        receiver _ (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
     exact wf_preserved_under_handle_invariant_updDomain hwf₂
                     pe.senderDomainId
                     (fun d' => { d' with frozenHandles :=
                               d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
-                    (fun _ => rfl) (fun _ => rfl)
+                    (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
 /-! ### Sealed send preserves WellFormed -/
 
@@ -2194,10 +2523,10 @@ theorem sealedSend_preserves_wellformed
     have hwf₁ : WellFormed (s.updDomain caller
         (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })) :=
       wf_preserved_under_handle_invariant_updDomain hwf caller _
-        (fun _ => rfl) (fun _ => rfl)
+        (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
     -- Step 2: enqueue pending entry on receiver.
     exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
-            (fun _ => rfl) (fun _ => rfl)
+            (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
 /-! ### Create preserves WellFormed
 
@@ -2280,7 +2609,7 @@ theorem create_preserves_wellformed
   have hNextDom : (create_apply s caller policy).nextDomId = s.nextDomId + 1 := rfl
   have hNextDomCap :
       (create_apply s caller policy).nextDomCapId = s.nextDomCapId + 1 := rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2427,6 +2756,194 @@ theorem create_preserves_wellformed
           exact hwf.addressMapsWf did dpre hpre
       · rw [if_neg h2] at hd'
         exact hwf.addressMapsWf did d' hd'
+  case dtw =>
+    -- Helper: lift `(s.getDom x).isSome` to `(s'.getDom x).isSome`.
+    have hLift : ∀ x, (s.getDom x).isSome →
+        ((create_apply s caller policy).getDom x).isSome := by
+      intro x hx
+      rw [hDomEq]
+      by_cases h1 : x = s.nextDomId
+      · rw [if_pos h1]; rfl
+      · rw [if_neg h1]
+        by_cases h2 : x = caller
+        · rw [if_pos h2]
+          rcases hpre : s.getDom x with _ | dpre <;> simp [hpre] at hx ⊢
+        · rw [if_neg h2]; exact hx
+    refine ⟨?pres, ?chres, ?bidi, ?pc⟩
+    · -- DomainParentResolves
+      intro did d hd pid hpar
+      rw [hDomEq] at hd
+      by_cases h1 : did = s.nextDomId
+      · rw [if_pos h1] at hd
+        injection hd with hd_eq
+        rw [← hd_eq] at hpar
+        have hpcaller : pid = caller := by
+          have : (freshChildDomain caller policy).parent = some pid := hpar
+          change some caller = some pid at this
+          injection this with h; exact h.symm
+        rw [hpcaller]
+        exact hLift caller (by rw [hdcaller]; rfl)
+      · rw [if_neg h1] at hd
+        by_cases h2 : did = caller
+        · rw [if_pos h2] at hd
+          rcases hpre : s.getDom did with _ | dpre
+          · rw [hpre] at hd; cases hd
+          · rw [hpre] at hd
+            simp only [Option.map_some, Option.some.injEq] at hd
+            have hpar' : dpre.parent = some pid := by rw [← hd] at hpar; exact hpar
+            exact hLift pid (hwf.domainTreeWf.parentResolves did dpre hpre pid hpar')
+        · rw [if_neg h2] at hd
+          exact hLift pid (hwf.domainTreeWf.parentResolves did d hd pid hpar)
+    · -- DomainChildResolves
+      intro did d hd cid hcid
+      rw [hDomEq] at hd
+      by_cases h1 : did = s.nextDomId
+      · rw [if_pos h1] at hd
+        injection hd with hd_eq
+        rw [← hd_eq] at hcid
+        exact absurd hcid (by intro h; cases h)
+      · rw [if_neg h1] at hd
+        by_cases h2 : did = caller
+        · rw [if_pos h2] at hd
+          rcases hpre : s.getDom did with _ | dpre
+          · rw [hpre] at hd; cases hd
+          · rw [hpre] at hd
+            simp only [Option.map_some, Option.some.injEq] at hd
+            have hcd : d.childrenDoms = dpre.childrenDoms ++ [s.nextDomId] := by
+              rw [← hd]
+            rw [hcd, List.mem_append, List.mem_singleton] at hcid
+            rcases hcid with hold | hnew
+            · exact hLift cid (hwf.domainTreeWf.childResolves did dpre hpre cid hold)
+            · rw [hnew, hDomEq, if_pos rfl]; rfl
+        · rw [if_neg h2] at hd
+          exact hLift cid (hwf.domainTreeWf.childResolves did d hd cid hcid)
+    · -- DomainTreeBidirectional
+      intro pid p hp cid hcid c hc
+      rw [hDomEq] at hp hc
+      by_cases hp1 : pid = s.nextDomId
+      · rw [if_pos hp1] at hp
+        injection hp with hp_eq
+        rw [← hp_eq] at hcid
+        exact absurd hcid (by intro h; cases h)
+      · rw [if_neg hp1] at hp
+        by_cases hp2 : pid = caller
+        · rw [if_pos hp2] at hp
+          rcases hppre : s.getDom pid with _ | ppre
+          · rw [hppre] at hp; cases hp
+          · rw [hppre] at hp
+            simp only [Option.map_some, Option.some.injEq] at hp
+            have hpcd : p.childrenDoms = ppre.childrenDoms ++ [s.nextDomId] := by
+              rw [← hp]
+            rw [hpcd, List.mem_append, List.mem_singleton] at hcid
+            rcases hcid with hold | hnew
+            · by_cases hc1 : cid = s.nextDomId
+              · exfalso
+                rw [hc1] at hold
+                have hres := hwf.domainTreeWf.childResolves pid ppre hppre s.nextDomId hold
+                obtain ⟨dx, hdx⟩ := Option.isSome_iff_exists.mp hres
+                exact Nat.lt_irrefl _ (hwf.freshDomCounter _
+                  (Arena.mem_keys_of_find?_some _ _ _ hdx))
+              · rw [if_neg hc1] at hc
+                by_cases hc2 : cid = caller
+                · rw [if_pos hc2] at hc
+                  rcases hcpre : s.getDom cid with _ | cpre
+                  · rw [hcpre] at hc; cases hc
+                  · rw [hcpre] at hc
+                    simp only [Option.map_some, Option.some.injEq] at hc
+                    have hcpar : c.parent = cpre.parent := by rw [← hc]
+                    rw [hcpar]
+                    exact hwf.domainTreeWf.bidirectional pid ppre hppre cid hold cpre hcpre
+                · rw [if_neg hc2] at hc
+                  exact hwf.domainTreeWf.bidirectional pid ppre hppre cid hold c hc
+            · rw [hnew, if_pos rfl] at hc
+              injection hc with hc_eq
+              rw [← hc_eq]
+              show (freshChildDomain caller policy).parent = some pid
+              change some caller = some pid
+              rw [hp2]
+        · rw [if_neg hp2] at hp
+          by_cases hc1 : cid = s.nextDomId
+          · exfalso
+            have hres := hwf.domainTreeWf.childResolves pid p hp s.nextDomId
+              (by rw [← hc1]; exact hcid)
+            obtain ⟨dx, hdx⟩ := Option.isSome_iff_exists.mp hres
+            exact Nat.lt_irrefl _ (hwf.freshDomCounter _
+              (Arena.mem_keys_of_find?_some _ _ _ hdx))
+          · rw [if_neg hc1] at hc
+            by_cases hc2 : cid = caller
+            · rw [if_pos hc2] at hc
+              rcases hcpre : s.getDom cid with _ | cpre
+              · rw [hcpre] at hc; cases hc
+              · rw [hcpre] at hc
+                simp only [Option.map_some, Option.some.injEq] at hc
+                have hcpar : c.parent = cpre.parent := by rw [← hc]
+                rw [hcpar]
+                exact hwf.domainTreeWf.bidirectional pid p hp cid hcid cpre hcpre
+            · rw [if_neg hc2] at hc
+              exact hwf.domainTreeWf.bidirectional pid p hp cid hcid c hc
+    · -- DomainTreeParentChild
+      intro cid c hc pid hcpar p hp
+      rw [hDomEq] at hc hp
+      by_cases hc1 : cid = s.nextDomId
+      · rw [if_pos hc1] at hc
+        injection hc with hc_eq
+        rw [← hc_eq] at hcpar
+        change some caller = some pid at hcpar
+        injection hcpar with hpid_eq
+        rw [← hpid_eq] at hp
+        rw [if_neg hcallerNeFresh, if_pos rfl, hdcaller] at hp
+        injection hp with hp_eq
+        rw [← hp_eq, hc1]
+        simp
+      · rw [if_neg hc1] at hc
+        by_cases hc2 : cid = caller
+        · rw [if_pos hc2] at hc
+          rcases hcpre : s.getDom cid with _ | cpre
+          · rw [hcpre] at hc; cases hc
+          · rw [hcpre] at hc
+            simp only [Option.map_some, Option.some.injEq] at hc
+            have hcpar' : cpre.parent = some pid := by rw [← hc] at hcpar; exact hcpar
+            have hpres : (s.getDom pid).isSome :=
+              hwf.domainTreeWf.parentResolves cid cpre hcpre pid hcpar'
+            obtain ⟨ppre, hppre⟩ := Option.isSome_iff_exists.mp hpres
+            by_cases hp1 : pid = s.nextDomId
+            · exfalso; rw [hp1] at hppre
+              exact Nat.lt_irrefl _ (hwf.freshDomCounter _
+                (Arena.mem_keys_of_find?_some _ _ _ hppre))
+            · rw [if_neg hp1] at hp
+              by_cases hp2 : pid = caller
+              · rw [if_pos hp2, hppre] at hp
+                simp only [Option.map_some, Option.some.injEq] at hp
+                have hpcd : p.childrenDoms = ppre.childrenDoms ++ [s.nextDomId] := by
+                  rw [← hp]
+                rw [hpcd]
+                exact List.mem_append_left _
+                  (hwf.domainTreeWf.parentChild cid cpre hcpre pid hcpar' ppre hppre)
+              · rw [if_neg hp2, hppre] at hp
+                injection hp with hp_eq
+                rw [← hp_eq]
+                exact hwf.domainTreeWf.parentChild cid cpre hcpre pid hcpar' ppre hppre
+        · rw [if_neg hc2] at hc
+          have hpres : (s.getDom pid).isSome :=
+            hwf.domainTreeWf.parentResolves cid c hc pid hcpar
+          obtain ⟨ppre, hppre⟩ := Option.isSome_iff_exists.mp hpres
+          by_cases hp1 : pid = s.nextDomId
+          · exfalso; rw [hp1] at hppre
+            exact Nat.lt_irrefl _ (hwf.freshDomCounter _
+              (Arena.mem_keys_of_find?_some _ _ _ hppre))
+          · rw [if_neg hp1] at hp
+            by_cases hp2 : pid = caller
+            · rw [if_pos hp2, hppre] at hp
+              simp only [Option.map_some, Option.some.injEq] at hp
+              have hpcd : p.childrenDoms = ppre.childrenDoms ++ [s.nextDomId] := by
+                rw [← hp]
+              rw [hpcd]
+              exact List.mem_append_left _
+                (hwf.domainTreeWf.parentChild cid c hc pid hcpar ppre hppre)
+            · rw [if_neg hp2, hppre] at hp
+              injection hp with hp_eq
+              rw [← hp_eq]
+              exact hwf.domainTreeWf.parentChild cid c hc pid hcpar ppre hppre
 
 /-! ### RevokeDomain preserves WellFormed
 
@@ -2510,7 +3027,7 @@ theorem revokeDomain_preserves_wellformed
     · rw [h, Arena.find?_remove_same, if_pos rfl]
     · rw [Arena.find?_remove_other _ _ _ h, if_neg h]
       rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2630,6 +3147,172 @@ theorem revokeDomain_preserves_wellformed
         rw [← hd']
       · rw [if_neg h2] at hd'
         exact ⟨d', hd', rfl⟩
+  case dtw =>
+    obtain ⟨t, ht⟩ :=
+      Option.isSome_iff_exists.mp (guard.targetExists dcaller hdcaller dcId hdcId dc hdc)
+    have hTLeaf : t.childrenDoms = [] :=
+      (guard.targetIsLeaf dcaller hdcaller dcId hdcId dc hdc t ht).1
+    have hTPar : t.parent = some caller :=
+      guard.targetParentIsCaller dcaller hdcaller dcId hdcId dc hdc t ht
+    -- No pre-state domain has target as parent (target is leaf).
+    have hNoneHasTargetParent :
+        ∀ did d, s.getDom did = some d → d.parent ≠ some dc.targetDom := by
+      intro did d hd hbad
+      have hmem : did ∈ t.childrenDoms :=
+        hwf.domainTreeWf.parentChild did d hd dc.targetDom hbad t ht
+      rw [hTLeaf] at hmem; cases hmem
+    have hLiftDom : ∀ id, (s.getDom id).isSome → id ≠ dc.targetDom →
+        ((revokeDomain_apply s caller handle).getDom id).isSome := by
+      intro id hsome hne
+      rw [hDomEq, if_neg hne]
+      by_cases hcc : id = caller
+      · rw [if_pos hcc]
+        rcases hg : s.getDom id with _ | dx
+        · rw [hg] at hsome; cases hsome
+        · rfl
+      · rw [if_neg hcc]; exact hsome
+    refine ⟨?pres, ?chres, ?bidi, ?pc⟩
+    · -- DomainParentResolves
+      intro did d' hd' pid hpar
+      rw [hDomEq] at hd'
+      by_cases h1 : did = dc.targetDom
+      · rw [if_pos h1] at hd'; cases hd'
+      · rw [if_neg h1] at hd'
+        have hpidNeT : pid ≠ dc.targetDom := by
+          intro hbad
+          by_cases h2 : did = caller
+          · subst did
+            rw [if_pos rfl, hdcaller] at hd'
+            simp only [Option.map_some, Option.some.injEq] at hd'
+            have : d'.parent = dcaller.parent := by rw [← hd']
+            rw [this] at hpar
+            exact hNoneHasTargetParent caller dcaller hdcaller (by rw [hpar, hbad])
+          · rw [if_neg h2] at hd'
+            exact hNoneHasTargetParent did d' hd' (by rw [hpar, hbad])
+        by_cases h2 : did = caller
+        · subst did
+          rw [if_pos rfl, hdcaller] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          have hp_eq : d'.parent = dcaller.parent := by rw [← hd']
+          rw [hp_eq] at hpar
+          have hres := hwf.domainTreeWf.parentResolves caller dcaller hdcaller pid hpar
+          exact hLiftDom pid hres hpidNeT
+        · rw [if_neg h2] at hd'
+          have hres := hwf.domainTreeWf.parentResolves did d' hd' pid hpar
+          exact hLiftDom pid hres hpidNeT
+    · -- DomainChildResolves
+      intro did d' hd' cid hcid
+      rw [hDomEq] at hd'
+      by_cases h1 : did = dc.targetDom
+      · rw [if_pos h1] at hd'; cases hd'
+      · rw [if_neg h1] at hd'
+        by_cases h2 : did = caller
+        · subst did
+          rw [if_pos rfl, hdcaller] at hd'
+          simp only [Option.map_some, Option.some.injEq] at hd'
+          have hch_eq : d'.childrenDoms =
+              dcaller.childrenDoms.filter (· ≠ dc.targetDom) := by rw [← hd']
+          rw [hch_eq, List.mem_filter] at hcid
+          have hcidPre : cid ∈ dcaller.childrenDoms := hcid.1
+          have hcidNeT : cid ≠ dc.targetDom := by
+            have := hcid.2
+            simp at this; exact this
+          have hres := hwf.domainTreeWf.childResolves caller dcaller hdcaller cid hcidPre
+          exact hLiftDom cid hres hcidNeT
+        · rw [if_neg h2] at hd'
+          have hres := hwf.domainTreeWf.childResolves did d' hd' cid hcid
+          obtain ⟨c, hc⟩ := Option.isSome_iff_exists.mp hres
+          have hcidNeT : cid ≠ dc.targetDom := by
+            intro hbad
+            have hcpar : c.parent = some did :=
+              hwf.domainTreeWf.bidirectional did d' hd' cid hcid c hc
+            rw [hbad, ht] at hc; injection hc with hc_eq
+            rw [← hc_eq] at hcpar
+            rw [hTPar] at hcpar
+            injection hcpar with hCallerEq
+            exact h2 hCallerEq.symm
+          exact hLiftDom cid hres hcidNeT
+    · -- DomainTreeBidirectional
+      intro pid p' hp' cid hcid c' hc'
+      rw [hDomEq] at hp' hc'
+      by_cases hp1 : pid = dc.targetDom
+      · rw [if_pos hp1] at hp'; cases hp'
+      · rw [if_neg hp1] at hp'
+        by_cases hc1 : cid = dc.targetDom
+        · rw [if_pos hc1] at hc'; cases hc'
+        · rw [if_neg hc1] at hc'
+          by_cases hp2 : pid = caller
+          · subst pid
+            rw [if_pos rfl, hdcaller] at hp'
+            simp only [Option.map_some, Option.some.injEq] at hp'
+            have hch_eq : p'.childrenDoms =
+                dcaller.childrenDoms.filter (· ≠ dc.targetDom) := by rw [← hp']
+            rw [hch_eq, List.mem_filter] at hcid
+            have hcidPre : cid ∈ dcaller.childrenDoms := hcid.1
+            by_cases hc2 : cid = caller
+            · subst cid
+              rw [if_pos rfl, hdcaller] at hc'
+              simp only [Option.map_some, Option.some.injEq] at hc'
+              have hp_eq : c'.parent = dcaller.parent := by rw [← hc']
+              rw [hp_eq]
+              exact hwf.domainTreeWf.bidirectional caller dcaller hdcaller caller hcidPre dcaller hdcaller
+            · rw [if_neg hc2] at hc'
+              exact hwf.domainTreeWf.bidirectional caller dcaller hdcaller cid hcidPre c' hc'
+          · rw [if_neg hp2] at hp'
+            by_cases hc2 : cid = caller
+            · subst cid
+              rw [if_pos rfl, hdcaller] at hc'
+              simp only [Option.map_some, Option.some.injEq] at hc'
+              have hp_eq : c'.parent = dcaller.parent := by rw [← hc']
+              rw [hp_eq]
+              exact hwf.domainTreeWf.bidirectional pid p' hp' caller hcid dcaller hdcaller
+            · rw [if_neg hc2] at hc'
+              exact hwf.domainTreeWf.bidirectional pid p' hp' cid hcid c' hc'
+    · -- DomainTreeParentChild
+      intro cid c' hc' pid hcpar p' hp'
+      rw [hDomEq] at hc' hp'
+      by_cases hc1 : cid = dc.targetDom
+      · rw [if_pos hc1] at hc'; cases hc'
+      · rw [if_neg hc1] at hc'
+        by_cases hp1 : pid = dc.targetDom
+        · -- pid = target. Derive contradiction.
+          rw [if_pos hp1] at hp'; cases hp'
+        · rw [if_neg hp1] at hp'
+          by_cases hc2 : cid = caller
+          · subst cid
+            rw [if_pos rfl, hdcaller] at hc'
+            simp only [Option.map_some, Option.some.injEq] at hc'
+            have hp_eq : c'.parent = dcaller.parent := by rw [← hc']
+            rw [hp_eq] at hcpar
+            have hpre := hwf.domainTreeWf.parentChild caller dcaller hdcaller pid hcpar
+            by_cases hp2 : pid = caller
+            · subst pid
+              rw [if_pos rfl, hdcaller] at hp'
+              simp only [Option.map_some, Option.some.injEq] at hp'
+              have hch_eq : p'.childrenDoms =
+                  dcaller.childrenDoms.filter (· ≠ dc.targetDom) := by rw [← hp']
+              rw [hch_eq, List.mem_filter]
+              refine ⟨?_, by simp; intro hbad; exact hc1 hbad⟩
+              exact hpre dcaller hdcaller
+            · rw [if_neg hp2] at hp'
+              exact hpre p' hp'
+          · rw [if_neg hc2] at hc'
+            rcases hpre' : s.getDom cid with _ | cpre
+            · rw [hpre'] at hc'; cases hc'
+            · rw [hpre'] at hc'; injection hc' with he
+              have hcpar' : cpre.parent = some pid := by rw [he]; exact hcpar
+              have hpre := hwf.domainTreeWf.parentChild cid cpre hpre' pid hcpar'
+              by_cases hp2 : pid = caller
+              · subst pid
+                rw [if_pos rfl, hdcaller] at hp'
+                simp only [Option.map_some, Option.some.injEq] at hp'
+                have hch_eq : p'.childrenDoms =
+                    dcaller.childrenDoms.filter (· ≠ dc.targetDom) := by rw [← hp']
+                rw [hch_eq, List.mem_filter]
+                refine ⟨?_, by simp; intro hbad; exact hc1 hbad⟩
+                exact hpre dcaller hdcaller
+              · rw [if_neg hp2] at hp'
+                exact hpre p' hp'
 
 end ThemisCapa
 
