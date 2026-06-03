@@ -901,62 +901,12 @@ pub extern "C" fn _start_rust(fdt_ptr: u64) -> ! {
 // ── AP entry point ───────────────────────────────────────────────────────── //
 
 /// Application processor entry point — called by Limine for each AP.
+///
+/// Thin trampoline; the real x86 AP bring-up lives in
+/// [`crate::arch::x86_64::boot::ap_run`].
 #[cfg(target_arch = "x86_64")]
 pub(crate) unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
-    while SERIAL_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    serial_println!("  AP {} (LAPIC {}) ready", cpu.id, cpu.lapic_id);
-    SERIAL_LOCK.store(false, Ordering::Release);
-
-    AP_READY_COUNT.fetch_add(1, Ordering::Release);
-
-    // ── Spin until BSP sets AP_LAUNCH_READY ──────────────────────────────── //
-    while !AP_LAUNCH_READY.load(Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-
-    let id = cpu.id as usize;
-
-    // Take the InactiveVcpu from PlatformDomain (dom0, vp_id = id).
-    let platform_ptr = PLATFORM_PTR.load(Ordering::Relaxed);
-    assert!(!platform_ptr.is_null(), "AP{}: PLATFORM_PTR is null", id);
-    let platform = unsafe { &*platform_ptr };
-
-    let vmxon_phys = platform.vmxon_phys(id);
-
-    // Enable VMX on this AP.
-    crate::vmx::enable_vmx_on_core(vmxon_phys).expect("AP VMXON failed");
-
-    // Set XCR0 to full feature set before VMLAUNCH.
-    {
-        let cr4 = x86::controlregs::cr4();
-        x86::controlregs::cr4_write(cr4 | x86::controlregs::Cr4::CR4_ENABLE_OS_XSAVE);
-
-        let cpuid_d = core::arch::x86_64::__cpuid_count(0xD, 0);
-        let max_xcr0 = (((cpuid_d.edx as u64) << 32) | (cpuid_d.eax as u64)) | 1;
-        core::arch::asm!(
-            "xsetbv",
-            in("ecx") 0u32,
-            in("eax") max_xcr0 as u32,
-            in("edx") (max_xcr0 >> 32) as u32,
-            options(nomem, nostack),
-        );
-    }
-
-    let inactive = platform
-        .take_vcpu(0, id)
-        .unwrap_or_else(|| panic!("AP{}: no InactiveVcpu in PlatformDomain", id));
-
-    let active = inactive.activate().expect("AP activate failed");
-
-    // Wrap in platform-agnostic Vp and enter the generic monitor loop.
-    let arch = crate::arch::x86_64::x86_platform::X86Platform::new(platform as *const _);
-    let mut vp = crate::arch_traits::types::Vp::new(arch, active);
-    monitor::monitor_loop(&mut vp);
+    crate::arch::x86_64::boot::ap_run(cpu)
 }
 
 // ── Panic handler ────────────────────────────────────────────────────────── //

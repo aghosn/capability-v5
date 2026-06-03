@@ -24,7 +24,7 @@ pub fn init_themis(info: &PlatformInfo) -> crate::platform::ThemisPlatform {
 
     let mut platform =
         ThemisPlatform::new(alloc::sync::Arc::clone(&info.uc_ranges), info.num_cores);
-    platform.bootstrap_set_lapic_ids(info.cpu_lapic_ids.clone());
+    platform.arch.set_lapic_ids(info.cpu_lapic_ids.clone());
     platform.bootstrap_register_domain(ROOT_ID, None, info.hhdm_offset);
 
     // Map META regions into HHDM and give them to the platform.

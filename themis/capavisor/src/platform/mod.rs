@@ -96,15 +96,13 @@ pub type InactiveVp = <ArchDomainState as ArchDomain>::InactiveVp;
 mod domain;
 mod maps;
 mod sync;
-mod vcpu_slot;
+pub(crate) mod vcpu_slot;
 
 pub use domain::{DoorbellEntry, PlatformDomain, THEMIC_DOORBELL_FLAG_ANY_SIZE,
     THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_MAX_DOORBELLS,
 };
 pub use maps::CoreUpdate;
 pub use vcpu_slot::CoreContext;
-#[cfg(target_arch = "x86_64")]
-pub use vcpu_slot::VcpuSlot;
 
 use maps::{DomainTable, RoutingMaps};
 use sync::{Barrier, ExclusiveGuard, SharedGuard};
@@ -213,32 +211,6 @@ impl ThemisPlatform {
     ) -> capability_engine::error::Result<(u64, alloc::vec::Vec<u64>)> {
         self.switch_mgr
             .route_interrupt(vector, interrupted, core_id)
-    }
-
-    /// Store per-core VMXON physical addresses (called once by BSP before
-    /// AP_LAUNCH_READY).
-    #[cfg(target_arch = "x86_64")]
-    pub fn bootstrap_set_vmxon_phys(&mut self, phys: Vec<u64>) {
-        self.arch.set_vmxon_phys(phys);
-    }
-
-    /// Get VMXON physical address for a core (called by APs after Acquire
-    /// on AP_LAUNCH_READY).
-    #[cfg(target_arch = "x86_64")]
-    pub fn vmxon_phys(&self, core_index: usize) -> u64 {
-        self.arch.vmxon_phys(core_index)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub fn bootstrap_set_lapic_ids(&self, ids: Vec<u32>) {
-        self.arch.set_lapic_ids(ids);
-    }
-
-    /// Physical LAPIC ID of the BSP (core 0).
-    /// Used as the remapped-IRTE destination for Report/NotReport vectors.
-    #[cfg(target_arch = "x86_64")]
-    pub fn bsp_lapic_id(&self) -> u32 {
-        self.arch.bsp_lapic_id()
     }
 
     /// Reprogram a PCI device's IOMMU context entry to use `domain_id`'s

@@ -26,6 +26,7 @@ use crate::guest::linux::E820Entry;
 use crate::mem::{MemoryPartition, PhysRegion, UncacheableRanges};
 use crate::vmx::CpuFeatures;
 
+mod ap;
 mod capa;
 mod launch;
 mod linux;
@@ -34,6 +35,7 @@ mod themis;
 mod vmcs;
 mod vmx;
 
+pub use ap::run as ap_run;
 pub use capa::capa;
 pub use launch::launch;
 pub use linux::linux;

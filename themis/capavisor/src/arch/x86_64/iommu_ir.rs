@@ -197,7 +197,7 @@ pub fn program_domain_irtes(
     }
 
     let hhdm = platform.hhdm_offset();
-    let bsp_lapic = platform.bsp_lapic_id();
+    let bsp_lapic = platform.arch.bsp_lapic_id();
 
     let (child_id, intr_policy) = {
         let r = child_cap.read();

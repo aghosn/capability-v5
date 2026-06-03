@@ -69,7 +69,7 @@ pub fn vmx(info: &PlatformInfo, platform: &mut crate::platform::ThemisPlatform) 
         .expect("BSP LAPIC ID not found in CPU list");
 
     let bsp_vmxon = vmxon_addrs[bsp_index];
-    platform.bootstrap_set_vmxon_phys(vmxon_addrs);
+    platform.arch.set_vmxon_phys(vmxon_addrs);
 
     crate::vmx::enable_vmx_on_core(bsp_vmxon).expect("VMXON failed on BSP");
     serial_println!(

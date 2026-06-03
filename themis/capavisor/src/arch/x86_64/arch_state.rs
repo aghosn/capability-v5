@@ -16,7 +16,7 @@ use ept::{EptEntryFlags, EptMapper, EptMemoryType, Level};
 use crate::arch::x86_64::layout::{APIC_REG_ICR_HIGH, APIC_REG_ICR_LOW, LAPIC_MMIO_BASE, MMIO_PAGE_SIZE};
 use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 use crate::mem::{MetaAllocator, UncacheableRanges};
-use crate::platform::VcpuSlot;
+use crate::platform::vcpu_slot::VcpuSlot;
 use crate::serial_println;
 
 use super::acpi::DhrdUnit;
