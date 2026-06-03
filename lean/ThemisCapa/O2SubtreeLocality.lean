@@ -10,17 +10,22 @@
   preserved.
 
   ## Scope
-  This module covers only the **domain-record** side of O2.
+  This module covers the **domain-record** side AND the
+  **owned-memcap** side of O2:
+  - Domain-side: `step_subtree_dom_preserved`,
+    `step_subtree_isParent_preserved`, `step_subtree_isAncestor_fwd`,
+    `step_subtree_membership_fwd`.
+  - Memory-side: `step_subtree_mem_preserved` — memcaps whose
+    `owner` is in `subtree(s, root)` are preserved when the action's
+    `affectsMem` footprint contains no such memcap.
+
   It does NOT cover:
-  - `getMem` preservation (an outsider holding a memcap aliased into
-    the subtree could still revoke or transfer it). That belongs to
-    a separate "memory-side" sibling theorem keyed off
-    `Action.affectsMem` and capability provenance.
   - Reverse direction `InSubtree s' root did → InSubtree s root did`.
     Proving this requires reasoning about how `create` introduces
     fresh `IsParentOf` edges; deferred to a follow-up batch.
-  - Any address-space (`AddressMap`) side-effects — those are domain-local
-    and so are already implicitly covered by `getDom`-preservation.
+  - Memcaps that are *aliased into* the subtree but owned outside
+    (the canonical "outsider with a borrowed mem-handle" case).
+    That belongs to a separate provenance-level theorem.
 
   ## What "footprint-disjoint" means
   The hypothesis `(∀ d, a.affectsDom s d → ¬ InSubtree s root d)` is a
@@ -122,15 +127,7 @@ theorem step_subtree_isAncestor_fwd
 -- § Subtree-membership preservation (forward direction)
 -- ════════════════════════════════════════════════════════════════════
 
-/-- **O2 subtree-membership (forward).**
-    Subtree membership lifts forward across footprint-disjoint steps:
-    if `did` was in `subtree(s, root)`, it is still in
-    `subtree(s', root)`.
-
-    The reverse direction (no new domain joins the subtree) is the
-    harder half: it requires reasoning about which actions can
-    introduce new `IsParentOf` edges (`create` is the main
-    offender). Deferred to a follow-up. -/
+/-- Subtree membership lifts forward across footprint-disjoint steps. -/
 theorem step_subtree_membership_fwd
     {s s' : SpecState} {a : Action} (hstep : step s a s')
     {root : DomId}
@@ -140,5 +137,45 @@ theorem step_subtree_membership_fwd
   rcases h with heq | hanc
   · exact Or.inl heq
   · exact Or.inr (step_subtree_isAncestor_fwd hstep hout hanc)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § Memory-side: memcaps owned by domains inside the subtree
+-- ════════════════════════════════════════════════════════════════════
+
+/-- A memcap "belongs to" the subtree rooted at `root` if it currently
+    exists and its `owner` is in `subtree(s, root)`. -/
+def MemCapInSubtree (s : SpecState) (root : DomId) (id : MemCapId) : Prop :=
+  ∃ m, s.getMem id = some m ∧ InSubtree s root m.owner
+
+/-- **O2 mem-locality (atomic).**
+    A step whose memcap-write footprint avoids every memcap owned by
+    a domain inside the subtree leaves those memcaps unchanged.
+
+    Note the hypothesis is stated pointwise on `Action.affectsMem`:
+    an action may freely modify memcaps owned outside the subtree,
+    but no `affectsMem` id may have an owner inside subtree(root). -/
+theorem step_subtree_mem_preserved
+    {s s' : SpecState} {a : Action} (hstep : step s a s')
+    {root : DomId}
+    (hout : ∀ id, a.affectsMem s id →
+            ∀ m, s.getMem id = some m → ¬ InSubtree s root m.owner)
+    {id : MemCapId} (hin : MemCapInSubtree s root id) :
+    s'.getMem id = s.getMem id := by
+  apply step_locality_mem hstep
+  intro haf
+  obtain ⟨m, hm, hown⟩ := hin
+  exact hout id haf m hm hown
+
+/-- Convenience corollary: same conclusion phrased over a witness
+    `(id, m)` rather than the packed `MemCapInSubtree`. -/
+theorem step_subtree_mem_preserved'
+    {s s' : SpecState} {a : Action} (hstep : step s a s')
+    {root : DomId}
+    (hout : ∀ id, a.affectsMem s id →
+            ∀ m, s.getMem id = some m → ¬ InSubtree s root m.owner)
+    {id : MemCapId} {m : MemCap}
+    (hm : s.getMem id = some m) (hown : InSubtree s root m.owner) :
+    s'.getMem id = s.getMem id :=
+  step_subtree_mem_preserved hstep hout ⟨m, hm, hown⟩
 
 end ThemisCapa
