@@ -85,7 +85,7 @@ impl ArchDomain for ArchDomainState {
         unimplemented!("destroy: aarch64 backend not yet implemented")
     }
 
-    fn tlb_handle(&self) -> Option<u64> {
+    fn slat(&self) -> Option<u64> {
         // TODO(arm): return VMID-derived handle once Stage-2 is wired.
         None
     }
@@ -93,6 +93,20 @@ impl ArchDomain for ArchDomainState {
     fn flush_tlb(&self) {
         // TODO(arm): TLBI VMALLS12E1 / VMALLE1 by VMID.
         unimplemented!("flush_tlb: aarch64 backend not yet implemented")
+    }
+
+    type InactiveVp = ();
+
+    fn store_inactive_vp(&mut self, _vp_id: usize, _vcpu: Self::InactiveVp) {
+        unimplemented!("store_inactive_vp: aarch64 backend not yet implemented")
+    }
+
+    fn take_inactive_vp(&self, _vp_id: usize) -> Option<Self::InactiveVp> {
+        None
+    }
+
+    fn return_inactive_vp(&mut self, _vp_id: usize, _vcpu: Self::InactiveVp) {
+        unimplemented!("return_inactive_vp: aarch64 backend not yet implemented")
     }
 }
 

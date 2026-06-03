@@ -37,7 +37,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     let num_vps = info.num_cores;
     let eptp = capa
         .platform
-        .eptp(0)
+        .slat(0)
         .expect("P2d: EPT root not set up — run boot::capa() first");
 
     // Allocate VMCS, VAPIC, and MSR bitmap pages from the META pool via ThemisPlatform.

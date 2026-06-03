@@ -23,7 +23,7 @@ use super::domain::PlatformDomain;
 pub enum CoreUpdate {
     /// Flush per-LP second-stage cache for `domain` using the provided
     /// `handle` (arch-specific: x86 EPTP, ARM VMID-derived; see
-    /// [`crate::arch_traits::ArchDomain::tlb_handle`]).
+    /// [`crate::arch_traits::ArchDomain::slat`]).
     ///
     /// The handle is snapshotted at queue time so the receiver can flush
     /// without holding any reference to (a possibly-revoked) `domain`.

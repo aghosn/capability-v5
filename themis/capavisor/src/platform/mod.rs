@@ -79,13 +79,18 @@ use capability_engine::{
     SwitchManager, Update,
 };
 
-use crate::arch::ArchPlatformState;
+use crate::arch::{ArchDomainState, ArchPlatformState};
 use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 use crate::serial_println;
-#[cfg(target_arch = "x86_64")]
-use crate::vcpu::InactiveVcpu;
 
 use crate::mem::{PhysRegion, UncacheableRanges};
+
+/// Cross-arch alias for the per-VP inactive state owned by an
+/// [`ArchDomainState`].  On x86 this resolves to
+/// [`crate::vcpu::InactiveVcpu`]; on AArch64 it resolves to the stub
+/// associated type.  Used by the platform's VP-slot wrappers so callers
+/// never have to spell out the trait projection.
+pub type InactiveVp = <ArchDomainState as ArchDomain>::InactiveVp;
 
 // ── Submodules ────────────────────────────────────────────────────────────── //
 
@@ -98,7 +103,9 @@ pub use domain::{DoorbellEntry, PlatformDomain, THEMIC_DOORBELL_FLAG_ANY_SIZE,
     THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_MAX_DOORBELLS,
 };
 pub use maps::CoreUpdate;
-pub use vcpu_slot::{CoreContext, VcpuSlot};
+pub use vcpu_slot::CoreContext;
+#[cfg(target_arch = "x86_64")]
+pub use vcpu_slot::VcpuSlot;
 
 use maps::{DomainTable, RoutingMaps};
 use sync::{Barrier, ExclusiveGuard, SharedGuard};
@@ -425,14 +432,12 @@ impl ThemisPlatform {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    pub fn eptp(&self, domain_id: DomainId) -> Option<u64> {
-        self.domains
-            .get(domain_id)?
-            .lock()
-            .arch
-            .ept()
-            .map(|e| e.eptp())
+    /// Snapshot of the per-LP translation-cache handle (the SLAT context
+    /// identifier) for `domain_id` — x86: the EPTP, ARM: a VMID-derived
+    /// value.  Returns `None` when the domain is unknown or has no
+    /// second-stage tables yet.
+    pub fn slat(&self, domain_id: DomainId) -> Option<u64> {
+        self.domains.get(domain_id)?.lock().arch.slat()
     }
 
     /// Get a cloned Arc reference to a PlatformDomain (for use outside apply_update).
@@ -488,44 +493,37 @@ impl ThemisPlatform {
 
     /// Store an InactiveVcpu in a domain's VP slot during bootstrap.
     ///
+    /// Insert an inactive VP into a domain's per-VP slot vector, growing
+    /// the vector as needed.
+    ///
     /// `vp_id` is the domain-local VP index (0, 1, 2, ...).
-    /// Extends the VP vector if needed.
-    #[cfg(target_arch = "x86_64")]
-    pub fn bootstrap_store_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
+    pub fn bootstrap_store_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVp) {
         let arc = self
             .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("bootstrap_store_vcpu: domain not registered"));
         let mut d = arc.lock();
-        if d.arch.vps().len() <= vp_id {
-            d.arch.vps_mut().resize_with(vp_id + 1, VcpuSlot::empty);
-        }
-        d.arch.vps_mut()[vp_id].put(vcpu);
+        d.arch.store_inactive_vp(vp_id, vcpu);
     }
 
-    /// Atomically take an InactiveVcpu from a domain's VP slot.
+    /// Atomically take an inactive VP from a domain's slot.
     ///
-    /// Returns `None` if the VP is already active on another core.
-    #[cfg(target_arch = "x86_64")]
-    pub fn take_vcpu(&self, domain_id: DomainId, vp_id: usize) -> Option<InactiveVcpu> {
+    /// Returns `None` if the VP is already active on another core (slot
+    /// empty) or the domain/VP id is unknown.
+    pub fn take_vcpu(&self, domain_id: DomainId, vp_id: usize) -> Option<InactiveVp> {
         let arc = self.domains.get(domain_id)?;
         let d = arc.lock();
-        d.arch.vps().get(vp_id).and_then(|slot| slot.take())
+        d.arch.take_inactive_vp(vp_id)
     }
 
-    /// Return an InactiveVcpu to a domain's VP slot after deactivation.
-    #[cfg(target_arch = "x86_64")]
-    pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVcpu) {
+    /// Return an inactive VP to a domain's slot after deactivation.
+    pub fn return_vcpu(&self, domain_id: DomainId, vp_id: usize, vcpu: InactiveVp) {
         let arc = self
             .domains
             .get(domain_id)
             .unwrap_or_else(|| panic!("return_vcpu: domain not registered"));
         let mut d = arc.lock();
-        assert!(
-            vp_id < d.arch.vps().len(),
-            "return_vcpu: vp_id out of range"
-        );
-        d.arch.vps_mut()[vp_id].put(vcpu);
+        d.arch.return_inactive_vp(vp_id, vcpu);
     }
 
     /// Flush this domain's per-LP translation cache on the *current* CPU.
@@ -1038,7 +1036,7 @@ impl Platform for ThemisPlatform {
         if let Some(arc) = self.domains.get(domain_id) {
             let pd = arc.lock();
             let cached = pd.snapshot_cached_on();
-            let handle = pd.arch.tlb_handle().unwrap_or(0);
+            let handle = pd.arch.slat().unwrap_or(0);
             drop(pd);
             if handle != 0 {
                 let current = self.get_current_core();

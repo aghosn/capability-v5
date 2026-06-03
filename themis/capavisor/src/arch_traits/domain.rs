@@ -62,13 +62,50 @@ pub trait ArchDomain {
     /// applied later via [`flush_tlb_handle`](crate::arch::flush_tlb_handle)
     /// without holding any reference to the (possibly-revoked) domain.
     ///
+    /// "SLAT" = Second-Level Address Translation, the cross-arch name
+    /// for what x86 calls EPT and ARM calls Stage-2.
+    ///
     /// Returns `None` when no second-stage tables exist yet (a domain
     /// that has never been entered cannot have cached translations).
-    fn tlb_handle(&self) -> Option<u64>;
+    fn slat(&self) -> Option<u64>;
 
     /// Flush this domain's per-LP translation cache on the *current*
-    /// CPU.  Convenience wrapper around `tlb_handle()` +
+    /// CPU.  Convenience wrapper around `slat()` +
     /// [`flush_tlb_handle`](crate::arch::flush_tlb_handle); a no-op when
     /// no second-stage tables exist yet.
     fn flush_tlb(&self);
+
+    // ── VP slot ownership (cross-core handoff) ──────────────────────────── //
+    //
+    // Each domain owns a vector of per-VP "inactive" VP states. A core that
+    // wants to run VP i takes the inactive state, activates it (loads it on
+    // the CPU), runs the guest, then returns the inactive state when it
+    // exits.  The atomic take/return machinery is arch-specific (x86 wraps
+    // a heap-allocated `InactiveVcpu` in an `AtomicPtr`).
+
+    /// Per-VP inactive state owned by the domain (x86: `InactiveVcpu`,
+    /// AArch64: TBD).
+    type InactiveVp;
+
+    /// Insert `vcpu` at VP index `vp_id`, growing the per-domain VP vector
+    /// as needed.  Used at VP construction time (boot for dom0, child VP
+    /// creation for sealed children).
+    ///
+    /// # Panics
+    /// Implementations may panic if the slot at `vp_id` is already
+    /// populated (double-store bug).
+    fn store_inactive_vp(&mut self, vp_id: usize, vcpu: Self::InactiveVp);
+
+    /// Atomically take the inactive VP at index `vp_id`, leaving the slot
+    /// empty.  Returns `None` if the slot is already empty (VP is active
+    /// on another core, or out-of-range).
+    fn take_inactive_vp(&self, vp_id: usize) -> Option<Self::InactiveVp>;
+
+    /// Return a previously-taken inactive VP back to its slot after
+    /// deactivation.  Symmetric to `take_inactive_vp`.
+    ///
+    /// # Panics
+    /// Implementations may panic if the slot is not empty (double-return
+    /// bug) or if `vp_id` is out-of-range.
+    fn return_inactive_vp(&mut self, vp_id: usize, vcpu: Self::InactiveVp);
 }

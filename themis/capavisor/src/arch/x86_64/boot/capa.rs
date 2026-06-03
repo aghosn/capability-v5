@@ -207,7 +207,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         .expect("P2c: capability engine execute failed");
 
     let eptp = platform
-        .eptp(ROOT_ID)
+        .slat(ROOT_ID)
         .expect("P2c: EPT root not allocated after execute");
 
     serial_println!(

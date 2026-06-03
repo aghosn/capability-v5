@@ -84,10 +84,6 @@ impl ArchDomainState {
         &self.vps
     }
 
-    pub fn vps_mut(&mut self) -> &mut Vec<VcpuSlot> {
-        &mut self.vps
-    }
-
     // ── Bitmap / APIC accessors ──────────────────────────────────────────── //
 
     pub fn msr_bitmap_phys(&self) -> u64 {
@@ -336,7 +332,7 @@ impl ArchDomain for ArchDomainState {
         }
     }
 
-    fn tlb_handle(&self) -> Option<u64> {
+    fn slat(&self) -> Option<u64> {
         self.ept.as_ref().map(|e| e.eptp())
     }
 
@@ -347,11 +343,34 @@ impl ArchDomain for ArchDomainState {
             }
         }
     }
+
+    type InactiveVp = crate::vcpu::InactiveVcpu;
+
+    fn store_inactive_vp(&mut self, vp_id: usize, vcpu: Self::InactiveVp) {
+        if self.vps.len() <= vp_id {
+            self.vps.resize_with(vp_id + 1, VcpuSlot::empty);
+        }
+        self.vps[vp_id].put(vcpu);
+    }
+
+    fn take_inactive_vp(&self, vp_id: usize) -> Option<Self::InactiveVp> {
+        self.vps.get(vp_id).and_then(|slot| slot.take())
+    }
+
+    fn return_inactive_vp(&mut self, vp_id: usize, vcpu: Self::InactiveVp) {
+        assert!(
+            vp_id < self.vps.len(),
+            "return_inactive_vp: vp_id {} out of range (vps.len() = {})",
+            vp_id,
+            self.vps.len()
+        );
+        self.vps[vp_id].put(vcpu);
+    }
 }
 
 /// Apply an INVEPT(single-context) on the *current* CPU using a previously
 /// snapshotted EPTP handle.  Handle must come from
-/// [`ArchDomain::tlb_handle`] (or zero, in which case this is a no-op).
+/// [`ArchDomain::slat`] (or zero, in which case this is a no-op).
 ///
 /// Used by the cross-core `TlbShootdown` handler so the receiver can flush
 /// without holding any reference to the originating (possibly-revoked)
