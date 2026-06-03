@@ -49,6 +49,7 @@
 -/
 import ThemisCapa.NonInterference
 import ThemisCapa.Properties
+import ThemisCapa.FreshPending
 
 namespace ThemisCapa
 open Arena
@@ -128,10 +129,8 @@ theorem sealedSend_apply_caller_get
   rfl
 
 /-- The freshly-allocated `pendingId` resolves in the receiver's
-    post-state to the just-enqueued payload, provided `nextPendingId`
-    was indeed unused in the receiver's `pendingMemCaps` (a
-    well-formedness-style precondition not yet encoded as an explicit
-    invariant — see TODO `FreshPending`). -/
+    post-state to the just-enqueued payload, derived from the
+    `FreshPending` invariant. -/
 theorem sealedSend_apply_lookupPending
     {s : SpecState} {caller receiver : DomId}
     {handle : LocalHandle} {gpaHint : Option Nat}
@@ -139,7 +138,7 @@ theorem sealedSend_apply_lookupPending
     {d_caller : Domain} (h_caller : s.getDom caller = some d_caller)
     {capId : MemCapId} (h_lookup : d_caller.lookupMemHandle handle = some capId)
     {d_recv : Domain} (h_recv : s.getDom receiver = some d_recv)
-    (h_fresh : ∀ p ∈ d_recv.pendingMemCaps, p.1 ≠ d_recv.nextPendingId) :
+    (hfp : FreshPending s) :
     ∃ d_recv_post : Domain,
       (sealedSend_apply s caller receiver handle gpaHint).getDom receiver =
         some d_recv_post ∧
@@ -148,7 +147,7 @@ theorem sealedSend_apply_lookupPending
                senderHandle := handle, gpaHint := gpaHint } := by
   refine ⟨_, sealedSend_apply_receiver_get h_neq h_caller h_lookup h_recv, ?_⟩
   show (List.find? _ (d_recv.pendingMemCaps ++ [_])).map _ = _
-  rw [find?_append_fresh_singleton _ _ _ h_fresh]
+  rw [find?_append_fresh_singleton _ _ _ (FreshPending.mem_fresh hfp h_recv)]
   rfl
 
 /-- `sealedSend_apply` leaves memcaps untouched (it only updates
@@ -197,8 +196,8 @@ private theorem accept_apply_some
 
     Hypotheses:
     - The sealedSend guard supplies sender authority and existence.
-    - `h_fresh` asserts the pending counter is unused — a
-      well-formedness-style fact awaiting an explicit invariant. -/
+    - `FreshPending s` (a global WF-style invariant) discharges the
+      freshness obligation on the receiver's pending counter. -/
 theorem ipc_sealedSend_accept_transfers_cap
     {s : SpecState} {caller receiver : DomId}
     {handle : LocalHandle} {gpaHint : Option Nat}
@@ -206,13 +205,13 @@ theorem ipc_sealedSend_accept_transfers_cap
     {d_caller : Domain} (h_caller : s.getDom caller = some d_caller)
     {capId : MemCapId} (h_lookup : d_caller.lookupMemHandle handle = some capId)
     {d_recv : Domain} (h_recv : s.getDom receiver = some d_recv)
-    (h_fresh : ∀ p ∈ d_recv.pendingMemCaps, p.1 ≠ d_recv.nextPendingId)
+    (hfp : FreshPending s)
     {c_pre : MemCap} (h_cap : s.getMem capId = some c_pre) :
     let s_send := sealedSend_apply s caller receiver handle gpaHint
     let s_acc  := accept_apply s_send receiver d_recv.nextPendingId
     s_acc.getMem capId = some { c_pre with owner := receiver } := by
   obtain ⟨d_recv_post, h_recv_post, h_lookup_post⟩ :=
-    sealedSend_apply_lookupPending h_neq h_caller h_lookup h_recv h_fresh
+    sealedSend_apply_lookupPending h_neq h_caller h_lookup h_recv hfp
   show (accept_apply (sealedSend_apply s caller receiver handle gpaHint)
                      receiver d_recv.nextPendingId).getMem capId = _
   rw [accept_apply_some h_recv_post h_lookup_post]
