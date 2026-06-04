@@ -80,6 +80,14 @@ instance : LE InterruptPolicy where le := InterruptPolicy.refines
 theorem InterruptPolicy.le_refl (ip : InterruptPolicy) : ip ≤ ip :=
   fun _ => VectorPolicy.le_refl _
 
+/-- Convenience: visibility of vector `v` for domain `d`.
+    Defined here in terms of `InterruptPolicy.lookup`; the actual
+    `Domain` record lives in `State.lean`, so this helper is provided
+    via a `Domain.policy` projection by the consumer.
+    See `Domain.visibilityFor` for the convenience wrapper. -/
+def DomainPolicy.visibilityFor (p : DomainPolicy) (vec : Nat) : InterruptVisibility :=
+  (p.interrupts.lookup vec).visibility
+
 -- ════════════════════════════════════════════════════════════════════
 -- § ExitAction — trap-only refinement
 --   `trap = false` (handle locally) is the high-rights state;
@@ -213,6 +221,47 @@ theorem refl (p : DomainPolicy) : p ≤ p := by
   · exact ExitPolicy.le_refl _
   · exact ProcFeatureConfig.le_refl _
   · exact ProcFeatureConfig.le_refl _
+
+/-- Transitivity of `≤` on `DomainPolicy`. Per-axis: subset/Nat-le/
+    pointwise-le composition; for `ProcFeatureAction.refines`,
+    transitivity is the implication chain `c=native → p=native`,
+    `p=native → q=native` ⇒ `c=native → q=native`. -/
+theorem le_trans {a b c : DomainPolicy} (hab : a ≤ b) (hbc : b ≤ c) : a ≤ c := by
+  refine ⟨?cores, ?api, ?irq, ?ex, ?cpu, ?msr, Nat.le_trans hab.2.2.2.2.2.2 hbc.2.2.2.2.2.2⟩
+  case cores =>
+    intro x hx; exact hbc.1 x (hab.1 x hx)
+  case api =>
+    have h1 := hab.2.1
+    have h2 := hbc.2.1
+    refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+    · exact fun h => h2.1 (h1.1 h)
+    · exact fun h => h2.2.1 (h1.2.1 h)
+    · exact fun h => h2.2.2.1 (h1.2.2.1 h)
+    · exact fun h => h2.2.2.2.1 (h1.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.1 (h1.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.1 (h1.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.2.2.2.2.1 (h1.2.2.2.2.2.2.2.2.2.2.2.2.1 h)
+    · exact fun h => h2.2.2.2.2.2.2.2.2.2.2.2.2.2 (h1.2.2.2.2.2.2.2.2.2.2.2.2.2 h)
+  case irq =>
+    intro vec
+    have h1 := hab.2.2.1 vec
+    have h2 := hbc.2.2.1 vec
+    exact Nat.le_trans h1 h2
+  case ex =>
+    intro reason h
+    exact hab.2.2.2.1 reason (hbc.2.2.2.1 reason h)
+  case cpu =>
+    intro l s w h
+    exact hbc.2.2.2.2.1 l s w (hab.2.2.2.2.1 l s w h)
+  case msr =>
+    intro l s w h
+    exact hbc.2.2.2.2.2.1 l s w (hab.2.2.2.2.2.1 l s w h)
 
 theorem cores_le_of_le {a b : DomainPolicy} (h : a ≤ b) : a.cores ⊆ b.cores :=
   h.1

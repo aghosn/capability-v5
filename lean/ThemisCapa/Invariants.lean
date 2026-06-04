@@ -183,6 +183,48 @@ theorem PolicyMonotonicAncestry.numVps
     d_c.policy.numVps ≤ d_p.policy.numVps :=
   DomainPolicy.numVps_le_of_le (h child parent d_c d_p hc hp hpd)
 
+/-- Transitive closure: if `a` is an ancestor of `d`, then `d.policy ≤ a.policy`.
+    Composes per-edge `PolicyMonotonicAncestry` with `DomainPolicy.le_trans`. -/
+theorem PolicyMonotonicAncestry.ancestor_le_strict
+    {s : SpecState} (h : PolicyMonotonicAncestry s) :
+    ∀ {a d : DomId}, IsAncestorOf s a d →
+    ∀ {dd da : Domain}, s.getDom d = some dd → s.getDom a = some da →
+      dd.policy ≤ da.policy := by
+  intro a d hanc
+  induction hanc with
+  | direct hpa =>
+    intro dd da hd hda
+    rcases hpa with ⟨dd', hdd', hpar⟩
+    have heq : dd' = dd := by rw [hd] at hdd'; exact Option.some.inj hdd'.symm
+    subst heq
+    exact h _ _ _ _ hd hpar hda
+  | step hpa _hac ih =>
+    intro dd da hd hda
+    rcases hpa with ⟨dm, hdm, hpar_am⟩
+    have h1 : dd.policy ≤ dm.policy := ih hd hdm
+    have h2 : dm.policy ≤ da.policy := h _ _ _ _ hdm hpar_am hda
+    exact DomainPolicy.le_trans h1 h2
+
+/-- Reflexive variant: `IsAncestorOrSelf s a d → dd.policy ≤ da.policy`. -/
+theorem PolicyMonotonicAncestry.ancestor_le
+    {s : SpecState} (h : PolicyMonotonicAncestry s)
+    {a d : DomId} (hanc : IsAncestorOrSelf s a d)
+    {dd da : Domain} (hd : s.getDom d = some dd) (hda : s.getDom a = some da) :
+    dd.policy ≤ da.policy := by
+  rcases hanc with heq | hstrict
+  · cases heq
+    have heq2 : dd = da := by rw [hd] at hda; exact Option.some.inj hda
+    rw [heq2]; exact DomainPolicy.refl _
+  · exact PolicyMonotonicAncestry.ancestor_le_strict h hstrict hd hda
+
+/-- Per-axis transitive corollary: cores monotone along the ancestor chain. -/
+theorem PolicyMonotonicAncestry.cores_ancestor
+    {s : SpecState} (h : PolicyMonotonicAncestry s)
+    {a d : DomId} (hanc : IsAncestorOrSelf s a d)
+    {dd da : Domain} (hd : s.getDom d = some dd) (hda : s.getDom a = some da) :
+    dd.policy.cores ⊆ da.policy.cores :=
+  DomainPolicy.cores_le_of_le (PolicyMonotonicAncestry.ancestor_le h hanc hd hda)
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique             : UniqueArenas s
