@@ -105,6 +105,25 @@ def HandleOwner (s : SpecState) : Prop :=
 def AddressMapsWf (s : SpecState) : Prop :=
   ∀ did d, s.getDom did = some d → d.addressMap.Wf
 
+/-- For every domain `d`, every entry in `d.pendingMemCaps` (resp.
+    `d.pendingDomCaps`) has a key strictly less than `d.nextPendingId`.
+    Provides freshness of the pending counter — used by sealedSend to
+    guarantee a freshly-allocated `pendingId` is unused as a key. -/
+def FreshPending (s : SpecState) : Prop :=
+  ∀ did d, s.getDom did = some d →
+    (∀ p ∈ d.pendingMemCaps, p.1 < d.nextPendingId) ∧
+    (∀ p ∈ d.pendingDomCaps, p.1 < d.nextPendingId)
+
+/-- Corollary: a fresh `nextPendingId` is unused as a key in the
+    receiver's existing `pendingMemCaps`. This is the form consumed
+    by the O3 round-trip theorem. -/
+theorem FreshPending.mem_fresh
+    {s : SpecState} (h : FreshPending s)
+    {did : DomId} {d : Domain} (hd : s.getDom did = some d) :
+    ∀ p ∈ d.pendingMemCaps, p.1 ≠ d.nextPendingId := by
+  intro p hp heq
+  exact Nat.lt_irrefl _ (heq ▸ (h did d hd).1 p hp)
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique             : UniqueArenas s
@@ -118,5 +137,6 @@ structure WellFormed (s : SpecState) : Prop where
   freshDomCapCounter : FreshDomCapCounter s
   addressMapsWf      : AddressMapsWf s
   domainTreeWf       : DomainTreeWf s
+  freshPending       : FreshPending s
 
 end ThemisCapa

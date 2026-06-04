@@ -22,26 +22,10 @@
 -/
 import ThemisCapa.Step
 import ThemisCapa.Locality
+import ThemisCapa.Invariants
 
 namespace ThemisCapa
 open Arena
-
-/-- For every domain `d`, every entry in `d.pendingMemCaps` (resp.
-    `d.pendingDomCaps`) has a key strictly less than `d.nextPendingId`. -/
-def FreshPending (s : SpecState) : Prop :=
-  ∀ did d, s.getDom did = some d →
-    (∀ p ∈ d.pendingMemCaps, p.1 < d.nextPendingId) ∧
-    (∀ p ∈ d.pendingDomCaps, p.1 < d.nextPendingId)
-
-/-- Corollary: a fresh `nextPendingId` is unused as a key in the
-    receiver's existing `pendingMemCaps`. This is the form consumed
-    by the O3 round-trip theorem. -/
-theorem FreshPending.mem_fresh
-    {s : SpecState} (h : FreshPending s)
-    {did : DomId} {d : Domain} (hd : s.getDom did = some d) :
-    ∀ p ∈ d.pendingMemCaps, p.1 ≠ d.nextPendingId := by
-  intro p hp heq
-  exact Nat.lt_irrefl _ (heq ▸ (h did d hd).1 p hp)
 
 -- ════════════════════════════════════════════════════════════════════
 -- Primitive preservation helpers
@@ -50,7 +34,7 @@ theorem FreshPending.mem_fresh
 /-- Generic `updDomain` lift: if `f` preserves `FreshPending`'s bound
     pointwise on the targeted domain record, the global invariant is
     preserved. -/
-private theorem freshPending_updDomain
+theorem freshPending_updDomain
     {s : SpecState} (h : FreshPending s) (x : DomId) (f : Domain → Domain)
     (hf : ∀ d_pre, s.getDom x = some d_pre →
             (∀ p ∈ (f d_pre).pendingMemCaps, p.1 < (f d_pre).nextPendingId) ∧
@@ -70,7 +54,7 @@ private theorem freshPending_updDomain
     exact h did d hd
 
 /-- Specialization: `f` preserves the three pending fields field-by-field. -/
-private theorem freshPending_updDomain_id
+theorem freshPending_updDomain_id
     {s : SpecState} (h : FreshPending s) (x : DomId) (f : Domain → Domain)
     (h1 : ∀ d, (f d).pendingMemCaps = d.pendingMemCaps)
     (h2 : ∀ d, (f d).pendingDomCaps = d.pendingDomCaps)
@@ -82,7 +66,7 @@ private theorem freshPending_updDomain_id
   exact h x d_pre hpre
 
 /-- Filter on `pendingMemCaps` preserves the bound (no other field changes). -/
-private theorem freshPending_updDomain_filter_pendingMem
+theorem freshPending_updDomain_filter_pendingMem
     {s : SpecState} (h : FreshPending s) (x : DomId)
     (pred : PendingId × PendingMemCap → Bool) :
     FreshPending (s.updDomain x (fun d =>
@@ -94,7 +78,7 @@ private theorem freshPending_updDomain_filter_pendingMem
   · intro p hp; exact (h x d_pre hpre).2 p hp
 
 /-- Filter on `pendingDomCaps` preserves the bound. -/
-private theorem freshPending_updDomain_filter_pendingDom
+theorem freshPending_updDomain_filter_pendingDom
     {s : SpecState} (h : FreshPending s) (x : DomId)
     (pred : PendingId × PendingDomCap → Bool) :
     FreshPending (s.updDomain x (fun d =>
@@ -106,7 +90,7 @@ private theorem freshPending_updDomain_filter_pendingDom
   · intro p hp; exact (h x d_pre hpre).2 p (List.mem_filter.mp hp).1
 
 /-- The headline append-and-bump case (sealedSend's receiver branch). -/
-private theorem freshPending_updDomain_sealedSendReceiver
+theorem freshPending_updDomain_sealedSendReceiver
     {s : SpecState} (h : FreshPending s) (x : DomId)
     (mk : Domain → PendingMemCap) :
     FreshPending (s.updDomain x (fun d =>
@@ -123,29 +107,29 @@ private theorem freshPending_updDomain_sealedSendReceiver
     exact Nat.lt_succ_of_lt ((h x d_pre hpre).2 p hp)
 
 /-- Non-domain primitives leave `FreshPending` definitionally untouched. -/
-private theorem freshPending_updMem
+theorem freshPending_updMem
     {s : SpecState} (h : FreshPending s) (id : MemCapId) (g : MemCap → MemCap) :
     FreshPending (s.updMem id g) := h
 
-private theorem freshPending_updDomCap
+theorem freshPending_updDomCap
     {s : SpecState} (h : FreshPending s) (id : DomCapId) (g : DomCap → DomCap) :
     FreshPending (s.updDomCap id g) := h
 
-private theorem freshPending_updCore
+theorem freshPending_updCore
     {s : SpecState} (h : FreshPending s) (id : CoreId) (g : CoreState → CoreState) :
     FreshPending (s.updCore id g) := h
 
-private theorem freshPending_freshMem
+theorem freshPending_freshMem
     {s : SpecState} (h : FreshPending s) (c : MemCap) :
     FreshPending (s.freshMem c).snd := h
 
-private theorem freshPending_freshDomCap
+theorem freshPending_freshDomCap
     {s : SpecState} (h : FreshPending s) (dc : DomCap) :
     FreshPending (s.freshDomCap dc).snd := h
 
 /-- `freshDom` allocating a domain whose pending lists are empty
     (and `nextPendingId = 0`) preserves `FreshPending`. -/
-private theorem freshPending_freshDom_empty
+theorem freshPending_freshDom_empty
     {s : SpecState} (h : FreshPending s) (dm : Domain)
     (h1 : dm.pendingMemCaps = []) (h2 : dm.pendingDomCaps = []) :
     FreshPending (s.freshDom dm).snd := by
@@ -162,7 +146,7 @@ private theorem freshPending_freshDom_empty
     exact h did d hd
 
 /-- Removing a domain preserves `FreshPending` vacuously. -/
-private theorem freshPending_domains_remove
+theorem freshPending_domains_remove
     {s : SpecState} (h : FreshPending s) (target : DomId) :
     FreshPending { s with domains := s.domains.remove target } := by
   intro did d hd
@@ -173,7 +157,7 @@ private theorem freshPending_domains_remove
   · rw [Arena.find?_remove_other _ _ _ heq] at hd
     exact h did d hd
 
-private theorem freshPending_domcaps_set
+theorem freshPending_domcaps_set
     {s : SpecState} (h : FreshPending s) (dcs : Arena DomCapId DomCap) :
     FreshPending { s with domcaps := dcs } := h
 
@@ -181,7 +165,7 @@ private theorem freshPending_domcaps_set
 -- Per-action preservation lemmas (using simp-unfold pattern from Locality.lean)
 -- ════════════════════════════════════════════════════════════════════
 
-private theorem carve_preservesFreshPending
+theorem carve_preservesFreshPending
     (s : SpecState) (caller : DomId) (parent : MemCapId)
     (access : Access) (attrs : Attributes) (h : FreshPending s) :
     FreshPending (carve_apply s caller parent access attrs) := by
@@ -192,7 +176,7 @@ private theorem carve_preservesFreshPending
       (freshPending_updMem (freshPending_freshMem h _) _ _) caller _
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem alias_preservesFreshPending
+theorem alias_preservesFreshPending
     (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
     (h : FreshPending s) :
     FreshPending (alias_apply s caller parent access) := by
@@ -203,7 +187,7 @@ private theorem alias_preservesFreshPending
       (freshPending_updMem (freshPending_freshMem h _) _ _) caller _
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem revoke_preservesFreshPending
+theorem revoke_preservesFreshPending
     (s : SpecState) (caller : DomId) (target : MemCapId) (h : FreshPending s) :
     FreshPending (revoke_apply s caller target) := by
   rcases hm : s.getMem target with _ | t
@@ -224,7 +208,7 @@ private theorem revoke_preservesFreshPending
           (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
       · rw [if_neg hv]; exact h3
 
-private theorem send_preservesFreshPending
+theorem send_preservesFreshPending
     (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
     (h : FreshPending s) :
     FreshPending (send_apply s caller receiver cap) := by
@@ -238,7 +222,7 @@ private theorem send_preservesFreshPending
     (fun d => { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ cap) })
     (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem seal_preservesFreshPending
+theorem seal_preservesFreshPending
     (s : SpecState) (caller : DomId) (cap : DomCapId) (h : FreshPending s) :
     FreshPending (seal_apply s caller cap) := by
   rcases hc : s.getDomCap cap with _ | dc
@@ -248,7 +232,7 @@ private theorem seal_preservesFreshPending
       (fun d => { d with status := .sealed })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem accept_preservesFreshPending
+theorem accept_preservesFreshPending
     (s : SpecState) (receiver : DomId) (pendingId : PendingId)
     (h : FreshPending s) :
     FreshPending (accept_apply s receiver pendingId) := by
@@ -264,7 +248,7 @@ private theorem accept_preservesFreshPending
                   d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem reject_preservesFreshPending
+theorem reject_preservesFreshPending
     (s : SpecState) (receiver : DomId) (pendingId : PendingId)
     (h : FreshPending s) :
     FreshPending (reject_apply s receiver pendingId) := by
@@ -280,7 +264,7 @@ private theorem reject_preservesFreshPending
                   d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem sealedSend_preservesFreshPending
+theorem sealedSend_preservesFreshPending
     (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
     (gpaHint : Option Nat) (h : FreshPending s) :
     FreshPending (sealedSend_apply s caller receiver handle gpaHint) := by
@@ -295,7 +279,7 @@ private theorem sealedSend_preservesFreshPending
       (fun _ => { capId := capId, senderDomainId := caller,
                   senderHandle := handle, gpaHint := gpaHint })
 
-private theorem setPolicy_preservesFreshPending
+theorem setPolicy_preservesFreshPending
     (s : SpecState) (caller : DomId) (cap : DomCapId)
     (id : PolicyIdentifier) (value : Nat) (h : FreshPending s) :
     FreshPending (setPolicy_apply s caller cap id value) := by
@@ -306,7 +290,7 @@ private theorem setPolicy_preservesFreshPending
       (fun d => { d with policy := applyPolicyValue d.policy id value })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem sendChannel_preservesFreshPending
+theorem sendChannel_preservesFreshPending
     (s : SpecState) (caller receiver : DomId) (cap : DomCapId)
     (h : FreshPending s) :
     FreshPending (sendChannel_apply s caller receiver cap) := by
@@ -320,7 +304,7 @@ private theorem sendChannel_preservesFreshPending
     (fun d => { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ cap) })
     (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem acceptChannel_preservesFreshPending
+theorem acceptChannel_preservesFreshPending
     (s : SpecState) (receiver : DomId) (pendingId : PendingId)
     (h : FreshPending s) :
     FreshPending (acceptChannel_apply s receiver pendingId) := by
@@ -336,7 +320,7 @@ private theorem acceptChannel_preservesFreshPending
                   d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem rejectChannel_preservesFreshPending
+theorem rejectChannel_preservesFreshPending
     (s : SpecState) (receiver : DomId) (pendingId : PendingId)
     (h : FreshPending s) :
     FreshPending (rejectChannel_apply s receiver pendingId) := by
@@ -352,7 +336,7 @@ private theorem rejectChannel_preservesFreshPending
                   d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem switchReturn_preservesFreshPending
+theorem switchReturn_preservesFreshPending
     (s : SpecState) (caller : DomId) (core : CoreId)
     (exitReason : Option Nat) (h : FreshPending s) :
     FreshPending (switchReturn_apply s caller core exitReason) := by
@@ -372,7 +356,7 @@ private theorem switchReturn_preservesFreshPending
         { vp with runState := .available exitReason }))
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem switch_preservesFreshPending
+theorem switch_preservesFreshPending
     (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
     (toVpId : VpId) (core : CoreId) (h : FreshPending s) :
     FreshPending (switch_apply s caller toHandle toVpId core) := by
@@ -396,7 +380,7 @@ private theorem switch_preservesFreshPending
                 VpRunState.running core (some { domainId := caller, vpId := vpv.1 }) }))
           (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem switchSuspended_preservesFreshPending
+theorem switchSuspended_preservesFreshPending
     (s : SpecState) (caller : DomId) (toHandle : LocalHandle)
     (toVpId : VpId) (core : CoreId)
     (calleeDom : DomId) (calleeVp : VpId) (h : FreshPending s) :
@@ -427,7 +411,7 @@ private theorem switchSuspended_preservesFreshPending
           (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
         exact freshPending_updCore h3 core _
 
-private theorem addVp_preservesFreshPending
+theorem addVp_preservesFreshPending
     (s : SpecState) (caller : DomId) (childHandle commHandle : LocalHandle)
     (h : FreshPending s) :
     FreshPending (addVp_apply s caller childHandle commHandle) := by
@@ -450,7 +434,7 @@ private theorem addVp_preservesFreshPending
                        commBindings := d.commBindings ++ [mid] })
             (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem registerComm_preservesFreshPending
+theorem registerComm_preservesFreshPending
     (s : SpecState) (caller : DomId) (commHandle childHandle : LocalHandle)
     (vpId : VpId) (h : FreshPending s) :
     FreshPending (registerComm_apply s caller commHandle childHandle vpId) := by
@@ -470,7 +454,7 @@ private theorem registerComm_preservesFreshPending
             (fun d => { d with commBindings := d.commBindings ++ [mid] })
             (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem mapSelf_preservesFreshPending
+theorem mapSelf_preservesFreshPending
     (s : SpecState) (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
     (h : FreshPending s) :
     FreshPending (mapSelf_apply s caller capHandle newGpa) := by
@@ -489,7 +473,7 @@ private theorem mapSelf_preservesFreshPending
             unfold Domain.updMappedGpa
             split <;> rfl
 
-private theorem create_preservesFreshPending
+theorem create_preservesFreshPending
     (s : SpecState) (caller : DomId) (policy : DomainPolicy)
     (h : FreshPending s) :
     FreshPending (create_apply s caller policy) := by
@@ -499,7 +483,7 @@ private theorem create_preservesFreshPending
       (freshPending_freshDom_empty h _ rfl rfl) _) caller _
     (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
-private theorem revokeDomain_preservesFreshPending
+theorem revokeDomain_preservesFreshPending
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (h : FreshPending s) :
     FreshPending (revokeDomain_apply s caller handle) := by
@@ -522,7 +506,7 @@ private theorem revokeDomain_preservesFreshPending
 -- deliverInterrupt: chain induction
 -- ════════════════════════════════════════════════════════════════════
 
-private theorem applyMidsAndHandler_preservesFreshPending
+theorem applyMidsAndHandler_preservesFreshPending
     (core : CoreId) (vector : Nat) :
     ∀ (prev : DomId × VpId) (chain : List (DomId × VpId)) (s : SpecState),
       FreshPending s → FreshPending (applyMidsAndHandler core vector prev chain s)
@@ -543,7 +527,7 @@ private theorem applyMidsAndHandler_preservesFreshPending
           { vp with runState := .suspended prev.1 prev.2 vector }))
         (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
 
-private theorem deliverInterrupt_preservesFreshPending
+theorem deliverInterrupt_preservesFreshPending
     (s : SpecState) (interrupted handler : DomId) (core : CoreId)
     (vector : Nat) (chain : List (DomId × VpId)) (h : FreshPending s) :
     FreshPending (deliverInterrupt_apply s interrupted handler core vector chain) := by

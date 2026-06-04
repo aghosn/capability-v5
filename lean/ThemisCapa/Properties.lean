@@ -10,6 +10,7 @@
 import ThemisCapa.State
 import ThemisCapa.Step
 import ThemisCapa.Invariants
+import ThemisCapa.FreshPending
 
 namespace ThemisCapa
 open Arena
@@ -224,6 +225,7 @@ theorem carve_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.carve caller parent access attrs) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   -- Resolve parent lookup once.
@@ -231,7 +233,8 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -750,11 +753,13 @@ theorem alias_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.alias caller parent access) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1239,6 +1244,7 @@ theorem revoke_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.revoke caller target) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   -- Unpack target.
@@ -1289,7 +1295,8 @@ theorem revoke_preserves_wellformed
               (Arena.update_unique_keys _ _ _ hwf.unique.domains)
     · simp only [if_neg hv]
       exact Arena.update_unique_keys _ _ _ hwf.unique.domains
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1758,7 +1765,8 @@ theorem send_apply_preserves_wellformed
         (send_apply s caller receiver cap).getMem id = s.getMem id := by
     intro id hidC
     rw [send_apply_getMem, if_neg hidC]
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact send_preservesFreshPending s caller receiver cap hwf.freshPending
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2129,6 +2137,7 @@ theorem seal_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.seal caller cap) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   rcases hdc : s.getDomCap cap with _ | dc
@@ -2153,7 +2162,8 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2291,7 +2301,8 @@ private theorem wf_preserved_under_handle_invariant_updDomain
     (hHandles : ∀ d, (f d).memHandles = d.memHandles)
     (hAddrMap : ∀ d, (f d).addressMap = d.addressMap)
     (hParentF : ∀ d, (f d).parent = d.parent)
-    (hChildrenF : ∀ d, (f d).childrenDoms = d.childrenDoms) :
+    (hChildrenF : ∀ d, (f d).childrenDoms = d.childrenDoms)
+    (hFP : FreshPending (s.updDomain did f)) :
     WellFormed (s.updDomain did f) := by
   have hMem : ∀ id, (s.updDomain did f).getMem id = s.getMem id := by
     intro id; rfl
@@ -2317,7 +2328,7 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, hFP⟩
   case u =>
     refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
     show ((s.updDomain did f).domains).UniqueKeys
@@ -2465,12 +2476,16 @@ theorem reject_preserves_wellformed
                           d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
     wf_preserved_under_handle_invariant_updDomain hwf receiver _
       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+      (freshPending_updDomain_filter_pendingMem hwf.freshPending receiver
+        (fun p => p.1 ≠ pendingId))
   rcases h : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
     with _ | pe
   · simp only [h]; exact hwf₁
   · simp only [h]
     exact wf_preserved_under_handle_invariant_updDomain hwf₁
             pe.senderDomainId _ (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+            (freshPending_updDomain_id hwf₁.freshPending pe.senderDomainId _
+              (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
 
 theorem accept_preserves_wellformed
     {s s' : SpecState} {receiver : DomId} {pendingId : PendingId}
@@ -2500,11 +2515,15 @@ theorem accept_preserves_wellformed
                               d'.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })) :=
       wf_preserved_under_handle_invariant_updDomain hwfSend
         receiver _ (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+        (freshPending_updDomain_filter_pendingMem hwfSend.freshPending receiver
+          (fun p => p.1 ≠ pendingId))
     exact wf_preserved_under_handle_invariant_updDomain hwf₂
                     pe.senderDomainId
                     (fun d' => { d' with frozenHandles :=
                               d'.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
                     (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+                    (freshPending_updDomain_id hwf₂.freshPending pe.senderDomainId _
+                      (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
 
 /-! ### Sealed send preserves WellFormed -/
 
@@ -2524,9 +2543,14 @@ theorem sealedSend_preserves_wellformed
         (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })) :=
       wf_preserved_under_handle_invariant_updDomain hwf caller _
         (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+        (freshPending_updDomain_id hwf.freshPending caller _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
     -- Step 2: enqueue pending entry on receiver.
     exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
             (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+            (freshPending_updDomain_sealedSendReceiver hwf₁.freshPending receiver
+              (fun _ => { capId := capId, senderDomainId := caller,
+                          senderHandle := handle, gpaHint := gpaHint }))
 
 /-! ### Create preserves WellFormed
 
@@ -2552,6 +2576,7 @@ theorem create_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.create caller policy) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   -- Caller exists, so caller ∈ s.domains.keys, so caller < s.nextDomId.
@@ -2609,7 +2634,8 @@ theorem create_preserves_wellformed
   have hNextDom : (create_apply s caller policy).nextDomId = s.nextDomId + 1 := rfl
   have hNextDomCap :
       (create_apply s caller policy).nextDomCapId = s.nextDomCapId + 1 := rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2968,6 +2994,7 @@ theorem revokeDomain_preserves_wellformed
     (hwf : WellFormed s)
     (hstep : step s (.revokeDomain caller handle) s') :
     WellFormed s' := by
+  have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   cases hstep
   rename_i guard
   obtain ⟨dcaller, hdcaller⟩ := Option.isSome_iff_exists.mp guard.callerExists
@@ -3027,7 +3054,8 @@ theorem revokeDomain_preserves_wellformed
     · rw [h, Arena.find?_remove_same, if_pos rfl]
     · rw [Arena.find?_remove_other _ _ _ h, if_neg h]
       rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending⟩
+  case freshPending => exact hfp_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
