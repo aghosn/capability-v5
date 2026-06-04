@@ -98,19 +98,27 @@ const X2APIC_TIMER_DCR: u32 = 0x83E;
 const X2APIC_SELF_IPI: u32 = 0x83F;
 
 // ── Exit reason constants (Intel SDM Vol 3C §27.9.1) ─────────────────────── //
+//
+// Sourced from `themis_abi::vmx_exit_reasons` (single source of truth shared
+// with the userspace VMM) and re-exported under the SDM-style
+// `EXIT_REASON_<NAME>` aliases that local call sites expect.
 
 /// VMX-preemption-timer ticks loaded on every VMENTRY (~30 ms at 2 GHz / 128).
 pub const PREEMPTION_TIMER_TICKS: u64 = 60_000_000;
 
-pub const EXIT_REASON_EXCEPTION_NMI: u32 = 0;
-pub const EXIT_REASON_EXTERNAL_INTERRUPT: u32 = 1;
-pub const EXIT_REASON_TRIPLE_FAULT: u32 = 2;
-pub const EXIT_REASON_INIT_SIGNAL: u32 = 3;
-pub const EXIT_REASON_SIPI: u32 = 4;
-pub const EXIT_REASON_INTERRUPT_WINDOW: u32 = 7;
-pub const EXIT_REASON_CPUID: u32 = 10;
-pub const EXIT_REASON_HLT: u32 = 12;
-pub const EXIT_REASON_VMCALL: u32 = 18;
+pub use themis_abi::vmx_exit_reasons::{
+    APIC_ACCESS as EXIT_REASON_APIC_ACCESS, APIC_WRITE as EXIT_REASON_APIC_WRITE,
+    CPUID as EXIT_REASON_CPUID, CR_ACCESS as EXIT_REASON_CR_ACCESS,
+    EOI_INDUCED as EXIT_REASON_EOI_INDUCED, EPT_MISCONFIG as EXIT_REASON_EPT_MISCONFIG,
+    EPT_VIOLATION as EXIT_REASON_EPT_VIOLATION, EXCEPTION_NMI as EXIT_REASON_EXCEPTION_NMI,
+    EXTERNAL_INTERRUPT as EXIT_REASON_EXTERNAL_INTERRUPT, HLT as EXIT_REASON_HLT,
+    INIT_SIGNAL as EXIT_REASON_INIT_SIGNAL, INTERRUPT_WINDOW as EXIT_REASON_INTERRUPT_WINDOW,
+    IO_INSTRUCTION as EXIT_REASON_IO_INSTRUCTION, RDMSR as EXIT_REASON_RDMSR,
+    SIPI as EXIT_REASON_SIPI, TRIPLE_FAULT as EXIT_REASON_TRIPLE_FAULT,
+    VMCALL as EXIT_REASON_VMCALL, VMENTRY_INVALID_GUEST as EXIT_REASON_VMENTRY_INVALID_GUEST,
+    VMX_PREEMPTION_TIMER as EXIT_REASON_VMX_PREEMPTION_TIMER, WRMSR as EXIT_REASON_WRMSR,
+    XSETBV as EXIT_REASON_XSETBV,
+};
 
 // ── APIC register offsets (Intel SDM Vol 3A §10.4.1) ─────────────────────── //
 
@@ -178,26 +186,9 @@ bitflags::bitflags! {
 
 pub(super) const MSR_LOW_MASK: u64 = 0xFFFF_FFFF;
 
-pub const EXIT_REASON_CR_ACCESS: u32 = 28;
-pub const EXIT_REASON_IO_INSTRUCTION: u32 = 30;
-pub const EXIT_REASON_RDMSR: u32 = 31;
-pub const EXIT_REASON_WRMSR: u32 = 32;
-pub const EXIT_REASON_VMENTRY_INVALID_GUEST: u32 = 33;
-pub const EXIT_REASON_EPT_VIOLATION: u32 = 48;
-pub const EXIT_REASON_EPT_MISCONFIG: u32 = 49;
-pub const EXIT_REASON_VMX_PREEMPTION_TIMER: u32 = 52;
-pub const EXIT_REASON_XSETBV: u32 = 55;
-/// APIC-access VM exit (SDM Vol 3C §29.4): guest accessed the APIC-access
-/// page while VIRTUALIZE_APIC_ACCESSES (secondary bit 0) was set.
-pub const EXIT_REASON_APIC_ACCESS: u32 = 44;
-/// EOI-induced VM exit (SDM Vol 3C §29.1.4): VID=1, guest wrote EOI, and the
-/// delivered vector's bit was set in the EOI-exit bitmap.  Used to notify the
-/// capability engine when a REPORT-visibility vector completes.
-pub const EXIT_REASON_EOI_INDUCED: u32 = 45;
-/// APIC-write VM exit (SDM Vol 3C §29.4.3.3): APIC_REGISTER_VIRT wrote to
-/// VAPIC page, processor now exits so VMM can process side-effects.
-/// RIP is already past the faulting instruction.
-pub const EXIT_REASON_APIC_WRITE: u32 = 56;
+// (EXIT_REASON_* re-exports above already cover CR_ACCESS, IO_INSTRUCTION,
+// RDMSR, WRMSR, VMENTRY_INVALID_GUEST, EPT_VIOLATION, EPT_MISCONFIG,
+// VMX_PREEMPTION_TIMER, XSETBV, APIC_ACCESS, EOI_INDUCED, APIC_WRITE.)
 
 // ── Local-exit dispatch ──────────────────────────────────────────────────── //
 

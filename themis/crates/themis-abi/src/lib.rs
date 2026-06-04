@@ -233,6 +233,8 @@ pub mod errors {
 
 pub mod regs;
 
+pub mod vmx_exit_reasons;
+
 pub mod domcomm;
 
 // ── Themis hypervisor CPUID discovery ──────────────────────────────────────── //
