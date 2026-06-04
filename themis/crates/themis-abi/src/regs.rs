@@ -819,9 +819,15 @@ pub const ALL_VP_REGISTERS: &[VpRegister] = &[
 /// Byte offset within the `VpCommPage` where the intercept message is stored.
 pub const VP_COMM_INTERCEPT_OFFSET: usize = 512;
 
+/// Size of one fixed message slot in the COMM page (matches `THEMIC_MSG_SLOT_SIZE`).
+pub const THEMIC_MSG_SLOT_SIZE: usize = 256;
+
 /// Message types (matches THEMIC_MSG_* in thhv.h).
 pub const THEMIC_MSG_NONE: u32 = 0x0000;
 pub const THEMIC_MSG_VP_INTERCEPT: u32 = 0x0001;
+pub const THEMIC_MSG_DOORBELL: u32 = 0x0002;
+pub const THEMIC_MSG_IRQ_ACK: u32 = 0x0003;
+pub const THEMIC_MSG_SHUTDOWN: u32 = 0x0004;
 
 /// Message header preceding every message in the COMM page.
 /// Matches `struct themic_message_header` in thhv.h (16 bytes).
