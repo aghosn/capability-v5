@@ -11,6 +11,7 @@
 import ThemisCapa.Basic
 import ThemisCapa.State
 import ThemisCapa.Action
+import ThemisCapa.Policy
 
 namespace ThemisCapa
 
@@ -469,9 +470,10 @@ structure CreateGuard (s : SpecState) (caller : DomId) (policy : DomainPolicy)
   callerExists      : (s.getDom caller).isSome
   callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
   hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canCreate = true
-  /-- Engine's policy-monotonicity check: child policy's API is a
-      subset of the parent's. -/
-  policyApiSubset   : ∀ d, s.getDom caller = some d → policy.api ≤ d.policy.api
+  /-- Engine's policy-monotonicity check: child policy refines the
+      parent's per-component (cores ⊆, api ≤, numVps ≤, plus stubs
+      for interrupts/exits/cpuid/msrs). -/
+  policySubset      : ∀ d, s.getDom caller = some d → policy ≤ d.policy
 
 /-- Construct the freshly-allocated child domain (unsealed, no caps yet,
     parent = caller). -/

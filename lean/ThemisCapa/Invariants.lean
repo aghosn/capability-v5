@@ -12,6 +12,7 @@ import ThemisCapa.Basic
 import ThemisCapa.State
 import ThemisCapa.Arena
 import ThemisCapa.DomainTree
+import ThemisCapa.Policy
 
 namespace ThemisCapa
 
@@ -138,6 +139,50 @@ def CoreAffinity (s : SpecState) : Prop :=
     ∀ c caller, vp.runState = VpRunState.running c caller →
     c ∈ d.policy.cores
 
+/-- **Policy-monotonic-ancestry invariant.** Every child domain's
+    policy refines its parent's per-component (`cores ⊆`, `api ≤`,
+    `numVps ≤`, plus stubs for the remaining fields). Captures
+    the engine's policy-refinement check at `create` time:
+    a child cannot have rights the parent doesn't have.
+
+    Subsumes per-field axes (each derivable in one line):
+    * `CoreMonotonicAncestry` — every ancestor's `policy.cores`
+      contains its descendant's.
+    * `ApiMonotonicAncestry`  — same for `policy.api`.
+    * `NumVpsMonotonicAncestry` — same for `policy.numVps`. -/
+def PolicyMonotonicAncestry (s : SpecState) : Prop :=
+  ∀ child parent d_c d_p,
+    s.getDom child  = some d_c → d_c.parent = some parent →
+    s.getDom parent = some d_p →
+    d_c.policy ≤ d_p.policy
+
+/-- Derived: per-core-axis monotonic ancestry. -/
+theorem PolicyMonotonicAncestry.cores
+    {s : SpecState} (h : PolicyMonotonicAncestry s)
+    {child parent : DomId} {d_c d_p : Domain}
+    (hc : s.getDom child = some d_c) (hp : d_c.parent = some parent)
+    (hpd : s.getDom parent = some d_p) :
+    d_c.policy.cores ⊆ d_p.policy.cores :=
+  DomainPolicy.cores_le_of_le (h child parent d_c d_p hc hp hpd)
+
+/-- Derived: per-API-axis monotonic ancestry. -/
+theorem PolicyMonotonicAncestry.api
+    {s : SpecState} (h : PolicyMonotonicAncestry s)
+    {child parent : DomId} {d_c d_p : Domain}
+    (hc : s.getDom child = some d_c) (hp : d_c.parent = some parent)
+    (hpd : s.getDom parent = some d_p) :
+    d_c.policy.api ≤ d_p.policy.api :=
+  DomainPolicy.api_le_of_le (h child parent d_c d_p hc hp hpd)
+
+/-- Derived: per-numVps-axis monotonic ancestry. -/
+theorem PolicyMonotonicAncestry.numVps
+    {s : SpecState} (h : PolicyMonotonicAncestry s)
+    {child parent : DomId} {d_c d_p : Domain}
+    (hc : s.getDom child = some d_c) (hp : d_c.parent = some parent)
+    (hpd : s.getDom parent = some d_p) :
+    d_c.policy.numVps ≤ d_p.policy.numVps :=
+  DomainPolicy.numVps_le_of_le (h child parent d_c d_p hc hp hpd)
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique             : UniqueArenas s
@@ -153,5 +198,6 @@ structure WellFormed (s : SpecState) : Prop where
   domainTreeWf       : DomainTreeWf s
   freshPending       : FreshPending s
   coreAffinity       : CoreAffinity s
+  policyAncestry     : PolicyMonotonicAncestry s
 
 end ThemisCapa

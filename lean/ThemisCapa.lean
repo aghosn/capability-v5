@@ -5,6 +5,7 @@
 -- `archive-v1/README.md` for the v1 → v2 migration rationale.
 import ThemisCapa.Basic
 import ThemisCapa.Domain
+import ThemisCapa.Policy
 import ThemisCapa.Interposition
 import ThemisCapa.Translation
 import ThemisCapa.Switch
@@ -26,6 +27,7 @@ import ThemisCapa.O2SubtreeLocalityRev
 import ThemisCapa.O2MemcapSubtree
 import ThemisCapa.FreshPending
 import ThemisCapa.CoreAffinity
+import ThemisCapa.PolicyMonotonic
 import ThemisCapa.O3IpcIsolation
 import ThemisCapa.O3PairIsolation
 import ThemisCapa.O3PendingPreserved

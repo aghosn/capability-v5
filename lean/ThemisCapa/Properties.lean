@@ -12,6 +12,7 @@ import ThemisCapa.Step
 import ThemisCapa.Invariants
 import ThemisCapa.FreshPending
 import ThemisCapa.CoreAffinity
+import ThemisCapa.PolicyMonotonic
 
 namespace ThemisCapa
 open Arena
@@ -228,6 +229,7 @@ theorem carve_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   -- Resolve parent lookup once.
@@ -235,9 +237,10 @@ theorem carve_preserves_wellformed
   · exact absurd guard.parentExists (by simp [hpOpt])
   -- Rewrite s' via the concrete form.
   have hs' := carve_apply_eq_of_parent s caller parent access attrs p hpOpt
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     -- s'.memcaps = (s.memcaps.insert next child).update parent fupd
     -- s'.domcaps unchanged; s'.domains = s.domains.update caller fupd'.
@@ -758,13 +761,15 @@ theorem alias_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   rcases hpOpt : s.getMem parent with _ | p
   · exact absurd guard.parentExists (by simp [hpOpt])
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1251,6 +1256,7 @@ theorem revoke_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   -- Unpack target.
@@ -1301,9 +1307,10 @@ theorem revoke_preserves_wellformed
               (Arena.update_unique_keys _ _ _ hwf.unique.domains)
     · simp only [if_neg hv]
       exact Arena.update_unique_keys _ _ _ hwf.unique.domains
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -1772,9 +1779,10 @@ theorem send_apply_preserves_wellformed
         (send_apply s caller receiver cap).getMem id = s.getMem id := by
     intro id hidC
     rw [send_apply_getMem, if_neg hidC]
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact send_preservesFreshPending s caller receiver cap hwf.freshPending
   case coreAffinity => exact send_preservesCoreAffinity s caller receiver cap hwf.coreAffinity
+  case policyAncestry => exact send_preservesPolicyMonotonicAncestry s caller receiver cap hwf.policyAncestry
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2147,6 +2155,7 @@ theorem seal_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   rcases hdc : s.getDomCap cap with _ | dc
@@ -2171,9 +2180,10 @@ theorem seal_preserves_wellformed
         exact ⟨dpre, rfl, by rw [← hd']⟩
     · rw [if_neg h] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -2313,7 +2323,8 @@ private theorem wf_preserved_under_handle_invariant_updDomain
     (hParentF : ∀ d, (f d).parent = d.parent)
     (hChildrenF : ∀ d, (f d).childrenDoms = d.childrenDoms)
     (hFP : FreshPending (s.updDomain did f))
-    (hCA : CoreAffinity (s.updDomain did f)) :
+    (hCA : CoreAffinity (s.updDomain did f))
+    (hPMA : PolicyMonotonicAncestry (s.updDomain did f)) :
     WellFormed (s.updDomain did f) := by
   have hMem : ∀ id, (s.updDomain did f).getMem id = s.getMem id := by
     intro id; rfl
@@ -2339,7 +2350,7 @@ private theorem wf_preserved_under_handle_invariant_updDomain
         exact Arena.find?_update_other _ _ _ _ hne
       rw [this] at hd'
       exact ⟨d', hd', rfl⟩
-  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, hFP, hCA⟩
+  refine ⟨?u, ?r, ?cm, ?cb, ?fr, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, hFP, hCA, hPMA⟩
   case u =>
     refine ⟨hwf.unique.memcaps, hwf.unique.domcaps, ?_⟩
     show ((s.updDomain did f).domains).UniqueKeys
@@ -2491,6 +2502,8 @@ theorem reject_preserves_wellformed
         (fun p => p.1 ≠ pendingId))
       (coreAffinity_updDomain_id hwf.coreAffinity receiver _
         (fun _ => rfl) (fun _ => rfl))
+      (policyMA_updDomain_id hwf.policyAncestry receiver _
+        (fun _ => rfl) (fun _ => rfl))
   rcases h : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
     with _ | pe
   · simp only [h]; exact hwf₁
@@ -2500,6 +2513,8 @@ theorem reject_preserves_wellformed
             (freshPending_updDomain_id hwf₁.freshPending pe.senderDomainId _
               (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
             (coreAffinity_updDomain_id hwf₁.coreAffinity pe.senderDomainId _
+              (fun _ => rfl) (fun _ => rfl))
+            (policyMA_updDomain_id hwf₁.policyAncestry pe.senderDomainId _
               (fun _ => rfl) (fun _ => rfl))
 
 theorem accept_preserves_wellformed
@@ -2534,6 +2549,8 @@ theorem accept_preserves_wellformed
           (fun p => p.1 ≠ pendingId))
         (coreAffinity_updDomain_id hwfSend.coreAffinity receiver _
           (fun _ => rfl) (fun _ => rfl))
+        (policyMA_updDomain_id hwfSend.policyAncestry receiver _
+          (fun _ => rfl) (fun _ => rfl))
     exact wf_preserved_under_handle_invariant_updDomain hwf₂
                     pe.senderDomainId
                     (fun d' => { d' with frozenHandles :=
@@ -2542,6 +2559,8 @@ theorem accept_preserves_wellformed
                     (freshPending_updDomain_id hwf₂.freshPending pe.senderDomainId _
                       (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
                     (coreAffinity_updDomain_id hwf₂.coreAffinity pe.senderDomainId _
+                      (fun _ => rfl) (fun _ => rfl))
+                    (policyMA_updDomain_id hwf₂.policyAncestry pe.senderDomainId _
                       (fun _ => rfl) (fun _ => rfl))
 
 /-! ### Sealed send preserves WellFormed -/
@@ -2566,6 +2585,8 @@ theorem sealedSend_preserves_wellformed
           (fun _ => rfl) (fun _ => rfl) (fun _ => rfl))
         (coreAffinity_updDomain_id hwf.coreAffinity caller _
           (fun _ => rfl) (fun _ => rfl))
+        (policyMA_updDomain_id hwf.policyAncestry caller _
+          (fun _ => rfl) (fun _ => rfl))
     -- Step 2: enqueue pending entry on receiver.
     exact wf_preserved_under_handle_invariant_updDomain hwf₁ receiver _
             (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
@@ -2573,6 +2594,8 @@ theorem sealedSend_preserves_wellformed
               (fun _ => { capId := capId, senderDomainId := caller,
                           senderHandle := handle, gpaHint := gpaHint }))
             (coreAffinity_updDomain_id hwf₁.coreAffinity receiver _
+              (fun _ => rfl) (fun _ => rfl))
+            (policyMA_updDomain_id hwf₁.policyAncestry receiver _
               (fun _ => rfl) (fun _ => rfl))
 
 /-! ### Create preserves WellFormed
@@ -2601,6 +2624,7 @@ theorem create_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   -- Caller exists, so caller ∈ s.domains.keys, so caller < s.nextDomId.
@@ -2658,9 +2682,10 @@ theorem create_preserves_wellformed
   have hNextDom : (create_apply s caller policy).nextDomId = s.nextDomId + 1 := rfl
   have hNextDomCap :
       (create_apply s caller policy).nextDomCapId = s.nextDomCapId + 1 := rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
@@ -3021,6 +3046,7 @@ theorem revokeDomain_preserves_wellformed
     WellFormed s' := by
   have hfp_post : FreshPending s' := step_preservesFreshPending hwf.freshPending hstep
   have hca_post : CoreAffinity s' := step_preservesCoreAffinity hwf.coreAffinity hstep
+  have hpma_post : PolicyMonotonicAncestry s' := step_preservesPolicyMonotonicAncestry hwf hstep
   cases hstep
   rename_i guard
   obtain ⟨dcaller, hdcaller⟩ := Option.isSome_iff_exists.mp guard.callerExists
@@ -3080,9 +3106,10 @@ theorem revokeDomain_preserves_wellformed
     · rw [h, Arena.find?_remove_same, if_pos rfl]
     · rw [Arena.find?_remove_other _ _ _ h, if_neg h]
       rfl
-  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity⟩
+  refine ⟨?unique, ?refs, ?cdtMono, ?cdtBidi, ?fresh, ?ho, ?pca, ?fDom, ?fDomCap, ?addrWf, ?dtw, ?freshPending, ?coreAffinity, ?policyAncestry⟩
   case freshPending => exact hfp_post
   case coreAffinity => exact hca_post
+  case policyAncestry => exact hpma_post
   case unique =>
     refine ⟨?mc, ?dc, ?ds⟩
     case mc =>
