@@ -124,6 +124,20 @@ theorem FreshPending.mem_fresh
   intro p hp heq
   exact Nat.lt_irrefl _ (heq ▸ (h did d hd).1 p hp)
 
+/-- **Core-affinity invariant.** Every VP that is currently in the
+    `.running c _` state belongs to a domain whose policy permits
+    `c`. Captures the O4 confinement property:
+    a domain cannot execute on a core outside its `policy.cores`.
+
+    Other `VpRunState` cases (`.available`, `.locked`, `.suspended`,
+    `.interrupted`) carry no core obligation here — the engine enforces
+    core membership at the *moment of transition into `.running`*. -/
+def CoreAffinity (s : SpecState) : Prop :=
+  ∀ did d, s.getDom did = some d →
+    ∀ vp ∈ d.vps,
+    ∀ c caller, vp.runState = VpRunState.running c caller →
+    c ∈ d.policy.cores
+
 /-- The full well-formedness predicate. -/
 structure WellFormed (s : SpecState) : Prop where
   unique             : UniqueArenas s
@@ -138,5 +152,6 @@ structure WellFormed (s : SpecState) : Prop where
   addressMapsWf      : AddressMapsWf s
   domainTreeWf       : DomainTreeWf s
   freshPending       : FreshPending s
+  coreAffinity       : CoreAffinity s
 
 end ThemisCapa

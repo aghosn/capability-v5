@@ -724,6 +724,13 @@ structure SwitchReturnGuard (s : SpecState) (caller : DomId) (core : CoreId) :
   prevDomLive       : ∀ d, s.getDom caller = some d →
                       ∀ p, d.vpAndPrevCallerOnCore core = some p →
                       ∀ pd, s.getDom p.2.domainId = some pd → pd.isLive
+  /-- The previous caller's policy must allow `core`. (Holds in the
+      engine because the lock was created by a `switch` from `core`,
+      and policy cores are immutable in v2 spec.) -/
+  prevCoreAllowed   : ∀ d, s.getDom caller = some d →
+                      ∀ p, d.vpAndPrevCallerOnCore core = some p →
+                      ∀ pd, s.getDom p.2.domainId = some pd →
+                      core ∈ pd.policy.cores
 
 /-- Pure state update for `switchReturn`:
     1. Caller's running VP on `core` → `.available exitReason`.
@@ -945,6 +952,11 @@ structure DeliverInterruptGuard
   /-- Both endpoints must be live (revoked tombstones cannot serve interrupts). -/
   interruptedLive    : ∀ d, s.getDom interrupted = some d → d.isLive
   handlerLive        : ∀ d, s.getDom handler = some d → d.isLive
+  /-- Handler's policy must allow the interrupt-target `_core`.
+      Matches engine behavior: an interrupt is only routed to a handler
+      whose policy permits the firing core. -/
+  handlerCoreAllowed : ∀ hd, s.getDom handler = some hd →
+                       _core ∈ hd.policy.cores
 
 /-- Pure state update for `deliverInterrupt`. Applies leaf → Interrupted,
     then walks the chain tail with `applyMidsAndHandler` (intermediates
