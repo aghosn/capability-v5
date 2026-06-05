@@ -13,7 +13,7 @@
 #include <linux/poll.h>
 #include <asm/cpuid.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 #define THHV_DEV_NAME "thhv"
 

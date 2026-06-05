@@ -23,7 +23,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Assign ─────────────────────────────────────────────────────────────── */
 

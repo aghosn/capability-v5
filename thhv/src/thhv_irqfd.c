@@ -21,7 +21,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Work handler ────────────────────────────────────────────────────────── */
 
@@ -99,7 +99,7 @@ if (copy_from_user(&args, uarg, sizeof(args)))
 return -EFAULT;
 if (args.fd < 0)
 return -EBADF;
-if (args.gsi == 0 || args.gsi > 255)
+if (args.gsi == 0 || args.gsi > THHV_MAX_GSI)
 return -EINVAL;
 
 file = fget(args.fd);

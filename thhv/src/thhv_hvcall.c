@@ -8,7 +8,7 @@
  */
 
 #include <linux/module.h>
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Generic fallback (for opcodes without dedicated wrappers) ─────────── */
 

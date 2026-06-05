@@ -21,7 +21,7 @@
 #include <linux/io.h>
 #include <asm/cpuid.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Global DomainComm instance ────────────────────────────────────────────── */
 

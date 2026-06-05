@@ -181,6 +181,15 @@ pub mod synthetic_exits {
     pub const THEMIS_EXIT_DOORBELL: u32 = 0x8000_0001;
 }
 
+/// Maximum number of VPs that may be created in a single Themis domain.
+///
+/// This is the cap enforced by the capavisor; thhv's partition-create
+/// ioctl rejects larger requests with `-EINVAL`, and the cloud-hypervisor
+/// Themis backend advertises the same value via `Hypervisor::get_max_vcpus`.
+/// Mirrored as `THHV_MAX_VPS_PER_DOMAIN` in `<thhv/inc/thhv.h>`; the two
+/// definitions must agree.
+pub const MAX_VPS_PER_DOMAIN: u32 = 256;
+
 /// Policy-kind discriminants for `THEMIS_SET_POLICY`.
 ///
 /// Each constant maps 1:1 to a `PolicyIdentifier` variant in the capability engine.

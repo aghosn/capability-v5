@@ -23,7 +23,7 @@
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Global PA map ─────────────────────────────────────────────────────────── */
 
@@ -214,7 +214,7 @@ int thhv_set_pa_map(void __user *uarg)
 
 	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 		return -EFAULT;
-	if (hdr.nr_entries == 0 || hdr.nr_entries > 4096)
+	if (hdr.nr_entries == 0 || hdr.nr_entries > THHV_PA_MAP_MAX_ENTRIES)
 		return -EINVAL;
 
 	entries = (struct thhv_pa_map_entry __user *)(unsigned long)hdr.entries;

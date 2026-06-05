@@ -15,7 +15,7 @@
 #include <linux/highmem.h>
 #include <linux/delay.h>
 
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── ThemIC intercept message reader ────────────────────────────────────────── */
 

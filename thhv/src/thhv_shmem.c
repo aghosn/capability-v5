@@ -18,7 +18,7 @@
 #include <linux/mutex.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include "thhv.h"
+#include "thhv_internal.h"
 
 /* ── Rendezvous table ──────────────────────────────────────────────────────── */
 
