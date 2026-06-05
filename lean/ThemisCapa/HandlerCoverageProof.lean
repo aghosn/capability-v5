@@ -230,6 +230,67 @@ theorem hc_updDomain_id
       rw [h_pol a_pre]; exact ha_vis_pre
     · simp [hax]; exact ha_vis_pre
 
+/-- Conditional `updDomain` lift: when `f` preserves `parent`/`policy`
+    pointwise but only preserves `isLive` *at* the specific updated key
+    `x` (under a hypothesis on the pre-state domain there), HC still
+    transports.  Used for `seal`, where `f := fun d => { d with status :=
+    .sealed }` resurrects tombstones in general but is fine at the
+    guarded `.unsealed` target. -/
+theorem hc_updDomain_at
+    {s : SpecState} (h : HandlerCoverage s)
+    (x : DomId) (f : Domain → Domain)
+    (h_par : ∀ d, (f d).parent = d.parent)
+    (h_pol : ∀ d, (f d).policy = d.policy)
+    (h_live_at : ∀ d_pre, s.getDom x = some d_pre →
+                 ((f d_pre).isLive ↔ d_pre.isLive)) :
+    HandlerCoverage (s.updDomain x f) := by
+  intro did d' hd' hlive vec
+  have hd_pre : ∃ d_pre, s.getDom did = some d_pre ∧
+      d'.parent = d_pre.parent ∧ d'.policy = d_pre.policy ∧
+      (d'.isLive ↔ d_pre.isLive) := by
+    unfold SpecState.updDomain SpecState.getDom at hd'
+    by_cases hxd : did = x
+    · subst hxd
+      rw [Arena.find?_update_eq_map] at hd'
+      rcases hpre : s.domains.find? did with _ | d_pre
+      · rw [hpre] at hd'; cases hd'
+      · rw [hpre] at hd'
+        simp only [Option.map_some, Option.some.injEq] at hd'
+        have hpre' : s.getDom did = some d_pre := by
+          unfold SpecState.getDom; exact hpre
+        refine ⟨d_pre, hpre', ?_, ?_, ?_⟩
+        · rw [← hd']; exact h_par d_pre
+        · rw [← hd']; exact h_pol d_pre
+        · rw [← hd']; exact h_live_at d_pre hpre'
+    · rw [Arena.find?_update_other _ _ _ _ hxd] at hd'
+      refine ⟨d', ?_, rfl, rfl, Iff.rfl⟩
+      unfold SpecState.getDom; exact hd'
+  obtain ⟨d_pre, hd_pre, hpar_eq, hpol_eq, hlive_iff⟩ := hd_pre
+  have hlive_pre : d_pre.isLive := hlive_iff.mp hlive
+  obtain ⟨aid, a_pre, hanc_pre, ha_pre, ha_live_pre, ha_vis_pre⟩ :=
+    h did d_pre hd_pre hlive_pre vec
+  refine ⟨aid, if aid = x then f a_pre else a_pre, ?_, ?_, ?_, ?_⟩
+  · exact (IsAncestorOrSelf_updDomain_id x f h_par).mpr hanc_pre
+  · unfold SpecState.updDomain SpecState.getDom
+    by_cases hax : aid = x
+    · subst hax
+      rw [Arena.find?_update_eq_map]
+      unfold SpecState.getDom at ha_pre
+      rw [ha_pre]; simp
+    · rw [Arena.find?_update_other _ _ _ _ hax]
+      unfold SpecState.getDom at ha_pre
+      simp [hax, ha_pre]
+  · by_cases hax : aid = x
+    · subst hax
+      simp only [if_true]
+      exact (h_live_at a_pre ha_pre).mpr ha_live_pre
+    · simp [hax]; exact ha_live_pre
+  · by_cases hax : aid = x
+    · simp only [hax, if_true]
+      unfold Domain.visibilityFor at ha_vis_pre ⊢
+      rw [h_pol a_pre]; exact ha_vis_pre
+    · simp [hax]; exact ha_vis_pre
+
 -- ════════════════════════════════════════════════════════════════════
 -- § 2.  Per-action lemmas — trivial (parent, policy, isLive untouched)
 -- ════════════════════════════════════════════════════════════════════
@@ -562,5 +623,36 @@ theorem deliverInterrupt_preservesHandlerCoverage
   rcases hgl : (leaf :: m :: rest).getLast? with _ | ⟨hDom, hVp⟩
   · exact h1
   · exact hc_updCore h1 core _
+
+-- ════════════════════════════════════════════════════════════════════
+-- § 3.  Per-action lemma — seal (status flip, conditional helper)
+-- ════════════════════════════════════════════════════════════════════
+
+/-- Sealing the target domain (`.unsealed → .sealed`) preserves
+    `HandlerCoverage`.  The unconditional `hc_updDomain_id` doesn't
+    apply because `(f d).isLive ↔ d.isLive` would resurrect a tombstone
+    pointwise.  However, at the specific guarded target `dc.targetDom`
+    the `SealGuard.targetUnsealed` premise gives us
+    `td.status = .unsealed`, so both pre- and post-state are live —
+    enough for `hc_updDomain_at`. -/
+theorem seal_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (guard : SealGuard s caller cap) (h : HandlerCoverage s) :
+    HandlerCoverage (seal_apply s caller cap) := by
+  rcases hc : s.getDomCap cap with _ | dc
+  · simp only [seal_apply, hc]; exact h
+  · simp only [seal_apply, hc]
+    apply hc_updDomain_at h dc.targetDom
+            (fun d => { d with status := .sealed })
+            (fun _ => rfl) (fun _ => rfl)
+    -- Local liveness: at the guarded target, status = .unsealed pre,
+    -- and .sealed post — both live (≠ .revoked).
+    intro d_pre hpre
+    have htu : d_pre.isUnsealed := guard.targetUnsealed dc hc d_pre hpre
+    -- `.unsealed → True` for isLive; `.sealed → True` for isLive.
+    constructor
+    · intro _; unfold Domain.isLive; unfold Domain.isUnsealed at htu
+      intro habs; rw [habs] at htu; cases htu
+    · intro _; unfold Domain.isLive; intro habs; cases habs
 
 end ThemisCapa
