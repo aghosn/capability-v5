@@ -170,19 +170,19 @@ theorem hc_freshDomCap
   hc_of_getDom_eq (s₁ := s) (s₂ := (s.freshDomCap dc).snd) (fun _ => rfl) h
 
 /-- Generic `updDomain` lift: any `f` that preserves `parent`, `policy`,
-    and `status` for every existing domain preserves `HandlerCoverage`. -/
+    and the `isLive` predicate for every domain preserves `HandlerCoverage`. -/
 theorem hc_updDomain_id
     {s : SpecState} (h : HandlerCoverage s)
     (x : DomId) (f : Domain → Domain)
     (h_par : ∀ d, (f d).parent = d.parent)
     (h_pol : ∀ d, (f d).policy = d.policy)
-    (h_sta : ∀ d, (f d).status = d.status) :
+    (h_live : ∀ d, (f d).isLive ↔ d.isLive) :
     HandlerCoverage (s.updDomain x f) := by
   intro did d' hd' hlive vec
   -- Recover a pre-state domain for `did` and a live witness for the source.
   have hd_pre : ∃ d_pre, s.getDom did = some d_pre ∧
       d'.parent = d_pre.parent ∧ d'.policy = d_pre.policy ∧
-      d'.status = d_pre.status := by
+      (d'.isLive ↔ d_pre.isLive) := by
     unfold SpecState.updDomain SpecState.getDom at hd'
     by_cases hxd : did = x
     · subst hxd
@@ -195,13 +195,12 @@ theorem hc_updDomain_id
         · unfold SpecState.getDom; exact hpre
         · rw [← hd']; exact h_par d_pre
         · rw [← hd']; exact h_pol d_pre
-        · rw [← hd']; exact h_sta d_pre
+        · rw [← hd']; exact h_live d_pre
     · rw [Arena.find?_update_other _ _ _ _ hxd] at hd'
-      refine ⟨d', ?_, rfl, rfl, rfl⟩
+      refine ⟨d', ?_, rfl, rfl, Iff.rfl⟩
       unfold SpecState.getDom; exact hd'
-  obtain ⟨d_pre, hd_pre, hpar_eq, hpol_eq, hsta_eq⟩ := hd_pre
-  have hlive_pre : d_pre.isLive := by
-    unfold Domain.isLive at hlive ⊢; rw [hsta_eq] at hlive; exact hlive
+  obtain ⟨d_pre, hd_pre, hpar_eq, hpol_eq, hlive_iff⟩ := hd_pre
+  have hlive_pre : d_pre.isLive := hlive_iff.mp hlive
   -- Pull a witness out of HC in the pre-state.
   obtain ⟨aid, a_pre, hanc_pre, ha_pre, ha_live_pre, ha_vis_pre⟩ :=
     h did d_pre hd_pre hlive_pre vec
@@ -222,8 +221,7 @@ theorem hc_updDomain_id
   · -- isLive preserved
     by_cases hax : aid = x
     · simp only [hax, if_true]
-      unfold Domain.isLive at ha_live_pre ⊢
-      rw [h_sta a_pre]; exact ha_live_pre
+      exact (h_live a_pre).mpr ha_live_pre
     · simp [hax]; exact ha_live_pre
   · -- visibilityFor preserved
     by_cases hax : aid = x
@@ -231,5 +229,338 @@ theorem hc_updDomain_id
       unfold Domain.visibilityFor at ha_vis_pre ⊢
       rw [h_pol a_pre]; exact ha_vis_pre
     · simp [hax]; exact ha_vis_pre
+
+-- ════════════════════════════════════════════════════════════════════
+-- § 2.  Per-action lemmas — trivial (parent, policy, isLive untouched)
+-- ════════════════════════════════════════════════════════════════════
+
+/-! These 17 actions modify only bookkeeping fields (memHandles,
+    frozenHandles, vps, pendingMemCaps, channels, etc.) — none of
+    `parent`, `policy`, or `status` change for any domain.  They all
+    discharge the `hc_updDomain_id` obligations with `rfl` / `Iff.rfl`.
+
+    The 4 deferred cases (with bespoke status/structure changes):
+    * `seal` — flips status `.unsealed → .sealed` (live → live but the
+      `isLive ↔ isLive` only holds at the guarded target; needs a
+      conditional helper).
+    * `revoke` — vital cascade may flip a domain to `.revoked`; needs
+      cascade-aware reasoning to show no live survivor depends on it.
+    * `create` — introduces a new ancestor edge; needs `hc_freshDom_create`.
+    * `revokeDomain` — removes a leaf domain; needs `hc_domains_remove`. -/
+
+theorem carve_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (parent : MemCapId)
+    (access : Access) (attrs : Attributes) (h : HandlerCoverage s) :
+    HandlerCoverage (carve_apply s caller parent access attrs) := by
+  rcases hm : s.getMem parent with _ | p
+  · simp only [carve_apply, hm]; exact h
+  · simp only [carve_apply, hm]
+    exact hc_updDomain_id
+      (hc_updMem (hc_freshMem h _) _ _) caller _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem alias_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (parent : MemCapId) (access : Access)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (alias_apply s caller parent access) := by
+  rcases hm : s.getMem parent with _ | p
+  · simp only [alias_apply, hm]; exact h
+  · simp only [alias_apply, hm]
+    exact hc_updDomain_id
+      (hc_updMem (hc_freshMem h _) _ _) caller _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem send_preservesHandlerCoverage
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (send_apply s caller receiver cap) := by
+  simp only [send_apply]
+  apply hc_updMem _ cap
+  apply hc_updDomain_id _ receiver
+    (fun d => { d with memHandles := d.memHandles ++ [(d.nextHandle, cap)],
+                       nextHandle := d.nextHandle + 1 })
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  exact hc_updDomain_id h caller
+    (fun d => { d with memHandles := d.memHandles.filter (fun h => h.2 ≠ cap) })
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem accept_preservesHandlerCoverage
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (accept_apply s receiver pendingId) := by
+  rcases hp : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
+    with _ | pe
+  · simp only [accept_apply, hp]; exact h
+  · simp only [accept_apply, hp]
+    have h1 := send_preservesHandlerCoverage s pe.senderDomainId receiver pe.capId h
+    have h2 := hc_updDomain_id h1 receiver
+      (fun d => { d with pendingMemCaps :=
+                  d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+    exact hc_updDomain_id h2 pe.senderDomainId
+      (fun d => { d with frozenHandles :=
+                  d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem reject_preservesHandlerCoverage
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (reject_apply s receiver pendingId) := by
+  simp only [reject_apply]
+  have h1 := hc_updDomain_id h receiver
+    (fun d => { d with pendingMemCaps :=
+                d.pendingMemCaps.filter (fun p => p.1 ≠ pendingId) })
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  rcases hp : (s.getDom receiver).bind (fun d => d.lookupPending pendingId)
+    with _ | pe
+  · simp only [hp]; exact h1
+  · simp only [hp]
+    exact hc_updDomain_id h1 pe.senderDomainId
+      (fun d => { d with frozenHandles :=
+                  d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem sealedSend_preservesHandlerCoverage
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (gpaHint : Option Nat) (h : HandlerCoverage s) :
+    HandlerCoverage (sealedSend_apply s caller receiver handle gpaHint) := by
+  rcases hp : (s.getDom caller).bind (fun d => d.lookupMemHandle handle)
+    with _ | capId
+  · simp only [sealedSend_apply, hp]; exact h
+  · simp only [sealedSend_apply, hp]
+    have h1 := hc_updDomain_id h caller
+      (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+    exact hc_updDomain_id h1 receiver _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem setPolicy_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (cap : DomCapId)
+    (id : PolicyIdentifier) (value : Nat) (h : HandlerCoverage s) :
+    HandlerCoverage (setPolicy_apply s caller cap id value) := by
+  rcases hc : s.getDomCap cap with _ | dc
+  · simp only [setPolicy_apply, hc]; exact h
+  · simp only [setPolicy_apply, hc]
+    -- `applyPolicyValue` is identity in v2 spec → policy preserved.
+    exact hc_updDomain_id h dc.targetDom
+      (fun d => { d with policy := applyPolicyValue d.policy id value })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem sendChannel_preservesHandlerCoverage
+    (s : SpecState) (caller receiver : DomId) (cap : DomCapId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (sendChannel_apply s caller receiver cap) := by
+  simp only [sendChannel_apply]
+  apply hc_updDomCap _ cap
+  refine hc_updDomain_id ?_ receiver _
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  exact hc_updDomain_id h caller _
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem acceptChannel_preservesHandlerCoverage
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (acceptChannel_apply s receiver pendingId) := by
+  rcases hp : (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId)
+    with _ | pe
+  · simp only [acceptChannel_apply, hp]; exact h
+  · simp only [acceptChannel_apply, hp]
+    have h1 := sendChannel_preservesHandlerCoverage s pe.senderDomainId receiver pe.capId h
+    have h2 := hc_updDomain_id h1 receiver
+      (fun d => { d with pendingDomCaps :=
+                  d.pendingDomCaps.filter (fun p => p.1 ≠ pendingId) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+    exact hc_updDomain_id h2 pe.senderDomainId
+      (fun d => { d with frozenHandles :=
+                  d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem rejectChannel_preservesHandlerCoverage
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (rejectChannel_apply s receiver pendingId) := by
+  simp only [rejectChannel_apply]
+  have h1 := hc_updDomain_id h receiver
+    (fun d => { d with pendingDomCaps :=
+                d.pendingDomCaps.filter (fun p => p.1 ≠ pendingId) })
+    (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  rcases hp : (s.getDom receiver).bind (fun d => d.lookupPendingDom pendingId)
+    with _ | pe
+  · simp only [hp]; exact h1
+  · simp only [hp]
+    exact hc_updDomain_id h1 pe.senderDomainId
+      (fun d => { d with frozenHandles :=
+                  d.frozenHandles.filter (fun fh => fh ≠ pe.senderHandle) })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem addVp_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (childHandle commHandle : LocalHandle)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (addVp_apply s caller childHandle commHandle) := by
+  rcases hh : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle)
+    with _ | cid
+  · simp only [addVp_apply, hh]; exact h
+  · rcases hc : s.getDomCap cid with _ | dc
+    · simp only [addVp_apply, hh, hc]; exact h
+    · rcases ht : s.getDom dc.targetDom with _ | cd
+      · simp only [addVp_apply, hh, hc, ht]; exact h
+      · rcases hm : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle)
+          with _ | mid
+        · simp only [addVp_apply, hh, hc, ht, hm]; exact h
+        · simp only [addVp_apply, hh, hc, ht, hm]
+          apply hc_updMem _ mid
+          exact hc_updDomain_id h dc.targetDom _
+            (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem registerComm_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (commHandle childHandle : LocalHandle)
+    (vpId : VpId) (h : HandlerCoverage s) :
+    HandlerCoverage (registerComm_apply s caller commHandle childHandle vpId) := by
+  rcases hh : (s.getDom caller).bind (fun d => d.lookupDomHandle childHandle)
+    with _ | cid
+  · simp only [registerComm_apply, hh]; exact h
+  · rcases hc : s.getDomCap cid with _ | dc
+    · simp only [registerComm_apply, hh, hc]; exact h
+    · rcases ht : s.getDom dc.targetDom with _ | _
+      · simp only [registerComm_apply, hh, hc, ht]; exact h
+      · rcases hm : (s.getDom caller).bind (fun d => d.lookupMemHandle commHandle)
+          with _ | mid
+        · simp only [registerComm_apply, hh, hc, ht, hm]; exact h
+        · simp only [registerComm_apply, hh, hc, ht, hm]
+          apply hc_updMem _ mid
+          exact hc_updDomain_id h dc.targetDom _
+            (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem mapSelf_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+    (h : HandlerCoverage s) :
+    HandlerCoverage (mapSelf_apply s caller capHandle newGpa) := by
+  rcases hd : s.getDom caller with _ | d
+  · simp only [mapSelf_apply, hd]; exact h
+  · rcases hh : d.lookupMemHandle capHandle with _ | capId
+    · simp only [mapSelf_apply, hd, hh]; exact h
+    · rcases hg : s.getMem capId with _ | c
+      · simp only [mapSelf_apply, hd, hh, hg]; exact h
+      · rcases hog : d.lookupMappedGpa capHandle with _ | oldGpa
+        · simp only [mapSelf_apply, hd, hh, hg, hog]; exact h
+        · simp only [mapSelf_apply, hd, hh, hg, hog]
+          refine hc_updDomain_id h caller _ ?_ ?_ ?_
+          · intro d'; unfold Domain.updMappedGpa; split <;> rfl
+          · intro d'; unfold Domain.updMappedGpa; split <;> rfl
+          · intro d'; unfold Domain.updMappedGpa; split <;> exact Iff.rfl
+
+-- ════════════════════════════════════════════════════════════════════
+-- § 3.  Scheduling actions (switch, switchSuspended, switchReturn)
+-- ════════════════════════════════════════════════════════════════════
+
+theorem switch_preservesHandlerCoverage
+    {s : SpecState} {caller : DomId} {toHandle : LocalHandle}
+    {toVpId : VpId} {core : CoreId}
+    (h : HandlerCoverage s) :
+    HandlerCoverage (switch_apply s caller toHandle toVpId core) := by
+  rcases hh : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [switch_apply, hh]; exact h
+  · rcases hc : s.getDomCap cid with _ | dc
+    · simp only [switch_apply, hh, hc]; exact h
+    · rcases hv : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | vpv
+      · simp only [switch_apply, hh, hc, hv]; exact h
+      · simp only [switch_apply, hh, hc, hv]
+        apply hc_updCore _ core
+        refine hc_updDomain_id ?_ caller _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+        exact hc_updDomain_id h dc.targetDom _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem switchSuspended_preservesHandlerCoverage
+    {s : SpecState} {caller : DomId} {toHandle : LocalHandle}
+    {toVpId : VpId} {core : CoreId}
+    {calleeDom : DomId} {calleeVp : VpId}
+    (h : HandlerCoverage s) :
+    HandlerCoverage
+      (switchSuspended_apply s caller toHandle toVpId core calleeDom calleeVp) := by
+  rcases hh : (s.getDom caller).bind (fun d => d.lookupDomHandle toHandle)
+    with _ | cid
+  · simp only [switchSuspended_apply, hh]; exact h
+  · rcases hc : s.getDomCap cid with _ | dc
+    · simp only [switchSuspended_apply, hh, hc]; exact h
+    · rcases hv : (s.getDom caller).bind (fun d => d.vpAndOptPrevOnCore core)
+        with _ | vpv
+      · simp only [switchSuspended_apply, hh, hc, hv]; exact h
+      · simp only [switchSuspended_apply, hh, hc, hv]
+        apply hc_updCore _ core
+        refine hc_updDomain_id ?_ caller _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+        refine hc_updDomain_id ?_ calleeDom _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+        exact hc_updDomain_id h dc.targetDom _
+          (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem switchReturn_preservesHandlerCoverage
+    {s : SpecState} {caller : DomId} {core : CoreId} {exitReason : Option Nat}
+    (h : HandlerCoverage s) :
+    HandlerCoverage (switchReturn_apply s caller core exitReason) := by
+  rcases hp : (s.getDom caller).bind (fun d => d.vpAndPrevCallerOnCore core)
+    with _ | pair
+  · simp only [switchReturn_apply, hp]; exact h
+  · obtain ⟨vpId, pctx⟩ := pair
+    simp only [switchReturn_apply, hp]
+    apply hc_updCore _ core
+    refine hc_updDomain_id ?_ pctx.domainId _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+    exact hc_updDomain_id h caller _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+-- ════════════════════════════════════════════════════════════════════
+-- § 4.  deliverInterrupt — induction over the chain
+-- ════════════════════════════════════════════════════════════════════
+
+theorem applyMidsAndHandler_preservesHandlerCoverage
+    (core : CoreId) (vector : Nat) :
+    ∀ (chain : List (DomId × VpId)) (prev : DomId × VpId) (s : SpecState),
+    HandlerCoverage s →
+    HandlerCoverage (applyMidsAndHandler core vector prev chain s) := by
+  intro chain
+  induction chain with
+  | nil =>
+    intro _ s h
+    simp only [applyMidsAndHandler]; exact h
+  | cons head tail ih =>
+    intro prev s h
+    match tail with
+    | [] =>
+      simp only [applyMidsAndHandler]
+      exact hc_updDomain_id h head.1 _
+        (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+    | mid :: rest =>
+      simp only [applyMidsAndHandler]
+      apply ih head
+      exact hc_updDomain_id h head.1 _
+        (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
+theorem deliverInterrupt_preservesHandlerCoverage
+    (s : SpecState) (interrupted handler : DomId) (core : CoreId)
+    (vector : Nat) (chain : List (DomId × VpId))
+    (h : HandlerCoverage s) :
+    HandlerCoverage
+      (deliverInterrupt_apply s interrupted handler core vector chain) := by
+  unfold deliverInterrupt_apply
+  rcases chain with _ | ⟨leaf, tail⟩
+  · exact h
+  rcases tail with _ | ⟨m, rest⟩
+  · exact h
+  -- chain = leaf :: m :: rest
+  simp only
+  have h0 : HandlerCoverage
+      (s.updDomain leaf.1 (fun d => d.updVp leaf.2 (fun vp =>
+        { vp with runState := .interrupted vector }))) :=
+    hc_updDomain_id h leaf.1 _
+      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  have h1 := applyMidsAndHandler_preservesHandlerCoverage core vector
+              (m :: rest) leaf _ h0
+  rcases hgl : (leaf :: m :: rest).getLast? with _ | ⟨hDom, hVp⟩
+  · exact h1
+  · exact hc_updCore h1 core _
 
 end ThemisCapa
