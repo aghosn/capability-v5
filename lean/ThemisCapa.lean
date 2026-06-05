@@ -29,6 +29,7 @@ import ThemisCapa.FreshPending
 import ThemisCapa.CoreAffinity
 import ThemisCapa.PolicyMonotonic
 import ThemisCapa.HandlerCoverage
+import ThemisCapa.HandlerCoverageProof
 import ThemisCapa.O3IpcIsolation
 import ThemisCapa.O3PairIsolation
 import ThemisCapa.O3PendingPreserved
