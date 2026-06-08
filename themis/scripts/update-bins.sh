@@ -122,7 +122,12 @@ if [[ ! -f "$BINS_IMG" ]]; then
 fi
 
 MNT="$(mktemp -d)"
-fuse2fs -o fakeroot "$BINS_IMG" "$MNT" >/dev/null 2>&1
+if ! fuse2fs -o fakeroot "$BINS_IMG" "$MNT"; then
+    echo "ERROR: fuse2fs failed to mount $BINS_IMG" >&2
+    echo "       If it reported 'Errors detected; running e2fsck is required'," >&2
+    echo "       run: fsck.ext4 -fp $BINS_IMG" >&2
+    exit 1
+fi
 MOUNTED=true
 
 for _ in {1..50}; do
@@ -133,8 +138,8 @@ for _ in {1..50}; do
 done
 
 if ! mountpoint -q "$MNT" 2>/dev/null; then
-    echo "ERROR: failed to mount $BINS_IMG with fuse2fs" >&2
-    echo "       Remediation: ensure FUSE is available, then retry." >&2
+    echo "ERROR: $BINS_IMG mounted but mountpoint check failed" >&2
+    echo "       Try: fsck.ext4 -fp $BINS_IMG" >&2
     exit 1
 fi
 

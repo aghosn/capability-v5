@@ -212,8 +212,34 @@ pub(crate) fn handle_local_exit(
         EXIT_REASON_CR_ACCESS => cr::handle_cr_access(vcpu),
         EXIT_REASON_EXCEPTION_NMI => reinject_exception(vcpu),
         EXIT_REASON_EPT_VIOLATION => {
-            // No special local handling; advance RIP and return.
-            vcpu.next_rip();
+            // CPL=3: an unprivileged process touched a GPA that is no longer
+            // present in this domain's EPT (typically a page that was sent to
+            // a child via CARVE+SEND).  Inject #GP(0) so Linux delivers
+            // SIGSEGV to the offending user process — userspace can install a
+            // handler with siglongjmp to demonstrate the isolation property.
+            //
+            // CPL=0: kernel-context EPT violation.  We can't safely inject
+            // #PF (Linux walks guest PT, sees the entry present, treats the
+            // fault as spurious, and re-runs the instruction → infinite EPT
+            // loop) or #GP (no extable for the typical HHDM access path —
+            // would oops).  Log the event and advance RIP; the load is
+            // effectively skipped (destination register unchanged).
+            let cs_sel = vcpu.get(vmcs::guest::CS_SELECTOR);
+            let cpl = (cs_sel & 0x3) as u8;
+            let gpa = if let ExitInfo::EptViolation { gpa, .. } = info { *gpa } else { 0 };
+            if cpl == 3 {
+                serial_println!(
+                    "[VMEXIT] EPT_VIOLATION CPL=3 gpa={:#x} rip={:#018x} → inject #GP(0)",
+                    gpa, vcpu.rip()
+                );
+                inject_gp(vcpu);
+            } else {
+                serial_println!(
+                    "[VMEXIT] EPT_VIOLATION CPL=0 gpa={:#x} rip={:#018x} → skip (no inject)",
+                    gpa, vcpu.rip()
+                );
+                vcpu.next_rip();
+            }
         }
         EXIT_REASON_SIPI => {
             // AP bootstrap — only fires for dom0 (children use virtual LAPIC).

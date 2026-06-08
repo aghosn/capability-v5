@@ -595,3 +595,57 @@ err_revoke:
 	return ret;
 }
 
+
+/* ── Per-partition collector for THHV_DEBUG_LIST_HPAS ───────────────────────
+ *
+ * Walks the partition's rb-tree of memory regions, emitting carved (non-alias)
+ * HPA runs into the caller-provided scratch buffer.  Coalesces with the
+ * existing run state (`*cur_hpa`, `*cur_pages`) so the device-level handler
+ * (thhv_main.c) can chain calls across multiple partitions.
+ *
+ * Acquires part->mem.lock internally.  Caller may already hold
+ * thhv_partitions_lock — the lock-order convention is partitions_lock → mem.lock
+ * (no inverse code path exists; register/unregister never hold mem.lock).
+ */
+void thhv_collect_carved_runs(struct thhv_partition *part,
+			      struct thhv_debug_hpa_range *scratch,
+			      u32 cap,
+			      u32 *nr_total,
+			      u64 *cur_hpa,
+			      u64 *cur_pages)
+{
+	struct rb_node *node;
+
+	spin_lock(&part->mem.lock);
+	for (node = rb_first(&part->mem.regions); node; node = rb_next(node)) {
+		struct thhv_mem_region *r =
+			container_of(node, struct thhv_mem_region, node);
+		u64 i;
+
+		if (r->flags & THHV_MEM_F_ALIAS)
+			continue;
+		if (!r->pages)
+			continue;
+
+		for (i = 0; i < r->nr_pages; i++) {
+			u64 hpa = (u64)page_to_pfn(r->pages[i]) << PAGE_SHIFT;
+
+			if (*cur_pages &&
+			    hpa == *cur_hpa + (*cur_pages << PAGE_SHIFT)) {
+				(*cur_pages)++;
+				continue;
+			}
+
+			if (*cur_pages) {
+				if (*nr_total < cap) {
+					scratch[*nr_total].hpa = *cur_hpa;
+					scratch[*nr_total].nr_pages = *cur_pages;
+				}
+				(*nr_total)++;
+			}
+			*cur_hpa = hpa;
+			*cur_pages = 1;
+		}
+	}
+	spin_unlock(&part->mem.lock);
+}

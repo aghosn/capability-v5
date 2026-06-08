@@ -135,4 +135,46 @@ esac
 
 echo ""
 
+# coco-illegal-access is a self-contained isolation test: boot dom1 in the
+# background, give it time to come up and stamp its sentinel pages, then run
+# the attacker against /dev/thhv.  The workload spins forever so a fixed
+# sleep is fine.
+if [[ "$WORKLOAD_NAME" == "coco-illegal-access" ]]; then
+    ATTACKER_BIN="$BINS/thhv/tests/test_coco_attacker"
+    if [[ ! -x "$ATTACKER_BIN" ]]; then
+        echo "ERROR: $ATTACKER_BIN not found/executable" >&2
+        exit 1
+    fi
+
+    DOM1_LOG="$(mktemp -t eunomia-dom1.XXXXXX.log)"
+    echo "→ launching dom1 in background (log: $DOM1_LOG) ..."
+    "$CHV" "${CHV_ARGS[@]}" >"$DOM1_LOG" 2>&1 &
+    DOM1_PID=$!
+
+    cleanup() {
+        if kill -0 "$DOM1_PID" 2>/dev/null; then
+            kill "$DOM1_PID" 2>/dev/null || true
+            sleep 1
+            kill -9 "$DOM1_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
+    echo "→ sleeping 10s to let dom1 boot ..."
+    sleep 10
+
+    echo "→ running attacker ..."
+    set +e
+    "$ATTACKER_BIN" -v
+    RC=$?
+    set -e
+
+    echo "→ attacker exit code: $RC"
+    echo "── dom1 log tail ────────────────────────────────────────────"
+    tail -40 "$DOM1_LOG" || true
+    echo "─────────────────────────────────────────────────────────────"
+    rm -f "$DOM1_LOG"
+    exit "$RC"
+fi
+
 exec "$CHV" "${CHV_ARGS[@]}"

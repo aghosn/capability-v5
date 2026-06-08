@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
+#include <linux/mm.h>
 #include <asm/cpuid.h>
 
 #include "thhv_internal.h"
@@ -18,6 +19,32 @@
 #define THHV_DEV_NAME "thhv"
 
 static DEFINE_MUTEX(attest_lock);
+
+/* ── Global partitions list (THHV_DEBUG_LIST_HPAS) ─────────────────────────
+ *
+ * Each successfully-created thhv_partition links itself onto this list via
+ * thhv_partitions_register, and unlinks in thhv_partitions_unregister at
+ * teardown.  The list lets the device-level THHV_DEBUG_LIST_HPAS ioctl
+ * enumerate carved HPAs without holding the partition fd (which is owned
+ * by the VMM process, not the attacker test).
+ */
+static LIST_HEAD(thhv_partitions);
+static DEFINE_SPINLOCK(thhv_partitions_lock);
+
+void thhv_partitions_register(struct thhv_partition *part)
+{
+	spin_lock(&thhv_partitions_lock);
+	list_add_tail(&part->global_node, &thhv_partitions);
+	spin_unlock(&thhv_partitions_lock);
+}
+
+void thhv_partitions_unregister(struct thhv_partition *part)
+{
+	spin_lock(&thhv_partitions_lock);
+	if (!list_empty(&part->global_node))
+		list_del_init(&part->global_node);
+	spin_unlock(&thhv_partitions_lock);
+}
 
 /* ── CPUID detection ───────────────────────────────────────────────────────── */
 
@@ -259,9 +286,87 @@ attest_unlock_err:
 		return thhv_test_cmd(uarg);
 #endif
 
+	case THHV_DEBUG_LIST_HPAS:
+		return thhv_debug_list_hpas(uarg);
+
 	default:
 		return -ENOTTY;
 	}
+}
+
+/* ── THHV_DEBUG_LIST_HPAS implementation ───────────────────────────────────
+ *
+ * Allocates a kernel scratch buffer (cap = max_entries), iterates the global
+ * partitions list under thhv_partitions_lock, and for each partition matching
+ * args.domain_handle (0 = all) calls thhv_collect_carved_runs to fill
+ * scratch with carved HPA runs.  After dropping the lock, copies up to
+ * min(nr_total, cap) entries to userspace; nr_total reports the actual
+ * number available so callers can grow their buffer and retry.
+ */
+long thhv_debug_list_hpas(void __user *uarg)
+{
+	struct thhv_debug_list_hpas args;
+	struct thhv_debug_hpa_range __user *user_entries;
+	struct thhv_debug_hpa_range *scratch = NULL;
+	struct thhv_partition *part;
+	u32 cap;
+	u32 nr_total = 0;
+	u64 cur_hpa = 0;
+	u64 cur_pages = 0;
+	long ret = 0;
+
+	/* Debug ioctl: leaks domain physical layout — restrict to root. */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (copy_from_user(&args, uarg, sizeof(args)))
+		return -EFAULT;
+
+	user_entries = (struct thhv_debug_hpa_range __user *)(uintptr_t)args.entries;
+	if (args.max_entries && !user_entries)
+		return -EINVAL;
+
+	cap = args.max_entries;
+	if (cap) {
+		scratch = kvcalloc(cap, sizeof(*scratch), GFP_KERNEL);
+		if (!scratch)
+			return -ENOMEM;
+	}
+
+	spin_lock(&thhv_partitions_lock);
+	list_for_each_entry(part, &thhv_partitions, global_node) {
+		if (args.domain_handle != 0 &&
+		    part->domain_handle != args.domain_handle)
+			continue;
+		thhv_collect_carved_runs(part, scratch, cap, &nr_total,
+					 &cur_hpa, &cur_pages);
+	}
+	/* Flush the trailing run after iterating all partitions. */
+	if (cur_pages) {
+		if (nr_total < cap) {
+			scratch[nr_total].hpa = cur_hpa;
+			scratch[nr_total].nr_pages = cur_pages;
+		}
+		nr_total++;
+	}
+	spin_unlock(&thhv_partitions_lock);
+
+	if (cap && nr_total) {
+		u32 to_copy = min(nr_total, cap);
+
+		if (copy_to_user(user_entries, scratch,
+				 to_copy * sizeof(*scratch)))
+			ret = -EFAULT;
+	}
+	kvfree(scratch);
+
+	if (ret)
+		return ret;
+
+	args.nr_entries = nr_total;
+	if (copy_to_user(uarg, &args, sizeof(args)))
+		return -EFAULT;
+	return 0;
 }
 
 /* ── Device fd file_operations ─────────────────────────────────────────────── */
@@ -277,11 +382,38 @@ static int thhv_dev_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/* ── /dev/thhv mmap: map a host-physical page range into userspace ──────────
+ *
+ * Used by the coco-attacker isolation test: after THHV_DEBUG_LIST_HPAS
+ * returns the HPA runs owned exclusively by a child domain, the attacker
+ * mmaps those HPAs into its own address space and reads them.  An access
+ * that hits a CARVE'd page faults at the EPT level → capavisor injects
+ * #GP(0) → kernel SIGSEGV's the process → handler longjmps.
+ *
+ * `offset` parameter to mmap(2) is interpreted as the HPA (must be page-
+ * aligned; mmap converts to vm_pgoff for us).  CAP_SYS_ADMIN gated: this
+ * is a debug-only interface that lets root map arbitrary physical memory.
+ */
+static int thhv_dev_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	unsigned long size = vma->vm_end - vma->vm_start;
+
+	(void)file;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+			    size, vma->vm_page_prot))
+		return -EAGAIN;
+	return 0;
+}
+
 static const struct file_operations thhv_dev_fops = {
 	.owner          = THIS_MODULE,
 	.open           = thhv_dev_open,
 	.release        = thhv_dev_release,
 	.unlocked_ioctl = thhv_dev_ioctl,
+	.mmap           = thhv_dev_mmap,
 };
 
 /* ── Misc device ───────────────────────────────────────────────────────────── */

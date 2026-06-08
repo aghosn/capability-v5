@@ -96,6 +96,11 @@ struct thhv_partition {
 	u32 num_vps;
 	bool sealed;
 
+	/* Membership in the global partitions list (thhv_main.c).  Used by the
+	 * device-level THHV_DEBUG_LIST_HPAS ioctl so any process opening
+	 * /dev/thhv can enumerate carved HPAs without owning the partition fd. */
+	struct list_head global_node;
+
 	struct thhv_vp **vps;
 
 	/* Shared META pages: MSR bitmap + IO bitmaps A & B.  Pinned at INITIALIZE. */
@@ -323,6 +328,24 @@ unsigned int thhv_ept_meta_needed(u64 gpa, u64 size);
 
 /* THHV_SET_GUEST_MEMORY ioctl handler (thhv_part_mem.c). */
 long thhv_set_guest_memory(struct thhv_partition *part, void __user *uarg);
+
+/* THHV_DEBUG_LIST_HPAS — device-level ioctl (thhv_main.c).  Walks the global
+ * partitions list registered by thhv_partitions_register.  When
+ * args.domain_handle is 0, returns carved HPAs for ALL partitions; otherwise
+ * filters to the matching one.  Skips THHV_MEM_F_ALIAS regions. */
+long thhv_debug_list_hpas(void __user *uarg);
+
+/* Per-partition collector used by thhv_debug_list_hpas (thhv_part_mem.c). */
+void thhv_collect_carved_runs(struct thhv_partition *part,
+			      struct thhv_debug_hpa_range *scratch,
+			      u32 cap,
+			      u32 *nr_total,
+			      u64 *cur_hpa,
+			      u64 *cur_pages);
+
+/* Global partitions list (thhv_main.c) — used by thhv_debug_list_hpas. */
+void thhv_partitions_register(struct thhv_partition *part);
+void thhv_partitions_unregister(struct thhv_partition *part);
 
 /* Synthetic region_key values for META caps (never valid as a guest_pfn). */
 #define THHV_META_KEY_SHARED	0xFFFFFFFFFFFF0001ULL

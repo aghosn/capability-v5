@@ -25,6 +25,11 @@ static void thhv_partition_destroy(struct kref *ref)
 	int ret;
 	u32 i;
 
+	/* Remove from the global partitions list first so concurrent
+	 * THHV_DEBUG_LIST_HPAS callers cannot observe a half-torn-down
+	 * partition (its rb-tree is freed below). */
+	thhv_partitions_unregister(part);
+
 	/* Revoke the domain in the capavisor (recursively tears down children). */
 	if (part->domain_handle) {
 		ret = themis_revoke_domain(part->domain_handle);
@@ -474,6 +479,8 @@ long thhv_partition_create(struct file *dev_file, void __user *uarg)
 	part->num_vps = cp.num_vps;
 	part->sealed = false;
 
+	INIT_LIST_HEAD(&part->global_node);
+
 	spin_lock_init(&part->mem.lock);
 	part->mem.regions = RB_ROOT;
 
@@ -718,6 +725,10 @@ domcomm_done:
 	}
 
 	part->file = file;
+	/* Register before fd_install so an attacker that immediately queries
+	 * the global list cannot observe a usable fd whose partition is not
+	 * yet enumerable. */
+	thhv_partitions_register(part);
 	fd_install(fd, file);
 	return fd;
 

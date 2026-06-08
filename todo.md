@@ -7,6 +7,62 @@
 
 ---
 
+## Current State (2026-06-04)
+
+### Just-completed CHV-themis cleanup arc (committed)
+
+The cloud-hypervisor Themis backend is fully refactored and deduped:
+
+* **File split** (Phases 1–8): `cloud-hypervisor/hypervisor/src/themis/` is now
+  10 focused files (`mod.rs` 52 LOC façade, `vcpu.rs` 1362, `vm_impl.rs` 509,
+  `hypervisor_impl.rs` 175, `vm_state.rs` 375, `consts.rs` 145, `abi.rs` 278,
+  `helpers.rs` 117, `mmap.rs` 53, `emulator.rs` 218).
+* **Dedup vs `themis-abi`**: VpRegister, REALMODE access-rights,
+  THEMIC_MSG_*, `vmx_exit_reasons` (SDM basic exit reasons), and synthetic
+  exits all flow from `themis-abi` — the CHV backend re-exports rather than
+  redefines.
+* **Inline magic named**: LAPIC_MMIO_{BASE,SIZE,END,OFFSET_MASK},
+  CPUID_LEAF_TSC_FREQ/PROC_FREQ, THEMIS_MAX_VCPUS.
+* **TSC kHz from CPUID**: `handle_wrmsr_exit` no longer hardcodes 3 GHz; reads
+  the same OnceLock-cached CPUID-derived value as `Vcpu::tsc_khz()` (with a
+  warned fallback only if both leaves return nothing).  Also fixed a
+  pre-existing rounding bug (integer-divide through GHz → exact u128 ns math).
+* Build with `themis,kvm,ivshmem`: 0 warnings, 0 errors.
+
+Latest committed: CHV `7891cba82`, outer `d6fac441b`.
+
+### In progress — thhv refactor + magic-number dedup (UNCOMMITTED)
+
+Mirrors the CHV cleanup on the kernel-module side.  See
+`~/.copilot/session-state/2d26c842-6034-4eb0-8eed-042885dd1a1a/plan.md` for
+the full inventory; summary:
+
+* `thhv_part.c` (1308 LOC) split into `thhv_part.c` (733, lifecycle + ioctl
+  dispatch) + `thhv_part_mem.c` (597, rb-tree + SET_GUEST_MEMORY +
+  send_meta_pages).
+* `inc/thhv.h` (1418 LOC) split: kernel-only block extracted to private
+  `src/thhv_internal.h` (375); `inc/thhv.h` is now 1071 LOC of pure UAPI.
+  All 10 `src/*.c` files now `#include "thhv_internal.h"`.
+* Magic numbers named: `THHV_MAX_VPS_PER_DOMAIN` (256), `THHV_MAX_GSI` (255),
+  `THHV_PA_MAP_MAX_ENTRIES` (4096).  The 256 vCPU cap is now a single
+  source-of-truth via `themis_abi::MAX_VPS_PER_DOMAIN`; CHV `THEMIS_MAX_VCPUS`
+  re-exports from there, and `THHV_MAX_VPS_PER_DOMAIN` carries a comment
+  cross-link.
+* All three components build clean (`thhv.ko`, CHV themis+kvm+ivshmem,
+  capavisor).  **No boot test yet** — that's tomorrow's first step before
+  committing in 3 logical pieces.
+
+### Next session resume order
+1. Deploy + boot-test the uncommitted thhv work
+   (`cd themis && cargo themis 2>&1 | tee /tmp/out.txt`).
+2. Commit in 3 logical commits (split, header split, magic dedup) — see
+   session plan.md for exact file lists.
+3. Investigate the pre-existing `dom1-not-reaching-login` issue (deferred
+   throughout the refactor so debug effort wasn't wasted on code about to
+   be moved).
+
+---
+
 ## Current State (2026-05-26)
 
 ### What works

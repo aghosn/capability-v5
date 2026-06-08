@@ -1081,5 +1081,36 @@ struct thhv_test_cmd {
 #define THHV_TEST \
 	_IOWR(THHV_IOCTL_MAGIC, 0xF0, struct thhv_test_cmd)
 
+/* ── Debug: list HPA ranges owned (carved) by the calling partition ─────────
+ *
+ * Returns the list of (hpa, nr_pages) ranges that the calling partition
+ * carved away from dom0 via THHV_SET_GUEST_MEMORY (i.e. exclusive — dom0 has
+ * lost EPT access).  Aliased (shared) regions are NOT included.
+ *
+ * Userspace fills `max_entries` and `entries` (pointer to its own buffer of
+ * struct thhv_debug_hpa_range).  The kernel writes up to `max_entries` and
+ * sets `nr_entries` to the actual number available (which may exceed
+ * `max_entries`; userspace can retry with a larger buffer).
+ *
+ * Coalesces adjacent pages into runs to keep the response compact.
+ *
+ * Behind CONFIG-style guard: refuses unless thhv was built with debug
+ * support.  Intended only for the coco-attacker isolation test.
+ */
+struct thhv_debug_hpa_range {
+	__u64 hpa;        /* Host physical address of run start (page-aligned) */
+	__u64 nr_pages;   /* Number of 4 KiB pages in this run */
+};
+
+struct thhv_debug_list_hpas {
+	__u64 domain_handle; /* IN:  partition (matches thhv_partition.domain_handle); 0 = all */
+	__u32 max_entries;   /* IN:  capacity of `entries` */
+	__u32 nr_entries;    /* OUT: total number of runs available */
+	__u64 entries;       /* IN:  __u64-encoded user pointer to entries[] */
+};
+
+#define THHV_DEBUG_LIST_HPAS \
+	_IOWR(THHV_IOCTL_MAGIC, 0xF1, struct thhv_debug_list_hpas)
+
 
 #endif /* _THHV_H */
