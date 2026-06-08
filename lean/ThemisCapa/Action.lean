@@ -204,6 +204,28 @@ inductive Action where
       - caller's `mappedGpas` mapping for `capHandle` is updated to
         `newGpa`. -/
   | mapSelf (caller : DomId) (capHandle : LocalHandle) (newGpa : Nat)
+  /-- `caller` measures itself.  Mirrors
+      `capa-engine/src/capability.rs::attest_self`.  Read-only:
+      the engine returns an `AttestationReport`; the spec leaves the
+      state unchanged.  Output modeling is deferred to a later phase. -/
+  | attestSelf (caller : DomId)
+  /-- `caller` measures a child domain referenced by `handle` (a local
+      dom-handle in caller's `domHandles`).  Mirrors
+      `capa-engine/src/capability.rs::attest`.  Read-only. -/
+  | attest (caller : DomId) (handle : LocalHandle)
+  /-- `caller` reads one field of a child domain's policy, identified
+      by `id`.  Mirrors `capa-engine/src/capability.rs::set_policy`'s
+      `get_policy` sibling (only-read variant in `domain.rs`).  Read-only. -/
+  | getPolicy (caller : DomId) (handle : LocalHandle)
+              (id : PolicyIdentifier)
+  /-- `caller` obtains a channel-handle for a child domain referenced
+      by `handle`.  Mirrors `capa-engine/src/capability.rs::get_chan`.
+      Read-only: spec returns no value, just confirms enablement. -/
+  | getChan (caller : DomId) (handle : LocalHandle)
+  /-- `caller` obtains a channel-handle for itself (no child arg).
+      Mirrors `capa-engine/src/capability.rs::get_chan_self`.
+      Read-only. -/
+  | getChanSelf (caller : DomId)
 deriving Repr
 
 end ThemisCapa

@@ -729,6 +729,53 @@ private theorem registerComm_apply_preservesIsRevoked
           · rw [Arena.find?_update_other _ dc.targetDom did _ hdid] at hp'
             rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
 
+/-! ### Read-only operations (S1) — identity apply preserves isRevoked trivially -/
+
+private theorem attestSelf_apply_preservesIsRevoked
+    (caller : DomId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (attestSelf_apply s caller).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [attestSelf_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
+private theorem attest_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (attest_apply s caller handle).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [attest_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
+private theorem getPolicy_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle) (id : PolicyIdentifier)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (getPolicy_apply s caller handle id).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [getPolicy_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
+private theorem getChan_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (getChan_apply s caller handle).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [getChan_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
+private theorem getChanSelf_apply_preservesIsRevoked
+    (caller : DomId)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain) (hpost : (getChanSelf_apply s caller).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [getChanSelf_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
 /-! ### Helper: `updVp` preserves status -/
 
 private theorem Domain.updVp_status (d : Domain) (vpId : VpId)
@@ -1205,6 +1252,16 @@ theorem step_preserves_revoked
       exact registerComm_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
   | mapSelf _ =>
       exact mapSelf_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | attestSelf _ =>
+      exact attestSelf_apply_preservesIsRevoked _ s did d hpre hrev d' hpost
+  | attest _ =>
+      exact attest_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | getPolicy _ =>
+      exact getPolicy_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | getChan _ =>
+      exact getChan_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
+  | getChanSelf _ =>
+      exact getChanSelf_apply_preservesIsRevoked _ s did d hpre hrev d' hpost
 
 /-! ### T4: parent immutable across the cascade (corollary) -/
 

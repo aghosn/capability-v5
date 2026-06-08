@@ -727,5 +727,10 @@ theorem step_preservesCoreAffinity
   | addVp _             => exact addVp_preservesCoreAffinity           _ _ _ _ h
   | registerComm _      => exact registerComm_preservesCoreAffinity    _ _ _ _ _ h
   | mapSelf _           => exact mapSelf_preservesCoreAffinity         _ _ _ _ h
+  | attestSelf _        => exact h
+  | attest _            => exact h
+  | getPolicy _         => exact h
+  | getChan _           => exact h
+  | getChanSelf _       => exact h
 
 end ThemisCapa

@@ -593,5 +593,10 @@ theorem step_preservesPolicyMonotonicAncestry
   | addVp _             => exact addVp_preservesPolicyMonotonicAncestry           _ _ _ _ h
   | registerComm _      => exact registerComm_preservesPolicyMonotonicAncestry    _ _ _ _ _ h
   | mapSelf _           => exact mapSelf_preservesPolicyMonotonicAncestry         _ _ _ _ h
+  | attestSelf _        => exact h
+  | attest _            => exact h
+  | getPolicy _         => exact h
+  | getChan _           => exact h
+  | getChanSelf _       => exact h
 
 end ThemisCapa

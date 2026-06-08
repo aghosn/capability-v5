@@ -228,5 +228,10 @@ theorem step_view_preservation
     exact hBcaller (hown.symm.trans hown_caller)
   | switchSuspended _ => exact id
   | mapSelf _ => exact id
+  | attestSelf _ => exact id
+  | attest _ => exact id
+  | getPolicy _ => exact id
+  | getChan _ => exact id
+  | getChanSelf _ => exact id
 
 end ThemisCapa

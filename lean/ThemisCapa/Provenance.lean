@@ -193,6 +193,32 @@ private theorem mapSelf_mem_isSome
     ((mapSelf_apply s caller capHandle newGpa).getMem c).isSome := by
   rw [mapSelf_frame_mem]; exact h
 
+private theorem attestSelf_mem_isSome
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((attestSelf_apply s caller).getMem c).isSome := h
+
+private theorem attest_mem_isSome
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((attest_apply s caller handle).getMem c).isSome := h
+
+private theorem getPolicy_mem_isSome
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (id : PolicyIdentifier) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((getPolicy_apply s caller handle id).getMem c).isSome := h
+
+private theorem getChan_mem_isSome
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((getChan_apply s caller handle).getMem c).isSome := h
+
+private theorem getChanSelf_mem_isSome
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((getChanSelf_apply s caller).getMem c).isSome := h
+
 private theorem deliverInterrupt_mem_isSome
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
     (chain : List (DomId × VpId)) (c : MemCapId)
@@ -355,6 +381,31 @@ theorem provenance_removal
     exfalso
     have h := mapSelf_mem_isSome s caller capHandle newGpa c hPre
     rw [hPost] at h; cases h
+  | attestSelf guard =>
+    rename_i caller
+    exfalso
+    have h := attestSelf_mem_isSome s caller c hPre
+    rw [hPost] at h; cases h
+  | attest guard =>
+    rename_i caller handle
+    exfalso
+    have h := attest_mem_isSome s caller handle c hPre
+    rw [hPost] at h; cases h
+  | getPolicy guard =>
+    rename_i caller handle id
+    exfalso
+    have h := getPolicy_mem_isSome s caller handle id c hPre
+    rw [hPost] at h; cases h
+  | getChan guard =>
+    rename_i caller handle
+    exfalso
+    have h := getChan_mem_isSome s caller handle c hPre
+    rw [hPost] at h; cases h
+  | getChanSelf guard =>
+    rename_i caller
+    exfalso
+    have h := getChanSelf_mem_isSome s caller c hPre
+    rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
 
@@ -502,6 +553,32 @@ private theorem mapSelf_mem_isNone
     (c : MemCapId) (h : s.getMem c = none) :
     (mapSelf_apply s caller capHandle newGpa).getMem c = none := by
   rw [mapSelf_frame_mem]; exact h
+
+private theorem attestSelf_mem_isNone
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (attestSelf_apply s caller).getMem c = none := h
+
+private theorem attest_mem_isNone
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (attest_apply s caller handle).getMem c = none := h
+
+private theorem getPolicy_mem_isNone
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (id : PolicyIdentifier) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (getPolicy_apply s caller handle id).getMem c = none := h
+
+private theorem getChan_mem_isNone
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (getChan_apply s caller handle).getMem c = none := h
+
+private theorem getChanSelf_mem_isNone
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (getChanSelf_apply s caller).getMem c = none := h
 
 private theorem deliverInterrupt_mem_isNone
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
@@ -730,6 +807,31 @@ theorem provenance_creation
     rename_i caller capHandle newGpa
     exfalso
     have h := mapSelf_mem_isNone s caller capHandle newGpa c hPre
+    rw [hPost] at h; cases h
+  | attestSelf guard =>
+    rename_i caller
+    exfalso
+    have h := attestSelf_mem_isNone s caller c hPre
+    rw [hPost] at h; cases h
+  | attest guard =>
+    rename_i caller handle
+    exfalso
+    have h := attest_mem_isNone s caller handle c hPre
+    rw [hPost] at h; cases h
+  | getPolicy guard =>
+    rename_i caller handle id
+    exfalso
+    have h := getPolicy_mem_isNone s caller handle id c hPre
+    rw [hPost] at h; cases h
+  | getChan guard =>
+    rename_i caller handle
+    exfalso
+    have h := getChan_mem_isNone s caller handle c hPre
+    rw [hPost] at h; cases h
+  | getChanSelf guard =>
+    rename_i caller
+    exfalso
+    have h := getChanSelf_mem_isNone s caller c hPre
     rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
@@ -980,6 +1082,52 @@ private theorem mapSelf_owner_preserved
     capPre.owner = capPost.owner := by
   rw [mapSelf_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
+
+private theorem attestSelf_owner_preserved
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (attestSelf_apply s caller).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [attestSelf_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem attest_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (attest_apply s caller handle).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [attest_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem getPolicy_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (id : PolicyIdentifier) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (getPolicy_apply s caller handle id).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [getPolicy_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem getChan_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (getChan_apply s caller handle).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [getChan_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem getChanSelf_owner_preserved
+    (s : SpecState) (caller : DomId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (getChanSelf_apply s caller).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [getChanSelf_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
 
 private theorem deliverInterrupt_owner_preserved
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
@@ -1277,5 +1425,30 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (mapSelf_owner_preserved s caller capHandle newGpa c capPre capPost hPre hPost)
+  | attestSelf guard =>
+    rename_i caller
+    exfalso
+    exact hOwnerChange
+      (attestSelf_owner_preserved s caller c capPre capPost hPre hPost)
+  | attest guard =>
+    rename_i caller handle
+    exfalso
+    exact hOwnerChange
+      (attest_owner_preserved s caller handle c capPre capPost hPre hPost)
+  | getPolicy guard =>
+    rename_i caller handle id
+    exfalso
+    exact hOwnerChange
+      (getPolicy_owner_preserved s caller handle id c capPre capPost hPre hPost)
+  | getChan guard =>
+    rename_i caller handle
+    exfalso
+    exact hOwnerChange
+      (getChan_owner_preserved s caller handle c capPre capPost hPre hPost)
+  | getChanSelf guard =>
+    rename_i caller
+    exfalso
+    exact hOwnerChange
+      (getChanSelf_owner_preserved s caller c capPre capPost hPre hPost)
 
 end ThemisCapa

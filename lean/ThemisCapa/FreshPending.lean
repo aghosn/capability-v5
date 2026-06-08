@@ -577,5 +577,10 @@ theorem step_preservesFreshPending
   | addVp _             => exact addVp_preservesFreshPending           _ _ _ _ h
   | registerComm _      => exact registerComm_preservesFreshPending    _ _ _ _ _ h
   | mapSelf _           => exact mapSelf_preservesFreshPending         _ _ _ _ h
+  | attestSelf _        => exact h
+  | attest _            => exact h
+  | getPolicy _         => exact h
+  | getChan _           => exact h
+  | getChanSelf _       => exact h
 
 end ThemisCapa

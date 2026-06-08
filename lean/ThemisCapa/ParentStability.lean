@@ -1140,5 +1140,20 @@ theorem step_parent_immutable
   | registerComm _      => exact registerComm_apply_preservesParents      _ _ _ _ s did d d' hpre hpost
   | switchSuspended _   => exact switchSuspended_apply_preservesParents   _ _ _ _ _ _ s did d d' hpre hpost
   | mapSelf _           => exact mapSelf_apply_preservesParents           _ _ _ s did d d' hpre hpost
+  | attestSelf _        =>
+      simp only [attestSelf_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | attest _            =>
+      simp only [attest_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | getPolicy _         =>
+      simp only [getPolicy_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | getChan _           =>
+      simp only [getChan_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | getChanSelf _       =>
+      simp only [getChanSelf_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
 
 end ThemisCapa

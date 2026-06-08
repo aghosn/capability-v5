@@ -857,6 +857,11 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
        ∀ cid, d.lookupDomHandle toHandle = some cid →
        ∀ dc, s.getDomCap cid = some dc → did = dc.targetDom)
   | .mapSelf caller _ _, did => did = caller
+  | .attestSelf _, _ => False
+  | .attest _ _, _ => False
+  | .getPolicy _ _ _, _ => False
+  | .getChan _ _, _ => False
+  | .getChanSelf _, _ => False
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -892,6 +897,11 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
       id = mid
   | .switchSuspended _ _ _ _ _ _, _ => False
   | .mapSelf _ _ _, _ => False
+  | .attestSelf _, _ => False
+  | .attest _ _, _ => False
+  | .getPolicy _ _ _, _ => False
+  | .getChan _ _, _ => False
+  | .getChanSelf _, _ => False
 
 /-! ## Top-level locality theorems.
 
@@ -1102,6 +1112,11 @@ theorem step_locality_dom
     rename_i caller capHandle newGpa
     have h1 : did ≠ caller := fun e => h e
     exact mapSelf_frame_dom _ _ _ _ _ h1
+  | attestSelf _ => rfl
+  | attest _ => rfl
+  | getPolicy _ => rfl
+  | getChan _ => rfl
+  | getChanSelf _ => rfl
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -1186,5 +1201,10 @@ theorem step_locality_mem
     exact heq
   | switchSuspended guard => exact switchSuspended_frame_mem _ _ _ _ _ _ _ _
   | mapSelf guard => exact mapSelf_frame_mem _ _ _ _ _
+  | attestSelf _ => rfl
+  | attest _ => rfl
+  | getPolicy _ => rfl
+  | getChan _ => rfl
+  | getChanSelf _ => rfl
 
 end ThemisCapa

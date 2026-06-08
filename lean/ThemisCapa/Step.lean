@@ -1225,6 +1225,105 @@ def mapSelf_apply (s : SpecState) (caller : DomId)
                   (d'.addressMap.removeWithin oldGpa c.region.access.size).insert newEntry
               }.updMappedGpa capHandle newGpa)
 
+/-! ### Read-only operations — S1 spec extension
+
+    Engine entry points `attest_self`, `attest`, `get_policy`, `get_chan`,
+    `get_chan_self` are read-only: they produce an output value but do
+    not mutate `SpecState`.  Modeling them as identity `step` actions
+    completes MonitorAPI coverage without changing the schema.  Output
+    binding (so refinement can also check return values) is a later
+    phase (S5).  Guards encode the engine-side permission and resolution
+    requirements so that the action's *enablement* is a real predicate
+    on state. -/
+
+/-- Preconditions for `attestSelf(caller)`. -/
+structure AttestSelfGuard (s : SpecState) (caller : DomId) : Prop where
+  callerExists  : (s.getDom caller).isSome
+  callerSealed  : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission : ∀ d, s.getDom caller = some d → d.policy.api.canAttest = true
+
+/-- Identity apply for `attestSelf`. -/
+def attestSelf_apply (s : SpecState) (_caller : DomId) : SpecState := s
+
+/-- Preconditions for `attest(caller, handle)`. -/
+structure AttestGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canAttest = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupDomHandle handle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            (s.getDomCap dcId).isSome
+  capOwnedByCaller  : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
+  targetExists      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            (s.getDom dc.targetDom).isSome
+
+/-- Identity apply for `attest`. -/
+def attest_apply (s : SpecState) (_caller : DomId) (_handle : LocalHandle)
+    : SpecState := s
+
+/-- Preconditions for `getPolicy(caller, handle, id)`. -/
+structure GetPolicyGuard (s : SpecState) (caller : DomId)
+                          (handle : LocalHandle) (_id : PolicyIdentifier)
+    : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canGet = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupDomHandle handle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            (s.getDomCap dcId).isSome
+  capOwnedByCaller  : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
+  targetExists      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            (s.getDom dc.targetDom).isSome
+
+/-- Identity apply for `getPolicy`. -/
+def getPolicy_apply (s : SpecState) (_caller : DomId) (_handle : LocalHandle)
+                    (_id : PolicyIdentifier) : SpecState := s
+
+/-- Preconditions for `getChan(caller, handle)`. -/
+structure GetChanGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canGetChan = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupDomHandle handle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            (s.getDomCap dcId).isSome
+  capOwnedByCaller  : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
+  targetExists      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            (s.getDom dc.targetDom).isSome
+
+/-- Identity apply for `getChan`. -/
+def getChan_apply (s : SpecState) (_caller : DomId) (_handle : LocalHandle)
+    : SpecState := s
+
+/-- Preconditions for `getChanSelf(caller)`. -/
+structure GetChanSelfGuard (s : SpecState) (caller : DomId) : Prop where
+  callerExists  : (s.getDom caller).isSome
+  callerSealed  : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission : ∀ d, s.getDom caller = some d → d.policy.api.canGetChan = true
+
+/-- Identity apply for `getChanSelf`. -/
+def getChanSelf_apply (s : SpecState) (_caller : DomId) : SpecState := s
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -1316,5 +1415,21 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : MapSelfGuard s caller capHandle newGpa) :
     step s (.mapSelf caller capHandle newGpa)
          (mapSelf_apply s caller capHandle newGpa)
+  | attestSelf {s : SpecState} {caller : DomId}
+    (guard : AttestSelfGuard s caller) :
+    step s (.attestSelf caller) (attestSelf_apply s caller)
+  | attest {s : SpecState} {caller : DomId} {handle : LocalHandle}
+    (guard : AttestGuard s caller handle) :
+    step s (.attest caller handle) (attest_apply s caller handle)
+  | getPolicy {s : SpecState} {caller : DomId} {handle : LocalHandle}
+              {id : PolicyIdentifier}
+    (guard : GetPolicyGuard s caller handle id) :
+    step s (.getPolicy caller handle id) (getPolicy_apply s caller handle id)
+  | getChan {s : SpecState} {caller : DomId} {handle : LocalHandle}
+    (guard : GetChanGuard s caller handle) :
+    step s (.getChan caller handle) (getChan_apply s caller handle)
+  | getChanSelf {s : SpecState} {caller : DomId}
+    (guard : GetChanSelfGuard s caller) :
+    step s (.getChanSelf caller) (getChanSelf_apply s caller)
 
 end ThemisCapa
