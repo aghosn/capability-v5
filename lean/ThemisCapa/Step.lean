@@ -1628,6 +1628,103 @@ structure GetChanSelfGuard (s : SpecState) (caller : DomId) : Prop where
 /-- Identity apply for `getChanSelf`. -/
 def getChanSelf_apply (s : SpecState) (_caller : DomId) : SpecState := s
 
+/-! ### Register access (read-only at spec level)
+
+    `getReg` / `setReg` mediate access to VP registers. The register
+    file itself lives on the platform (it is below the spec abstraction
+    — `ThemisPlatform::{get,set}_vp_register` in Rust), so both actions
+    have an *identity* `_apply`. What the spec captures is the
+    access-control predicate that must hold for the action to fire:
+
+    1. Caller holds the appropriate `MonitorAPI` bit (`canGet`/`canSet`).
+    2. Caller resolves a dom-cap referencing a sealed (`d.policy`-bearing)
+       child domain via `handle`.
+    3. The target VP exists and is *not* `Running`.
+    4. The relevant register bit is set in the *effective* bitmap, which
+       depends on the VP's `runState`:
+       - `interrupted v` / `suspended _ _ v` → `policy.interrupts.getPolicy v`
+       - `available (some r)`                → `policy.exits.getAction r`
+       - `available none` / `locked _ _ _`   → `policy.interrupts.getPolicy VECTOR_AVAILABLE`
+
+    Mirrors `capa-engine/src/capability.rs::register_access_check`. -/
+
+/-- Effective register-access bitmap for VP `vp`, as a function of which
+    direction (`wantRead = true` for read-set, `false` for write-set). -/
+def effectiveRegBitmap (policy : DomainPolicy) (vp : VProcessor)
+                       (wantRead : Bool) : RegBitmap :=
+  match vp.runState with
+  | .interrupted v
+  | .suspended _ _ v =>
+      let p := policy.interrupts.getPolicy v
+      if wantRead then p.readSet else p.writeSet
+  | .available (some r) =>
+      let a := policy.exits.getAction r
+      if wantRead then a.readSet else a.writeSet
+  | _ =>
+      let p := policy.interrupts.getPolicy VECTOR_AVAILABLE
+      if wantRead then p.readSet else p.writeSet
+
+/-- Common register-access preconditions for both `getReg` and `setReg`.
+    `wantRead` selects which API bit and which bitmap are required. -/
+structure RegisterAccessGuard (s : SpecState) (caller : DomId)
+                              (handle : LocalHandle) (vpId : VpId)
+                              (regId : Nat) (wantRead : Bool) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d →
+                            (if wantRead then d.policy.api.canGet
+                             else d.policy.api.canSet) = true
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                            (d.lookupDomHandle handle).isSome
+  capExists         : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            (s.getDomCap dcId).isSome
+  capOwnedByCaller  : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
+  targetExists      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            (s.getDom dc.targetDom).isSome
+  vpExists          : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            ∀ td, s.getDom dc.targetDom = some td →
+                            ∃ vp ∈ td.vps, vp.id = vpId
+  vpNotRunning      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            ∀ td, s.getDom dc.targetDom = some td →
+                            ∀ vp ∈ td.vps, vp.id = vpId →
+                            ∀ core caller', vp.runState ≠ .running core caller'
+  bitmapBitSet      : ∀ d, s.getDom caller = some d →
+                            ∀ dcId, d.lookupDomHandle handle = some dcId →
+                            ∀ dc, s.getDomCap dcId = some dc →
+                            ∀ td, s.getDom dc.targetDom = some td →
+                            ∀ vp ∈ td.vps, vp.id = vpId →
+                            (effectiveRegBitmap td.policy vp wantRead).isSet regId
+
+/-- Preconditions for `getReg(caller, handle, vpId, regId)`. -/
+abbrev GetRegGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
+                   (vpId : VpId) (regId : Nat) : Prop :=
+  RegisterAccessGuard s caller handle vpId regId true
+
+/-- Preconditions for `setReg(caller, handle, vpId, regId, value)`.
+    `value` does not appear in the guard — the bit-level write is
+    delegated to the platform. -/
+abbrev SetRegGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
+                   (vpId : VpId) (regId : Nat) (_value : Nat) : Prop :=
+  RegisterAccessGuard s caller handle vpId regId false
+
+/-- Identity apply for `getReg`. -/
+def getReg_apply (s : SpecState) (_caller : DomId) (_handle : LocalHandle)
+                 (_vpId : VpId) (_regId : Nat) : SpecState := s
+
+/-- Identity apply for `setReg`. The actual register write is platform
+    state, below the spec abstraction. -/
+def setReg_apply (s : SpecState) (_caller : DomId) (_handle : LocalHandle)
+                 (_vpId : VpId) (_regId : Nat) (_value : Nat) : SpecState := s
+
 /-! ### S2: sealed channel transfer (dom-cap pending path)
 
     Mirrors `sealedSend` but for `DomCap` (channels). The caller's
@@ -1841,5 +1938,15 @@ inductive step : SpecState → Action → SpecState → Prop
     (guard : AcceptAtGuard s receiver pendingId gpaOverride) :
     step s (.accept_at receiver pendingId gpaOverride)
          (accept_at_apply s receiver pendingId gpaOverride)
+  | getReg {s : SpecState} {caller : DomId} {handle : LocalHandle}
+           {vpId : VpId} {regId : Nat}
+    (guard : GetRegGuard s caller handle vpId regId) :
+    step s (.getReg caller handle vpId regId)
+         (getReg_apply s caller handle vpId regId)
+  | setReg {s : SpecState} {caller : DomId} {handle : LocalHandle}
+           {vpId : VpId} {regId : Nat} {value : Nat}
+    (guard : SetRegGuard s caller handle vpId regId value) :
+    step s (.setReg caller handle vpId regId value)
+         (setReg_apply s caller handle vpId regId value)
 
 end ThemisCapa

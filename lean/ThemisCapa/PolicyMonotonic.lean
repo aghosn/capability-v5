@@ -690,6 +690,8 @@ theorem step_preservesPolicyMonotonicAncestry
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | getReg _            => exact h
+  | setReg _            => exact h
   | sealedSendChannel _ => exact sealedSendChannel_preservesPolicyMonotonicAncestry _ _ _ _ h
   | send_at _           => exact send_at_preservesPolicyMonotonicAncestry         _ _ _ _ _ h
   | accept_at _         => exact accept_at_preservesPolicyMonotonicAncestry       _ _ _ _ h

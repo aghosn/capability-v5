@@ -239,6 +239,18 @@ private theorem getChanSelf_mem_isSome
     (h : (s.getMem c).isSome) :
     ((getChanSelf_apply s caller).getMem c).isSome := h
 
+private theorem getReg_mem_isSome
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((getReg_apply s caller handle vpId regId).getMem c).isSome := h
+
+private theorem setReg_mem_isSome
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (value : Nat) (c : MemCapId)
+    (h : (s.getMem c).isSome) :
+    ((setReg_apply s caller handle vpId regId value).getMem c).isSome := h
+
 private theorem deliverInterrupt_mem_isSome
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
     (chain : List (DomId × VpId)) (c : MemCapId)
@@ -425,6 +437,16 @@ theorem provenance_removal
     rename_i caller
     exfalso
     have h := getChanSelf_mem_isSome s caller c hPre
+    rw [hPost] at h; cases h
+  | getReg guard =>
+    rename_i caller handle vpId regId
+    exfalso
+    have h := getReg_mem_isSome s caller handle vpId regId c hPre
+    rw [hPost] at h; cases h
+  | setReg guard =>
+    rename_i caller handle vpId regId value
+    exfalso
+    have h := setReg_mem_isSome s caller handle vpId regId value c hPre
     rw [hPost] at h; cases h
   | sealedSendChannel guard =>
     rename_i caller receiver handle
@@ -634,6 +656,18 @@ private theorem getChanSelf_mem_isNone
     (s : SpecState) (caller : DomId) (c : MemCapId)
     (h : s.getMem c = none) :
     (getChanSelf_apply s caller).getMem c = none := h
+
+private theorem getReg_mem_isNone
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (getReg_apply s caller handle vpId regId).getMem c = none := h
+
+private theorem setReg_mem_isNone
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (value : Nat) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (setReg_apply s caller handle vpId regId value).getMem c = none := h
 
 private theorem deliverInterrupt_mem_isNone
     (s : SpecState) (interrupted handler : DomId) (core : CoreId) (vector : Nat)
@@ -887,6 +921,16 @@ theorem provenance_creation
     rename_i caller
     exfalso
     have h := getChanSelf_mem_isNone s caller c hPre
+    rw [hPost] at h; cases h
+  | getReg guard =>
+    rename_i caller handle vpId regId
+    exfalso
+    have h := getReg_mem_isNone s caller handle vpId regId c hPre
+    rw [hPost] at h; cases h
+  | setReg guard =>
+    rename_i caller handle vpId regId value
+    exfalso
+    have h := setReg_mem_isNone s caller handle vpId regId value c hPre
     rw [hPost] at h; cases h
   | sealedSendChannel guard =>
     rename_i caller receiver handle
@@ -1206,6 +1250,26 @@ private theorem getChanSelf_owner_preserved
     (hPost : (getChanSelf_apply s caller).getMem c = some capPost) :
     capPre.owner = capPost.owner := by
   simp only [getChanSelf_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem getReg_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (getReg_apply s caller handle vpId regId).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [getReg_apply] at hPost
+  rw [hPre] at hPost; injection hPost with h; rw [h]
+
+private theorem setReg_owner_preserved
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (vpId : VpId) (regId : Nat) (value : Nat) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (setReg_apply s caller handle vpId regId value).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  simp only [setReg_apply] at hPost
   rw [hPre] at hPost; injection hPost with h; rw [h]
 
 private theorem deliverInterrupt_owner_preserved
@@ -1551,6 +1615,16 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (getChanSelf_owner_preserved s caller c capPre capPost hPre hPost)
+  | getReg guard =>
+    rename_i caller handle vpId regId
+    exfalso
+    exact hOwnerChange
+      (getReg_owner_preserved s caller handle vpId regId c capPre capPost hPre hPost)
+  | setReg guard =>
+    rename_i caller handle vpId regId value
+    exfalso
+    exact hOwnerChange
+      (setReg_owner_preserved s caller handle vpId regId value c capPre capPost hPre hPost)
   | sealedSendChannel guard =>
     rename_i caller receiver handle
     exfalso

@@ -84,6 +84,16 @@ def none : RegBitmap := ⟨0, 0, 0⟩
 /-- All-bits-set as the limit `2^64 - 1`. Modeled symbolically as `Nat.max`. -/
 def allWord : Nat := 2 ^ 64 - 1
 def all : RegBitmap := ⟨allWord, allWord, allWord⟩
+
+/-- Test whether register `regId` is set in the bitmap.
+    Mirrors `RegBitmap::is_set` in `capa-engine/src/domain.rs`.
+    `regId < 64` → word0, `[64, 128)` → word1, `[128, 192)` → word2;
+    anything ≥ 192 is unset. -/
+def isSet (b : RegBitmap) (regId : Nat) : Prop :=
+  if regId < 64       then (b.word0 / 2 ^ regId) % 2 = 1
+  else if regId < 128 then (b.word1 / 2 ^ (regId - 64)) % 2 = 1
+  else if regId < 192 then (b.word2 / 2 ^ (regId - 128)) % 2 = 1
+  else False
 end RegBitmap
 
 -- ════════════════════════════════════════════════════════════════════
@@ -117,6 +127,15 @@ structure InterruptPolicy where
   default   : VectorPolicy
   overrides : List (Nat × VectorPolicy)  -- (vector, policy)
 deriving Repr
+
+namespace InterruptPolicy
+/-- Lookup the vector policy for `vector`: first matching override,
+    else `default`. Mirrors `InterruptPolicy::get_policy`. -/
+def getPolicy (p : InterruptPolicy) (vector : Nat) : VectorPolicy :=
+  match p.overrides.find? (fun e => e.1 = vector) with
+  | some e => e.2
+  | none   => p.default
+end InterruptPolicy
 
 /-- Synthetic vector representing the "VP is available / not interrupted" state.
     Used uniformly with real vectors for register-access policy lookup.
@@ -173,6 +192,15 @@ structure ExitPolicy where
   default   : ExitAction
   overrides : List (Nat × ExitAction)  -- (exit_reason, action)
 deriving Repr
+
+namespace ExitPolicy
+/-- Lookup the exit action for `exitReason`: first matching override,
+    else `default`. Mirrors `ExitPolicy::get_action`. -/
+def getAction (p : ExitPolicy) (exitReason : Nat) : ExitAction :=
+  match p.overrides.find? (fun e => e.1 = exitReason) with
+  | some e => e.2
+  | none   => p.default
+end ExitPolicy
 
 -- ════════════════════════════════════════════════════════════════════
 -- § Policy identifiers (for set_policy / get_policy)

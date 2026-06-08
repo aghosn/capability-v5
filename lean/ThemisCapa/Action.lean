@@ -251,6 +251,51 @@ inductive Action where
       delegates to `accept_apply`. -/
   | accept_at (receiver : DomId) (pendingId : PendingId)
               (gpaOverride : Option Nat)
+  /-- `caller` reads VP register `regId` on VP `vpId` of the child domain
+      referenced by `handle`. Mirrors `capa-engine/src/capability.rs::get_register`.
+
+      Read-only at the spec level: register values are platform-managed
+      (`ThemisPlatform::get_vp_register`) and below the spec abstraction.
+      The action's *enablement* is the access-control predicate
+      (MonitorAPI::GET + per-vector read-bitmap + VP not Running). -/
+  | getReg (caller : DomId) (handle : LocalHandle) (vpId : VpId) (regId : Nat)
+  /-- `caller` writes `value` to VP register `regId` on VP `vpId` of the
+      child domain referenced by `handle`. Mirrors
+      `capa-engine/src/capability.rs::set_register`.
+
+      Spec models only the engine-visible state (none here — register file
+      is platform-managed). The action's *enablement* is the access-control
+      predicate (MonitorAPI::SET + per-vector write-bitmap + VP not Running). -/
+  | setReg (caller : DomId) (handle : LocalHandle) (vpId : VpId)
+           (regId : Nat) (value : Nat)
 deriving Repr
+
+/-! ## Out-of-scope hypercalls (capavisor-level, not engine-level)
+
+The following hypercalls exist in `themis/capavisor/` but are intentionally
+*not* modeled in this spec because they live above the capability engine
+and operate on platform-managed state (IOMMU, IRQ routing, doorbell
+tables, attestation transport) rather than on the engine's logical
+state machine. They are listed here so that anyone auditing "spec
+completeness" can see the boundary explicitly.
+
+- `do_assign_device` / `do_release_device` (PCI BDF ↔ domain binding via IOMMU).
+  Out of scope: the engine has no notion of devices; assignment is mediated
+  by IOMMU/EPT mirroring (axiom A4).
+- `do_register_doorbell` / `do_unregister_doorbell` / `do_set_themic_vector`
+  (per-core/per-vector interrupt routing). Out of scope: the engine sees
+  only logical vectors (via `deliverInterrupt`); hardware routing is platform.
+- `do_domcomm_notify` (kick the dom-comm page). Out of scope: COMM page
+  contents are platform-visible bytes, not engine state.
+- `do_attest_self` / `do_read_pcr` *transport* (signature, PCR readback).
+  The *capability-engine* part of attestation (`attest_self` / `attest`) is
+  modeled by `attestSelf` / `attest`; PCR readback is platform.
+- `compute_memory_hash` (`MemCap.content_hash` writeback). Engine API
+  exists but no hypercall wires it; the `Attributes.hash` flag is modeled
+  but the content-hash field is not. Deferred until a hypercall exposes it.
+
+When/if the scope of this spec is widened to "guest-observable hypercall
+ABI" (rather than "capability engine state machine"), these become in-scope.
+-/
 
 end ThemisCapa

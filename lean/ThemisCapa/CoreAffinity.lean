@@ -770,6 +770,8 @@ theorem step_preservesCoreAffinity
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | getReg _            => exact h
+  | setReg _            => exact h
   | sealedSendChannel _ => exact sealedSendChannel_preservesCoreAffinity _ _ _ _ h
   | send_at _           => exact send_at_preservesCoreAffinity         _ _ _ _ _ h
   | accept_at _         => exact accept_at_preservesCoreAffinity       _ _ _ _ h

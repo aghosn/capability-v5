@@ -908,6 +908,8 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
   | .getPolicy _ _ _, _ => False
   | .getChan _ _, _ => False
   | .getChanSelf _, _ => False
+  | .getReg _ _ _ _, _ => False
+  | .setReg _ _ _ _ _, _ => False
   | .sealedSendChannel caller receiver _, did => did = caller ∨ did = receiver
   | .send_at caller receiver _ _, did => did = caller ∨ did = receiver
   | .accept_at receiver pid _, did =>
@@ -954,6 +956,8 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .getPolicy _ _ _, _ => False
   | .getChan _ _, _ => False
   | .getChanSelf _, _ => False
+  | .getReg _ _ _ _, _ => False
+  | .setReg _ _ _ _ _, _ => False
   | .sealedSendChannel _ _ _, _ => False
   | .send_at _ _ cap _, id => id = cap
   | .accept_at receiver pid _, id =>
@@ -1174,6 +1178,8 @@ theorem step_locality_dom
   | getPolicy _ => rfl
   | getChan _ => rfl
   | getChanSelf _ => rfl
+  | getReg _ => rfl
+  | setReg _ => rfl
   | sealedSendChannel guard =>
     have h1 : did ≠ _ := fun e => h (Or.inl e)
     have h2 : did ≠ _ := fun e => h (Or.inr e)
@@ -1283,6 +1289,8 @@ theorem step_locality_mem
   | getPolicy _ => rfl
   | getChan _ => rfl
   | getChanSelf _ => rfl
+  | getReg _ => rfl
+  | setReg _ => rfl
   | sealedSendChannel guard => exact sealedSendChannel_frame_mem _ _ _ _ _
   | send_at guard =>
     have h1 : id ≠ _ := h

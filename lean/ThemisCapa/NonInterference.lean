@@ -233,6 +233,8 @@ theorem step_view_preservation
   | getPolicy _ => exact id
   | getChan _ => exact id
   | getChanSelf _ => exact id
+  | getReg _ => exact id
+  | setReg _ => exact id
   | sealedSendChannel _ => exact id
   | send_at guard =>
     rename_i caller receiver cap _

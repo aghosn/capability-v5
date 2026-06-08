@@ -830,6 +830,26 @@ private theorem getChanSelf_apply_preservesIsRevoked
   simp only [getChanSelf_apply] at hpost
   rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
 
+private theorem getReg_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle) (vpId : VpId) (regId : Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (getReg_apply s caller handle vpId regId).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [getReg_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
+private theorem setReg_apply_preservesIsRevoked
+    (caller : DomId) (handle : LocalHandle) (vpId : VpId) (regId : Nat) (value : Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (setReg_apply s caller handle vpId regId value).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [setReg_apply] at hpost
+  rw [hpre] at hpost; injection hpost with e; rw [← e]; exact hrev
+
 /-! ### Helper: `updVp` preserves status -/
 
 private theorem Domain.updVp_status (d : Domain) (vpId : VpId)
@@ -1290,6 +1310,10 @@ theorem step_preserves_revoked
       exact getChan_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
   | getChanSelf _ =>
       exact getChanSelf_apply_preservesIsRevoked _ s did d hpre hrev d' hpost
+  | getReg _ =>
+      exact getReg_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | setReg _ =>
+      exact setReg_apply_preservesIsRevoked _ _ _ _ _ s did d hpre hrev d' hpost
   | sealedSendChannel _ =>
       exact sealedSendChannel_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
   | send_at _ =>

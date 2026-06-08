@@ -627,6 +627,8 @@ theorem step_preservesFreshPending
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | getReg _            => exact h
+  | setReg _            => exact h
   | sealedSendChannel _ => exact sealedSendChannel_preservesFreshPending _ _ _ _ h
   | send_at _           => exact send_at_preservesFreshPending         _ _ _ _ _ h
   | accept_at _         => exact accept_at_preservesFreshPending       _ _ _ _ h

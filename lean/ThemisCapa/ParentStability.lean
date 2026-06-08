@@ -1171,6 +1171,12 @@ theorem step_parent_immutable
   | getChanSelf _       =>
       simp only [getChanSelf_apply] at hpost
       rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | getReg _            =>
+      simp only [getReg_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | setReg _            =>
+      simp only [setReg_apply] at hpost
+      rw [hpre] at hpost; injection hpost with e; rw [← e]
   | sealedSendChannel _ => exact sealedSendChannel_apply_preservesParents _ _ _ s did d d' hpre hpost
   | send_at _           => exact send_at_apply_preservesParents _ _ _ _ s did d d' hpre hpost
   | accept_at _         => exact accept_at_apply_preservesParents _ _ _ s did d d' hpre hpost
