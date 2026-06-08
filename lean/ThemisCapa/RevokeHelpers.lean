@@ -382,4 +382,256 @@ theorem revokeDomain_apply_dom_axes
     foldl_revokeOneDomain_dom_axes s (collectSubtree s dc.targetDom) did d1 h1
   exact ⟨d_pre, h_pre, hp2.trans hp1, hpar2.trans hpar1, hst2.trans hst1, hv2.trans hv1⟩
 
+/-! ## Pending-axes helpers (for FreshPending)
+
+The fields {pendingMemCaps, nextPendingId} are preserved by EVERY stage
+of `revokeDomain_apply` for surviving domains. The field
+{pendingDomCaps} is preserved by every stage except channel
+cancellation, which can only filter (shrink) it. -/
+
+/-- Generic `updDomain` lift for pending fields. -/
+private theorem updDomain_pending
+    (s : SpecState) (id : DomId) (f : Domain → Domain)
+    (hf : ∀ d, (f d).pendingMemCaps = d.pendingMemCaps ∧
+               (f d).nextPendingId = d.nextPendingId ∧
+               (∀ p, p ∈ (f d).pendingDomCaps → p ∈ d.pendingDomCaps))
+    (did : DomId) (d : Domain)
+    (h : (s.updDomain id f).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  by_cases hne : did = id
+  · subst hne
+    simp only [SpecState.getDom, SpecState.updDomain] at h
+    rcases hs : s.domains.find? did with _ | d_pre
+    · rw [Arena.find?_update_eq_map, hs] at h; cases h
+    · rw [Arena.find?_update_same _ _ _ hs] at h
+      have heq := Option.some.inj h
+      have ⟨hpm, hnp, hpd⟩ := hf d_pre
+      refine ⟨d_pre, hs, ?_, ?_, ?_⟩
+      · rw [← heq]; exact hpm.symm
+      · rw [← heq]; exact hnp.symm
+      · intro p hp; rw [← heq] at hp; exact hpd p hp
+  · simp only [SpecState.getDom, SpecState.updDomain] at h
+    rw [Arena.find?_update_other _ _ _ _ hne] at h
+    exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+
+private theorem cancelChannelStep_pending
+    (cap : DomCapId) (acc : SpecState) (entry : DomId × Domain)
+    (did : DomId) (d : Domain)
+    (h : (cancelChannelStep cap acc entry).getDom did = some d) :
+    ∃ d_pre, acc.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  unfold cancelChannelStep at h
+  rcases hfind : entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap) with _ | ⟨_pid, pe⟩
+  · rw [hfind] at h
+    exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  · rw [hfind] at h
+    obtain ⟨d_mid, h_mid, hpm1, hnp1, hpd1⟩ :=
+      updDomain_pending _ pe.senderDomainId
+        (fun sd => { sd with frozenHandles :=
+                      sd.frozenHandles.filter (· ≠ pe.senderHandle) })
+        (fun _ => ⟨rfl, rfl, fun _ hp => hp⟩) did d h
+    obtain ⟨d_pre, h_pre, hpm2, hnp2, hpd2⟩ :=
+      updDomain_pending acc entry.1
+        (fun rd => { rd with pendingDomCaps :=
+                      rd.pendingDomCaps.filter (fun p => p.2.capId ≠ cap) })
+        (fun rd => ⟨rfl, rfl, fun p hp => (List.mem_filter.mp hp).1⟩)
+        did d_mid h_mid
+    exact ⟨d_pre, h_pre, hpm2.trans hpm1, hnp2.trans hnp1,
+           fun p hp => hpd2 p (hpd1 p hp)⟩
+
+private theorem foldl_cancelChannelStep_pending
+    (cap : DomCapId) (entries : List (DomId × Domain))
+    (s : SpecState) (did : DomId) (d : Domain)
+    (h : (entries.foldl (cancelChannelStep cap) s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  induction entries generalizing s with
+  | nil => exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  | cons entry rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨d_mid, h_mid, hpm, hnp, hpd⟩ := ih (cancelChannelStep cap s entry) h
+    obtain ⟨d_pre, h_pre, hpm', hnp', hpd'⟩ :=
+      cancelChannelStep_pending cap s entry did d_mid h_mid
+    exact ⟨d_pre, h_pre, hpm'.trans hpm, hnp'.trans hnp,
+           fun p hp => hpd' p (hpd p hp)⟩
+
+theorem cancelChannelIfPending_pending
+    (s : SpecState) (cap : DomCapId) (did : DomId) (d : Domain)
+    (h : (cancelChannelIfPending s cap).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  rw [cancelChannelIfPending_eq_foldl] at h
+  exact foldl_cancelChannelStep_pending cap _ s did d h
+
+theorem foldl_channelOps_pending
+    (caps : List DomCapId) (s : SpecState) (did : DomId) (d : Domain)
+    (h : (caps.foldl (fun acc cap =>
+            match acc.getDomCap cap with
+            | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+            | none    => acc) s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  induction caps generalizing s with
+  | nil => exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  | cons cap rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨d_mid, h_mid, hpm, hnp, hpd⟩ := ih _ h
+    rcases hdc : s.getDomCap cap with _ | dc
+    · have hstep : (match s.getDomCap cap with
+                    | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                    | none    => s) = s := by rw [hdc]
+      rw [hstep] at h_mid
+      exact ⟨d_mid, h_mid, hpm, hnp, hpd⟩
+    · by_cases hch : dc.isChannel
+      · have hstep : (match s.getDomCap cap with
+                      | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                      | none    => s) = cancelChannelIfPending s cap := by
+          rw [hdc]; simp [hch]
+        rw [hstep] at h_mid
+        obtain ⟨d_pre, h_pre, hpm', hnp', hpd'⟩ :=
+          cancelChannelIfPending_pending s cap did d_mid h_mid
+        exact ⟨d_pre, h_pre, hpm'.trans hpm, hnp'.trans hnp,
+               fun p hp => hpd' p (hpd p hp)⟩
+      · have hstep : (match s.getDomCap cap with
+                      | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                      | none    => s) = s := by
+          rw [hdc]; simp [hch]
+        rw [hstep] at h_mid
+        exact ⟨d_mid, h_mid, hpm, hnp, hpd⟩
+
+theorem revokeOneMemCap_pending
+    (s : SpecState) (mid : MemCapId) (did : DomId) (d : Domain)
+    (h : (revokeOneMemCap s mid).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  have := revokeOneMemCap_domains_eq s mid
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+
+theorem foldl_revokeOneMemCap_pending
+    (s : SpecState) (mids : List MemCapId) (did : DomId) (d : Domain)
+    (h : (mids.foldl revokeOneMemCap s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  have := foldl_revokeOneMemCap_domains_eq s mids
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+
+theorem clearCommBindings_pending
+    (s : SpecState) (cbs : List MemCapId) (did : DomId) (d : Domain)
+    (h : (clearCommBindings s cbs).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  have := clearCommBindings_domains_eq s cbs
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+
+theorem revokeOneDomain_pending
+    (s : SpecState) (did' did : DomId) (d : Domain)
+    (h : (revokeOneDomain s did').getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  unfold revokeOneDomain at h
+  rcases hd' : s.getDom did' with _ | d'
+  · rw [hd'] at h; exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  · rw [hd'] at h
+    simp only [SpecState.getDom] at h
+    by_cases hne : did = did'
+    · subst hne; rw [Arena.find?_remove_same] at h; cases h
+    rw [Arena.find?_remove_other _ _ _ hne] at h
+    let s_memcap := (d'.memHandles.map Prod.snd).foldl revokeOneMemCap s
+    let s_chan := (d'.domHandles.map Prod.snd).foldl (fun acc cap =>
+        match acc.getDomCap cap with
+        | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+        | none    => acc) s_memcap
+    let s_comm := clearCommBindings s_chan d'.commBindings
+    have stages123 : ∀ {did : DomId} {d : Domain},
+        s_comm.getDom did = some d →
+        ∃ d_pre, s.getDom did = some d_pre ∧
+          d_pre.pendingMemCaps = d.pendingMemCaps ∧
+          d_pre.nextPendingId = d.nextPendingId ∧
+          (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+      intro did d hh
+      obtain ⟨d3, h3, hpm3, hnp3, hpd3⟩ := clearCommBindings_pending _ _ _ _ hh
+      obtain ⟨d2, h2, hpm2, hnp2, hpd2⟩ := foldl_channelOps_pending _ _ _ _ h3
+      obtain ⟨d1, h1, hpm1, hnp1, hpd1⟩ := foldl_revokeOneMemCap_pending _ _ _ _ h2
+      exact ⟨d1, h1, hpm1.trans (hpm2.trans hpm3), hnp1.trans (hnp2.trans hnp3),
+             fun p hp => hpd1 p (hpd2 p (hpd3 p hp))⟩
+    rcases hp : d'.parent with _ | pid
+    · rw [hp] at h
+      exact stages123 (show s_comm.getDom did = some d from h)
+    · rw [hp] at h
+      have hh : (s_comm.updDomain pid (fun pd =>
+          { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })).getDom did = some d := h
+      obtain ⟨d5, h5, hpm5, hnp5, hpd5⟩ :=
+        updDomain_pending s_comm pid
+          (fun pd => { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })
+          (fun _ => ⟨rfl, rfl, fun _ hp => hp⟩) did d hh
+      obtain ⟨d_pre, h_pre, hpm', hnp', hpd'⟩ := stages123 h5
+      exact ⟨d_pre, h_pre, hpm'.trans hpm5, hnp'.trans hnp5,
+             fun p hp => hpd' p (hpd5 p hp)⟩
+
+theorem foldl_revokeOneDomain_pending
+    (s : SpecState) (dids : List DomId) (did : DomId) (d : Domain)
+    (h : (dids.foldl revokeOneDomain s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  induction dids generalizing s with
+  | nil => exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  | cons did' rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨d_mid, h_mid, hpm, hnp, hpd⟩ := ih (revokeOneDomain s did') h
+    obtain ⟨d_pre, h_pre, hpm', hnp', hpd'⟩ :=
+      revokeOneDomain_pending s did' did d_mid h_mid
+    exact ⟨d_pre, h_pre, hpm'.trans hpm, hnp'.trans hnp,
+           fun p hp => hpd' p (hpd p hp)⟩
+
+theorem revokeDomain_apply_pending
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (did : DomId) (d : Domain)
+    (h : (revokeDomain_apply s caller handle).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.pendingMemCaps = d.pendingMemCaps ∧
+      d_pre.nextPendingId = d.nextPendingId ∧
+      (∀ p, p ∈ d.pendingDomCaps → p ∈ d_pre.pendingDomCaps) := by
+  unfold revokeDomain_apply at h
+  rcases hc : s.getDom caller with _ | d_c
+  · rw [hc] at h; exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  rw [hc] at h
+  rcases hlh : d_c.lookupDomHandle handle with _ | dcId
+  · simp [hlh] at h; exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  simp [hlh] at h
+  rcases hdcp : s.getDomCap dcId with _ | dc
+  · simp [hdcp] at h; exact ⟨d, h, rfl, rfl, fun _ hp => hp⟩
+  simp [hdcp] at h
+  obtain ⟨d1, h1, hpm1, hnp1, hpd1⟩ :=
+    updDomain_pending (collectSubtree s dc.targetDom |>.foldl revokeOneDomain s) caller
+      (fun d => { d with domHandles := d.domHandles.filter (fun h => !decide (h.snd = dcId)) })
+      (fun _ => ⟨rfl, rfl, fun _ hp => hp⟩) did d h
+  obtain ⟨d_pre, h_pre, hpm2, hnp2, hpd2⟩ :=
+    foldl_revokeOneDomain_pending s (collectSubtree s dc.targetDom) did d1 h1
+  exact ⟨d_pre, h_pre, hpm2.trans hpm1, hnp2.trans hnp1,
+         fun p hp => hpd2 p (hpd1 p hp)⟩
+
 end ThemisCapa

@@ -23,6 +23,7 @@
 import ThemisCapa.Step
 import ThemisCapa.Locality
 import ThemisCapa.Invariants
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Arena
@@ -532,10 +533,19 @@ theorem revokeDomain_preservesFreshPending
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (h : FreshPending s) :
     FreshPending (revokeDomain_apply s caller handle) := by
-  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
-  -- Channel cancellation removes pending entries (decreases); per-domain
-  -- nextPendingId stays monotone. Phase B will reduce this to a fold.
-  sorry
+  intro did d hd
+  obtain ⟨d_pre, h_pre, hpm, hnp, hpd⟩ :=
+    revokeDomain_apply_pending s caller handle did d hd
+  have hbase := h did d_pre h_pre
+  refine ⟨?_, ?_⟩
+  · intro p hp
+    rw [← hpm] at hp
+    rw [← hnp]
+    exact hbase.1 p hp
+  · intro p hp
+    have hp_pre := hpd p hp
+    rw [← hnp]
+    exact hbase.2 p hp_pre
 
 -- ════════════════════════════════════════════════════════════════════
 -- deliverInterrupt: chain induction
