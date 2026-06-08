@@ -28,6 +28,7 @@ import ThemisCapa.O2MemcapSubtree
 import ThemisCapa.FreshPending
 import ThemisCapa.CoreAffinity
 import ThemisCapa.PolicyMonotonic
+import ThemisCapa.RevokeHelpers
 import ThemisCapa.HandlerCoverage
 import ThemisCapa.HandlerCoverageProof
 import ThemisCapa.O3IpcIsolation
