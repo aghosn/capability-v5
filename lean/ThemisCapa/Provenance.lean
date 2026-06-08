@@ -156,11 +156,28 @@ private theorem create_mem_isSome
     ((create_apply s caller policy).getMem c).isSome := by
   rw [create_frame_mem]; exact h
 
+/-- Memcap `c` survives `revokeDomain` only if it is outside the cascade
+    footprint (not owned by any subtree domain, not a parent of a
+    subtree-owned cap, not COMM-bound to any subtree domain). -/
 private theorem revokeDomain_mem_isSome
     (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
+    (dcaller : Domain) (hdcaller : s.getDom caller = some dcaller)
+    (dcId : DomCapId) (hh : dcaller.lookupDomHandle handle = some dcId)
+    (dc : DomCap) (hdc : s.getDomCap dcId = some dc)
+    (hNotOwned : ∀ m, s.getMem c = some m →
+                  m.owner ∉ collectSubtree s dc.targetDom)
+    (hNotParent : ∀ m, s.getMem c = some m →
+                  ∀ childId mChild, s.getMem childId = some mChild →
+                  mChild.parent = some c →
+                  mChild.owner ∉ collectSubtree s dc.targetDom)
+    (hNotComm : ∀ m, s.getMem c = some m →
+                ∀ did ∈ collectSubtree s dc.targetDom,
+                ∀ dd, s.getDom did = some dd → c ∉ dd.commBindings)
     (h : (s.getMem c).isSome) :
     ((revokeDomain_apply s caller handle).getMem c).isSome := by
-  rw [revokeDomain_frame_mem]; exact h
+  rw [revokeDomain_frame_mem s caller handle dcaller hdcaller dcId hh dc hdc c
+        hNotOwned hNotParent hNotComm]
+  exact h
 
 private theorem setPolicy_mem_isSome
     (s : SpecState) (caller : DomId) (cap : DomCapId)
@@ -298,12 +315,15 @@ private theorem registerComm_mem_isSome
 
 /-! ### Provenance — Removal -/
 
-/-- The only way a memcap can disappear from one step to the next is
-    via the `revoke` action, with target equal to the disappeared id. -/
+/-- A memcap can disappear from one step to the next either via the
+    `revoke` action (with target equal to the disappeared id) or via
+    the `revokeDomain` cascade (which removes all memcaps owned by any
+    domain in the revoked subtree). -/
 theorem provenance_removal
     {s s' : SpecState} {a : Action} (hstep : step s a s')
     {c : MemCapId} (hPre : (s.getMem c).isSome) (hPost : (s'.getMem c) = none) :
-    ∃ caller, a = .revoke caller c := by
+    (∃ caller, a = .revoke caller c) ∨
+    (∃ caller handle, a = .revokeDomain caller handle) := by
   cases hstep with
   | carve guard =>
     rename_i caller parent access attrs
@@ -317,7 +337,7 @@ theorem provenance_removal
     rw [hPost] at h; cases h
   | revoke guard =>
     rename_i caller target
-    refine ⟨caller, ?_⟩
+    refine Or.inl ⟨caller, ?_⟩
     by_cases hc : c = target
     · rw [hc]
     · exfalso
@@ -355,9 +375,7 @@ theorem provenance_removal
     rw [hPost] at h; cases h
   | revokeDomain guard =>
     rename_i caller handle
-    exfalso
-    have h := revokeDomain_mem_isSome s caller handle c hPre
-    rw [hPost] at h; cases h
+    exact Or.inr ⟨caller, handle, rfl⟩
   | setPolicy guard =>
     rename_i caller cap id value
     exfalso
@@ -578,7 +596,23 @@ private theorem revokeDomain_mem_isNone
     (s : SpecState) (caller : DomId) (handle : LocalHandle) (c : MemCapId)
     (h : s.getMem c = none) :
     (revokeDomain_apply s caller handle).getMem c = none := by
-  rw [revokeDomain_frame_mem]; exact h
+  -- All three frame_mem premises are vacuously satisfied when
+  -- `s.getMem c = none` (the universal quantifier `∀ m, s.getMem c = some m → …`
+  -- has no instance), except we need to pick *some* `dc.targetDom` to invoke
+  -- the lemma. Resolve the handle chain or short-circuit if the action
+  -- is a no-op.
+  rcases hc : s.getDom caller with _ | dcaller
+  · -- caller not in arena → revokeDomain_apply is identity
+    unfold revokeDomain_apply; rw [hc]; exact h
+  rcases hh : dcaller.lookupDomHandle handle with _ | dcId
+  · unfold revokeDomain_apply; rw [hc]; simp [hh]; exact h
+  rcases hdc : s.getDomCap dcId with _ | dc
+  · unfold revokeDomain_apply; rw [hc]; simp [hh, hdc]; exact h
+  rw [revokeDomain_frame_mem s caller handle dcaller hc dcId hh dc hdc c
+      (fun m hm => by rw [h] at hm; cases hm)
+      (fun m hm => by rw [h] at hm; cases hm)
+      (fun m hm => by rw [h] at hm; cases hm)]
+  exact h
 
 private theorem setPolicy_mem_isNone
     (s : SpecState) (caller : DomId) (cap : DomCapId)
@@ -1121,14 +1155,19 @@ private theorem create_owner_preserved
   rw [create_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
+/-- Owner field is preserved when memcap survives `revokeDomain`.
+    The cascade only ever **removes** memcaps or modifies their COMM
+    attributes; it never changes the `owner` field. The full proof
+    requires a per-stage "owner unchanged" helper family analogous to
+    `RevokeHelpers.revokeDomain_apply_dom_axes`; this is left as
+    `sorry` until that helper is added. -/
 private theorem revokeDomain_owner_preserved
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (c : MemCapId) (capPre capPost : MemCap)
     (hPre : s.getMem c = some capPre)
     (hPost : (revokeDomain_apply s caller handle).getMem c = some capPost) :
     capPre.owner = capPost.owner := by
-  rw [revokeDomain_frame_mem, hPre] at hPost
-  injection hPost with h; rw [h]
+  sorry
 
 private theorem setPolicy_owner_preserved
     (s : SpecState) (caller : DomId) (cap : DomCapId)

@@ -188,7 +188,13 @@ theorem step_view_preservation
   | reject _ => exact id
   | sealedSend _ => exact id
   | create _ => exact id
-  | revokeDomain _ => exact id
+  | revokeDomain _ =>
+    -- ¬affectsMem now means c is outside the cascade footprint
+    -- (not in subtree, not parent, not comm-bound). Discharging this
+    -- requires owner-preservation across the full cascade — left as
+    -- `sorry` until the cascade owner-preservation helper family is
+    -- added (mirrors `revokeDomain_owner_preserved` TODO).
+    intro _; sorry
   | setPolicy _ => exact id
   | sendChannel _ => exact id
   | acceptChannel _ => exact id

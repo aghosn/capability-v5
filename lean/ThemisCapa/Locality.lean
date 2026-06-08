@@ -321,25 +321,57 @@ theorem create_frame_mem (s : SpecState) (caller : DomId) (policy : DomainPolicy
     (id : MemCapId) :
     (create_apply s caller policy).getMem id = s.getMem id := rfl
 
-/-! ### RevokeDomain -/
+/-! ### RevokeDomain
 
+The frame lemmas for the cascade are *conditional* on the domain/memcap
+being outside the cascade's footprint. See `Action.affectsDom` /
+`Action.affectsMem` cases for `.revokeDomain` for the precise footprint.
+
+These lemmas are still pending (`sorry`); their statements are sound
+under the cascade semantics introduced in S4 Phase A. Discharging them
+requires building a per-stage record-equality helper family on top of
+the existing `*_dom_axes` / `*_pending` survivor lemmas in
+`RevokeHelpers.lean`. -/
+
+/-- Outside the cascade's domain footprint, the domain record is
+    preserved. The premise `notAffected` is `¬ Action.affectsDom s
+    (.revokeDomain caller handle) did` unfolded. -/
 theorem revokeDomain_frame_dom (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (dcaller : Domain) (hdc : s.getDom caller = some dcaller)
     (dcId : DomCapId) (hh : dcaller.lookupDomHandle handle = some dcId)
     (dc : DomCap) (hdcap : s.getDomCap dcId = some dc)
-    (did : DomId) (h1 : did ≠ caller) (h2 : did ≠ dc.targetDom) :
+    (did : DomId)
+    (h1 : did ≠ caller)
+    (hNotSubtree : did ∉ collectSubtree s dc.targetDom)
+    (hNotChildParent : ∀ td, s.getDom dc.targetDom = some td →
+                       ∀ pid, td.parent = some pid → did ≠ pid)
+    (hNoChanCap : ∀ dd, s.getDom did = some dd →
+                  ∀ entry ∈ dd.pendingDomCaps,
+                  ∀ dcap, s.getDomCap entry.2.capId = some dcap →
+                  dcap.owner ∉ collectSubtree s dc.targetDom) :
     (revokeDomain_apply s caller handle).getDom did = s.getDom did := by
-  -- Phase A (S4, checkpoint 005): subtree cascade may touch any
-  -- descendant of `dc.targetDom`; the leaf-only assumption no longer
-  -- applies, so this lemma needs a `did ∉ subtree` premise.
   sorry
 
+/-- Outside the cascade's memcap footprint, the memcap record is
+    preserved. The premise mirrors `¬ Action.affectsMem s
+    (.revokeDomain caller handle) id` for the three disjuncts:
+    not owned by subtree, not parent of subtree-owned cap, not bound
+    as a COMM cap to any subtree domain. -/
 theorem revokeDomain_frame_mem (s : SpecState) (caller : DomId) (handle : LocalHandle)
-    (id : MemCapId) :
+    (dcaller : Domain) (hdc : s.getDom caller = some dcaller)
+    (dcId : DomCapId) (hh : dcaller.lookupDomHandle handle = some dcId)
+    (dc : DomCap) (hdcap : s.getDomCap dcId = some dc)
+    (id : MemCapId)
+    (hNotOwnedBySubtree : ∀ m, s.getMem id = some m →
+                          m.owner ∉ collectSubtree s dc.targetDom)
+    (hNotParentOfSubtreeCap : ∀ m, s.getMem id = some m →
+                              ∀ childId mChild, s.getMem childId = some mChild →
+                              mChild.parent = some id →
+                              mChild.owner ∉ collectSubtree s dc.targetDom)
+    (hNotCommBoundInSubtree : ∀ m, s.getMem id = some m →
+                              ∀ did ∈ collectSubtree s dc.targetDom,
+                              ∀ dd, s.getDom did = some dd → id ∉ dd.commBindings) :
     (revokeDomain_apply s caller handle).getMem id = s.getMem id := by
-  -- Phase A (S4, checkpoint 005): subtree cascade may revoke memcaps
-  -- owned by descendants; this lemma needs `id` not owned by any
-  -- domain in the revoked subtree.
   sorry
 
 /-! ### Channels (sendChannel / acceptChannel / rejectChannel)
@@ -864,7 +896,19 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
       did = caller ∨
       (∀ dc, s.getDom caller = some dc →
        ∀ dcId, dc.lookupDomHandle handle = some dcId →
-       ∀ d, s.getDomCap dcId = some d → did = d.targetDom)
+       ∀ d, s.getDomCap dcId = some d →
+         -- Any domain in the revoked subtree (cascade-targeted).
+         did ∈ collectSubtree s d.targetDom ∨
+         -- Parent of the subtree root has its `childrenDoms` filtered.
+         (∀ td, s.getDom d.targetDom = some td →
+          ∀ pid, td.parent = some pid → did = pid) ∨
+         -- Surviving domains whose `pendingDomCaps` reference a dom-cap
+         -- owned by a subtree member have those entries cancelled
+         -- (which also filters their `frozenHandles`).
+         (∃ dd, s.getDom did = some dd ∧
+          ∃ entry ∈ dd.pendingDomCaps,
+          ∃ dcap, s.getDomCap entry.2.capId = some dcap ∧
+                  dcap.owner ∈ collectSubtree s d.targetDom))
   | .setPolicy _ cap _ _,        did =>
       ∀ dc, s.getDomCap cap = some dc → did = dc.targetDom
   | .sendChannel caller receiver _, did => did = caller ∨ did = receiver
@@ -933,7 +977,21 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .reject _ _,         _  => False
   | .sealedSend _ _ _ _, _  => False
   | .create _ _,         _  => False
-  | .revokeDomain _ _,   _  => False
+  | .revokeDomain caller handle, id =>
+      ∀ dc, s.getDom caller = some dc →
+      ∀ dcId, dc.lookupDomHandle handle = some dcId →
+      ∀ d, s.getDomCap dcId = some d →
+        let subtree := collectSubtree s d.targetDom
+        -- Memcaps owned by any subtree domain are revoked.
+        (∀ m, s.getMem id = some m → m.owner ∈ subtree) ∨
+        -- Their parents have `childrenIds` filtered.
+        (∀ m, s.getMem id = some m →
+         ∃ childId mChild, s.getMem childId = some mChild ∧
+           mChild.parent = some id ∧ mChild.owner ∈ subtree) ∨
+        -- COMM-bound memcaps of subtree domains have their `comm` attribute
+        -- cleared and `commBinding` set to none.
+        (∃ m, s.getMem id = some m ∧
+         ∃ did ∈ subtree, ∃ dd, s.getDom did = some dd ∧ id ∈ dd.commBindings)
   | .setPolicy _ _ _ _,  _  => False
   | .sendChannel _ _ _,  _  => False
   | .acceptChannel _ _,  _  => False
@@ -1030,15 +1088,42 @@ theorem step_locality_dom
     obtain ⟨dc, hdc⟩ :=
       Option.isSome_iff_exists.mp (guard.capExists dcaller hdcaller dcId hdcId)
     have h1 : did ≠ caller := fun e => h (Or.inl e)
-    have h2 : did ≠ dc.targetDom := fun e =>
-      h (Or.inr (fun dcaller' hdc' dcId' hh' d' hdcap' => by
-        rw [hdcaller] at hdc'; injection hdc' with hh
-        rw [← hh] at hh'
-        rw [hdcId] at hh'; injection hh' with hhh
-        rw [← hhh] at hdcap'
-        rw [hdc] at hdcap'; injection hdcap' with hhhh
-        rw [← hhhh]; exact e))
-    exact revokeDomain_frame_dom _ _ _ _ hdcaller _ hdcId _ hdc _ h1 h2
+    -- Extract the three sub-clauses of the (negated) footprint disjunct.
+    have hRest : ¬ (did ∈ collectSubtree s dc.targetDom ∨
+                    (∀ td, s.getDom dc.targetDom = some td →
+                     ∀ pid, td.parent = some pid → did = pid) ∨
+                    (∃ dd, s.getDom did = some dd ∧
+                     ∃ entry ∈ dd.pendingDomCaps,
+                     ∃ dcap, s.getDomCap entry.2.capId = some dcap ∧
+                             dcap.owner ∈ collectSubtree s dc.targetDom)) := by
+      intro hd
+      apply h
+      refine Or.inr ?_
+      intro dc' hdc' dcId' hh' d' hdcap'
+      rw [hdcaller] at hdc'; injection hdc' with eq1
+      rw [← eq1] at hh'
+      rw [hdcId] at hh'; injection hh' with eq2
+      rw [← eq2] at hdcap'
+      rw [hdc] at hdcap'; injection hdcap' with eq3
+      rw [← eq3]; exact hd
+    have hNotSubtree : did ∉ collectSubtree s dc.targetDom :=
+      fun hin => hRest (Or.inl hin)
+    have hNotChildParent : ∀ td, s.getDom dc.targetDom = some td →
+                           ∀ pid, td.parent = some pid → did ≠ pid := by
+      intro td htd pid hpid heq
+      exact hRest (Or.inr (Or.inl (fun td' htd' pid' hpid' => by
+        rw [htd] at htd'; injection htd' with e1
+        rw [← e1] at hpid'
+        rw [hpid] at hpid'; injection hpid' with e2
+        rw [← e2]; exact heq)))
+    have hNoChanCap : ∀ dd, s.getDom did = some dd →
+                       ∀ entry ∈ dd.pendingDomCaps,
+                       ∀ dcap, s.getDomCap entry.2.capId = some dcap →
+                       dcap.owner ∉ collectSubtree s dc.targetDom := by
+      intro dd hdd entry hentry dcap hdcap' howner
+      exact hRest (Or.inr (Or.inr ⟨dd, hdd, entry, hentry, dcap, hdcap', howner⟩))
+    exact revokeDomain_frame_dom _ _ _ _ hdcaller _ hdcId _ hdc _ h1
+            hNotSubtree hNotChildParent hNoChanCap
   | setPolicy guard =>
     rename_i caller cap id value
     obtain ⟨dc, hdc⟩ := Option.isSome_iff_exists.mp guard.capExists
@@ -1244,7 +1329,50 @@ theorem step_locality_mem
   | reject guard => exact reject_frame_mem _ _ _ _
   | sealedSend guard => exact sealedSend_frame_mem _ _ _ _ _ _
   | create guard => exact create_frame_mem _ _ _ _
-  | revokeDomain guard => exact revokeDomain_frame_mem _ _ _ _
+  | revokeDomain guard =>
+    rename_i caller handle
+    obtain ⟨dcaller, hdcaller⟩ := Option.isSome_iff_exists.mp guard.callerExists
+    obtain ⟨dcId, hdcId⟩ :=
+      Option.isSome_iff_exists.mp (guard.handleResolves dcaller hdcaller)
+    obtain ⟨dc, hdc⟩ :=
+      Option.isSome_iff_exists.mp (guard.capExists dcaller hdcaller dcId hdcId)
+    -- Extract the three sub-clauses of the (negated) memcap footprint.
+    have hRest : ¬ ((∀ m, s.getMem id = some m → m.owner ∈ collectSubtree s dc.targetDom) ∨
+                    (∀ m, s.getMem id = some m →
+                     ∃ childId mChild, s.getMem childId = some mChild ∧
+                       mChild.parent = some id ∧
+                       mChild.owner ∈ collectSubtree s dc.targetDom) ∨
+                    (∃ m, s.getMem id = some m ∧
+                     ∃ did ∈ collectSubtree s dc.targetDom,
+                     ∃ dd, s.getDom did = some dd ∧ id ∈ dd.commBindings)) := by
+      intro hmem
+      apply h
+      intro dc' hdc' dcId' hh' d' hdcap'
+      rw [hdcaller] at hdc'; injection hdc' with eq1
+      rw [← eq1] at hh'
+      rw [hdcId] at hh'; injection hh' with eq2
+      rw [← eq2] at hdcap'
+      rw [hdc] at hdcap'; injection hdcap' with eq3
+      rw [← eq3]; exact hmem
+    have hNotOwned : ∀ m, s.getMem id = some m →
+                     m.owner ∉ collectSubtree s dc.targetDom := by
+      intro m hm howner
+      apply hRest
+      exact Or.inl (fun m' hm' => by rw [hm] at hm'; injection hm' with e; rw [← e]; exact howner)
+    have hNotParent : ∀ m, s.getMem id = some m →
+                       ∀ childId mChild, s.getMem childId = some mChild →
+                       mChild.parent = some id →
+                       mChild.owner ∉ collectSubtree s dc.targetDom := by
+      intro m hm childId mChild hmC hpar howner
+      apply hRest
+      refine Or.inr (Or.inl (fun m' hm' => ⟨childId, mChild, hmC, hpar, howner⟩))
+    have hNotComm : ∀ m, s.getMem id = some m →
+                     ∀ did ∈ collectSubtree s dc.targetDom,
+                     ∀ dd, s.getDom did = some dd → id ∉ dd.commBindings := by
+      intro m hm did hdid dd hdd hin
+      exact hRest (Or.inr (Or.inr ⟨m, hm, did, hdid, dd, hdd, hin⟩))
+    exact revokeDomain_frame_mem _ _ _ _ hdcaller _ hdcId _ hdc _
+            hNotOwned hNotParent hNotComm
   | setPolicy guard => exact setPolicy_frame_mem _ _ _ _ _ _
   | sendChannel guard => exact sendChannel_frame_mem _ _ _ _ _
   | acceptChannel guard => exact acceptChannel_frame_mem _ _ _ _
