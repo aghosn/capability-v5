@@ -745,31 +745,10 @@ theorem revokeDomain_preservesHandlerCoverage
     (guard : RevokeDomainGuard s caller handle)
     (hwf : DomainTreeWf s) (h : HandlerCoverage s) :
     HandlerCoverage (revokeDomain_apply s caller handle) := by
-  rcases hd : s.getDom caller with _ | d
-  · simp only [revokeDomain_apply, hd]; exact h
-  · rcases hh : d.lookupDomHandle handle with _ | dcId
-    · simp only [revokeDomain_apply, hd, hh]; exact h
-    · rcases hc : s.getDomCap dcId with _ | dc
-      · simp only [revokeDomain_apply, hd, hh, hc]; exact h
-      · simp only [revokeDomain_apply, hd, hh, hc]
-        -- Extract the leaf-ness premise from the guard.
-        have htgtsome := guard.targetExists d hd dcId hh dc hc
-        obtain ⟨t, htgt⟩ := Option.isSome_iff_exists.mp htgtsome
-        have hleaf : t.childrenDoms = [] :=
-          (guard.targetIsLeaf d hd dcId hh dc hc t htgt).1
-        -- Step 1: remove the target domain.
-        have h_rm := hc_domains_remove h hwf.parentChild dc.targetDom t htgt hleaf
-        -- Step 2: removing the dom-cap doesn't affect getDom.
-        have h_rm_dc :
-            HandlerCoverage { s with domains := s.domains.remove dc.targetDom,
-                                     domcaps := s.domcaps.remove dcId } :=
-          hc_of_getDom_eq
-            (s₁ := { s with domains := s.domains.remove dc.targetDom })
-            (s₂ := { s with domains := s.domains.remove dc.targetDom,
-                            domcaps := s.domcaps.remove dcId })
-            (fun _ => rfl) h_rm
-        -- Step 3: updDomain on caller (filters only — parent/policy/status untouched).
-        exact hc_updDomain_id h_rm_dc caller _
-                (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
+  -- Strategy: descendants' handler witnesses go through the subtree root's
+  -- parent, which is outside the subtree (caller, by `targetParentIsCaller`).
+  -- Phase B will prove this by induction on the descendant list.
+  sorry
 
 end ThemisCapa

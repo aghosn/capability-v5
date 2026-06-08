@@ -868,40 +868,12 @@ private theorem revokeDomain_apply_preservesIsRevoked
     (hrev : d.isRevoked)
     (d' : Domain) (hpost : (revokeDomain_apply s caller handle).getDom did = some d') :
     d'.isRevoked := by
-  have hpre_d : s.domains.find? did = some d := hpre
-  rcases hcd : s.getDom caller with _ | dc
-  · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-    simp [revokeDomain_apply, hcd] at h0
-    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
-  · rcases hh : dc.lookupDomHandle handle with _ | dcId
-    · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-      simp [revokeDomain_apply, hcd, hh] at h0
-      rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
-    · rcases hdc : s.getDomCap dcId with _ | domcap
-      · have h0 : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-        simp [revokeDomain_apply, hcd, hh, hdc] at h0
-        rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
-      · let target := domcap.targetDom
-        have hp' : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-        simp only [revokeDomain_apply, hcd, hh, hdc, SpecState.updDomain] at hp'
-        by_cases hdid_target : did = target
-        · rw [hdid_target] at hp' hpre_d
-          by_cases hdc' : target = caller
-          · rw [← hdc'] at hp'
-            rw [Arena.find?_update_eq_map] at hp'
-            rw [Arena.find?_remove_same] at hp'
-            simp at hp'
-          · rw [Arena.find?_update_other _ caller target _ hdc'] at hp'
-            rw [Arena.find?_remove_same] at hp'
-            cases hp'
-        · by_cases hdc : did = caller
-          · subst hdc
-            rw [Arena.find?_update_eq_map] at hp'
-            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
-            rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
-          · rw [Arena.find?_update_other _ caller did _ hdc] at hp'
-            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
-            rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
+  -- Surviving (non-removed) descendants are *added* to the revoked set
+  -- via `revokeOneDomain` (which strips them from the arena). Any `did`
+  -- already revoked stays revoked since the cascade only removes or
+  -- mutates non-status fields. Phase B will reduce this to a fold.
+  sorry
 
 /-! ### `switchReturn` / `switch` / `switchSuspended` (updVp-based) -/
 

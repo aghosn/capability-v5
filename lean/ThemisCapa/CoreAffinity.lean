@@ -332,20 +332,16 @@ theorem create_preservesCoreAffinity
 theorem revokeDomain_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (handle : LocalHandle) (h : CoreAffinity s) :
     CoreAffinity (revokeDomain_apply s caller handle) := by
-  rcases hd : s.getDom caller with _ | d
-  · simp only [revokeDomain_apply, hd]; exact h
-  · rcases hh : d.lookupDomHandle handle with _ | dcId
-    · simp only [revokeDomain_apply, hd, hh]; exact h
-    · rcases hc : s.getDomCap dcId with _ | dc
-      · simp only [revokeDomain_apply, hd, hh, hc]; exact h
-      · simp only [revokeDomain_apply, hd, hh, hc]
-        exact coreAffinity_updDomain_id
-          (coreAffinity_domains_remove
-            (coreAffinity_domcaps_remove h _) dc.targetDom) caller
-          (fun d =>
-            { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ dcId),
-                     childrenDoms := d.childrenDoms.filter (· ≠ dc.targetDom) })
-          (fun _ => rfl) (fun _ => rfl)
+  -- Phase A (S4 plan, checkpoint 005): `revokeDomain_apply` now cascades
+  -- a post-order subtree revocation. Preservation reduces to:
+  --   (a) `revokeOneDomain` preserves CoreAffinity (running-VP obligation
+  --       is discharged on the revoked domain because its VPs disappear
+  --       from the arena), and
+  --   (b) a fold of (a) preserves CoreAffinity.
+  -- Will need a `subtreeVpsNotRunning` guard precondition (or rely on
+  -- WellFormed: revoked descendants have status .revoked and hence no
+  -- running VPs by some axiom).
+  sorry
 
 theorem setPolicy_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (cap : DomCapId)

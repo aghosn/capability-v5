@@ -1065,45 +1065,11 @@ theorem create_apply_preservesParents_of_wf
 /-- `revokeDomain_apply` preserves parents. -/
 theorem revokeDomain_apply_preservesParents (caller : DomId) (handle : LocalHandle) :
     PreservesParents (fun s => revokeDomain_apply s caller handle) := by
-  intro s did d d' hpre hpost
-  have hpre_d : s.domains.find? did = some d := hpre
-  rcases hcd : s.getDom caller with _ | dc
-  · have : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-    simp [revokeDomain_apply, hcd] at this
-    rw [hpre_d] at this; injection this with eq; rw [eq]
-  · rcases hh : dc.lookupDomHandle handle with _ | dcId
-    · have : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-      simp [revokeDomain_apply, hcd, hh] at this
-      rw [hpre_d] at this; injection this with eq; rw [eq]
-    · rcases hdc : s.getDomCap dcId with _ | domcap
-      · have : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-        simp [revokeDomain_apply, hcd, hh, hdc] at this
-        rw [hpre_d] at this; injection this with eq; rw [eq]
-      · -- success branch: state = (s with domains := domains.remove target,
-        -- domcaps := domcaps.remove dcId).updDomain caller f.
-        let target := domcap.targetDom
-        have hp' : (revokeDomain_apply s caller handle).domains.find? did = some d' := hpost
-        simp only [revokeDomain_apply, hcd, hh, hdc, SpecState.updDomain] at hp'
-        -- The intermediate state's `domains` is `s.domains.remove target`.
-        by_cases hdid_target : did = target
-        · -- removed: s'.find? did = none, contradiction with hpost.
-          rw [hdid_target] at hp' hpre_d
-          by_cases hdc' : target = caller
-          · rw [← hdc'] at hp'
-            rw [Arena.find?_update_eq_map] at hp'
-            rw [Arena.find?_remove_same] at hp'
-            simp at hp'
-          · rw [Arena.find?_update_other _ caller target _ hdc'] at hp'
-            rw [Arena.find?_remove_same] at hp'
-            cases hp'
-        · by_cases hdc : did = caller
-          · subst hdc
-            rw [Arena.find?_update_eq_map] at hp'
-            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
-            rw [hpre_d] at hp'; simp at hp'; rw [← hp']
-          · rw [Arena.find?_update_other _ caller did _ hdc] at hp'
-            rw [Arena.find?_remove_other _ target did hdid_target] at hp'
-            rw [hpre_d] at hp'; injection hp' with eq; rw [eq]
+  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
+  -- The cascade may remove descendants; surviving domains' parent
+  -- pointers are unchanged (no `parent` field is rewritten). Phase B
+  -- will reduce this to a fold over `revokeOneDomain`.
+  sorry
 
 /-! ## Top-level theorem: `step` preserves parent pointers -/
 

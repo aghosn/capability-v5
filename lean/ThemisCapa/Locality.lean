@@ -329,26 +329,18 @@ theorem revokeDomain_frame_dom (s : SpecState) (caller : DomId) (handle : LocalH
     (dc : DomCap) (hdcap : s.getDomCap dcId = some dc)
     (did : DomId) (h1 : did ≠ caller) (h2 : did ≠ dc.targetDom) :
     (revokeDomain_apply s caller handle).getDom did = s.getDom did := by
-  show ((revokeDomain_apply s caller handle).domains).find? did = _
-  simp only [revokeDomain_apply, hdc, hh, hdcap, SpecState.updDomain]
-  rw [Arena.find?_update_other _ caller did _ h1,
-      Arena.find?_remove_other _ dc.targetDom did h2]
-  rfl
+  -- Phase A (S4, checkpoint 005): subtree cascade may touch any
+  -- descendant of `dc.targetDom`; the leaf-only assumption no longer
+  -- applies, so this lemma needs a `did ∉ subtree` premise.
+  sorry
 
 theorem revokeDomain_frame_mem (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (id : MemCapId) :
     (revokeDomain_apply s caller handle).getMem id = s.getMem id := by
-  show ((revokeDomain_apply s caller handle).memcaps).find? id = _
-  unfold revokeDomain_apply
-  rcases h1 : s.getDom caller with _ | d
-  · rfl
-  · simp only []
-    rcases h2 : d.lookupDomHandle handle with _ | dcId
-    · rfl
-    · simp only []
-      rcases h3 : s.getDomCap dcId with _ | dc
-      · rfl
-      · simp only [SpecState.updDomain]; rfl
+  -- Phase A (S4, checkpoint 005): subtree cascade may revoke memcaps
+  -- owned by descendants; this lemma needs `id` not owned by any
+  -- domain in the revoked subtree.
+  sorry
 
 /-! ### Channels (sendChannel / acceptChannel / rejectChannel)
 

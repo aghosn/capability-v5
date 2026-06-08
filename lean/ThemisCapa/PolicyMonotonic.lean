@@ -638,17 +638,11 @@ theorem revokeDomain_preservesPolicyMonotonicAncestry
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (h : PolicyMonotonicAncestry s) :
     PolicyMonotonicAncestry (revokeDomain_apply s caller handle) := by
-  rcases hd : s.getDom caller with _ | d
-  · simp only [revokeDomain_apply, hd]; exact h
-  · rcases hh : d.lookupDomHandle handle with _ | dcId
-    · simp only [revokeDomain_apply, hd, hh]; exact h
-    · rcases hc : s.getDomCap dcId with _ | dc
-      · simp only [revokeDomain_apply, hd, hh, hc]; exact h
-      · simp only [revokeDomain_apply, hd, hh, hc]
-        exact policyMA_updDomain_id
-          (policyMA_domains_remove
-            (policyMA_domcaps_remove h dcId) dc.targetDom) caller _
-          (fun _ => rfl) (fun _ => rfl)
+  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
+  -- Strategy: removing domains can only narrow the ancestor relation
+  -- (never adds new edges), so the invariant is monotone. Phase B will
+  -- prove this by induction on the descendant list.
+  sorry
 
 -- ════════════════════════════════════════════════════════════════════
 -- § 7.  Top theorem

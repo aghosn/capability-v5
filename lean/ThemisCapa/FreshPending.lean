@@ -532,20 +532,10 @@ theorem revokeDomain_preservesFreshPending
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (h : FreshPending s) :
     FreshPending (revokeDomain_apply s caller handle) := by
-  rcases hd : s.getDom caller with _ | d
-  · simp only [revokeDomain_apply, hd]; exact h
-  · rcases hh : d.lookupDomHandle handle with _ | dcId
-    · simp only [revokeDomain_apply, hd, hh]; exact h
-    · rcases hc : s.getDomCap dcId with _ | dc
-      · simp only [revokeDomain_apply, hd, hh, hc]; exact h
-      · simp only [revokeDomain_apply, hd, hh, hc]
-        exact freshPending_updDomain_id
-          (freshPending_domains_remove
-            (freshPending_domcaps_set h _) dc.targetDom) caller
-          (fun d =>
-            { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ dcId),
-                     childrenDoms := d.childrenDoms.filter (· ≠ dc.targetDom) })
-          (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
+  -- Channel cancellation removes pending entries (decreases); per-domain
+  -- nextPendingId stays monotone. Phase B will reduce this to a fold.
+  sorry
 
 -- ════════════════════════════════════════════════════════════════════
 -- deliverInterrupt: chain induction

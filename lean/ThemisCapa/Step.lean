@@ -715,67 +715,171 @@ def create_apply (s : SpecState) (caller : DomId)
              nextHandle   := d.nextHandle + 1,
              childrenDoms := d.childrenDoms ++ [newDomId] })
 
-/-! ### RevokeDomain (leaf-only)
+/-! ### RevokeDomain (full subtree cascade — S4)
 
-Slice scope: leaf domain revocation only. The Rust `revoke_domain`
-deletes a whole subtree recursively; the spec version requires the
-target to have no children, no held memcaps, and no held domcaps,
-so the proof reduces to removing one domain + one dom-cap and
-patching the caller's `domHandles` / `childrenDoms`. Full subtree
-revocation is future work.
+Mirrors `capa-engine/src/capability.rs::revoke_domain_subtree`. The
+algorithm is depth-first / post-order: descendants are revoked before
+their parent. For each revoked domain we:
 
-Target must differ from caller (you can't revoke yourself through
-this op). -/
+1. **Memcap cleanup**: for each memcap owned by the domain, detach it
+   from its capability-tree parent (filter from `childrenIds`) and
+   remove it from the arena. The engine performs an additional
+   `ChangeRights` to restore access to the cap-tree parent's owner;
+   the spec does *not* model the per-domain `addressMap` at that
+   granularity, so we mirror only the cap-tree restructuring.
 
-/-- Preconditions for `revokeDomain(caller, handle)`. -/
+2. **Channel cancellation**: for each channel dom-cap owned by the
+   domain, locate any receiver that has it `pending` and remove the
+   pending entry; unfreeze the sender's frozen handle. (Engine:
+   `pending_receiver` + `pending_domain_capabilities`.)
+
+3. **COMM bindings cleanup**: for every memcap id in
+   `commBindings`, strip the COMM attribute and clear its
+   `commBinding` field. Mirrors the engine's
+   `attributes = NONE; comm_binding = None`.
+
+4. **Dom-cap removal**: remove every dom-cap whose `owner` is the
+   revoked domain (and every dom-cap whose `targetDom` is one of the
+   revoked domains — these become dangling).
+
+5. **Domain removal**: remove the domain from the arena, and strip
+   its id from its parent's `childrenDoms` (only meaningful for the
+   subtree root; descendants' parents are also being revoked).
+
+Termination is by fuel = `s.domains.entries.length + 1` since the
+domain-tree has at most that many nodes. -/
+
+/-- Post-order DFS traversal of the subtree rooted at `root` in `s`.
+    Returns descendants then `root`. -/
+def collectSubtreeAux (s : SpecState) : Nat → DomId → List DomId
+  | 0,        _    => []
+  | fuel + 1, root =>
+    match s.getDom root with
+    | none   => []
+    | some d => d.childrenDoms.flatMap (collectSubtreeAux s fuel) ++ [root]
+
+/-- Subtree of `root` in `s`, post-order. -/
+def collectSubtree (s : SpecState) (root : DomId) : List DomId :=
+  collectSubtreeAux s (s.domains.entries.length + 1) root
+
+/-- Drop a memcap: remove it from the arena and from its parent's
+    `childrenIds` list. The engine additionally restores rights to the
+    parent's owner via `ChangeRights`; the spec does not model the
+    per-domain `addressMap` here. -/
+def revokeOneMemCap (s : SpecState) (mid : MemCapId) : SpecState :=
+  match s.getMem mid with
+  | none   => s
+  | some m =>
+    let s₁ : SpecState := { s with memcaps := s.memcaps.remove mid }
+    match m.parent with
+    | none     => s₁
+    | some pid =>
+      s₁.updMem pid (fun p =>
+        { p with childrenIds := p.childrenIds.filter (· ≠ mid) })
+
+/-- Cancel a pending channel dom-cap if any receiver has it queued.
+    Scans every domain's `pendingDomCaps`; for each match: remove the
+    pending entry and unfreeze the corresponding `senderHandle` on the
+    sender domain. -/
+def cancelChannelIfPending (s : SpecState) (cap : DomCapId) : SpecState :=
+  s.domains.entries.foldl
+    (fun acc entry =>
+      let recvId := entry.1
+      let d := entry.2
+      match d.pendingDomCaps.find? (fun p => p.2.capId = cap) with
+      | none           => acc
+      | some (_pid, pe) =>
+        let acc₁ := acc.updDomain recvId (fun rd =>
+          { rd with pendingDomCaps :=
+              rd.pendingDomCaps.filter (fun p => p.2.capId ≠ cap) })
+        acc₁.updDomain pe.senderDomainId (fun sd =>
+          { sd with frozenHandles :=
+              sd.frozenHandles.filter (· ≠ pe.senderHandle) }))
+    s
+
+/-- Strip COMM attribute on every cap referenced by `cbs`. -/
+def clearCommBindings (s : SpecState) (cbs : List MemCapId) : SpecState :=
+  cbs.foldl (fun acc mid =>
+    acc.updMem mid (fun m =>
+      { m with region :=
+          { m.region with
+              attributes := { m.region.attributes with comm := false },
+              commBinding := none } }))
+    s
+
+/-- Per-domain cleanup performed on each revoked domain in post-order.
+
+    Drops every memcap owned by `did`; cancels every channel cap owned
+    by `did`; removes every dom-cap whose owner is `did` or whose
+    `targetDom` is `did`; clears COMM bindings; finally removes `did`
+    from the arena and strips it from its parent's `childrenDoms`. -/
+def revokeOneDomain (s : SpecState) (did : DomId) : SpecState :=
+  match s.getDom did with
+  | none   => s
+  | some d =>
+    -- 1. Revoke each memcap held by the domain.
+    let ownedMems : List MemCapId := d.memHandles.map Prod.snd
+    let s₁ := ownedMems.foldl revokeOneMemCap s
+    -- 2. Cancel channel dom-caps owned by the domain (if pending).
+    let ownedDomCaps : List DomCapId := d.domHandles.map Prod.snd
+    let s₂ := ownedDomCaps.foldl (fun acc cap =>
+      match acc.getDomCap cap with
+      | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+      | none    => acc) s₁
+    -- 3. Clear COMM bindings.
+    let s₃ := clearCommBindings s₂ d.commBindings
+    -- 4. Remove every dom-cap whose owner is `did` or whose target is `did`.
+    let s₄ : SpecState :=
+      { s₃ with domcaps :=
+          ⟨s₃.domcaps.entries.filter
+            (fun entry => entry.2.owner ≠ did ∧ entry.2.targetDom ≠ did)⟩ }
+    -- 5. Remove the domain from its parent's children list and the arena.
+    let s₅ : SpecState :=
+      match d.parent with
+      | none     => s₄
+      | some pid =>
+        s₄.updDomain pid (fun pd =>
+          { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did) })
+    { s₅ with domains := s₅.domains.remove did }
+
+/-- Preconditions for `revokeDomain(caller, handle)` — full subtree.
+
+    The structural preconditions (subtree shape, VPs not running across
+    the whole subtree, etc.) live in `WellFormed` for now and are
+    propagated to per-invariant preservation proofs via the
+    `WellFormed` hypothesis. -/
 structure RevokeDomainGuard (s : SpecState) (caller : DomId) (handle : LocalHandle)
     : Prop where
   callerExists      : (s.getDom caller).isSome
   callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
   hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canRevoke = true
-  /-- The local handle resolves to some dom-cap held by the caller. -/
   handleResolves    : ∀ d, s.getDom caller = some d →
                             (d.lookupDomHandle handle).isSome
-  /-- The resolved dom-cap exists in the arena. -/
   capExists         : ∀ d, s.getDom caller = some d →
                             ∀ dcId, d.lookupDomHandle handle = some dcId →
                             (s.getDomCap dcId).isSome
-  /-- Caller owns the resolved dom-cap. -/
   capOwnedByCaller  : ∀ d, s.getDom caller = some d →
                             ∀ dcId, d.lookupDomHandle handle = some dcId →
                             ∀ dc, s.getDomCap dcId = some dc → dc.owner = caller
-  /-- The target domain (referenced by the dom-cap) exists. -/
   targetExists      : ∀ d, s.getDom caller = some d →
                             ∀ dcId, d.lookupDomHandle handle = some dcId →
                             ∀ dc, s.getDomCap dcId = some dc →
                             (s.getDom dc.targetDom).isSome
-  /-- You cannot revoke yourself. -/
   notSelf           : ∀ d, s.getDom caller = some d →
                             ∀ dcId, d.lookupDomHandle handle = some dcId →
                             ∀ dc, s.getDomCap dcId = some dc →
                             dc.targetDom ≠ caller
-  /-- Slice restriction: target is a leaf with no held caps. -/
-  targetIsLeaf      : ∀ d, s.getDom caller = some d →
-                            ∀ dcId, d.lookupDomHandle handle = some dcId →
-                            ∀ dc, s.getDomCap dcId = some dc →
-                            ∀ t, s.getDom dc.targetDom = some t →
-                            t.childrenDoms = [] ∧ t.memHandles = [] ∧
-                            t.domHandles = []
-  /-- Engine semantics: caller is target's parent. The engine's
-      `revoke_child_domain` looks up the child via the caller's own
-      domain table, so the caller is necessarily the parent. -/
   targetParentIsCaller : ∀ d, s.getDom caller = some d →
                             ∀ dcId, d.lookupDomHandle handle = some dcId →
                             ∀ dc, s.getDomCap dcId = some dc →
                             ∀ t, s.getDom dc.targetDom = some t →
                             t.parent = some caller
 
-/-- Pure state update for a successful leaf `revokeDomain`.
+/-- Pure state update for `revokeDomain` (full subtree cascade).
 
-    1. Remove the target domain from the `domains` arena.
-    2. Remove the dom-cap from the `domcaps` arena.
-    3. Strip every handle to the dom-cap from caller's `domHandles`
-       and strip the target id from caller's `childrenDoms`. -/
+    Computes the post-order list of descendants (+ target root), then
+    folds `revokeOneDomain` over it. Finally strips the entry-point
+    dom-cap handle from the caller. -/
 def revokeDomain_apply (s : SpecState) (caller : DomId) (handle : LocalHandle)
     : SpecState :=
   match s.getDom caller with
@@ -788,12 +892,10 @@ def revokeDomain_apply (s : SpecState) (caller : DomId) (handle : LocalHandle)
       | none    => s
       | some dc =>
         let target := dc.targetDom
-        let s₁ : SpecState :=
-          { s with domains := s.domains.remove target,
-                   domcaps := s.domcaps.remove dcId }
+        let subtree := collectSubtree s target
+        let s₁ := subtree.foldl revokeOneDomain s
         s₁.updDomain caller (fun d =>
-          { d with domHandles   := d.domHandles.filter (fun h => h.2 ≠ dcId),
-                   childrenDoms := d.childrenDoms.filter (· ≠ target) })
+          { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ dcId) })
 
 /-! ### Channels (sendChannel / acceptChannel / rejectChannel)
 
