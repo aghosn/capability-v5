@@ -272,28 +272,215 @@ def seal_apply (s : SpecState) (caller : DomId) (cap : DomCapId) : SpecState :=
 
 /-! ### Set policy -/
 
+/-- Conversion from raw `Nat` to `MonitorAPI` bits (positional, matching
+    `MonitorAPI::from_bits` in Rust). Bit `i` of `n` sets the `i`-th field. -/
+def MonitorAPI.fromNat (n : Nat) : MonitorAPI :=
+  let bit (i : Nat) : Bool := (n / 2 ^ i) % 2 = 1
+  { canCreate           := bit 0,
+    canSet              := bit 1,
+    canGet              := bit 2,
+    canSend             := bit 3,
+    canSeal             := bit 4,
+    canAttest           := bit 5,
+    canEnumerate        := bit 6,
+    canSwitch           := bit 7,
+    canAlias            := bit 8,
+    canCarve            := bit 9,
+    canRevoke           := bit 10,
+    canGetChan          := bit 11,
+    canReceiveAfterSeal := bit 12,
+    canMapSelf          := bit 13 }
+
+/-- Conversion from raw `Nat` bitmask to `CoreMask` (list of allowed core ids).
+    Bit `i` set → core `i ∈ result`. We bound the scan at 64 bits like Rust's `u64`. -/
+def CoreMask.fromBitmask (n : Nat) : CoreMask :=
+  (List.range 64).filter (fun i => (n / 2 ^ i) % 2 = 1)
+
+/-- Visibility decoding: 0 → deliver, 1 → report, 2 → notReport. Other
+    values default to the most restrictive (`notReport`) to keep the
+    spec total (engine returns an error for invalid values). -/
+def visibilityFromNat (n : Nat) : InterruptVisibility :=
+  match n with
+  | 0 => .deliver
+  | 1 => .report
+  | _ => .notReport
+
+/-- Default action decoding: 0 → trap, _ → native. -/
+def defaultActionFromNat (n : Nat) : DefaultAction :=
+  match n with
+  | 0 => .trap
+  | _ => .native
+
+namespace RegBitmap
+
+/-- Set one of the three 64-bit words. -/
+def setWord (b : RegBitmap) (idx : Nat) (v : Nat) : RegBitmap :=
+  match idx with
+  | 0 => { b with word0 := v }
+  | 1 => { b with word1 := v }
+  | _ => { b with word2 := v }
+
+end RegBitmap
+
+namespace InterruptPolicy
+
+/-- Insert-or-replace an override for `vec`. -/
+def setVectorPolicy (ip : InterruptPolicy) (vec : Nat) (vp : VectorPolicy) :
+    InterruptPolicy :=
+  let stripped := ip.overrides.filter (fun p => p.1 ≠ vec)
+  { ip with overrides := stripped ++ [(vec, vp)] }
+
+/-- Per-vector visibility update; preserves any existing override's
+    register sets and defaults register sets to `none` if no override. -/
+def setVectorVisibility (ip : InterruptPolicy) (vec : Nat)
+                        (vis : InterruptVisibility) : InterruptPolicy :=
+  let cur := ip.lookup vec
+  ip.setVectorPolicy vec { cur with visibility := vis }
+
+/-- Per-vector register read-set word update. -/
+def setVectorRegRead (ip : InterruptPolicy) (vec wordIdx value : Nat) :
+    InterruptPolicy :=
+  let cur := ip.lookup vec
+  ip.setVectorPolicy vec { cur with readSet := cur.readSet.setWord wordIdx value }
+
+/-- Per-vector register write-set word update. -/
+def setVectorRegWrite (ip : InterruptPolicy) (vec wordIdx value : Nat) :
+    InterruptPolicy :=
+  let cur := ip.lookup vec
+  ip.setVectorPolicy vec { cur with writeSet := cur.writeSet.setWord wordIdx value }
+
+end InterruptPolicy
+
+namespace ExitPolicy
+
+/-- Lookup effective per-reason action (override or default). -/
+def lookupAction (ep : ExitPolicy) (reason : Nat) : ExitAction :=
+  match ep.overrides.find? (fun p => p.1 == reason) with
+  | some (_, a) => a
+  | none        => ep.default
+
+/-- Insert-or-replace an override for `reason`. -/
+def setReasonAction (ep : ExitPolicy) (reason : Nat) (a : ExitAction) :
+    ExitPolicy :=
+  let stripped := ep.overrides.filter (fun p => p.1 ≠ reason)
+  { ep with overrides := stripped ++ [(reason, a)] }
+
+/-- Per-reason trap flag update. -/
+def setReasonTrap (ep : ExitPolicy) (reason : Nat) (trap : Bool) : ExitPolicy :=
+  let cur := ep.lookupAction reason
+  ep.setReasonAction reason { cur with trap := trap }
+
+/-- Per-reason register read-set word update. -/
+def setReasonRegRead (ep : ExitPolicy) (reason wordIdx value : Nat) : ExitPolicy :=
+  let cur := ep.lookupAction reason
+  ep.setReasonAction reason { cur with readSet := cur.readSet.setWord wordIdx value }
+
+/-- Per-reason register write-set word update. -/
+def setReasonRegWrite (ep : ExitPolicy) (reason wordIdx value : Nat) : ExitPolicy :=
+  let cur := ep.lookupAction reason
+  ep.setReasonAction reason { cur with writeSet := cur.writeSet.setWord wordIdx value }
+
+end ExitPolicy
+
+namespace ProcFeatureConfig
+
+/-- Append a Trap or Native range entry (action determined by `value`:
+    0 → Trap, _ → Native). -/
+def addRange (cfg : ProcFeatureConfig) (sLeaf sSub eLeaf eSub value : Nat) :
+    ProcFeatureConfig :=
+  let entry : ProcFeatureEntry :=
+    match value with
+    | 0 => .trap   sLeaf sSub eLeaf eSub
+    | _ => .native sLeaf sSub eLeaf eSub
+  { cfg with overrides := cfg.overrides ++ [entry] }
+
+/-- Append an Emulate point entry. -/
+def addEmulate (cfg : ProcFeatureConfig) (leaf sub wordIdx value : Nat) :
+    ProcFeatureConfig :=
+  { cfg with overrides := cfg.overrides ++ [.emulate leaf sub wordIdx value] }
+
+end ProcFeatureConfig
+
 /-- Pointwise update on a `DomainPolicy` keyed by `PolicyIdentifier`.
 
-    **Stub.** Mirrors the *structure* of `set_policy` faithfully (the
-    update is keyed by the identifier and value), but the per-identifier
-    semantics are intentionally left as no-ops for now: locality and
-    provenance theorems are insensitive to the exact field update, since
-    they only observe *which* domain record is modified. Refining the
-    per-case lattice (`cores` monotonicity, `apiMonitor` subset, etc.)
-    is independent follow-up work.
+    Faithful to the 13-case dispatch of
+    `capa-engine/src/capability.rs::set_policy`: each case rewrites
+    exactly one axis of `DomainPolicy`, leaving all others unchanged.
+    The `Nat` argument is decoded per axis (bitmask for `cores` /
+    `apiMonitor`, visibility-rank for the interrupt cases, trap/native
+    Bool for the exit/processor-feature cases, packed register values
+    for the bitmap cases).
 
-    Future refinement: replicate the 13-way case match from
-    `capa-engine/src/capability.rs::set_policy`. -/
-def applyPolicyValue (p : DomainPolicy) (_id : PolicyIdentifier)
-                     (_value : Nat) : DomainPolicy := p
+    Side-conditions (monotonicity vs parent, value range validation)
+    live in `SetPolicyGuard`; this function is total and pure. -/
+def applyPolicyValue (p : DomainPolicy) (id : PolicyIdentifier)
+                     (value : Nat) : DomainPolicy :=
+  match id with
+  | .cores =>
+      let mask := CoreMask.fromBitmask value
+      -- Engine clamps numVps to popcount(cores); we mirror with `min`.
+      let newNumVps := if mask.length < p.numVps then mask.length else p.numVps
+      { p with cores := mask, numVps := newNumVps }
+  | .apiMonitor =>
+      { p with api := MonitorAPI.fromNat value }
+  | .defaultInterruptVisibility =>
+      let vis := visibilityFromNat value
+      { p with interrupts :=
+        { p.interrupts with default :=
+            { p.interrupts.default with visibility := vis } } }
+  | .vectorVisibility vec =>
+      let vis := visibilityFromNat value
+      { p with interrupts := p.interrupts.setVectorVisibility vec vis }
+  | .vectorRegReadSet vec wordIdx =>
+      { p with interrupts := p.interrupts.setVectorRegRead vec wordIdx value }
+  | .vectorRegWriteSet vec wordIdx =>
+      { p with interrupts := p.interrupts.setVectorRegWrite vec wordIdx value }
+  | .defaultExitTrap =>
+      let trap := value ≠ 0
+      { p with exits :=
+        { p.exits with default :=
+            { p.exits.default with trap := trap } } }
+  | .exitReasonTrap reason =>
+      let trap := value ≠ 0
+      { p with exits := p.exits.setReasonTrap reason trap }
+  | .exitReasonRegReadSet reason wordIdx =>
+      { p with exits := p.exits.setReasonRegRead reason wordIdx value }
+  | .exitReasonRegWriteSet reason wordIdx =>
+      { p with exits := p.exits.setReasonRegWrite reason wordIdx value }
+  | .procFeatureDefault kind =>
+      let act := defaultActionFromNat value
+      match kind with
+      | .cpuid => { p with cpuid := { p.cpuid with default := act } }
+      | .msr   => { p with msrs  := { p.msrs  with default := act } }
+  | .procFeatureRange kind sLeaf sSub eLeaf eSub =>
+      match kind with
+      | .cpuid => { p with cpuid := p.cpuid.addRange sLeaf sSub eLeaf eSub value }
+      | .msr   => { p with msrs  := p.msrs.addRange  sLeaf sSub eLeaf eSub value }
+  | .procFeatureEmulate kind leaf sub wordIdx =>
+      match kind with
+      | .cpuid => { p with cpuid := p.cpuid.addEmulate leaf sub wordIdx value }
+      | .msr   => { p with msrs  := p.msrs.addEmulate  leaf sub wordIdx value }
 
 /-- Preconditions for `setPolicy(caller, cap, id, value)`. Mirrors
     `capa-engine/src/capability.rs::set_policy`: caller must own the
     DomCap, the target domain must be unsealed, caller's `MonitorAPI`
-    must include `canSet`. Per-identifier monotonicity (value ≤ parent
-    value) is intentionally deferred — see `applyPolicyValue`. -/
+    must include `canSet`. The monotonicity check is encoded as a
+    uniform `≤` constraint between the *new* target policy (computed
+    by `applyPolicyValue`) and the caller's policy — this is justified
+    because the engine takes `caller.policy` as the parent_policy for
+    its per-case checks, and `DomainPolicy.le` is the uniform
+    conjunction that covers all 13 axes.
+
+    Two structural side-conditions encode invariants that the engine
+    enforces by construction (DomCap creation pinning caller=parent and
+    create's `callerSealed` precondition forbidding grandchild creation
+    on unsealed targets):
+      * `callerIsParent` — target.parent = caller.
+      * `targetHasNoChildren` — target has no children domains. Holds
+        because `create` requires its caller (here, target) to be
+        sealed; `setPolicy` requires target unsealed. -/
 structure SetPolicyGuard (s : SpecState) (caller : DomId) (cap : DomCapId)
-    (_id : PolicyIdentifier) (_value : Nat) : Prop where
+    (id : PolicyIdentifier) (value : Nat) : Prop where
   callerExists      : (s.getDom caller).isSome
   callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
   hasPermission     :
@@ -305,6 +492,21 @@ structure SetPolicyGuard (s : SpecState) (caller : DomId) (cap : DomCapId)
   targetUnsealed    :
     ∀ dc, s.getDomCap cap = some dc →
     ∀ td, s.getDom dc.targetDom = some td → td.isUnsealed
+  callerIsParent    :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td → td.parent = some caller
+  targetHasNoChildren :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td → td.childrenDoms = []
+  targetVpsNotRunning :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td →
+    ∀ vp ∈ td.vps, ∀ c cb, vp.runState ≠ VpRunState.running c cb
+  newPolicyMonotonic :
+    ∀ dc, s.getDomCap cap = some dc →
+    ∀ td, s.getDom dc.targetDom = some td →
+    ∀ cd, s.getDom caller = some cd →
+    applyPolicyValue td.policy id value ≤ cd.policy
 
 /-- Pure state update for a successful `setPolicy`: replace the target
     domain's `policy` with `applyPolicyValue old id value`. Everything

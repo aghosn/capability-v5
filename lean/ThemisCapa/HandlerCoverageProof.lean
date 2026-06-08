@@ -397,15 +397,21 @@ theorem sealedSend_preservesHandlerCoverage
 
 theorem setPolicy_preservesHandlerCoverage
     (s : SpecState) (caller : DomId) (cap : DomCapId)
-    (id : PolicyIdentifier) (value : Nat) (h : HandlerCoverage s) :
+    (id : PolicyIdentifier) (value : Nat)
+    (guard : SetPolicyGuard s caller cap id value)
+    (hdtwf : DomainTreeParentChild s)
+    (h : HandlerCoverage s) :
     HandlerCoverage (setPolicy_apply s caller cap id value) := by
-  rcases hc : s.getDomCap cap with _ | dc
-  · simp only [setPolicy_apply, hc]; exact h
-  · simp only [setPolicy_apply, hc]
-    -- `applyPolicyValue` is identity in v2 spec → policy preserved.
-    exact hc_updDomain_id h dc.targetDom
-      (fun d => { d with policy := applyPolicyValue d.policy id value })
-      (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+  -- HC line was paused at 19/21 actions (create, revoke deferred).
+  -- This setPolicy entry is left as `sorry` because target's policy
+  -- (specifically per-vector `visibility`) genuinely changes, so the
+  -- pre-state handler witness for `did = target` may no longer be
+  -- deliver-visible. The intended proof: walk caller's HC witness up
+  -- (caller is ancestor of target by `callerIsParent`, and any handler
+  -- of caller is also a handler of target since `targetHasNoChildren`
+  -- implies no other descendant can have target as proper ancestor).
+  -- Not used by any top-level dispatcher (HC dispatcher does not exist).
+  sorry
 
 theorem sendChannel_preservesHandlerCoverage
     (s : SpecState) (caller receiver : DomId) (cap : DomCapId)

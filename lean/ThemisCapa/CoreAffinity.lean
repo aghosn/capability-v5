@@ -349,15 +349,27 @@ theorem revokeDomain_preservesCoreAffinity
 
 theorem setPolicy_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (cap : DomCapId)
-    (id : PolicyIdentifier) (value : Nat) (h : CoreAffinity s) :
+    (id : PolicyIdentifier) (value : Nat)
+    (guard : SetPolicyGuard s caller cap id value)
+    (h : CoreAffinity s) :
     CoreAffinity (setPolicy_apply s caller cap id value) := by
   rcases hc : s.getDomCap cap with _ | dc
   · simp only [setPolicy_apply, hc]; exact h
   · simp only [setPolicy_apply, hc]
-    -- `applyPolicyValue` is identity in v2 spec → policy.cores unchanged.
-    exact coreAffinity_updDomain_id h dc.targetDom
-      (fun d => { d with policy := applyPolicyValue d.policy id value })
-      (fun _ => rfl) (fun _ => rfl)
+    intro did d hd
+    unfold SpecState.updDomain SpecState.getDom at hd
+    by_cases heq : did = dc.targetDom
+    · subst heq
+      rw [Arena.find?_update_eq_map] at hd
+      rcases hpre : s.domains.find? dc.targetDom with _ | d_pre
+      · rw [hpre] at hd; cases hd
+      · rw [hpre] at hd
+        simp only [Option.map_some, Option.some.injEq] at hd
+        rw [← hd]
+        intro vp hvp c cb hrun
+        exact absurd hrun (guard.targetVpsNotRunning dc hc d_pre hpre vp hvp c cb)
+    · rw [Arena.find?_update_other _ _ _ _ heq] at hd
+      exact h did d hd
 
 theorem sendChannel_preservesCoreAffinity
     (s : SpecState) (caller receiver : DomId) (cap : DomCapId)
@@ -749,7 +761,7 @@ theorem step_preservesCoreAffinity
   | sealedSend _        => exact sealedSend_preservesCoreAffinity      _ _ _ _ _ h
   | create _            => exact create_preservesCoreAffinity          _ _ _ h
   | revokeDomain _      => exact revokeDomain_preservesCoreAffinity    _ _ _ h
-  | setPolicy _         => exact setPolicy_preservesCoreAffinity       _ _ _ _ _ h
+  | setPolicy guard     => exact setPolicy_preservesCoreAffinity       _ _ _ _ _ guard h
   | sendChannel _       => exact sendChannel_preservesCoreAffinity     _ _ _ _ h
   | acceptChannel _     => exact acceptChannel_preservesCoreAffinity   _ _ _ h
   | rejectChannel _     => exact rejectChannel_preservesCoreAffinity   _ _ _ h

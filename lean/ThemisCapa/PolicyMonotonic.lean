@@ -332,15 +332,78 @@ theorem accept_at_preservesPolicyMonotonicAncestry
 
 theorem setPolicy_preservesPolicyMonotonicAncestry
     (s : SpecState) (caller : DomId) (cap : DomCapId)
-    (id : PolicyIdentifier) (value : Nat) (h : PolicyMonotonicAncestry s) :
+    (id : PolicyIdentifier) (value : Nat)
+    (guard : SetPolicyGuard s caller cap id value)
+    (hdtwf : DomainTreeParentChild s)
+    (h : PolicyMonotonicAncestry s) :
     PolicyMonotonicAncestry (setPolicy_apply s caller cap id value) := by
   rcases hc : s.getDomCap cap with _ | dc
   · simp only [setPolicy_apply, hc]; exact h
   · simp only [setPolicy_apply, hc]
-    -- `applyPolicyValue` is identity in v2 spec → policy preserved.
-    exact policyMA_updDomain_id h dc.targetDom
-      (fun d => { d with policy := applyPolicyValue d.policy id value })
-      (fun _ => rfl) (fun _ => rfl)
+    -- Let `target := dc.targetDom` (inline; `set` tactic unavailable).
+    -- Establish: caller ≠ target (caller is sealed, target is unsealed).
+    have hcaller_get : (s.getDom caller).isSome := guard.callerExists
+    obtain ⟨cd, hcd⟩ := Option.isSome_iff_exists.mp hcaller_get
+    have htarget_get : (s.getDom dc.targetDom).isSome := guard.targetExists dc hc
+    obtain ⟨td, htd⟩ := Option.isSome_iff_exists.mp htarget_get
+    have hcaller_sealed : cd.isSealed := guard.callerSealed cd hcd
+    have htarget_unsealed : td.isUnsealed := guard.targetUnsealed dc hc td htd
+    have hne : caller ≠ dc.targetDom := by
+      intro heq
+      rw [heq] at hcd
+      rw [hcd] at htd
+      injection htd with hcdtd
+      have hsealed : td.status = DomainStatus.sealed := by
+        unfold Domain.isSealed at hcaller_sealed
+        rw [← hcdtd]; exact hcaller_sealed
+      have hunsealed : td.status = DomainStatus.unsealed := htarget_unsealed
+      rw [hsealed] at hunsealed; cases hunsealed
+    intro child parent d_c d_p hgc hpar hgp
+    by_cases hct : child = dc.targetDom
+    · subst hct
+      have hd_c_pre :
+          d_c.parent = td.parent ∧
+          d_c.policy = applyPolicyValue td.policy id value := by
+        unfold SpecState.updDomain SpecState.getDom at hgc
+        rw [Arena.find?_update_eq_map] at hgc
+        have htd' : s.domains.find? dc.targetDom = some td := htd
+        rw [htd'] at hgc
+        simp only [Option.map_some, Option.some.injEq] at hgc
+        refine ⟨?_, ?_⟩
+        · rw [← hgc]
+        · rw [← hgc]
+      have hpar_pre : td.parent = some parent := by
+        rw [← hd_c_pre.1]; exact hpar
+      have hpar_caller : parent = caller := by
+        have hcip := guard.callerIsParent dc hc td htd
+        rw [hpar_pre] at hcip; exact Option.some.inj hcip
+      subst hpar_caller
+      -- After subst, `caller` is replaced with `parent` (or vice versa).
+      -- Now use whichever is in scope.
+      have hd_p_eq : d_p = cd := by
+        unfold SpecState.updDomain SpecState.getDom at hgp
+        rw [Arena.find?_update_other _ _ _ _ hne] at hgp
+        have hh' := hcd
+        unfold SpecState.getDom at hh'
+        rw [hh'] at hgp
+        exact (Option.some.inj hgp).symm
+      rw [hd_c_pre.2, hd_p_eq]
+      exact guard.newPolicyMonotonic dc hc td htd cd hcd
+    · have hd_c_pre : s.getDom child = some d_c := by
+        unfold SpecState.updDomain SpecState.getDom at hgc
+        rw [Arena.find?_update_other _ _ _ _ hct] at hgc
+        unfold SpecState.getDom; exact hgc
+      by_cases hpt : parent = dc.targetDom
+      · subst hpt
+        have hch : child ∈ td.childrenDoms :=
+          hdtwf child d_c hd_c_pre dc.targetDom hpar td htd
+        rw [guard.targetHasNoChildren dc hc td htd] at hch
+        cases hch
+      · have hd_p_pre : s.getDom parent = some d_p := by
+          unfold SpecState.updDomain SpecState.getDom at hgp
+          rw [Arena.find?_update_other _ _ _ _ hpt] at hgp
+          unfold SpecState.getDom; exact hgp
+        exact h child parent d_c d_p hd_c_pre hpar hd_p_pre
 
 theorem sendChannel_preservesPolicyMonotonicAncestry
     (s : SpecState) (caller receiver : DomId) (cap : DomCapId)
@@ -609,7 +672,7 @@ theorem step_preservesPolicyMonotonicAncestry
       exact create_preservesPolicyMonotonicAncestry guard
               hwf.domainTreeWf.parentResolves hwf.freshDomCounter h
   | revokeDomain _      => exact revokeDomain_preservesPolicyMonotonicAncestry    _ _ _ h
-  | setPolicy _         => exact setPolicy_preservesPolicyMonotonicAncestry       _ _ _ _ _ h
+  | setPolicy guard     => exact setPolicy_preservesPolicyMonotonicAncestry _ _ _ _ _ guard hwf.domainTreeWf.parentChild h
   | sendChannel _       => exact sendChannel_preservesPolicyMonotonicAncestry     _ _ _ _ h
   | acceptChannel _     => exact acceptChannel_preservesPolicyMonotonicAncestry   _ _ _ h
   | rejectChannel _     => exact rejectChannel_preservesPolicyMonotonicAncestry   _ _ _ h
