@@ -655,4 +655,115 @@ theorem seal_preservesHandlerCoverage
       intro habs; rw [habs] at htu; cases htu
     · intro _; unfold Domain.isLive; intro habs; cases habs
 
+-- ════════════════════════════════════════════════════════════════════
+-- § 4.  Per-action lemma — revokeDomain (leaf removal)
+-- ════════════════════════════════════════════════════════════════════
+
+/-- If `target` has no children in the `IsParentOf` sense, then any
+    ancestor chain `IsAncestorOf s a c` with `c ≠ target` lifts to the
+    arena-removed state: `target` never appears on the chain (else it
+    would be the parent of some next node, contradicting the no-children
+    hypothesis), so every edge survives. -/
+theorem IsAncestorOf_of_no_children
+    {s : SpecState} (target : DomId)
+    (h_no_ch : ∀ m, ¬ IsParentOf s target m) :
+    ∀ {a c : DomId}, IsAncestorOf s a c → c ≠ target →
+    a ≠ target ∧
+    IsAncestorOf { s with domains := s.domains.remove target } a c := by
+  intro a c hac
+  induction hac with
+  | @direct p c hpa =>
+    intro hcne
+    have hane : p ≠ target := by intro hp; subst hp; exact h_no_ch _ hpa
+    refine ⟨hane, .direct ?_⟩
+    obtain ⟨d, hd, hpar⟩ := hpa
+    refine ⟨d, ?_, hpar⟩
+    unfold SpecState.getDom at hd ⊢
+    simp only
+    rw [Arena.find?_remove_other _ _ _ hcne]; exact hd
+  | @step a m c hpa _ ih =>
+    intro hcne
+    obtain ⟨hmne, hac'⟩ := ih hcne
+    have hane : a ≠ target := by intro ha; subst ha; exact h_no_ch _ hpa
+    refine ⟨hane, .step ?_ hac'⟩
+    obtain ⟨d, hd, hpar⟩ := hpa
+    refine ⟨d, ?_, hpar⟩
+    unfold SpecState.getDom at hd ⊢
+    simp only
+    rw [Arena.find?_remove_other _ _ _ hmne]; exact hd
+
+/-- Removing a leaf domain (`t.childrenDoms = []`) from the arena
+    preserves `HandlerCoverage`.  Leaf-ness — combined with
+    `DomainTreeParentChild` — implies no domain has `target` as parent,
+    so no surviving live domain's ancestor chain passes through
+    `target`.  Existing witnesses transport verbatim. -/
+theorem hc_domains_remove
+    {s : SpecState} (h : HandlerCoverage s)
+    (hPC : DomainTreeParentChild s)
+    (target : DomId) (t : Domain)
+    (htarget : s.getDom target = some t)
+    (hleaf : t.childrenDoms = []) :
+    HandlerCoverage { s with domains := s.domains.remove target } := by
+  have h_no_ch : ∀ m, ¬ IsParentOf s target m := by
+    intro m hpc
+    obtain ⟨d_m, hd_m, hpar_m⟩ := hpc
+    have hin := hPC m d_m hd_m target hpar_m t htarget
+    rw [hleaf] at hin
+    cases hin
+  intro did d' hd' hlive vec
+  have hdne : did ≠ target := by
+    intro heq; subst heq
+    unfold SpecState.getDom at hd'
+    simp only [Arena.find?_remove_same] at hd'
+    cases hd'
+  have hd_pre : s.getDom did = some d' := by
+    unfold SpecState.getDom at hd' ⊢
+    rw [Arena.find?_remove_other _ _ _ hdne] at hd'; exact hd'
+  obtain ⟨aid, a, hanc, ha, halive, hvis⟩ := h did d' hd_pre hlive vec
+  have hane : aid ≠ target := by
+    rcases hanc with heq | hac'
+    · rw [heq]; exact hdne
+    · exact (IsAncestorOf_of_no_children target h_no_ch hac' hdne).1
+  refine ⟨aid, a, ?_, ?_, halive, hvis⟩
+  · rcases hanc with heq | hac'
+    · exact Or.inl heq
+    · exact Or.inr (IsAncestorOf_of_no_children target h_no_ch hac' hdne).2
+  · unfold SpecState.getDom at ha ⊢
+    simp only
+    rw [Arena.find?_remove_other _ _ _ hane]; exact ha
+
+/-- `revokeDomain` removes a leaf target from the arena, removes the
+    associated dom-cap, and updates the caller's bookkeeping fields. -/
+theorem revokeDomain_preservesHandlerCoverage
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (guard : RevokeDomainGuard s caller handle)
+    (hwf : DomainTreeWf s) (h : HandlerCoverage s) :
+    HandlerCoverage (revokeDomain_apply s caller handle) := by
+  rcases hd : s.getDom caller with _ | d
+  · simp only [revokeDomain_apply, hd]; exact h
+  · rcases hh : d.lookupDomHandle handle with _ | dcId
+    · simp only [revokeDomain_apply, hd, hh]; exact h
+    · rcases hc : s.getDomCap dcId with _ | dc
+      · simp only [revokeDomain_apply, hd, hh, hc]; exact h
+      · simp only [revokeDomain_apply, hd, hh, hc]
+        -- Extract the leaf-ness premise from the guard.
+        have htgtsome := guard.targetExists d hd dcId hh dc hc
+        obtain ⟨t, htgt⟩ := Option.isSome_iff_exists.mp htgtsome
+        have hleaf : t.childrenDoms = [] :=
+          (guard.targetIsLeaf d hd dcId hh dc hc t htgt).1
+        -- Step 1: remove the target domain.
+        have h_rm := hc_domains_remove h hwf.parentChild dc.targetDom t htgt hleaf
+        -- Step 2: removing the dom-cap doesn't affect getDom.
+        have h_rm_dc :
+            HandlerCoverage { s with domains := s.domains.remove dc.targetDom,
+                                     domcaps := s.domcaps.remove dcId } :=
+          hc_of_getDom_eq
+            (s₁ := { s with domains := s.domains.remove dc.targetDom })
+            (s₂ := { s with domains := s.domains.remove dc.targetDom,
+                            domcaps := s.domcaps.remove dcId })
+            (fun _ => rfl) h_rm
+        -- Step 3: updDomain on caller (filters only — parent/policy/status untouched).
+        exact hc_updDomain_id h_rm_dc caller _
+                (fun _ => rfl) (fun _ => rfl) (fun _ => Iff.rfl)
+
 end ThemisCapa
