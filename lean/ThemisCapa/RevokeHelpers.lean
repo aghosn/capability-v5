@@ -634,4 +634,88 @@ theorem revokeDomain_apply_pending
   exact ⟨d_pre, h_pre, hpm2.trans hpm1, hnp2.trans hnp1,
          fun p hp => hpd2 p (hpd1 p hp)⟩
 
+/-! ## Survivor full-equality lemmas (S4 Locality frame support)
+
+These lemmas extend the per-axis survivor pattern to **full record
+equality** for domains/memcaps outside the cascade footprint. They are
+the building blocks for `Locality.revokeDomain_frame_dom` and
+`revokeDomain_frame_mem`. -/
+
+/-- `updDomain f` at `id` leaves any other domain's record unchanged. -/
+theorem updDomain_other_eq (s : SpecState) (id : DomId) (f : Domain → Domain)
+    (did : DomId) (hne : did ≠ id) :
+    (s.updDomain id f).getDom did = s.getDom did := by
+  simp only [SpecState.getDom, SpecState.updDomain]
+  exact Arena.find?_update_other _ _ _ _ hne
+
+/-- `revokeOneMemCap` never touches the domain arena. -/
+theorem revokeOneMemCap_getDom_eq (s : SpecState) (mid : MemCapId) (did : DomId) :
+    (revokeOneMemCap s mid).getDom did = s.getDom did := by
+  simp [SpecState.getDom, revokeOneMemCap_domains_eq]
+
+theorem foldl_revokeOneMemCap_getDom_eq
+    (s : SpecState) (mids : List MemCapId) (did : DomId) :
+    (mids.foldl revokeOneMemCap s).getDom did = s.getDom did := by
+  simp [SpecState.getDom, foldl_revokeOneMemCap_domains_eq]
+
+/-- `clearCommBindings` never touches the domain arena. -/
+theorem clearCommBindings_getDom_eq
+    (s : SpecState) (cbs : List MemCapId) (did : DomId) :
+    (clearCommBindings s cbs).getDom did = s.getDom did := by
+  simp [SpecState.getDom, clearCommBindings_domains_eq]
+
+/-- `cancelChannelStep` leaves `did` untouched when `did` is neither the
+    receiver nor the sender of the pending entry being cancelled. -/
+private theorem cancelChannelStep_other_eq
+    (cap : DomCapId) (acc : SpecState) (entry : DomId × Domain) (did : DomId)
+    (hRecv : did ≠ entry.1)
+    (hSend : ∀ pid pe, entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+                       = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (cancelChannelStep cap acc entry).getDom did = acc.getDom did := by
+  unfold cancelChannelStep
+  rcases hfind : entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+    with _ | ⟨pid, pe⟩
+  · rw [hfind]
+  · rw [hfind]
+    rw [updDomain_other_eq _ pe.senderDomainId _ did (hSend pid pe hfind),
+        updDomain_other_eq _ entry.1 _ did hRecv]
+
+private theorem foldl_cancelChannelStep_other_eq
+    (cap : DomCapId) (entries : List (DomId × Domain))
+    (s : SpecState) (did : DomId)
+    (hRecv : ∀ entry ∈ entries, did ≠ entry.1)
+    (hSend : ∀ entry ∈ entries, ∀ pid pe,
+              entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+                = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (entries.foldl (cancelChannelStep cap) s).getDom did = s.getDom did := by
+  induction entries generalizing s with
+  | nil => rfl
+  | cons entry rest ih =>
+    simp only [List.foldl_cons]
+    rw [ih _ (fun e he => hRecv e (List.mem_cons_of_mem _ he))
+           (fun e he => hSend e (List.mem_cons_of_mem _ he))]
+    exact cancelChannelStep_other_eq cap s entry did
+            (hRecv entry List.mem_cons_self)
+            (hSend entry List.mem_cons_self)
+
+/-- `cancelChannelIfPending cap` leaves `did` untouched when `did` is
+    neither a receiver-of-pending-entry for `cap` nor a sender of such. -/
+theorem cancelChannelIfPending_getDom_eq
+    (s : SpecState) (cap : DomCapId) (did : DomId)
+    (hRecv : ∀ rid rd, s.getDom rid = some rd →
+              rd.pendingDomCaps.find? (fun p => p.2.capId = cap) = none ∨ did ≠ rid)
+    (hSend : ∀ rid rd, s.getDom rid = some rd →
+              ∀ pid pe, rd.pendingDomCaps.find? (fun p => p.2.capId = cap)
+                        = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (cancelChannelIfPending s cap).getDom did = s.getDom did := by
+  rw [cancelChannelIfPending_eq_foldl]
+  apply foldl_cancelChannelStep_other_eq
+  · intro entry hentry
+    -- entry ∈ s.domains.entries, so s.getDom entry.1 = some entry.2 (under
+    -- UniqueKeys). We don't have that here; fall back on a direct case split
+    -- on whether the pending list contains a match.
+    sorry
+  · intro entry hentry pid pe hfind
+    sorry
+
 end ThemisCapa
