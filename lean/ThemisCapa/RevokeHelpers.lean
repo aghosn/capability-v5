@@ -114,4 +114,272 @@ theorem clearCommBindings_domcaps_eq (s : SpecState) (cbs : List MemCapId) :
   | nil => rfl
   | cons _ rest ih => simp only [List.foldl_cons]; rw [ih]; rfl
 
+/-! ## Survivor lemmas for `revokeOneDomain`
+
+For any domain that survives a single `revokeOneDomain s did'`
+(i.e. lookups still return `some d`), the **policy, parent, status,
+vps** fields agree with the pre-state. Channel cancellation only
+touches `pendingDomCaps`/`frozenHandles`; the parent's `childrenDoms`
+patch leaves the four axes alone. -/
+
+/-- Generic: `updDomain` with a function that preserves the four axes
+    transports those axes through `getDom`. -/
+theorem updDomain_dom_axes
+    (s : SpecState) (id : DomId) (f : Domain → Domain)
+    (hf : ∀ d, (f d).policy = d.policy ∧ (f d).parent = d.parent ∧
+                (f d).status = d.status ∧ (f d).vps = d.vps)
+    (did : DomId) (d : Domain)
+    (h : (s.updDomain id f).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  by_cases hne : did = id
+  · subst hne
+    simp only [SpecState.getDom, SpecState.updDomain] at h
+    rcases hs : s.domains.find? did with _ | d_pre
+    · rw [Arena.find?_update_eq_map, hs] at h; cases h
+    · rw [Arena.find?_update_same _ _ _ hs] at h
+      have heq := Option.some.inj h
+      have ⟨hp, hpar, hst, hv⟩ := hf d_pre
+      refine ⟨d_pre, hs, ?_, ?_, ?_, ?_⟩
+      · rw [← heq]; exact hp.symm
+      · rw [← heq]; exact hpar.symm
+      · rw [← heq]; exact hst.symm
+      · rw [← heq]; exact hv.symm
+  · simp only [SpecState.getDom, SpecState.updDomain] at h
+    rw [Arena.find?_update_other _ _ _ _ hne] at h
+    exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+
+/-- One `cancelChannelStep` preserves `policy`/`parent`/`status`/`vps`
+    for any domain. -/
+private theorem cancelChannelStep_dom_axes
+    (cap : DomCapId) (acc : SpecState) (entry : DomId × Domain)
+    (did : DomId) (d : Domain)
+    (h : (cancelChannelStep cap acc entry).getDom did = some d) :
+    ∃ d_pre, acc.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  unfold cancelChannelStep at h
+  rcases hfind : entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap) with _ | ⟨_pid, pe⟩
+  · rw [hfind] at h
+    exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  · rw [hfind] at h
+    -- Apply updDomain_dom_axes twice (sender then receiver).
+    obtain ⟨d_mid, h_mid, hp1, hpar1, hst1, hv1⟩ :=
+      updDomain_dom_axes _ pe.senderDomainId
+        (fun sd => { sd with frozenHandles :=
+                      sd.frozenHandles.filter (· ≠ pe.senderHandle) })
+        (fun _ => ⟨rfl, rfl, rfl, rfl⟩) did d h
+    obtain ⟨d_pre, h_pre, hp2, hpar2, hst2, hv2⟩ :=
+      updDomain_dom_axes acc entry.1
+        (fun rd => { rd with pendingDomCaps :=
+                      rd.pendingDomCaps.filter (fun p => p.2.capId ≠ cap) })
+        (fun _ => ⟨rfl, rfl, rfl, rfl⟩) did d_mid h_mid
+    exact ⟨d_pre, h_pre, hp2.trans hp1, hpar2.trans hpar1, hst2.trans hst1, hv2.trans hv1⟩
+
+private theorem foldl_cancelChannelStep_dom_axes
+    (cap : DomCapId) (entries : List (DomId × Domain))
+    (s : SpecState) (did : DomId) (d : Domain)
+    (h : (entries.foldl (cancelChannelStep cap) s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  induction entries generalizing s with
+  | nil => exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  | cons entry rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨d_mid, h_mid, hp, hpar, hst, hv⟩ := ih (cancelChannelStep cap s entry) h
+    obtain ⟨d_pre, h_pre, hp', hpar', hst', hv'⟩ :=
+      cancelChannelStep_dom_axes cap s entry did d_mid h_mid
+    exact ⟨d_pre, h_pre, hp'.trans hp, hpar'.trans hpar, hst'.trans hst, hv'.trans hv⟩
+
+theorem cancelChannelIfPending_dom_axes
+    (s : SpecState) (cap : DomCapId) (did : DomId) (d : Domain)
+    (h : (cancelChannelIfPending s cap).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  rw [cancelChannelIfPending_eq_foldl] at h
+  exact foldl_cancelChannelStep_dom_axes cap _ s did d h
+
+/-- `revokeOneMemCap` does not touch the domain arena (transports the
+    axes trivially). -/
+theorem revokeOneMemCap_dom_axes
+    (s : SpecState) (mid : MemCapId) (did : DomId) (d : Domain)
+    (h : (revokeOneMemCap s mid).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  have := revokeOneMemCap_domains_eq s mid
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+
+theorem foldl_revokeOneMemCap_dom_axes
+    (s : SpecState) (mids : List MemCapId) (did : DomId) (d : Domain)
+    (h : (mids.foldl revokeOneMemCap s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  have := foldl_revokeOneMemCap_domains_eq s mids
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+
+theorem clearCommBindings_dom_axes
+    (s : SpecState) (cbs : List MemCapId) (did : DomId) (d : Domain)
+    (h : (clearCommBindings s cbs).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  have := clearCommBindings_domains_eq s cbs
+  simp [SpecState.getDom, this] at h
+  exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+
+/-- The `ownedDomCaps.foldl` over channel-cancel ops preserves the four
+    axes for any surviving domain. -/
+theorem foldl_channelOps_dom_axes
+    (caps : List DomCapId) (s : SpecState) (did : DomId) (d : Domain)
+    (h : (caps.foldl (fun acc cap =>
+            match acc.getDomCap cap with
+            | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+            | none    => acc) s).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  induction caps generalizing s with
+  | nil => exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  | cons cap rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨d_mid, h_mid, hp1, hpar1, hst1, hv1⟩ := ih _ h
+    rcases hdc : s.getDomCap cap with _ | dc
+    · -- step s cap = s
+      have hstep : (match s.getDomCap cap with
+                    | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                    | none    => s) = s := by rw [hdc]
+      rw [hstep] at h_mid
+      exact ⟨d_mid, h_mid, hp1, hpar1, hst1, hv1⟩
+    · by_cases hch : dc.isChannel
+      · have hstep : (match s.getDomCap cap with
+                      | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                      | none    => s) = cancelChannelIfPending s cap := by
+          rw [hdc]; simp [hch]
+        rw [hstep] at h_mid
+        obtain ⟨d_pre, h_pre, hp2, hpar2, hst2, hv2⟩ :=
+          cancelChannelIfPending_dom_axes s cap did d_mid h_mid
+        exact ⟨d_pre, h_pre, hp2.trans hp1, hpar2.trans hpar1, hst2.trans hst1, hv2.trans hv1⟩
+      · have hstep : (match s.getDomCap cap with
+                      | some dc => if dc.isChannel then cancelChannelIfPending s cap else s
+                      | none    => s) = s := by
+          rw [hdc]; simp [hch]
+        rw [hstep] at h_mid
+        exact ⟨d_mid, h_mid, hp1, hpar1, hst1, hv1⟩
+
+/-- **Main survivor lemma.** Any domain that survives one
+    `revokeOneDomain s did'` has the same policy, parent, status, vps
+    as in the pre-state, and is necessarily not `did'`. -/
+theorem revokeOneDomain_dom_axes
+    (s : SpecState) (did' did : DomId) (d : Domain)
+    (h : (revokeOneDomain s did').getDom did = some d) :
+    did ≠ did' ∧ ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  unfold revokeOneDomain at h
+  rcases hd' : s.getDom did' with _ | d'
+  · rw [hd'] at h
+    refine ⟨?_, d, h, rfl, rfl, rfl, rfl⟩
+    intro heq; subst heq
+    rw [hd'] at h; cases h
+  · rw [hd'] at h
+    -- Stage 6: domain removal.
+    simp only [SpecState.getDom] at h
+    by_cases hne : did = did'
+    · subst hne; rw [Arena.find?_remove_same] at h; cases h
+    refine ⟨hne, ?_⟩
+    rw [Arena.find?_remove_other _ _ _ hne] at h
+    -- Re-package as a `.getDom` statement on s₅.
+    -- Stage 5: parent's childrenDoms patch (or no-op).
+    -- Stage 4: domcaps filter (preserves domains).
+    -- Stage 3: clearCommBindings (preserves domains).
+    -- Stages 1-2: memcap fold + channel-op fold (need dom_axes lemmas).
+    let s_memcap := (d'.memHandles.map Prod.snd).foldl revokeOneMemCap s
+    let s_chan := (d'.domHandles.map Prod.snd).foldl (fun acc cap =>
+        match acc.getDomCap cap with
+        | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+        | none    => acc) s_memcap
+    let s_comm := clearCommBindings s_chan d'.commBindings
+    -- After stages 1-3, getDom of survivor maps back to s.
+    have stages123 : ∀ {did : DomId} {d : Domain},
+        s_comm.getDom did = some d →
+        ∃ d_pre, s.getDom did = some d_pre ∧
+          d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+          d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+      intro did d hh
+      obtain ⟨d3, h3, hp3, hpar3, hst3, hv3⟩ :=
+        clearCommBindings_dom_axes _ _ _ _ hh
+      obtain ⟨d2, h2, hp2, hpar2, hst2, hv2⟩ :=
+        foldl_channelOps_dom_axes _ _ _ _ h3
+      obtain ⟨d1, h1, hp1, hpar1, hst1, hv1⟩ :=
+        foldl_revokeOneMemCap_dom_axes _ _ _ _ h2
+      exact ⟨d1, h1, hp1.trans (hp2.trans hp3), hpar1.trans (hpar2.trans hpar3),
+                     hst1.trans (hst2.trans hst3), hv1.trans (hv2.trans hv3)⟩
+    -- Now handle stages 4-5.
+    rcases hp : d'.parent with _ | pid
+    · rw [hp] at h
+      exact stages123 (show s_comm.getDom did = some d from h)
+    · rw [hp] at h
+      have hh : (s_comm.updDomain pid (fun pd =>
+          { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })).getDom did = some d := h
+      obtain ⟨d5, h5, hp5, hpar5, hst5, hv5⟩ :=
+        updDomain_dom_axes s_comm pid
+          (fun pd => { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })
+          (fun _ => ⟨rfl, rfl, rfl, rfl⟩) did d hh
+      obtain ⟨d_pre, h_pre, hp', hpar', hst', hv'⟩ := stages123 h5
+      exact ⟨d_pre, h_pre, hp'.trans hp5, hpar'.trans hpar5,
+                           hst'.trans hst5, hv'.trans hv5⟩
+
+/-- Foldl version: any survivor of `foldl revokeOneDomain dids s` has the
+    four axes equal to its pre-state value and is not in `dids`. -/
+theorem foldl_revokeOneDomain_dom_axes
+    (s : SpecState) (dids : List DomId) (did : DomId) (d : Domain)
+    (h : (dids.foldl revokeOneDomain s).getDom did = some d) :
+    did ∉ dids ∧ ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  induction dids generalizing s with
+  | nil => exact ⟨List.not_mem_nil, d, h, rfl, rfl, rfl, rfl⟩
+  | cons did' rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨hnotin, d_mid, h_mid, hp, hpar, hst, hv⟩ := ih (revokeOneDomain s did') h
+    obtain ⟨hne, d_pre, h_pre, hp', hpar', hst', hv'⟩ :=
+      revokeOneDomain_dom_axes s did' did d_mid h_mid
+    refine ⟨?_, d_pre, h_pre, hp'.trans hp, hpar'.trans hpar, hst'.trans hst, hv'.trans hv⟩
+    simp only [List.mem_cons, not_or]
+    exact ⟨hne, hnotin⟩
+
+/-- Final survivor lemma for the public action `revokeDomain_apply`. -/
+theorem revokeDomain_apply_dom_axes
+    (s : SpecState) (caller : DomId) (handle : LocalHandle)
+    (did : DomId) (d : Domain)
+    (h : (revokeDomain_apply s caller handle).getDom did = some d) :
+    ∃ d_pre, s.getDom did = some d_pre ∧
+      d_pre.policy = d.policy ∧ d_pre.parent = d.parent ∧
+      d_pre.status = d.status ∧ d_pre.vps = d.vps := by
+  unfold revokeDomain_apply at h
+  rcases hc : s.getDom caller with _ | d_c
+  · rw [hc] at h; exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  rw [hc] at h
+  rcases hlh : d_c.lookupDomHandle handle with _ | dcId
+  · simp [hlh] at h; exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  simp [hlh] at h
+  rcases hdcp : s.getDomCap dcId with _ | dc
+  · simp [hdcp] at h; exact ⟨d, h, rfl, rfl, rfl, rfl⟩
+  simp [hdcp] at h
+  -- h : (foldl rev. subtree).updDomain caller (filter) .getDom did = some d
+  obtain ⟨d1, h1, hp1, hpar1, hst1, hv1⟩ :=
+    updDomain_dom_axes (collectSubtree s dc.targetDom |>.foldl revokeOneDomain s) caller
+      (fun d => { d with domHandles := d.domHandles.filter (fun h => !decide (h.snd = dcId)) })
+      (fun _ => ⟨rfl, rfl, rfl, rfl⟩) did d h
+  obtain ⟨_, d_pre, h_pre, hp2, hpar2, hst2, hv2⟩ :=
+    foldl_revokeOneDomain_dom_axes s (collectSubtree s dc.targetDom) did d1 h1
+  exact ⟨d_pre, h_pre, hp2.trans hp1, hpar2.trans hpar1, hst2.trans hst1, hv2.trans hv1⟩
+
 end ThemisCapa

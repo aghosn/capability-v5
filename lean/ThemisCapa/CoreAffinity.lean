@@ -17,6 +17,7 @@
 -/
 import ThemisCapa.Step
 import ThemisCapa.Invariants
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Arena
@@ -332,16 +333,12 @@ theorem create_preservesCoreAffinity
 theorem revokeDomain_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (handle : LocalHandle) (h : CoreAffinity s) :
     CoreAffinity (revokeDomain_apply s caller handle) := by
-  -- Phase A (S4 plan, checkpoint 005): `revokeDomain_apply` now cascades
-  -- a post-order subtree revocation. Preservation reduces to:
-  --   (a) `revokeOneDomain` preserves CoreAffinity (running-VP obligation
-  --       is discharged on the revoked domain because its VPs disappear
-  --       from the arena), and
-  --   (b) a fold of (a) preserves CoreAffinity.
-  -- Will need a `subtreeVpsNotRunning` guard precondition (or rely on
-  -- WellFormed: revoked descendants have status .revoked and hence no
-  -- running VPs by some axiom).
-  sorry
+  intro did d hd vp hvp c caller' hrun
+  obtain ⟨d_pre, hd_pre, hpol, _, _, hvps⟩ :=
+    revokeDomain_apply_dom_axes s caller handle did d hd
+  have hvp_pre : vp ∈ d_pre.vps := by rw [hvps]; exact hvp
+  have : c ∈ d_pre.policy.cores := h did d_pre hd_pre vp hvp_pre c caller' hrun
+  rw [← hpol]; exact this
 
 theorem setPolicy_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (cap : DomCapId)

@@ -25,6 +25,7 @@
 import ThemisCapa.Step
 import ThemisCapa.Invariants
 import ThemisCapa.Policy
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Arena
@@ -638,11 +639,18 @@ theorem revokeDomain_preservesPolicyMonotonicAncestry
     (s : SpecState) (caller : DomId) (handle : LocalHandle)
     (h : PolicyMonotonicAncestry s) :
     PolicyMonotonicAncestry (revokeDomain_apply s caller handle) := by
-  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
-  -- Strategy: removing domains can only narrow the ancestor relation
-  -- (never adds new edges), so the invariant is monotone. Phase B will
-  -- prove this by induction on the descendant list.
-  sorry
+  intro child parent d_c d_p hc hpar hp
+  -- Survivors keep their `policy` and `parent`. Pull back both edges
+  -- to the pre-state and apply the hypothesis.
+  obtain ⟨d_c_pre, hc_pre, hpc, hparc, _, _⟩ :=
+    revokeDomain_apply_dom_axes s caller handle child d_c hc
+  obtain ⟨d_p_pre, hp_pre, hpp, _, _, _⟩ :=
+    revokeDomain_apply_dom_axes s caller handle parent d_p hp
+  -- d_c_pre.parent = d_c.parent = some parent
+  have hparc' : d_c_pre.parent = some parent := hparc.trans hpar
+  have hbase := h child parent d_c_pre d_p_pre hc_pre hparc' hp_pre
+  -- d_c.policy = d_c_pre.policy, d_p.policy = d_p_pre.policy
+  rw [← hpc, ← hpp]; exact hbase
 
 -- ════════════════════════════════════════════════════════════════════
 -- § 7.  Top theorem
