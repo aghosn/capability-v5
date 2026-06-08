@@ -26,6 +26,7 @@
 -/
 import ThemisCapa.ParentStability
 import ThemisCapa.Properties
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Domain
@@ -868,12 +869,14 @@ private theorem revokeDomain_apply_preservesIsRevoked
     (hrev : d.isRevoked)
     (d' : Domain) (hpost : (revokeDomain_apply s caller handle).getDom did = some d') :
     d'.isRevoked := by
-  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
-  -- Surviving (non-removed) descendants are *added* to the revoked set
-  -- via `revokeOneDomain` (which strips them from the arena). Any `did`
-  -- already revoked stays revoked since the cascade only removes or
-  -- mutates non-status fields. Phase B will reduce this to a fold.
-  sorry
+  obtain ⟨d_pre, h_pre, _, _, hst, _⟩ :=
+    revokeDomain_apply_dom_axes s caller handle did d' hpost
+  -- d_pre = d (lookup is functional)
+  rw [h_pre] at hpre
+  have : d_pre = d := Option.some.inj hpre
+  subst this
+  unfold Domain.isRevoked at hrev ⊢
+  rw [← hst]; exact hrev
 
 /-! ### `switchReturn` / `switch` / `switchSuspended` (updVp-based) -/
 

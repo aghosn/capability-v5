@@ -36,6 +36,7 @@
 import ThemisCapa.Locality
 import ThemisCapa.Invariants
 import ThemisCapa.DomainTree
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Arena
@@ -1065,11 +1066,13 @@ theorem create_apply_preservesParents_of_wf
 /-- `revokeDomain_apply` preserves parents. -/
 theorem revokeDomain_apply_preservesParents (caller : DomId) (handle : LocalHandle) :
     PreservesParents (fun s => revokeDomain_apply s caller handle) := by
-  -- Phase A (S4 plan, checkpoint 005): pending recursive subtree proof.
-  -- The cascade may remove descendants; surviving domains' parent
-  -- pointers are unchanged (no `parent` field is rewritten). Phase B
-  -- will reduce this to a fold over `revokeOneDomain`.
-  sorry
+  intro s did d d' hpre hpost
+  obtain ⟨d_pre, h_pre, _, hpar, _, _⟩ :=
+    revokeDomain_apply_dom_axes s caller handle did d' hpost
+  rw [h_pre] at hpre
+  have : d_pre = d := Option.some.inj hpre
+  subst this
+  exact hpar.symm
 
 /-! ## Top-level theorem: `step` preserves parent pointers -/
 
