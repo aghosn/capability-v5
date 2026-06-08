@@ -1324,6 +1324,97 @@ structure GetChanSelfGuard (s : SpecState) (caller : DomId) : Prop where
 /-- Identity apply for `getChanSelf`. -/
 def getChanSelf_apply (s : SpecState) (_caller : DomId) : SpecState := s
 
+/-! ### S2: sealed channel transfer (dom-cap pending path)
+
+    Mirrors `sealedSend` but for `DomCap` (channels). The caller's
+    domain handle is frozen and a `PendingDomCap` entry is enqueued on
+    the receiver. No ownership transfer happens until `acceptChannel`. -/
+
+/-- Preconditions for `sealedSendChannel(caller, receiver, handle)`. -/
+structure SealedSendChannelGuard (s : SpecState) (caller receiver : DomId)
+                                 (handle : LocalHandle) : Prop where
+  callerExists      : (s.getDom caller).isSome
+  receiverExists    : (s.getDom receiver).isSome
+  callerSealed      : ∀ d, s.getDom caller = some d → d.isSealed
+  hasPermission     : ∀ d, s.getDom caller = some d → d.policy.api.canSend = true
+  receiverPermits   : ∀ rd, s.getDom receiver = some rd →
+                              rd.policy.api.canReceiveAfterSeal = true
+  /-- The local handle resolves to some dom-cap held by the caller. -/
+  handleResolves    : ∀ d, s.getDom caller = some d →
+                              (d.lookupDomHandle handle).isSome
+  /-- The resolved dom-cap exists in the arena. -/
+  capExists         : ∀ d, s.getDom caller = some d →
+                              ∀ capId, d.lookupDomHandle handle = some capId →
+                              (s.getDomCap capId).isSome
+  /-- The resolved cap is a channel cap. -/
+  capIsChannel      : ∀ d, s.getDom caller = some d →
+                              ∀ capId, d.lookupDomHandle handle = some capId →
+                              ∀ dc, s.getDomCap capId = some dc →
+                              dc.isChannel = true
+  /-- The caller actually owns the resolved cap. -/
+  callerOwnsCap     : ∀ d, s.getDom caller = some d →
+                              ∀ capId, d.lookupDomHandle handle = some capId →
+                              ∀ dc, s.getDomCap capId = some dc → dc.owner = caller
+  /-- Send-to-self forbidden. -/
+  notSelf           : caller ≠ receiver
+  /-- The handle is not already frozen. -/
+  notFrozen         : ∀ d, s.getDom caller = some d → handle ∉ d.frozenHandles
+  /-- Receiver must be sealed (sealed-path-only). -/
+  receiverSealed    : ∀ d, s.getDom receiver = some d → d.isSealed
+  /-- Receiver must be live (not yet revoked). -/
+  receiverLive      : ∀ d, s.getDom receiver = some d → d.isLive
+
+/-- Pure state update for `sealedSendChannel`.
+
+    1. Append `handle` to caller's `frozenHandles`.
+    2. Append a fresh `(nextPendingId, PendingDomCap{..})` to receiver's
+       `pendingDomCaps` and bump `nextPendingId`.
+
+    No domcap or handle ownership changes. Returns `s` unchanged when
+    handle resolution fails. -/
+def sealedSendChannel_apply (s : SpecState) (caller receiver : DomId)
+                            (handle : LocalHandle) : SpecState :=
+  match (s.getDom caller).bind (fun d => d.lookupDomHandle handle) with
+  | none       => s
+  | some capId =>
+    let s₁ := s.updDomain caller (fun d =>
+      { d with frozenHandles := d.frozenHandles ++ [handle] })
+    s₁.updDomain receiver (fun d =>
+      let pid := d.nextPendingId
+      let pe  : PendingDomCap :=
+        { capId := capId, senderDomainId := caller,
+          senderHandle := handle }
+      { d with pendingDomCaps := d.pendingDomCaps ++ [(pid, pe)],
+               nextPendingId  := pid + 1 })
+
+/-! ### S2: send_at / accept_at — thin wrappers exposing the engine entry
+    points.  The `gpaHint` / `gpaOverride` parameters affect address-map
+    placement, which is below the spec's abstraction (the address map is
+    not refined here), so the apply functions delegate verbatim to
+    `send_apply` / `accept_apply`. -/
+
+/-- Preconditions for `send_at(caller, receiver, cap, gpaHint)` —
+    identical to `SendGuard`; gpaHint is unused at this abstraction. -/
+structure SendAtGuard (s : SpecState) (caller receiver : DomId)
+                      (cap : MemCapId) (_gpaHint : Option Nat)
+    extends SendGuard s caller receiver cap : Prop
+
+/-- Identity-wrapping apply: gpaHint ignored. -/
+def send_at_apply (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+                  (_gpaHint : Option Nat) : SpecState :=
+  send_apply s caller receiver cap
+
+/-- Preconditions for `accept_at(receiver, pendingId, gpaOverride)` —
+    identical to `AcceptGuard`; gpaOverride is unused at this abstraction. -/
+structure AcceptAtGuard (s : SpecState) (receiver : DomId)
+                        (pendingId : PendingId) (_gpaOverride : Option Nat)
+    extends AcceptGuard s receiver pendingId : Prop
+
+/-- Identity-wrapping apply: gpaOverride ignored. -/
+def accept_at_apply (s : SpecState) (receiver : DomId)
+                    (pendingId : PendingId) (_gpaOverride : Option Nat) : SpecState :=
+  accept_apply s receiver pendingId
+
 inductive step : SpecState → Action → SpecState → Prop
   | carve {s : SpecState} {caller : DomId} {parent : MemCapId}
           {access : Access} {attrs : Attributes}
@@ -1431,5 +1522,20 @@ inductive step : SpecState → Action → SpecState → Prop
   | getChanSelf {s : SpecState} {caller : DomId}
     (guard : GetChanSelfGuard s caller) :
     step s (.getChanSelf caller) (getChanSelf_apply s caller)
+  | sealedSendChannel {s : SpecState} {caller receiver : DomId}
+                      {handle : LocalHandle}
+    (guard : SealedSendChannelGuard s caller receiver handle) :
+    step s (.sealedSendChannel caller receiver handle)
+         (sealedSendChannel_apply s caller receiver handle)
+  | send_at {s : SpecState} {caller receiver : DomId} {cap : MemCapId}
+            {gpaHint : Option Nat}
+    (guard : SendAtGuard s caller receiver cap gpaHint) :
+    step s (.send_at caller receiver cap gpaHint)
+         (send_at_apply s caller receiver cap gpaHint)
+  | accept_at {s : SpecState} {receiver : DomId} {pendingId : PendingId}
+              {gpaOverride : Option Nat}
+    (guard : AcceptAtGuard s receiver pendingId gpaOverride) :
+    step s (.accept_at receiver pendingId gpaOverride)
+         (accept_at_apply s receiver pendingId gpaOverride)
 
 end ThemisCapa

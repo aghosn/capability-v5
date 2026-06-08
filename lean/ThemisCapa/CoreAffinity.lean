@@ -284,6 +284,39 @@ theorem sealedSend_preservesCoreAffinity
                  nextPendingId  := pid + 1 })
       (fun _ => rfl) (fun _ => rfl)
 
+theorem sealedSendChannel_preservesCoreAffinity
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (h : CoreAffinity s) :
+    CoreAffinity (sealedSendChannel_apply s caller receiver handle) := by
+  rcases hp : (s.getDom caller).bind (fun d => d.lookupDomHandle handle)
+    with _ | capId
+  · simp only [sealedSendChannel_apply, hp]; exact h
+  · simp only [sealedSendChannel_apply, hp]
+    have h1 := coreAffinity_updDomain_id h caller
+      (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })
+      (fun _ => rfl) (fun _ => rfl)
+    exact coreAffinity_updDomain_id h1 receiver
+      (fun d =>
+        let pid := d.nextPendingId
+        let pe  : PendingDomCap :=
+          { capId := capId, senderDomainId := caller,
+            senderHandle := handle }
+        { d with pendingDomCaps := d.pendingDomCaps ++ [(pid, pe)],
+                 nextPendingId  := pid + 1 })
+      (fun _ => rfl) (fun _ => rfl)
+
+theorem send_at_preservesCoreAffinity
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (gpaHint : Option Nat) (h : CoreAffinity s) :
+    CoreAffinity (send_at_apply s caller receiver cap gpaHint) := by
+  simp only [send_at_apply]; exact send_preservesCoreAffinity s caller receiver cap h
+
+theorem accept_at_preservesCoreAffinity
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (gpaOverride : Option Nat) (h : CoreAffinity s) :
+    CoreAffinity (accept_at_apply s receiver pendingId gpaOverride) := by
+  simp only [accept_at_apply]; exact accept_preservesCoreAffinity s receiver pendingId h
+
 theorem create_preservesCoreAffinity
     (s : SpecState) (caller : DomId) (policy : DomainPolicy) (h : CoreAffinity s) :
     CoreAffinity (create_apply s caller policy) := by
@@ -732,5 +765,8 @@ theorem step_preservesCoreAffinity
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | sealedSendChannel _ => exact sealedSendChannel_preservesCoreAffinity _ _ _ _ h
+  | send_at _           => exact send_at_preservesCoreAffinity         _ _ _ _ _ h
+  | accept_at _         => exact accept_at_preservesCoreAffinity       _ _ _ _ h
 
 end ThemisCapa

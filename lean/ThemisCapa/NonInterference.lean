@@ -233,5 +233,34 @@ theorem step_view_preservation
   | getPolicy _ => exact id
   | getChan _ => exact id
   | getChanSelf _ => exact id
+  | sealedSendChannel _ => exact id
+  | send_at guard =>
+    rename_i caller receiver cap _
+    have hBcaller : B ≠ caller := fun he => hB (Or.inl (Or.inl he))
+    intro hmem
+    have hcap_eq : c = cap := hmem
+    obtain ⟨cp, hcp⟩ := Option.isSome_iff_exists.mp guard.toSendGuard.capExists
+    have hown_caller : capPre.owner = caller := by
+      rw [hcap_eq, hcp] at hPre; injection hPre with hpe
+      rw [← hpe]; exact guard.toSendGuard.callerOwnsCap cp hcp
+    exact hBcaller (hown.symm.trans hown_caller)
+  | accept_at guard =>
+    rename_i receiver pid _
+    have hBrecv : B ≠ receiver := fun he => hB (Or.inl (Or.inl he))
+    obtain ⟨dr, hdr⟩ := Option.isSome_iff_exists.mp guard.toAcceptGuard.receiverExists
+    obtain ⟨pe, hpe⟩ := Option.isSome_iff_exists.mp (guard.toAcceptGuard.pendingFound dr hdr)
+    obtain ⟨cp, hcp⟩ := Option.isSome_iff_exists.mp (guard.toAcceptGuard.capExists dr pe hdr hpe)
+    have hBsender : B ≠ pe.senderDomainId :=
+      fun he => hB (Or.inl (Or.inr (fun dr' hdr' pe' hpe' => by
+        rw [hdr] at hdr'; injection hdr' with hh
+        rw [← hh] at hpe'
+        rw [hpe] at hpe'; injection hpe' with hhh
+        rw [← hhh]; exact he)))
+    intro hmem
+    have hc_eq : c = pe.capId := hmem dr hdr pe hpe
+    have hown_sender : capPre.owner = pe.senderDomainId := by
+      rw [hc_eq, hcp] at hPre; injection hPre with hpe2
+      rw [← hpe2]; exact guard.toAcceptGuard.capOwnedBySender dr pe hdr hpe cp hcp
+    exact hBsender (hown.symm.trans hown_sender)
 
 end ThemisCapa

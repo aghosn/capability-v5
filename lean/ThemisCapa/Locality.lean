@@ -251,6 +251,60 @@ theorem sealedSend_frame_mem (s : SpecState) (caller receiver : DomId)
   rcases (s.getDom caller).bind (fun d => d.lookupMemHandle handle) with _ | _ <;>
     rfl
 
+/-! ### SealedSendChannel -/
+
+theorem sealedSendChannel_frame_dom (s : SpecState) (caller receiver : DomId)
+    (handle : LocalHandle)
+    (did : DomId) (h1 : did ≠ caller) (h2 : did ≠ receiver) :
+    (sealedSendChannel_apply s caller receiver handle).getDom did = s.getDom did := by
+  show ((sealedSendChannel_apply s caller receiver handle).domains).find? did = _
+  simp only [sealedSendChannel_apply, SpecState.updDomain]
+  rcases (s.getDom caller).bind (fun d => d.lookupDomHandle handle) with _ | _
+  · rfl
+  · rw [Arena.find?_update_other _ receiver did _ h2,
+        Arena.find?_update_other _ caller did _ h1]
+    rfl
+
+theorem sealedSendChannel_frame_mem (s : SpecState) (caller receiver : DomId)
+    (handle : LocalHandle) (id : MemCapId) :
+    (sealedSendChannel_apply s caller receiver handle).getMem id = s.getMem id := by
+  show ((sealedSendChannel_apply s caller receiver handle).memcaps).find? id = _
+  simp only [sealedSendChannel_apply, SpecState.updDomain]
+  rcases (s.getDom caller).bind (fun d => d.lookupDomHandle handle) with _ | _ <;>
+    rfl
+
+/-! ### send_at / accept_at — delegating to send / accept -/
+
+theorem send_at_frame_dom (s : SpecState) (caller receiver : DomId)
+    (cap : MemCapId) (gpaHint : Option Nat)
+    (did : DomId) (h1 : did ≠ caller) (h2 : did ≠ receiver) :
+    (send_at_apply s caller receiver cap gpaHint).getDom did = s.getDom did := by
+  simp only [send_at_apply]; exact send_frame_dom s caller receiver cap did h1 h2
+
+theorem send_at_frame_mem (s : SpecState) (caller receiver : DomId)
+    (cap : MemCapId) (gpaHint : Option Nat)
+    (id : MemCapId) (h : id ≠ cap) :
+    (send_at_apply s caller receiver cap gpaHint).getMem id = s.getMem id := by
+  simp only [send_at_apply]; exact send_frame_mem s caller receiver cap id h
+
+theorem accept_at_frame_mem (s : SpecState) (receiver : DomId)
+    (pendingId : PendingId) (gpaOverride : Option Nat)
+    (dr : Domain) (hdr : s.getDom receiver = some dr)
+    (pe : PendingMemCap) (hpe : dr.lookupPending pendingId = some pe)
+    (id : MemCapId) (h : id ≠ pe.capId) :
+    (accept_at_apply s receiver pendingId gpaOverride).getMem id = s.getMem id := by
+  simp only [accept_at_apply]
+  exact accept_frame_mem s receiver pendingId dr hdr pe hpe id h
+
+theorem accept_at_frame_dom (s : SpecState) (receiver : DomId)
+    (pendingId : PendingId) (gpaOverride : Option Nat)
+    (dr : Domain) (hdr : s.getDom receiver = some dr)
+    (pe : PendingMemCap) (hpe : dr.lookupPending pendingId = some pe)
+    (did : DomId) (h1 : did ≠ receiver) (h2 : did ≠ pe.senderDomainId) :
+    (accept_at_apply s receiver pendingId gpaOverride).getDom did = s.getDom did := by
+  simp only [accept_at_apply]
+  exact accept_frame_dom s receiver pendingId dr hdr pe hpe did h1 h2
+
 /-! ### Create -/
 
 theorem create_frame_dom (s : SpecState) (caller : DomId) (policy : DomainPolicy)
@@ -862,6 +916,12 @@ def Action.affectsDom (s : SpecState) : Action → DomId → Prop
   | .getPolicy _ _ _, _ => False
   | .getChan _ _, _ => False
   | .getChanSelf _, _ => False
+  | .sealedSendChannel caller receiver _, did => did = caller ∨ did = receiver
+  | .send_at caller receiver _ _, did => did = caller ∨ did = receiver
+  | .accept_at receiver pid _, did =>
+      did = receiver ∨
+      (∀ dr, s.getDom receiver = some dr →
+       ∀ pe, dr.lookupPending pid = some pe → did = pe.senderDomainId)
 
 /-- Set of memcap ids that `a` may modify when fired from `s`. -/
 def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
@@ -902,6 +962,11 @@ def Action.affectsMem (s : SpecState) : Action → MemCapId → Prop
   | .getPolicy _ _ _, _ => False
   | .getChan _ _, _ => False
   | .getChanSelf _, _ => False
+  | .sealedSendChannel _ _ _, _ => False
+  | .send_at _ _ cap _, id => id = cap
+  | .accept_at receiver pid _, id =>
+      ∀ dr, s.getDom receiver = some dr →
+      ∀ pe, dr.lookupPending pid = some pe → id = pe.capId
 
 /-! ## Top-level locality theorems.
 
@@ -1117,6 +1182,26 @@ theorem step_locality_dom
   | getPolicy _ => rfl
   | getChan _ => rfl
   | getChanSelf _ => rfl
+  | sealedSendChannel guard =>
+    have h1 : did ≠ _ := fun e => h (Or.inl e)
+    have h2 : did ≠ _ := fun e => h (Or.inr e)
+    exact sealedSendChannel_frame_dom _ _ _ _ _ h1 h2
+  | send_at guard =>
+    have h1 : did ≠ _ := fun e => h (Or.inl e)
+    have h2 : did ≠ _ := fun e => h (Or.inr e)
+    exact send_at_frame_dom _ _ _ _ _ _ h1 h2
+  | accept_at guard =>
+    rename_i receiver pid _
+    obtain ⟨dr, hdr⟩ := Option.isSome_iff_exists.mp guard.toAcceptGuard.receiverExists
+    obtain ⟨pe, hpe⟩ :=
+      Option.isSome_iff_exists.mp (guard.toAcceptGuard.pendingFound dr hdr)
+    have h1 : did ≠ receiver := fun e => h (Or.inl e)
+    have h2 : did ≠ pe.senderDomainId := fun e => h (Or.inr (fun dr' hdr' pe' hpe' => by
+      rw [hdr] at hdr'; injection hdr' with hh
+      rw [← hh] at hpe'
+      rw [hpe] at hpe'; injection hpe' with hh'
+      rw [← hh']; exact e))
+    exact accept_at_frame_dom _ _ _ _ _ hdr _ hpe _ h1 h2
 
 theorem step_locality_mem
     {s s' : SpecState} {a : Action} (hstep : step s a s')
@@ -1206,5 +1291,20 @@ theorem step_locality_mem
   | getPolicy _ => rfl
   | getChan _ => rfl
   | getChanSelf _ => rfl
+  | sealedSendChannel guard => exact sealedSendChannel_frame_mem _ _ _ _ _
+  | send_at guard =>
+    have h1 : id ≠ _ := h
+    exact send_at_frame_mem _ _ _ _ _ _ h1
+  | accept_at guard =>
+    rename_i receiver pid _
+    obtain ⟨dr, hdr⟩ := Option.isSome_iff_exists.mp guard.toAcceptGuard.receiverExists
+    obtain ⟨pe, hpe⟩ :=
+      Option.isSome_iff_exists.mp (guard.toAcceptGuard.pendingFound dr hdr)
+    have h1 : id ≠ pe.capId := fun e => h (fun dr' hdr' pe' hpe' => by
+      rw [hdr] at hdr'; injection hdr' with hh
+      rw [← hh] at hpe'
+      rw [hpe] at hpe'; injection hpe' with hh'
+      rw [← hh']; exact e)
+    exact accept_at_frame_mem _ _ _ _ _ hdr _ hpe _ h1
 
 end ThemisCapa

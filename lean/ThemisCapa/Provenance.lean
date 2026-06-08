@@ -130,6 +130,26 @@ private theorem sealedSend_mem_isSome
     ((sealedSend_apply s caller receiver handle gpaHint).getMem c).isSome := by
   rw [sealedSend_frame_mem]; exact h
 
+private theorem sealedSendChannel_mem_isSome
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((sealedSendChannel_apply s caller receiver handle).getMem c).isSome := by
+  rw [sealedSendChannel_frame_mem]; exact h
+
+private theorem send_at_mem_isSome
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (gpaHint : Option Nat) (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((send_at_apply s caller receiver cap gpaHint).getMem c).isSome := by
+  simp only [send_at_apply]
+  exact send_mem_isSome s caller receiver cap c h
+
+private theorem accept_at_mem_isSome
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (gpaOverride : Option Nat) (c : MemCapId) (h : (s.getMem c).isSome) :
+    ((accept_at_apply s receiver pid gpaOverride).getMem c).isSome := by
+  simp only [accept_at_apply]
+  exact accept_mem_isSome s receiver pid c h
+
 private theorem create_mem_isSome
     (s : SpecState) (caller : DomId) (policy : DomainPolicy) (c : MemCapId)
     (h : (s.getMem c).isSome) :
@@ -406,6 +426,21 @@ theorem provenance_removal
     exfalso
     have h := getChanSelf_mem_isSome s caller c hPre
     rw [hPost] at h; cases h
+  | sealedSendChannel guard =>
+    rename_i caller receiver handle
+    exfalso
+    have h := sealedSendChannel_mem_isSome s caller receiver handle c hPre
+    rw [hPost] at h; cases h
+  | send_at guard =>
+    rename_i caller receiver cap gpa
+    exfalso
+    have h := send_at_mem_isSome s caller receiver cap gpa c hPre
+    rw [hPost] at h; cases h
+  | accept_at guard =>
+    rename_i receiver pid gpa
+    exfalso
+    have h := accept_at_mem_isSome s receiver pid gpa c hPre
+    rw [hPost] at h; cases h
 
 /-! ### Helpers: `isNone` is preserved by `update` and (under inequality) `remove`/`insert`. -/
 
@@ -490,6 +525,26 @@ private theorem sealedSend_mem_isNone
     (gpaHint : Option Nat) (c : MemCapId) (h : s.getMem c = none) :
     (sealedSend_apply s caller receiver handle gpaHint).getMem c = none := by
   rw [sealedSend_frame_mem]; exact h
+
+private theorem sealedSendChannel_mem_isNone
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (sealedSendChannel_apply s caller receiver handle).getMem c = none := by
+  rw [sealedSendChannel_frame_mem]; exact h
+
+private theorem send_at_mem_isNone
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (gpaHint : Option Nat) (c : MemCapId) (h : s.getMem c = none) :
+    (send_at_apply s caller receiver cap gpaHint).getMem c = none := by
+  simp only [send_at_apply]
+  exact send_mem_isNone s caller receiver cap c h
+
+private theorem accept_at_mem_isNone
+    (s : SpecState) (receiver : DomId) (pid : PendingId)
+    (gpaOverride : Option Nat) (c : MemCapId) (h : s.getMem c = none) :
+    (accept_at_apply s receiver pid gpaOverride).getMem c = none := by
+  simp only [accept_at_apply]
+  exact accept_mem_isNone s receiver pid c h
 
 private theorem create_mem_isNone
     (s : SpecState) (caller : DomId) (policy : DomainPolicy) (c : MemCapId)
@@ -833,6 +888,21 @@ theorem provenance_creation
     exfalso
     have h := getChanSelf_mem_isNone s caller c hPre
     rw [hPost] at h; cases h
+  | sealedSendChannel guard =>
+    rename_i caller receiver handle
+    exfalso
+    have h := sealedSendChannel_mem_isNone s caller receiver handle c hPre
+    rw [hPost] at h; cases h
+  | send_at guard =>
+    rename_i caller receiver cap gpa
+    exfalso
+    have h := send_at_mem_isNone s caller receiver cap gpa c hPre
+    rw [hPost] at h; cases h
+  | accept_at guard =>
+    rename_i receiver pid gpa
+    exfalso
+    have h := accept_at_mem_isNone s receiver pid gpa c hPre
+    rw [hPost] at h; cases h
 
 /-! ### Per-action: owner preserved (or characterized for send/accept). -/
 
@@ -987,6 +1057,15 @@ private theorem sealedSend_owner_preserved
     (hPost : (sealedSend_apply s caller receiver handle gpaHint).getMem c = some capPost) :
     capPre.owner = capPost.owner := by
   rw [sealedSend_frame_mem, hPre] at hPost
+  injection hPost with h; rw [h]
+
+private theorem sealedSendChannel_owner_preserved
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (sealedSendChannel_apply s caller receiver handle).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rw [sealedSendChannel_frame_mem, hPre] at hPost
   injection hPost with h; rw [h]
 
 private theorem create_owner_preserved
@@ -1295,6 +1374,26 @@ private theorem accept_owner_change
     · left; exact hown
     · right; exact hown
 
+/-- `send_at` delegates to `send_apply`; same owner-change shape. -/
+private theorem send_at_owner_change
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId) (gpaHint : Option Nat)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (send_at_apply s caller receiver cap gpaHint).getMem c = some capPost) :
+    (c = cap ∧ capPost.owner = receiver) ∨ capPre.owner = capPost.owner := by
+  simp only [send_at_apply] at hPost
+  exact send_owner_change s caller receiver cap c capPre capPost hPre hPost
+
+/-- `accept_at` delegates to `accept_apply`; same owner-change shape. -/
+private theorem accept_at_owner_change
+    (s : SpecState) (receiver : DomId) (pid : PendingId) (gpaOverride : Option Nat)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (accept_at_apply s receiver pid gpaOverride).getMem c = some capPost) :
+    capPost.owner = receiver ∨ capPre.owner = capPost.owner := by
+  simp only [accept_at_apply] at hPost
+  exact accept_owner_change s receiver pid c capPre capPost hPre hPost
+
 /-! ### Provenance — Transfer -/
 
 /-- The only way the owner of an existing memcap can change is via
@@ -1307,7 +1406,9 @@ theorem provenance_transfer
     (hPost : s'.getMem c = some capPost)
     (hOwnerChange : capPre.owner ≠ capPost.owner) :
     (∃ caller, a = .send caller capPost.owner c) ∨
-    (∃ pid, a = .accept capPost.owner pid) := by
+    (∃ pid, a = .accept capPost.owner pid) ∨
+    (∃ caller gpa, a = .send_at caller capPost.owner c gpa) ∨
+    (∃ pid gpa, a = .accept_at capPost.owner pid gpa) := by
   cases hstep with
   | carve guard =>
     rename_i caller parent access attrs
@@ -1343,7 +1444,7 @@ theorem provenance_transfer
     rename_i receiver pid
     rcases accept_owner_change s receiver pid c capPre capPost hPre hPost with
       hOwn | hPres
-    · right
+    · right; left
       refine ⟨pid, ?_⟩
       rw [hOwn]
     · exfalso; exact hOwnerChange hPres
@@ -1450,5 +1551,27 @@ theorem provenance_transfer
     exfalso
     exact hOwnerChange
       (getChanSelf_owner_preserved s caller c capPre capPost hPre hPost)
+  | sealedSendChannel guard =>
+    rename_i caller receiver handle
+    exfalso
+    exact hOwnerChange
+      (sealedSendChannel_owner_preserved s caller receiver handle
+        c capPre capPost hPre hPost)
+  | send_at guard =>
+    rename_i caller receiver cap gpa
+    rcases send_at_owner_change s caller receiver cap gpa c capPre capPost hPre hPost with
+      ⟨hcEq, hOwn⟩ | hPres
+    · right; right; left
+      refine ⟨caller, gpa, ?_⟩
+      rw [hcEq, hOwn]
+    · exfalso; exact hOwnerChange hPres
+  | accept_at guard =>
+    rename_i receiver pid gpa
+    rcases accept_at_owner_change s receiver pid gpa c capPre capPost hPre hPost with
+      hOwn | hPres
+    · right; right; right
+      refine ⟨pid, gpa, ?_⟩
+      rw [hOwn]
+    · exfalso; exact hOwnerChange hPres
 
 end ThemisCapa

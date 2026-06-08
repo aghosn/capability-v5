@@ -226,6 +226,31 @@ inductive Action where
       Mirrors `capa-engine/src/capability.rs::get_chan_self`.
       Read-only. -/
   | getChanSelf (caller : DomId)
+  /-- `caller` transfers a channel domain-cap to a **sealed** `receiver`
+      via the pending-queue path.  `handle` is a local dom-handle in
+      caller's `domHandles` resolving to the channel cap.  The handle is
+      frozen on the sender and a `PendingDomCap` entry is appended to
+      the receiver.  No ownership transfer happens until `acceptChannel`.
+      Mirrors `capa-engine/src/capability.rs::send_channel` sealed branch.
+      Counterpart of `sealedSend` for memcaps. -/
+  | sealedSendChannel (caller : DomId) (receiver : DomId)
+                      (handle : LocalHandle)
+  /-- `caller` sends memory capability `cap` to `receiver` with an
+      optional `gpaHint` controlling where the region appears in the
+      receiver's guest address space.  Mirrors
+      `capa-engine/src/capability.rs::send_at` (unsealed branch — the
+      sealed branch is modeled by `sealedSend`).  The `gpaHint` is below
+      the spec abstraction (`AddressMap` is opaque at this level) so the
+      apply delegates to `send_apply`. -/
+  | send_at (caller : DomId) (receiver : DomId) (cap : MemCapId)
+            (gpaHint : Option Nat)
+  /-- `receiver` accepts the pending memcap identified by `pendingId`,
+      with an optional `gpaOverride` that ignores the sender's hint.
+      Mirrors `capa-engine/src/capability.rs::accept_at`.  The
+      `gpaOverride` is below the spec abstraction so the apply
+      delegates to `accept_apply`. -/
+  | accept_at (receiver : DomId) (pendingId : PendingId)
+              (gpaOverride : Option Nat)
 deriving Repr
 
 end ThemisCapa

@@ -1107,6 +1107,53 @@ theorem revokeDomain_apply_preservesParents (caller : DomId) (handle : LocalHand
 
 /-! ## Top-level theorem: `step` preserves parent pointers -/
 
+/-- `sealedSendChannel_apply` preserves parents (mirrors `sealedSend_apply_preservesParents`). -/
+theorem sealedSendChannel_apply_preservesParents
+    (caller receiver : DomId) (handle : LocalHandle) :
+    PreservesParents (fun s => sealedSendChannel_apply s caller receiver handle) := by
+  intro s did d d' hpre hpost
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle handle) with _ | capId
+  · have : (sealedSendChannel_apply s caller receiver handle).domains.find? did = some d' :=
+      hpost
+    simp [sealedSendChannel_apply, hb] at this
+    rw [hpre_d] at this; injection this with eq; rw [eq]
+  · have hp' : (sealedSendChannel_apply s caller receiver handle).domains.find? did = some d' :=
+      hpost
+    simp only [sealedSendChannel_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = receiver
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+    · rw [Arena.find?_update_other _ receiver did _ hd1] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [eq]
+
+/-- `send_at_apply` preserves parents (delegates to `send_apply`). -/
+theorem send_at_apply_preservesParents
+    (caller receiver : DomId) (cap : MemCapId) (gpaHint : Option Nat) :
+    PreservesParents (fun s => send_at_apply s caller receiver cap gpaHint) := by
+  intro s did d d' hpre hpost
+  simp only [send_at_apply] at hpost
+  exact send_apply_preservesParents caller receiver cap s did d d' hpre hpost
+
+/-- `accept_at_apply` preserves parents (delegates to `accept_apply`). -/
+theorem accept_at_apply_preservesParents
+    (receiver : DomId) (pendingId : PendingId) (gpaOverride : Option Nat) :
+    PreservesParents (fun s => accept_at_apply s receiver pendingId gpaOverride) := by
+  intro s did d d' hpre hpost
+  simp only [accept_at_apply] at hpost
+  exact accept_apply_preservesParents receiver pendingId s did d d' hpre hpost
+
 /-- **Parent immutability under `step`.**
 
     Once a domain has been allocated, its `parent` field never changes.
@@ -1155,5 +1202,8 @@ theorem step_parent_immutable
   | getChanSelf _       =>
       simp only [getChanSelf_apply] at hpost
       rw [hpre] at hpost; injection hpost with e; rw [← e]
+  | sealedSendChannel _ => exact sealedSendChannel_apply_preservesParents _ _ _ s did d d' hpre hpost
+  | send_at _           => exact send_at_apply_preservesParents _ _ _ _ s did d d' hpre hpost
+  | accept_at _         => exact accept_at_apply_preservesParents _ _ _ s did d d' hpre hpost
 
 end ThemisCapa

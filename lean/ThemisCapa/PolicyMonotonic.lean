@@ -303,6 +303,33 @@ theorem sealedSend_preservesPolicyMonotonicAncestry
       (fun _ => rfl) (fun _ => rfl)
     exact policyMA_updDomain_id h1 receiver _ (fun _ => rfl) (fun _ => rfl)
 
+theorem sealedSendChannel_preservesPolicyMonotonicAncestry
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (h : PolicyMonotonicAncestry s) :
+    PolicyMonotonicAncestry (sealedSendChannel_apply s caller receiver handle) := by
+  rcases hp : (s.getDom caller).bind (fun d => d.lookupDomHandle handle)
+    with _ | capId
+  · simp only [sealedSendChannel_apply, hp]; exact h
+  · simp only [sealedSendChannel_apply, hp]
+    have h1 := policyMA_updDomain_id h caller
+      (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })
+      (fun _ => rfl) (fun _ => rfl)
+    exact policyMA_updDomain_id h1 receiver _ (fun _ => rfl) (fun _ => rfl)
+
+theorem send_at_preservesPolicyMonotonicAncestry
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (gpaHint : Option Nat) (h : PolicyMonotonicAncestry s) :
+    PolicyMonotonicAncestry (send_at_apply s caller receiver cap gpaHint) := by
+  simp only [send_at_apply]
+  exact send_preservesPolicyMonotonicAncestry s caller receiver cap h
+
+theorem accept_at_preservesPolicyMonotonicAncestry
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (gpaOverride : Option Nat) (h : PolicyMonotonicAncestry s) :
+    PolicyMonotonicAncestry (accept_at_apply s receiver pendingId gpaOverride) := by
+  simp only [accept_at_apply]
+  exact accept_preservesPolicyMonotonicAncestry s receiver pendingId h
+
 theorem setPolicy_preservesPolicyMonotonicAncestry
     (s : SpecState) (caller : DomId) (cap : DomCapId)
     (id : PolicyIdentifier) (value : Nat) (h : PolicyMonotonicAncestry s) :
@@ -598,5 +625,8 @@ theorem step_preservesPolicyMonotonicAncestry
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | sealedSendChannel _ => exact sealedSendChannel_preservesPolicyMonotonicAncestry _ _ _ _ h
+  | send_at _           => exact send_at_preservesPolicyMonotonicAncestry         _ _ _ _ _ h
+  | accept_at _         => exact accept_at_preservesPolicyMonotonicAncestry       _ _ _ _ h
 
 end ThemisCapa

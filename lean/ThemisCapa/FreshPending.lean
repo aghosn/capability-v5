@@ -106,6 +106,24 @@ theorem freshPending_updDomain_sealedSendReceiver
   · intro p hp
     exact Nat.lt_succ_of_lt ((h x d_pre hpre).2 p hp)
 
+/-- The headline append-and-bump case for the channel variant
+    (sealedSendChannel's receiver branch). -/
+theorem freshPending_updDomain_sealedSendChannelReceiver
+    {s : SpecState} (h : FreshPending s) (x : DomId)
+    (mk : Domain → PendingDomCap) :
+    FreshPending (s.updDomain x (fun d =>
+      { d with pendingDomCaps := d.pendingDomCaps ++ [(d.nextPendingId, mk d)],
+               nextPendingId  := d.nextPendingId + 1 })) := by
+  apply freshPending_updDomain h
+  intro d_pre hpre
+  refine ⟨?_, ?_⟩
+  · intro p hp
+    exact Nat.lt_succ_of_lt ((h x d_pre hpre).1 p hp)
+  · intro p hp
+    rcases List.mem_append.mp hp with hin | hin
+    · exact Nat.lt_succ_of_lt ((h x d_pre hpre).2 p hin)
+    · simp only [List.mem_singleton] at hin; rw [hin]; exact Nat.lt_succ_self _
+
 /-- Non-domain primitives leave `FreshPending` definitionally untouched. -/
 theorem freshPending_updMem
     {s : SpecState} (h : FreshPending s) (id : MemCapId) (g : MemCap → MemCap) :
@@ -278,6 +296,33 @@ theorem sealedSend_preservesFreshPending
     exact freshPending_updDomain_sealedSendReceiver h1 receiver
       (fun _ => { capId := capId, senderDomainId := caller,
                   senderHandle := handle, gpaHint := gpaHint })
+
+theorem sealedSendChannel_preservesFreshPending
+    (s : SpecState) (caller receiver : DomId) (handle : LocalHandle)
+    (h : FreshPending s) :
+    FreshPending (sealedSendChannel_apply s caller receiver handle) := by
+  rcases hp : (s.getDom caller).bind (fun d => d.lookupDomHandle handle)
+    with _ | capId
+  · simp only [sealedSendChannel_apply, hp]; exact h
+  · simp only [sealedSendChannel_apply, hp]
+    have h1 := freshPending_updDomain_id h caller
+      (fun d => { d with frozenHandles := d.frozenHandles ++ [handle] })
+      (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+    exact freshPending_updDomain_sealedSendChannelReceiver h1 receiver
+      (fun _ => { capId := capId, senderDomainId := caller,
+                  senderHandle := handle })
+
+theorem send_at_preservesFreshPending
+    (s : SpecState) (caller receiver : DomId) (cap : MemCapId)
+    (gpaHint : Option Nat) (h : FreshPending s) :
+    FreshPending (send_at_apply s caller receiver cap gpaHint) := by
+  simp only [send_at_apply]; exact send_preservesFreshPending s caller receiver cap h
+
+theorem accept_at_preservesFreshPending
+    (s : SpecState) (receiver : DomId) (pendingId : PendingId)
+    (gpaOverride : Option Nat) (h : FreshPending s) :
+    FreshPending (accept_at_apply s receiver pendingId gpaOverride) := by
+  simp only [accept_at_apply]; exact accept_preservesFreshPending s receiver pendingId h
 
 theorem setPolicy_preservesFreshPending
     (s : SpecState) (caller : DomId) (cap : DomCapId)
@@ -582,5 +627,8 @@ theorem step_preservesFreshPending
   | getPolicy _         => exact h
   | getChan _           => exact h
   | getChanSelf _       => exact h
+  | sealedSendChannel _ => exact sealedSendChannel_preservesFreshPending _ _ _ _ h
+  | send_at _           => exact send_at_preservesFreshPending         _ _ _ _ _ h
+  | accept_at _         => exact accept_at_preservesFreshPending       _ _ _ _ h
 
 end ThemisCapa

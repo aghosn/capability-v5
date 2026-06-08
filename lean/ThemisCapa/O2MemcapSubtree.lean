@@ -85,7 +85,7 @@ theorem step_memcap_subtree_preserved_rev
         step_subtree_membership_rev hwf hstep hown_post hd_post
       -- Derive a.affectsDom s m_post.owner from provenance_transfer.
       rcases provenance_transfer hwf hstep hpre hm_post hOwn with
-        ⟨caller, ha⟩ | ⟨pid, ha⟩
+        ⟨caller, ha⟩ | ⟨pid, ha⟩ | ⟨caller, gpa, ha⟩ | ⟨pid, gpa, ha⟩
       · subst ha
         exfalso
         exact houtDom m_post.owner (Or.inr rfl) hOwnInPre
@@ -93,6 +93,12 @@ theorem step_memcap_subtree_preserved_rev
         exfalso
         -- accept's affectsDom is `did = receiver ∨ ...`. m_post.owner
         -- equals the receiver (the first arg of `.accept m_post.owner pid`).
+        exact houtDom m_post.owner (Or.inl rfl) hOwnInPre
+      · subst ha
+        exfalso
+        exact houtDom m_post.owner (Or.inr rfl) hOwnInPre
+      · subst ha
+        exfalso
         exact houtDom m_post.owner (Or.inl rfl) hOwnInPre
   · -- id outside affectsMem footprint: getMem is preserved, owner same.
     have hframe : s'.getMem id = s.getMem id := step_locality_mem hstep hAff

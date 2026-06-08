@@ -451,6 +451,49 @@ private theorem sealedSend_apply_preservesIsRevoked
       · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
         rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
 
+private theorem sealedSendChannel_apply_preservesIsRevoked
+    (caller receiver : DomId) (handle : LocalHandle)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (sealedSendChannel_apply s caller receiver handle).getDom did = some d') :
+    d'.isRevoked := by
+  have hpre_d : s.domains.find? did = some d := hpre
+  rcases hb : (s.getDom caller).bind (fun d => d.lookupDomHandle handle) with _ | capId
+  · have h0 :
+        (sealedSendChannel_apply s caller receiver handle).domains.find? did = some d' := hpost
+    simp [sealedSendChannel_apply, hb] at h0
+    rw [hpre_d] at h0; injection h0 with eq; rw [← eq]; exact hrev
+  · have hp' :
+        (sealedSendChannel_apply s caller receiver handle).domains.find? did = some d' := hpost
+    simp only [sealedSendChannel_apply, hb, SpecState.updDomain] at hp'
+    by_cases hd1 : did = receiver
+    · subst hd1
+      rw [Arena.find?_update_eq_map] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+    · rw [Arena.find?_update_other _ receiver did _ hd1] at hp'
+      by_cases hd2 : did = caller
+      · subst hd2
+        rw [Arena.find?_update_eq_map] at hp'
+        rw [hpre_d] at hp'; simp at hp'; rw [← hp']; exact hrev
+      · rw [Arena.find?_update_other _ caller did _ hd2] at hp'
+        rw [hpre_d] at hp'; injection hp' with eq; rw [← eq]; exact hrev
+
+private theorem send_at_apply_preservesIsRevoked
+    (caller receiver : DomId) (cap : MemCapId) (gpaHint : Option Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (send_at_apply s caller receiver cap gpaHint).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [send_at_apply] at hpost
+  exact send_apply_preservesIsRevoked caller receiver cap s did d hpre hrev d' hpost
+
 private theorem sendChannel_apply_preservesIsRevoked
     (caller receiver : DomId) (cap : DomCapId)
     (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
@@ -579,6 +622,16 @@ private theorem accept_apply_preservesIsRevoked'
             (send_apply s pe.senderDomainId receiver pe.capId).getDom did = some d' := hp'
         exact send_apply_preservesIsRevoked pe.senderDomainId receiver pe.capId
                 s did d hpre hrev d' hsendp
+
+private theorem accept_at_apply_preservesIsRevoked'
+    (receiver : DomId) (pid : PendingId) (gpaOverride : Option Nat)
+    (s : SpecState) (did : DomId) (d : Domain) (hpre : s.getDom did = some d)
+    (hrev : d.isRevoked)
+    (d' : Domain)
+    (hpost : (accept_at_apply s receiver pid gpaOverride).getDom did = some d') :
+    d'.isRevoked := by
+  simp only [accept_at_apply] at hpost
+  exact accept_apply_preservesIsRevoked' receiver pid s did d hpre hrev d' hpost
 
 private theorem acceptChannel_apply_preservesIsRevoked
     (receiver : DomId) (pendingId : PendingId)
@@ -1262,6 +1315,12 @@ theorem step_preserves_revoked
       exact getChan_apply_preservesIsRevoked _ _ s did d hpre hrev d' hpost
   | getChanSelf _ =>
       exact getChanSelf_apply_preservesIsRevoked _ s did d hpre hrev d' hpost
+  | sealedSendChannel _ =>
+      exact sealedSendChannel_apply_preservesIsRevoked _ _ _ s did d hpre hrev d' hpost
+  | send_at _ =>
+      exact send_at_apply_preservesIsRevoked _ _ _ _ s did d hpre hrev d' hpost
+  | accept_at _ =>
+      exact accept_at_apply_preservesIsRevoked' _ _ _ s did d hpre hrev d' hpost
 
 /-! ### T4: parent immutable across the cascade (corollary) -/
 
