@@ -664,58 +664,152 @@ theorem clearCommBindings_getDom_eq
     (clearCommBindings s cbs).getDom did = s.getDom did := by
   simp [SpecState.getDom, clearCommBindings_domains_eq]
 
-/-- `cancelChannelStep` leaves `did` untouched when `did` is neither the
-    receiver nor the sender of the pending entry being cancelled. -/
-private theorem cancelChannelStep_other_eq
+/-- `cancelChannelStep` leaves `did` untouched when, for any match on
+    the pending list, `did` is neither the receiver nor the sender. -/
+theorem cancelChannelStep_other_eq
     (cap : DomCapId) (acc : SpecState) (entry : DomId × Domain) (did : DomId)
-    (hRecv : did ≠ entry.1)
-    (hSend : ∀ pid pe, entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
-                       = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (h : ∀ pid pe, entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+                   = some (pid, pe) → did ≠ entry.1 ∧ did ≠ pe.senderDomainId) :
     (cancelChannelStep cap acc entry).getDom did = acc.getDom did := by
   unfold cancelChannelStep
   rcases hfind : entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
     with _ | ⟨pid, pe⟩
   · rw [hfind]
   · rw [hfind]
-    rw [updDomain_other_eq _ pe.senderDomainId _ did (hSend pid pe hfind),
+    obtain ⟨hRecv, hSend⟩ := h pid pe hfind
+    rw [updDomain_other_eq _ pe.senderDomainId _ did hSend,
         updDomain_other_eq _ entry.1 _ did hRecv]
 
-private theorem foldl_cancelChannelStep_other_eq
+theorem foldl_cancelChannelStep_other_eq
     (cap : DomCapId) (entries : List (DomId × Domain))
     (s : SpecState) (did : DomId)
-    (hRecv : ∀ entry ∈ entries, did ≠ entry.1)
-    (hSend : ∀ entry ∈ entries, ∀ pid pe,
-              entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
-                = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (h : ∀ entry ∈ entries, ∀ pid pe,
+          entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+            = some (pid, pe) → did ≠ entry.1 ∧ did ≠ pe.senderDomainId) :
     (entries.foldl (cancelChannelStep cap) s).getDom did = s.getDom did := by
   induction entries generalizing s with
   | nil => rfl
   | cons entry rest ih =>
     simp only [List.foldl_cons]
-    rw [ih _ (fun e he => hRecv e (List.mem_cons_of_mem _ he))
-           (fun e he => hSend e (List.mem_cons_of_mem _ he))]
+    rw [ih _ (fun e he => h e (List.mem_cons_of_mem _ he))]
     exact cancelChannelStep_other_eq cap s entry did
-            (hRecv entry List.mem_cons_self)
-            (hSend entry List.mem_cons_self)
+            (h entry List.mem_cons_self)
 
-/-- `cancelChannelIfPending cap` leaves `did` untouched when `did` is
-    neither a receiver-of-pending-entry for `cap` nor a sender of such. -/
+/-- `cancelChannelIfPending cap` leaves `did` untouched when, for every
+    entry in the domain arena, neither the holder nor the sender of
+    any matching pending entry is `did`. (Premise is stated directly
+    over `s.domains.entries`; downstream callers bridge from `getDom`
+    via `UniqueKeys` from `WellFormed`.) -/
 theorem cancelChannelIfPending_getDom_eq
     (s : SpecState) (cap : DomCapId) (did : DomId)
-    (hRecv : ∀ rid rd, s.getDom rid = some rd →
-              rd.pendingDomCaps.find? (fun p => p.2.capId = cap) = none ∨ did ≠ rid)
-    (hSend : ∀ rid rd, s.getDom rid = some rd →
-              ∀ pid pe, rd.pendingDomCaps.find? (fun p => p.2.capId = cap)
-                        = some (pid, pe) → did ≠ pe.senderDomainId) :
+    (h : ∀ entry ∈ s.domains.entries, ∀ pid pe,
+          entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+            = some (pid, pe) → did ≠ entry.1 ∧ did ≠ pe.senderDomainId) :
     (cancelChannelIfPending s cap).getDom did = s.getDom did := by
   rw [cancelChannelIfPending_eq_foldl]
-  apply foldl_cancelChannelStep_other_eq
-  · intro entry hentry
-    -- entry ∈ s.domains.entries, so s.getDom entry.1 = some entry.2 (under
-    -- UniqueKeys). We don't have that here; fall back on a direct case split
-    -- on whether the pending list contains a match.
+  exact foldl_cancelChannelStep_other_eq cap _ s did h
+
+/-! ## `revokeOneDomain` survivor equality
+
+Stage-wise breakdown of `revokeOneDomain s did'` (see Step.lean:816):
+  1. Revoke owned memcaps — never touches domain arena.
+  2. Cancel channels on owned dom-caps — may touch `did` if `did` is
+     the holder or sender of a pending entry for a cancelled cap.
+  3. Clear COMM bindings — never touches domain arena.
+  4. Filter domcaps — never touches domain arena.
+  5. Patch parent's `childrenDoms` — touches `pid` if `d.parent = some pid`.
+  6. Remove `did'` from the domain arena — touches `did` iff `did = did'`.
+
+The premises below enumerate the survivors. -/
+
+/-- Single-step `revokeOneDomain s did'` preserves `did`'s domain record
+    when `did` is outside the cascade footprint for this step. -/
+theorem revokeOneDomain_getDom_eq
+    (s : SpecState) (did' : DomId) (did : DomId)
+    (hNe : did ≠ did')
+    (hNotParent : ∀ d, s.getDom did' = some d → d.parent ≠ some did)
+    (hNoChan : ∀ d, s.getDom did' = some d →
+                ∀ cap ∈ d.domHandles.map Prod.snd,
+                  ∀ entry ∈ s.domains.entries, ∀ pid pe,
+                    entry.2.pendingDomCaps.find?
+                      (fun p => p.2.capId = cap) = some (pid, pe) →
+                    did ≠ entry.1 ∧ did ≠ pe.senderDomainId) :
+    (revokeOneDomain s did').getDom did = s.getDom did := by
+  unfold revokeOneDomain
+  rcases hgd : s.getDom did' with _ | d
+  · rfl
+  -- Stage 1
+  let ownedMems := d.memHandles.map Prod.snd
+  let ownedCaps := d.domHandles.map Prod.snd
+  show (let s₁ := ownedMems.foldl revokeOneMemCap s
+        let s₂ := ownedCaps.foldl (fun (acc : SpecState) cap =>
+          match acc.getDomCap cap with
+          | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+          | none    => acc) s₁
+        let s₃ := clearCommBindings s₂ d.commBindings
+        let s₄ : SpecState :=
+          { s₃ with domcaps :=
+              ⟨s₃.domcaps.entries.filter
+                (fun entry => entry.2.owner ≠ did' ∧ entry.2.targetDom ≠ did')⟩ }
+        let s₅ : SpecState :=
+          match d.parent with
+          | none     => s₄
+          | some pid =>
+              s₄.updDomain pid (fun pd =>
+                { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })
+        { s₅ with domains := s₅.domains.remove did' }).getDom did = s.getDom did
+  -- Final `domains.remove did'`: did ≠ did' so this is identity on getDom.
+  show ((_ : SpecState).getDom did) = s.getDom did
+  -- Unfold inner lets stepwise.
+  simp only []
+  -- Stage 6: remove did' from domains
+  have step6 : ∀ (st : SpecState),
+      ({ st with domains := st.domains.remove did' } : SpecState).getDom did
+        = st.getDom did := by
+    intro st
+    simp only [SpecState.getDom]
+    exact Arena.find?_remove_other _ _ _ hNe
+  rw [step6]
+  -- Stage 5: parent childrenDoms patch
+  have step5 : ∀ (st : SpecState),
+      (match d.parent with
+       | none     => st
+       | some pid =>
+           st.updDomain pid (fun pd =>
+             { pd with childrenDoms := pd.childrenDoms.filter (· ≠ did') })
+      ).getDom did = st.getDom did := by
+    intro st
+    rcases hpar : d.parent with _ | pid
+    · rfl
+    · have hpne : did ≠ pid := by
+        intro heq
+        exact hNotParent d hgd (heq ▸ hpar)
+      exact updDomain_other_eq _ _ _ _ hpne
+  rw [step5]
+  -- Stage 4: domcaps filter — preserves domain arena
+  have step4 : ∀ (st : SpecState),
+      ({ st with domcaps :=
+            ⟨st.domcaps.entries.filter
+              (fun entry => entry.2.owner ≠ did' ∧ entry.2.targetDom ≠ did')⟩ }
+       : SpecState).getDom did = st.getDom did := by
+    intro st; rfl
+  rw [step4]
+  -- Stage 3: clearCommBindings
+  rw [clearCommBindings_getDom_eq]
+  -- Stage 2: channel cancellation fold
+  -- The fold is over ownedCaps in the *stage-1* state s₁, but
+  -- pendingDomCaps queries happen against the evolving state.
+  -- We need a lemma showing the fold preserves `getDom did` provided
+  -- the initial entries' pending lists don't contain matches with
+  -- did as holder/sender. Use `foldl_channelOps_getDom_eq` below.
+  have step2 : (ownedCaps.foldl (fun acc cap =>
+      match acc.getDomCap cap with
+      | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+      | none    => acc) (ownedMems.foldl revokeOneMemCap s)).getDom did
+      = (ownedMems.foldl revokeOneMemCap s).getDom did := by
     sorry
-  · intro entry hentry pid pe hfind
-    sorry
+  rw [step2]
+  -- Stage 1: revokeOneMemCap fold
+  exact foldl_revokeOneMemCap_getDom_eq s ownedMems did
 
 end ThemisCapa
