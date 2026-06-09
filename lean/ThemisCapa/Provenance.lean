@@ -19,6 +19,7 @@
 -/
 import ThemisCapa.Locality
 import ThemisCapa.Properties
+import ThemisCapa.RevokeHelpers
 
 namespace ThemisCapa
 open Arena
@@ -1167,7 +1168,30 @@ private theorem revokeDomain_owner_preserved
     (hPre : s.getMem c = some capPre)
     (hPost : (revokeDomain_apply s caller handle).getMem c = some capPost) :
     capPre.owner = capPost.owner := by
-  sorry
+  unfold revokeDomain_apply at hPost
+  rcases hc : s.getDom caller with _ | d
+  · simp [hc] at hPost; rw [hPre] at hPost
+    injection hPost with h; rw [h]
+  · simp only [hc] at hPost
+    rcases hh : d.lookupDomHandle handle with _ | dcId
+    · simp [hh] at hPost; rw [hPre] at hPost
+      injection hPost with h; rw [h]
+    · simp only [hh] at hPost
+      rcases hdc : s.getDomCap dcId with _ | dc
+      · simp [hdc] at hPost; rw [hPre] at hPost
+        injection hPost with h; rw [h]
+      · simp only [hdc] at hPost
+        -- Final updDomain on caller doesn't touch memcaps; so
+        -- getMem c on post = getMem c on subtree.foldl.
+        let subtree := collectSubtree s dc.targetDom
+        let s₁ := subtree.foldl revokeOneDomain s
+        have hmm : (s₁.updDomain caller (fun d =>
+            { d with domHandles := d.domHandles.filter (fun h => h.2 ≠ dcId) })).memcaps
+            = s₁.memcaps := rfl
+        have hpost' : s₁.getMem c = some capPost := by
+          show s₁.memcaps.find? c = some capPost
+          rw [← hmm]; exact hPost
+        exact foldl_revokeOneDomain_owner_preserved s subtree c capPre capPost hPre hpost'
 
 private theorem setPolicy_owner_preserved
     (s : SpecState) (caller : DomId) (cap : DomCapId)

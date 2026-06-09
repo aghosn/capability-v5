@@ -835,4 +835,407 @@ theorem revokeOneDomain_getDom_eq
   -- Stage 1: revokeOneMemCap fold
   exact foldl_revokeOneMemCap_getDom_eq s ownedMems did
 
+/-! ## Cascade owner preservation
+
+For the owner field, every cascade modification either removes a memcap
+or modifies fields other than `owner`. -/
+
+/-- `updMem` with an owner-preserving function preserves the owner of
+    any surviving memcap. -/
+theorem updMem_owner_preserved
+    (s : SpecState) (id : MemCapId) (f : MemCap → MemCap)
+    (hf : ∀ m, (f m).owner = m.owner)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (s.updMem id f).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  show capPre.owner = capPost.owner
+  by_cases hc : c = id
+  · subst hc
+    have : (s.updMem c f).getMem c = some (f capPre) := by
+      show (s.memcaps.update c f).find? c = some (f capPre)
+      exact Arena.find?_update_same _ _ _ hPre
+    rw [this] at hPost
+    injection hPost with heq; rw [← heq]; exact (hf capPre).symm
+  · have : (s.updMem id f).getMem c = some capPre := by
+      show (s.memcaps.update id f).find? c = some capPre
+      rw [Arena.find?_update_other _ _ _ _ hc]; exact hPre
+    rw [this] at hPost
+    injection hPost with heq; rw [heq]
+
+/-- `remove id` from memcaps preserves the owner of any surviving memcap
+    (because survivors at `c` must have `c ≠ id`). -/
+theorem remove_memcap_owner_preserved
+    (s : SpecState) (id : MemCapId)
+    (c : MemCapId) (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : ({ s with memcaps := s.memcaps.remove id } : SpecState).getMem c
+              = some capPost) :
+    capPre.owner = capPost.owner := by
+  by_cases hc : c = id
+  · subst hc
+    have : ({ s with memcaps := s.memcaps.remove c } : SpecState).getMem c = none := by
+      show (s.memcaps.remove c).find? c = none
+      exact Arena.find?_remove_same _ _
+    rw [this] at hPost; cases hPost
+  · have : ({ s with memcaps := s.memcaps.remove id } : SpecState).getMem c
+            = some capPre := by
+      show (s.memcaps.remove id).find? c = some capPre
+      rw [Arena.find?_remove_other _ _ _ hc]; exact hPre
+    rw [this] at hPost
+    injection hPost with heq; rw [heq]
+
+/-- `revokeOneMemCap` preserves the `owner` field of any surviving memcap. -/
+theorem revokeOneMemCap_owner_preserved
+    (s : SpecState) (mid : MemCapId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (revokeOneMemCap s mid).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  unfold revokeOneMemCap at hPost
+  rcases hm : s.getMem mid with _ | m
+  · simp only [hm] at hPost
+    rw [hPre] at hPost; injection hPost with heq; rw [heq]
+  · simp only [hm] at hPost
+    rcases hpar : m.parent with _ | pid
+    · simp only [hpar] at hPost
+      exact remove_memcap_owner_preserved s mid c capPre capPost hPre hPost
+    · simp only [hpar] at hPost
+      -- Two-stage: first remove, then updMem
+      rcases hmid :
+        ({ s with memcaps := s.memcaps.remove mid } : SpecState).getMem c
+        with _ | capMid
+      · -- post = none ⇒ contradicts hPost
+        exfalso
+        have hnone :
+          (({ s with memcaps := s.memcaps.remove mid } : SpecState).updMem pid
+              (fun p => { p with childrenIds := p.childrenIds.filter (· ≠ mid) })).getMem c
+            = none := by
+          show ((s.memcaps.remove mid).update pid _).find? c = none
+          by_cases hcp : c = pid
+          · subst hcp
+            rw [Arena.find?_update_eq_map]
+            rw [show (s.memcaps.remove mid).find? c = none from hmid]; rfl
+          · rw [Arena.find?_update_other _ _ _ _ hcp]; exact hmid
+        rw [hnone] at hPost; cases hPost
+      · have h1 : capPre.owner = capMid.owner :=
+          remove_memcap_owner_preserved s mid c capPre capMid hPre hmid
+        have h2 : capMid.owner = capPost.owner := by
+          let s' : SpecState := { s with memcaps := s.memcaps.remove mid }
+          let f : MemCap → MemCap := fun p =>
+            { p with childrenIds := p.childrenIds.filter (· ≠ mid) }
+          have hp : (s'.updMem pid f).getMem c = some capPost := hPost
+          exact updMem_owner_preserved s' pid f
+            (fun _ => rfl) c capMid capPost hmid hp
+        exact h1.trans h2
+
+theorem foldl_revokeOneMemCap_owner_preserved
+    (s : SpecState) (mids : List MemCapId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (mids.foldl revokeOneMemCap s).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  induction mids generalizing s capPre with
+  | nil =>
+    simp only [List.foldl_nil] at hPost
+    rw [hPre] at hPost; injection hPost with heq; rw [heq]
+  | cons mid rest ih =>
+    simp only [List.foldl_cons] at hPost
+    rcases hmid : (revokeOneMemCap s mid).getMem c with _ | capMid
+    · -- if c removed, later folds can't make it some
+      exfalso
+      have hnone_pres : ∀ (s' : SpecState) (ms : List MemCapId),
+              s'.getMem c = none →
+              (ms.foldl revokeOneMemCap s').getMem c = none := by
+        intro s' ms hn
+        induction ms generalizing s' with
+        | nil => simpa using hn
+        | cons m rest' ih' =>
+          simp only [List.foldl_cons]
+          apply ih'
+          unfold revokeOneMemCap
+          rcases hg : s'.getMem m with _ | mcap
+          · simp only [hg]; exact hn
+          · simp only [hg]
+            rcases hp : mcap.parent with _ | pp
+            · simp only [hp]
+              show (s'.memcaps.remove m).find? c = none
+              by_cases hcm : c = m
+              · subst hcm; exact Arena.find?_remove_same _ _
+              · rw [Arena.find?_remove_other _ _ _ hcm]; exact hn
+            · simp only [hp]
+              show (((s'.memcaps.remove m) : Arena _ _).update pp _).find? c = none
+              by_cases hcp : c = pp
+              · subst hcp
+                rw [Arena.find?_update_eq_map]
+                by_cases hcm : c = m
+                · subst hcm
+                  show Option.map _ ((s'.memcaps.remove c).find? c) = none
+                  rw [Arena.find?_remove_same]; rfl
+                · show Option.map _ ((s'.memcaps.remove m).find? c) = none
+                  rw [Arena.find?_remove_other _ _ _ hcm]
+                  have hn' : s'.memcaps.find? c = none := hn
+                  rw [hn']; rfl
+              · rw [Arena.find?_update_other _ _ _ _ hcp]
+                by_cases hcm : c = m
+                · subst hcm; exact Arena.find?_remove_same _ _
+                · rw [Arena.find?_remove_other _ _ _ hcm]; exact hn
+      rw [hnone_pres _ rest hmid] at hPost; cases hPost
+    · have h1 := revokeOneMemCap_owner_preserved s mid c capPre capMid hPre hmid
+      have h2 := ih (revokeOneMemCap s mid) capMid hmid hPost
+      exact h1.trans h2
+
+/-- `clearCommBindings` preserves the `owner` field of any surviving memcap. -/
+theorem clearCommBindings_owner_preserved
+    (s : SpecState) (cbs : List MemCapId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (clearCommBindings s cbs).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  unfold clearCommBindings at hPost
+  induction cbs generalizing s capPre with
+  | nil =>
+    simp only [List.foldl_nil] at hPost
+    rw [hPre] at hPost; injection hPost with heq; rw [heq]
+  | cons mid rest ih =>
+    simp only [List.foldl_cons] at hPost
+    rcases hmid : (s.updMem mid (fun m =>
+        { m with region :=
+            { m.region with
+                attributes := { m.region.attributes with comm := false },
+                commBinding := none } })).getMem c with _ | capMid
+    · -- If updMem produces none on c, then it must've been none originally
+      -- (updMem doesn't remove). Contradicts hPre.
+      exfalso
+      have hsome : ∃ v, (s.updMem mid (fun m =>
+          { m with region :=
+              { m.region with
+                  attributes := { m.region.attributes with comm := false },
+                  commBinding := none } })).getMem c = some v := by
+        show ∃ v, (s.memcaps.update mid _).find? c = some v
+        by_cases hcm : c = mid
+        · subst hcm
+          refine ⟨_, Arena.find?_update_same _ _ _ hPre⟩
+        · rw [Arena.find?_update_other _ _ _ _ hcm]
+          exact ⟨capPre, hPre⟩
+      rcases hsome with ⟨v, hv⟩
+      rw [hv] at hmid; cases hmid
+    · have h1 : capPre.owner = capMid.owner := by
+        let f : MemCap → MemCap := fun m =>
+          { m with region :=
+              { m.region with
+                  attributes := { m.region.attributes with comm := false },
+                  commBinding := none } }
+        have hp : (s.updMem mid f).getMem c = some capMid := hmid
+        exact updMem_owner_preserved s mid f (fun _ => rfl) c capPre capMid hPre hp
+      have h2 : capMid.owner = capPost.owner := ih _ capMid hmid hPost
+      exact h1.trans h2
+
+/-- `cancelChannelIfPending` never touches memcaps. -/
+theorem cancelChannelIfPending_owner_preserved
+    (s : SpecState) (cap : DomCapId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (cancelChannelIfPending s cap).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  have hmm := cancelChannelIfPending_memcaps_eq s cap
+  have : (cancelChannelIfPending s cap).getMem c = s.getMem c := by
+    simp [SpecState.getMem, hmm]
+  rw [this, hPre] at hPost
+  injection hPost with heq; rw [heq]
+
+/-- `updMem` preserves `none` lookup at any key. -/
+theorem updMem_getMem_none_preserved
+    (s : SpecState) (id : MemCapId) (f : MemCap → MemCap)
+    (c : MemCapId) (h : s.getMem c = none) :
+    (s.updMem id f).getMem c = none := by
+  show (s.memcaps.update id f).find? c = none
+  by_cases hc : c = id
+  · subst hc
+    rw [Arena.find?_update_eq_map]
+    have h' : s.memcaps.find? c = none := h
+    rw [h']; rfl
+  · rw [Arena.find?_update_other _ _ _ _ hc]; exact h
+
+/-- `clearCommBindings` preserves `none` lookup. -/
+theorem clearCommBindings_getMem_none_preserved
+    (s : SpecState) (cbs : List MemCapId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (clearCommBindings s cbs).getMem c = none := by
+  unfold clearCommBindings
+  induction cbs generalizing s with
+  | nil => simpa using h
+  | cons mid rest ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    exact updMem_getMem_none_preserved s mid _ c h
+
+/-- The channel-cancel fold body used in `revokeOneDomain` stage 2
+    preserves `memcaps`. -/
+theorem foldl_channelCancel_memcaps_eq (s : SpecState) (caps : List DomCapId) :
+    (caps.foldl (fun acc cap =>
+        match acc.getDomCap cap with
+        | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+        | none    => acc) s).memcaps = s.memcaps := by
+  induction caps generalizing s with
+  | nil => rfl
+  | cons cap rest ih =>
+    simp only [List.foldl_cons]
+    rw [ih]
+    rcases hg : s.getDomCap cap with _ | dc
+    · simp [hg]
+    · simp only [hg]
+      by_cases hch : dc.isChannel
+      · rw [if_pos hch]; exact cancelChannelIfPending_memcaps_eq _ _
+      · rw [if_neg hch]
+
+/-- Stage-2 fold preserves `getMem c`. -/
+theorem foldl_channelCancel_getMem_eq (s : SpecState) (caps : List DomCapId)
+    (c : MemCapId) :
+    (caps.foldl (fun acc cap =>
+        match acc.getDomCap cap with
+        | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+        | none    => acc) s).getMem c = s.getMem c := by
+  show _ = _
+  unfold SpecState.getMem
+  rw [foldl_channelCancel_memcaps_eq]
+
+/-- Real `revokeOneDomain s did'` owner preservation. -/
+theorem revokeOneDomain_owner_preserved
+    (s : SpecState) (did' : DomId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (revokeOneDomain s did').getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  rcases hgd : s.getDom did' with _ | d
+  · have hno : revokeOneDomain s did' = s := by
+      unfold revokeOneDomain; rw [hgd]
+    rw [hno] at hPost
+    rw [hPre] at hPost
+    injection hPost with heq; rw [heq]
+  · -- Local abbreviations
+    let s₁ : SpecState := (d.memHandles.map Prod.snd).foldl revokeOneMemCap s
+    let s₂ : SpecState := (d.domHandles.map Prod.snd).foldl
+        (fun acc cap => match acc.getDomCap cap with
+                        | some dc => if dc.isChannel
+                                     then cancelChannelIfPending acc cap
+                                     else acc
+                        | none => acc) s₁
+    let s₃ : SpecState := clearCommBindings s₂ d.commBindings
+    have hPost_eq : (revokeOneDomain s did').getMem c = s₃.getMem c := by
+      show (revokeOneDomain s did').memcaps.find? c = s₃.memcaps.find? c
+      have hmm : (revokeOneDomain s did').memcaps = s₃.memcaps := by
+        unfold revokeOneDomain
+        simp only [hgd]
+        cases d.parent <;> rfl
+      rw [hmm]
+    rw [hPost_eq] at hPost
+    rcases h2 : s₂.getMem c with _ | cap2
+    · have h3none : s₃.getMem c = none :=
+        clearCommBindings_getMem_none_preserved s₂ d.commBindings c h2
+      rw [h3none] at hPost; cases hPost
+    · have e23 : cap2.owner = capPost.owner :=
+        clearCommBindings_owner_preserved s₂ d.commBindings c cap2 capPost h2 hPost
+      have h12 : s₂.getMem c = s₁.getMem c :=
+        foldl_channelCancel_getMem_eq s₁ _ c
+      rw [h12] at h2
+      have e12 : capPre.owner = cap2.owner :=
+        foldl_revokeOneMemCap_owner_preserved s _ c capPre cap2 hPre h2
+      exact e12.trans e23
+
+/-- `revokeOneMemCap` preserves `none` lookup. -/
+theorem revokeOneMemCap_getMem_none_preserved
+    (s : SpecState) (mid : MemCapId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (revokeOneMemCap s mid).getMem c = none := by
+  unfold revokeOneMemCap
+  rcases hgm : s.getMem mid with _ | mcap
+  · simp [hgm]; exact h
+  · simp only [hgm]
+    rcases hpp : mcap.parent with _ | pid
+    · simp only [hpp]
+      show ({ s with memcaps := s.memcaps.remove mid } : SpecState).getMem c = none
+      show (s.memcaps.remove mid).find? c = none
+      by_cases hcm : c = mid
+      · subst hcm; exact Arena.find?_remove_same _ _
+      · rw [Arena.find?_remove_other _ _ _ hcm]; exact h
+    · simp only [hpp]
+      show (({ s with memcaps := s.memcaps.remove mid } : SpecState).updMem pid _).getMem c = none
+      apply updMem_getMem_none_preserved
+      show (s.memcaps.remove mid).find? c = none
+      by_cases hcm : c = mid
+      · subst hcm; exact Arena.find?_remove_same _ _
+      · rw [Arena.find?_remove_other _ _ _ hcm]; exact h
+
+/-- A fold of `revokeOneMemCap` preserves `none` lookup. -/
+theorem foldl_revokeOneMemCap_getMem_none_preserved
+    (s : SpecState) (mids : List MemCapId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (mids.foldl revokeOneMemCap s).getMem c = none := by
+  induction mids generalizing s with
+  | nil => simpa using h
+  | cons mid rest ih =>
+    simp only [List.foldl_cons]
+    exact ih (revokeOneMemCap s mid) (revokeOneMemCap_getMem_none_preserved s mid c h)
+
+/-- `none` propagates along a fold of `revokeOneDomain` over a list. -/
+theorem foldl_revokeOneDomain_getMem_none_preserved
+    (s : SpecState) (dids : List DomId) (c : MemCapId)
+    (h : s.getMem c = none) :
+    (dids.foldl revokeOneDomain s).getMem c = none := by
+  induction dids generalizing s with
+  | nil => simpa using h
+  | cons did rest ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    -- show (revokeOneDomain s did).getMem c = none, given s.getMem c = none
+    rcases hg : s.getDom did with _ | d
+    · have : revokeOneDomain s did = s := by
+        unfold revokeOneDomain; rw [hg]
+      rw [this]; exact h
+    · -- Re-use the memcaps chain established above.
+      let s₁ : SpecState := (d.memHandles.map Prod.snd).foldl revokeOneMemCap s
+      let s₂ : SpecState := (d.domHandles.map Prod.snd).foldl
+          (fun acc cap => match acc.getDomCap cap with
+                          | some dc => if dc.isChannel
+                                       then cancelChannelIfPending acc cap
+                                       else acc
+                          | none => acc) s₁
+      let s₃ : SpecState := clearCommBindings s₂ d.commBindings
+      have hmm : (revokeOneDomain s did).memcaps = s₃.memcaps := by
+        unfold revokeOneDomain
+        simp only [hg]
+        cases d.parent <;> rfl
+      have hres : (revokeOneDomain s did).getMem c = s₃.getMem c := by
+        show (revokeOneDomain s did).memcaps.find? c = s₃.memcaps.find? c
+        rw [hmm]
+      rw [hres]
+      -- s₃ = clearCommBindings s₂ d.commBindings; s₂.memcaps = s₁.memcaps
+      apply clearCommBindings_getMem_none_preserved
+      rw [show s₂.getMem c = s₁.getMem c from
+            foldl_channelCancel_getMem_eq s₁ _ c]
+      exact foldl_revokeOneMemCap_getMem_none_preserved s _ c h
+
+/-- A fold of `revokeOneDomain` over a list of dids preserves the owner
+    of any memcap that survives the fold. -/
+theorem foldl_revokeOneDomain_owner_preserved
+    (s : SpecState) (dids : List DomId) (c : MemCapId)
+    (capPre capPost : MemCap)
+    (hPre : s.getMem c = some capPre)
+    (hPost : (dids.foldl revokeOneDomain s).getMem c = some capPost) :
+    capPre.owner = capPost.owner := by
+  induction dids generalizing s capPre with
+  | nil => simp at hPost; rw [hPre] at hPost; injection hPost with h; rw [h]
+  | cons did rest ih =>
+    simp only [List.foldl_cons] at hPost
+    rcases hmid : (revokeOneDomain s did).getMem c with _ | capMid
+    · -- cap removed → can't come back
+      have : (rest.foldl revokeOneDomain (revokeOneDomain s did)).getMem c = none :=
+        foldl_revokeOneDomain_getMem_none_preserved _ _ _ hmid
+      rw [this] at hPost; cases hPost
+    · have h1 : capPre.owner = capMid.owner :=
+        revokeOneDomain_owner_preserved s did c capPre capMid hPre hmid
+      have h2 : capMid.owner = capPost.owner := ih _ capMid hmid hPost
+      exact h1.trans h2
+
 end ThemisCapa
