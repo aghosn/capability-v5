@@ -722,6 +722,29 @@ Stage-wise breakdown of `revokeOneDomain s did'` (see Step.lean:816):
 
 The premises below enumerate the survivors. -/
 
+/-- Single channel-ops step preserves `did`'s domain when no current
+    pending entry for `cap` has `did` as holder or sender.
+
+    NOTE: this is the *current-state* premise. Lifting to an
+    initial-state premise that survives the channel-ops fold is left
+    as a TODO (`foldl_channelOps_getDom_eq`); see the stage-2 sorry
+    in `revokeOneDomain_getDom_eq` below. -/
+private theorem channelOpsStep_other_eq
+    (acc : SpecState) (cap : DomCapId) (did : DomId)
+    (h : ∀ entry ∈ acc.domains.entries, ∀ pid pe,
+          entry.2.pendingDomCaps.find? (fun p => p.2.capId = cap)
+            = some (pid, pe) → did ≠ entry.1 ∧ did ≠ pe.senderDomainId) :
+    (match acc.getDomCap cap with
+     | some dc => if dc.isChannel then cancelChannelIfPending acc cap else acc
+     | none    => acc).getDom did = acc.getDom did := by
+  rcases hdc : acc.getDomCap cap with _ | dc
+  · rfl
+  · show (if dc.isChannel then cancelChannelIfPending acc cap else acc).getDom did
+          = acc.getDom did
+    by_cases hch : dc.isChannel
+    · rw [if_pos hch]; exact cancelChannelIfPending_getDom_eq acc cap did h
+    · rw [if_neg hch]
+
 /-- Single-step `revokeOneDomain s did'` preserves `did`'s domain record
     when `did` is outside the cascade footprint for this step. -/
 theorem revokeOneDomain_getDom_eq
