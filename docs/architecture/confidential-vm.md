@@ -807,3 +807,169 @@ verify CHANNEL_SEND delivers the alias to dom0.
 - Current CHV memory setup: `cloud-hypervisor/hypervisor/src/themis/mod.rs` (lines 438-475)
 - swiotlb bounce buffer: `kernel/dma/swiotlb.c`
 - virtio CoCo hardening: [LWN article](https://lwn.net/Articles/865216/)
+
+---
+
+## 12. Virtio notify via `THEMIS_RING_DOORBELL` (guest patch)
+
+### Why
+
+The pre-CoCo virtio kick path was `iowrite16(vq->index, notify_bar)`. That
+triggers an `EPT_VIOLATION` which the capavisor used to resolve by reading
+guest instruction bytes via a page walk (so the parent's iced-x86 could
+decode), then forwarding to CHV userspace for ioeventfd dispatch.
+
+That is wrong for two reasons:
+
+1. **Capavisor must never decode guest instructions.** It is a hard
+   invariant — for a confidential domain the capavisor cannot read guest
+   code, and for any domain it is the parent's job (with information
+   provided by the capavisor straight from the VMCS exit fields) to do
+   any decoding. Tracked separately by `parent-side-mmio-emulation`.
+2. **Latency.** Each kick = two VMCS swaps + iced-x86 dispatch. Slow
+   enough that systemd generators time out (SIGALRM) during boot.
+
+The Themis-native answer mirrors SEV-SNP's GHCB: the guest itself packages
+the request and issues a hypercall, the host gets a fully resolved
+notification with no decode required.
+
+### Mechanism
+
+The optimization is **decoupled from CoCo**: it is gated on a CPUID
+feature bit so that non-confidential Themis guests benefit too (no
+parent-side decode round-trip). Capavisor advertises capabilities via a
+paravirt CPUID feature leaf, mirroring the KVM/Hyper-V layout:
+
+| Leaf         | Always? | Content                                                     |
+|--------------|---------|-------------------------------------------------------------|
+| `0x40000000` | yes     | EAX = max leaf, EBX:ECX:EDX = `"ThemisCapa  "` (LE bytes)   |
+| `0x40000001` | yes     | EAX = feature bitmap (see below)                            |
+| `0x40000002` | yes     | DomainComm GPA + page count                                 |
+| `0x40000003` | yes     | Capacity limits                                             |
+| `0x40000004` | when ivshmem | Per-device subleaves                                   |
+| `0x40000100` | confidential only | EAX = VTOM bit; EBX:ECX:EDX = `"ThemisCoCo  "`     |
+
+Feature bits in EAX of `0x40000001` (see `themis_abi::cpuid::feature_bits`):
+
+- bit 0 — `FEATURE_SYNC_SWITCH`
+- bit 1 — `FEATURE_DOORBELL_HYPERCALL` — guest may use `THEMIS_RING_DOORBELL`
+  in place of MMIO writes to virtio notify BARs
+
+The guest reads `0x40000000` early in `setup_arch()`
+(`themis_platform_init()` in `arch/x86/kernel/cpu/themis_platform.c`),
+caches the bitmap, and the virtio modern transport flips its
+`vp_notify` callback only when bit 1 is set. CoCo detection
+(`0x40000100`) runs separately in `themis_coco_init()` and sets
+`cc_vendor`. Memory-confidentiality and the doorbell path are now
+orthogonal.
+
+When the doorbell bit is set the guest's `vp_notify` swaps the MMIO
+write for a `THEMIS_RING_DOORBELL` (opcode `0x23`) VMCALL carrying the
+notify GPA and the queue index (or notification-data word for the
+`VIRTIO_F_NOTIFICATION_DATA` path). Path:
+
+```
+guest THEMIS_RING_DOORBELL
+   → capavisor matches GPA against the child PD's doorbell list
+   → enqueues DoorbellNotify on the parent's DomainComm RX ring
+   → forward_child_exit(THEMIS_EXIT_DOORBELL)
+   → thhv drains the ring and signals the matching eventfd
+   → CHV virtio backend runs the queue
+```
+
+No instruction decode anywhere; the GPA comes from the guest, equivalent
+to how SEV-SNP packages MMIO requests inside the GHCB.
+
+### Why the GPAs agree by construction
+
+Doorbells are registered today through:
+
+```
+CHV register_ioevent  →  thhv THHV_IOEVENTFD  →  REGISTER_DOORBELL hypercall
+                       →  capavisor pushes DoorbellEntry into the child PD
+```
+
+Both CHV and the guest compute the notify GPA the same way:
+
+```
+notify_gpa = notify_bar_base + queue_notify_off * notify_off_multiplier
+```
+
+from the standard virtio_pci notify capability. In the guest that is the
+existing `pa` out-parameter of `vp_modern_map_vq_notify(mdev, index,
+&pa)`.
+
+### Guest-side code (linux fork, branch `v6.19.14-themis`)
+
+- **`arch/x86/include/asm/themis_hcall.h`** (new) — inline
+  `themis_ring_doorbell(gpa, value)` wrapping `vmcall` with the System V
+  convention (RAX = opcode `0x23`, RDI = GPA, RSI = value, RAX = return).
+  Opcode mirrors `themis_abi::opcodes::THEMIS_RING_DOORBELL`.
+
+- **`arch/x86/include/asm/themis_platform.h`** (new) — public API for
+  Themis paravirt detection: `themis_platform_init()`,
+  `themis_on_themis()`, `themis_feature_bits()`, `themis_has_feature()`.
+  Stubs out to `false`/`0` when `CONFIG_THEMIS_GUEST=n`. Mirrors the ABI
+  signature constants and feature bits.
+
+- **`arch/x86/kernel/cpu/themis_platform.c`** (new, gated on
+  `CONFIG_THEMIS_GUEST`) — reads CPUID `0x40000000` for the signature
+  and `0x40000001` for the feature bitmap; called from `setup_arch()`
+  before `themis_coco_init()`.
+
+- **`arch/x86/Kconfig`** — new `CONFIG_THEMIS_GUEST` symbol (default y if
+  Themis CoCo); `CONFIG_THEMIS_COCO` now `select`s it.
+
+- **`drivers/virtio/virtio_pci_common.h`** — `struct virtio_pci_vq_info`
+  gains an optional `themis_notify_iomem` field (gated on
+  `CONFIG_THEMIS_GUEST`) used to remember the per-vq ioremap so
+  `del_vq` can release it cleanly. We need the side-band field because
+  `vq->priv` is re-purposed in Themis mode (see below).
+
+- **`drivers/virtio/virtio_pci_modern.c`**:
+  - Includes `<asm/themis_platform.h>` and `<asm/themis_hcall.h>` under
+    `CONFIG_THEMIS_GUEST`.
+  - `themis_is_active()` returns
+    `themis_has_feature(THEMIS_FEATURE_DOORBELL_HYPERCALL)`.
+  - New static `themis_vp_notify` / `themis_vp_notify_with_data` call
+    `themis_ring_doorbell((u64)(unsigned long)vq->priv, vq->index_or_data)`.
+  - `setup_vq` picks the themis variants when `themis_is_active()`. After
+    the existing `vp_modern_map_vq_notify(..., NULL)` it re-resolves with
+    `&pa`, drops the per-vq ioremap (if `mdev->notify_base == NULL`) and
+    stores it in `info->themis_notify_iomem` for later cleanup, then
+    overwrites `vq->priv` with the GPA cast to `void *`.
+  - `del_vq` releases `info->themis_notify_iomem` instead of treating
+    `vq->priv` as iomem in Themis mode.
+
+The legacy virtio_pci path is unchanged — cloud-hypervisor only exposes
+the modern transport.
+
+### Why `vq->priv` overloading
+
+`vp_notify(vq)` only has the `struct virtqueue *` to work from, so the
+per-vq state (iomem ptr today, GPA in Themis) must be reachable from
+there. The two cases are mutually exclusive (selected by the
+`FEATURE_DOORBELL_HYPERCALL` bit at probe time), so re-purposing the
+existing field keeps the patch small and avoids extra per-vq
+storage. The dual semantics are confined to `virtio_pci_modern.c`;
+nothing outside the module touches `vq->priv`.
+
+### Status
+
+| Component                                        | Status    |
+|--------------------------------------------------|-----------|
+| CPUID base + feature leaf (`0x40000000` / `0x40000001`) | done |
+| Capavisor `do_ring_doorbell` (`0x23`)            | done      |
+| CHV `register_ioevent` → `REGISTER_DOORBELL`     | done      |
+| Guest virtio notify swap (this section)          | done      |
+| Non-Themis-aware fallback rewrite (`parent-side-mmio-emulation`) | pending |
+
+### CHV-side fallback (non-Themis-aware guests)
+
+For Themis guests where `FEATURE_DOORBELL_HYPERCALL` is unused (e.g. an
+unmodified upstream kernel), kicks still EPT-violate. That path is
+documented as broken-by-design and tracked by the
+`parent-side-mmio-emulation` todo: capavisor must hand the parent RIP /
+GPA / qualification straight from the VMCS exit fields, and the parent
+decodes itself (capavisor must never decode guest instructions).
+

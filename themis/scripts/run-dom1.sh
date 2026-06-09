@@ -25,6 +25,12 @@
 #   CHV_CPUS      vCPU count (default: 2)
 #   CHV_MEM       Memory (default: 1G)
 #   CHV_EXTRA_ARGS  Extra cloud-hypervisor arguments
+#   SYSTEMD_DEBUG   Set to 1 to add `systemd.log_level=debug systemd.log_target=console`
+#                   to the kernel cmdline (verbose systemd boot, useful for diagnosing
+#                   PID1 failures).
+#   INIT_SHELL      Set to 1 to bypass systemd entirely with `init=/bin/sh`
+#                   (drops to a root shell on hvc0; mutually exclusive with the
+#                   normal boot).
 
 set -euo pipefail
 
@@ -211,12 +217,25 @@ build_cmdline() {
     CMDLINE+=" systemd.mask=snapd.seeded.service"
     CMDLINE+=" systemd.mask=snapd.service"
 
+    # Optional: verbose systemd output to console — for diagnosing PID1 failures.
+    if [[ "${SYSTEMD_DEBUG:-0}" == "1" ]]; then
+        CMDLINE+=" systemd.log_level=debug systemd.log_target=console"
+    fi
+
     # CoCo kernel: keep KASLR and paravirt, they work fine
     # Dom0 kernel: disable for easier debugging
     if [[ "${SELECTED_KERNEL}" == *"nested"* || "${SELECTED_KERNEL}" == *"guest/kernel"* ]]; then
         CMDLINE+=" nokaslr"
     else
         CMDLINE+=" nokaslr nopv"
+    fi
+
+    # Optional: bypass systemd entirely, drop to a root shell on hvc0.
+    # MUST be the last entry on the cmdline: tokens after `init=` that the
+    # kernel doesn't recognize are passed as argv to the init binary, so
+    # any kernel-only args (e.g. `nokaslr`) must come BEFORE `init=`.
+    if [[ "${INIT_SHELL:-0}" == "1" ]]; then
+        CMDLINE+=" init=/bin/sh"
     fi
 
     echo "$CMDLINE"

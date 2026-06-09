@@ -259,8 +259,25 @@ pub mod cpuid {
     pub const LEAF_BASE: u32 = 0x4000_0000;
 
     /// Feature flags leaf.
-    /// EAX = feature bitmap (bit 0: sync-switch supported).
+    /// EAX = feature bitmap (see `feature_bits` below).
     pub const LEAF_FEATURES: u32 = 0x4000_0001;
+
+    /// Bits returned in EAX of `LEAF_FEATURES`.  Each bit advertises one
+    /// optional capability of the capavisor; guests MUST check the bit
+    /// before using the associated mechanism.  New bits MUST be appended;
+    /// existing bits MUST NOT be repurposed.
+    pub mod feature_bits {
+        /// Capavisor supports the sync-switch scheduling model.  Always
+        /// set in the current build — kept as a stable bit for guests
+        /// that want to assert it.
+        pub const FEATURE_SYNC_SWITCH: u32 = 1 << 0;
+
+        /// Guest may issue the `THEMIS_RING_DOORBELL` VMCALL (opcode
+        /// 0x23) to notify the parent through a registered doorbell,
+        /// bypassing the MMIO emulation path.  See
+        /// `docs/architecture/confidential-vm.md` §12.
+        pub const FEATURE_DOORBELL_HYPERCALL: u32 = 1 << 1;
+    }
 
     /// DomainComm discovery (alias for domcomm::CPUID_DOMCOMM_LEAF).
     /// EAX:EBX = base GPA (lo:hi), ECX = size in pages.

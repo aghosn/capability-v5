@@ -81,7 +81,8 @@ fn handle_themis_leaf(
             true
         }
         themis_abi::cpuid::LEAF_FEATURES => {
-            *eax = 0b00001;
+            use themis_abi::cpuid::feature_bits::*;
+            *eax = FEATURE_SYNC_SWITCH | FEATURE_DOORBELL_HYPERCALL;
             *ebx = 0;
             *ecx = 0;
             *edx = 0;

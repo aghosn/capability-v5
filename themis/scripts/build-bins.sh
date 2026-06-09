@@ -79,12 +79,12 @@ if [[ "$BINS_TARGETS" != "all" ]]; then
         _target="${_target,,}"
         [[ -z "$_target" ]] && continue
         case "$_target" in
-            capavisor|chv|cloud-hypervisor|capa-engine|thhv|eunomia)
+            capavisor|chv|cloud-hypervisor|capa-engine|thhv|eunomia|tools)
                 SELECTED_TARGETS+=("$_target")
                 ;;
             *)
                 echo "ERROR: unknown BINS_TARGETS entry '$_raw'" >&2
-                echo "       Supported values: all, capavisor, chv, capa-engine, thhv, eunomia" >&2
+                echo "       Supported values: all, capavisor, chv, capa-engine, thhv, eunomia, tools" >&2
                 exit 1
                 ;;
         esac
@@ -245,6 +245,24 @@ if should_build eunomia; then
     fi
 else
     echo "→ [eunomia] skipped"
+fi
+
+if should_build tools; then
+    TOOLS_DIR="$REPO_ROOT/tools"
+    if [[ -d "$TOOLS_DIR" ]]; then
+        echo "→ [tools] building C utilities"
+        shopt -s nullglob
+        for src in "$TOOLS_DIR"/*.c; do
+            name="$(basename "$src" .c)"
+            echo "  → $name"
+            (cd "$TOOLS_DIR" && gcc -static -O2 -Wall -o "$name" "$(basename "$src")")
+        done
+        shopt -u nullglob
+    else
+        warn "tools/ not found; skipping tools build"
+    fi
+else
+    echo "→ [tools] skipped"
 fi
 
 if [[ ! -f "$BINS_IMG" ]]; then

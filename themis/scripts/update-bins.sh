@@ -148,7 +148,8 @@ mkdir -p \
     "$MNT/cloud-hypervisor" \
     "$MNT/capa-engine/tests" \
     "$MNT/nested" \
-    "$MNT/eunomia"
+    "$MNT/eunomia" \
+    "$MNT/tools"
 
 # ── README ───────────────────────────────────────────────────────────────────
 cat > "$MNT/README.md" <<'EOF'
@@ -355,6 +356,29 @@ if [[ -n "$NESTED_ROOTFS" ]]; then
         cp "$NESTED_ROOTFS" "$MNT/nested/rootfs.img"
     else
         warn_missing "$NESTED_ROOTFS"
+    fi
+fi
+
+# ── Host-side C tools (toggle-debug, future helpers) ─────────────────────────
+if should_package tools; then
+    TOOLS_DIR="$REPO_ROOT/tools"
+    TOOLS_PACKED=0
+    if [[ -d "$TOOLS_DIR" ]]; then
+        shopt -s nullglob
+        for src in "$TOOLS_DIR"/*.c; do
+            name="$(basename "$src" .c)"
+            bin="$TOOLS_DIR/$name"
+            if [[ -x "$bin" ]]; then
+                cp "$bin" "$MNT/tools/$name"
+                TOOLS_PACKED=$((TOOLS_PACKED + 1))
+            else
+                warn_missing "$bin (build with: cargo build-bins)"
+            fi
+        done
+        shopt -u nullglob
+    fi
+    if (( TOOLS_PACKED > 0 )); then
+        echo "  ✔ tools/ ($TOOLS_PACKED utilities)"
     fi
 fi
 
