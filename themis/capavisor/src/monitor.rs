@@ -79,12 +79,14 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
 
                 // MSR interposition: per-MSR policy overrides ExitPolicy.
                 if let ExitInfo::Msr {
-                    number, is_write, ..
+                    number, is_write, value,
                 } = info
                 {
+                    let action = lookup_msr_action(platform, *number);
                     if !is_write {
-                        // RDMSR: check MSR interposition policy.
-                        match lookup_msr_action(platform, *number) {
+                        // RDMSR: existing semantics — Emulate returns the
+                        // policy's stored value.
+                        match action {
                             InterpositionAction::Trap => {
                                 vp.forward_exit(reason);
                                 continue;
@@ -93,15 +95,36 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                                 vp.handle_local(reason, info);
                                 continue;
                             }
-                            InterpositionAction::Emulate(value) => {
-                                vp.emulate_rdmsr(value);
+                            InterpositionAction::Emulate(stored) => {
+                                vp.emulate_rdmsr(stored);
                                 continue;
                             }
                         }
+                    } else {
+                        // WRMSR: symmetric three-state.
+                        // Emulate ⇒ try capavisor's internal MSR emulator
+                        // registry; fail-closed to Trap (forward to parent)
+                        // when no handler is registered.
+                        match action {
+                            InterpositionAction::Trap => {
+                                vp.forward_exit(reason);
+                                continue;
+                            }
+                            InterpositionAction::Native => {
+                                vp.handle_local(reason, info);
+                                continue;
+                            }
+                            InterpositionAction::Emulate(_) => {
+                                match vp.try_emulate_wrmsr(*number, *value) {
+                                    Ok(()) => continue,
+                                    Err(()) => {
+                                        vp.forward_exit(reason);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    // WRMSR: for now, fall through to ExitPolicy.
-                    // (MSR emulate only defines read values; writes use
-                    // trap/native per ExitPolicy.)
                 }
 
                 // Default: consult ExitPolicy for all other exit reasons.
@@ -247,10 +270,16 @@ fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlat
 
 /// Handle preemption timer exit.
 ///
-/// For quantum-sched: flush deferred vectors on quantum expiry.
-/// For all domains: reset the timer and resume.
+/// First gives the arch-side MSR emulators a chance to consume the timer
+/// (e.g. injecting `0xEC` for an emulated TSC-deadline expiry). If
+/// consumed, no re-arm: the emulator already programmed any next deadline.
+/// Otherwise, the timer fired for the generic quantum-sched path.
 #[allow(unused_variables)]
 fn handle_preemption_timer<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform) {
+    if vp.try_consume_preemption_timer() {
+        return;
+    }
+
     #[cfg(feature = "quantum-sched")]
     {
         let core_id = platform.get_current_core().unwrap_or(0) as usize;

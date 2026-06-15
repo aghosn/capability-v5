@@ -91,6 +91,28 @@ pub trait ArchVpOps {
     /// Called by the generic monitor loop when MSR interposition policy
     /// returns Emulate for a RDMSR exit.
     fn emulate_rdmsr(&mut self, vp: &mut Self::VpHandle, value: u64);
+
+    /// Try to handle a WRMSR via capavisor's internal emulator registry.
+    ///
+    /// Called by the generic monitor when the per-domain `MsrPolicy`
+    /// returns `Emulate` for a write. Returns `Ok(())` if the registry
+    /// handled the write (caller should resume the guest); `Err(())`
+    /// if no handler is registered (caller forwards the exit to the
+    /// parent — fail-closed semantics consistent with the user-facing
+    /// "Emulate else Trap" rule for writes).
+    fn try_emulate_wrmsr(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        msr: u32,
+        value: u64,
+    ) -> Result<(), ()>;
+
+    /// Called from the generic preemption-timer exit handler to give
+    /// arch-specific MSR emulators (e.g. TSC-deadline) a chance to act
+    /// on the timer fire. Returns `true` if the timer was consumed by
+    /// an emulator (interrupt injected internally); `false` otherwise,
+    /// in which case the caller follows the default re-arm path.
+    fn try_consume_preemption_timer(&mut self, vp: &mut Self::VpHandle) -> bool;
 }
 
 // ── Guest physical address space (EPT / Stage-2) ─────────────────────────── //

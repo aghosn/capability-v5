@@ -158,6 +158,23 @@ impl ArchVpOps for X86Platform {
         vp.set_reg(Reg::Rdx, (value >> 32) & 0xFFFF_FFFF);
         vp.next_rip();
     }
+
+    fn try_emulate_wrmsr(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        msr: u32,
+        value: u64,
+    ) -> Result<(), ()> {
+        let core_id = self.platform().current_core_id().unwrap_or(0) as usize;
+        crate::arch::x86_64::msr_emulator::try_handle_wrmsr(vp, core_id, msr, value)?;
+        vp.next_rip();
+        Ok(())
+    }
+
+    fn try_consume_preemption_timer(&mut self, vp: &mut Self::VpHandle) -> bool {
+        let core_id = self.platform().current_core_id().unwrap_or(0) as usize;
+        crate::arch::x86_64::msr_emulator::maybe_inject_tsc_deadline(vp, core_id)
+    }
 }
 
 // ── ArchGuestPhysMap ─────────────────────────────────────────────────────── //

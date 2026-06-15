@@ -305,4 +305,17 @@ impl<A: ArchVpOps> Vp<A> {
     pub fn emulate_rdmsr(&mut self, value: u64) {
         self.arch.emulate_rdmsr(&mut self.handle, value);
     }
+
+    /// Try to handle a WRMSR Emulate via capavisor's internal registry.
+    /// Returns `Ok(())` if handled (caller resumes guest), `Err(())` if
+    /// the caller should trap to parent.
+    pub fn try_emulate_wrmsr(&mut self, msr: u32, value: u64) -> Result<(), ()> {
+        self.arch.try_emulate_wrmsr(&mut self.handle, msr, value)
+    }
+
+    /// Give the arch-side MSR emulators a chance to consume a preemption-timer
+    /// exit (e.g. TSC-deadline injection). Returns `true` if consumed.
+    pub fn try_consume_preemption_timer(&mut self) -> bool {
+        self.arch.try_consume_preemption_timer(&mut self.handle)
+    }
 }

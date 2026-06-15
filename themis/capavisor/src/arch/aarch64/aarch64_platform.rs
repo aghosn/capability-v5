@@ -96,6 +96,31 @@ impl ArchVpOps for Aarch64Platform {
         // ARM EL2 physical timer: write CNTHP_TVAL_EL2 or CNTHP_CTL_EL2.
         unimplemented!("aarch64: reset_timer")
     }
+
+    fn emulate_cpuid(
+        &mut self,
+        _vp: &mut Self::VpHandle,
+        _result: &capability_engine::interposition::CpuidResult,
+    ) {
+        unimplemented!("aarch64: emulate_cpuid (no CPUID on aarch64)")
+    }
+
+    fn emulate_rdmsr(&mut self, _vp: &mut Self::VpHandle, _value: u64) {
+        unimplemented!("aarch64: emulate_rdmsr")
+    }
+
+    fn try_emulate_wrmsr(
+        &mut self,
+        _vp: &mut Self::VpHandle,
+        _msr: u32,
+        _value: u64,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn try_consume_preemption_timer(&mut self, _vp: &mut Self::VpHandle) -> bool {
+        false
+    }
 }
 
 // ── ArchGuestPhysMap ─────────────────────────────────────────────────────── //
