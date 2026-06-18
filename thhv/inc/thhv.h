@@ -194,6 +194,7 @@ static inline int __themis_to_errno(u64 status)
 	case THEMIS_ERR_NOMEM:    return -ENOMEM;
 	case THEMIS_ERR_BADSTATE: return -EBUSY;
 	case THEMIS_ERR_NOTFOUND: return -ENOENT;
+	case THEMIS_ERR_BUSY:     return -EBUSY;
 	case THEMIS_ERR_RETRY:    return -EAGAIN;
 	case THEMIS_ERR_RACE:     return -EAGAIN;
 	case THEMIS_ERR_UNIMPL:   return -ENOSYS;

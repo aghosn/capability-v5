@@ -256,14 +256,21 @@ fn enqueue_attest_chunk(
     if offset >= total_size {
         return HypercallResult::success_2(total_size as u64, 0);
     }
-    let slice = &payload[offset..];
+    // DomainComm enforces "one message ≤ one ring page" — splitter pads
+    // residual page space, so messages > MAX_PAYLOAD are always rejected.
+    // The caller already loops on (offset, total_size); cap each chunk so a
+    // signed report (common base + envelope + optional TPM tail, easily
+    // > MAX_PAYLOAD) is delivered as a sequence of page-sized chunks.
+    let remaining = total_size - offset;
+    let chunk_len = remaining.min(domcomm::MAX_PAYLOAD);
+    let slice = &payload[offset..offset + chunk_len];
     let ring_bytes = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
     if ring_bytes == 0 {
         return HypercallResult::error(errors::ERR_BUSY);
     }
-    // Whole `slice` was enqueued as one message (rx_enqueue is all-or-nothing);
-    // report progress in payload bytes so the caller can compare against
-    // total_size directly.
+    // Report progress in payload bytes (excluding the MsgHeader and any
+    // page-padding the ring inserted) so the caller can simply
+    // `offset += wrote` until `offset == total_size`.
     HypercallResult::success_2(total_size as u64, slice.len() as u64)
 }
 
