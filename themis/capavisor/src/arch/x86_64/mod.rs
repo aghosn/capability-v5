@@ -12,6 +12,7 @@ pub mod gdt;
 pub mod iommu_ir;
 pub mod iommu_dev;
 pub mod layout;
+pub mod msr_bitmap;
 pub mod msr_emulator;
 pub mod msr_virt;
 pub mod page_walk;

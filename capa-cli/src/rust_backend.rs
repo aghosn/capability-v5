@@ -218,6 +218,14 @@ fn convert_updates(batch: &UpdateBatch) -> Vec<HwUpdate> {
             hpa: *start,
             rights: None,
         },
+        Update::PolicyChanged { domain, .. } => HwUpdate {
+            kind: HwUpdateKind::PolicyChanged,
+            domain_id: *domain,
+            gpa: 0,
+            size: 0,
+            hpa: 0,
+            rights: None,
+        },
     }).collect()
 }
 
@@ -746,6 +754,7 @@ impl Backend for RustBackend {
         let (parent_arc, _child_arc, handle) = self.resolve_dom_handle(parent, child)?;
         let policy_id = parse_policy_id(field)?;
         Capability::set_policy(&parent_arc, handle, policy_id, value)
+            .map(|_batch| ())
             .map_err(convert_error)
     }
 
@@ -805,7 +814,9 @@ impl Backend for RustBackend {
             handle,
             PolicyIdentifier::VectorVisibility(vector),
             visibility,
-        ).map_err(convert_error)
+        )
+        .map(|_batch| ())
+        .map_err(convert_error)
     }
 
     // ── Queries ─────────────────────────────────────────────────────────

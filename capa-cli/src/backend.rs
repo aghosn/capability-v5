@@ -168,6 +168,7 @@ pub enum HwUpdateKind {
     CommRegion,
     UncommRegion,
     GiveMetaMem,
+    PolicyChanged,
 }
 
 impl fmt::Display for HwUpdateKind {
@@ -182,6 +183,7 @@ impl fmt::Display for HwUpdateKind {
             HwUpdateKind::CommRegion => write!(f, "CommRegion"),
             HwUpdateKind::UncommRegion => write!(f, "UncommRegion"),
             HwUpdateKind::GiveMetaMem => write!(f, "GiveMetaMem"),
+            HwUpdateKind::PolicyChanged => write!(f, "PolicyChanged"),
         }
     }
 }

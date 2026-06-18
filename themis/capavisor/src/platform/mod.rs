@@ -80,6 +80,8 @@ use capability_engine::{
 };
 
 use crate::arch::{ArchDomainState, ArchPlatformState};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::msr_bitmap;
 use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 
 use crate::mem::{PhysRegion, UncacheableRanges};
@@ -566,6 +568,90 @@ impl ThemisPlatform {
     pub(crate) fn current_core_id(&self) -> Option<capability_engine::CoreId> {
         self.get_current_core()
     }
+
+    /// Apply a `PolicyChange` delta to per-domain hardware state.
+    ///
+    /// Today only MSR variants project to hardware (the per-domain VMX
+    /// MSR bitmap, x86-only). The other variants are no-ops with
+    /// explicit TODO markers — kept as match arms so any future
+    /// engine-side addition causes a compile-time miss here.
+    fn apply_policy_change(
+        &self,
+        domain: DomainId,
+        change: &capability_engine::PolicyChange,
+    ) {
+        use capability_engine::PolicyChange as PC;
+
+        match change {
+            #[cfg(target_arch = "x86_64")]
+            PC::MsrDefault(action) => {
+                if let Some(phys) = self.msr_bitmap_phys(domain) {
+                    // SAFETY: bitmap_phys is the domain's MSR bitmap
+                    // page; hardware re-reads the bitmap on every MSR
+                    // access so partial updates between set_default and
+                    // the subsequent range/override re-emits are safe.
+                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+                    unsafe { msr_bitmap::set_default(phys, hhdm, *action); }
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            PC::MsrRange { start, end, action } => {
+                if let Some(phys) = self.msr_bitmap_phys(domain) {
+                    let trap = matches!(action, capability_engine::DefaultAction::Trap);
+                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+                    unsafe { msr_bitmap::apply_range(phys, hhdm, *start, *end, trap); }
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            PC::MsrEmulate { msr, .. } => {
+                if let Some(phys) = self.msr_bitmap_phys(domain) {
+                    // Emulate ⇒ trap (capavisor's emulator runs on exit).
+                    let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+                    unsafe { msr_bitmap::trap_msr(phys, hhdm, *msr, true); }
+                }
+            }
+
+            // Non-x86 builds: MSR variants have no projection.
+            #[cfg(not(target_arch = "x86_64"))]
+            PC::MsrDefault(_) | PC::MsrRange { .. } | PC::MsrEmulate { .. } => {}
+
+            // CPUID is always trapped via CPUID-exiting=1 and dispatched
+            // at exit against the live engine policy; no derived bitmap.
+            PC::CpuidDefault(_)
+            | PC::CpuidRange { .. }
+            | PC::CpuidEmulate { .. } => {}
+
+            // Exit-routing → VMCS procbased/pin/exit/entry controls.
+            // TODO: project to VMCS controls when policy.exits drives them.
+            PC::DefaultExitTrap(_)
+            | PC::ExitReason { .. }
+            | PC::ExitReasonRegReadSet { .. }
+            | PC::ExitReasonRegWriteSet { .. } => {}
+
+            // Interrupt visibility / per-vector reg sets — consumed at
+            // exit dispatch time; no derived hardware bitmap today.
+            // TODO when A3 (lazy-unwind) relaxes and EOI-exit bitmap is used.
+            PC::InterruptDefaultVisibility(_)
+            | PC::VectorVisibility { .. }
+            | PC::VectorRegReadSet { .. }
+            | PC::VectorRegWriteSet { .. } => {}
+
+            // Pure engine ACLs (no hardware effect).
+            PC::Cores(_) | PC::ApiMonitor(_) => {}
+        }
+
+        let _ = domain;
+    }
+
+    /// Look up the per-domain MSR bitmap physical address, or `None` if
+    /// the domain isn't registered yet or has no bitmap allocated (will
+    /// be projected from policy by the next `do_add_vp`).
+    #[cfg(target_arch = "x86_64")]
+    fn msr_bitmap_phys(&self, domain: DomainId) -> Option<u64> {
+        let d = self.domains.get(domain)?;
+        let phys = d.lock().arch.msr_bitmap_phys();
+        if phys == 0 { None } else { Some(phys) }
+    }
 }
 
 impl Platform for ThemisPlatform {
@@ -777,6 +863,14 @@ impl Platform for ThemisPlatform {
             } => {
                 let _ = (domain_id, target_domain_id, vp_id, phys, size);
                 // TODO(P7): unmap COMM page.
+            }
+
+            /// Domain-wide policy mutation. The platform re-projects any
+            // per-domain hardware state it derives from policy. Today
+            // only MSR has a derived projection (the VMX MSR bitmap);
+            // the rest are no-ops with TODOs for when we wire them up.
+            Update::PolicyChanged { domain, change } => {
+                self.apply_policy_change(*domain, change);
             }
         }
     }

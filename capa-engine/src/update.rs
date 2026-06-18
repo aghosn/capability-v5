@@ -1,5 +1,7 @@
 //! Update tracking for domain address space modifications
 
+use crate::domain::{ExitAction, VectorPolicy};
+use crate::interposition::DefaultAction;
 use crate::memory::Rights;
 use crate::sync::RwLock;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -93,7 +95,137 @@ pub enum Update {
         phys: u64,
         size: u64,
     },
+
+    /// A domain-wide policy field was mutated by `Capability::set_policy`.
+    /// Carries the precise post-write delta so the platform can re-project
+    /// any hardware state it derives from that policy field, incrementally
+    /// and without re-reading the engine. The platform must propagate the
+    /// change to every VP of `domain` for fields with per-VP derived
+    /// hardware state (today: MSR bitmap; in the future: VMCS exit
+    /// controls, EOI-exit bitmap, etc.).
+    ///
+    /// Variants are emitted one-per-mutation arm of `set_policy`. Not every
+    /// variant has a hardware projection today — see `PolicyChange` for
+    /// which arms platforms are expected to act on.
+    PolicyChanged {
+        domain: DomainId,
+        change: PolicyChange,
+    },
 }
+
+/// Concrete policy delta carried by `Update::PolicyChanged`.
+///
+/// Each variant corresponds 1:1 to a `PolicyIdentifier` arm in
+/// `Capability::set_policy` that mutates a domain's policy. Variants carry
+/// the *post-write* value so `apply_update` is pure (no engine re-read).
+///
+/// **Platform expectations as of today:**
+/// - `Msr*` variants: must re-project the per-VP MSR bitmap.
+/// - All other variants: **no hardware projection required today**;
+///   capavisor matches them to no-op arms. They exist so the engine's
+///   `set_policy` is uniform — every mutation emits an Update — which
+///   lets future platform projections (VMCS exit controls, interrupt
+///   visibility bitmaps, etc.) hook in without changing the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyChange {
+    /// `policy.cores` (allowed-core bitmap) updated. **No hardware
+    /// projection today** — scheduling consults the value at dispatch.
+    Cores(u64),
+    /// `policy.api` (MonitorAPI bitmap) updated. Pure engine ACL; no
+    /// hardware projection.
+    ApiMonitor(u16),
+
+    // ── Interrupt routing (`policy.interrupts`) ──────────────────────
+    /// Default per-vector interrupt visibility changed.
+    InterruptDefaultVisibility(InterruptVisibility),
+    /// Per-vector visibility override changed (new effective policy
+    /// snapshot for `vector`).
+    VectorVisibility {
+        vector: u8,
+        policy: VectorPolicy,
+    },
+    /// Per-vector "registers parent can read on COMM" set updated for
+    /// one 64-bit word of the bitmap.
+    VectorRegReadSet {
+        vector: u8,
+        word: u8,
+        bits: u64,
+    },
+    /// Per-vector "registers parent can write back" set updated.
+    VectorRegWriteSet {
+        vector: u8,
+        word: u8,
+        bits: u64,
+    },
+
+    // ── Exit routing (`policy.exits`) ────────────────────────────────
+    /// Default exit-reason trap flag changed (true = forward to parent).
+    DefaultExitTrap(bool),
+    /// Per-exit-reason action snapshot changed.
+    ExitReason {
+        reason: u32,
+        action: ExitAction,
+    },
+    /// Per-exit-reason "registers parent can read" word updated.
+    ExitReasonRegReadSet {
+        reason: u32,
+        word: u8,
+        bits: u64,
+    },
+    /// Per-exit-reason "registers parent can write back" word updated.
+    ExitReasonRegWriteSet {
+        reason: u32,
+        word: u8,
+        bits: u64,
+    },
+
+    // ── CPUID interposition (`policy.cpuid`) ─────────────────────────
+    // CPUID is always trapped via CPUID-exiting=1 and dispatched at exit
+    // time against the live engine policy; capavisor needs no derived
+    // hardware bitmap. The variants are emitted for symmetry.
+    /// Default CPUID action changed (Trap/Native).
+    CpuidDefault(DefaultAction),
+    /// A CPUID `[start..=end]` (leaf, subleaf) range was given a fixed
+    /// Trap/Native action.
+    CpuidRange {
+        start_leaf: u32,
+        start_sub: u32,
+        end_leaf: u32,
+        end_sub: u32,
+        action: DefaultAction,
+    },
+    /// One 32-bit word of an Emulate-stored CPUID result changed.
+    /// `word_index` selects EAX(0)/EBX(1)/ECX(2)/EDX(3).
+    CpuidEmulate {
+        leaf: u32,
+        subleaf: u32,
+        word_index: u8,
+        value: u32,
+    },
+
+    // ── MSR interposition (`policy.msrs`) ────────────────────────────
+    // Projected to the per-VP VMX MSR bitmap by capavisor's
+    // `msr_bitmap::populate_from_policy` / incremental helpers.
+    /// Default MSR action changed; platform fills the bitmap background
+    /// (all-1s for Trap, all-0s for Native) and re-applies known overrides.
+    MsrDefault(DefaultAction),
+    /// An MSR `[start..=end]` range was given a fixed action.
+    MsrRange {
+        start: u32,
+        end: u32,
+        action: DefaultAction,
+    },
+    /// One 32-bit word of an Emulate-stored MSR value changed; the MSR
+    /// itself is trapped by the bitmap so capavisor's emulator runs.
+    MsrEmulate {
+        msr: u32,
+        word_index: u8,
+        value: u32,
+    },
+}
+
+/// Re-export to keep the `update` module's public type surface stable.
+pub use crate::domain::InterruptVisibility;
 
 impl Update {
     /// Get the domain ID affected by this update (if applicable)
@@ -108,6 +240,7 @@ impl Update {
             // not the domain's EPT — no IPI needed.
             Update::CommRegion { .. } | Update::UncommRegion { .. } => None,
             Update::ZeroMemory { .. } => None,
+            Update::PolicyChanged { domain, .. } => Some(*domain),
         }
     }
 }
@@ -159,6 +292,13 @@ impl UpdateBatch {
     /// Add memory zeroing (for clean attribute)
     pub fn add_zero_memory(&mut self, address: u64, size: u64) {
         self.add(Update::ZeroMemory { address, size });
+    }
+
+    /// Add a policy-change notification. Emitted by `Capability::set_policy`
+    /// for every mutation arm; see `PolicyChange` for the per-variant
+    /// platform-projection expectations.
+    pub fn add_policy_changed(&mut self, domain: DomainId, change: PolicyChange) {
+        self.add(Update::PolicyChanged { domain, change });
     }
 
     /// Add a change-rights update for a memory range

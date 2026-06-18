@@ -13,7 +13,7 @@
 #   QEMU_BIOS=1             use legacy BIOS instead of UEFI (default: 0)
 #   QEMU_NET=1              enable user-mode networking (default: 1)
 #   QEMU_NET_FWD            extra port forwards (e.g. "hostfwd=tcp::8080-:8080")
-#   QEMU_TPM=1              enable TPM 2.0 via swtpm (default: 0)
+#   QEMU_TPM=0              disable TPM 2.0 via swtpm (default: 1 = enabled)
 #   QEMU_TIS=1              use TIS transport instead of CRB (requires QEMU_TPM=1)
 #   QEMU_EXTRA_ARGS         additional arguments appended to the QEMU command
 
@@ -92,7 +92,7 @@ fi
 
 # ── TPM (swtpm) ──────────────────────────────────────────────────────────────
 TPM_ARGS=""
-if [[ "${QEMU_TPM:-0}" == "1" ]]; then
+if [[ "${QEMU_TPM:-1}" == "1" ]]; then
     SWTPM_SOCK="/tmp/themis-swtpm/swtpm-sock"
     if [[ ! -S "$SWTPM_SOCK" ]]; then
         echo "→ Starting swtpm automatically..."

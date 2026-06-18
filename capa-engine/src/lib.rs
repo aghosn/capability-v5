@@ -58,7 +58,7 @@ pub use switch::{
     CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext,
 };
 pub use update::{
-    CoreId, CoreUpdate, DomainId, Update, UpdateBatch, UpdateProcessor, UpdateStatus,
+    CoreId, CoreUpdate, DomainId, PolicyChange, Update, UpdateBatch, UpdateProcessor, UpdateStatus,
 };
 pub use view::{
     compute_view_from_capabilities, view_diff, AddressSpaceView, ViewRegion,

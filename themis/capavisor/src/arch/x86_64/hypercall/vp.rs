@@ -39,7 +39,9 @@ pub(super) fn do_add_vp(
     use x86::msr;
 
     // ── Step 0: resolve child domain_id from handle (read-only) ──
-    let child_domain_id: DomainId = {
+    // Keep `child_ref` alive — we read its MsrPolicy below to populate
+    // the MSR bitmap as a faithful projection of the per-domain policy.
+    let (child_domain_id, child_ref): (DomainId, _) = {
         let r = caller.read();
         let child_weak = match r.data.get_domain_capability(child_domain_handle) {
             Some(w) => w.clone(),
@@ -51,7 +53,7 @@ pub(super) fn do_add_vp(
             None => return HypercallResult::error(errors::ERR_NOTFOUND),
         };
         let id = child_ref.read().data.id;
-        id
+        (id, child_ref)
     };
 
     // ── Step 1: pre-allocate VMCS + VAPIC + PID from child's META pool ──
@@ -194,31 +196,43 @@ pub(super) fn do_add_vp(
         );
     }
 
-    // Initialize MSR bitmap for child domains: zero (pass-through) then trap
-    // WRMSR for IA32_TSC_DEADLINE (0x6E0) so the capavisor can forward
-    // TSC-deadline timer programming to CHV for proper LAPIC timer emulation.
+    // Initialize MSR bitmap as a pure projection of the child's MsrPolicy.
     //
-    // MSR bitmap layout (1 page = 4096 bytes):
+    // Invariant: bitmap ⊇ policy. Every MSR whose policy resolves to
+    // `Trap` or `Emulate` traps via this bitmap; `Native` MSRs run
+    // without exit. The capability engine validates every trapped access
+    // (A1) before any side effect; if the bitmap were more permissive
+    // than the policy, the engine would never see those accesses and
+    // policy enforcement would be silently bypassed.
+    //
+    // Layout (Intel SDM Vol 3C §24.6.9):
     //   bytes    0-1023: RDMSR bitmap for MSRs 0x0–0x1FFF
     //   bytes 1024-2047: RDMSR bitmap for MSRs 0xC0000000–0xC0001FFF
     //   bytes 2048-3071: WRMSR bitmap for MSRs 0x0–0x1FFF
     //   bytes 3072-4095: WRMSR bitmap for MSRs 0xC0000000–0xC0001FFF
-    // Bit = 1 ⟹ trap (VM exit); bit = 0 ⟹ pass-through.
     if first_vp && msr_bitmap_phys != 0 {
+        let policy_summary = {
+            let guard = child_ref.read();
+            let p = &guard.data.policy.msrs;
+            (p.default, p.overrides.len())
+        };
+        // SAFETY: `msr_bitmap_phys` is a freshly-allocated 4 KiB META
+        // frame for this child's MSR bitmap; the VMCS that will reference
+        // it has not been loaded on any core yet.
         unsafe {
-            core::ptr::write_bytes((msr_bitmap_phys + hhdm) as *mut u8, 0, 4096);
-
-            let bitmap = (msr_bitmap_phys + hhdm) as *mut u8;
-
-            // Trap WRMSR for IA32_TSC_DEADLINE (0x6E0 = 1760).
-            // Write bitmap for low MSRs starts at byte 2048.
-            const TSC_DEADLINE_MSR: usize = 0x6E0;
-            let byte_off = 2048 + TSC_DEADLINE_MSR / 8;
-            let bit = TSC_DEADLINE_MSR % 8;
-            let old = bitmap.add(byte_off).read_volatile();
-            bitmap.add(byte_off).write_volatile(old | (1u8 << bit));
+            let guard = child_ref.read();
+            crate::arch::x86_64::msr_bitmap::populate_from_policy(
+                msr_bitmap_phys,
+                hhdm,
+                &guard.data.policy.msrs,
+            );
         }
-        serial_println!("  MSR bitmap: {:#x} (WRMSR 0x6E0 trapped)", msr_bitmap_phys,);
+        serial_println!(
+            "  MSR bitmap: {:#x} (default={:?}, {} overrides)",
+            msr_bitmap_phys,
+            policy_summary.0,
+            policy_summary.1,
+        );
     }
 
     // ── Step 2: call into capa engine ──

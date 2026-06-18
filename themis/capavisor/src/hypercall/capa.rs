@@ -342,7 +342,7 @@ pub(super) fn do_set_policy(
     let caller = caller.clone();
     execute_or_return!(platform, || {
         Capability::set_policy(&caller, child_handle, id.clone(), value)
-            .map(|()| ((), UpdateBatch::new()))
+            .map(|batch| ((), batch))
     });
     HypercallResult::success()
 }

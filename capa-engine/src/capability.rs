@@ -3405,7 +3405,9 @@ impl Capability<Domain> {
         child_handle: LocalHandle,
         id: PolicyIdentifier,
         value: u64,
-    ) -> Result<()> {
+    ) -> Result<UpdateBatch> {
+        use crate::update::PolicyChange;
+
         // Validate caller has SET permission.
         caller.read().data.require_api(MonitorAPI::SET)?;
 
@@ -3427,6 +3429,9 @@ impl Capability<Domain> {
             return Err(CapaError::DomainSealed);
         }
 
+        let child_id = child_w.data.id;
+        let mut batch = UpdateBatch::new();
+
         match id {
             PolicyIdentifier::Cores => {
                 // Monotonicity: new cores must be a subset of parent cores.
@@ -3439,6 +3444,7 @@ impl Capability<Domain> {
                 if child_w.data.policy.num_vprocessors > max_vps {
                     child_w.data.policy.num_vprocessors = max_vps;
                 }
+                batch.add_policy_changed(child_id, PolicyChange::Cores(value));
             }
             PolicyIdentifier::ApiMonitor => {
                 let bits = value as u16;
@@ -3446,6 +3452,7 @@ impl Capability<Domain> {
                     return Err(CapaError::MonotonicityViolation);
                 }
                 child_w.data.policy.api = MonitorAPI::from_bits(bits);
+                batch.add_policy_changed(child_id, PolicyChange::ApiMonitor(bits));
             }
             PolicyIdentifier::DefaultInterruptVisibility => {
                 let vis = visibility_from_u64(value)?;
@@ -3457,6 +3464,10 @@ impl Capability<Domain> {
                     return Err(CapaError::MonotonicityViolation);
                 }
                 child_w.data.policy.interrupts.default.visibility = vis;
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::InterruptDefaultVisibility(vis),
+                );
             }
             PolicyIdentifier::VectorVisibility(vec) => {
                 let vis = visibility_from_u64(value)?;
@@ -3481,6 +3492,11 @@ impl Capability<Domain> {
                         write_set: default_write,
                     });
                 entry.visibility = vis;
+                let snapshot = entry.clone();
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::VectorVisibility { vector: vec, policy: snapshot },
+                );
             }
             PolicyIdentifier::VectorRegReadSet(vec, word) => {
                 let entry = child_w
@@ -3491,6 +3507,10 @@ impl Capability<Domain> {
                     .entry(vec)
                     .or_insert_with(VectorPolicy::default_report);
                 entry.read_set.set_word(word as usize, value);
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::VectorRegReadSet { vector: vec, word, bits: value },
+                );
             }
             PolicyIdentifier::VectorRegWriteSet(vec, word) => {
                 let entry = child_w
@@ -3501,6 +3521,10 @@ impl Capability<Domain> {
                     .entry(vec)
                     .or_insert_with(VectorPolicy::default_report);
                 entry.write_set.set_word(word as usize, value);
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::VectorRegWriteSet { vector: vec, word, bits: value },
+                );
             }
             PolicyIdentifier::DefaultExitTrap => {
                 let trap = value != 0;
@@ -3509,6 +3533,7 @@ impl Capability<Domain> {
                     return Err(CapaError::MonotonicityViolation);
                 }
                 child_w.data.policy.exits.default.trap = trap;
+                batch.add_policy_changed(child_id, PolicyChange::DefaultExitTrap(trap));
             }
             PolicyIdentifier::ExitReasonTrap(reason) => {
                 let trap = value != 0;
@@ -3530,6 +3555,11 @@ impl Capability<Domain> {
                         write_set: RegBitmap::ALL,
                     });
                 entry.trap = trap;
+                let snapshot = entry.clone();
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::ExitReason { reason, action: snapshot },
+                );
             }
             PolicyIdentifier::ExitReasonRegReadSet(reason, word) => {
                 let default_trap = child_w.data.policy.exits.default.trap;
@@ -3545,6 +3575,10 @@ impl Capability<Domain> {
                         write_set: RegBitmap::ALL,
                     });
                 entry.read_set.set_word(word as usize, value);
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::ExitReasonRegReadSet { reason, word, bits: value },
+                );
             }
             PolicyIdentifier::ExitReasonRegWriteSet(reason, word) => {
                 let default_trap = child_w.data.policy.exits.default.trap;
@@ -3560,6 +3594,10 @@ impl Capability<Domain> {
                         write_set: RegBitmap::ALL,
                     });
                 entry.write_set.set_word(word as usize, value);
+                batch.add_policy_changed(
+                    child_id,
+                    PolicyChange::ExitReasonRegWriteSet { reason, word, bits: value },
+                );
             }
 
             // ── Processor feature interposition policy ──
@@ -3568,8 +3606,54 @@ impl Capability<Domain> {
                 let default = crate::interposition::DefaultAction::from_u8(value as u8)
                     .ok_or(CapaError::InvalidValue)?;
                 match rk {
-                    ResourceKind::Cpuid => child_w.data.policy.cpuid.default = default,
-                    ResourceKind::Msr => child_w.data.policy.msrs.default = default,
+                    ResourceKind::Cpuid => {
+                        child_w.data.policy.cpuid.default = default;
+                        batch.add_policy_changed(
+                            child_id,
+                            PolicyChange::CpuidDefault(default),
+                        );
+                    }
+                    ResourceKind::Msr => {
+                        child_w.data.policy.msrs.default = default;
+                        batch.add_policy_changed(
+                            child_id,
+                            PolicyChange::MsrDefault(default),
+                        );
+                        // The MsrDefault delta sets the bitmap background
+                        // but clobbers existing override bits on the
+                        // platform side (the platform applies updates
+                        // incrementally from the live engine state — see
+                        // PolicyChange docs). Re-emit each existing
+                        // override so the bitmap converges to the full
+                        // current policy without requiring the platform
+                        // to re-read the engine.
+                        for rule in &child_w.data.policy.msrs.overrides {
+                            let (start, end) = match rule {
+                                crate::interposition::ProcFeaturePolicy::Trap(r)
+                                | crate::interposition::ProcFeaturePolicy::Native(r)
+                                | crate::interposition::ProcFeaturePolicy::Emulate(r, _) => *r,
+                            };
+                            let action = match rule {
+                                crate::interposition::ProcFeaturePolicy::Trap(_) => {
+                                    crate::interposition::DefaultAction::Trap
+                                }
+                                crate::interposition::ProcFeaturePolicy::Native(_) => {
+                                    crate::interposition::DefaultAction::Native
+                                }
+                                crate::interposition::ProcFeaturePolicy::Emulate(_, _) => {
+                                    // Emulate ⇒ trap (engine consumes the
+                                    // exit and returns/discards the stored
+                                    // value); from a bitmap perspective
+                                    // Emulate is equivalent to Trap.
+                                    crate::interposition::DefaultAction::Trap
+                                }
+                            };
+                            batch.add_policy_changed(
+                                child_id,
+                                PolicyChange::MsrRange { start, end, action },
+                            );
+                        }
+                    }
                 }
             }
             PolicyIdentifier::ProcFeatureRange(rk, start, start_sub, end, end_sub) => {
@@ -3590,6 +3674,18 @@ impl Capability<Domain> {
                     crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
                     crate::interposition::InsertError::NotFound => CapaError::NotFound,
                 })?;
+                match rk {
+                    ResourceKind::Cpuid => batch.add_policy_changed(
+                        child_id,
+                        PolicyChange::CpuidRange {
+                            start_leaf: start, start_sub, end_leaf: end, end_sub, action,
+                        },
+                    ),
+                    ResourceKind::Msr => batch.add_policy_changed(
+                        child_id,
+                        PolicyChange::MsrRange { start, end, action },
+                    ),
+                }
             }
             PolicyIdentifier::ProcFeatureEmulate(rk, key32, sub_key32, word) => {
                 match rk {
@@ -3601,6 +3697,15 @@ impl Capability<Domain> {
                             word,
                             value,
                         )?;
+                        batch.add_policy_changed(
+                            child_id,
+                            PolicyChange::CpuidEmulate {
+                                leaf: key32,
+                                subleaf: sub_key32,
+                                word_index: word,
+                                value: value as u32,
+                            },
+                        );
                     }
                     ResourceKind::Msr => {
                         msr_set_emulate_word(
@@ -3609,12 +3714,20 @@ impl Capability<Domain> {
                             word,
                             value,
                         )?;
+                        batch.add_policy_changed(
+                            child_id,
+                            PolicyChange::MsrEmulate {
+                                msr: key32,
+                                word_index: word,
+                                value: value as u32,
+                            },
+                        );
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(batch)
     }
 
     /// Read a domain-wide policy field from a child domain.
