@@ -26,6 +26,11 @@ pub struct CpuFeatures {
     pub virtual_intr_delivery: bool,
     /// Process posted interrupts (pin-based bit 7).
     pub posted_interrupts: bool,
+    /// Virtualize x2APIC mode (secondary proc-based bit 4).
+    /// When set together with `apic_register_virt` and `virtual_intr_delivery`,
+    /// children can boot directly into x2APIC mode with full hardware
+    /// virtualization of MSRs 0x800–0x8FF.
+    pub virt_x2apic_mode: bool,
 
     /// VT-d (IOMMU) detected via DMAR table (passed in, not CPUID).
     pub vtd: bool,
@@ -35,6 +40,13 @@ impl CpuFeatures {
     /// True if full APICv is available (all three sub-features).
     pub fn has_apicv(&self) -> bool {
         self.apic_register_virt && self.virtual_intr_delivery && self.posted_interrupts
+    }
+
+    /// True if all the controls required to virtualize x2APIC for a child
+    /// in hardware are present: VIRT_X2APIC_MODE + APIC_REGISTER_VIRT + VID.
+    /// Posted interrupts are NOT required (capavisor uses a software PIR drain).
+    pub fn has_x2apic_virt(&self) -> bool {
+        self.virt_x2apic_mode && self.apic_register_virt && self.virtual_intr_delivery
     }
 }
 
@@ -59,6 +71,7 @@ pub fn detect_features(has_dmar: bool) -> CpuFeatures {
         apic_register_virt: false,
         virtual_intr_delivery: false,
         posted_interrupts: false,
+        virt_x2apic_mode: false,
         vtd: has_dmar,
     };
 
@@ -102,6 +115,7 @@ pub fn detect_features(has_dmar: bool) -> CpuFeatures {
         let allowed1 = (procbased_ctls2 >> 32) as u32;
         features.apic_register_virt = allowed1 & (1 << 8) != 0;
         features.virtual_intr_delivery = allowed1 & (1 << 9) != 0;
+        features.virt_x2apic_mode = allowed1 & (1 << 4) != 0;
     }
 
     // Posted interrupts: pin-based controls bit 7.

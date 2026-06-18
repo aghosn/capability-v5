@@ -158,16 +158,26 @@ pub(crate) fn classify_and_handle_internal(
         EXIT_REASON_APIC_WRITE => {
             let info = ExitQualification(vcpu.get(vmcs::ro::EXIT_QUALIFICATION)).apic();
             if info.offset == Some(APIC_REG_ICR_LOW) {
+                // ICR write under VIRT_X2APIC_MODE / APIC_REGISTER_VIRT:
+                // hardware has already deposited the value into the
+                // virtual-APIC page before exit.  For x2APIC WRMSR(0x830)
+                // the 64-bit value is split into VAPIC[0x300] (low) +
+                // VAPIC[0x310] (high, holding the raw 32-bit destination
+                // APIC ID — SDM §29.5.1).  The downstream parent (CHV)
+                // decodes ICR_HIGH as xAPIC (dest in bits [31:24]); since
+                // child VMs are pinned to x2APIC mode by capavisor we
+                // normalize the destination back into the xAPIC layout
+                // here so the parent's existing decoder works unchanged.
                 let hhdm = platform.hhdm_offset();
                 let vapic_virt = (vcpu.vapic_phys() + hhdm) as *const u32;
                 let icr_low = unsafe { vapic_virt.add(APIC_REG_ICR_LOW / 4).read_volatile() };
+                let icr_high_x2 = unsafe { vapic_virt.add(APIC_REG_ICR_HIGH / 4).read_volatile() };
+                let icr_high = (icr_high_x2 & 0xFF) << 24;
                 vcpu.set_reg(Reg::Rax, icr_low as u64);
+                vcpu.set_reg(Reg::Rcx, icr_high as u64);
                 SemanticExit::PolicyDriven {
                     reason: EXIT_REASON_APIC_ACCESS, // normalize to APIC_ACCESS for parent
-                    info: ExitInfo::ApicIcr {
-                        icr_low,
-                        icr_high: 0,
-                    },
+                    info: ExitInfo::ApicIcr { icr_low, icr_high },
                 }
             } else {
                 // Non-ICR APIC write: hardware handled (VID for EOI, etc.)

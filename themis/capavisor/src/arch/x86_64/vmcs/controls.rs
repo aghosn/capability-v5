@@ -82,39 +82,69 @@ pub(super) unsafe fn write_control_fields(
     // ── Secondary proc-based ──────────────────────────────────────────── //
     // ENABLE_RDTSCP (bit 3), ENABLE_EPT (bit 1), ENABLE_VPID (bit 5),
     // UNRESTRICTED_GUEST (bit 7), ENABLE_XSAVES (bit 20).
-    // APIC_REGISTER_VIRT (bit 8): virtualises APIC register reads to VAPIC page.
-    //   Requires USE_TPR_SHADOW=1.  Harmless without "Virtualize APIC accesses"
-    //   for xAPIC MMIO — it only affects x2APIC MSR reads.
-    // VID (bit 9): Virtual Interrupt Delivery.  On VM entry with VID=1, the
-    //   processor evaluates vIRR and delivers pending virtual interrupts without
-    //   a VM exit.  Requires USE_TPR_SHADOW=1 AND EXTERNAL_INTERRUPT_EXITING=1
-    //   (Intel SDM Vol 3C §26.2.1.1).  Only set for child VMs, which already
-    //   have EXTERNAL_INTERRUPT_EXITING enabled.  For dom0, VID is omitted:
-    //   dom0 handles interrupts natively and vIRR is always 0.
+    //
+    // APIC virtualisation, two mutually-exclusive modes:
+    //   • Dom0: VIRTUALIZE_APIC_ACCESSES (bit 0) when apic_access_phys != 0,
+    //     plus APIC_REGISTER_VIRT (bit 8). Dom0 runs in xAPIC mode.
+    //   • Child: VIRTUALIZE_X2APIC_MODE (bit 4) + APIC_REGISTER_VIRT (bit 8)
+    //     + VID (bit 9). Children are pinned to x2APIC mode from boot
+    //     (CHV pushes IA32_APIC_BASE = EN|EXTD via MSR_EMULATE policy, and a
+    //     Native MSR bitmap range for 0x800..=0x83F except ICR 0x830 which
+    //     stays Trap and forwards to CHV's deliver_ipi). The xAPIC MMIO
+    //     decoder (vmexit/apic.rs::decode_apic_write_value) is therefore
+    //     dead code for children — the first APIC write is WRMSR(0x830),
+    //     never an xAPIC MOV.
+    //
+    // VIRT_X2APIC_MODE (bit 4) and VIRT_APIC_ACCESSES (bit 0) are mutually
+    // exclusive per SDM Vol 3C §26.2.1.1 — children use bit 4 instead of
+    // bit 0. Self-IPI WRMSR(0x83F) under VID=1 is fully hardware-handled
+    // (zero exits) — this is the perf-win that motivates the switch.
+    // Pre-read secondary cap MSR so we can gate the x2APIC virtualization
+    // path on hardware support.  Nested KVM (L0) typically does not expose
+    // VIRT_X2APIC_MODE / APIC_REGISTER_VIRT / VID — when any of bits 4, 8, 9
+    // are missing from allowed-1, fall back to the xAPIC MMIO path for
+    // children (EPT-violation forwarding via arch_state::change_rights),
+    // and never advertise FEATURE_X2APIC_VIRT to dom0 userspace.  See
+    // themis_abi::cpuid::feature_bits::FEATURE_X2APIC_VIRT.
+    let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
+    let allowed1 = (secondary_msr >> 32) as u32;
+    let x2apic_virt_hw =
+        (allowed1 & (1 << 4)) != 0 && (allowed1 & (1 << 8)) != 0 && (allowed1 & (1 << 9)) != 0;
+
+    let want_virt_x2apic_child = child && x2apic_virt_hw;
+    let want_virt_apic_accesses_dom0 = !child && apic_access_phys != 0;
+    let want_apic_reg_virt = true; // both dom0 and child (cleared by adjust() if unsupported)
+    let want_vid_child = child && x2apic_virt_hw; // VID only useful alongside VIRT_X2APIC_MODE
     let secondary_desired: u64 = (1 << 1)   // ENABLE_EPT
         | (1 << 3) // ENABLE_RDTSCP
         | (1 << 5) // ENABLE_VPID
         | (1 << 7) // UNRESTRICTED_GUEST
-        | (if !child { 1 << 8 } else { 0 }) // APIC_REGISTER_VIRT — dom0 only
-        // Child: bit 8 off because APIC_REGISTER_VIRT causes the processor to
-        // execute the guest's LAPIC write instruction, hitting INT3 text_poke
-        // sites in native_apic_mem_write.  Without bit 8, the exit happens
-        // BEFORE instruction execution, avoiding the INT3.
-        // VID (bit 9): dom0 doesn't have EXTERNAL_INTERRUPT_EXITING.
-        // Child: off (requires bit 8 for EOI→ISR clearing).
-        // EOI is emulated in software by handle_apic_access_exit.
-        | (if apic_access_phys != 0 { 1 << 0 } else { 0 }) // VIRTUALIZE_APIC_ACCESSES
+        | (if want_apic_reg_virt { 1 << 8 } else { 0 }) // APIC_REGISTER_VIRT
+        | (if want_vid_child { 1 << 9 } else { 0 })     // VID
+        | (if want_virt_x2apic_child { 1 << 4 } else { 0 }) // VIRT_X2APIC_MODE (child)
+        | (if want_virt_apic_accesses_dom0 { 1 << 0 } else { 0 }) // VIRT_APIC_ACCESSES (dom0)
         | (1 << 12) // ENABLE_INVPCID
         | (1 << 20); // ENABLE_XSAVES_XRSTORS
-    let secondary_msr = unsafe { msr::rdmsr(msr::IA32_VMX_PROCBASED_CTLS2) };
     let secondary_val = adjust(secondary_desired, secondary_msr);
     vmx::vmwrite(control::SECONDARY_PROCBASED_EXEC_CONTROLS, secondary_val)
         .expect("vmwrite secondary proc-based");
 
-    if apic_access_phys != 0 && (secondary_val & 1) == 0 {
+    if want_virt_apic_accesses_dom0 && (secondary_val & (1 << 0)) == 0 {
         serial_println!(
             "  [WARN] VIRTUALIZE_APIC_ACCESSES not supported by hardware — \
              LAPIC MMIO will use EPT violation fallback"
+        );
+    }
+    if want_virt_x2apic_child && (secondary_val & (1 << 4)) == 0 {
+        serial_println!(
+            "  [WARN] VIRTUALIZE_X2APIC_MODE not supported by hardware — \
+             child x2APIC MSRs will all trap to capavisor"
+        );
+    }
+    if want_vid_child && (secondary_val & (1 << 9)) == 0 {
+        serial_println!(
+            "  [WARN] Virtual-Interrupt-Delivery (VID) not supported — \
+             self-IPI WRMSR(0x83F) will exit instead of running natively"
         );
     }
 

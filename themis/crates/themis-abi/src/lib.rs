@@ -277,6 +277,17 @@ pub mod cpuid {
         /// bypassing the MMIO emulation path.  See
         /// `docs/architecture/confidential-vm.md` §12.
         pub const FEATURE_DOORBELL_HYPERCALL: u32 = 1 << 1;
+
+        /// Capavisor advertises hardware x2APIC virtualization support
+        /// to children — VIRTUALIZE_X2APIC_MODE (bit 4), APIC_REGISTER_VIRT
+        /// (bit 8) and Virtual-Interrupt-Delivery (bit 9) are all settable
+        /// in `IA32_VMX_PROCBASED_CTLS2`.  When this bit is clear the
+        /// nested host (typically KVM-as-L0) does not expose the controls,
+        /// and parents (CHV) must keep children in xAPIC mode — pushing
+        /// x2APIC MSR ranges or `IA32_APIC_BASE.EXTD` would let the guest
+        /// switch to x2APIC ops while hardware delivers no virtualization,
+        /// causing `#GP` on RDMSR of any x2APIC register.
+        pub const FEATURE_X2APIC_VIRT: u32 = 1 << 2;
     }
 
     /// DomainComm discovery (alias for domcomm::CPUID_DOMCOMM_LEAF).

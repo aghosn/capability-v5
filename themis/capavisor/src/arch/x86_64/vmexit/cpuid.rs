@@ -82,7 +82,20 @@ fn handle_themis_leaf(
         }
         themis_abi::cpuid::LEAF_FEATURES => {
             use themis_abi::cpuid::feature_bits::*;
-            *eax = FEATURE_SYNC_SWITCH | FEATURE_DOORBELL_HYPERCALL;
+            let mut bits = FEATURE_SYNC_SWITCH | FEATURE_DOORBELL_HYPERCALL;
+            // Advertise hardware x2APIC virtualization to dom0 userspace
+            // (CHV) only when the CPU exposes VIRT_X2APIC_MODE +
+            // APIC_REGISTER_VIRT + VID. On nested KVM these are usually
+            // absent — CHV must then keep children in xAPIC mode.
+            let secondary_msr = unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
+            let allowed1 = (secondary_msr >> 32) as u32;
+            if (allowed1 & (1 << 4)) != 0
+                && (allowed1 & (1 << 8)) != 0
+                && (allowed1 & (1 << 9)) != 0
+            {
+                bits |= FEATURE_X2APIC_VIRT;
+            }
+            *eax = bits;
             *ebx = 0;
             *ecx = 0;
             *edx = 0;

@@ -45,6 +45,14 @@ use crate::vcpu::ActiveVcpu;
 /// mode (Intel SDM Vol 3A §10.5.4.1).
 pub const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 
+/// IA32_APIC_BASE — read by Linux during early boot to learn the LAPIC base
+/// physical address and the EN/EXTD mode bits.  Children are pinned to
+/// x2APIC mode by capavisor (VIRTUALIZE_X2APIC_MODE in VMCS); the RDMSR
+/// returns a fixed value set via the engine's MSR_EMULATE policy
+/// (BASE | EN | EXTD), and WRMSR is silently dropped so a guest cannot
+/// disable EXTD and try to fall back to xAPIC MMIO.
+pub const MSR_IA32_APIC_BASE: u32 = 0x1B;
+
 /// IA32_VMX_MISC — bits [4:0] hold the preemption-timer rate divisor:
 /// the timer decrements once every 2^N TSC ticks (Intel SDM Vol 3D, A.6).
 const IA32_VMX_MISC: u32 = 0x485;
@@ -101,6 +109,17 @@ pub fn try_handle_wrmsr(vcpu: &mut ActiveVcpu, core_id: usize, msr: u32, value: 
     match msr {
         MSR_IA32_TSC_DEADLINE => {
             handle_wrmsr_tsc_deadline(vcpu, core_id, value);
+            Ok(())
+        }
+        MSR_IA32_APIC_BASE => {
+            // x2APIC is pinned for child VMs by capavisor.  Linux's
+            // __x2apic_enable() unconditionally writes back IA32_APIC_BASE
+            // with EXTD set; we accept the write but never apply it,
+            // forcing the guest to stay in x2APIC mode.  The matching
+            // RDMSR returns the policy's stored Emulate value
+            // (BASE | EN | EXTD) via monitor.rs without entering this
+            // handler.
+            let _ = (vcpu, core_id, value);
             Ok(())
         }
         _ => Err(()),
