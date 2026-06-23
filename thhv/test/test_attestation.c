@@ -37,8 +37,9 @@
 struct thhv_attest_self {
 	uint8_t  nonce[32];
 	uint8_t  user_pub_key[32];
+	uint64_t buf_uaddr;
+	uint64_t buf_len;
 	uint64_t report_size;
-	uint8_t  report_buf[4096];
 };
 
 #define THHV_ATTEST_SELF \
@@ -305,16 +306,26 @@ out:
 static int test_unsigned(int fd)
 {
 	struct thhv_attest_self as;
+	uint8_t *buf;
 	int ret;
 
 	printf("=== Test 1: Unsigned attestation (nonce=0) ===\n");
 
+	buf = calloc(1, 65536);
+	if (!buf) {
+		printf("  FAIL: out of memory\n");
+		return 1;
+	}
+
 	memset(&as, 0, sizeof(as));
+	as.buf_uaddr = (uintptr_t)buf;
+	as.buf_len = 65536;
 
 	ret = ioctl(fd, THHV_ATTEST_SELF, &as);
 	if (ret < 0) {
 		printf("  FAIL: ioctl returned %d (errno=%d: %s)\n",
 		       ret, errno, strerror(errno));
+		free(buf);
 		return 1;
 	}
 
@@ -322,11 +333,13 @@ static int test_unsigned(int fd)
 
 	if (as.report_size == 0) {
 		printf("  FAIL: report_size is 0\n");
+		free(buf);
 		return 1;
 	}
 
 	printf("  PASS: unsigned attestation returned %lu bytes\n",
 	       (unsigned long)as.report_size);
+	free(buf);
 	return 0;
 }
 
@@ -335,6 +348,7 @@ static int test_signed(int fd)
 	struct thhv_attest_self as;
 	struct attest_report *hdr;
 	struct signed_envelope *env;
+	uint8_t *buf;
 	size_t base_len;
 	int ret;
 	uint8_t test_nonce[32];
@@ -342,7 +356,15 @@ static int test_signed(int fd)
 
 	printf("\n=== Test 2: Signed attestation (nonce + user_pub_key) ===\n");
 
+	buf = calloc(1, 65536);
+	if (!buf) {
+		printf("  FAIL: out of memory\n");
+		return 1;
+	}
+
 	memset(&as, 0, sizeof(as));
+	as.buf_uaddr = (uintptr_t)buf;
+	as.buf_len = 65536;
 
 	/* Generate test nonce and user pub key. */
 	fill_random(test_nonce, 32);
@@ -357,6 +379,7 @@ static int test_signed(int fd)
 	if (ret < 0) {
 		printf("  FAIL: ioctl returned %d (errno=%d: %s)\n",
 		       ret, errno, strerror(errno));
+		free(buf);
 		return 1;
 	}
 
@@ -365,10 +388,11 @@ static int test_signed(int fd)
 	if (as.report_size < ATTEST_REPORT_SIZE) {
 		printf("  FAIL: report too small for AttestReport header (%lu < %zu)\n",
 		       (unsigned long)as.report_size, ATTEST_REPORT_SIZE);
+		free(buf);
 		return 1;
 	}
 
-	hdr = (struct attest_report *)as.report_buf;
+	hdr = (struct attest_report *)buf;
 	base_len = common_base_size(hdr);
 
 	printf("  domain_id=%lu flags=%#x num_vps=%u mem_caps=%u dom_caps=%u pa_entries=%u\n",
@@ -378,6 +402,7 @@ static int test_signed(int fd)
 
 	if (!(hdr->flags & DOMCOMM_ATTEST_F_SEALED)) {
 		printf("  FAIL: DOMCOMM_ATTEST_F_SEALED not set on signed report\n");
+		free(buf);
 		return 1;
 	}
 	printf("  PASS: DOMCOMM_ATTEST_F_SEALED set\n");
@@ -386,16 +411,18 @@ static int test_signed(int fd)
 		printf("  FAIL: report too small for common base + envelope (%lu < %zu)\n",
 		       (unsigned long)as.report_size,
 		       base_len + sizeof(struct signed_envelope));
+		free(buf);
 		return 1;
 	}
 
-	env = (struct signed_envelope *)(as.report_buf + base_len);
+	env = (struct signed_envelope *)(buf + base_len);
 
 	/* Verify nonce is echoed back. */
 	if (memcmp(env->nonce, test_nonce, 32) != 0) {
 		printf("  FAIL: nonce mismatch!\n");
 		hexdump("sent    ", test_nonce, 32);
 		hexdump("received", env->nonce, 32);
+		free(buf);
 		return 1;
 	}
 	printf("  PASS: nonce echoed correctly\n");
@@ -405,6 +432,7 @@ static int test_signed(int fd)
 		printf("  FAIL: user_pub_key mismatch!\n");
 		hexdump("sent    ", test_pubkey, 32);
 		hexdump("received", env->user_pub_key, 32);
+		free(buf);
 		return 1;
 	}
 	printf("  PASS: user_pub_key echoed correctly\n");
@@ -415,8 +443,9 @@ static int test_signed(int fd)
 	hexdump("signature", env->signature, 64);
 	hexdump("capavisor_pub_key", env->pub_key, 32);
 
-	if (verify_ed25519(as.report_buf, base_len, env) != 0) {
+	if (verify_ed25519(buf, base_len, env) != 0) {
 		printf("  FAIL: Ed25519 signature verification failed\n");
+		free(buf);
 		return 1;
 	}
 	printf("  PASS: Ed25519 signature VALID (covers cap inventory)\n");
@@ -438,10 +467,11 @@ static int test_signed(int fd)
 
 		if (as.report_size < expected_total) {
 			printf("  FAIL: report too small for TPM data\n");
+			free(buf);
 			return 1;
 		}
 
-		uint8_t *tpm_quote = as.report_buf + base_len
+		uint8_t *tpm_quote = buf + base_len
 			+ sizeof(struct signed_envelope);
 		uint8_t *tpm_sig = tpm_quote + env->tpm_quote_size;
 		uint8_t *ak_pub = tpm_sig + env->tpm_sig_size;
@@ -456,6 +486,7 @@ static int test_signed(int fd)
 				     tpm_sig, env->tpm_sig_size,
 				     ak_pub, env->ak_pub_size) != 0) {
 			printf("  FAIL: TPM RSA signature verification failed\n");
+			free(buf);
 			return 1;
 		}
 		printf("  PASS: TPM RSA signature VALID\n");
@@ -464,6 +495,7 @@ static int test_signed(int fd)
 	}
 
 	printf("  PASS: signed attestation structure valid\n");
+	free(buf);
 	return 0;
 }
 

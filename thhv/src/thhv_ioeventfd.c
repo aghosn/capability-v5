@@ -156,6 +156,25 @@ void thhv_drain_domcomm_rx(struct thhv_partition *part)
 					 &msg_type, &payload_size);
 		if (ret == -EAGAIN)
 			break;  /* ring empty */
+		if (ret == -ENOSPC) {
+			/* Head message is larger than our doorbell-sized
+			 * scratch buffer (e.g. a stale ATTEST chunk left
+			 * behind by a failed ioctl).  Drop it without
+			 * copying so the ring keeps draining instead of
+			 * spamming pr_warn forever.
+			 */
+			u32 drop_type = 0, drop_size = 0;
+			int dret = domcomm_rx_discard(rx, &drop_type,
+						      &drop_size);
+			if (dret < 0) {
+				pr_warn_ratelimited("thhv: domcomm RX discard failed: %d\n",
+						    dret);
+				break;
+			}
+			pr_warn_ratelimited("thhv: dropped oversized RX msg type=%u size=%u\n",
+					    drop_type, drop_size);
+			continue;
+		}
 		if (ret < 0) {
 			pr_warn_ratelimited("thhv: domcomm RX dequeue error: %d\n", ret);
 			break;

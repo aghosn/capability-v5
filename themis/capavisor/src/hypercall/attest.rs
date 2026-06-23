@@ -89,7 +89,7 @@ pub(super) fn do_attest_self(
         }
     }
 
-    enqueue_attest_chunk(&mut pd, &payload, offset)
+    enqueue_attest_payload(&mut pd, &payload, offset)
 }
 
 /// Read the verifier's `AttestRequest` from the caller's TX ring.
@@ -238,14 +238,22 @@ fn build_signed_tail(
     Ok(tail)
 }
 
-/// Enqueue `payload[offset..]` onto the caller's RX ring as a single
-/// `DOMCOMM_MSG_ATTEST` message.
+/// Enqueue `payload[offset..]` onto the caller's RX ring as a sequence of
+/// `DOMCOMM_MSG_ATTEST` messages, each ≤ `MAX_PAYLOAD` bytes.
+///
+/// The full payload is split and pushed in a single hypercall so that the
+/// caller doesn't need to re-invoke us per chunk — re-invocation would
+/// require re-reading the (now-consumed) `AttestRequest` from the TX ring
+/// on the signed path, which we cannot do.
 ///
 /// Returns `RDI = total_size`, `RSI = payload bytes written this call`.
-/// Both values are in **payload bytes** (the ring's per-message MsgHeader and
-/// 8-byte alignment padding are not exposed to the caller), so the caller can
-/// simply `offset += wrote` and loop while `offset < total_size`.
-fn enqueue_attest_chunk(
+/// Values are in **payload bytes** (the ring's MsgHeaders and 8-byte
+/// alignment padding are not exposed). When `offset == 0` and the full
+/// payload was enqueued, `wrote == total_size`.
+///
+/// On ring-full, we return `ERR_BUSY` and roll back nothing (already-pushed
+/// chunks remain in the ring; the caller is expected to drain them).
+fn enqueue_attest_payload(
     pd: &mut crate::platform::PlatformDomain,
     payload: &[u8],
     offset: usize,
@@ -256,22 +264,21 @@ fn enqueue_attest_chunk(
     if offset >= total_size {
         return HypercallResult::success_2(total_size as u64, 0);
     }
-    // DomainComm enforces "one message ≤ one ring page" — splitter pads
-    // residual page space, so messages > MAX_PAYLOAD are always rejected.
-    // The caller already loops on (offset, total_size); cap each chunk so a
-    // signed report (common base + envelope + optional TPM tail, easily
-    // > MAX_PAYLOAD) is delivered as a sequence of page-sized chunks.
-    let remaining = total_size - offset;
-    let chunk_len = remaining.min(domcomm::MAX_PAYLOAD);
-    let slice = &payload[offset..offset + chunk_len];
-    let ring_bytes = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
-    if ring_bytes == 0 {
-        return HypercallResult::error(errors::ERR_BUSY);
+
+    let mut written = 0usize;
+    let mut cur = offset;
+    while cur < total_size {
+        let chunk_len = (total_size - cur).min(domcomm::MAX_PAYLOAD);
+        let slice = &payload[cur..cur + chunk_len];
+        let ring_bytes = pd.domcomm_rx_enqueue(domcomm::msg_types::ATTEST, slice);
+        if ring_bytes == 0 {
+            return HypercallResult::error(errors::ERR_BUSY);
+        }
+        cur += chunk_len;
+        written += chunk_len;
     }
-    // Report progress in payload bytes (excluding the MsgHeader and any
-    // page-padding the ring inserted) so the caller can simply
-    // `offset += wrote` until `offset == total_size`.
-    HypercallResult::success_2(total_size as u64, slice.len() as u64)
+
+    HypercallResult::success_2(total_size as u64, written as u64)
 }
 
 

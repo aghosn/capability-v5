@@ -156,6 +156,47 @@ int domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 }
 
 /*
+ * domcomm_rx_discard — drop the head message without copying its payload.
+ * Padding messages are transparently advanced past, same as in
+ * domcomm_rx_dequeue.  Returns 0 on success, -EAGAIN if ring is empty.
+ */
+int domcomm_rx_discard(struct domcomm_ring *ring, u32 *out_type,
+		       u32 *out_payload_size)
+{
+	struct domcomm_msg_header mhdr;
+	u32 head, tail, avail, pg, off, page_remain;
+
+	head = smp_load_acquire(ring->head);
+	tail = *ring->tail;
+	if (head == tail)
+		return -EAGAIN;
+	avail = head - tail;
+
+	ring_read(ring, tail, &mhdr, sizeof(mhdr));
+
+	if (mhdr.message_type == DOMCOMM_MSG_NONE) {
+		ring_offset_to_page(ring, tail, &pg, &off);
+		page_remain = PAGE_SIZE - off;
+		smp_store_release(ring->tail, tail + page_remain);
+		return domcomm_rx_discard(ring, out_type, out_payload_size);
+	}
+
+	if (mhdr.total_size > avail) {
+		pr_warn("thhv: domcomm RX: corrupt message (size %u > avail %u)\n",
+			mhdr.total_size, avail);
+		return -EIO;
+	}
+
+	if (out_type)
+		*out_type = mhdr.message_type;
+	if (out_payload_size)
+		*out_payload_size = mhdr.total_size - sizeof(mhdr);
+
+	smp_store_release(ring->tail, tail + mhdr.total_size);
+	return 0;
+}
+
+/*
  * domcomm_tx_enqueue — produce one message on the TX ring.
  *
  * Returns 0 on success, -ENOSPC if the ring is full.

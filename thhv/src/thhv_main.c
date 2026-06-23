@@ -160,8 +160,6 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 		u64 total_size = 0;
 		u64 offset = 0;
 		u64 wrote = 0;
-		u32 rx_msg_type;
-		u32 rx_chunk_size;
 		u64 tx_sequence = 0;
 		int is_signed = 0;
 		int ret, i;
@@ -171,6 +169,20 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 			return -ENOMEM;
 
 		if (copy_from_user(as, uarg, sizeof(*as))) {
+			kfree(as);
+			return -EFAULT;
+		}
+
+		/* Reject unreasonable buffer sizes early.  64 MiB cap is well
+		 * above any plausible attestation report size and matches the
+		 * boot-time pa-map ceiling used by thhv_translate.c.
+		 */
+		if (as->buf_len == 0 || as->buf_len > (16ULL << 20)) {
+			kfree(as);
+			return -EINVAL;
+		}
+		if (!access_ok((void __user *)(unsigned long)as->buf_uaddr,
+			       as->buf_len)) {
 			kfree(as);
 			return -EFAULT;
 		}
@@ -207,42 +219,84 @@ static long thhv_dev_ioctl(struct file *file, unsigned int cmd,
 		if (ret)
 			goto attest_unlock_err;
 
-		if (total_size == 0 || total_size > sizeof(as->report_buf)) {
-			pr_err("thhv: ATTEST_SELF total %llu does not fit user buffer (%zu)\n",
-			       total_size, sizeof(as->report_buf));
-			ret = -EMSGSIZE;
+		if (total_size == 0) {
+			ret = -EPROTO;
 			goto attest_unlock_err;
 		}
 
-		/* Reassemble chunks into the userspace buffer.  The signed
-		 * path's AttestRequest is consumed by the first hypercall
-		 * call only; subsequent chunk calls pass tx_sequence=0. */
-		for (;;) {
-			ret = domcomm_rx_dequeue(&thhv_domcomm.rx,
-						 as->report_buf + offset,
-						 (u32)(total_size - offset),
-						 &rx_msg_type,
-						 &rx_chunk_size);
-			if (ret)
-				goto attest_unlock_err;
-			if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
-				ret = -EPROTO;
-				goto attest_unlock_err;
+		/* Stream all chunks off the RX ring.  We always drain (even
+		 * when total_size > buf_len), copying as much as fits into
+		 * the user buffer and discarding the rest.  Leaving chunks
+		 * on the ring would block the doorbell drain forever and
+		 * spam pr_warn_ratelimited.
+		 *
+		 * Capavisor's do_attest_self pushes the entire payload onto
+		 * the RX ring in a single hypercall (see enqueue_attest_payload),
+		 * so `wrote` already covers all bytes from `arg1` to total_size.
+		 * We just dequeue chunks until we've consumed `wrote` bytes.
+		 */
+		{
+			u8 *scratch = NULL;
+			u64 enqueued_end = offset + wrote;
+
+			while (offset < enqueued_end) {
+				bool fits = offset < as->buf_len;
+				u32 room = fits
+					? (u32)min_t(u64,
+						     as->buf_len - offset,
+						     enqueued_end - offset)
+					: 0;
+				u32 rx_msg_type, rx_chunk_size;
+
+				if (fits) {
+					if (!scratch) {
+						scratch = kvmalloc(PAGE_SIZE,
+								   GFP_KERNEL);
+						if (!scratch) {
+							ret = -ENOMEM;
+							goto attest_unlock_err;
+						}
+					}
+					room = (u32)min_t(u32, room, PAGE_SIZE);
+					ret = domcomm_rx_dequeue(
+						&thhv_domcomm.rx,
+						scratch, room,
+						&rx_msg_type, &rx_chunk_size);
+				} else {
+					ret = domcomm_rx_discard(
+						&thhv_domcomm.rx,
+						&rx_msg_type, &rx_chunk_size);
+				}
+				if (ret) {
+					kvfree(scratch);
+					goto attest_unlock_err;
+				}
+				if (rx_msg_type != DOMCOMM_MSG_ATTEST) {
+					kvfree(scratch);
+					ret = -EPROTO;
+					goto attest_unlock_err;
+				}
+				if (fits) {
+					if (copy_to_user(
+						(void __user *)(unsigned long)
+							(as->buf_uaddr + offset),
+						scratch, rx_chunk_size)) {
+						kvfree(scratch);
+						ret = -EFAULT;
+						goto attest_unlock_err;
+					}
+				}
+				offset += rx_chunk_size;
 			}
-			offset += rx_chunk_size;
-			if (offset >= total_size)
-				break;
-			ret = themis_attest_self(is_signed ? 1 : 0, offset, 0,
-						 &total_size, &wrote);
-			if (ret)
-				goto attest_unlock_err;
+			kvfree(scratch);
 		}
 
 		mutex_unlock(&attest_lock);
 
 		as->report_size = total_size;
+		ret = (total_size > as->buf_len) ? -ENOSPC : 0;
 
-		if (copy_to_user(uarg, as, sizeof(*as)))
+		if (copy_to_user(uarg, as, sizeof(*as)) && !ret)
 			ret = -EFAULT;
 
 		kfree(as);

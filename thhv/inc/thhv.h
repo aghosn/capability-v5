@@ -960,11 +960,22 @@ struct thhv_query {
  *
  * Returns: report_size (bytes written to DomainComm RX ring) in result field.
  */
+/*
+ * THHV_ATTEST_SELF — return the calling partition's signed/unsigned
+ * attestation report into a userspace-supplied buffer.
+ *
+ * Userspace owns the buffer (any size, kernel streams chunks into it via
+ * copy_to_user as they arrive from the capavisor RX ring).  On return,
+ * `report_size` is the actual number of bytes written; if it exceeds
+ * `buf_len` the ioctl returns -ENOSPC and `report_size` carries the
+ * full size so the caller can resize and retry.
+ */
 struct thhv_attest_self {
 	__u8  nonce[32];         /* in: verifier-supplied nonce */
 	__u8  user_pub_key[32];  /* in: verifier's public key (bound into signature) */
-	__u64 report_size;       /* out: total bytes of signed report */
-	__u8  report_buf[4096];  /* out: signed attestation report (variable length) */
+	__u64 buf_uaddr;         /* in: userspace VA of report buffer */
+	__u64 buf_len;           /* in: capacity in bytes */
+	__u64 report_size;       /* out: total bytes of report (always set) */
 };
 
 #define THHV_ATTEST_SELF \

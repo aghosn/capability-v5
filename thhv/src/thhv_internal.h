@@ -385,6 +385,13 @@ int  domcomm_init(void);
 void domcomm_cleanup(void);
 int  domcomm_rx_dequeue(struct domcomm_ring *ring, void *buf,
 			u32 buf_size, u32 *out_type, u32 *out_payload_size);
+/* Drop the message at the ring head without copying its payload.  Used by
+ * consumers that don't recognise (or can't fit) the next message but still
+ * need the ring to drain so subsequent producers/consumers make progress.
+ * Returns 0 on success, -EAGAIN if ring is empty.
+ */
+int  domcomm_rx_discard(struct domcomm_ring *ring, u32 *out_type,
+			u32 *out_payload_size);
 int  domcomm_tx_enqueue(struct domcomm_ring *ring, u32 msg_type,
 			const void *payload, u32 payload_size,
 			u64 *out_sequence);
