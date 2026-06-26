@@ -201,6 +201,12 @@ impl Capability<MemoryRegion> {
     ) -> Result<CapabilityRef<MemoryRegion>> {
         let mut parent = parent_ref.write();
 
+        // META and COMM regions may not be aliased.  Checked under parent.write()
+        // so the domain-mediated layer doesn't need a separate parent.read() pre-flight.
+        if parent.owned.attributes.meta() || parent.owned.attributes.comm() {
+            return Err(CapaError::PermissionDenied);
+        }
+
         // Check if the requested range overlaps with any existing carved children
         // Aliasing is not allowed to overlap with carved regions
         for child_ref in &parent.children {
@@ -245,6 +251,12 @@ impl Capability<MemoryRegion> {
         owner: DomainId,
     ) -> Result<CapabilityRef<MemoryRegion>> {
         let mut parent = parent_ref.write();
+
+        // META and COMM regions may not be carved.  Checked under parent.write()
+        // so the domain-mediated layer doesn't need a separate parent.read() pre-flight.
+        if parent.owned.attributes.meta() || parent.owned.attributes.comm() {
+            return Err(CapaError::PermissionDenied);
+        }
 
         // Check if the requested range overlaps with any existing children.
         for child_ref in &parent.children {
@@ -1045,73 +1057,101 @@ pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView
 // Domain-mediated high-level operations
 // =============================================================================
 
+/// Acquire two domain write locks in ascending `DomainId` order, then bind the
+/// guards back to the caller's chosen names so the body reads naturally
+/// regardless of which physical order was used.
+///
+/// Domain IDs are immutable post-creation, so reading `data.id` under
+/// short-lived read locks before taking the write locks is safe.
+///
+/// Caller MUST pass two *distinct* domains (different `Arc` identity *and*
+/// different `DomainId`).  Passing the same domain twice would deadlock
+/// (`RwLock` is not reentrant).
+///
+/// This is the codebase-wide rule for any cross-domain mutation: see
+/// `send_memory_unsealed`, `accept_capability`, `send_channel`, `accept_channel`.
+macro_rules! lock_two_domains_ordered {
+    (
+        let ($a_guard:ident, $b_guard:ident) =
+            ($a_ref:expr, $a_id:expr, $b_ref:expr, $b_id:expr);
+    ) => {
+        debug_assert!(
+            $a_id != $b_id,
+            "lock_two_domains_ordered: same DomainId — would deadlock"
+        );
+        let (mut $a_guard, mut $b_guard) = if $a_id < $b_id {
+            let a_w = $a_ref.write();
+            let b_w = $b_ref.write();
+            (a_w, b_w)
+        } else {
+            let b_w = $b_ref.write();
+            let a_w = $a_ref.write();
+            (a_w, b_w)
+        };
+    };
+}
+
 impl Capability<Domain> {
     /// Carve a memory sub-region.  Returns `(LocalHandle, SubHandle, UpdateBatch)`.
     ///
     /// - `LocalHandle`: the caller's domain-table key for the new child.
     /// - `SubHandle`: the child's stable tree identity (auto-allocated from the
-    ///   parent capability's counter).  Pass this to [`revoke`] to
-    ///   revoke the child even after it has been sent to another domain.
+    ///   source region's counter).  Pass this to [`revoke`] to revoke the child
+    ///   even after it has been sent to another domain.
     ///
     /// # Errors
-    /// - [`CapaError::PermissionDenied`] — handle is frozen, parent has `META` attribute, or `CARVE` API not allowed.
-    /// - [`CapaError::NotFound`] — `parent` handle not found in caller's table.
-    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed parent.
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, source region has `META`/`COMM` attribute, or `CARVE` API not allowed.
+    /// - [`CapaError::NotFound`] — `region` handle not found in caller's table.
+    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed source region.
     pub fn carve(
         caller: &CapabilityRef<Domain>,
-        parent: LocalHandle,
+        region: LocalHandle,
         access: Access,
     ) -> Result<(LocalHandle, SubHandle, UpdateBatch)> {
-        // Pre-flight: read-only validation before acquiring the write lock.
-        // validate_operation reads owner_domain (= caller via a read lock), which would
-        // deadlock if called while we hold caller.write().
-        let owner_id;
-        let parent_ref: CapabilityRef<MemoryRegion>;
-        let same_rights;
+        // Single-lock discipline: validate + mutate atomically under caller.write().
+        //
+        // Why this is safe:
+        //   - Every memory cap reachable via `caller.data.memory_capabilities[h]`
+        //     has `cap.owned.owner == caller.id` by construction (invariant
+        //     maintained at every transfer point).  So we don't need to fetch
+        //     `owner_domain` and re-validate — the caller IS the owner.
+        //   - `require_api` checks sealed + API on the caller's own policy,
+        //     which we already hold under `w`.
+        //   - Lock order: `caller.write()` → `region_ref.write()` (taken inside
+        //     `carve_child`).  Per-region attribute checks (META/COMM) are also
+        //     enforced inside carve_child as defence in depth; we do an early
+        //     check here under region.read so that META/COMM rejection takes
+        //     precedence over a stale-caller `DomainNotSealed` error.
+        let mut w = caller.write();
+        if w.data.is_memory_handle_frozen(region) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let owner_id = w.data.id;
+        let region_ref = w
+            .data
+            .get_memory_capability(region)
+            .ok_or(CapaError::NotFound)?
+            .upgrade()
+            .ok_or(CapaError::NotFound)?;
+
+        // Early per-region rejection (error-precedence preservation).
         {
-            let r = caller.read();
-            if r.data.is_memory_handle_frozen(parent) {
+            let p = region_ref.read();
+            if p.owned.attributes.meta() || p.owned.attributes.comm() {
                 return Err(CapaError::PermissionDenied);
             }
-            owner_id = r.data.id;
-            let parent_weak = r
-                .data
-                .get_memory_capability(parent)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
-            let parent_owned = {
-                let p = parent_ref.read();
-                if p.owned.owner != owner_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                // META and COMM regions may not be carved.
-                if p.owned.attributes.meta() || p.owned.attributes.comm() {
-                    return Err(CapaError::PermissionDenied);
-                }
-                let parent_rights = p.data.access.rights;
-                same_rights = access.rights == parent_rights;
-                p.owned.clone()
-                // p (parent_ref.read()) dropped here
-            };
-            // Validate AFTER releasing parent_ref.read() to avoid ABBA:
-            // mutation holds dom.write() → parent_ref.write() (via carve_child);
-            // pre-flight holding parent_ref.read() while validate_operation
-            // tries dom.read() would deadlock.
-            parent_owned.validate_operation(MonitorAPI::CARVE)?;
         }
 
-        // Mutation: hold write lock for the atomic before/mutate/after sequence.
-        // carve_child and child_ref operate on CapabilityRef<MemoryRegion> — independent
-        // arcs, safe to lock while holding the domain write lock.
-        let mut w = caller.write();
+        w.data.require_api(MonitorAPI::CARVE)?;
 
         w.data.ensure_view_fresh();
         let view_before = w.data.cached_view.clone();
 
-        let child_ref = Capability::carve_child(&parent_ref, access, owner_id)?;
+        // carve_child takes region_ref.write() and rejects META/COMM regions
+        // under that same lock — see fold-in below.
+        let child_ref = Capability::carve_child(&region_ref, access, owner_id)?;
 
+        let same_rights;
         // Single write lock on child_ref: extract sub_handle, set owner, grab
         // footprint data.  Avoids 2 extra read-lock sync points that blow up
         // loom's interleaving space.
@@ -1122,6 +1162,13 @@ impl Capability<Domain> {
             let mut cw = child_ref.write();
             child_sub = cw.sub_handle;
             cw.owned.owner_domain = Some(Arc::downgrade(caller));
+            // Same-rights check, captured here while we already hold the child write.
+            // Parent's rights == child's rights iff the carve preserved them — read
+            // the parent rights briefly under read (lock order: child write held
+            // is OK because parent is a *different* Arc — read while holding child
+            // write is the same direction we already use in carve_child).
+            let parent_rights = region_ref.read().data.access.rights;
+            same_rights = access.rights == parent_rights;
             #[cfg(feature = "address_translation")]
             {
                 footprint = (
@@ -1179,62 +1226,43 @@ impl Capability<Domain> {
     /// Alias a memory sub-region.  Returns `(LocalHandle, SubHandle)`.
     ///
     /// See [`carve`] for the meaning of each return value.
-    /// The domain-level checks (frozen handle, ownership) are performed here before
-    /// delegating to the low-level primitive, keeping domain logic in the domain-mediated layer.
-    /// Alias a memory region.  Returns `(LocalHandle, SubHandle)`.
-    ///
-    /// Creates a read-only alias of `parent` restricted to `access` in the caller's table.
+    /// Creates a read-only alias of `region` restricted to `access` in the caller's table.
     ///
     /// # Errors
-    /// - [`CapaError::PermissionDenied`] — handle is frozen, parent has `META` attribute, or `ALIAS` API not allowed.
-    /// - [`CapaError::NotFound`] — `parent` handle not found in caller's table.
-    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed parent.
+    /// - [`CapaError::PermissionDenied`] — handle is frozen, source region has `META`/`COMM` attribute, or `ALIAS` API not allowed.
+    /// - [`CapaError::NotFound`] — `region` handle not found in caller's table.
+    /// - [`CapaError::InvalidAccess`] — requested range or rights exceed source region.
     pub fn alias(
         caller: &CapabilityRef<Domain>,
-        parent: LocalHandle,
+        region: LocalHandle,
         access: Access,
     ) -> Result<(LocalHandle, SubHandle)> {
-        // Pre-flight: read-only validation (same rationale as carve).
-        let owner_id;
-        let parent_ref: CapabilityRef<MemoryRegion>;
-        #[cfg(feature = "address_translation")]
-        let parent_hpa_start: u64;
+        // Single-lock discipline (see carve for the full rationale): validate +
+        // mutate atomically under caller.write(); per-region attribute checks
+        // live in alias_child under region_ref.write(), with an early check
+        // here to preserve error precedence.
+        let mut w = caller.write();
+        if w.data.is_memory_handle_frozen(region) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let owner_id = w.data.id;
+        let region_ref = w
+            .data
+            .get_memory_capability(region)
+            .ok_or(CapaError::NotFound)?
+            .upgrade()
+            .ok_or(CapaError::NotFound)?;
         {
-            let r = caller.read();
-            if r.data.is_memory_handle_frozen(parent) {
+            let p = region_ref.read();
+            if p.owned.attributes.meta() || p.owned.attributes.comm() {
                 return Err(CapaError::PermissionDenied);
             }
-            owner_id = r.data.id;
-            let parent_weak = r
-                .data
-                .get_memory_capability(parent)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
-            let parent_owned = {
-                let p = parent_ref.read();
-                if p.owned.owner != owner_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                // META and COMM regions may not be aliased.
-                if p.owned.attributes.meta() || p.owned.attributes.comm() {
-                    return Err(CapaError::PermissionDenied);
-                }
-                #[cfg(feature = "address_translation")]
-                {
-                    parent_hpa_start = p.data.access.start;
-                }
-                p.owned.clone()
-                // p (parent_ref.read()) dropped here
-            };
-            // Validate after releasing parent_ref.read() — same ABBA fix as carve.
-            parent_owned.validate_operation(MonitorAPI::ALIAS)?;
         }
+        w.data.require_api(MonitorAPI::ALIAS)?;
+        #[cfg(feature = "address_translation")]
+        let parent_hpa_start: u64 = region_ref.read().data.access.start;
 
-        // Mutation: hold write lock for the atomic mutation.
-        let mut w = caller.write();
-        let child_ref = Capability::alias_child(&parent_ref, access, owner_id)?;
+        let child_ref = Capability::alias_child(&region_ref, access, owner_id)?;
 
         // Single write lock on child_ref: extract sub_handle, set owner, grab
         // footprint data.  Same loom optimisation as carve().
@@ -1266,7 +1294,7 @@ impl Capability<Domain> {
         {
             let (alias_hpa, alias_size, alias_view, alias_rights) = footprint;
             // Alias's initial GPA = parent's GPA + offset within parent.
-            let parent_gpa = w.data.mapped_gpas.get(&parent).copied()
+            let parent_gpa = w.data.mapped_gpas.get(&region).copied()
                 .unwrap_or(parent_hpa_start);
             let alias_gpa = parent_gpa + (alias_hpa - parent_hpa_start);
             let _ = add_footprint(
@@ -1421,38 +1449,37 @@ impl Capability<Domain> {
         attrs: Attributes,
         _gpa_hint: Option<u64>,
     ) -> Result<UpdateBatch> {
-        // Pre-flight: resolve cap, check ownership, validate SEND — all under read
-        // locks so validate_operation can safely upgrade owner_domain.
+        // Single-lock discipline: validate caller.require_api(SEND) + freeze
+        // under caller.write().  By the dom↔cap invariant, every cap in
+        // caller's table is owned by caller, so no owner_domain re-validation
+        // is needed.  The receiver-side mutations (pending insertion) are
+        // sequential — sealed sends do not need atomic two-domain mutation
+        // because the receiver only observes the pending entry as an opaque
+        // queue item.
         let cap_ref = {
-            let r = caller.read();
-            let cap_weak = r
-                .data
-                .get_memory_capability(cap)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-            if cap_ref.read().owned.owner != caller_id {
-                return Err(CapaError::PermissionDenied);
-            }
-            if !receiver_ref.read().data.policy.receive_after_seal() {
-                return Err(CapaError::PermissionDenied);
-            }
-            // cap_ref.read() released here; validate_operation acquires dom.read()
-            // separately, so no cap.read() + dom.read() overlap.
-            let cap_owned = cap_ref.read().owned.clone();
-            cap_owned.validate_operation(MonitorAPI::SEND)?;
-            cap_ref
-        };
-
-        // Mutation: freeze under caller.write() — the authoritative commit point.
-        {
             let mut caller_w = caller.write();
+            caller_w.data.require_api(MonitorAPI::SEND)?;
             if caller_w.data.is_memory_handle_frozen(cap) {
                 return Err(CapaError::PermissionDenied);
             }
+            let cap_ref = caller_w
+                .data
+                .get_memory_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .upgrade()
+                .ok_or(CapaError::NotFound)?;
+            // RECEIVE_AFTER_SEAL check is a property of the receiver's policy;
+            // takes a brief receiver read while we hold caller.write().  Lock
+            // order: there is no rule requiring caller.write before receiver.read,
+            // but no concurrent mutation can reorder the chain (parking_lot
+            // read locks are non-recursive but compatible with writes on
+            // unrelated locks).
+            if !receiver_ref.read().data.policy.receive_after_seal() {
+                return Err(CapaError::PermissionDenied);
+            }
             caller_w.data.freeze_memory_handle(cap);
-        }
+            cap_ref
+        };
 
         // Attributes are applied only after the freeze is committed, so a failed
         // freeze (concurrent send) never leaves attributes in an inconsistent state.
@@ -1473,13 +1500,8 @@ impl Capability<Domain> {
 
     /// Unsealed send: immediately transfer ownership and emit MMU updates.
     ///
-    /// Acquires both domain write locks in domain-ID order (ABBA-safe). The
+    /// Acquires both domain write locks in domain-ID order (ABBA-safe).  The
     /// ownership change and view refresh happen atomically under both locks.
-    ///
-    /// Owner check and `owner_domain` clone are captured in a single read-lock
-    /// scope to prevent a TOCTOU where a concurrent transfer changes `owner_domain`
-    /// between an ownership check and a later read (which would erroneously surface
-    /// as `DomainNotSealed` from `validate_operation`).
     fn send_memory_unsealed(
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
@@ -1490,38 +1512,15 @@ impl Capability<Domain> {
     ) -> Result<UpdateBatch> {
         let receiver_id = receiver_ref.read().data.id;
 
-        // Pre-flight: validate SEND permission before acquiring write locks.
-        {
-            let r = caller.read();
-            let cap_weak = r
-                .data
-                .get_memory_capability(cap)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-            let cap_owned = {
-                let cr = cap_ref.read();
-                if cr.owned.owner != caller_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                cr.owned.clone()
-            };
-            cap_owned.validate_operation(MonitorAPI::SEND)?;
+        // Atomic acquisition of both domain write locks, ordered by DomainId.
+        lock_two_domains_ordered! {
+            let (caller_w, recv_w) = (caller, caller_id, receiver_ref, receiver_id);
         }
 
-        // Acquire both write locks in domain-ID order.
-        let (mut caller_w, mut recv_w) = if caller_id < receiver_id {
-            let c = caller.write();
-            let r = receiver_ref.write();
-            (c, r)
-        } else {
-            let r = receiver_ref.write();
-            let c = caller.write();
-            (c, r)
-        };
-
-        // Authoritative frozen check (commit point).
+        // Validate caller-side permission + frozen state under the authoritative
+        // write lock (no separate read-lock pre-flight — the dom↔cap invariant
+        // makes the indirect validate_operation check redundant).
+        caller_w.data.require_api(MonitorAPI::SEND)?;
         if caller_w.data.is_memory_handle_frozen(cap) {
             return Err(CapaError::PermissionDenied);
         }
@@ -1693,15 +1692,10 @@ impl Capability<Domain> {
 
         // Acquire both write locks in domain-ID order (same rule as send unsealed
         // path) so that concurrent send + accept on the same domain pair cannot deadlock.
-        let (mut recv_w, mut sender_w) = if receiver_id < sender_id_peek {
-            let r = receiver.write();
-            let s = sender_ref.write();
-            (r, s)
-        } else {
-            let s = sender_ref.write();
-            let r = receiver.write();
-            (r, s)
-        };
+        lock_two_domains_ordered! {
+            let (recv_w, sender_w) =
+                (receiver, receiver_id, &sender_ref, sender_id_peek);
+        }
 
         // Atomically remove the pending entry (commit point for accept vs. reject race).
         let pending = recv_w
@@ -1903,39 +1897,30 @@ impl Capability<Domain> {
     ) -> Result<UpdateBatch> {
         use crate::translation::address_map_diff;
 
-        // ── Pre-flight (read lock) ──────────────────────────────────────
-        let owner_id;
-        let cap_ref: CapabilityRef<MemoryRegion>;
-        {
-            let r = caller.read();
-            if r.data.is_memory_handle_frozen(cap_handle) {
-                return Err(CapaError::PermissionDenied);
-            }
-            owner_id = r.data.id;
-            let cap_weak = r
-                .data
-                .get_memory_capability(cap_handle)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-            {
-                let c = cap_ref.read();
-                if c.owned.owner != owner_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                if c.owned.attributes.meta() || c.owned.attributes.comm() {
-                    return Err(CapaError::PermissionDenied);
-                }
-                let owned = c.owned.clone();
-                drop(c);
-                owned.validate_operation(MonitorAPI::MAP_SELF)?;
-            }
+        // Single-lock discipline: validate + mutate under caller.write().
+        // Per-cap META/COMM check happens under cap_ref.read() inside the
+        // write-locked region (cap_ref is a separate Arc — taking its read
+        // while holding caller.write() does not introduce any new lock
+        // edge: the established mutation order is caller.write → cap.write).
+        let mut w = caller.write();
+        w.data.require_api(MonitorAPI::MAP_SELF)?;
+        if w.data.is_memory_handle_frozen(cap_handle) {
+            return Err(CapaError::PermissionDenied);
         }
+        let owner_id = w.data.id;
+        let cap_ref = w
+            .data
+            .get_memory_capability(cap_handle)
+            .ok_or(CapaError::NotFound)?
+            .upgrade()
+            .ok_or(CapaError::NotFound)?;
 
-        // ── Read cap address info + rights ──────────────────────────────
+        // Read cap address info + rights + reject META/COMM.
         let (cap_hpa, cap_size, cap_view, cap_rights) = {
             let c = cap_ref.read();
+            if c.owned.attributes.meta() || c.owned.attributes.comm() {
+                return Err(CapaError::PermissionDenied);
+            }
             (
                 c.data.access.start,
                 c.data.access.size,
@@ -1943,9 +1928,6 @@ impl Capability<Domain> {
                 c.data.access.rights,
             )
         };
-
-        // ── Mutation (write lock) ───────────────────────────────────────
-        let mut w = caller.write();
 
         // Look up where this cap's footprint currently lives.
         let old_gpa = *w
@@ -2028,16 +2010,16 @@ impl Capability<Domain> {
         receiver_handle: LocalHandle,
         attrs: Attributes,
     ) -> Result<()> {
-        // Pre-flight reads.
+        // Resolve chan/receiver Arcs and the receiver-sealed predicate under a
+        // single short caller.read() — these reads are non-authoritative; the
+        // authoritative checks happen under caller.write() below.
         let caller_id;
         let chan_ref: CapabilityRef<Domain>;
         let receiver_ref: CapabilityRef<Domain>;
+        let receiver_id;
         let recv_sealed;
         {
             let r = caller.read();
-            if r.data.is_domain_handle_frozen(chan_handle) {
-                return Err(CapaError::PermissionDenied);
-            }
             caller_id = r.data.id;
             let chan_weak = r
                 .data
@@ -2052,74 +2034,97 @@ impl Capability<Domain> {
             drop(r);
             chan_ref = chan_weak.upgrade().ok_or(CapaError::NotFound)?;
             receiver_ref = recv_weak.upgrade().ok_or(CapaError::NotFound)?;
-            recv_sealed = receiver_ref.read().data.is_sealed();
+            let rr = receiver_ref.read();
+            receiver_id = rr.data.id;
+            recv_sealed = rr.data.is_sealed();
         }
 
-        // Only channels may be transferred.
+        // Only channels may be transferred — checked under chan.read().
         if !chan_ref.read().is_channel() {
             return Err(CapaError::PermissionDenied);
         }
 
-        // Caller must own the channel.
-        if chan_ref.read().owned.owner != caller_id {
-            return Err(CapaError::PermissionDenied);
-        }
-
-        // Validate SEND permission on channel cap.
-        chan_ref.read().owned.validate_operation(MonitorAPI::SEND)?;
-
         if recv_sealed {
-            // Sealed path: check receiver accepts after seal.
-            if !receiver_ref.read().data.policy.receive_after_seal() {
+            // ── Sealed receiver: freeze + enqueue pending ─────────────────
+            //
+            // Lock-order rule for channels: `chan.write` is never held while
+            // any of `caller/recv/sender.write` is held.  This rule is required
+            // by `revoke_domain_subtree`'s channel branch which holds `chan.write`
+            // and then takes `(recv, sender)` ordered via the macro — if any
+            // path took `chan.write` *while holding* `recv` or `sender`, we'd
+            // have a classic ABBA.
+            //
+            // Consequence: chan mutations happen in a separate phase from the
+            // two-domain table mutation.  A brief mid-state where the chan
+            // attributes haven't been updated yet is acceptable — the only
+            // observers are other send/accept_channel calls, which read the
+            // chan independently.
+            lock_two_domains_ordered! {
+                let (caller_w, recv_w) =
+                    (caller, caller_id, &receiver_ref, receiver_id);
+            }
+
+            // Authoritative checks under caller.write().
+            caller_w.data.require_api(MonitorAPI::SEND)?;
+            if caller_w.data.is_domain_handle_frozen(chan_handle) {
                 return Err(CapaError::PermissionDenied);
             }
-
-            // Freeze source handle (authoritative commit).
-            {
-                let mut cw = caller.write();
-                if cw.data.is_domain_handle_frozen(chan_handle) {
-                    return Err(CapaError::PermissionDenied);
-                }
-                cw.data.freeze_domain_handle(chan_handle);
+            if !recv_w.data.policy.receive_after_seal() {
+                return Err(CapaError::PermissionDenied);
             }
+            caller_w.data.freeze_domain_handle(chan_handle);
 
-            // Apply attrs (after freeze commit) and record the receiver for revocation cleanup.
-            {
-                let mut cw = chan_ref.write();
-                cw.owned.attributes = attrs;
-                cw.owned.pending_receiver = Some(Arc::downgrade(&receiver_ref));
-            }
-
+            // Pending insertion stays inside the atomic block so the freeze +
+            // pending-insert pair is observed together (matters for accept/reject
+            // races, which take recv.write to find pending entries).
             let pending = PendingDomainCapability {
                 cap: Arc::downgrade(&chan_ref),
                 sender_domain_id: caller_id,
                 sender_handle: chan_handle,
                 sender_domain: Arc::downgrade(caller),
             };
-            receiver_ref
-                .write()
-                .data
-                .add_pending_domain_capability(pending);
-        } else {
-            // Unsealed path: immediate ownership transfer.
-            let receiver_id = receiver_ref.read().data.id;
+            recv_w.data.add_pending_domain_capability(pending);
+            drop(caller_w);
+            drop(recv_w);
+
+            // Chan mutation in isolation (lock-order rule above).
             {
-                let mut cw = caller.write();
-                cw.data.remove_domain_capability(chan_handle);
+                let mut cw = chan_ref.write();
+                cw.owned.attributes = attrs;
+                cw.owned.pending_receiver = Some(Arc::downgrade(&receiver_ref));
             }
+        } else {
+            // ── Unsealed receiver: immediate ownership transfer ────────────
+            //
+            // Two-domain atomic block covers the table mutation only.  The chan
+            // owner-update happens in a separate phase to honour the lock-order
+            // rule (see sealed branch above).
+            lock_two_domains_ordered! {
+                let (caller_w, recv_w) =
+                    (caller, caller_id, &receiver_ref, receiver_id);
+            }
+
+            caller_w.data.require_api(MonitorAPI::SEND)?;
+            if caller_w.data.is_domain_handle_frozen(chan_handle) {
+                return Err(CapaError::PermissionDenied);
+            }
+
+            caller_w.data.remove_domain_capability(chan_handle);
+            let new_handle = recv_w.data.allocate_domain_handle();
+            recv_w
+                .data
+                .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
+            let _ = new_handle;
+            drop(caller_w);
+            drop(recv_w);
+
+            // Chan owner mutation in isolation.
             {
                 let mut cw = chan_ref.write();
                 cw.owned.owner = receiver_id;
                 cw.owned.owner_domain = Some(Arc::downgrade(&receiver_ref));
                 cw.owned.attributes = attrs;
             }
-            let new_handle = {
-                let mut rw = receiver_ref.write();
-                let h = rw.data.allocate_domain_handle();
-                rw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
-                h
-            };
-            let _ = new_handle;
         }
 
         Ok(())
@@ -2141,43 +2146,68 @@ impl Capability<Domain> {
     ) -> Result<LocalHandle> {
         let receiver_id = receiver.read().data.id;
 
-        // Atomically remove the pending entry.
-        let pending = {
-            let mut rw = receiver.write();
-            rw.data
+        // Peek at the pending entry to learn sender's DomainId for ordered locking.
+        // The actual commit (remove_from_pending) happens under both write locks below.
+        let (sender_id_peek, sender_domain_weak) = {
+            let r = receiver.read();
+            let pending = r
+                .data
+                .pending_domain_capabilities
+                .get(&pending_id)
+                .ok_or(CapaError::NotFound)?;
+            (pending.sender_domain_id, pending.sender_domain.clone())
+        };
+        let sender_ref = sender_domain_weak.upgrade().ok_or(CapaError::NotFound)?;
+
+        // Acquire both domain write locks atomically (ABBA-safe by DomainId order)
+        // so the remove-from-sender + add-to-receiver pair is observed atomically.
+        // chan.write is taken AFTER releasing both — the lock-order rule for
+        // channels is "chan.write never held with recv/sender.write"; see
+        // send_channel for the rationale (deadlock avoidance with revoke).
+        let (chan_ref, sender_handle);
+        {
+            lock_two_domains_ordered! {
+                let (recv_w, sender_w) =
+                    (receiver, receiver_id, &sender_ref, sender_id_peek);
+            }
+
+            // Atomically remove the pending entry (commit point).
+            let pending = recv_w
+                .data
                 .pending_domain_capabilities
                 .remove(&pending_id)
-                .ok_or(CapaError::NotFound)?
-        };
+                .ok_or(CapaError::NotFound)?;
+            chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
+            sender_handle = pending.sender_handle;
 
-        // Check sender is still alive.
-        let sender_ref = pending.sender_domain.upgrade().ok_or(CapaError::NotFound)?;
-        let chan_ref = pending.cap.upgrade().ok_or(CapaError::NotFound)?;
+            // Unfreeze sender's handle and remove it from sender's table.
+            sender_w.data.unfreeze_domain_handle(sender_handle);
+            sender_w.data.remove_domain_capability(sender_handle);
 
-        // Transfer ownership and clear the in-transit marker.
-        {
-            let mut cw = chan_ref.write();
-            cw.owned.owner = receiver_id;
-            cw.owned.owner_domain = Some(Arc::downgrade(receiver));
-            cw.owned.pending_receiver = None;
+            // Allocate handle in receiver's table (atomic with pending removal
+            // so concurrent readers never see the chan in neither table).
+            let new_handle = recv_w.data.allocate_domain_handle();
+            recv_w
+                .data
+                .add_domain_capability(new_handle, Arc::downgrade(&chan_ref));
+
+            // Capture new_handle for the function return value before guards drop.
+            let result_handle = new_handle;
+
+            // Drop both domain writes BEFORE taking chan.write (lock-order rule).
+            drop(recv_w);
+            drop(sender_w);
+
+            // Now safe to take chan.write standalone.
+            {
+                let mut cw = chan_ref.write();
+                cw.owned.owner = receiver_id;
+                cw.owned.owner_domain = Some(Arc::downgrade(receiver));
+                cw.owned.pending_receiver = None;
+            }
+
+            return Ok(result_handle);
         }
-
-        // Unfreeze sender's handle and remove it from sender's table.
-        {
-            let mut sw = sender_ref.write();
-            sw.data.unfreeze_domain_handle(pending.sender_handle);
-            sw.data.remove_domain_capability(pending.sender_handle);
-        }
-
-        // Allocate handle in receiver's table.
-        let new_handle = {
-            let mut rw = receiver.write();
-            let h = rw.data.allocate_domain_handle();
-            rw.data.add_domain_capability(h, Arc::downgrade(&chan_ref));
-            h
-        };
-
-        Ok(new_handle)
     }
 
     /// Reject a pending channel capability. Unfreezes the sender's handle.
@@ -2207,57 +2237,45 @@ impl Capability<Domain> {
         Ok(())
     }
 
-    /// Revoke a direct child of the parent capability identified by `child_sub`.
+    /// Revoke a direct child of the memory region capability identified by `child_sub`.
     ///
-    /// `parent` is the LocalHandle of the parent memory region in `caller`'s table.
-    /// `child_sub` is the SubHandle returned by [`carve`] or [`alias`]
-    /// when the child was created.  Because SubHandles are auto-allocated from the
-    /// parent's internal counter they are unique among siblings and stable across
-    /// ownership transfers — so this call succeeds even after the child has been
-    /// sent to another domain.
+    /// `region` is the LocalHandle of the parent memory region in `caller`'s table.
+    /// `child_sub` is the SubHandle returned by [`carve`] or [`alias`] when the
+    /// child was created.  Because SubHandles are auto-allocated from the region's
+    /// internal counter they are unique among siblings and stable across ownership
+    /// transfers — so this call succeeds even after the child has been sent to
+    /// another domain.
     ///
     /// # Errors
-    /// - [`CapaError::PermissionDenied`] — `parent` handle is frozen, caller does not own the parent,
-    ///   parent has `META` attribute, or `REVOKE` API not allowed.
-    /// - [`CapaError::NotFound`] — `parent` handle or `child_sub` not found.
+    /// - [`CapaError::PermissionDenied`] — `region` handle is frozen, or `REVOKE` API not allowed.
+    /// - [`CapaError::NotFound`] — `region` handle or `child_sub` not found.
     pub fn revoke(
         caller: &CapabilityRef<Domain>,
-        parent: LocalHandle,
+        region: LocalHandle,
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {
-        // Pre-flight: read-only validation before acquiring the write lock.
-        let owner_id;
-        let parent_ref: CapabilityRef<MemoryRegion>;
-        {
-            let r = caller.read();
-            if r.data.is_memory_handle_frozen(parent) {
-                return Err(CapaError::PermissionDenied);
-            }
-            owner_id = r.data.id;
-            let parent_weak = r
-                .data
-                .get_memory_capability(parent)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            drop(r);
-            parent_ref = parent_weak.upgrade().ok_or(CapaError::NotFound)?;
-            let parent_owned = {
-                let p = parent_ref.read();
-                if p.owned.owner != owner_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                p.owned.clone()
-                // p (parent_ref.read()) dropped here
-            };
-            // Validate after releasing parent_ref.read() — same ABBA fix as carve.
-            parent_owned.validate_operation(MonitorAPI::REVOKE)?;
-        }
-
-        // Mutation: hold write lock. revoke_child operates only on
-        // CapabilityRef<MemoryRegion> arcs (independent) — no deadlock risk.
+        // Single-lock discipline: validate + mutate under caller.write().
+        // Per the dom↔cap invariant, region looked up in caller's table is
+        // owned by caller; the owner_domain indirection is redundant.
         let mut w = caller.write();
+        w.data.require_api(MonitorAPI::REVOKE)?;
+        if w.data.is_memory_handle_frozen(region) {
+            return Err(CapaError::PermissionDenied);
+        }
+        let owner_id = w.data.id;
+        #[cfg(not(feature = "address_translation"))]
+        let _ = owner_id;
+        let region_ref = w
+            .data
+            .get_memory_capability(region)
+            .ok_or(CapaError::NotFound)?
+            .upgrade()
+            .ok_or(CapaError::NotFound)?;
+
+        // revoke_child operates only on CapabilityRef<MemoryRegion> arcs
+        // (independent of the domain lock) — no deadlock risk.
         #[allow(unused_mut)]
-        let mut updates = Capability::revoke_child(&parent_ref, child_sub)?;
+        let mut updates = Capability::revoke_child(&region_ref, child_sub)?;
         w.data.prune_stale_memory_capabilities();
 
         // Unblock parent's AddressMap entries that were blocked during send.
@@ -2300,18 +2318,21 @@ impl Capability<Domain> {
     /// - [`CapaError::ApiNotAllowed`] — `cap` is a channel capability, or `SEAL` API not allowed.
     /// - [`CapaError::DomainAlreadySealed`] — domain is already sealed.
     pub fn seal(caller: &CapabilityRef<Domain>, cap: LocalHandle) -> Result<()> {
-        let cap_weak = caller
-            .read()
-            .data
-            .get_domain_capability(cap)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+        // Single-lock discipline: validate SEAL on the caller (the owner of
+        // the child domain cap, by the dom↔cap invariant) and seal the child
+        // under its own write lock.
+        let cap_ref = {
+            let r = caller.read();
+            r.data.require_api(MonitorAPI::SEAL)?;
+            r.data
+                .get_domain_capability(cap)
+                .ok_or(CapaError::NotFound)?
+                .upgrade()
+                .ok_or(CapaError::NotFound)?
+        };
         if cap_ref.read().is_channel() {
             return Err(CapaError::ApiNotAllowed);
         }
-        // Caller must have SEAL permission before sealing a child domain.
-        cap_ref.read().owned.validate_operation(MonitorAPI::SEAL)?;
         let result = cap_ref.write().data.seal();
         result
     }
@@ -2414,40 +2435,35 @@ impl Capability<Domain> {
         let cap_ref: CapabilityRef<MemoryRegion>;
         let child_ref: CapabilityRef<Domain>;
 
-        // Pre-flight: resolve memory handle and child domain handle.
+        // Pre-flight: validate SET on caller + resolve memory and child domain handles.
         {
             let r = caller.read();
+            r.data.require_api(MonitorAPI::SET)?;
             if r.data.is_memory_handle_frozen(handle) {
                 return Err(CapaError::PermissionDenied);
             }
             owner_id = r.data.id;
 
-            let cap_weak = r
+            cap_ref = r
                 .data
                 .get_memory_capability(handle)
                 .ok_or(CapaError::NotFound)?
-                .clone();
-
-            let child_weak = r
+                .upgrade()
+                .ok_or(CapaError::NotFound)?;
+            child_ref = r
                 .data
                 .get_domain_capability(child_domain_handle)
                 .ok_or(CapaError::NotFound)?
-                .clone();
-
-            drop(r);
-            cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-            child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+                .upgrade()
+                .ok_or(CapaError::NotFound)?;
         }
 
         let child_domain_id: DomainId;
 
-        // Validate cap: must be Carve, Exclusive, leaf, owned by caller,
-        // not META, not already COMM.
-        let cap_owned = {
+        // Validate cap shape: must be Carve, Exclusive, leaf, not META/COMM already.
+        // (Ownership-by-caller is implied by reaching cap_ref through caller's table.)
+        {
             let c = cap_ref.read();
-            if c.owned.owner != owner_id {
-                return Err(CapaError::PermissionDenied);
-            }
             if c.data.kind != RegionKind::Carve {
                 return Err(CapaError::PermissionDenied);
             }
@@ -2462,12 +2478,7 @@ impl Capability<Domain> {
                     "capability already carries the COMM or META attribute".into(),
                 ));
             }
-            c.owned.clone()
-            // c (cap_ref.read()) released here
-        };
-        // Validate AFTER releasing cap_ref.read() to avoid ABBA deadlock
-        // (same pattern as carve/alias/send).
-        cap_owned.validate_operation(MonitorAPI::SET)?;
+        }
 
         // Read child domain ID, validate VP index, and check no existing
         // COMM binding for this VP.
@@ -2765,32 +2776,30 @@ impl Capability<Domain> {
         caller: &CapabilityRef<Domain>,
         target_handle: LocalHandle,
     ) -> Result<LocalHandle> {
-        let caller_id = caller.read().data.id;
-
-        // 1. Resolve target domain capability.
-        let target_weak = caller
-            .read()
-            .data
-            .get_domain_capability(target_handle)
-            .ok_or(CapaError::NotFound)?
-            .clone();
-        let target_ref = target_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-        // 2. Check GETCHAN permission: validate that the caller domain (owner of
-        //    target_ref) has GETCHAN in its policy.  We use the standard pattern of
-        //    calling validate_operation on the owned struct of the capability being
-        //    operated on — its owner_domain IS the caller.
+        // Validate GETCHAN on caller + resolve target Arc under one caller.read().
+        // By the dom↔cap invariant, target_ref looked up in caller's table is
+        // owned by caller, so the indirect validate_operation is equivalent
+        // to require_api on the caller itself.
+        let caller_id;
+        let target_ref: CapabilityRef<Domain>;
         {
-            let target_r = target_ref.read();
-            target_r.owned.validate_operation(MonitorAPI::GETCHAN)?;
+            let r = caller.read();
+            r.data.require_api(MonitorAPI::GETCHAN)?;
+            caller_id = r.data.id;
+            target_ref = r
+                .data
+                .get_domain_capability(target_handle)
+                .ok_or(CapaError::NotFound)?
+                .upgrade()
+                .ok_or(CapaError::NotFound)?;
         }
 
-        // 3. Target must be sealed (channels are only meaningful for live domains).
+        // Target must be sealed (channels are only meaningful for live domains).
         if !target_ref.read().data.is_sealed() {
             return Err(CapaError::DomainNotSealed);
         }
 
-        // 4. Allocate a SubHandle and depth from the target's CDT node.
+        // Allocate a SubHandle and depth from the target's CDT node.
         let (sub_handle, chan_depth) = {
             let mut t = target_ref.write();
             let s = t.next_child_sub;
@@ -2798,7 +2807,7 @@ impl Capability<Domain> {
             (s, t.depth + 1)
         };
 
-        // 5. Build the channel capability.
+        // Build the channel capability.
         //    - data: sentinel (never used directly)
         //    - channel_target: weak ref to target
         //    - MonitorAPI: ATTEST | GETCHAN | SEND only
@@ -2819,10 +2828,10 @@ impl Capability<Domain> {
             next_child_sub: 1,
         }));
 
-        // 6. Register channel as a child of target in the CDT.
+        // Register channel as a child of target in the CDT.
         target_ref.write().add_child(chan_ref.clone());
 
-        // 7. Register in caller's domain capability table and return handle.
+        // Register in caller's domain capability table and return handle.
         let chan_handle = {
             let mut cw = caller.write();
             let h = cw.data.allocate_domain_handle();
