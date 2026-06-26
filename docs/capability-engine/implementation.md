@@ -504,10 +504,11 @@ The `RwLock` wrapper allows concurrent reads (e.g., two threads inspecting the s
 
 ```rust
 pub struct Ownership {
-    pub owner:        DomainId,
-    pub handle:       LocalHandle,
-    pub attributes:   Attributes,
-    pub owner_domain: Option<CapabilityWeak<Domain>>,
+    pub owner:            DomainId,
+    pub attributes:       Attributes,
+    pub owner_domain:     Option<CapabilityWeak<Domain>>,
+    /// Set only on channel capabilities while in-transit (send_channel).
+    pub pending_receiver: Option<CapabilityWeak<Domain>>,
 }
 ```
 
@@ -519,44 +520,33 @@ pub struct Ownership {
 
 Root capabilities in tests and in the root domain itself set `owner_domain = None`, which skips the check entirely.
 
-## CDT Operations — Static vs. Extension Trait
+`LocalHandle`s are not stored on the capability itself — they are per-domain keys in the owner's `memory_capabilities` / `domain_capabilities` tables.
 
-Every CDT operation is available in two forms:
+## CDT Operations
 
-### Static methods on `Capability<T>`
-
-Explicit about every parameter. Used when the caller constructs ownership details manually:
+Static methods on `Capability<T>` are the low-level CDT primitives. Most public API code should go through the domain-mediated entry points instead (`Capability::carve`, `alias`, `send_memory_*`, `revoke`, `create`, `revoke_domain`, `send_channel`, `accept_channel`), which handle handle allocation, table updates and the `UpdateBatch`.
 
 ```rust
-// Memory
-Capability::alias_child(&parent, access, owner_id, handle)?;
-Capability::carve_child(&parent, access, owner_id, handle)?;
-Capability::send_to(&region, caller, new_owner_id, new_handle, attributes)?;
-Capability::revoke_child(&parent, child_handle)?;
+// Memory primitives
+Capability::alias_child(&parent, access, owner_id)?;
+Capability::carve_child(&parent, access, owner_id)?;
+Capability::send_to(&region, caller_id, new_owner_id, attributes)?;
+Capability::revoke_child(&parent, child_sub)?;
 Capability::revoke_child_ref(&parent, &child_ref)?;
 
-// Domain
-Capability::create_child_domain(&parent, policy, owner_id, handle)?;
-Capability::revoke_child_domain(&parent, child_handle)?;
+// Domain primitives
+//
+// `create_child_domain` takes a `&mut Capability<Domain>` reborrowed from a
+// write guard the caller already holds — it does NOT acquire any lock on
+// `parent`. This is required because the public `Capability::create` must
+// also allocate a `LocalHandle` and insert the child into the parent's
+// domain table inside the same write region, which would deadlock if the
+// helper tried to reacquire the lock.
+let mut w = parent.write();
+let child = Capability::create_child_domain(&mut *w, &parent, policy, owner_id)?;
+
+Capability::revoke_child_domain(&parent, child_sub)?;
 ```
-
-### Extension traits
-
-Infer ownership from the capability itself. Cleaner for higher-level code:
-
-```rust
-// MemoryCapabilityExt — implemented on CapabilityRef<MemoryRegion>
-parent_ref.alias(access, handle)?;
-parent_ref.carve(access, handle)?;
-region_ref.send(new_owner_id, new_handle, attributes)?;
-parent_ref.revoke(child_handle)?;
-
-// DomainCapabilityExt — implemented on CapabilityRef<Domain>
-parent_ref.create_child(policy, handle)?;
-parent_ref.revoke_child(child_handle)?;
-```
-
-The extension trait methods are thin wrappers: they read `self`'s current owner information and forward to the static methods.
 
 ## `compute_address_space`
 
