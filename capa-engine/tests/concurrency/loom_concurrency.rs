@@ -763,22 +763,22 @@ fn region_reuse_after_revoke() {
 //
 // | Thread A (shared lock)                          | Thread B (shared lock)                          |
 // |-------------------------------------------------|-------------------------------------------------|
-// | create_child_domain(&parent, policy, …, h=1)    | create_child_domain(&parent, policy, …, h=2)    |
+// | Capability::create(&parent, policy)             | Capability::create(&parent, policy)             |
 //
 // Setup: sealed parent domain with MonitorAPI::ALL.
 //
-// create_child_domain has a read → drop → write gap:
-//   1. parent.read()                — validate sealed + policy.
-//   2. drop(parent)                 — release read lock.
-//   3. parent_ref.write().add_child — acquire write lock.
-//
-// Two concurrent creates both pass validation in step 1, then serialise at
-// step 3.
+// Exercises the public `Capability::create` API end-to-end: allocate a
+// LocalHandle in the parent's domain_capabilities table, build the child via
+// `create_child_domain`, and register the child in the parent's handle table.
+// Both the `LocalHandle` allocation/insertion and the `SubHandle` allocation
+// must serialise correctly so neither pair collides.
 //
 // Valid outcomes (all schedules):
 // - Both succeed.
-// - Parent has 2 children with handles 1 and 2.
-// - No deadlock in the read → drop → write transition.
+// - Parent has 2 children in `children`.
+// - Parent has 2 distinct entries in `domain_capabilities` with distinct
+//   `LocalHandle`s.
+// - No deadlock.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Helper: create a sealed root domain capability suitable for loom tests.
@@ -801,7 +801,7 @@ fn concurrent_domain_creation() {
         let cp = child_policy.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::create_child_domain(&p, cp, 0)
+            Capability::create(&p, cp)
         });
 
         let pl = platform_lock.clone();
@@ -809,15 +809,30 @@ fn concurrent_domain_creation() {
         let cp = child_policy.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::create_child_domain(&p, cp, 0)
+            Capability::create(&p, cp)
         });
 
         let res_a = ta.join().unwrap();
         let res_b = tb.join().unwrap();
 
-        assert!(res_a.is_ok(), "domain creation A should succeed");
-        assert!(res_b.is_ok(), "domain creation B should succeed");
-        assert_eq!(parent.read().children.len(), 2);
+        let (handle_a, _) = res_a.expect("domain creation A should succeed");
+        let (handle_b, _) = res_b.expect("domain creation B should succeed");
+
+        // The two creates must produce distinct LocalHandles in the parent's
+        // domain_capabilities table — this is the property the smallest-free
+        // allocator must preserve under concurrent creates on the same parent.
+        assert_ne!(
+            handle_a, handle_b,
+            "concurrent creates must return distinct LocalHandles"
+        );
+
+        let p = parent.read();
+        assert_eq!(p.children.len(), 2, "parent must have 2 children in CDT");
+        assert_eq!(
+            p.data.domain_capability_handles().len(),
+            2,
+            "parent must have 2 entries in domain_capabilities table"
+        );
     });
 }
 

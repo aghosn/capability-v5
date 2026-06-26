@@ -667,38 +667,42 @@ impl Capability<Domain> {
     ///
     /// **Internal primitive.** Prefer the domain-mediated [`create`] instead.
     #[doc(hidden)]
+    /// Create a child domain capability under the parent.
+    ///
+    /// **Locking contract (explicit):** the caller must hold `parent`'s write
+    /// lock; `parent_cap` is the inner value reborrowed from that guard
+    /// (e.g. `&mut *parent.write()`). This function acquires no lock itself
+    /// so the caller can keep the parent write held across surrounding work
+    /// (e.g. `LocalHandle` allocate + insert in [`Capability::create`]).
+    ///
+    /// `parent` is also passed to obtain a `Weak` reference for the child's
+    /// CDT back-pointer — there is no way to recover the surrounding `Arc`
+    /// from `parent_cap` alone.
     pub fn create_child_domain(
-        parent_ref: &CapabilityRef<Domain>,
+        parent_cap: &mut Capability<Domain>,
+        parent: &CapabilityRef<Domain>,
         policy: DomainPolicy,
         owner: DomainId,
     ) -> Result<CapabilityRef<Domain>> {
-        let parent = parent_ref.read();
-
-        parent.data.require_api(MonitorAPI::CREATE)?;
-
-        policy.is_subset_of(&parent.data.policy)?;
+        parent_cap.data.require_api(MonitorAPI::CREATE)?;
+        policy.is_subset_of(&parent_cap.data.policy)?;
 
         let child_domain = Domain::new(policy);
 
-        drop(parent);
-
         // Auto-allocate a unique SubHandle from the parent's counter; capture depth too.
-        let (sub_handle, child_depth) = {
-            let mut parent = parent_ref.write();
-            let s = parent.next_child_sub;
-            parent.next_child_sub += 1;
-            (s, parent.depth + 1)
-        };
+        let sub_handle = parent_cap.next_child_sub;
+        parent_cap.next_child_sub += 1;
+        let child_depth = parent_cap.depth + 1;
 
         let child = Capability::new_child(
             owner,
             sub_handle,
             child_depth,
             child_domain,
-            Arc::downgrade(parent_ref),
+            Arc::downgrade(parent),
         );
 
-        parent_ref.write().add_child(child.clone());
+        parent_cap.add_child(child.clone());
 
         Ok(child)
     }
@@ -2349,28 +2353,41 @@ impl Capability<Domain> {
         parent: &CapabilityRef<Domain>,
         policy: DomainPolicy,
     ) -> Result<(LocalHandle, UpdateBatch)> {
-        let owner_id = parent.read().data.id;
+        // Hold a single parent write guard across the entire sequence so that
+        // (handle allocation, child creation in CDT, handle table insertion)
+        // are observed atomically. `allocate_domain_handle` is a smallest-free
+        // scan over `domain_capabilities` — it MUST run under the same write
+        // guard that performs the subsequent `add_domain_capability`, otherwise
+        // two concurrent creates can both pick the same handle and clobber
+        // each other.
+        let (new_handle, child_ref, owner_id, parent_id) = {
+            let mut w = parent.write();
+            let owner_id = w.data.id;
 
-        // 1. Auto-allocate handle (domain table key)
-        let new_handle = parent.read().data.allocate_domain_handle();
+            // 1. Auto-allocate handle (domain table key) under the held write.
+            let new_handle = w.data.allocate_domain_handle();
 
-        // 2. Create the child (validates sealed + CREATE permission + policy monotonicity)
-        //    sub_handle is auto-allocated from parent's next_child_sub counter
-        let child_ref = Capability::create_child_domain(parent, policy, owner_id)?;
+            // 2. Create the child via the helper, passing the held write guard
+            //    (dereferenced to &mut Capability<Domain>) so it does not
+            //    attempt to re-lock `parent`.
+            let child_ref =
+                Capability::create_child_domain(&mut *w, parent, policy, owner_id)?;
 
-        // 3. Set owner_domain so API checks work on the child
+            // 3. Register child in parent's domain capability table — atomic
+            //    with the allocate above (same write guard).
+            w.data
+                .add_domain_capability(new_handle, Arc::downgrade(&child_ref));
+
+            (new_handle, child_ref, owner_id, w.data.id)
+        };
+
+        // 4. Set owner_domain on the child (separate lock — child_ref only).
         child_ref.write().owned.owner_domain = Some(Arc::downgrade(parent));
 
-        // 4. Register child in parent's table
-        parent
-            .write()
-            .data
-            .add_domain_capability(new_handle, Arc::downgrade(&child_ref));
-
         let new_domain_id = child_ref.read().data.id;
-        let parent_id = Some(parent.read().data.id);
         let mut batch = UpdateBatch::new();
-        batch.add_create_domain(new_domain_id, parent_id);
+        batch.add_create_domain(new_domain_id, Some(parent_id));
+        let _ = owner_id;
         Ok((new_handle, batch))
     }
 
