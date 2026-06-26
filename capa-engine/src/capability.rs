@@ -2349,10 +2349,15 @@ impl Capability<Domain> {
         parent: &CapabilityRef<Domain>,
         policy: DomainPolicy,
     ) -> Result<(LocalHandle, UpdateBatch)> {
-        let owner_id = parent.read().data.id;
+
+        // We could take a read lock here, but only if `allocate_domain_handle` were
+        // atomic and stateful. Since it isn't, we take a write lock instead.
+        // -- @HaoyiZeng
+        let w = parent.write();
+        let owner_id = w.data.id;
 
         // 1. Auto-allocate handle (domain table key)
-        let new_handle = parent.read().data.allocate_domain_handle();
+        let new_handle = w.data.allocate_domain_handle();
 
         // 2. Create the child (validates sealed + CREATE permission + policy monotonicity)
         //    sub_handle is auto-allocated from parent's next_child_sub counter
