@@ -203,7 +203,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         b
     };
 
-    capability_engine::execute(&platform, false, || Ok(((), batch)))
+    capability_engine::bootstrap::apply_initial_updates(&platform, batch)
         .expect("P2c: capability engine execute failed");
 
     let eptp = platform
@@ -241,7 +241,7 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         b
     };
 
-    capability_engine::execute(&platform, false, || Ok(((), passthrough_batch)))
+    capability_engine::bootstrap::apply_initial_updates(&platform, passthrough_batch)
         .expect("P2c: passthrough EPT execute failed");
 
     serial_println!(

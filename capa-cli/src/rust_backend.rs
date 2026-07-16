@@ -429,7 +429,7 @@ impl Backend for RustBackend {
 
     fn reject(&mut self, domain: DomainId, pending_id: u64) -> Result<()> {
         let domain_arc = self.get_domain(domain)?;
-        Capability::reject(&domain_arc, pending_id).map_err(convert_error)
+        Capability::reject(&*self.platform, &domain_arc, pending_id).map_err(convert_error)
     }
 
     fn revoke_mem(

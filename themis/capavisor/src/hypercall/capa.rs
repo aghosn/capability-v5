@@ -102,11 +102,10 @@ pub(super) fn do_reject(
     caller: &CapabilityRef<Domain>,
     pending_id: u64,
 ) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::reject(&caller, pending_id).map(|()| ((), Default::default()))
-    });
-    HypercallResult::success()
+    match Capability::reject(platform, caller, pending_id) {
+        Ok(()) => HypercallResult::success(),
+        Err(e) => HypercallResult::error(map_error(&e)),
+    }
 }
 
 // ── Channel (domain capability transfer) handlers ────────────────────────── //

@@ -23,6 +23,9 @@ use capability_engine::*;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[path = "../common/mod.rs"]
+mod common;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Create a sealed domain with MonitorAPI::ALL (includes SEND and RECEIVE_AFTER_SEAL).
@@ -145,7 +148,10 @@ fn send_then_reject() {
     let pending_id = receiver.read().data.get_pending_ids()[0];
 
     // Reject: unfreezes handle 1 in sender, removes pending entry.
-    Capability::<Domain>::reject(&receiver, pending_id).unwrap();
+    let platform = common::TestPlatform::new();
+    platform.register_domain(sender.read().data.id, None);
+    platform.register_domain(receiver.read().data.id, None);
+    Capability::<Domain>::reject(&platform, &receiver, pending_id).unwrap();
 
     // Handle 1 is back — accessible and not frozen.
     assert!(
@@ -332,7 +338,11 @@ fn reject_then_reuse_handle() {
         .add_domain_capability(2, Arc::downgrade(&receiver2));
     Capability::<Domain>::send(&sender, 1, 1, Attributes::NONE).unwrap();
     let pending_id = receiver1.read().data.get_pending_ids()[0];
-    Capability::<Domain>::reject(&receiver1, pending_id).unwrap();
+    let platform = common::TestPlatform::new();
+    platform.register_domain(sender.read().data.id, None);
+    platform.register_domain(receiver1.read().data.id, None);
+    platform.register_domain(receiver2.read().data.id, None);
+    Capability::<Domain>::reject(&platform, &receiver1, pending_id).unwrap();
 
     // Handle 1 is unfrozen — second send must succeed.
     Capability::<Domain>::send(&sender, 1, 2, Attributes::NONE)

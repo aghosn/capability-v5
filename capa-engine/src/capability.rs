@@ -1831,26 +1831,38 @@ impl Capability<Domain> {
 
     /// Reject a pending memory capability. Unfreezes the sender's LocalHandle.
     ///
+    /// The call is wrapped in [`crate::platform::execute`] with an empty
+    /// [`UpdateBatch`], so it serialises against destructive operations via
+    /// the shared cap lock without triggering the cross-core IPI/barrier
+    /// path.
+    ///
     /// # Errors
     /// - [`CapaError::NotFound`] — `pending_id` not found in receiver's pending queue.
-    pub fn reject(receiver: &CapabilityRef<Domain>, pending_id: u64) -> Result<()> {
-        // 1. Remove pending from receiver
-        let pending = {
-            let mut recv = receiver.write();
-            recv.data
-                .pending_capabilities
-                .remove(&pending_id)
-                .ok_or(CapaError::NotFound)?
-        };
+    pub fn reject(
+        platform: &dyn Platform,
+        receiver: &CapabilityRef<Domain>,
+        pending_id: u64,
+    ) -> Result<()> {
+        let ((), _batch) = crate::platform::execute(platform, false, || {
+            // 1. Remove pending from receiver
+            let pending = {
+                let mut recv = receiver.write();
+                recv.data
+                    .pending_capabilities
+                    .remove(&pending_id)
+                    .ok_or(CapaError::NotFound)?
+            };
 
-        // 2. Unfreeze sender's handle
-        if let Some(sender_ref) = pending.sender_domain.upgrade() {
-            sender_ref
-                .write()
-                .data
-                .unfreeze_memory_handle(pending.sender_handle);
-        }
+            // 2. Unfreeze sender's handle
+            if let Some(sender_ref) = pending.sender_domain.upgrade() {
+                sender_ref
+                    .write()
+                    .data
+                    .unfreeze_memory_handle(pending.sender_handle);
+            }
 
+            Ok(((), UpdateBatch::new()))
+        })?;
         Ok(())
     }
 

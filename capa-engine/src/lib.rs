@@ -19,6 +19,7 @@
 extern crate alloc;
 
 pub mod attest;
+pub mod bootstrap;
 pub mod capability;
 pub mod domain;
 pub mod error;
