@@ -7,6 +7,122 @@
 
 ---
 
+## RESUME NEXT: port + build dom1 (CoCo guest kernel) on this machine (2026-06-23)
+
+Status on this machine: eunomia + attestation work. dom1 **root disk** and
+**firmware** auto-fetch, but the **CoCo guest kernel is NOT built yet**:
+`../linux` fork absent, `themis/guest/kernel/bzImage` absent, `/nested` empty in
+`bins.img`. dom1 boots from `/opt/bins/nested/bzImage` (built-in virtio/ext4/9p,
+no initramfs) + `/opt/bins/dom1/dom1.raw`.
+
+Steps to run when resuming:
+
+1. **Clone the kernel fork** next to the repo (default `LINUX_DIR=../linux`):
+   ```bash
+   cd ~/Documents/Programs/MSR        # parent of capability-v5
+   git clone https://github.com/aghosn/linux.git
+   cd linux && git checkout v6.19.14-themis
+   ```
+2. **Install kernel build deps** (host is jammy 22.04; gcc-11/12 builds 6.19 fine):
+   ```bash
+   sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc dwarves
+   ```
+3. **Build the bzImage** from repo root → installs to `themis/guest/kernel/bzImage`:
+   ```bash
+   cd ~/Documents/Programs/MSR/capability-v5
+   cargo build-kernel                 # KERNEL_PROFILE=minimal (default)
+   # add modules if dom1 needs them:  TARGETS=all cargo build-kernel
+   ```
+4. **Pack into bins.img** — `update-bins.sh` auto-detects `guest/kernel/bzImage`
+   and copies it to `/nested/bzImage`:
+   ```bash
+   cargo build-bins-docker            # repacks bins.img (includes nested kernel)
+   # or just: NESTED_KERNEL=themis/guest/kernel/bzImage bash themis/scripts/update-bins.sh
+   ```
+5. **Reboot the stack** (`cargo themis`), then **inside dom0**:
+   ```bash
+   sudo /opt/bins/cloud-hypervisor/run-dom1.sh           # --themis auto if /dev/thhv
+   ```
+   Auto-picks `/opt/bins/nested/bzImage` + `dom1.raw`. Use `--kvm` to isolate
+   kernel vs Themis if it panics.
+
+Refs: `themis/scripts/build-kernel.sh`, `themis/scripts/README.md:183-251`,
+`docs/building.md:144`. Fork branch `v6.19.14-themis` has `CONFIG_THEMIS_COCO=y`.
+This is also where x2APIC fast-path boot validation gets exercised (per-child,
+when dom1 boots — watch capavisor `CPU features:` + `FEATURE_X2APIC_VIRT`, no
+`VIRTUALIZE_X2APIC_MODE`/`VID not supported` WARN).
+
+---
+
+## x2APIC fast-path — bare-metal prerequisites CONFIRMED (2026-06-23)
+
+Context: commit `24c29d37e` added the child x2APIC fast path (children boot in
+x2APIC mode so self-IPI `WRMSR(0x83F)` is hardware-handled under VID, zero
+exits). It was **dormant on the WSL2/Hyper-V dev box** because nested L0 there
+does not expose the APICv VMX bits. Gating lives in
+`capavisor/src/arch/x86_64/vmcs/controls.rs:109-112` (`x2apic_virt_hw` =
+`IA32_VMX_PROCBASED_CTLS2` allowed-1 bits **4** `VIRT_X2APIC_MODE`, **8**
+`APIC_REGISTER_VIRT`, **9** `VID`) and `crates/vmx/src/features.rs`
+(`has_x2apic_virt()`); `vmexit/cpuid.rs:83` advertises `FEATURE_X2APIC_VIRT`
+to dom0/CHV only when all three are present.
+
+On **this bare-metal machine** (asmodai), all prerequisites are GREEN:
+* No `hypervisor` CPUID flag (true bare metal); host has `vmx` + `x2apic`.
+* `IA32_VMX_PROCBASED_CTLS2` (0x48B) allowed-1 = `0x0f5d7fff` → bits 4, 8, 9
+  (and 0) all **SET**.
+* KVM: `kvm_intel` `nested=Y`, `enable_apicv=Y`, `ept=Y` — so KVM should pass
+  APICv through to capavisor (L1) under `cargo themis` (`-enable-kvm -cpu host`).
+
+Probe script saved at `/tmp/check-x2apic-bits.sh` (reads + decodes the cap MSR;
+exit 0 = fast path will activate).
+
+**Next step (deferred):** boot `cd themis && cargo themis 2>&1 | tee /tmp/out.txt`
+and confirm in the capavisor serial: (a) `CPU features:` shows x2APIC virt,
+(b) NO `[WARN] VIRTUALIZE_X2APIC_MODE not supported` / `VID not supported`
+(controls.rs:138-148), (c) `FEATURE_X2APIC_VIRT` advertised. Fast path is
+per-**child**, so it's exercised when **dom1** boots.
+
+---
+
+## Build-env fix (2026-06-23) — `cargo build-bins-docker` resilience
+
+After syncing missing commits, `build-bins-docker` failed in four independent
+spots; all fixed (uncommitted). Modified files:
+
+* **`themis/scripts/build-bins-docker.sh`** — a host-side header **prefetch**
+  was tried and **reverted**. The container is `ubuntu:24.04` (noble), the same
+  distro as dom0, so it is the *authoritative* source for the noble headers that
+  must match dom0's noble kernel. Prefetching on the host (asmodai = jammy 22.04)
+  pulled **jammy-HWE** headers (`~22.04.1`) → distro mismatch. The fix was simply
+  to rebuild the `themis-build:latest` image so its apt index is fresh enough to
+  see `6.8.0-124`; the container then fetches **noble** headers itself.
+* **`themis/scripts/fetch-kheaders.sh`** — now also fetches the **common**
+  headers package, discovered from the `-generic` package's `Depends`
+  (noble GA: `linux-headers-<abi>`). Both are extracted side-by-side under
+  `usr/src/` so the relative symlinks (e.g. `scripts/Makefile.ubsan`) resolve;
+  added a check that verifies this. Confirmed pulling noble `6.8.0-124.124` from
+  `noble-updates/main` (not jammy).
+* **`Dockerfile.build`** — added `gcc-12` (harmless; noble `6.8.0-124` is
+  actually built with **gcc-13**, which the image already ships, so the compiler
+  now matches the kernel — no vermagic/ABI issue).
+* **`themis/scripts/update-bins.sh`** — auto `e2fsck -fp` on `guest/bins.img`
+  before the fuse2fs mount; interrupted builds left it unclean and fuse2fs
+  refused to mount it.
+
+Result: full `cargo build-bins-docker` is green — `thhv.ko` (2.1 MB, vermagic
+`6.8.0-124-generic`, noble) builds and `guest/bins.img` repacks. Verified the
+`.ko` packed into `themis/guest/bins.img` is byte-identical to the build output.
+
+### thhv/dom0 kernel reconciliation (2026-06-23)
+dom0 ran noble `6.8.0-107-generic`; thhv built/pinned at `6.8.0-124-generic` →
+`insmod` failed (modversions CRC mismatch, no `/dev/thhv`). Chose **option B**:
+upgraded dom0. Installed `linux-image/linux-modules-extra-6.8.0-124-generic` in
+dom0, `update-grub` (124 = top entry, `GRUB_DEFAULT=0`). Pin stays `6.8.0-124`.
+**Next:** reboot the stack so dom0 boots 124, then
+`sudo insmod /opt/bins/thhv/thhv.ko`, confirm `/dev/thhv`, run eunomia.
+
+---
+
 ## Current State (2026-06-04)
 
 ### Just-completed CHV-themis cleanup arc (committed)

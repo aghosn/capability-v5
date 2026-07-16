@@ -24,6 +24,10 @@ RUN apt-get update \
     e2fsprogs \
     fuse2fs \
     fuse3 \
+    # gcc-12: match the dom0 kernel's build compiler (CONFIG_CC_VERSION_TEXT)
+    # so out-of-tree thhv.ko is ABI/vermagic-compatible. Ubuntu 24.04 ships
+    # gcc-13 by default; the pinned 6.8 HWE dom0 kernel was built with gcc-12.
+    gcc-12 \
     git \
     grub-pc-bin \
     libclang-dev \

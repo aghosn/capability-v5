@@ -122,6 +122,23 @@ if [[ ! -f "$BINS_IMG" ]]; then
 fi
 
 MNT="$(mktemp -d)"
+
+# Proactively repair the ext4 image before mounting. fuse2fs refuses to mount
+# an image whose last unmount was unclean (e.g. an interrupted build), failing
+# with "Errors detected; running e2fsck is required". e2fsck -fp does a full,
+# non-interactive repair of safe inconsistencies and needs no root for a plain
+# file. Exit 0 (clean) and 1 (errors corrected) are success; >=4 means the image
+# is unfixable automatically, so fail loudly.
+if command -v e2fsck &>/dev/null; then
+    rc=0
+    e2fsck -fp "$BINS_IMG" || rc=$?
+    if (( rc >= 4 )); then
+        echo "ERROR: e2fsck could not auto-repair $BINS_IMG (exit $rc)." >&2
+        echo "       Inspect manually: e2fsck -f $BINS_IMG" >&2
+        exit 1
+    fi
+fi
+
 if ! fuse2fs -o fakeroot "$BINS_IMG" "$MNT"; then
     echo "ERROR: fuse2fs failed to mount $BINS_IMG" >&2
     echo "       If it reported 'Errors detected; running e2fsck is required'," >&2

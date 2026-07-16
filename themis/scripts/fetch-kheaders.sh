@@ -48,13 +48,11 @@ if [[ -z "$KVER" ]]; then
 fi
 
 if [[ "$KVER" == *-generic ]]; then
-    KBASE="${KVER%-generic}"
+    GENERIC_PKG="linux-headers-${KVER}"
     KDIR="$KHEADERS_ROOT/usr/src/linux-headers-${KVER}"
-    PACKAGES=("linux-headers-${KBASE}" "linux-headers-${KVER}")
 else
-    KBASE="$KVER"
+    GENERIC_PKG="linux-headers-${KVER}-generic"
     KDIR="$KHEADERS_ROOT/usr/src/linux-headers-${KVER}-generic"
-    PACKAGES=("linux-headers-${KVER}" "linux-headers-${KVER}-generic")
 fi
 
 mkdir -p "$KHEADERS_ROOT"
@@ -67,6 +65,30 @@ fi
 TMPDIR="$(mktemp -d)"
 
 echo "→ Downloading kernel headers for $KVER"
+
+# The flavour package (…-generic) provides arch/build-specific files but
+# relative-symlinks its common sources (scripts/, include/, Kbuild, …) into a
+# separate "common" headers package. That package is named differently for GA
+# kernels (linux-headers-<abi>) vs HWE kernels (linux-hwe-<x.y>-headers-<abi>),
+# so we discover it from the flavour package's Depends instead of guessing.
+# Both must be extracted side-by-side under usr/src/ for the relative symlinks
+# (e.g. scripts/Makefile.ubsan -> ../../<common>/scripts/Makefile.ubsan) to
+# resolve; otherwise the out-of-tree thhv.ko build fails on missing files.
+COMMON_PKG="$(apt-cache depends "$GENERIC_PKG" 2>/dev/null \
+    | awk '/Depends:/ {print $2}' \
+    | grep -iE 'headers' \
+    | grep -v "^${GENERIC_PKG}\$" \
+    | head -n1 || true)"
+
+PACKAGES=("$GENERIC_PKG")
+if [[ -n "$COMMON_PKG" ]]; then
+    echo "→ Common headers package: $COMMON_PKG"
+    PACKAGES+=("$COMMON_PKG")
+else
+    echo "⚠ Could not determine common headers package for $GENERIC_PKG;" >&2
+    echo "  the extracted tree may be incomplete (missing scripts/, include/)." >&2
+fi
+
 (
     cd "$TMPDIR"
     apt-get download "${PACKAGES[@]}"
@@ -89,6 +111,16 @@ done
 if [[ ! -d "$KDIR" || ! -f "$KDIR/Makefile" ]]; then
     echo "ERROR: extracted headers are incomplete; expected $KDIR/Makefile" >&2
     echo "       Remediation: delete $KHEADERS_ROOT and rerun this script." >&2
+    exit 1
+fi
+
+# Verify the common-tree sources resolve through the flavour package's relative
+# symlinks. scripts/Makefile.ubsan lives in the common package; -f follows the
+# symlink, so this fails fast if the common headers package was not extracted.
+if [[ ! -f "$KDIR/scripts/Makefile.ubsan" ]]; then
+    echo "ERROR: common kernel headers missing (scripts/ symlinks dangle)." >&2
+    echo "       The '-generic' package was extracted but its common headers" >&2
+    echo "       package (Depends) was not. Delete $KHEADERS_ROOT and rerun." >&2
     exit 1
 fi
 
