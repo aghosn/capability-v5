@@ -327,6 +327,7 @@ fi
 # ── Eunomia workloads ─────────────────────────────────────────────────────────
 if should_package eunomia; then
     EUNOMIA_DIR="$REPO_ROOT/eunomia/workloads"
+    EUNOMIA_POLICIES_SRC="$REPO_ROOT/eunomia/policies"
     EUNOMIA_PACKED=0
     if [[ -d "$EUNOMIA_DIR" ]]; then
         for wdir in "$EUNOMIA_DIR"/*/; do
@@ -341,6 +342,11 @@ if should_package eunomia; then
     # Package the runner script
     cp "$SCRIPT_DIR/run-eunomia.sh" "$MNT/eunomia/run-eunomia.sh"
     chmod +x "$MNT/eunomia/run-eunomia.sh"
+    # Package per-workload policy JSONs for --policy-suite mode.
+    if [[ -d "$EUNOMIA_POLICIES_SRC" ]]; then
+        mkdir -p "$MNT/eunomia/policies"
+        cp -r "$EUNOMIA_POLICIES_SRC/." "$MNT/eunomia/policies/"
+    fi
     if (( EUNOMIA_PACKED > 0 )); then
         echo "  ✔ eunomia/ ($EUNOMIA_PACKED workloads)"
     else

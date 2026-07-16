@@ -1,0 +1,28 @@
+{
+  "extends": "standard",
+  "general": { "name": "wrmsr-scenario-3-emulate-all" },
+  "policies": {
+    "msrs": {
+      "default": "Trap",
+      "overrides": [
+        { "msr": "0xC0000103", "action": "Emulate", "value": "0x1111" },
+        { "msr": "0xC0000102", "action": "Emulate", "value": "0x2222" },
+        { "msr": "0xC0000084", "action": "Emulate", "value": "0x3333" }
+      ]
+    },
+    "cpuid": {
+      "default": "Native",
+      "hypervisor_range_native": true,
+      "overrides": [
+        {
+          "leaf": "0x40000F00", "subleaf": 0,
+          "action": "Emulate",
+          "eax": 3,
+          "ebx": "Euno",
+          "ecx": 0,
+          "edx": 0
+        }
+      ]
+    }
+  }
+}

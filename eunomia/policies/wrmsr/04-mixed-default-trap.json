@@ -1,0 +1,27 @@
+{
+  "extends": "standard",
+  "general": { "name": "wrmsr-scenario-4-mixed-default-trap" },
+  "policies": {
+    "msrs": {
+      "default": "Trap",
+      "overrides": [
+        { "msr": "0xC0000103", "action": "Native"                          },
+        { "msr": "0xC0000102", "action": "Emulate", "value": "0xCAFE"      }
+      ]
+    },
+    "cpuid": {
+      "default": "Native",
+      "hypervisor_range_native": true,
+      "overrides": [
+        {
+          "leaf": "0x40000F00", "subleaf": 0,
+          "action": "Emulate",
+          "eax": 4,
+          "ebx": "Euno",
+          "ecx": 0,
+          "edx": 0
+        }
+      ]
+    }
+  }
+}
