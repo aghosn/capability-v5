@@ -124,7 +124,18 @@ static EXCEPTION_NAMES: [&str; 32] = [
 
 /// Common Rust handler called from the assembly stubs.
 #[no_mangle]
-extern "C" fn exception_handler(frame: &InterruptFrame) {
+extern "C" fn exception_handler(frame: &mut InterruptFrame) {
+    // Give the installed fault handler (if any) first look.
+    // On `Resume(rip)`, patch the frame's RIP and return — the stub
+    // will iretq to the new address.
+    match crate::fault::dispatch(frame) {
+        crate::fault::FaultOutcome::Resume(rip) => {
+            frame.rip = rip;
+            return;
+        }
+        crate::fault::FaultOutcome::Unhandled | crate::fault::FaultOutcome::Fatal => {}
+    }
+
     let vec = frame.vector as usize;
     let name = if vec < 32 {
         EXCEPTION_NAMES[vec]

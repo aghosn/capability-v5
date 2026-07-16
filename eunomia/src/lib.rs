@@ -21,6 +21,8 @@ pub mod hv;
 pub mod paging;
 pub mod domcomm;
 pub mod ivshmem;
+pub mod fault;
+pub mod msr;
 
 // Re-export libthemis (typed hypercall wrappers) and themis-abi (opcodes,
 // error codes) so workloads can call e.g. `eunomia::themis::alias()`.
