@@ -7,6 +7,11 @@
 
 ## Current Status
 
+- **2026-07-17 — capa-cli migration to platform-first domain API** ✅ DONE. Fixed `capa-cli/src/rust_backend.rs` to match the refactored `capa-engine` domain-mediated API (platform as first arg, tuple returns). `cd capa-cli && cargo build --release` now succeeds with 0 errors.
+
+  Files modified this session:
+  - `capa-cli/src/rust_backend.rs` — migrated all `Capability::*` call sites to platform-first signature; removed 8 double-lock `execute()` wrappers (carve, send_at, accept_at, revoke, revoke_domain, register_comm, switch_forward, switch_return); added `platform` arg and tuple destructuring to carve/alias/create/seal/revoke/revoke_domain/get_chan/get_chan_self/send_channel/accept_channel/reject_channel/register_comm/switch/deliver_interrupt_vp/set_policy/get_policy/set_register/get_register; removed `execute` from imports.
+
 - **2026-07-17 — capa-engine domain API test migration** ✅ DONE. Updated default-feature tests for the platform-first `Capability::<Domain>` API and tuple-return signatures; `cd capa-engine && cargo test --no-run` now succeeds.
 
   Files modified this session:
