@@ -9,7 +9,7 @@
 //! future arch backends.
 #![allow(dead_code)]
 
-use capability_engine::Rights;
+use capability_engine::{CapaError, Rights};
 
 // ── Hypercall arguments / results ────────────────────────────────────────── //
 
@@ -35,6 +35,38 @@ pub struct HypercallResult {
     pub val0: u64,
     pub val1: u64,
     pub val2: u64,
+}
+
+impl From<CapaError> for HypercallResult {
+    fn from(e: CapaError) -> Self {
+        let code = match e {
+            CapaError::InvalidAccess
+            | CapaError::InvalidOperation(_)
+            | CapaError::RegionOverlap
+            | CapaError::InvalidRemapping
+            | CapaError::AlreadyExists
+            | CapaError::InvalidValue => themis_abi::errors::ERR_INVALID,
+
+            CapaError::PermissionDenied
+            | CapaError::CannotAliasCarved
+            | CapaError::MonotonicityViolation
+            | CapaError::TreeLocked
+            | CapaError::RegisterAccessDenied => themis_abi::errors::ERR_NOPERM,
+
+            CapaError::NotFound | CapaError::ParentRevoked | CapaError::DomainRevoked => {
+                themis_abi::errors::ERR_NOTFOUND
+            }
+
+            CapaError::DomainSealed | CapaError::DomainNotSealed | CapaError::ApiNotAllowed => {
+                themis_abi::errors::ERR_BADSTATE
+            }
+
+            CapaError::NotSupported | CapaError::RegisterOutOfRange => themis_abi::errors::ERR_UNIMPL,
+
+            CapaError::NoMemory => themis_abi::errors::ERR_NOMEM,
+        };
+        HypercallResult::error(code)
+    }
 }
 
 impl HypercallResult {

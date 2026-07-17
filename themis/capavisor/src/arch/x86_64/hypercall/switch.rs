@@ -19,7 +19,7 @@ use capability_engine::{
 use themis_abi::errors;
 
 use super::write_reply;
-use crate::hypercall::{map_error, HypercallResult};
+use crate::hypercall::{HypercallResult};
 use crate::arch::x86_64::apic::current_lapic_id;
 use crate::arch::x86_64::iommu_ir::sync_irte_ndst;
 use crate::arch::x86_64::pid::inject_via_pid;
@@ -135,7 +135,7 @@ pub(crate) fn do_switch(
         Ok((ctx, _batch)) => ctx,
         Err(e) => {
             serial_debug!("[SWITCH] validation failed: {:?}", e);
-            write_reply(vcpu, HypercallResult::error(map_error(&e)));
+            write_reply(vcpu, HypercallResult::from(e));
             vcpu.next_rip();
             return;
         }

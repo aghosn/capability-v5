@@ -46,59 +46,12 @@ macro_rules! try_domain {
 }
 pub(super) use try_domain;
 
-/// Unwrap a `Result<T, CapaError>` returned by a capability-engine API call.
-/// On `Ok(v)` evaluates to `v`; on `Err(e)` performs an early
-/// `return HypercallResult::error(map_error(&e))` from the enclosing function.
-///
-/// Since API methods now internally call `crate::platform::execute()`, this
-/// macro simply propagates errors — it no longer performs the lock+apply itself.
-macro_rules! try_capa {
-    ($result:expr) => {
-        match $result {
-            Ok(v) => v,
-            Err(e) => return HypercallResult::error(map_error(&e)),
-        }
-    };
-}
-pub(super) use try_capa;
-
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
 // Re-export the architecture-neutral hypercall result type from the arch_traits
 // boundary. Per-opcode handlers in the submodules return this; `handle_vmcall`
 // writes it back via the arch-trait `set_hypercall_result`.
 pub(super) use crate::arch_traits::types::HypercallResult;
-
-// ── CapaError → ABI error mapping ────────────────────────────────────────── //
-
-pub(super) fn map_error(e: &CapaError) -> u64 {
-    match e {
-        CapaError::InvalidAccess
-        | CapaError::InvalidOperation(_)
-        | CapaError::RegionOverlap
-        | CapaError::InvalidRemapping
-        | CapaError::AlreadyExists
-        | CapaError::InvalidValue => errors::ERR_INVALID,
-
-        CapaError::PermissionDenied
-        | CapaError::CannotAliasCarved
-        | CapaError::MonotonicityViolation
-        | CapaError::TreeLocked
-        | CapaError::RegisterAccessDenied => errors::ERR_NOPERM,
-
-        CapaError::NotFound | CapaError::ParentRevoked | CapaError::DomainRevoked => {
-            errors::ERR_NOTFOUND
-        }
-
-        CapaError::DomainSealed | CapaError::DomainNotSealed | CapaError::ApiNotAllowed => {
-            errors::ERR_BADSTATE
-        }
-
-        CapaError::NotSupported | CapaError::RegisterOutOfRange => errors::ERR_UNIMPL,
-
-        CapaError::NoMemory => errors::ERR_NOMEM,
-    }
-}
 
 // ── Arch-locked hypercall extension ──────────────────────────────────────── //
 
@@ -203,7 +156,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
     let args = arch.get_hypercall_args(vp);
     let (arg0, arg1, arg2, arg3, arg4) = (args.arg0, args.arg1, args.arg2, args.arg3, args.arg4);
 
-    let result = match args.opcode {
+    let result: Result<HypercallResult, CapaError> = match args.opcode {
         opcodes::THEMIS_CARVE => capa::do_carve(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_ALIAS => capa::do_alias(platform, &caller, arg0, arg1, arg2, arg3),
         opcodes::THEMIS_SEND => capa::do_send(platform, &caller, arg0, arg1, arg2, arg3),
@@ -214,13 +167,13 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_REVOKE_MEM => capa::do_revoke_mem(platform, &caller, arg0, arg1),
         opcodes::THEMIS_REVOKE_DOMAIN => capa::do_revoke_domain(platform, &caller, arg0),
         opcodes::THEMIS_ATTEST_SELF => {
-            attest::do_attest_self(platform, &caller, arg0, arg1, arg2, arg3)
+            Ok(attest::do_attest_self(platform, &caller, arg0, arg1, arg2, arg3))
         }
         opcodes::THEMIS_REGISTER_COMM => vp::do_register_comm(platform, &caller, arg0, arg1, arg2),
-        opcodes::THEMIS_DOMCOMM_NOTIFY => domcomm::do_domcomm_notify(platform, &caller),
+        opcodes::THEMIS_DOMCOMM_NOTIFY => Ok(domcomm::do_domcomm_notify(platform, &caller)),
 
         // Arch-locked opcode: needs raw VP state (VMCS PA on x86).
-        opcodes::THEMIS_ADD_VP => arch.h_add_vp(vp, platform, &caller, arg0, arg1),
+        opcodes::THEMIS_ADD_VP => Ok(arch.h_add_vp(vp, platform, &caller, arg0, arg1)),
 
         // Swap handlers: own their writeback (success → swapped, early error → wrote reply).
         opcodes::THEMIS_SWITCH => {
@@ -242,7 +195,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_GET_REG => vp::do_get_reg(platform, &caller, arg0, arg1, arg2),
         opcodes::THEMIS_SET_REG => vp::do_set_reg(platform, &caller, arg0, arg1, arg2, arg3),
 
-        opcodes::THEMIS_REGISTER_DOORBELL => doorbell::do_register_doorbell(
+        opcodes::THEMIS_REGISTER_DOORBELL => Ok(doorbell::do_register_doorbell(
             platform,
             &caller,
             arg0,
@@ -250,15 +203,15 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
             arg2 as u32,
             arg3,
             arg4 as u32,
-        ),
+        )),
         opcodes::THEMIS_UNREGISTER_DOORBELL => {
-            doorbell::do_unregister_doorbell(platform, &caller, arg0, arg1 as u32)
+            Ok(doorbell::do_unregister_doorbell(platform, &caller, arg0, arg1 as u32))
         }
         opcodes::THEMIS_SET_THEMIC_VECTOR => {
-            doorbell::do_set_themic_vector(platform, &caller, arg0)
+            Ok(doorbell::do_set_themic_vector(platform, &caller, arg0))
         }
         opcodes::THEMIS_INJECT_INTERRUPT => {
-            arch.h_inject_interrupt(vp, platform, &caller, arg0, arg1 as u32, arg2 as u8)
+            Ok(arch.h_inject_interrupt(vp, platform, &caller, arg0, arg1 as u32, arg2 as u8))
         }
 
         opcodes::THEMIS_DBG_PRINT => {
@@ -266,7 +219,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
             // flooding serial during virtio-pci probe.  Re-enable for debugging.
             // let dom_id = caller.read().data.id;
             // serial_println!("[DBG] dom={} val={:#x}", dom_id, arg0);
-            HypercallResult::success()
+            Ok(HypercallResult::success())
         }
 
         opcodes::THEMIS_TOGGLE_DEBUG => {
@@ -276,10 +229,10 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
                 "[RTDBG] runtime debug {}",
                 if enable { "ENABLED" } else { "DISABLED" }
             );
-            HypercallResult::success()
+            Ok(HypercallResult::success())
         }
 
-        opcodes::THEMIS_READ_PCR => attest::do_read_pcr(arg0 as u32),
+        opcodes::THEMIS_READ_PCR => Ok(attest::do_read_pcr(arg0 as u32)),
 
         opcodes::THEMIS_MAP_SELF => capa::do_map_self(platform, &caller, arg0, arg1),
 
@@ -288,13 +241,14 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         opcodes::THEMIS_ACCEPT_CHAN => capa::do_accept_chan(platform, &caller, arg0),
 
         // Stubbed — return ERR_UNIMPL
-        opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => HypercallResult::unimpl(),
+        opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => Ok(HypercallResult::unimpl()),
 
         _unknown_opcode => {
             serial_debug!("[VMCALL] unknown opcode {:#x}", _unknown_opcode);
-            HypercallResult::error(errors::ERR_INVALID)
+            Ok(HypercallResult::error(errors::ERR_INVALID))
         }
     };
+    let result = result.unwrap_or_else(HypercallResult::from);
 
     arch.set_hypercall_result(vp, result);
     arch.next_rip(vp);
