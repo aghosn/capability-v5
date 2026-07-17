@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use capability_engine::{execute, Capability, CapabilityRef, Domain, DomainId};
+use capability_engine::{Capability, CapabilityRef, Domain, DomainId};
 use themis_abi::errors;
 
 use crate::hypercall::{map_error, try_domain, HypercallResult};
@@ -236,11 +236,7 @@ pub(super) fn do_add_vp(
     }
 
     // ── Step 2: call into capa engine ──
-    let caller = caller.clone();
-    let result = execute(platform, false, || {
-        Capability::add_vp(&caller, child_domain_handle, comm_cap_handle)
-            .map(|(vp_id, batch)| (vp_id, batch))
-    });
+    let result = Capability::add_vp(platform, caller, child_domain_handle, comm_cap_handle);
 
     match result {
         Err(e) => {

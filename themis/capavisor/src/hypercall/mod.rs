@@ -46,26 +46,21 @@ macro_rules! try_domain {
 }
 pub(super) use try_domain;
 
-/// Wrap a `capability_engine::execute()` call: on `Ok(v)` evaluate to `v`;
-/// on `Err(e)` perform an early `return HypercallResult::error(map_error(&e))`
-/// from the enclosing function.
+/// Unwrap a `Result<T, CapaError>` returned by a capability-engine API call.
+/// On `Ok(v)` evaluates to `v`; on `Err(e)` performs an early
+/// `return HypercallResult::error(map_error(&e))` from the enclosing function.
 ///
-/// Eliminates the boilerplate `match execute(...) { Ok(_) => …, Err(e) => … }`
-/// that appears at every capability-engine handler site.  The two-argument
-/// form defaults the `sealed` flag to `false`; pass it explicitly for the
-/// signed-only handlers.
-macro_rules! execute_or_return {
-    ($platform:expr, $body:expr) => {
-        execute_or_return!($platform, false, $body)
-    };
-    ($platform:expr, $sealed:expr, $body:expr) => {
-        match execute($platform, $sealed, $body) {
+/// Since API methods now internally call `crate::platform::execute()`, this
+/// macro simply propagates errors — it no longer performs the lock+apply itself.
+macro_rules! try_capa {
+    ($result:expr) => {
+        match $result {
             Ok(v) => v,
             Err(e) => return HypercallResult::error(map_error(&e)),
         }
     };
 }
-pub(super) use execute_or_return;
+pub(super) use try_capa;
 
 // ── Result encoding ──────────────────────────────────────────────────────── //
 
@@ -288,9 +283,9 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
 
         opcodes::THEMIS_MAP_SELF => capa::do_map_self(platform, &caller, arg0, arg1),
 
-        opcodes::THEMIS_GET_CHAN => capa::do_get_chan(&caller, arg0),
-        opcodes::THEMIS_SEND_CHAN => capa::do_send_chan(&caller, arg0, arg1, arg2),
-        opcodes::THEMIS_ACCEPT_CHAN => capa::do_accept_chan(&caller, arg0),
+        opcodes::THEMIS_GET_CHAN => capa::do_get_chan(platform, &caller, arg0),
+        opcodes::THEMIS_SEND_CHAN => capa::do_send_chan(platform, &caller, arg0, arg1, arg2),
+        opcodes::THEMIS_ACCEPT_CHAN => capa::do_accept_chan(platform, &caller, arg0),
 
         // Stubbed — return ERR_UNIMPL
         opcodes::THEMIS_ATTEST | opcodes::THEMIS_ENUMERATE => HypercallResult::unimpl(),

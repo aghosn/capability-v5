@@ -361,9 +361,8 @@ impl Backend for RustBackend {
         let handle = find_memory_handle(&domain, &mem).ok_or(BackendError::NotFound)?;
         let access = Access::new(start, size, Rights::from_bits(rights));
 
-        // alias does not go through execute() — no UpdateBatch produced.
-        let (child_handle, _sub) = Capability::alias(&domain, handle, access)
-            .map_err(convert_error)?;
+        let (child_handle, _sub, batch) =
+            Capability::alias(&*self.platform, &domain, handle, access).map_err(convert_error)?;
 
         let child = domain.read().data.memory_capabilities
             .get(&child_handle)
@@ -373,7 +372,7 @@ impl Backend for RustBackend {
         let uid = self.alloc_uid();
         self.mem_caps.insert(uid, child);
 
-        Ok((uid, Vec::new()))
+        Ok((uid, convert_updates(&batch)))
     }
 
     fn send(
@@ -429,7 +428,9 @@ impl Backend for RustBackend {
 
     fn reject(&mut self, domain: DomainId, pending_id: u64) -> Result<()> {
         let domain_arc = self.get_domain(domain)?;
-        Capability::reject(&*self.platform, &domain_arc, pending_id).map_err(convert_error)
+        Capability::reject(&*self.platform, &domain_arc, pending_id)
+            .map(|_batch| ())
+            .map_err(convert_error)
     }
 
     fn revoke_mem(

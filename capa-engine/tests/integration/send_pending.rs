@@ -151,7 +151,7 @@ fn send_then_reject() {
     let platform = common::TestPlatform::new();
     platform.register_domain(sender.read().data.id, None);
     platform.register_domain(receiver.read().data.id, None);
-    Capability::<Domain>::reject(&platform, &receiver, pending_id).unwrap();
+    let _batch = Capability::<Domain>::reject(&platform, &receiver, pending_id).unwrap();
 
     // Handle 1 is back — accessible and not frozen.
     assert!(
@@ -200,8 +200,10 @@ fn frozen_handle_refuses_ops() {
         "carve on frozen handle must fail"
     );
 
+    let platform = common::TestPlatform::new();
+
     // alias on frozen handle → PermissionDenied
-    let r = Capability::<Domain>::alias(&sender, 1, Access::new(0x0, 0x1000, Rights::RW));
+    let r = Capability::<Domain>::alias(&platform, &sender, 1, Access::new(0x0, 0x1000, Rights::RW));
     assert!(
         matches!(r, Err(CapaError::PermissionDenied)),
         "alias on frozen handle must fail"
@@ -342,7 +344,7 @@ fn reject_then_reuse_handle() {
     platform.register_domain(sender.read().data.id, None);
     platform.register_domain(receiver1.read().data.id, None);
     platform.register_domain(receiver2.read().data.id, None);
-    Capability::<Domain>::reject(&platform, &receiver1, pending_id).unwrap();
+    let _batch = Capability::<Domain>::reject(&platform, &receiver1, pending_id).unwrap();
 
     // Handle 1 is unfrozen — second send must succeed.
     Capability::<Domain>::send(&sender, 1, 2, Attributes::NONE)

@@ -260,12 +260,9 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         let cr = &info.partition.comm_region;
         let access = Access::new(cr.base, cr.length, Rights::RW);
 
-        let ((child_handle, _sub_handle), carve_batch) =
-            capability_engine::execute(&platform, false, || {
-                Capability::carve(&root_domain, comm_root_handle, access)
-                    .map(|(h, s, batch)| ((h, s), batch))
-            })
-            .expect("P2c: COMM carve failed");
+        let (child_handle, _sub_handle, carve_batch) =
+            Capability::carve(&platform, &root_domain, comm_root_handle, access)
+                .expect("P2c: COMM carve failed");
 
         serial_println!(
             "  COMM carve: child handle {} from root {}",
@@ -276,15 +273,13 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         let _ = carve_batch; // EPT already mapped in the RAM batch above.
 
         // register_comm: bind to dom0 itself (self-referential DomainComm).
-        capability_engine::execute(&platform, false, || {
-            Capability::register_comm(
-                &root_domain,
-                child_handle,
-                self_domain_cap_handle,
-                0, // vp_id 0 = domain-level COMM
-            )
-            .map(|batch| ((), batch))
-        })
+        Capability::register_comm(
+            &platform,
+            &root_domain,
+            child_handle,
+            self_domain_cap_handle,
+            0, // vp_id 0 = domain-level COMM
+        )
         .expect("P2c: COMM register failed");
 
         serial_println!(

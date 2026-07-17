@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "capa-engine"
+required-features = ["demo"]
 
 [features]
 # Default: hosted OS environment (Linux/macOS/Windows).  Uses parking_lot which
@@ -19,6 +20,10 @@ hosted = ["dep:parking_lot"]
 loom = ["dep:loom"]
 address_translation = []
 cache_coloring = ["address_translation"]
+# Enables the `capa-engine` demo binary (src/main.rs).  Gated because the
+# demo needs a Platform impl that lives outside the library.  Restore the
+# demo after the domain-mediated API sweep completes.
+demo = []
 
 [dependencies]
 # Hosted lock: parking_lot (OS-backed, efficient on multi-core hosted platforms).
