@@ -91,6 +91,35 @@ unsafe impl Send for DummyGuard {}
 unsafe impl Send for LoomPlatform {}
 unsafe impl Sync for LoomPlatform {}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NullPlatform — no-op Platform for sequential setup calls.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct NullPlatform;
+unsafe impl Send for NullPlatform {}
+unsafe impl Sync for NullPlatform {}
+
+impl Platform for NullPlatform {
+    fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(DummyGuard))
+    }
+    fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
+        Ok(Box::new(DummyGuard))
+    }
+    fn send_ipi(&self, _: CoreId) {}
+    fn sync_barrier(&self, _: u8, _: usize) {}
+    fn apply_update(&self, _: &Update) {}
+    fn on_domain_revoked(&self, _: DomainId, _: Option<DomainId>) {}
+    fn register_domain(&self, _: DomainId, _: Option<DomainId>) {}
+    fn set_core_context(&self, _: CoreId, _: &CapabilityRef<Domain>, _: u64) {}
+    fn clear_core_domain(&self, _: CoreId) {}
+    fn domain_cores(&self, _: DomainId) -> Vec<CoreId> { Vec::new() }
+    fn try_acquire_update_lock(&self) -> bool { true }
+    fn release_update_lock(&self) {}
+    fn get_current_core(&self) -> Option<CoreId> { None }
+}
+
+
 impl Platform for LoomPlatform {
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
         Ok(Box::new(DummyGuard))
@@ -148,14 +177,14 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let num_vps = policy.num_vprocessors;
-    let h = Capability::create(parent, policy).unwrap().0;
+    let h = Capability::create(&NullPlatform, parent, policy).unwrap().0;
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
     for _ in 0..num_vps as u64 {
         child.write().data.add_vprocessor().unwrap();
     }
-    Capability::seal(parent, h).unwrap();
+    Capability::seal(&NullPlatform, parent, h).unwrap();
     (child, h)
 }
 
@@ -193,13 +222,13 @@ fn vp_race_two_cores_same_vp() {
             let _target = target_t0; // keep alive
             let plat = LoomPlatform::new(0, state_t0);
             // Core 0 claims target VP[0].
-            Capability::switch(&root_t0, target_h, 0, &plat)
+            Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
             // Core 1 also tries to claim target VP[0].
-            Capability::switch(&root_t1, target_h, 0, &plat)
+            Capability::switch(&plat, &root_t1, target_h, 0)
         });
 
         let r0 = t0.join().unwrap();
@@ -256,13 +285,13 @@ fn vp_two_cores_different_vps() {
             let _target = target_t0;
             let plat = LoomPlatform::new(0, state_t0);
             // Core 0 claims VP[0].
-            Capability::switch(&root_t0, target_h, 0, &plat)
+            Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
             // Core 1 claims VP[1].
-            Capability::switch(&root_t1, target_h, 1, &plat)
+            Capability::switch(&plat, &root_t1, target_h, 1)
         });
 
         let r0 = t0.join().unwrap();
@@ -371,13 +400,13 @@ fn vp_concurrent_return_and_claim() {
         // Thread 0 (core 0): return from B → root.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::switch(&b_t0, 0, 0, &plat)
+            Capability::switch(&plat, &b_t0, 0, 0)
         });
 
         // Thread 1 (core 1): try to switch from root → B, claiming VP[0].
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch(&root_t1, b_h, 0, &plat)
+            Capability::switch(&plat, &root_t1, b_h, 0)
         });
 
         let r0 = t0.join().unwrap();
@@ -487,9 +516,9 @@ fn vp_interrupt_delivery_vs_claim_race() {
         //   dom0.vp0 = Running{core:0}
         init_vp_running(&dom0, 0, 0);
         //   dom0 switches to dom1.vp0 → dom0.vp0=Locked, dom1.vp0=Running{core:0}
-        Capability::switch(&dom0, dom1_h_in_dom0, 0, &plat_setup).unwrap();
+        Capability::switch(&plat_setup, &dom0, dom1_h_in_dom0, 0).unwrap();
         //   dom1 switches to dom2.vp0 → dom1.vp0=Locked, dom2.vp0=Running{core:0}
-        Capability::switch(&dom1, dom2_h_in_dom1, 0, &plat_setup).unwrap();
+        Capability::switch(&plat_setup, &dom1, dom2_h_in_dom1, 0).unwrap();
 
         // dom1.vp1 = Running on core 1: the "attacker" VP that will try to steal dom2.vp0.
         init_vp_running(&dom1, 1, 1);
@@ -506,7 +535,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::<Domain>::deliver_interrupt_vp(&dom2_t0, dom0_id, 0, 0, &plat)
+            Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, dom0_id, 0, 0)
         });
 
         // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.
@@ -514,7 +543,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // (after Thread 0's write) — neither is Available or Suspended — always fails.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch(&dom1_t1, dom2_h_in_dom1, 0, &plat)
+            Capability::switch(&plat, &dom1_t1, dom2_h_in_dom1, 0)
         });
 
         let r0 = t0.join().unwrap();
@@ -604,13 +633,13 @@ fn vp_two_cores_race_suspended_vp() {
         // Thread 0 (core 0, dom0.vp0): try to claim dom1.vp0.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::switch(&dom0_t0, dom1_h_in_dom0, 0, &plat)
+            Capability::switch(&plat, &dom0_t0, dom1_h_in_dom0, 0)
         });
 
         // Thread 1 (core 1, dom0.vp1): same target.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, state_t1);
-            Capability::switch(&dom0_t1, dom1_h_in_dom0, 0, &plat)
+            Capability::switch(&plat, &dom0_t1, dom1_h_in_dom0, 0)
         });
 
         let r0 = t0.join().unwrap();

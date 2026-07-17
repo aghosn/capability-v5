@@ -76,8 +76,8 @@ fn test_execute_revoke_redirects_core_to_fallback() {
     let root_id = root.read().data.id;
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create(&root, child_policy).unwrap().0;
-    Capability::seal(&root, child_h).unwrap();
+    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
+    Capability::seal(&platform, &root, child_h).unwrap();
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -179,8 +179,8 @@ fn test_execute_vital_revoke_none_fallback_uses_parent_map() {
     let root_id = root.read().data.id;
 
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create(&root, child_policy).unwrap().0;
-    Capability::seal(&root, child_h).unwrap();
+    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
+    Capability::seal(&platform, &root, child_h).unwrap();
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
@@ -224,7 +224,7 @@ fn test_revoke_domain_carries_fallback() {
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::REVOKE);
     let child_policy = DomainPolicy::new_restricted(0b0001, child_api);
     let child_h =
-        Capability::create(&root, child_policy).expect("create should succeed").0;
+        Capability::create(&platform, &root, child_policy).expect("create should succeed").0;
 
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
@@ -233,14 +233,10 @@ fn test_revoke_domain_carries_fallback() {
     reg(&platform, child_id, Some(ROOT_ID));
 
     // Root domain is already sealed (new_root); seal the child
-    Capability::seal(&root, child_h).unwrap();
+    Capability::seal(&platform, &root, child_h).unwrap();
 
-    let (_, batch) = execute(&platform, true, || {
-        let updates =
-            Capability::revoke_domain(&root, child_h).expect("revoke_domain should succeed");
-        Ok(((), updates))
-    })
-    .expect("execute should succeed");
+    let batch = Capability::revoke_domain(&platform, &root, child_h)
+        .expect("revoke_domain should succeed");
 
     // The UpdateBatch must contain RevokeDomain with fallback = Some(ROOT_ID)
     let revoke_update = batch

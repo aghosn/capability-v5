@@ -7,9 +7,14 @@
 use capability_engine::*;
 use std::sync::Arc;
 
+#[path = "../common/mod.rs"]
+mod common;
+
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn bootstrap() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHandle) {
+    let platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
@@ -22,6 +27,7 @@ fn bootstrap() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHand
 
 /// Seed root's AddressMap with a non-identity mapping.
 fn seed_map(root: &CapabilityRef<Domain>, hpa: u64, size: u64, rights: Rights, gpa: u64) {
+    let platform = common::TestPlatform::new();
     let mut w = root.write();
     let _ = w.data.address_map.insert(
         hpa,
@@ -35,9 +41,10 @@ fn seed_map(root: &CapabilityRef<Domain>, hpa: u64, size: u64, rights: Rights, g
 
 /// Create a child domain under root (unsealed).
 fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
+    let platform = common::TestPlatform::new();
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(root, policy).unwrap().0;
+    let h = Capability::create(&platform, root, policy).unwrap().0;
     let dom = root
         .read()
         .data
@@ -49,6 +56,7 @@ fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domai
 
 /// Return the DomainId for a domain capability.
 fn dom_id(dom: &CapabilityRef<Domain>) -> DomainId {
+    let platform = common::TestPlatform::new();
     dom.read().data.id
 }
 
@@ -56,12 +64,13 @@ fn dom_id(dom: &CapabilityRef<Domain>) -> DomainId {
 
 #[test]
 fn test_carve_splits_address_map() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
     let (_child_h, _child_sub, updates) =
-        Capability::carve(&root, r0_h, access).unwrap();
+        Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Map should be split into 3 entries.
     let r = root.read();
@@ -104,11 +113,12 @@ fn test_carve_splits_address_map() {
 
 #[test]
 fn test_carve_same_rights_no_split() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RWX);
-    let (_h, _sub, updates) = Capability::carve(&root, r0_h, access).unwrap();
+    let (_h, _sub, updates) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // With refcounting, the carved child adds a contribution to the overlapping
     // sub-range, splitting into 3 segments with different refcounts.
@@ -134,15 +144,16 @@ fn test_carve_same_rights_no_split() {
 
 #[test]
 fn test_send_blocks_sender_and_inserts_receiver() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let (dom1_h, dom1) = make_child(&root);
     let _updates =
-        Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, child_h, dom1_h, Attributes::NONE).unwrap();
 
     // Sender: carved entry should be Blocked.
     let r = root.read();
@@ -171,18 +182,19 @@ fn test_send_blocks_sender_and_inserts_receiver() {
 
 #[test]
 fn test_alias_send_does_not_block() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let alias_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (alias_h, _) = Capability::alias(&root, child_h, alias_access).unwrap();
+    let (alias_h, _, _)= Capability::alias(&platform, &root, child_h, alias_access).unwrap();
 
     let (dom1_h, _dom1) = make_child(&root);
     let _updates =
-        Capability::send(&root, alias_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, alias_h, dom1_h, Attributes::NONE).unwrap();
 
     // Sender's carved entry should still be Mapped (alias ≠ block).
     let r = root.read();
@@ -196,17 +208,18 @@ fn test_alias_send_does_not_block() {
 
 #[test]
 fn test_revoke_unblocks_sender_and_removes_receiver() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, child_sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, child_sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let (dom1_h, dom1) = make_child(&root);
     let _updates =
-        Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, child_h, dom1_h, Attributes::NONE).unwrap();
 
-    let revoke_updates = Capability::revoke(&root, r0_h, child_sub).unwrap();
+    let revoke_updates = Capability::revoke(&platform, &root, r0_h, child_sub).unwrap();
 
     // Sender: unblocked → back to Mapped with parent rights (RWX).
     // The entry may have been coalesced with neighbours, so use translate.
@@ -252,14 +265,15 @@ fn test_revoke_unblocks_sender_and_removes_receiver() {
 
 #[test]
 fn test_revoke_never_sent_carve_no_deadlock() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_child_h, child_sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (_child_h, child_sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Revoke without send — must not deadlock.
-    let updates = Capability::revoke(&root, r0_h, child_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, child_sub).unwrap();
 
     // No cross-domain transfer → no ChangeRights expected.
     let change_rights_count = updates
@@ -280,6 +294,7 @@ fn test_revoke_never_sent_carve_no_deadlock() {
 
 #[test]
 fn test_revoke_with_alias_subtree() {
+    let platform = common::TestPlatform::new();
     // Covers the deadlock fix: alias owned by root under a cap
     // that was sent to dom1 → revoke_subtree encounters root's
     // domain while root.write() is held.
@@ -288,20 +303,20 @@ fn test_revoke_with_alias_subtree() {
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
     let (child_h, child_sub, _) =
-        Capability::carve(&root, r0_h, access).unwrap();
+        Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Alias r1 (stays owned by root even after r1 is sent).
     let alias_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (_alias_h, _) = Capability::alias(&root, child_h, alias_access).unwrap();
+    let (_alias_h, _, _)= Capability::alias(&platform, &root, child_h, alias_access).unwrap();
 
     // Create dom1 and send r1 (the carve, not the alias) to it.
     let (dom1_h, dom1) = make_child(&root);
     let dom1_id = dom_id(&dom1);
     let _updates =
-        Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, child_h, dom1_h, Attributes::NONE).unwrap();
 
     // Revoke r1 (and its alias subtree) — must NOT deadlock.
-    let revoke_updates = Capability::revoke(&root, r0_h, child_sub).unwrap();
+    let revoke_updates = Capability::revoke(&platform, &root, r0_h, child_sub).unwrap();
 
     // Should have ChangeRights for both root (restore) and dom1 (unmap).
     let has_root_restore = revoke_updates.updates().iter().any(|u| {
@@ -333,30 +348,31 @@ fn test_revoke_with_alias_subtree() {
 
 #[test]
 fn test_accept_blocks_and_inserts() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, child_sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, child_sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Need RECEIVE_AFTER_SEAL for sealed-domain accept path.
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
         .domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Send to sealed → pending.
     let _send_updates =
-        Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, child_h, dom1_h, Attributes::NONE).unwrap();
 
     // Accept materialises the transfer (pending_id = 0, first pending).
-    let (_accepted_h, _accept_updates) = Capability::accept(&dom1, 0).unwrap();
+    let (_accepted_h, _accept_updates) = Capability::accept(&platform, &dom1, 0).unwrap();
 
     // Sender blocked.
     let r = root.read();
@@ -375,7 +391,7 @@ fn test_accept_blocks_and_inserts() {
     drop(d);
 
     // Revoke restores sender (may coalesce, so use translate).
-    let _revoke = Capability::revoke(&root, r0_h, child_sub).unwrap();
+    let _revoke = Capability::revoke(&platform, &root, r0_h, child_sub).unwrap();
     let r = root.read();
     let result = r.data.address_map.translate(0x1000, 0x1000);
     assert!(result.is_ok(), "revoke after accept should unblock");
@@ -385,6 +401,7 @@ fn test_accept_blocks_and_inserts() {
 
 #[test]
 fn test_full_lifecycle_gpa_fidelity() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     // Non-identity GPA: HPA [0x2000..0x6000) at GPA 0xC_0000.
     seed_map(&root, 0x2000, 0x4000, Rights::RWX, 0xC_0000);
@@ -392,7 +409,7 @@ fn test_full_lifecycle_gpa_fidelity() {
     // Carve [0x3000..0x4000) with RW.
     let access = Access::new(0x3000, 0x1000, Rights::RW);
     let (child_h, child_sub, carve_updates) =
-        Capability::carve(&root, r0_h, access).unwrap();
+        Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Verify carve update GPA.
     for u in carve_updates.updates() {
@@ -411,7 +428,7 @@ fn test_full_lifecycle_gpa_fidelity() {
     let (dom1_h, dom1) = make_child(&root);
     let dom1_id = dom_id(&dom1);
     let send_updates =
-        Capability::send(&root, child_h, dom1_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, child_h, dom1_h, Attributes::NONE).unwrap();
 
     // Send updates for dom1 should use dom1's GPA (identity by default).
     for u in send_updates.updates() {
@@ -427,7 +444,7 @@ fn test_full_lifecycle_gpa_fidelity() {
     }
 
     // Revoke.
-    let revoke_updates = Capability::revoke(&root, r0_h, child_sub).unwrap();
+    let revoke_updates = Capability::revoke(&platform, &root, r0_h, child_sub).unwrap();
 
     // Root's restore should use GPA 0xC_1000.
     for u in revoke_updates.updates() {
@@ -474,23 +491,18 @@ fn test_full_lifecycle_gpa_fidelity() {
 
 #[test]
 fn test_send_at_receiver_gets_requested_gpa() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let (dom1_h, dom1) = make_child(&root);
     let dom1_id = dom_id(&dom1);
 
     // Send with explicit GPA hint: receiver should see region at 0xF_0000.
-    let updates = Capability::send_at(
-        &root,
-        child_h,
-        dom1_h,
-        Attributes::NONE,
-        Some(0xF_0000),
-    )
+    let updates = Capability::send_at(&platform, &root, child_h, dom1_h, Attributes::NONE, Some(0xF_0000))
     .unwrap();
 
     // Receiver's AddressMap should have the entry at GPA 0xF_0000.
@@ -529,21 +541,16 @@ fn test_send_at_receiver_gets_requested_gpa() {
 
 #[test]
 fn test_send_at_none_gives_identity() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let (dom1_h, dom1) = make_child(&root);
 
     // send_at with None → same as send() → identity GPA.
-    let _updates = Capability::send_at(
-        &root,
-        child_h,
-        dom1_h,
-        Attributes::NONE,
-        None,
-    )
+    let _updates = Capability::send_at(&platform, &root, child_h, dom1_h, Attributes::NONE, None)
     .unwrap();
 
     let d = dom1.read();
@@ -553,16 +560,17 @@ fn test_send_at_none_gives_identity() {
 
 #[test]
 fn test_accept_preserves_gpa_hint() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Sealed receiver with RECEIVE_AFTER_SEAL.
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -570,20 +578,14 @@ fn test_accept_preserves_gpa_hint() {
         .upgrade()
         .unwrap();
     let dom1_id = dom_id(&dom1);
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Send with GPA hint to sealed domain → pending.
-    let _send = Capability::send_at(
-        &root,
-        child_h,
-        dom1_h,
-        Attributes::NONE,
-        Some(0xD_0000),
-    )
+    let _send = Capability::send_at(&platform, &root, child_h, dom1_h, Attributes::NONE, Some(0xD_0000))
     .unwrap();
 
     // Accept → GPA hint should be preserved from pending entry.
-    let (_h, accept_updates) = Capability::accept(&dom1, 0).unwrap();
+    let (_h, accept_updates) = Capability::accept(&platform, &dom1, 0).unwrap();
 
     let d = dom1.read();
     let (&gpa, _) = d.data.address_map.entries().iter().next().unwrap();
@@ -608,15 +610,16 @@ fn test_accept_preserves_gpa_hint() {
 
 #[test]
 fn test_accept_at_overrides_sender_hint() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
@@ -624,21 +627,15 @@ fn test_accept_at_overrides_sender_hint() {
         .upgrade()
         .unwrap();
     let dom1_id = dom_id(&dom1);
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Sender requests GPA 0xD_0000.
-    let _send = Capability::send_at(
-        &root,
-        child_h,
-        dom1_h,
-        Attributes::NONE,
-        Some(0xD_0000),
-    )
+    let _send = Capability::send_at(&platform, &root, child_h, dom1_h, Attributes::NONE, Some(0xD_0000))
     .unwrap();
 
     // Receiver overrides to 0xE_0000.
     let (_h, accept_updates) =
-        Capability::accept_at(&dom1, 0, Some(0xE_0000)).unwrap();
+        Capability::accept_at(&platform, &dom1, 0, Some(0xE_0000)).unwrap();
 
     let d = dom1.read();
     let (&gpa, _) = d.data.address_map.entries().iter().next().unwrap();
@@ -662,34 +659,29 @@ fn test_accept_at_overrides_sender_hint() {
 
 #[test]
 fn test_accept_at_none_falls_back_to_sender() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     let access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, _sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (child_h, _sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
         .domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Sender requests GPA 0xD_0000.
-    let _send = Capability::send_at(
-        &root,
-        child_h,
-        dom1_h,
-        Attributes::NONE,
-        Some(0xD_0000),
-    )
+    let _send = Capability::send_at(&platform, &root, child_h, dom1_h, Attributes::NONE, Some(0xD_0000))
     .unwrap();
 
     // accept_at with None → falls back to sender's hint.
-    let (_h, _) = Capability::accept_at(&dom1, 0, None).unwrap();
+    let (_h, _) = Capability::accept_at(&platform, &dom1, 0, None).unwrap();
 
     let d = dom1.read();
     let (&gpa, _) = d.data.address_map.entries().iter().next().unwrap();
@@ -703,25 +695,26 @@ fn test_accept_at_none_falls_back_to_sender() {
 /// silently overwrite the first mapping.
 #[test]
 fn test_send_at_conflicting_gpa() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     // Carve two disjoint regions.
     let (c1_h, _s1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (c2_h, _s2, _) =
-        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
 
     let (dom1_h, dom1) = make_child(&root);
 
     // First send at GPA 0xA_0000 — should succeed.
-    Capability::send_at(&root, c1_h, dom1_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom1_h, Attributes::NONE, Some(0xA_0000)).unwrap();
 
     let d = dom1.read();
     assert_eq!(d.data.address_map.entries().len(), 1);
     drop(d);
 
     // Second send at the SAME GPA — must fail (overlap).
-    let result = Capability::send_at(&root, c2_h, dom1_h, Attributes::NONE, Some(0xA_0000));
+    let result = Capability::send_at(&platform, &root, c2_h, dom1_h, Attributes::NONE, Some(0xA_0000));
     assert!(matches!(result, Err(CapaError::RegionOverlap)));
 
     // Receiver should still have only the first mapping at 0xA_0000.
@@ -749,31 +742,32 @@ fn test_send_at_conflicting_gpa() {
 /// Accept at a GPA that is already occupied in the receiver's map.
 #[test]
 fn test_accept_at_conflicting_gpa() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     let (c1_h, _s1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (c2_h, _s2, _) =
-        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
 
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root
         .read()
         .data
         .domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Send first cap (no GPA hint — gets identity 0x1000).
-    Capability::send(&root, c1_h, dom1_h, Attributes::NONE).unwrap();
-    let (_h1, _) = Capability::accept(&dom1, 0).unwrap();
+    Capability::send(&platform, &root, c1_h, dom1_h, Attributes::NONE).unwrap();
+    let (_h1, _) = Capability::accept(&platform, &dom1, 0).unwrap();
 
     // Send second cap with GPA hint = 0x1000 (collides with first).
-    Capability::send_at(&root, c2_h, dom1_h, Attributes::NONE, Some(0x1000)).unwrap();
-    let result = Capability::accept_at(&dom1, 1, Some(0x1000));
+    Capability::send_at(&platform, &root, c2_h, dom1_h, Attributes::NONE, Some(0x1000)).unwrap();
+    let result = Capability::accept_at(&platform, &dom1, 1, Some(0x1000));
     assert!(matches!(result, Err(CapaError::RegionOverlap)));
 
     // Only the first mapping should exist at GPA 0x1000.
@@ -797,14 +791,15 @@ fn test_accept_at_conflicting_gpa() {
 /// the blocked GPA — the insert must fail.
 #[test]
 fn test_blocked_gpa_prevents_insert() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x4000, Rights::RWX, 0x8_0000);
 
     // Carve + send → root's GPA 0x8_1000 becomes Blocked.
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom1_h, _dom1) = make_child(&root);
-    Capability::send(&root, c1_h, dom1_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, c1_h, dom1_h, Attributes::NONE).unwrap();
 
     // Confirm it's blocked.
     let r = root.read();
@@ -845,19 +840,20 @@ fn test_blocked_gpa_prevents_insert() {
 ///   5. Attempting to fill the gap with another cap should fail.
 #[test]
 fn test_view_aware_insert_shows_blocked_gap() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     // 1. Carve c1 = [0x1000, 0x3000)
     let (c1_h, _c1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
 
     // 2. Carve c2 = [0x1800, 0x2000) from c1
     let (_c2_h, _c2, _) =
-        Capability::carve(&root, c1_h, Access::new(0x1800, 0x800, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, c1_h, Access::new(0x1800, 0x800, Rights::RW)).unwrap();
 
     // 3. Send c1 to dom1 at GPA 0xA_0000 (unsealed).
     let (dom1_h, dom1) = make_child(&root);
-    Capability::send_at(&root, c1_h, dom1_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom1_h, Attributes::NONE, Some(0xA_0000)).unwrap();
 
     // 4. Verify dom1's AddressMap:
     let d = dom1.read();
@@ -895,8 +891,8 @@ fn test_view_aware_insert_shows_blocked_gap() {
 
     // 5. Attempt to fill the gap with another capability — must fail.
     let (c3_h, _c3, _) =
-        Capability::carve(&root, r0_h, Access::new(0x5000, 0x800, Rights::RW)).unwrap();
-    let result = Capability::send_at(&root, c3_h, dom1_h, Attributes::NONE, Some(0xA_0800));
+        Capability::carve(&platform, &root, r0_h, Access::new(0x5000, 0x800, Rights::RW)).unwrap();
+    let result = Capability::send_at(&platform, &root, c3_h, dom1_h, Attributes::NONE, Some(0xA_0800));
     assert!(
         matches!(result, Err(CapaError::RegionOverlap)),
         "insert at blocked gap must fail"
@@ -911,9 +907,10 @@ fn test_view_aware_insert_shows_blocked_gap() {
 
 /// Helper: create a child domain with all permissions (incl. MAP_SELF).
 fn make_child_with_map_self(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
+    let platform = common::TestPlatform::new();
     let api = MonitorAPI::ALL;
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(root, policy).unwrap().0;
+    let h = Capability::create(&platform, root, policy).unwrap().0;
     let dom = root
         .read()
         .data
@@ -925,12 +922,14 @@ fn make_child_with_map_self(root: &CapabilityRef<Domain>) -> (LocalHandle, Capab
 
 /// Get the first memory handle in a domain.
 fn first_mem_handle(dom: &CapabilityRef<Domain>) -> LocalHandle {
+    let platform = common::TestPlatform::new();
     let r = dom.read();
     *r.data.memory_capabilities.keys().next().expect("no memory caps")
 }
 
 /// Find the memory handle whose mapped_gpas entry equals `gpa`.
 fn handle_at_gpa(dom: &CapabilityRef<Domain>, gpa: u64) -> LocalHandle {
+    let platform = common::TestPlatform::new();
     let r = dom.read();
     *r.data
         .mapped_gpas
@@ -945,14 +944,15 @@ fn handle_at_gpa(dom: &CapabilityRef<Domain>, gpa: u64) -> LocalHandle {
 /// Basic: carve + send to child + seal + MAP_SELF to new GPA.
 #[test]
 fn test_map_self_basic_remap() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let cap_h = first_mem_handle(&dom);
     {
@@ -960,7 +960,7 @@ fn test_map_self_basic_remap() {
         assert!(d.data.address_map.entries().contains_key(&0x1000));
     }
 
-    let updates = Capability::map_self(&dom, cap_h, 0x5_0000).unwrap();
+    let updates = Capability::map_self(&platform, &dom, cap_h, 0x5_0000).unwrap();
 
     let d = dom.read();
     assert!(!d.data.address_map.entries().contains_key(&0x1000));
@@ -979,17 +979,18 @@ fn test_map_self_basic_remap() {
 /// MAP_SELF from a non-identity initial GPA (send_at with hint).
 #[test]
 fn test_map_self_from_nonidentity_gpa() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, ch, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let cap_h = first_mem_handle(&dom);
-    let _updates = Capability::map_self(&dom, cap_h, 0xB_0000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, cap_h, 0xB_0000).unwrap();
 
     let d = dom.read();
     assert!(!d.data.address_map.entries().contains_key(&0xA_0000));
@@ -1005,25 +1006,26 @@ fn test_map_self_from_nonidentity_gpa() {
 /// Re-MAP_SELF: remap the same cap twice in succession.
 #[test]
 fn test_map_self_twice() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let cap_h = first_mem_handle(&dom);
 
-    Capability::map_self(&dom, cap_h, 0x20_0000).unwrap();
+    Capability::map_self(&platform, &dom, cap_h, 0x20_0000).unwrap();
     {
         let d = dom.read();
         assert!(d.data.address_map.entries().contains_key(&0x20_0000));
         assert!(!d.data.address_map.entries().contains_key(&0x10_0000));
     }
 
-    Capability::map_self(&dom, cap_h, 0x30_0000).unwrap();
+    Capability::map_self(&platform, &dom, cap_h, 0x30_0000).unwrap();
     let d = dom.read();
     assert!(d.data.address_map.entries().contains_key(&0x30_0000));
     assert!(!d.data.address_map.entries().contains_key(&0x20_0000));
@@ -1032,20 +1034,21 @@ fn test_map_self_twice() {
 /// MAP_SELF a cap with a carved-away child: blocked gap moves with it.
 #[test]
 fn test_map_self_with_carved_hole() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     // Carve c1 = [0x1000..0x5000).
     let (c1_h, _c1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x4000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x4000, Rights::RW)).unwrap();
     // Carve c2 = [0x2000..0x3000) from c1 (hole in c1).
     let (_c2_h, _c2, _) =
-        Capability::carve(&root, c1_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, c1_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
 
     // Send c1 to child at GPA 0xA_0000.
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom_h, Attributes::NONE, Some(0xA_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let c1_child_h = first_mem_handle(&dom);
 
@@ -1057,7 +1060,7 @@ fn test_map_self_with_carved_hole() {
     }
 
     // MAP_SELF c1 to GPA 0xB_0000.
-    let _updates = Capability::map_self(&dom, c1_child_h, 0xB_0000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, c1_child_h, 0xB_0000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1097,24 +1100,25 @@ fn test_map_self_with_carved_hole() {
 /// alias elsewhere.  R1's contribution to the overlapping region survives.
 #[test]
 fn test_map_self_alias_within_domain() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     // Send a big region to child at GPA 0x0.
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let r1_h = first_mem_handle(&dom);
 
     // Child aliases [0x0..0x1000) RW from its own R1.
-    let (alias_h, _alias_sub) = Capability::alias(&dom, r1_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (alias_h, _alias_sub, _)= Capability::alias(&platform, &dom, r1_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
 
     // Before MAP_SELF: the [0x0..0x1000) region has refcount 2 (R1 + alias).
     // MAP_SELF alias to GPA 0x6000.
-    let _updates = Capability::map_self(&dom, alias_h, 0x6000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, alias_h, 0x6000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1147,23 +1151,24 @@ fn test_map_self_alias_within_domain() {
 /// R1's entries must survive (refcount drops from 2→1, not destroyed).
 #[test]
 fn test_map_self_full_alias_same_domain() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let r1_h = first_mem_handle(&dom);
 
     // Full alias.
-    let (alias_h, _) =
-        Capability::alias(&dom, r1_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
+    let (alias_h, _, _)=
+        Capability::alias(&platform, &dom, r1_h, Access::new(0x0, 0x5000, Rights::RW)).unwrap();
 
     // MAP_SELF alias to 0x1_0000.
-    let _updates = Capability::map_self(&dom, alias_h, 0x1_0000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, alias_h, 0x1_0000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1201,20 +1206,21 @@ fn test_map_self_full_alias_same_domain() {
 /// are always ⊆ parent rights. The refcount change is verified structurally.
 #[test]
 fn test_map_self_alias_different_rights() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x5000, Rights::RWX)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x5000, Rights::RWX)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let r1_h = first_mem_handle(&dom);
 
     // Alias sub-range [0x0..0x1000) with RX (subset of parent's RWX).
-    let (alias_h, _) =
-        Capability::alias(&dom, r1_h, Access::new(0x0, 0x1000, Rights::RX)).unwrap();
+    let (alias_h, _, _)=
+        Capability::alias(&platform, &dom, r1_h, Access::new(0x0, 0x1000, Rights::RX)).unwrap();
 
     // Before MAP_SELF: [0x0..0x1000) has R(2)W(1)X(2) = RWX.
     {
@@ -1227,7 +1233,7 @@ fn test_map_self_alias_different_rights() {
     }
 
     // MAP_SELF alias to 0x10000.
-    let _updates = Capability::map_self(&dom, alias_h, 0x10000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, alias_h, 0x10000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1256,22 +1262,23 @@ fn test_map_self_alias_different_rights() {
 /// both remain at original GPAs (rollback).
 #[test]
 fn test_map_self_overlap_rejected() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1, _s1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (c2, _s2, _) =
-        Capability::carve(&root, r0_h, Access::new(0x3000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x3000, 0x1000, Rights::RW)).unwrap();
 
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, c1, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::send_at(&root, c2, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, c1, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&platform, &root, c2, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let c1_h = handle_at_gpa(&dom, 0x10_0000);
 
-    let result = Capability::map_self(&dom, c1_h, 0x20_0000);
+    let result = Capability::map_self(&platform, &dom, c1_h, 0x20_0000);
     assert!(
         matches!(result, Err(CapaError::RegionOverlap)),
         "MAP_SELF onto existing cap must fail: {:?}", result
@@ -1288,17 +1295,18 @@ fn test_map_self_overlap_rejected() {
 /// MAP_SELF without MAP_SELF permission → ApiNotAllowed.
 #[test]
 fn test_map_self_permission_denied_no_api() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child(&root);
-    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let cap_h = first_mem_handle(&dom);
-    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    let result = Capability::map_self(&platform, &dom, cap_h, 0x5_0000);
     assert!(
         matches!(result, Err(CapaError::ApiNotAllowed)),
         "MAP_SELF without permission: {:?}", result
@@ -1308,17 +1316,18 @@ fn test_map_self_permission_denied_no_api() {
 /// MAP_SELF on unsealed domain → DomainNotSealed.
 #[test]
 fn test_map_self_requires_sealed() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, ch, dom_h, Attributes::NONE).unwrap();
     // NOT sealed.
 
     let cap_h = first_mem_handle(&dom);
-    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    let result = Capability::map_self(&platform, &dom, cap_h, 0x5_0000);
     assert!(
         matches!(result, Err(CapaError::DomainNotSealed)),
         "unsealed: {:?}", result
@@ -1328,29 +1337,31 @@ fn test_map_self_requires_sealed() {
 /// MAP_SELF with nonexistent handle → NotFound.
 #[test]
 fn test_map_self_not_found() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, _r0_h) = bootstrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
-    let result = Capability::map_self(&dom, 999, 0x5_0000);
+    let result = Capability::map_self(&platform, &dom, 999, 0x5_0000);
     assert!(matches!(result, Err(CapaError::NotFound)), "{:?}", result);
 }
 
 /// MAP_SELF on a frozen handle → PermissionDenied.
 #[test]
 fn test_map_self_frozen_handle_rejected() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, ch, dom_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, ch, dom_h, Attributes::NONE).unwrap();
     let cap_h = first_mem_handle(&dom);
     dom.write().data.frozen_handles.insert(cap_h);
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
-    let result = Capability::map_self(&dom, cap_h, 0x5_0000);
+    let result = Capability::map_self(&platform, &dom, cap_h, 0x5_0000);
     assert!(
         matches!(result, Err(CapaError::PermissionDenied)),
         "frozen: {:?}", result
@@ -1362,14 +1373,15 @@ fn test_map_self_frozen_handle_rejected() {
 /// MAP_SELF to the same GPA is a no-op: entry should survive unchanged.
 #[test]
 fn test_map_self_same_gpa_noop() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let cap_h = first_mem_handle(&dom);
 
@@ -1380,7 +1392,7 @@ fn test_map_self_same_gpa_noop() {
     };
 
     // MAP_SELF to the same GPA it already occupies.
-    let updates = Capability::map_self(&dom, cap_h, 0x10_0000).unwrap();
+    let updates = Capability::map_self(&platform, &dom, cap_h, 0x10_0000).unwrap();
 
     // Should produce no updates (nothing changed).
     assert!(updates.updates().is_empty(),
@@ -1397,23 +1409,24 @@ fn test_map_self_same_gpa_noop() {
 /// MAP_SELF a cap to GPA immediately adjacent to another cap (no gap, no overlap).
 #[test]
 fn test_map_self_adjacent_to_existing() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _s1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
     let (c2_h, _s2, _) =
-        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW)).unwrap();
 
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::send_at(&root, c2_h, dom_h, Attributes::NONE, Some(0x30_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&platform, &root, c2_h, dom_h, Attributes::NONE, Some(0x30_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let c2_child_h = handle_at_gpa(&dom, 0x30_0000);
 
     // Move c2 immediately after c1: [0x10_0000..0x11_000) + [0x11_000..0x12_000).
-    let _updates = Capability::map_self(&dom, c2_child_h, 0x10_1000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, c2_child_h, 0x10_1000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1425,18 +1438,19 @@ fn test_map_self_adjacent_to_existing() {
 /// MAP_SELF overlap rejection rolls back: the cap stays at its old GPA.
 #[test]
 fn test_map_self_overlap_rollback_preserves_state() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _s1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x2000, Rights::RW)).unwrap();
     let (c2_h, _s2, _) =
-        Capability::carve(&root, r0_h, Access::new(0x4000, 0x2000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x4000, 0x2000, Rights::RW)).unwrap();
 
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::send_at(&root, c2_h, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::send_at(&platform, &root, c2_h, dom_h, Attributes::NONE, Some(0x20_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let c1_child_h = handle_at_gpa(&dom, 0x10_0000);
 
@@ -1448,7 +1462,7 @@ fn test_map_self_overlap_rollback_preserves_state() {
 
     // Attempt overlap: c1 [0x2000 size] at 0x1F_F000 → [0x1FF000..0x201000)
     // overlaps c2 at [0x200000..0x202000).
-    let result = Capability::map_self(&dom, c1_child_h, 0x1F_F000);
+    let result = Capability::map_self(&platform, &dom, c1_child_h, 0x1F_F000);
     assert!(matches!(result, Err(CapaError::RegionOverlap)),
         "expected RegionOverlap, got {:?}", result);
 
@@ -1467,25 +1481,26 @@ fn test_map_self_overlap_rollback_preserves_state() {
 /// MAP_SELF a small alias multiple times across the address space.
 #[test]
 fn test_map_self_alias_bouncing() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let parent_h = first_mem_handle(&dom);
 
     // Create alias of sub-range [0x0..0x1000).
-    let (alias_h, _) =
-        Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (alias_h, _, _)=
+        Capability::alias(&platform, &dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
 
     // Bounce alias through several GPAs.
     let gpas = [0x10_0000, 0x20_0000, 0x30_0000, 0x10_0000];
     for &gpa in &gpas {
-        Capability::map_self(&dom, alias_h, gpa).unwrap();
+        Capability::map_self(&platform, &dom, alias_h, gpa).unwrap();
         let d = dom.read();
         let e = d.data.address_map.entries();
         assert!(e.contains_key(&gpa), "alias must be at GPA {:#x}", gpa);
@@ -1508,23 +1523,24 @@ fn test_map_self_alias_bouncing() {
 /// region.  Verifies blocked gap's GPA moves correctly with arbitrary base.
 #[test]
 fn test_map_self_carved_hole_nonaligned_base() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     // c1 = [0x0..0x4000), hole c2 = [0x1000..0x2000).
     let (c1_h, _c1, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x4000, Rights::RW)).unwrap();
     let (_c2_h, _c2, _) =
-        Capability::carve(&root, c1_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, c1_h, Access::new(0x1000, 0x1000, Rights::RW)).unwrap();
 
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, c1_h, dom_h, Attributes::NONE, Some(0x5_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, c1_h, dom_h, Attributes::NONE, Some(0x5_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let c1_child = first_mem_handle(&dom);
 
     // Move to 0x7_3000 (arbitrary non-zero-low-bits base).
-    let _updates = Capability::map_self(&dom, c1_child, 0x7_3000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, c1_child, 0x7_3000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1561,27 +1577,28 @@ fn test_map_self_carved_hole_nonaligned_base() {
 /// All aliases contribute to the same GPA region; removing one only decrements.
 #[test]
 fn test_map_self_multiple_aliases_same_range() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let parent_h = first_mem_handle(&dom);
 
     // Create 3 aliases of the same sub-range [0x0..0x1000).
-    let (a1, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    let (a2, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
-    let (a3, _) = Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (a1, _, _)= Capability::alias(&platform, &dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (a2, _, _)= Capability::alias(&platform, &dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (a3, _, _)= Capability::alias(&platform, &dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
 
     // At [0x0..0x1000): parent(RWX) + a1(RW) + a2(RW) + a3(RW) = R(4)W(4)X(1).
     // Effective rights = RWX.
 
     // Move a1 away.
-    Capability::map_self(&dom, a1, 0x10_0000).unwrap();
+    Capability::map_self(&platform, &dom, a1, 0x10_0000).unwrap();
 
     // [0x0..0x1000): parent(RWX) + a2(RW) + a3(RW) = R(3)W(3)X(1) = RWX.
     {
@@ -1593,7 +1610,7 @@ fn test_map_self_multiple_aliases_same_range() {
     }
 
     // Move a2 away.
-    Capability::map_self(&dom, a2, 0x20_0000).unwrap();
+    Capability::map_self(&platform, &dom, a2, 0x20_0000).unwrap();
 
     // [0x0..0x1000): parent(RWX) + a3(RW) = R(2)W(2)X(1) = RWX.
     {
@@ -1605,7 +1622,7 @@ fn test_map_self_multiple_aliases_same_range() {
     }
 
     // Move a3 away.
-    Capability::map_self(&dom, a3, 0x30_0000).unwrap();
+    Capability::map_self(&platform, &dom, a3, 0x30_0000).unwrap();
 
     // [0x0..0x1000): parent alone → R(1)W(1)X(1) = RWX.
     let d = dom.read();
@@ -1623,19 +1640,20 @@ fn test_map_self_multiple_aliases_same_range() {
 /// MAP_SELF produces correct UpdateBatch entries (GPA + HPA).
 #[test]
 fn test_map_self_update_batch_correctness() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (ch, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x2000, Rights::RW)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send_at(&root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send_at(&platform, &root, ch, dom_h, Attributes::NONE, Some(0x10_0000)).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let child_id = dom_id(&dom);
     let cap_h = first_mem_handle(&dom);
 
-    let updates = Capability::map_self(&dom, cap_h, 0x50_0000).unwrap();
+    let updates = Capability::map_self(&platform, &dom, cap_h, 0x50_0000).unwrap();
 
     // Should have updates for the child domain:
     // - Remove at old GPA (0x10_0000, size 0x2000)
@@ -1671,23 +1689,24 @@ fn test_map_self_update_batch_correctness() {
 /// MAP_SELF the parent cap itself (not just an alias) to a different GPA.
 #[test]
 fn test_map_self_parent_cap_with_alias_staying() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
     let (c1_h, _sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
     let (dom_h, dom) = make_child_with_map_self(&root);
-    Capability::send(&root, c1_h, dom_h, Attributes::NONE).unwrap();
-    Capability::seal(&root, dom_h).unwrap();
+    Capability::send(&platform, &root, c1_h, dom_h, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root, dom_h).unwrap();
 
     let parent_h = first_mem_handle(&dom);
 
     // Alias [0x0..0x1000) at same GPA → adds refcount.
-    let (alias_h, _) =
-        Capability::alias(&dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+    let (alias_h, _, _)=
+        Capability::alias(&platform, &dom, parent_h, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
 
     // MAP_SELF the PARENT to a new GPA. Alias stays behind.
-    let _updates = Capability::map_self(&dom, parent_h, 0x10_0000).unwrap();
+    let _updates = Capability::map_self(&platform, &dom, parent_h, 0x10_0000).unwrap();
 
     let d = dom.read();
     let e = d.data.address_map.entries();
@@ -1732,6 +1751,7 @@ fn test_map_self_parent_cap_with_alias_staying() {
 /// must still emit a ChangeRights for the new GPA so the platform maps it.
 #[test]
 fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
+    let platform = common::TestPlatform::new();
     // Setup: root with a 64K region.
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
@@ -1742,9 +1762,9 @@ fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
 
     // Alias the full region and send to child at GPA 0 (identity).
     let access_full = Access::new(0x0, 0x10000, Rights::RWX);
-    let (alias1_h, _alias1_sub) =
-        Capability::alias(&root, r0_h, access_full).unwrap();
-    let updates1 = Capability::send_at(&root, alias1_h, child_h, Attributes::NONE, Some(0x0))
+    let (alias1_h, _alias1_sub, _)=
+        Capability::alias(&platform, &root, r0_h, access_full).unwrap();
+    let updates1 = Capability::send_at(&platform, &root, alias1_h, child_h, Attributes::NONE, Some(0x0))
         .unwrap();
 
     // Verify the first send emits ChangeRights for the child at GPA 0.
@@ -1760,11 +1780,11 @@ fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
 
     // Now alias a SUBSET (4K at HPA 0x2000) and send at a completely different GPA (0x8000_0000).
     let access_sub = Access::new(0x2000, 0x1000, Rights::RWX);
-    let (alias2_h, _alias2_sub) =
-        Capability::alias(&root, r0_h, access_sub).unwrap();
+    let (alias2_h, _alias2_sub, _)=
+        Capability::alias(&platform, &root, r0_h, access_sub).unwrap();
     let vtom_gpa: u64 = 0x8000_0000;
     let updates2 =
-        Capability::send_at(&root, alias2_h, child_h, Attributes::NONE, Some(vtom_gpa))
+        Capability::send_at(&platform, &root, alias2_h, child_h, Attributes::NONE, Some(vtom_gpa))
             .unwrap();
 
     // The critical check: even though the child already sees HPA 0x2000-0x3000
@@ -1806,6 +1826,7 @@ fn test_send_alias_subset_at_different_gpa_emits_change_rights() {
 /// must include the first send's region, so the diff only shows the new region.
 #[test]
 fn test_sequential_sends_cumulative_receiver_view() {
+    let platform = common::TestPlatform::new();
     // Root with 64K at HPA 0x0, identity GPA.
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
@@ -1814,11 +1835,11 @@ fn test_sequential_sends_cumulative_receiver_view() {
     let child_id = dom_id(&child_dom);
 
     // Carve two non-overlapping 4K regions.
-    let (c1_h, _, _) = Capability::carve(&root, r0_h, Access::new(0x0, 0x1000, Rights::RWX)).unwrap();
-    let (c2_h, _, _) = Capability::carve(&root, r0_h, Access::new(0x1000, 0x1000, Rights::RWX)).unwrap();
+    let (c1_h, _, _) = Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x1000, Rights::RWX)).unwrap();
+    let (c2_h, _, _) = Capability::carve(&platform, &root, r0_h, Access::new(0x1000, 0x1000, Rights::RWX)).unwrap();
 
     // Send first region to child at GPA 0x0.
-    let u1 = Capability::send_at(&root, c1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let u1 = Capability::send_at(&platform, &root, c1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
     let maps1: Vec<_> = u1.updates().iter().filter_map(|u| match u {
         Update::ChangeRights { domain, address, size, rights, shootdown_required, .. }
             if *domain == child_id && !*shootdown_required && *rights != Rights::NONE
@@ -1829,7 +1850,7 @@ fn test_sequential_sends_cumulative_receiver_view() {
     assert_eq!(maps1[0], (0x0, 0x1000));
 
     // Send second region to child at GPA 0x1000.
-    let u2 = Capability::send_at(&root, c2_h, child_h, Attributes::NONE, Some(0x1000)).unwrap();
+    let u2 = Capability::send_at(&platform, &root, c2_h, child_h, Attributes::NONE, Some(0x1000)).unwrap();
     let maps2: Vec<_> = u2.updates().iter().filter_map(|u| match u {
         Update::ChangeRights { domain, address, size, rights, shootdown_required, .. }
             if *domain == child_id && !*shootdown_required && *rights != Rights::NONE
@@ -1844,6 +1865,7 @@ fn test_sequential_sends_cumulative_receiver_view() {
 /// and the subsequent send must reflect the post-carve state.
 #[test]
 fn test_carve_then_send_view_consistency() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
@@ -1853,7 +1875,7 @@ fn test_carve_then_send_view_consistency() {
 
     // Carve with reduced rights — parent view changes (4K hole at reduced rights).
     let (carve_h, _, carve_updates) =
-        Capability::carve(&root, r0_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
 
     // The carve should produce ChangeRights for the parent (rights reduced).
     let parent_changes: Vec<_> = carve_updates.updates().iter().filter(|u| {
@@ -1863,7 +1885,7 @@ fn test_carve_then_send_view_consistency() {
 
     // Now send the carve to the child at GPA 0x5000.
     let send_updates =
-        Capability::send_at(&root, carve_h, child_h, Attributes::NONE, Some(0x5000)).unwrap();
+        Capability::send_at(&platform, &root, carve_h, child_h, Attributes::NONE, Some(0x5000)).unwrap();
 
     // Child must get a map at GPA 0x5000, size 0x1000, rights R.
     let child_maps: Vec<_> = send_updates.updates().iter().filter_map(|u| match u {
@@ -1884,6 +1906,7 @@ fn test_carve_then_send_view_consistency() {
 /// empty again, and a fresh send must produce a new ChangeRights.
 #[test]
 fn test_send_revoke_resend_view_updates() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
@@ -1892,8 +1915,8 @@ fn test_send_revoke_resend_view_updates() {
 
     // Alias and send to child.
     let access = Access::new(0x0, 0x1000, Rights::RWX);
-    let (a1_h, a1_sub) = Capability::alias(&root, r0_h, access).unwrap();
-    let u1 = Capability::send_at(&root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let (a1_h, a1_sub, _)= Capability::alias(&platform, &root, r0_h, access).unwrap();
+    let u1 = Capability::send_at(&platform, &root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
     let child_maps1 = u1.updates().iter().filter(|u| {
         matches!(u, Update::ChangeRights { domain, rights, shootdown_required, .. }
             if *domain == child_id && !*shootdown_required && *rights != Rights::NONE)
@@ -1901,7 +1924,7 @@ fn test_send_revoke_resend_view_updates() {
     assert_eq!(child_maps1, 1, "first send: child gets a map");
 
     // Revoke the alias.
-    let revoke_updates = Capability::revoke(&root, r0_h, a1_sub).unwrap();
+    let revoke_updates = Capability::revoke(&platform, &root, r0_h, a1_sub).unwrap();
     let child_unmaps = revoke_updates.updates().iter().filter(|u| {
         matches!(u, Update::ChangeRights { domain, rights, .. }
             if *domain == child_id && *rights == Rights::NONE)
@@ -1909,8 +1932,8 @@ fn test_send_revoke_resend_view_updates() {
     assert_eq!(child_unmaps, 1, "revoke: child loses the map");
 
     // Re-send a fresh alias at the same GPA.
-    let (a2_h, _) = Capability::alias(&root, r0_h, access).unwrap();
-    let u2 = Capability::send_at(&root, a2_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let (a2_h, _, _)= Capability::alias(&platform, &root, r0_h, access).unwrap();
+    let u2 = Capability::send_at(&platform, &root, a2_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
     let child_maps2 = u2.updates().iter().filter(|u| {
         matches!(u, Update::ChangeRights { domain, rights, shootdown_required, .. }
             if *domain == child_id && !*shootdown_required && *rights != Rights::NONE)
@@ -1922,6 +1945,7 @@ fn test_send_revoke_resend_view_updates() {
 /// affect the second alias at GPA B.
 #[test]
 fn test_double_map_revoke_one_keeps_other() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     seed_map(&root, 0x0, 0x10000, Rights::RWX, 0x0);
 
@@ -1930,13 +1954,13 @@ fn test_double_map_revoke_one_keeps_other() {
 
     // Two aliases of overlapping HPA range.
     let access = Access::new(0x0, 0x1000, Rights::RWX);
-    let (a1_h, a1_sub) = Capability::alias(&root, r0_h, access).unwrap();
-    let (a2_h, _a2_sub) = Capability::alias(&root, r0_h, access).unwrap();
+    let (a1_h, a1_sub, _)= Capability::alias(&platform, &root, r0_h, access).unwrap();
+    let (a2_h, _a2_sub, _)= Capability::alias(&platform, &root, r0_h, access).unwrap();
 
     // Send alias1 at GPA 0x0.
-    let _ = Capability::send_at(&root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
+    let _ = Capability::send_at(&platform, &root, a1_h, child_h, Attributes::NONE, Some(0x0)).unwrap();
     // Send alias2 at GPA 0x8000_0000 (double-map).
-    let u2 = Capability::send_at(&root, a2_h, child_h, Attributes::NONE, Some(0x8000_0000)).unwrap();
+    let u2 = Capability::send_at(&platform, &root, a2_h, child_h, Attributes::NONE, Some(0x8000_0000)).unwrap();
     let maps2 = u2.updates().iter().filter(|u| {
         matches!(u, Update::ChangeRights { domain, address, rights, shootdown_required, .. }
             if *domain == child_id && *address == 0x8000_0000u64
@@ -1945,7 +1969,7 @@ fn test_double_map_revoke_one_keeps_other() {
     assert_eq!(maps2, 1, "second alias at different GPA must emit a map");
 
     // Revoke alias1 — child should lose GPA 0x0 but keep GPA 0x8000_0000.
-    let revoke_u = Capability::revoke(&root, r0_h, a1_sub).unwrap();
+    let revoke_u = Capability::revoke(&platform, &root, r0_h, a1_sub).unwrap();
     let unmap_gpa0 = revoke_u.updates().iter().filter(|u| {
         matches!(u, Update::ChangeRights { domain, rights, .. }
             if *domain == child_id && *rights == Rights::NONE)

@@ -4,6 +4,10 @@ use capability_engine::memory::Rights;
 use capability_engine::*;
 use std::sync::Arc;
 
+#[path = "../common/mod.rs"]
+mod common;
+
+
 /// Helper: sealed root domain with a memory root at local handle 1.
 /// Returns (root, mem_root_h, _mem_root) — caller must keep `_mem_root` alive.
 fn setup_root() -> (
@@ -11,6 +15,7 @@ fn setup_root() -> (
     LocalHandle,
     CapabilityRef<MemoryRegion>,
 ) {
+    let platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let total_mem = MemoryRegion::new_root(0x0, 0x10000);
@@ -23,10 +28,11 @@ fn setup_root() -> (
 
 #[test]
 fn test_carve_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let child_access = Access::new(0x1000, 0x1000, Rights::RWX);
     let (child_h, child_sub, updates) =
-        Capability::carve(&root, mem_root_h, child_access).unwrap();
+        Capability::carve(&platform, &root, mem_root_h, child_access).unwrap();
 
     assert_eq!(child_sub, 1); // first child gets sub_handle = 1
     assert!(updates.is_empty()); // same rights as parent — no MMU updates (fast path)
@@ -35,9 +41,10 @@ fn test_carve_memory() {
 
 #[test]
 fn test_alias_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
-    let (child_h, child_sub) = Capability::alias(&root, mem_root_h, child_access).unwrap();
+    let (child_h, child_sub, _)= Capability::alias(&platform, &root, mem_root_h, child_access).unwrap();
 
     assert_eq!(child_sub, 1);
     assert!(root.read().data.memory_capabilities.contains_key(&child_h));
@@ -45,26 +52,28 @@ fn test_alias_memory() {
 
 #[test]
 fn test_revoke_memory_child() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (_child_h, child_sub, _) =
-        Capability::carve(&root, mem_root_h, child_access).unwrap();
+        Capability::carve(&platform, &root, mem_root_h, child_access).unwrap();
 
-    Capability::revoke(&root, mem_root_h, child_sub).unwrap();
+    Capability::revoke(&platform, &root, mem_root_h, child_sub).unwrap();
 
     // Revoking the same sub_handle again must fail (child gone from parent's tree)
-    let result = Capability::revoke(&root, mem_root_h, child_sub);
+    let result = Capability::revoke(&platform, &root, mem_root_h, child_sub);
     assert!(matches!(result, Err(CapaError::NotFound)));
 }
 
 #[test]
 fn test_alias_multiple() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let access1 = Access::new(0x1000, 0x1000, Rights::RW);
     let access2 = Access::new(0x2000, 0x1000, Rights::RW);
 
-    let (child1_h, child1_sub) = Capability::alias(&root, mem_root_h, access1).unwrap();
-    let (child2_h, child2_sub) = Capability::alias(&root, mem_root_h, access2).unwrap();
+    let (child1_h, child1_sub, _)= Capability::alias(&platform, &root, mem_root_h, access1).unwrap();
+    let (child2_h, child2_sub, _)= Capability::alias(&platform, &root, mem_root_h, access2).unwrap();
 
     assert_ne!(child1_h, child2_h);
     assert_ne!(child1_sub, child2_sub); // sub_handles are unique among siblings
@@ -74,12 +83,13 @@ fn test_alias_multiple() {
 
 #[test]
 fn test_nested_carve_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let c1_access = Access::new(0x2000, 0x4000, Rights::RW);
-    let (c1_h, _, _) = Capability::carve(&root, mem_root_h, c1_access).unwrap();
+    let (c1_h, _, _) = Capability::carve(&platform, &root, mem_root_h, c1_access).unwrap();
 
     let c2_access = Access::new(0x3000, 0x1000, Rights::R);
-    let (c2_h, _, _) = Capability::carve(&root, c1_h, c2_access).unwrap();
+    let (c2_h, _, _) = Capability::carve(&platform, &root, c1_h, c2_access).unwrap();
 
     assert!(root.read().data.memory_capabilities.contains_key(&c1_h));
     assert!(root.read().data.memory_capabilities.contains_key(&c2_h));
@@ -91,9 +101,10 @@ fn test_nested_carve_memory() {
 
 #[test]
 fn test_create_domain() {
+    let platform = common::TestPlatform::new();
     let (root, _, _mem_root) = setup_root();
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let child_h = Capability::create(&root, child_policy).unwrap().0;
+    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
 
     assert!(root.read().data.domain_capabilities.contains_key(&child_h));
     let child = root.read().data.domain_capabilities[&child_h]
@@ -104,14 +115,15 @@ fn test_create_domain() {
 
 #[test]
 fn test_revoke_domain() {
+    let platform = common::TestPlatform::new();
     let (root, _, _mem_root) = setup_root();
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
-    let child_h = Capability::create(&root, child_policy).unwrap().0;
+    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
 
-    let updates = Capability::revoke_domain(&root, child_h).unwrap();
+    let updates = Capability::revoke_domain(&platform, &root, child_h).unwrap();
 
     assert!(!updates.is_empty()); // domain revocation always produces updates
     assert!(child.read().data.is_revoked()); // child domain is now revoked
@@ -123,14 +135,15 @@ fn test_revoke_domain() {
 
 #[test]
 fn test_nested_alias_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     // Carve a region first
     let c1_access = Access::new(0x1000, 0x2000, Rights::RW);
-    let (c1_h, _, _) = Capability::carve(&root, mem_root_h, c1_access).unwrap();
+    let (c1_h, _, _) = Capability::carve(&platform, &root, mem_root_h, c1_access).unwrap();
 
     // Alias from the carved child
     let a1_access = Access::new(0x1800, 0x800, Rights::R);
-    let (a1_h, _) = Capability::alias(&root, c1_h, a1_access).unwrap();
+    let (a1_h, _, _)= Capability::alias(&platform, &root, c1_h, a1_access).unwrap();
 
     let a1 = root.read().data.memory_capabilities[&a1_h]
         .upgrade()
@@ -141,20 +154,21 @@ fn test_nested_alias_memory() {
 
 #[test]
 fn test_carve_then_alias_then_carve_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     // Step 1: carve from root mem
     let (carved_h, _, _) =
-        Capability::carve(&root, mem_root_h, Access::new(0x2000, 0x2000, Rights::RW))
+        Capability::carve(&platform, &root, mem_root_h, Access::new(0x2000, 0x2000, Rights::RW))
             .unwrap();
 
     // Step 2: alias from carved
-    let (alias_h, _) =
-        Capability::alias(&root, carved_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
+    let (alias_h, _, _)=
+        Capability::alias(&platform, &root, carved_h, Access::new(0x2000, 0x1000, Rights::R)).unwrap();
 
     // Step 3: carve from alias
     let (cfa_h, _, _) =
-        Capability::carve(&root, alias_h, Access::new(0x2000, 0x0800, Rights::R)).unwrap();
+        Capability::carve(&platform, &root, alias_h, Access::new(0x2000, 0x0800, Rights::R)).unwrap();
 
     let cfa = root.read().data.memory_capabilities[&cfa_h]
         .upgrade()
@@ -165,24 +179,25 @@ fn test_carve_then_alias_then_carve_memory() {
 
 #[test]
 fn test_revoke_complex_subtree_memory() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     // Branch 1: carve → alias → carve
     let (b1_h, _, _) =
-        Capability::carve(&root, mem_root_h, Access::new(0x0000, 0x4000, Rights::RW))
+        Capability::carve(&platform, &root, mem_root_h, Access::new(0x0000, 0x4000, Rights::RW))
             .unwrap();
-    let (b1a_h, b1a_sub) =
-        Capability::alias(&root, b1_h, Access::new(0x1000, 0x1000, Rights::R)).unwrap();
+    let (b1a_h, b1a_sub, _)=
+        Capability::alias(&platform, &root, b1_h, Access::new(0x1000, 0x1000, Rights::R)).unwrap();
     let (_b1a1_h, _, _) =
-        Capability::carve(&root, b1a_h, Access::new(0x1000, 0x0800, Rights::R)).unwrap();
+        Capability::carve(&platform, &root, b1a_h, Access::new(0x1000, 0x0800, Rights::R)).unwrap();
 
     // Branch 2: plain carve (will not be revoked)
     let (b2_h, _, _) =
-        Capability::carve(&root, mem_root_h, Access::new(0x5000, 0x1000, Rights::R))
+        Capability::carve(&platform, &root, mem_root_h, Access::new(0x5000, 0x1000, Rights::R))
             .unwrap();
 
     // Revoke b1a (alias node) by its sub_handle
-    Capability::revoke(&root, b1_h, b1a_sub).unwrap();
+    Capability::revoke(&platform, &root, b1_h, b1a_sub).unwrap();
 
     // b1's children are now empty
     let b1_ref = root.read().data.memory_capabilities[&b1_h]
@@ -196,13 +211,14 @@ fn test_revoke_complex_subtree_memory() {
 
 #[test]
 fn test_revoke_memory_child_nonexistent() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     let child_access = Access::new(0x1000, 0x1000, Rights::RW);
     let (_child_h, _child_sub, _) =
-        Capability::carve(&root, mem_root_h, child_access).unwrap();
+        Capability::carve(&platform, &root, mem_root_h, child_access).unwrap();
 
     // Try to revoke with a garbage sub_handle
-    let result = Capability::revoke(&root, mem_root_h, 999);
+    let result = Capability::revoke(&platform, &root, mem_root_h, 999);
     assert!(matches!(result, Err(CapaError::NotFound)));
 
     // Valid child is untouched
@@ -214,11 +230,12 @@ fn test_revoke_memory_child_nonexistent() {
 
 #[test]
 fn test_send_memory_immediate() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     // Carve a child cap to send
     let (carved_h, _, _) =
-        Capability::carve(&root, mem_root_h, Access::new(0x1000, 0x1000, Rights::RW))
+        Capability::carve(&platform, &root, mem_root_h, Access::new(0x1000, 0x1000, Rights::RW))
             .unwrap();
 
     // Create an unsealed receiver domain and register it in root's domain table
@@ -233,7 +250,7 @@ fn test_send_memory_immediate() {
 
     // Send — receiver is unsealed → immediate transfer
     let updates =
-        Capability::send(&root, carved_h, domain_recv_h, Attributes::NONE).unwrap();
+        Capability::send(&platform, &root, carved_h, domain_recv_h, Attributes::NONE).unwrap();
 
     // Root no longer holds the handle
     assert!(!root.read().data.memory_capabilities.contains_key(&carved_h));
@@ -268,10 +285,11 @@ fn test_send_memory_immediate() {
 
 #[test]
 fn test_send_memory_with_attributes() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     let (carved_h, _, _) =
-        Capability::carve(&root, mem_root_h, Access::new(0x1000, 0x1000, Rights::RW))
+        Capability::carve(&platform, &root, mem_root_h, Access::new(0x1000, 0x1000, Rights::RW))
             .unwrap();
 
     let recv_policy = DomainPolicy::new_root(4);
@@ -283,7 +301,7 @@ fn test_send_memory_with_attributes() {
         .add_domain_capability(domain_recv_h, Arc::downgrade(&receiver));
 
     let attrs = Attributes::from_bits(Attributes::CLEAN | Attributes::VITAL);
-    Capability::send(&root, carved_h, domain_recv_h, attrs).unwrap();
+    Capability::send(&platform, &root, carved_h, domain_recv_h, attrs).unwrap();
 
     let recv_cap = receiver
         .read()
@@ -300,23 +318,24 @@ fn test_send_memory_with_attributes() {
 
 #[test]
 fn test_revoke_domain_tree() {
+    let platform = common::TestPlatform::new();
     let (root, _, _mem_root) = setup_root();
 
     // Create child and seal it
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
-    Capability::seal(&root, child_h).unwrap();
+    let child_h = Capability::create(&platform, &root, DomainPolicy::new_root(4)).unwrap().0;
+    Capability::seal(&platform, &root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
 
     // Create grandchild under child (child must be sealed)
-    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap().0;
+    let grandchild_h = Capability::create(&platform, &child_ref, DomainPolicy::new_root(4)).unwrap().0;
     let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
 
     // Revoke child (and transitively grandchild)
-    let updates = Capability::revoke_domain(&root, child_h).unwrap();
+    let updates = Capability::revoke_domain(&platform, &root, child_h).unwrap();
 
     assert!(root.read().children.is_empty());
     assert!(child_ref.read().data.is_revoked());
@@ -330,14 +349,15 @@ fn test_revoke_domain_tree() {
 /// Tests rights monotonicity through a two-level tree.
 #[test]
 fn test_nested_carve_excessive_rights() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
     // mem_root has RWX; carve a child with RW only
     let rw_access = Access::new(0x2000, 0x2000, Rights::RW);
-    let (rw_h, _, _) = Capability::carve(&root, mem_root_h, rw_access).unwrap();
+    let (rw_h, _, _) = Capability::carve(&platform, &root, mem_root_h, rw_access).unwrap();
 
     // Try to carve from the RW child with RWX — execute bit not in parent, must fail
     let rwx_access = Access::new(0x2000, 0x1000, Rights::RWX);
-    let result = Capability::carve(&root, rw_h, rwx_access);
+    let result = Capability::carve(&platform, &root, rw_h, rwx_access);
     assert!(result.is_err(), "carve with rights exceeding parent must fail");
 }
 
@@ -345,17 +365,18 @@ fn test_nested_carve_excessive_rights() {
 /// address space must no longer include that range.
 #[test]
 fn test_address_space_shrinks_after_send_of_carve() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     // Carve [0x2000, 0x4000) exclusively from root's mem
     let carved_access = Access::new(0x2000, 0x2000, Rights::RW);
-    let (carved_h, _, _) = Capability::carve(&root, mem_root_h, carved_access).unwrap();
+    let (carved_h, _, _) = Capability::carve(&platform, &root, mem_root_h, carved_access).unwrap();
 
     // Send to an unsealed receiver (immediate transfer)
     let recv_h =
-        Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
+        Capability::create(&platform, &root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
             .unwrap().0;
-    Capability::send(&root, carved_h, recv_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, carved_h, recv_h, Attributes::NONE).unwrap();
 
     // Root lost the carved handle; its remaining cap (mem_root) has a hole where
     // the carved child was — so the carved range must no longer be accessible.
@@ -377,17 +398,18 @@ fn test_address_space_shrinks_after_send_of_carve() {
 /// must still include that range — aliases are shared, not exclusive.
 #[test]
 fn test_address_space_unchanged_after_send_of_alias() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, _mem_root) = setup_root();
 
     // Alias [0x2000, 0x4000) from root's mem (shared — does not remove from parent view)
     let alias_access = Access::new(0x2000, 0x2000, Rights::R);
-    let (alias_h, _) = Capability::alias(&root, mem_root_h, alias_access).unwrap();
+    let (alias_h, _, _)= Capability::alias(&platform, &root, mem_root_h, alias_access).unwrap();
 
     // Send the alias to an unsealed receiver
     let recv_h =
-        Capability::create(&root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
+        Capability::create(&platform, &root, DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE))
             .unwrap().0;
-    Capability::send(&root, alias_h, recv_h, Attributes::NONE).unwrap();
+    Capability::send(&platform, &root, alias_h, recv_h, Attributes::NONE).unwrap();
 
     // Root's full range must remain accessible: aliasing is shared, so mem_root's
     // view is unchanged regardless of whether the alias handle was transferred.
@@ -410,6 +432,7 @@ fn test_address_space_unchanged_after_send_of_alias() {
 /// level in the tree, for both memory and domain capabilities.
 #[test]
 fn test_depth_invariant() {
+    let platform = common::TestPlatform::new();
     let (root, mem_root_h, mem_root) = setup_root();
 
     // Memory root is at depth 0
@@ -417,7 +440,7 @@ fn test_depth_invariant() {
 
     // Level-1 carve has depth 1
     let l1_access = Access::new(0x1000, 0x4000, Rights::RW);
-    let (l1_h, _, _) = Capability::carve(&root, mem_root_h, l1_access).unwrap();
+    let (l1_h, _, _) = Capability::carve(&platform, &root, mem_root_h, l1_access).unwrap();
     let l1 = root.read().data.memory_capabilities[&l1_h]
         .upgrade()
         .unwrap();
@@ -425,7 +448,7 @@ fn test_depth_invariant() {
 
     // Level-2 carve from level-1 has depth 2
     let l2_access = Access::new(0x2000, 0x1000, Rights::R);
-    let (l2_h, _, _) = Capability::carve(&root, l1_h, l2_access).unwrap();
+    let (l2_h, _, _) = Capability::carve(&platform, &root, l1_h, l2_access).unwrap();
     let l2 = root.read().data.memory_capabilities[&l2_h]
         .upgrade()
         .unwrap();
@@ -433,7 +456,7 @@ fn test_depth_invariant() {
 
     // Alias of the root region has depth 1
     let alias_access = Access::new(0x6000, 0x1000, Rights::R);
-    let (alias_h, _) = Capability::alias(&root, mem_root_h, alias_access).unwrap();
+    let (alias_h, _, _)= Capability::alias(&platform, &root, mem_root_h, alias_access).unwrap();
     let alias = root.read().data.memory_capabilities[&alias_h]
         .upgrade()
         .unwrap();
@@ -443,15 +466,15 @@ fn test_depth_invariant() {
     assert_eq!(root.read().depth, 0, "root domain should have depth 0");
 
     // Level-1 child domain has depth 1
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
+    let child_h = Capability::create(&platform, &root, DomainPolicy::new_root(4)).unwrap().0;
     let child = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
     assert_eq!(child.read().depth, 1, "child domain should have depth 1");
 
     // Level-2 grandchild domain (child must be sealed first) has depth 2
-    Capability::seal(&root, child_h).unwrap();
-    let grandchild_h = Capability::create(&child, DomainPolicy::new_root(4)).unwrap().0;
+    Capability::seal(&platform, &root, child_h).unwrap();
+    let grandchild_h = Capability::create(&platform, &child, DomainPolicy::new_root(4)).unwrap().0;
     let grandchild = child.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
@@ -463,33 +486,34 @@ fn test_depth_invariant() {
 /// fallback = the direct parent of the revoked subtree root.
 #[test]
 fn test_multi_level_domain_revoke() {
+    let platform = common::TestPlatform::new();
     let (root, _, _mem_root) = setup_root();
     let root_id = root.read().data.id;
 
     // Build a 3-level subtree under root: child → grandchild → great_grandchild
-    let child_h = Capability::create(&root, DomainPolicy::new_root(4)).unwrap().0;
-    Capability::seal(&root, child_h).unwrap();
+    let child_h = Capability::create(&platform, &root, DomainPolicy::new_root(4)).unwrap().0;
+    Capability::seal(&platform, &root, child_h).unwrap();
     let child_ref = root.read().data.domain_capabilities[&child_h]
         .upgrade()
         .unwrap();
     let child_id = child_ref.read().data.id;
 
-    let grandchild_h = Capability::create(&child_ref, DomainPolicy::new_root(4)).unwrap().0;
-    Capability::seal(&child_ref, grandchild_h).unwrap();
+    let grandchild_h = Capability::create(&platform, &child_ref, DomainPolicy::new_root(4)).unwrap().0;
+    Capability::seal(&platform, &child_ref, grandchild_h).unwrap();
     let grandchild_ref = child_ref.read().data.domain_capabilities[&grandchild_h]
         .upgrade()
         .unwrap();
     let grandchild_id = grandchild_ref.read().data.id;
 
     let great_grandchild_h =
-        Capability::create(&grandchild_ref, DomainPolicy::new_root(4)).unwrap().0;
+        Capability::create(&platform, &grandchild_ref, DomainPolicy::new_root(4)).unwrap().0;
     let great_grandchild_ref = grandchild_ref.read().data.domain_capabilities[&great_grandchild_h]
         .upgrade()
         .unwrap();
     let great_grandchild_id = great_grandchild_ref.read().data.id;
 
     // Revoke child (transitively revokes grandchild and great_grandchild)
-    let updates = Capability::revoke_domain(&root, child_h).unwrap();
+    let updates = Capability::revoke_domain(&platform, &root, child_h).unwrap();
     let updates_list = updates.updates();
 
     // Exactly 3 RevokeDomain updates — one per domain in the subtree

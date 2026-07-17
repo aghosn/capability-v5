@@ -3,8 +3,13 @@
 use capability_engine::*;
 use std::sync::Arc;
 
+#[path = "../common/mod.rs"]
+mod common;
+
+
 #[test]
 fn test_session() {
+    let platform = common::TestPlatform::new();
     // Bootstrap: Domain::new_root creates a sealed domain (id=0, status=Sealed)
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
@@ -18,7 +23,7 @@ fn test_session() {
     // Create child domain dom1 via domain-mediated API
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0x1, api);
-    let dom1_h = Capability::create(&root, policy).unwrap().0;
+    let dom1_h = Capability::create(&platform, &root, policy).unwrap().0;
     let dom1 = root.read().data.domain_capabilities[&dom1_h]
         .upgrade()
         .unwrap();
@@ -26,23 +31,18 @@ fn test_session() {
 
     // Carve r1 from r0 (r0.owner_domain=None → validate_operation skipped)
     let access = Access::new(0x0, 0x1000, Rights::RWX);
-    let (r1_h, r1_sub, _) = Capability::carve(&root, r0_h, access).unwrap();
+    let (r1_h, r1_sub, _) = Capability::carve(&platform, &root, r0_h, access).unwrap();
 
     // Alias r1 while root still owns it (r1.owner_domain=Some(root), root sealed → OK)
     let access = Access::new(0x0, 0x1000, Rights::RWX);
-    let (_r2_h, _) = Capability::alias(&root, r1_h, access).unwrap();
+    let (_r2_h, _, _)= Capability::alias(&platform, &root, r1_h, access).unwrap();
 
     // Send r1 to dom1 with VITAL attribute (dom1 unsealed → immediate transfer)
-    let _updates = Capability::send(
-        &root,
-        r1_h,
-        dom1_h,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+    let _updates = Capability::send(&platform, &root, r1_h, dom1_h, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
 
     // Seal dom1
-    Capability::seal(&root, dom1_h).unwrap();
+    Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Attest
     let _attestation = attest_domain(&root);
@@ -50,7 +50,7 @@ fn test_session() {
 
     // Revoke r1 from r0: after send to unsealed dom1, r1_h was removed from root's table;
     // revoke by handle instead.
-    let updates = Capability::revoke(&root, r0_h, r1_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, r1_sub).unwrap();
 
     // Verify that the update batch contains a domain revocation for dom1
     let has_domain_revoke = updates
