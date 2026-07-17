@@ -13,12 +13,12 @@
 //! assignment) through `crate::arch::x86_64::iommu_ir`.
 
 use capability_engine::{
-    execute, Access, Attributes, Capability, CapabilityRef, Domain, DomainPolicy, MonitorAPI,
-    PolicyIdentifier, ResourceKind, Rights, UpdateBatch,
+    Access, Attributes, Capability, CapaError, CapabilityRef, Domain, DomainPolicy, MonitorAPI,
+    PolicyIdentifier, ResourceKind, Rights,
 };
 use themis_abi::errors;
 
-use super::{execute_or_return, map_error, HypercallResult};
+use super::{HypercallResult};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
 
@@ -32,13 +32,10 @@ pub(super) fn do_carve(
     start: u64,
     size: u64,
     rights_bits: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
-    let caller = caller.clone();
-    let ((handle, sub), _) = execute_or_return!(platform, || {
-        Capability::carve(&caller, parent_handle, access).map(|(h, s, batch)| ((h, s), batch))
-    });
-    HypercallResult::success_2(handle, sub)
+    let (handle, sub, _batch) = Capability::carve(platform, caller, parent_handle, access)?;
+    Ok(HypercallResult::success_2(handle, sub))
 }
 
 /// ALIAS (0x02): alias shared sub-region from parent memory capability.
@@ -49,14 +46,10 @@ pub(super) fn do_alias(
     start: u64,
     size: u64,
     rights_bits: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     let access = Access::new(start, size, Rights::from_bits(rights_bits as u8));
-    let caller = caller.clone();
-    let ((handle, sub), _) = execute_or_return!(platform, || {
-        Capability::alias(&caller, parent_handle, access)
-            .map(|(h, s)| ((h, s), UpdateBatch::default()))
-    });
-    HypercallResult::success_2(handle, sub)
+    let (handle, sub, _batch) = Capability::alias(platform, caller, parent_handle, access)?;
+    Ok(HypercallResult::success_2(handle, sub))
 }
 
 /// SEND (0x03): send memory capability to a receiver domain.
@@ -70,19 +63,22 @@ pub(super) fn do_send(
     receiver_handle: u64,
     attrs_bits: u64,
     child_gpa: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     let attrs = Attributes::from_bits(attrs_bits as u8);
     let gpa_hint = if child_gpa != u64::MAX {
         Some(child_gpa)
     } else {
         None
     };
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::send_at(&caller, cap_handle, receiver_handle, attrs, gpa_hint)
-            .map(|batch| ((), batch))
-    });
-    HypercallResult::success()
+    let _batch = Capability::send_at(
+        platform,
+        caller,
+        cap_handle,
+        receiver_handle,
+        attrs,
+        gpa_hint
+    )?;
+    Ok(HypercallResult::success())
 }
 
 /// ACCEPT (0x04): accept a pending memory capability.
@@ -90,10 +86,9 @@ pub(super) fn do_accept(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     pending_id: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    let (handle, _) = execute_or_return!(platform, || Capability::accept(&caller, pending_id));
-    HypercallResult::success_1(handle)
+) -> Result<HypercallResult, CapaError> {
+    let (handle, _batch) = Capability::accept(platform, caller, pending_id)?;
+    Ok(HypercallResult::success_1(handle))
 }
 
 /// REJECT (0x05): reject a pending memory capability.
@@ -101,52 +96,54 @@ pub(super) fn do_reject(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     pending_id: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::reject(&caller, pending_id).map(|()| ((), Default::default()))
-    });
-    HypercallResult::success()
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::reject(platform, caller, pending_id)?;
+    Ok(HypercallResult::success())
 }
 
 // ── Channel (domain capability transfer) handlers ────────────────────────── //
 
 /// GET_CHAN (0x0B): get a channel capability to a child domain.
 /// If domain_handle == 0, creates a self-channel (for receiving from children).
-pub(super) fn do_get_chan(caller: &CapabilityRef<Domain>, domain_handle: u64) -> HypercallResult {
-    let caller = caller.clone();
-    let result = if domain_handle == 0 {
-        Capability::get_chan_self(&caller)
+pub(super) fn do_get_chan(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    domain_handle: u64,
+) -> Result<HypercallResult, CapaError> {
+    let (handle, _batch) = if domain_handle == 0 {
+        Capability::get_chan_self(platform, caller)?
     } else {
-        Capability::get_chan(&caller, domain_handle)
+        Capability::get_chan(platform, caller, domain_handle)?
     };
-    match result {
-        Ok(handle) => HypercallResult::success_1(handle),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+    Ok(HypercallResult::success_1(handle))
 }
 
 /// SEND_CHAN (0x20): send a channel capability to a receiver domain.
 pub(super) fn do_send_chan(
+    platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     chan_handle: u64,
     receiver_handle: u64,
     attrs: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    match Capability::send_channel(&caller, chan_handle, receiver_handle, Attributes::from_bits(attrs as u8)) {
-        Ok(()) => HypercallResult::success(),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::send_channel(
+        platform,
+        caller,
+        chan_handle,
+        receiver_handle,
+        Attributes::from_bits(attrs as u8),
+    )?;
+    Ok(HypercallResult::success())
 }
 
 /// ACCEPT_CHAN (0x21): accept a pending channel capability.
-pub(super) fn do_accept_chan(caller: &CapabilityRef<Domain>, pending_id: u64) -> HypercallResult {
-    let caller = caller.clone();
-    match Capability::accept_channel(&caller, pending_id) {
-        Ok(handle) => HypercallResult::success_1(handle),
-        Err(e) => HypercallResult::error(map_error(&e)),
-    }
+pub(super) fn do_accept_chan(
+    platform: &ThemisPlatform,
+    caller: &CapabilityRef<Domain>,
+    pending_id: u64,
+) -> Result<HypercallResult, CapaError> {
+    let (handle, _batch) = Capability::accept_channel(platform, caller, pending_id)?;
+    Ok(HypercallResult::success_1(handle))
 }
 
 /// CREATE_DOMAIN (0x06): create a new child domain.
@@ -155,18 +152,13 @@ pub(super) fn do_create_domain(
     caller: &CapabilityRef<Domain>,
     cores_bitmask: u64,
     api_flags: u64,
-) -> HypercallResult {
-    // Intersect the requested cores/api with what the caller actually has,
-    // so that !0 ("give me everything") works correctly.
+) -> Result<HypercallResult, CapaError> {
     let parent_cores = caller.read().data.policy.cores;
     let parent_api = caller.read().data.policy.api;
     let api = MonitorAPI::from_bits(api_flags as u16 & parent_api.bits());
     let policy = DomainPolicy::new_restricted(cores_bitmask & parent_cores, api);
-    let caller = caller.clone();
-    let (handle, _) = execute_or_return!(platform, || {
-        Capability::create(&caller, policy.clone())
-    });
-    HypercallResult::success_1(handle)
+    let (handle, _batch) = Capability::create(platform, caller, policy)?;
+    Ok(HypercallResult::success_1(handle))
 }
 
 /// SEAL (0x07): seal a domain (Unsealed → Sealed).
@@ -174,40 +166,33 @@ pub(super) fn do_seal(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     domain_handle: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    let result = execute(platform, false, || {
-        Capability::seal(&caller, domain_handle).map(|()| ((), Default::default()))
-    });
-    match result {
-        Ok(_) => {
-            // Resolve the child domain for post-seal setup.
-            let child_cap = caller
-                .read()
-                .data
-                .get_domain_capability(domain_handle)
-                .and_then(|weak| weak.upgrade());
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::seal(platform, caller, domain_handle)?;
 
-            if let Some(child) = &child_cap {
-                // Finalize DomainComm if pages were registered pre-seal.
-                let child_id = child.read().data.id;
-                if let Some(header_hpa) = platform.finalize_domcomm(child_id) {
-                    serial_println!(
-                        "[seal] DomainComm initialized for domain {:?} (header @ {:#x})",
-                        child_id,
-                        header_hpa,
-                    );
-                }
-            }
+    // Resolve the child domain for post-seal setup.
+    let child_cap = caller
+        .read()
+        .data
+        .get_domain_capability(domain_handle)
+        .and_then(|weak| weak.upgrade());
 
-            // intr-p3g: program IRTEs for the newly-sealed child domain.
-            if let Some(child) = &child_cap {
-                platform.program_domain_irtes(child);
-            }
-            HypercallResult::success()
+    if let Some(child) = &child_cap {
+        // Finalize DomainComm if pages were registered pre-seal.
+        let child_id = child.read().data.id;
+        if let Some(header_hpa) = platform.finalize_domcomm(child_id) {
+            serial_println!(
+                "[seal] DomainComm initialized for domain {:?} (header @ {:#x})",
+                child_id,
+                header_hpa,
+            );
         }
-        Err(e) => HypercallResult::error(map_error(&e)),
     }
+
+    // intr-p3g: program IRTEs for the newly-sealed child domain.
+    if let Some(child) = &child_cap {
+        platform.program_domain_irtes(child);
+    }
+    Ok(HypercallResult::success())
 }
 
 /// REVOKE_MEM (0x08): revoke a child of a memory capability.
@@ -216,12 +201,9 @@ pub(super) fn do_revoke_mem(
     caller: &CapabilityRef<Domain>,
     parent_handle: u64,
     child_sub: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, true, || {
-        Capability::revoke(&caller, parent_handle, child_sub).map(|batch| ((), batch))
-    });
-    HypercallResult::success()
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::revoke(platform, caller, parent_handle, child_sub)?;
+    Ok(HypercallResult::success())
 }
 
 /// REVOKE_DOMAIN (0x09): revoke an entire child domain.
@@ -229,7 +211,7 @@ pub(super) fn do_revoke_domain(
     platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
     child_handle: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     // intr-p3g: capture child domain_id BEFORE revocation (cap may be dropped after).
     let child_domain_id: Option<capability_engine::DomainId> = caller
         .read()
@@ -238,15 +220,12 @@ pub(super) fn do_revoke_domain(
         .and_then(|weak| weak.upgrade())
         .map(|cap| cap.read().data.id);
 
-    let caller = caller.clone();
-    execute_or_return!(platform, true, || {
-        Capability::revoke_domain(&caller, child_handle).map(|batch| ((), batch))
-    });
+    let _batch = Capability::revoke_domain(platform, caller, child_handle)?;
     // intr-p3g: clear all IRTEs that were programmed for this domain.
     if let Some(id) = child_domain_id {
         platform.invalidate_domain_irtes(id);
     }
-    HypercallResult::success()
+    Ok(HypercallResult::success())
 }
 
 
@@ -258,12 +237,9 @@ pub(super) fn do_map_self(
     caller: &CapabilityRef<Domain>,
     cap_handle: u64,
     new_gpa: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::map_self(&caller, cap_handle, new_gpa).map(|batch| ((), batch))
-    });
-    HypercallResult::success()
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::map_self(platform, caller, cap_handle, new_gpa)?;
+    Ok(HypercallResult::success())
 }
 
 
@@ -282,7 +258,7 @@ pub(super) fn do_set_policy(
     key: u64,
     sub_key: u64,
     value: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     use themis_abi::policy_kind;
 
     let id = match kind {
@@ -308,8 +284,6 @@ pub(super) fn do_set_policy(
             PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid)
         }
         policy_kind::CPUID_RANGE => {
-            // key = (start_leaf << 32) | start_subleaf
-            // sub_key = (end_leaf << 32) | end_subleaf
             let start_leaf = (key >> 32) as u32;
             let start_sub = key as u32;
             let end_leaf = (sub_key >> 32) as u32;
@@ -319,8 +293,6 @@ pub(super) fn do_set_policy(
             )
         }
         policy_kind::CPUID_EMULATE => {
-            // key = (leaf << 32) | subleaf
-            // sub_key = word_index
             let leaf = (key >> 32) as u32;
             let subleaf = key as u32;
             PolicyIdentifier::ProcFeatureEmulate(
@@ -336,15 +308,11 @@ pub(super) fn do_set_policy(
         policy_kind::MSR_EMULATE => {
             PolicyIdentifier::ProcFeatureEmulate(ResourceKind::Msr, key as u32, 0, sub_key as u8)
         }
-        _ => return HypercallResult::error(errors::ERR_INVALID),
+        _ => return Ok(HypercallResult::error(errors::ERR_INVALID)),
     };
 
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::set_policy(&caller, child_handle, id.clone(), value)
-            .map(|batch| ((), batch))
-    });
-    HypercallResult::success()
+    let _batch = Capability::set_policy(platform, caller, child_handle, id, value)?;
+    Ok(HypercallResult::success())
 }
 
 
@@ -363,7 +331,7 @@ pub(super) fn do_assign_device(
     caller: &CapabilityRef<Domain>,
     domain_handle: u64,
     bdf_arg: u64,
-) -> HypercallResult {
+) -> Result<HypercallResult, CapaError> {
     let bdf = bdf_arg as u16;
     // Resolve domain_handle → domain_id via the caller's capability tree.
     let child_domain_id = {
@@ -371,19 +339,19 @@ pub(super) fn do_assign_device(
         let child_weak = cap.data.get_domain_capability(domain_handle);
         match child_weak.and_then(|w| w.upgrade()) {
             Some(child) => child.read().data.id,
-            None => return HypercallResult::error(errors::ERR_INVALID),
+            None => return Ok(HypercallResult::error(errors::ERR_INVALID)),
         }
     };
     platform.assign_device(bdf, child_domain_id);
-    HypercallResult::success()
+    Ok(HypercallResult::success())
 }
 
 /// RELEASE_DEVICE (0x1a): return a PCI device to dom0 passthrough.
 ///
 /// IN:  RDI = pci_bdf (u16)
-pub(super) fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> HypercallResult {
+pub(super) fn do_release_device(platform: &ThemisPlatform, bdf_arg: u64) -> Result<HypercallResult, CapaError> {
     let bdf = bdf_arg as u16;
     platform.release_device(bdf);
-    HypercallResult::success()
+    Ok(HypercallResult::success())
 }
 

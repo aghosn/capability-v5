@@ -13,6 +13,10 @@ use capability_engine::memory::Rights;
 use capability_engine::*;
 use std::sync::Arc;
 
+#[path = "../common/mod.rs"]
+mod common;
+
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Sealed root domain with a root memory region [0x0, 0x40000) at handle 1.
@@ -21,6 +25,7 @@ fn bootstrap() -> (
     CapabilityRef<MemoryRegion>,
     LocalHandle,
 ) {
+    let platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let root_region = MemoryRegion::new_root(0x0, 0x40000);
@@ -35,10 +40,8 @@ fn bootstrap() -> (
 fn create_child(
     parent: &CapabilityRef<Domain>,
 ) -> (LocalHandle, CapabilityRef<Domain>) {
-    let h = Capability::create(
-        parent,
-        DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
-    )
+    let platform = common::TestPlatform::new();
+    let h = Capability::create(&platform, parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL))
     .unwrap()
     .0;
     let child = parent.read().data.domain_capabilities[&h]
@@ -67,6 +70,7 @@ fn create_child(
 ///   - RevokeDomain for app should be in the updates.
 #[test]
 fn test_vital_revoke_cascades_memory_cleanup() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     let root_id = root.read().data.id;
 
@@ -76,25 +80,20 @@ fn test_vital_revoke_cascades_memory_cleanup() {
 
     // Carve app_code [0x0, 0x10000) RWX, send to app (unsealed → immediate)
     let (app_code_h, _, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
-    Capability::send(&root, app_code_h, app_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root, app_code_h, app_h, Attributes::NONE).unwrap();
 
     // Carve app_meta [0x20000, 0x4000) RW, send to app with META
     let (app_meta_h, app_meta_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x20000, 0x4000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        app_meta_h,
-        app_h,
-        Attributes::from_bits(Attributes::META),
-    )
+        Capability::carve(&platform, &root, r0_h, Access::new(0x20000, 0x4000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, app_meta_h, app_h, Attributes::from_bits(Attributes::META))
     .unwrap();
 
     // Seal app
-    Capability::seal(&root, app_h).unwrap();
+    Capability::seal(&platform, &root, app_h).unwrap();
 
     // Revoke app_meta from r0 — VITAL fires
-    let updates = Capability::revoke(&root, r0_h, app_meta_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, app_meta_sub).unwrap();
     let list = updates.updates();
 
     // (1) RevokeDomain for app must be present
@@ -153,6 +152,7 @@ fn test_vital_revoke_cascades_memory_cleanup() {
 /// The META region must be zeroed AND the cascade must clean up the domain.
 #[test]
 fn test_meta_revoke_cascades_with_zero_and_cleanup() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     let root_id = root.read().data.id;
 
@@ -161,24 +161,19 @@ fn test_meta_revoke_cascades_with_zero_and_cleanup() {
 
     // Send non-META memory to app first
     let (code_h, _, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
-    Capability::send(&root, code_h, app_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root, code_h, app_h, Attributes::NONE).unwrap();
 
     // Send META memory to app
     let (meta_h, meta_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        meta_h,
-        app_h,
-        Attributes::from_bits(Attributes::META),
-    )
+        Capability::carve(&platform, &root, r0_h, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, meta_h, app_h, Attributes::from_bits(Attributes::META))
     .unwrap();
 
-    Capability::seal(&root, app_h).unwrap();
+    Capability::seal(&platform, &root, app_h).unwrap();
 
     // Revoke the META cap
-    let updates = Capability::revoke(&root, r0_h, meta_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, meta_sub).unwrap();
     let list = updates.updates();
 
     // META region must be zeroed (CLEAN attribute)
@@ -239,6 +234,7 @@ fn test_meta_revoke_cascades_with_zero_and_cleanup() {
 ///   - The cascade should clean up app's other memory caps (if any).
 #[test]
 fn test_transitive_vital_in_subtree_revoke() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     // Create monitor domain
@@ -247,11 +243,11 @@ fn test_transitive_vital_in_subtree_revoke() {
 
     // Carve region_a [0x0, 0x10000) and send to monitor
     let (region_a_h, region_a_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
-    Capability::send(&root, region_a_h, monitor_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root, region_a_h, monitor_h, Attributes::NONE).unwrap();
 
     // Seal monitor so it can create children
-    Capability::seal(&root, monitor_h).unwrap();
+    Capability::seal(&platform, &root, monitor_h).unwrap();
 
     // Monitor creates app
     let (app_h_in_mon, app) = create_child(&monitor);
@@ -260,19 +256,14 @@ fn test_transitive_vital_in_subtree_revoke() {
     // Monitor carves sub_region [0x0, 0x4000) from region_a and sends to app with VITAL
     let mon_region_h: LocalHandle = 1; // monitor's handle for region_a
     let (sub_h, _, _) =
-        Capability::carve(&monitor, mon_region_h, Access::new(0x0, 0x4000, Rights::RWX))
+        Capability::carve(&platform, &monitor, mon_region_h, Access::new(0x0, 0x4000, Rights::RWX))
             .unwrap();
-    Capability::send(
-        &monitor,
-        sub_h,
-        app_h_in_mon,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+    Capability::send(&platform, &monitor, sub_h, app_h_in_mon, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
-    Capability::seal(&monitor, app_h_in_mon).unwrap();
+    Capability::seal(&platform, &monitor, app_h_in_mon).unwrap();
 
     // Root revokes region_a from r0 — this processes the entire subtree
-    let updates = Capability::revoke(&root, r0_h, region_a_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, region_a_sub).unwrap();
     let list = updates.updates();
 
     // app must get RevokeDomain (VITAL fired)
@@ -310,6 +301,7 @@ fn test_transitive_vital_in_subtree_revoke() {
 ///   - root regains app_code range.
 #[test]
 fn test_vital_cascade_revokes_child_domains() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     let root_id = root.read().data.id;
 
@@ -318,21 +310,16 @@ fn test_vital_cascade_revokes_child_domains() {
 
     // Send app_code [0x0, 0x10000) to app
     let (code_h, _, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
-    Capability::send(&root, code_h, app_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root, code_h, app_h, Attributes::NONE).unwrap();
 
     // Send app_meta [0x20000, 0x4000) to app with META
     let (meta_h, meta_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x20000, 0x4000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        meta_h,
-        app_h,
-        Attributes::from_bits(Attributes::META),
-    )
+        Capability::carve(&platform, &root, r0_h, Access::new(0x20000, 0x4000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, meta_h, app_h, Attributes::from_bits(Attributes::META))
     .unwrap();
 
-    Capability::seal(&root, app_h).unwrap();
+    Capability::seal(&platform, &root, app_h).unwrap();
 
     // app creates sub_app
     let (sub_app_h, sub_app) = create_child(&app);
@@ -341,11 +328,11 @@ fn test_vital_cascade_revokes_child_domains() {
     // app carves sub_code [0x0, 0x4000) from app_code, sends to sub_app
     let app_code_h: LocalHandle = 1; // app's handle for app_code
     let (sub_code_h, _, _) =
-        Capability::carve(&app, app_code_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
-    Capability::send(&app, sub_code_h, sub_app_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &app, app_code_h, Access::new(0x0, 0x4000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &app, sub_code_h, sub_app_h, Attributes::NONE).unwrap();
 
     // Revoke app_meta → VITAL cascade
-    let updates = Capability::revoke(&root, r0_h, meta_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, meta_sub).unwrap();
     let list = updates.updates();
 
     // Both domains must be revoked
@@ -402,6 +389,7 @@ fn test_vital_cascade_revokes_child_domains() {
 /// is excluded from EPT).  Revoking it should still trigger cascade.
 #[test]
 fn test_explicit_vital_triggers_cascade() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
     let root_id = root.read().data.id;
 
@@ -410,24 +398,19 @@ fn test_explicit_vital_triggers_cascade() {
 
     // Send app_code [0x0, 0x8000) to app (normal)
     let (code_h, _, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
-    Capability::send(&root, code_h, app_h, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root, code_h, app_h, Attributes::NONE).unwrap();
 
     // Send vital_region [0x10000, 0x2000) with VITAL+CLEAN (not META)
     let (vital_h, vital_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        vital_h,
-        app_h,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+        Capability::carve(&platform, &root, r0_h, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, vital_h, app_h, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
 
-    Capability::seal(&root, app_h).unwrap();
+    Capability::seal(&platform, &root, app_h).unwrap();
 
     // Revoke the VITAL cap
-    let updates = Capability::revoke(&root, r0_h, vital_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, vital_sub).unwrap();
     let list = updates.updates();
 
     // RevokeDomain for app
@@ -474,6 +457,7 @@ fn test_explicit_vital_triggers_cascade() {
 /// The cascade for the first domain should not interfere with the second.
 #[test]
 fn test_multiple_vital_caps_same_subtree() {
+    let platform = common::TestPlatform::new();
     let (root, _r0, r0_h) = bootstrap();
 
     let (app1_h, app1) = create_child(&root);
@@ -484,33 +468,23 @@ fn test_multiple_vital_caps_same_subtree() {
 
     // Carve a parent region and carve two VITAL sub-regions for each domain
     let (parent_h, parent_sub, _) =
-        Capability::carve(&root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
+        Capability::carve(&platform, &root, r0_h, Access::new(0x0, 0x10000, Rights::RWX)).unwrap();
 
     let (v1_h, _, _) =
-        Capability::carve(&root, parent_h, Access::new(0x0, 0x4000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        v1_h,
-        app1_h,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+        Capability::carve(&platform, &root, parent_h, Access::new(0x0, 0x4000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, v1_h, app1_h, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
 
     let (v2_h, _, _) =
-        Capability::carve(&root, parent_h, Access::new(0x8000, 0x4000, Rights::RW)).unwrap();
-    Capability::send(
-        &root,
-        v2_h,
-        app2_h,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+        Capability::carve(&platform, &root, parent_h, Access::new(0x8000, 0x4000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root, v2_h, app2_h, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
 
-    Capability::seal(&root, app1_h).unwrap();
-    Capability::seal(&root, app2_h).unwrap();
+    Capability::seal(&platform, &root, app1_h).unwrap();
+    Capability::seal(&platform, &root, app2_h).unwrap();
 
     // Revoke parent region → both VITAL caps are in the subtree
-    let updates = Capability::revoke(&root, r0_h, parent_sub).unwrap();
+    let updates = Capability::revoke(&platform, &root, r0_h, parent_sub).unwrap();
     let list = updates.updates();
 
     let revoked: Vec<u64> = list
@@ -548,37 +522,33 @@ fn test_multiple_vital_caps_same_subtree() {
 /// triggers VITAL.  Both should produce the same domain state afterward.
 #[test]
 fn test_vital_equivalent_to_explicit_revoke_domain() {
+    let platform = common::TestPlatform::new();
     // Setup A: explicit revoke_domain
     let (root_a, _r0_a, r0_h_a) = bootstrap();
     let (app_h_a, app_a) = create_child(&root_a);
 
     let (code_h_a, _, _) =
-        Capability::carve(&root_a, r0_h_a, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
-    Capability::send(&root_a, code_h_a, app_h_a, Attributes::NONE).unwrap();
-    Capability::seal(&root_a, app_h_a).unwrap();
+        Capability::carve(&platform, &root_a, r0_h_a, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root_a, code_h_a, app_h_a, Attributes::NONE).unwrap();
+    Capability::seal(&platform, &root_a, app_h_a).unwrap();
 
-    let updates_a = Capability::revoke_domain(&root_a, app_h_a).unwrap();
+    let updates_a = Capability::revoke_domain(&platform, &root_a, app_h_a).unwrap();
 
     // Setup B: VITAL trigger
     let (root_b, _r0_b, r0_h_b) = bootstrap();
     let (app_h_b, app_b) = create_child(&root_b);
 
     let (code_h_b, _, _) =
-        Capability::carve(&root_b, r0_h_b, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
-    Capability::send(&root_b, code_h_b, app_h_b, Attributes::NONE).unwrap();
+        Capability::carve(&platform, &root_b, r0_h_b, Access::new(0x0, 0x8000, Rights::RWX)).unwrap();
+    Capability::send(&platform, &root_b, code_h_b, app_h_b, Attributes::NONE).unwrap();
 
     let (vital_h_b, vital_sub_b, _) =
-        Capability::carve(&root_b, r0_h_b, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
-    Capability::send(
-        &root_b,
-        vital_h_b,
-        app_h_b,
-        Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN),
-    )
+        Capability::carve(&platform, &root_b, r0_h_b, Access::new(0x10000, 0x2000, Rights::RW)).unwrap();
+    Capability::send(&platform, &root_b, vital_h_b, app_h_b, Attributes::from_bits(Attributes::VITAL | Attributes::CLEAN))
     .unwrap();
-    Capability::seal(&root_b, app_h_b).unwrap();
+    Capability::seal(&platform, &root_b, app_h_b).unwrap();
 
-    let updates_b = Capability::revoke(&root_b, r0_h_b, vital_sub_b).unwrap();
+    let updates_b = Capability::revoke(&platform, &root_b, r0_h_b, vital_sub_b).unwrap();
 
     // Both domains should be revoked
     assert!(app_a.read().data.is_revoked(), "setup A: app must be revoked");

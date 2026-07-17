@@ -8,9 +8,9 @@
 //! All four operate on a child domain's VPs; register access is mediated by the
 //! engine's read-/write-bitmaps and `MonitorAPI::{GET,SET}` checks.
 
-use capability_engine::{execute, Capability, CapabilityRef, Domain};
+use capability_engine::{Capability, CapaError, CapabilityRef, Domain};
 
-use super::{execute_or_return, map_error, HypercallResult};
+use super::{HypercallResult};
 use crate::platform::ThemisPlatform;
 
 /// REGISTER_COMM (0x18): register a COMM page bound to a child domain's VP.
@@ -22,13 +22,15 @@ pub(super) fn do_register_comm(
     mem_cap_handle: u64,
     child_domain_handle: u64,
     vp_id: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::register_comm(&caller, mem_cap_handle, child_domain_handle, vp_id as u32)
-            .map(|batch| ((), batch))
-    });
-    HypercallResult::success()
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::register_comm(
+        platform,
+        caller,
+        mem_cap_handle,
+        child_domain_handle,
+        vp_id as u32,
+    )?;
+    Ok(HypercallResult::success())
 }
 
 
@@ -49,13 +51,15 @@ pub(super) fn do_get_reg(
     domain_handle: u64,
     vp_id: u64,
     reg_id: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    let (value, _) = execute_or_return!(platform, || {
-        Capability::get_register(&caller, domain_handle, vp_id, reg_id, platform)
-            .map(|value| (value, Default::default()))
-    });
-    HypercallResult::success_1(value)
+) -> Result<HypercallResult, CapaError> {
+    let (value, _batch) = Capability::get_register(
+        platform,
+        caller,
+        domain_handle,
+        vp_id,
+        reg_id,
+    )?;
+    Ok(HypercallResult::success_1(value))
 }
 
 /// SET_REG (0x0F): write a single VP register on a child domain VP.
@@ -71,11 +75,14 @@ pub(super) fn do_set_reg(
     vp_id: u64,
     reg_id: u64,
     value: u64,
-) -> HypercallResult {
-    let caller = caller.clone();
-    execute_or_return!(platform, || {
-        Capability::set_register(&caller, domain_handle, vp_id, reg_id, value, platform)
-            .map(|()| ((), Default::default()))
-    });
-    HypercallResult::success()
+) -> Result<HypercallResult, CapaError> {
+    let _batch = Capability::set_register(
+        platform,
+        caller,
+        domain_handle,
+        vp_id,
+        reg_id,
+        value,
+    )?;
+    Ok(HypercallResult::success())
 }

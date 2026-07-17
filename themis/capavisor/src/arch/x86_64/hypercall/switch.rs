@@ -19,7 +19,7 @@ use capability_engine::{
 use themis_abi::errors;
 
 use super::write_reply;
-use crate::hypercall::{map_error, HypercallResult};
+use crate::hypercall::{HypercallResult};
 use crate::arch::x86_64::apic::current_lapic_id;
 use crate::arch::x86_64::iommu_ir::sync_irte_ndst;
 use crate::arch::x86_64::pid::inject_via_pid;
@@ -131,11 +131,11 @@ pub(crate) fn do_switch(
 
     // ── 2. Capability engine: forward switch (run-state transitions) ──
     // Target VP transitions Available → Running here; must be after COMM read above.
-    let switch_ctx = match Capability::switch(caller, to_domain_handle, vp_id, platform) {
-        Ok(ctx) => ctx,
+    let switch_ctx = match Capability::switch(platform, caller, to_domain_handle, vp_id) {
+        Ok((ctx, _batch)) => ctx,
         Err(e) => {
             serial_debug!("[SWITCH] validation failed: {:?}", e);
-            write_reply(vcpu, HypercallResult::error(map_error(&e)));
+            write_reply(vcpu, HypercallResult::from(e));
             vcpu.next_rip();
             return;
         }
@@ -402,8 +402,9 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     // ── Capa engine: return switch (child → parent) ──
     // Records exit_reason in the child VP's Available state so that the resume
     // path (register_access_check) uses the correct ExitPolicy write_set.
-    let return_ctx = Capability::switch_return_with_exit(&child_cap, exit_reason, platform)
-        .expect("[CHILD_EXIT] return switch failed");
+    let (return_ctx, _batch) =
+        Capability::switch_return_with_exit(platform, &child_cap, exit_reason)
+            .expect("[CHILD_EXIT] return switch failed");
 
     let child_domain_id = return_ctx.from_domain;
     let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
@@ -629,13 +630,13 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
 
     // Lazy-unwind: child VP → Interrupted, handler VP → Running.
     let intr_ctx = match Capability::deliver_interrupt_vp(
+        platform,
         &child_cap,
         handler_domain_id,
         core_id,
         vector,
-        platform,
     ) {
-        Ok(ctx) => ctx,
+        Ok((ctx, _batch)) => ctx,
         Err(_e) => {
             serial_debug!(
                 "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",

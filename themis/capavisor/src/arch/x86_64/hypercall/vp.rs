@@ -8,10 +8,10 @@
 
 extern crate alloc;
 
-use capability_engine::{execute, Capability, CapabilityRef, Domain, DomainId};
+use capability_engine::{Capability, CapabilityRef, Domain, DomainId};
 use themis_abi::errors;
 
-use crate::hypercall::{map_error, try_domain, HypercallResult};
+use crate::hypercall::{try_domain, HypercallResult};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
 use crate::vcpu::InactiveVcpu;
@@ -236,11 +236,7 @@ pub(super) fn do_add_vp(
     }
 
     // ── Step 2: call into capa engine ──
-    let caller = caller.clone();
-    let result = execute(platform, false, || {
-        Capability::add_vp(&caller, child_domain_handle, comm_cap_handle)
-            .map(|(vp_id, batch)| (vp_id, batch))
-    });
+    let result = Capability::add_vp(platform, caller, child_domain_handle, comm_cap_handle);
 
     match result {
         Err(e) => {
@@ -259,7 +255,7 @@ pub(super) fn do_add_vp(
                 // apic_access_phys is not from META — do not free it.
             }
             serial_println!("[ADD_VP] capa engine error, META rolled back");
-            HypercallResult::error(map_error(&e))
+            HypercallResult::from(e)
         }
         Ok((vp_id, _batch)) => {
             // ── Step 3: write VMCS revision ID, set up VMCS, create InactiveVcpu ──

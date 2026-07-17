@@ -359,7 +359,11 @@ pub trait Platform: Send + Sync {
 /// 7. **Release update lock**, then drop the capability lock guard.
 ///
 /// Returns `(R, UpdateBatch)` so callers can inspect the updates.
-pub fn execute<F, R>(platform: &dyn Platform, exclusive: bool, op: F) -> Result<(R, UpdateBatch)>
+pub(crate) fn execute<F, R>(
+    platform: &dyn Platform,
+    exclusive: bool,
+    op: F,
+) -> Result<(R, UpdateBatch)>
 where
     F: FnOnce() -> Result<(R, UpdateBatch)>,
 {

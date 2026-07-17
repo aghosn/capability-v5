@@ -22,6 +22,7 @@ mod common;
 
 /// Create a root domain with 4 cores and `MonitorAPI::ALL`.
 fn root() -> CapabilityRef<Domain> {
+    let platform = common::TestPlatform::new();
     Capability::new_root(0, 0, Domain::new_root(4))
 }
 
@@ -31,8 +32,9 @@ fn make_child(
     parent: &CapabilityRef<Domain>,
     policy: DomainPolicy,
 ) -> (CapabilityRef<Domain>, LocalHandle) {
+    let platform = common::TestPlatform::new();
     let num_vps = policy.num_vprocessors;
-    let h = Capability::create(parent, policy).unwrap().0;
+    let h = Capability::create(&platform, parent, policy).unwrap().0;
     let child = parent
         .read()
         .data
@@ -48,11 +50,13 @@ fn make_child(
 
 /// Seal a child via its parent handle.
 fn seal(parent: &CapabilityRef<Domain>, h: LocalHandle) {
-    Capability::seal(parent, h).unwrap();
+    let platform = common::TestPlatform::new();
+    Capability::seal(&platform, parent, h).unwrap();
 }
 
 /// Force VP[vp_id] of `domain` into `Interrupted { vector }`.
 fn set_vp_interrupted(domain: &CapabilityRef<Domain>, vp_id: usize, vector: u8) {
+    let platform = common::TestPlatform::new();
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
@@ -61,6 +65,7 @@ fn set_vp_interrupted(domain: &CapabilityRef<Domain>, vp_id: usize, vector: u8) 
 
 /// Force VP[vp_id] of `domain` into `Running { core: 0 }`.
 fn set_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize) {
+    let platform = common::TestPlatform::new();
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
@@ -73,67 +78,73 @@ fn set_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize) {
 
 #[test]
 fn test_set_get_cores() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::Cores).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::Cores).unwrap().0;
     assert_eq!(v, 0b0011);
 }
 
 #[test]
 fn test_set_get_api_monitor() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let child_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::SWITCH);
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let bits = child_api.bits() as u64;
-    Capability::set_policy(&parent, h, PolicyIdentifier::ApiMonitor, bits).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ApiMonitor).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ApiMonitor, bits).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ApiMonitor).unwrap().0;
     assert_eq!(v, bits);
 }
 
 #[test]
 fn test_set_get_default_interrupt_visibility() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // 1 = Report
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultInterruptVisibility, 1).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultInterruptVisibility).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultInterruptVisibility, 1).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::DefaultInterruptVisibility).unwrap().0;
     assert_eq!(v, 1);
 }
 
 #[test]
 fn test_set_get_vector_visibility() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // vector 32, visibility 2 = NotReport
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorVisibility(32), 2).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorVisibility(32)).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(32), 2).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(32)).unwrap().0;
     assert_eq!(v, 2);
 }
 
 #[test]
 fn test_set_get_vector_reg_read_set() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let bitmap: u64 = 0b1010_1010;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), bitmap).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), bitmap).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap().0;
     assert_eq!(v, bitmap);
 }
 
 #[test]
 fn test_set_get_vector_reg_write_set() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let bitmap: u64 = 0xDEAD_BEEF;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0), bitmap).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0)).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0), bitmap).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(7, 0)).unwrap().0;
     assert_eq!(v, bitmap);
 }
 
@@ -143,24 +154,26 @@ fn test_set_get_vector_reg_write_set() {
 
 #[test]
 fn test_get_policy_works_on_sealed_domain() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // set cores before sealing
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0101).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0101).unwrap();
     seal(&parent, h);
 
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::Cores).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::Cores).unwrap().0;
     assert_eq!(v, 0b0101);
 }
 
 #[test]
 fn test_set_policy_blocked_on_sealed_domain() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     seal(&parent, h);
 
-    let err = Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0011).unwrap_err();
+    let err = Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0011).unwrap_err();
     assert_eq!(err, CapaError::DomainSealed);
 }
 
@@ -170,15 +183,17 @@ fn test_set_policy_blocked_on_sealed_domain() {
 
 #[test]
 fn test_cores_monotonicity_ok_subset() {
+    let platform = common::TestPlatform::new();
     let parent = root(); // parent has all 4 cores (0b1111)
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // 0b0110 ⊆ 0b1111 → ok
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0110).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0110).unwrap();
 }
 
 #[test]
 fn test_cores_monotonicity_violated() {
+    let platform = common::TestPlatform::new();
     let parent = root(); // parent has 0b1111
     // create a child with only 0b0011, seal it, then create a grandchild
     let (_, child_h) =
@@ -190,18 +205,19 @@ fn test_cores_monotonicity_violated() {
         make_child(&child, DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL));
 
     // Try to give grandchild a core that child doesn't have (bit 2 = 0b0100)
-    let err = Capability::set_policy(&child, grandchild_h, PolicyIdentifier::Cores, 0b0100)
+    let err = Capability::set_policy(&platform, &child, grandchild_h, PolicyIdentifier::Cores, 0b0100)
         .unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 }
 
 #[test]
 fn test_cores_monotonicity_same_value_ok() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL));
 
     // Same value is still a subset — must succeed
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +226,7 @@ fn test_cores_monotonicity_same_value_ok() {
 
 #[test]
 fn test_api_monotonicity_violated() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // Constrained parent: GET | SWITCH | CREATE | SET | SEAL (needs CREATE to make grandchild,
     // SET to call set_policy, SEAL to seal itself)
@@ -228,7 +245,7 @@ fn test_api_monotonicity_violated() {
 
     let full_api = MonitorAPI::ALL.bits() as u64;
     let err =
-        Capability::set_policy(&constrained, gc_h, PolicyIdentifier::ApiMonitor, full_api)
+        Capability::set_policy(&platform, &constrained, gc_h, PolicyIdentifier::ApiMonitor, full_api)
             .unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 }
@@ -239,12 +256,13 @@ fn test_api_monotonicity_violated() {
 
 #[test]
 fn test_register_bitmaps_not_monotone() {
+    let platform = common::TestPlatform::new();
     // A restricted parent should still be able to set any bitmap value on its child.
     let parent = root();
     let (_, child_h) =
         make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // Parent sets a small read bitmap on child
-    Capability::set_policy(&parent, child_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0b0001)
+    Capability::set_policy(&platform, &parent, child_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0b0001)
         .unwrap();
     seal(&parent, child_h);
     let child = parent.read().data.domain_capabilities[&child_h].upgrade().unwrap();
@@ -252,10 +270,10 @@ fn test_register_bitmaps_not_monotone() {
     // Now set a LARGER bitmap on a grandchild through the child — must succeed (no monotonicity).
     let (_, gc_h) =
         make_child(&child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
-    Capability::set_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0xFFFF_FFFF)
+    Capability::set_policy(&platform, &child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0), 0xFFFF_FFFF)
         .unwrap();
     let v =
-        Capability::get_policy(&child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0)).unwrap();
+        Capability::get_policy(&platform, &child, gc_h, PolicyIdentifier::VectorRegReadSet(10, 0)).unwrap().0;
     assert_eq!(v, 0xFFFF_FFFF);
 }
 
@@ -265,11 +283,12 @@ fn test_register_bitmaps_not_monotone() {
 
 #[test]
 fn test_invalid_visibility_value_rejected() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     let err =
-        Capability::set_policy(&parent, h, PolicyIdentifier::DefaultInterruptVisibility, 99)
+        Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultInterruptVisibility, 99)
             .unwrap_err();
     assert!(matches!(err, CapaError::InvalidOperation(_)));
 }
@@ -280,19 +299,21 @@ fn test_invalid_visibility_value_rejected() {
 
 #[test]
 fn test_set_policy_bad_handle() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let bogus: LocalHandle = 9999;
     let err =
-        Capability::set_policy(&parent, bogus, PolicyIdentifier::Cores, 0b0001).unwrap_err();
+        Capability::set_policy(&platform, &parent, bogus, PolicyIdentifier::Cores, 0b0001).unwrap_err();
     assert_eq!(err, CapaError::NotFound);
 }
 
 #[test]
 fn test_get_policy_bad_handle() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let bogus: LocalHandle = 9999;
     let err =
-        Capability::get_policy(&parent, bogus, PolicyIdentifier::Cores).unwrap_err();
+        Capability::get_policy(&platform, &parent, bogus, PolicyIdentifier::Cores).unwrap_err();
     assert_eq!(err, CapaError::NotFound);
 }
 
@@ -312,6 +333,7 @@ fn make_restricted_caller(
     root: &CapabilityRef<Domain>,
     controller_api: MonitorAPI,
 ) -> (CapabilityRef<Domain>, LocalHandle, CapabilityRef<Domain>) {
+    let platform = common::TestPlatform::new();
     // controller: sealed under root
     let (_, ctrl_h) = make_child(root, DomainPolicy::new_restricted(0b1111, controller_api));
     seal(root, ctrl_h);
@@ -330,6 +352,7 @@ fn make_restricted_caller(
 
 #[test]
 fn test_set_policy_requires_set_permission() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // controller has CREATE + SEAL + GET but NOT SET
     let no_set = MonitorAPI::from_bits(
@@ -338,12 +361,13 @@ fn test_set_policy_requires_set_permission() {
     let (caller, target_h, _ctrl) = make_restricted_caller(&parent, no_set);
 
     let err =
-        Capability::set_policy(&caller, target_h, PolicyIdentifier::Cores, 0b0001).unwrap_err();
+        Capability::set_policy(&platform, &caller, target_h, PolicyIdentifier::Cores, 0b0001).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
 #[test]
 fn test_get_policy_requires_get_permission() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // controller has CREATE + SEAL + SET but NOT GET
     let no_get = MonitorAPI::from_bits(
@@ -351,7 +375,7 @@ fn test_get_policy_requires_get_permission() {
     );
     let (caller, target_h, _ctrl) = make_restricted_caller(&parent, no_get);
 
-    let err = Capability::get_policy(&caller, target_h, PolicyIdentifier::Cores).unwrap_err();
+    let err = Capability::get_policy(&platform, &caller, target_h, PolicyIdentifier::Cores).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
@@ -367,14 +391,14 @@ fn test_set_get_register_available_vp() {
 
     // Allow reg 0 for read and write under VECTOR_AVAILABLE (0xFF).
     let bitmap: u64 = 1; // bit 0 set
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), bitmap)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), bitmap)
         .unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), bitmap)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), bitmap)
         .unwrap();
 
     // VP[0] is Available by default → effective vector = VECTOR_AVAILABLE.
-    Capability::set_register(&parent, h, 0, 0, 0xCAFE, &platform).unwrap();
-    let v = Capability::get_register(&parent, h, 0, 0, &platform).unwrap();
+    Capability::set_register(&platform, &parent, h, 0, 0, 0xCAFE).unwrap();
+    let v = Capability::get_register(&platform, &parent, h, 0, 0).unwrap().0;
     assert_eq!(v, 0xCAFE);
 }
 
@@ -385,10 +409,10 @@ fn test_set_register_denied_when_bit_not_in_write_bitmap() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // write bitmap for VECTOR_AVAILABLE has bit 0 but NOT bit 1
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0b01)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0b01)
         .unwrap();
 
-    let err = Capability::set_register(&parent, h, 0, 1, 42, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 1, 42).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -399,10 +423,10 @@ fn test_get_register_denied_when_bit_not_in_read_bitmap() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // read bitmap for VECTOR_AVAILABLE has bit 0 but NOT bit 2
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 0b01)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 0b01)
         .unwrap();
 
-    let err = Capability::get_register(&parent, h, 0, 2, &platform).unwrap_err();
+    let err = Capability::get_register(&platform, &parent, h, 0, 2).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -419,14 +443,14 @@ fn test_set_get_register_interrupted_vp_uses_vector_override() {
 
     // Grant access to reg 3 under vector 42 only.
     let bitmap: u64 = 1 << 3;
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), bitmap).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(42, 0), bitmap).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), bitmap).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(42, 0), bitmap).unwrap();
 
     // Put VP[0] in Interrupted { vector: 42 }
     set_vp_interrupted(&child, 0, 42);
 
-    Capability::set_register(&parent, h, 0, 3, 0xBEEF, &platform).unwrap();
-    let v = Capability::get_register(&parent, h, 0, 3, &platform).unwrap();
+    Capability::set_register(&platform, &parent, h, 0, 3, 0xBEEF).unwrap();
+    let v = Capability::get_register(&platform, &parent, h, 0, 3).unwrap().0;
     assert_eq!(v, 0xBEEF);
 }
 
@@ -438,17 +462,17 @@ fn test_register_access_blocked_for_different_vector() {
         make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Restrict the default VECTOR_AVAILABLE write bitmap (default_report sets u64::MAX).
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
 
     // Only allow reg 3 under vector 42.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 3).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 3).unwrap();
     // Explicitly deny vector 99.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(99, 0), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(99, 0), 0).unwrap();
 
     // VP is interrupted by vector 99 → override write_set = 0.
     set_vp_interrupted(&child, 0, 99);
 
-    let err = Capability::set_register(&parent, h, 0, 3, 0xBEEF, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 3, 0xBEEF).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -460,13 +484,13 @@ fn test_vector_override_does_not_affect_available_vp() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Clear the default VECTOR_AVAILABLE write bitmap so only per-vector overrides grant access.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 0).unwrap();
 
     // Grant write access to reg 5 only under vector 42.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 5).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), 1 << 5).unwrap();
 
     // VP[0] is Available by default.
-    let err = Capability::set_register(&parent, h, 0, 5, 99, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 5, 99).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -481,15 +505,15 @@ fn test_set_register_denied_when_vp_running() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full write access under VECTOR_AVAILABLE so bitmaps are not the obstacle.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), u64::MAX)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), u64::MAX)
         .unwrap();
 
     // Confirm write works while Available.
-    Capability::set_register(&parent, h, 0, 0, 0x1, &platform).unwrap();
+    Capability::set_register(&platform, &parent, h, 0, 0, 0x1).unwrap();
 
     // Transition to Running — register access must now be denied.
     set_vp_running(&child, 0);
-    let err = Capability::set_register(&parent, h, 0, 0, 0x2, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 0, 0x2).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -500,15 +524,15 @@ fn test_get_register_denied_when_vp_running() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full read access under VECTOR_AVAILABLE.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), u64::MAX)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), u64::MAX)
         .unwrap();
 
     // Confirm read works while Available.
-    Capability::get_register(&parent, h, 0, 0, &platform).unwrap();
+    Capability::get_register(&platform, &parent, h, 0, 0).unwrap().0;
 
     // Transition to Running — register access must now be denied.
     set_vp_running(&child, 0);
-    let err = Capability::get_register(&parent, h, 0, 0, &platform).unwrap_err();
+    let err = Capability::get_register(&platform, &parent, h, 0, 0).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -523,7 +547,7 @@ fn test_set_register_out_of_range() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // TestPlatform has register_count() = 64; reg 64 is out of range.
-    let err = Capability::set_register(&parent, h, 0, 64, 0, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 64, 0).unwrap_err();
     assert_eq!(err, CapaError::RegisterOutOfRange);
 }
 
@@ -533,7 +557,7 @@ fn test_get_register_out_of_range() {
     let platform = common::TestPlatform::new();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
-    let err = Capability::get_register(&parent, h, 0, 64, &platform).unwrap_err();
+    let err = Capability::get_register(&platform, &parent, h, 0, 64).unwrap_err();
     assert_eq!(err, CapaError::RegisterOutOfRange);
 }
 
@@ -548,7 +572,7 @@ fn test_set_register_requires_set_permission() {
     let no_set = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::GET);
     let (caller, target_h, _ctrl) = make_restricted_caller(&parent, no_set);
 
-    let err = Capability::set_register(&caller, target_h, 0, 0, 0, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &caller, target_h, 0, 0, 0).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
@@ -559,7 +583,7 @@ fn test_get_register_requires_get_permission() {
     let no_get = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL | MonitorAPI::SET);
     let (caller, target_h, _ctrl) = make_restricted_caller(&parent, no_get);
 
-    let err = Capability::get_register(&caller, target_h, 0, 0, &platform).unwrap_err();
+    let err = Capability::get_register(&platform, &caller, target_h, 0, 0).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
@@ -574,16 +598,16 @@ fn test_set_register_works_on_sealed_domain() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant write access to reg 0 under VECTOR_AVAILABLE before sealing.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1)
         .unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 1)
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), 1)
         .unwrap();
 
     seal(&parent, h);
 
     // VP is still Available after sealing, so effective vector = VECTOR_AVAILABLE.
-    Capability::set_register(&parent, h, 0, 0, 123, &platform).unwrap();
-    let v = Capability::get_register(&parent, h, 0, 0, &platform).unwrap();
+    Capability::set_register(&platform, &parent, h, 0, 0, 123).unwrap();
+    let v = Capability::get_register(&platform, &parent, h, 0, 0).unwrap().0;
     assert_eq!(v, 123);
 
     // Silence unused-variable warning
@@ -601,7 +625,7 @@ fn test_set_register_bad_vp_id() {
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // VP 999 does not exist (domain has only num_cores VPs).
-    let err = Capability::set_register(&parent, h, 999, 0, 0, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 999, 0, 0).unwrap_err();
     assert_eq!(err, CapaError::NotFound);
 }
 
@@ -611,7 +635,7 @@ fn test_get_register_bad_vp_id() {
     let platform = common::TestPlatform::new();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
-    let err = Capability::get_register(&parent, h, 999, 0, &platform).unwrap_err();
+    let err = Capability::get_register(&platform, &parent, h, 999, 0).unwrap_err();
     assert_eq!(err, CapaError::NotFound);
 }
 
@@ -621,43 +645,45 @@ fn test_get_register_bad_vp_id() {
 
 #[test]
 fn test_vector_visibility_inherits_default() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Set the default to Report (1)
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultInterruptVisibility, 1).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultInterruptVisibility, 1).unwrap();
 
     // Setting visibility for a brand-new vector should create an entry that starts
     // with the inherited default (Report) and then overrides to NotReport (2).
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorVisibility(10), 2).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::VectorVisibility(10)).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(10), 2).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(10)).unwrap().0;
     assert_eq!(v, 2);
 
     // Other vectors still return the default (Report = 1).
-    let def = Capability::get_policy(&parent, h, PolicyIdentifier::VectorVisibility(11)).unwrap();
+    let def = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(11)).unwrap().0;
     assert_eq!(def, 1);
 }
 
 #[test]
 fn test_vector_visibility_independent_of_read_write_set() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Set visibility and bitmaps independently for the same vector.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), 0b111).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0), 0b011).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(5, 0), 0b111).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0), 0b011).unwrap();
 
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::VectorVisibility(5)).unwrap(),
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(5)).unwrap().0,
         1
     );
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap(),
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(5, 0)).unwrap().0,
         0b111
     );
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0)).unwrap(),
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(5, 0)).unwrap().0,
         0b011
     );
 }
@@ -673,20 +699,20 @@ fn test_effective_vector_switches_on_interrupt() {
     let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Allow reg 0 write under VECTOR_AVAILABLE but NOT under vector 1.
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::VectorRegWriteSet(1, 0), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(1, 0), 0).unwrap();
 
     // While Available: write should succeed.
-    Capability::set_register(&parent, h, 0, 0, 1, &platform).unwrap();
+    Capability::set_register(&platform, &parent, h, 0, 0, 1).unwrap();
 
     // After interrupt by vector 1: write must be denied.
     set_vp_interrupted(&child, 0, 1);
-    let err = Capability::set_register(&parent, h, 0, 0, 2, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 0, 2).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 
     // Back to Running: write must still be denied (VP is executing).
     set_vp_running(&child, 0);
-    let err = Capability::set_register(&parent, h, 0, 0, 3, &platform).unwrap_err();
+    let err = Capability::set_register(&platform, &parent, h, 0, 0, 3).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
 
@@ -696,6 +722,7 @@ fn test_effective_vector_switches_on_interrupt() {
 
 #[test]
 fn test_set_cores_narrows_vp_count() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // Child starts with 4 cores (0b1111) and thus 4 VPs.
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
@@ -706,16 +733,17 @@ fn test_set_cores_narrows_vp_count() {
     assert_eq!(get_vps(), 4);
 
     // Narrow to 2 cores — VP count must drop to 2.
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0011).unwrap();
     assert_eq!(get_vps(), 2);
 }
 
 #[test]
 fn test_set_cores_no_change_when_same_popcount() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // 0b0101 has popcount 2 — VP count must be clamped to 2 even though old count was 4.
-    Capability::set_policy(&parent, h, PolicyIdentifier::Cores, 0b0101).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::Cores, 0b0101).unwrap();
     let vps = parent.read().data.domain_capabilities[&h]
         .upgrade().unwrap().read().data.policy.num_vprocessors;
     assert_eq!(vps, 2);
@@ -727,58 +755,50 @@ fn test_set_cores_no_change_when_same_popcount() {
 
 #[test]
 fn test_default_visibility_monotonicity_enforced() {
+    let platform = common::TestPlatform::new();
     // Root has Deliver (0). Create a child, restrict its default to NotReport (2),
     // seal it, then verify that its grandchild cannot be given Deliver (0).
     let parent = root();
     let (child, child_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Restrict child default to NotReport — allowed (2 >= 0 relative to parent Deliver).
-    Capability::set_policy(&parent, child_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
+    Capability::set_policy(&platform, &parent, child_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
     seal(&parent, child_h);
 
     // Create grandchild under the now-sealed child.
-    let grand_h = Capability::create(
-        &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
-    ).unwrap().0;
+    let grand_h = Capability::create(&platform, &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL)).unwrap().0;
 
     // NotReport (2) is allowed for grandchild.
-    Capability::set_policy(&child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
+    Capability::set_policy(&platform, &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 2).unwrap();
 
     // Deliver (0) must be denied: parent (child) has NotReport (2), 0 < 2.
-    let err = Capability::set_policy(
-        &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 0,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 0).unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 
     // Report (1) must also be denied: 1 < 2.
-    let err = Capability::set_policy(
-        &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 1,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &child, grand_h, PolicyIdentifier::DefaultInterruptVisibility, 1).unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 }
 
 #[test]
 fn test_vector_visibility_monotonicity_enforced() {
+    let platform = common::TestPlatform::new();
     // Root has Deliver (0) default. Create child, set its vector 5 to Report (1), seal it.
     // Grandchild must not be allowed Deliver (0) for vector 5.
     let parent = root();
     let (child, parent_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
-    Capability::set_policy(&parent, parent_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap(); // Report
+    Capability::set_policy(&platform, &parent, parent_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap(); // Report
     seal(&parent, parent_h);
 
     // Create grandchild under the sealed child.
-    let grand_h = Capability::create(
-        &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL),
-    ).unwrap().0;
+    let grand_h = Capability::create(&platform, &child, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL)).unwrap().0;
 
     // Try to set grandchild's vector 5 to Deliver (0) — must be denied (0 < 1).
-    let err = Capability::set_policy(
-        &child, grand_h, PolicyIdentifier::VectorVisibility(5), 0,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &child, grand_h, PolicyIdentifier::VectorVisibility(5), 0).unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 
     // Report (1) should succeed.
-    Capability::set_policy(&child, grand_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
+    Capability::set_policy(&platform, &child, grand_h, PolicyIdentifier::VectorVisibility(5), 1).unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -787,6 +807,7 @@ fn test_vector_visibility_monotonicity_enforced() {
 
 #[test]
 fn test_seal_domain_denied_without_seal_permission() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // Create a child without SEAL in its API, but with CREATE so it can make grandchildren.
     let no_seal_api = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SET | MonitorAPI::GET);
@@ -795,21 +816,20 @@ fn test_seal_domain_denied_without_seal_permission() {
 
     // child is now sealed with CREATE but NOT SEAL.
     // The grandchild must have only the permissions child has (monotonicity).
-    let grand_h = Capability::create(
-        &child, DomainPolicy::new_restricted(0b1111, no_seal_api),
-    ).unwrap().0;
+    let grand_h = Capability::create(&platform, &child, DomainPolicy::new_restricted(0b1111, no_seal_api)).unwrap().0;
 
     // Attempting to seal grand_h through child must be denied.
-    let err = Capability::seal(&child, grand_h).unwrap_err();
+    let err = Capability::seal(&platform, &child, grand_h).unwrap_err();
     assert_eq!(err, CapaError::ApiNotAllowed);
 }
 
 #[test]
 fn test_seal_domain_allowed_with_seal_permission() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
     // parent has SEAL (root has ALL), so sealing should succeed.
-    Capability::seal(&parent, h).unwrap();
+    Capability::seal(&platform, &parent, h).unwrap();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -818,145 +838,139 @@ fn test_seal_domain_allowed_with_seal_permission() {
 
 #[test]
 fn test_set_get_default_exit_trap() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Default for restricted child is trap=true (1).
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap).unwrap().0;
     assert_eq!(v, 1);
 
     // Root has trap=false, so child can set trap=false (less restrictive parent).
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap).unwrap().0;
     assert_eq!(v, 0);
 
     // Set back to trap=true.
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::DefaultExitTrap).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap).unwrap().0;
     assert_eq!(v, 1);
 }
 
 #[test]
 fn test_set_get_exit_reason_trap() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Default is trap=true; override exit reason 10 (CPUID) to local.
-    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap().0;
     assert_eq!(v, 0);
 
     // Unoverridden exit reason still returns default.
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap().0;
     assert_eq!(v, 1);
 }
 
 #[test]
 fn test_set_get_exit_reason_reg_bitmaps() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Set read bitmap for exit reason 48 (EPT violation), word 0.
-    Capability::set_policy(
-        &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0), 0b1010,
-    ).unwrap();
-    let v = Capability::get_policy(
-        &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0),
-    ).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0), 0b1010).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonRegReadSet(48, 0)).unwrap().0;
     assert_eq!(v, 0b1010);
 
     // Write bitmap.
-    Capability::set_policy(
-        &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0), 0b0101,
-    ).unwrap();
-    let v = Capability::get_policy(
-        &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0),
-    ).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0), 0b0101).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonRegWriteSet(48, 0)).unwrap().0;
     assert_eq!(v, 0b0101);
 }
 
 #[test]
 fn test_exit_monotonicity_child_cannot_untrap() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // Create intermediate with trap=true default (restricted).
     let (mid, mid_h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
-    Capability::seal(&parent, mid_h).unwrap();
+    Capability::seal(&platform, &parent, mid_h).unwrap();
 
     // Create grandchild under mid.
     let (_, gc_h) = make_child(&mid, DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL));
 
     // mid has trap=true default. Grandchild cannot set trap=false.
-    let err = Capability::set_policy(
-        &mid, gc_h, PolicyIdentifier::DefaultExitTrap, 0,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &mid, gc_h, PolicyIdentifier::DefaultExitTrap, 0).unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 
     // Per-exit-reason: mid traps everything (default=true), so gc can't un-trap reason 10.
-    let err = Capability::set_policy(
-        &mid, gc_h, PolicyIdentifier::ExitReasonTrap(10), 0,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &mid, gc_h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap_err();
     assert_eq!(err, CapaError::MonotonicityViolation);
 }
 
 #[test]
 fn test_exit_monotonicity_parent_local_child_can_choose() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     // Root has trap=false (local). Child can set either trap=true or trap=false.
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Set to local (same as parent) — allowed.
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap();
 
     // Set back to trap — always allowed (more restrictive).
-    Capability::set_policy(&parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap, 1).unwrap();
 }
 
 #[test]
 fn test_exit_policy_blocked_after_seal() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
-    Capability::seal(&parent, h).unwrap();
+    Capability::seal(&platform, &parent, h).unwrap();
 
     // set_policy should fail on sealed domain.
-    let err = Capability::set_policy(
-        &parent, h, PolicyIdentifier::DefaultExitTrap, 0,
-    ).unwrap_err();
+    let err = Capability::set_policy(&platform, &parent, h, PolicyIdentifier::DefaultExitTrap, 0).unwrap_err();
     assert_eq!(err, CapaError::DomainSealed);
 }
 
 #[test]
 fn test_exit_get_policy_works_after_seal() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Set some policy before seal.
-    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
-    Capability::seal(&parent, h).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    Capability::seal(&platform, &parent, h).unwrap();
 
     // get_policy should still work on sealed domain.
-    let v = Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap().0;
     assert_eq!(v, 0);
 }
 
 #[test]
 fn test_exit_per_reason_override_independent() {
+    let platform = common::TestPlatform::new();
     let parent = root();
     let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Override two different exit reasons.
-    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
-    Capability::set_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(48), 0).unwrap();
 
     // Both read back correctly.
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap(), 0
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(10)).unwrap().0, 0
     );
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap(), 0
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(48)).unwrap().0, 0
     );
 
     // Non-overridden reason still default.
     assert_eq!(
-        Capability::get_policy(&parent, h, PolicyIdentifier::ExitReasonTrap(12)).unwrap(), 1
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::ExitReasonTrap(12)).unwrap().0, 1
     );
 }

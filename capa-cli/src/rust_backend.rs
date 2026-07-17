@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use capability_engine::{
     Access, Attributes, Capability, CapaError, CoreState, Domain, DomainPolicy, LocalHandle,
     MemoryRegion, MonitorAPI, Platform, PolicyIdentifier, ResourceKind, Rights, Update,
-    UpdateBatch, VpRunState, attest_domain, compute_address_space, execute,
+    UpdateBatch, VpRunState, attest_domain, compute_address_space,
 };
 
 use crate::backend::{
@@ -332,10 +332,8 @@ impl Backend for RustBackend {
         let handle = find_memory_handle(&domain, &mem).ok_or(BackendError::NotFound)?;
         let access = Access::new(start, size, Rights::from_bits(rights));
 
-        let (child_handle, batch) = execute(&*self.platform, false, || {
-            Capability::carve(&domain, handle, access)
-                .map(|(h, _sub, b)| (h, b))
-        }).map_err(convert_error)?;
+        let (child_handle, _sub, batch) =
+            Capability::carve(&*self.platform, &domain, handle, access).map_err(convert_error)?;
 
         let child = domain.read().data.memory_capabilities
             .get(&child_handle)
@@ -361,9 +359,8 @@ impl Backend for RustBackend {
         let handle = find_memory_handle(&domain, &mem).ok_or(BackendError::NotFound)?;
         let access = Access::new(start, size, Rights::from_bits(rights));
 
-        // alias does not go through execute() — no UpdateBatch produced.
-        let (child_handle, _sub) = Capability::alias(&domain, handle, access)
-            .map_err(convert_error)?;
+        let (child_handle, _sub, batch) =
+            Capability::alias(&*self.platform, &domain, handle, access).map_err(convert_error)?;
 
         let child = domain.read().data.memory_capabilities
             .get(&child_handle)
@@ -373,7 +370,7 @@ impl Backend for RustBackend {
         let uid = self.alloc_uid();
         self.mem_caps.insert(uid, child);
 
-        Ok((uid, Vec::new()))
+        Ok((uid, convert_updates(&batch)))
     }
 
     fn send(
@@ -391,15 +388,12 @@ impl Backend for RustBackend {
         let sender_handle = find_memory_handle(&sender, &mem_arc)
             .ok_or(BackendError::NotFound)?;
 
-        let is_sealed = receiver_arc.read().data.is_sealed();
         let attrs = Attributes::from_bits(attrs);
 
-        let (_, batch) = execute(&*self.platform, !is_sealed, || {
-            let recv_h = find_domain_handle(&sender, &receiver_arc)
-                .ok_or(CapaError::NotFound)?;
-            let updates = Capability::send_at(&sender, sender_handle, recv_h, attrs, gpa)?;
-            Ok(((), updates))
-        }).map_err(convert_error)?;
+        let recv_h = find_domain_handle(&sender, &receiver_arc)
+            .ok_or(BackendError::NotFound)?;
+        let batch = Capability::send_at(&*self.platform, &sender, sender_handle, recv_h, attrs, gpa)
+            .map_err(convert_error)?;
 
         Ok(convert_updates(&batch))
     }
@@ -412,9 +406,9 @@ impl Backend for RustBackend {
     ) -> Result<(MemCapUid, Vec<HwUpdate>)> {
         let domain_arc = self.get_domain(domain)?;
 
-        let (handle, batch) = execute(&*self.platform, false, || {
-            Capability::accept_at(&domain_arc, pending_id, gpa)
-        }).map_err(convert_error)?;
+        let (handle, batch) =
+            Capability::accept_at(&*self.platform, &domain_arc, pending_id, gpa)
+                .map_err(convert_error)?;
 
         let child = domain_arc.read().data.memory_capabilities
             .get(&handle)
@@ -429,7 +423,9 @@ impl Backend for RustBackend {
 
     fn reject(&mut self, domain: DomainId, pending_id: u64) -> Result<()> {
         let domain_arc = self.get_domain(domain)?;
-        Capability::reject(&domain_arc, pending_id).map_err(convert_error)
+        Capability::reject(&*self.platform, &domain_arc, pending_id)
+            .map(|_batch| ())
+            .map_err(convert_error)
     }
 
     fn revoke_mem(
@@ -445,10 +441,8 @@ impl Backend for RustBackend {
             .ok_or(BackendError::NotFound)?;
         let child_sub = child_arc.read().sub_handle;
 
-        let (_, batch) = execute(&*self.platform, true, || {
-            let updates = Capability::revoke(&owner_arc, parent_handle, child_sub)?;
-            Ok(((), updates))
-        }).map_err(convert_error)?;
+        let batch = Capability::revoke(&*self.platform, &owner_arc, parent_handle, child_sub)
+            .map_err(convert_error)?;
 
         // Remove the revoked child (and any descendants) from our table.
         self.prune_stale_mem_caps();
@@ -470,8 +464,9 @@ impl Backend for RustBackend {
         let parent_arc = self.get_domain(parent)?;
         let child_policy = DomainPolicy::new_restricted(cores, MonitorAPI::from_bits(api as u16));
 
-        let (child_handle, _batch) = Capability::create(&parent_arc, child_policy)
-            .map_err(convert_error)?;
+        let (child_handle, _batch) =
+            Capability::create(&*self.platform, &parent_arc, child_policy)
+                .map_err(convert_error)?;
 
         let child_arc = parent_arc.read().data.domain_capabilities
             .get(&child_handle)
@@ -494,7 +489,9 @@ impl Backend for RustBackend {
 
     fn seal(&mut self, owner: DomainId, child: DomainId) -> Result<()> {
         let (owner_arc, _child_arc, handle) = self.resolve_dom_handle(owner, child)?;
-        Capability::seal(&owner_arc, handle).map_err(convert_error)
+        Capability::seal(&*self.platform, &owner_arc, handle)
+            .map(|_batch| ())
+            .map_err(convert_error)
     }
 
     fn revoke_domain(
@@ -507,10 +504,8 @@ impl Backend for RustBackend {
         let child_handle = find_domain_handle(&parent_arc, &child_arc)
             .ok_or(BackendError::NotFound)?;
 
-        let (_, batch) = execute(&*self.platform, true, || {
-            let updates = Capability::revoke_domain(&parent_arc, child_handle)?;
-            Ok(((), updates))
-        }).map_err(convert_error)?;
+        let batch = Capability::revoke_domain(&*self.platform, &parent_arc, child_handle)
+            .map_err(convert_error)?;
 
         self.cleanup_revoked(&batch);
 
@@ -522,8 +517,9 @@ impl Backend for RustBackend {
     fn get_chan(&mut self, caller: DomainId, target: DomainId) -> Result<DomainId> {
         let (caller_arc, _target_arc, target_handle) = self.resolve_dom_handle(caller, target)?;
 
-        let chan_handle = Capability::get_chan(&caller_arc, target_handle)
-            .map_err(convert_error)?;
+        let (chan_handle, _batch) =
+            Capability::get_chan(&*self.platform, &caller_arc, target_handle)
+                .map_err(convert_error)?;
 
         let chan_ref = caller_arc.read().data.domain_capabilities[&chan_handle]
             .upgrade()
@@ -538,7 +534,7 @@ impl Backend for RustBackend {
     fn get_chan_self(&mut self, caller: DomainId) -> Result<DomainId> {
         let caller_arc = self.get_domain(caller)?;
 
-        let chan_handle = Capability::get_chan_self(&caller_arc)
+        let (chan_handle, _batch) = Capability::get_chan_self(&*self.platform, &caller_arc)
             .map_err(convert_error)?;
 
         let chan_ref = caller_arc.read().data.domain_capabilities[&chan_handle]
@@ -566,8 +562,11 @@ impl Backend for RustBackend {
         let recv_handle = find_domain_handle(&caller_arc, &receiver_arc)
             .ok_or(BackendError::NotFound)?;
 
-        Capability::<Domain>::send_channel(&caller_arc, chan_handle, recv_handle, Attributes::NONE)
-            .map_err(convert_error)
+        Capability::<Domain>::send_channel(
+            &*self.platform, &caller_arc, chan_handle, recv_handle, Attributes::NONE,
+        )
+        .map(|_batch| ())
+        .map_err(convert_error)
     }
 
     fn accept_channel(
@@ -577,8 +576,9 @@ impl Backend for RustBackend {
     ) -> Result<DomainId> {
         let receiver_arc = self.get_domain(receiver)?;
 
-        let new_handle = Capability::<Domain>::accept_channel(&receiver_arc, pending_id)
-            .map_err(convert_error)?;
+        let (new_handle, _batch) =
+            Capability::<Domain>::accept_channel(&*self.platform, &receiver_arc, pending_id)
+                .map_err(convert_error)?;
 
         let chan_ref = receiver_arc.read().data.domain_capabilities[&new_handle]
             .upgrade()
@@ -592,7 +592,8 @@ impl Backend for RustBackend {
 
     fn reject_channel(&mut self, receiver: DomainId, pending_id: u64) -> Result<()> {
         let receiver_arc = self.get_domain(receiver)?;
-        Capability::<Domain>::reject_channel(&receiver_arc, pending_id)
+        Capability::<Domain>::reject_channel(&*self.platform, &receiver_arc, pending_id)
+            .map(|_batch| ())
             .map_err(convert_error)
     }
 
@@ -626,10 +627,9 @@ impl Backend for RustBackend {
         let child_handle = find_domain_handle(&owner_arc, &child_arc)
             .ok_or(BackendError::NotFound)?;
 
-        let (_, batch) = execute(&*self.platform, false, || {
-            Capability::<Domain>::register_comm(&owner_arc, mem_handle, child_handle, vp_id)
-                .map(|b| ((), b))
-        }).map_err(convert_error)?;
+        let batch =
+            Capability::<Domain>::register_comm(&*self.platform, &owner_arc, mem_handle, child_handle, vp_id)
+                .map_err(convert_error)?;
 
         Ok(convert_updates(&batch))
     }
@@ -658,13 +658,9 @@ impl Backend for RustBackend {
 
         self.platform.set_current_core(Some(core));
 
-        let ctx = execute(self.platform.as_ref(), false, || {
-            let ctx = Capability::<Domain>::switch(
-                &from_ref, to_handle, vp_id, self.platform.as_ref(),
-            )?;
-            Ok((ctx, UpdateBatch::new()))
-        })
-        .map(|(ctx, _)| ctx)
+        let (ctx, _batch) = Capability::<Domain>::switch(
+            self.platform.as_ref(), &from_ref, to_handle, vp_id,
+        )
         .map_err(convert_error)?;
 
         self.platform.set_current_core(None);
@@ -696,14 +692,9 @@ impl Backend for RustBackend {
 
         self.platform.set_current_core(Some(core));
 
-        let ctx = execute(self.platform.as_ref(), false, || {
-            // handle=0 signals return
-            let ctx = Capability::<Domain>::switch(
-                &from_ref, 0, 0, self.platform.as_ref(),
-            )?;
-            Ok((ctx, UpdateBatch::new()))
-        })
-        .map(|(ctx, _)| ctx)
+        let (ctx, _batch) = Capability::<Domain>::switch(
+            self.platform.as_ref(), &from_ref, 0, 0,
+        )
         .map_err(convert_error)?;
 
         self.platform.set_current_core(None);
@@ -732,7 +723,7 @@ impl Backend for RustBackend {
             .map_err(convert_error)?;
 
         let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
-            &domain_arc, handler_id, core, vector, self.platform.as_ref(),
+            self.platform.as_ref(), &domain_arc, handler_id, core, vector,
         );
 
         if vp_delivery.is_err() && handler_id != domain {
@@ -753,7 +744,7 @@ impl Backend for RustBackend {
     ) -> Result<()> {
         let (parent_arc, _child_arc, handle) = self.resolve_dom_handle(parent, child)?;
         let policy_id = parse_policy_id(field)?;
-        Capability::set_policy(&parent_arc, handle, policy_id, value)
+        Capability::set_policy(&*self.platform, &parent_arc, handle, policy_id, value)
             .map(|_batch| ())
             .map_err(convert_error)
     }
@@ -769,7 +760,8 @@ impl Backend for RustBackend {
         let handle = find_domain_handle(parent_arc, child_arc)
             .ok_or(BackendError::NotFound)?;
         let policy_id = parse_policy_id(field)?;
-        Capability::get_policy(parent_arc, handle, policy_id)
+        Capability::get_policy(&*self.platform, parent_arc, handle, policy_id)
+            .map(|(v, _)| v)
             .map_err(convert_error)
     }
 
@@ -782,7 +774,8 @@ impl Backend for RustBackend {
         value: u64,
     ) -> Result<()> {
         let (parent_arc, _child_arc, handle) = self.resolve_dom_handle(parent, child)?;
-        Capability::set_register(&parent_arc, handle, vp, reg, value, self.platform.as_ref())
+        Capability::set_register(&*self.platform, &parent_arc, handle, vp, reg, value)
+            .map(|_batch| ())
             .map_err(convert_error)
     }
 
@@ -797,7 +790,8 @@ impl Backend for RustBackend {
         let child_arc = self.domains.get(&child).ok_or(BackendError::NotFound)?;
         let handle = find_domain_handle(parent_arc, child_arc)
             .ok_or(BackendError::NotFound)?;
-        Capability::get_register(parent_arc, handle, vp, reg, self.platform.as_ref())
+        Capability::get_register(&*self.platform, parent_arc, handle, vp, reg)
+            .map(|(v, _)| v)
             .map_err(convert_error)
     }
 
@@ -810,6 +804,7 @@ impl Backend for RustBackend {
     ) -> Result<()> {
         let (owner_arc, _child_arc, handle) = self.resolve_dom_handle(owner, child)?;
         Capability::set_policy(
+            &*self.platform,
             &owner_arc,
             handle,
             PolicyIdentifier::VectorVisibility(vector),

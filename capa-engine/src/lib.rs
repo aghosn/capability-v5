@@ -19,7 +19,9 @@
 extern crate alloc;
 
 pub mod attest;
+pub mod bootstrap;
 pub mod capability;
+pub mod domain_api;
 pub mod domain;
 pub mod error;
 pub mod interposition;
@@ -53,7 +55,23 @@ pub use interposition::{
     ProcFeature, ProcFeatureConfig, ProcFeaturePolicy,
 };
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
-pub use platform::{execute, OpLockGuard, Platform};
+pub use platform::{OpLockGuard, Platform};
+
+/// Test-only shim that exposes the crate-internal `execute()` wrapper for
+/// integration tests to validate lock discipline and update dispatch
+/// semantics directly. Production consumers must use the domain-mediated
+/// [`Capability`] API, which calls `execute()` internally.
+#[cfg(feature = "test-utils")]
+pub fn execute<F, R>(
+    platform: &dyn Platform,
+    exclusive: bool,
+    op: F,
+) -> Result<(R, update::UpdateBatch)>
+where
+    F: FnOnce() -> Result<(R, update::UpdateBatch)>,
+{
+    platform::execute(platform, exclusive, op)
+}
 pub use switch::{
     CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext,
 };

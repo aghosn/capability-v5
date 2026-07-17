@@ -2,8 +2,13 @@
 
 use capability_engine::*;
 
+#[path = "../common/mod.rs"]
+mod common;
+
+
 #[test]
 fn test_attest_domain() {
+    let platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -15,12 +20,13 @@ fn test_attest_domain() {
 
 #[test]
 fn test_enumerate_tree() {
+    let platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
     // Use create which requires root to be sealed (new_root is already sealed)
     let child_policy = DomainPolicy::new_root(4);
-    let _child_h = Capability::create(&root_ref, child_policy).unwrap().0;
+    let _child_h = Capability::create(&platform, &root_ref, child_policy).unwrap().0;
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 2);
@@ -28,6 +34,7 @@ fn test_enumerate_tree() {
 
 #[test]
 fn test_attest_with_signature() {
+    let platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -42,6 +49,7 @@ fn test_attest_with_signature() {
 
 #[test]
 fn test_attest_memory_region() {
+    let platform = common::TestPlatform::new();
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 0, root_region);
 
@@ -53,21 +61,22 @@ fn test_attest_memory_region() {
 
 #[test]
 fn test_enumerate_tree_with_multiple_levels() {
+    let platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root_ref = Capability::new_root(0, 0, root_domain);
 
     // Create first level children using domain-mediated API
-    let child1_h = Capability::create(&root_ref, DomainPolicy::new_root(4)).unwrap().0;
-    let _child2_h = Capability::create(&root_ref, DomainPolicy::new_root(4)).unwrap().0;
+    let child1_h = Capability::create(&platform, &root_ref, DomainPolicy::new_root(4)).unwrap().0;
+    let _child2_h = Capability::create(&platform, &root_ref, DomainPolicy::new_root(4)).unwrap().0;
 
     // Seal child1 before creating grandchild under it
-    Capability::seal(&root_ref, child1_h).unwrap();
+    Capability::seal(&platform, &root_ref, child1_h).unwrap();
     let child1_ref = root_ref.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
 
     // Create grandchild under child1
-    let _grandchild_h = Capability::create(&child1_ref, DomainPolicy::new_root(4)).unwrap().0;
+    let _grandchild_h = Capability::create(&platform, &child1_ref, DomainPolicy::new_root(4)).unwrap().0;
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 4); // root + 2 children + 1 grandchild

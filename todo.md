@@ -5,6 +5,35 @@
 > - [`docs/archive/session-notes/27_03_2026.md`](docs/archive/session-notes/27_03_2026.md) — full history through dom1 multi-core debugging
 > - [`docs/archive/session-notes/07_04_2026.md`](docs/archive/session-notes/07_04_2026.md) — differential testing, VITAL cascade fix, TPM, code review
 
+## Current Status
+
+- **2026-07-17 — capa-cli migration to platform-first domain API** ✅ DONE. Fixed `capa-cli/src/rust_backend.rs` to match the refactored `capa-engine` domain-mediated API (platform as first arg, tuple returns). `cd capa-cli && cargo build --release` now succeeds with 0 errors.
+
+  Files modified this session:
+  - `capa-cli/src/rust_backend.rs` — migrated all `Capability::*` call sites to platform-first signature; removed 8 double-lock `execute()` wrappers (carve, send_at, accept_at, revoke, revoke_domain, register_comm, switch_forward, switch_return); added `platform` arg and tuple destructuring to carve/alias/create/seal/revoke/revoke_domain/get_chan/get_chan_self/send_channel/accept_channel/reject_channel/register_comm/switch/deliver_interrupt_vp/set_policy/get_policy/set_register/get_register; removed `execute` from imports.
+
+- **2026-07-17 — capa-engine domain API test migration** ✅ DONE. Updated default-feature tests for the platform-first `Capability::<Domain>` API and tuple-return signatures; `cd capa-engine && cargo test --no-run` now succeeds.
+
+  Files modified this session:
+  - `capa-engine/tests/concurrency/platform.rs` — passed `TestPlatform` into domain API calls under default features.
+  - `capa-engine/tests/integration/api.rs` — migrated create/seal/carve/alias/send/revoke/revoke_domain calls and tuple destructuring.
+  - `capa-engine/tests/integration/comm.rs` — migrated register_comm/carve/alias/create/seal/revoke/send calls and tuple destructuring.
+  - `capa-engine/tests/integration/end_to_end.rs` — migrated create/seal/carve/alias/switch calls and tuple destructuring.
+  - `capa-engine/tests/integration/interrupt.rs` — migrated create/seal call sites to the platform-first API.
+  - `capa-engine/tests/integration/meta.rs` — migrated send/carve/alias/accept/revoke call sites and tuple destructuring.
+  - `capa-engine/tests/integration/overlap.rs` — migrated carve/alias call sites and 3-tuple destructuring.
+  - `capa-engine/tests/integration/revoke.rs` — migrated create/send/seal/carve/alias/revoke call sites and tuple destructuring.
+  - `capa-engine/tests/integration/send_bugs.rs` — migrated create/seal/carve/send call sites.
+  - `capa-engine/tests/integration/send_pending.rs` — finished remaining platform-first send/accept/reject/carve/revoke calls.
+  - `capa-engine/tests/integration/translation.rs` — migrated translation tests to the platform-first domain API and updated tuple destructuring.
+  - `capa-engine/tests/integration/vital_cascade.rs` — migrated create/seal/carve/send/revoke call sites.
+  - `capa-engine/tests/integration/vital_revoke.rs` — migrated create/carve/alias/send/seal/revoke call sites.
+  - `capa-engine/tests/unit/attest.rs` — added shared test platform usage for create/seal call sites.
+  - `capa-engine/tests/unit/channel.rs` — migrated get_chan/attest/send_channel/accept_channel/switch and related tuple destructuring.
+  - `capa-engine/tests/unit/domain.rs` — migrated create/seal/revoke_domain/set_policy/get_policy call sites.
+  - `capa-engine/tests/unit/set_get.rs` — migrated helper/test set_policy/get_policy/set_register/get_register usage.
+  - `capa-engine/tests/unit/switch.rs` — migrated switch/deliver_interrupt_vp call order and helper create/seal usage.
+
 ---
 
 ## RESUME NEXT: port + build dom1 (CoCo guest kernel) on this machine (2026-06-23)
