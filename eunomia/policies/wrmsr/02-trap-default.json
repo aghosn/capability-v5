@@ -3,8 +3,12 @@
   "general": { "name": "wrmsr-scenario-2-trap-default" },
   "policies": {
     "msrs": {
-      "default": "Trap",
-      "overrides": []
+      "default": "Native",
+      "overrides": [
+        { "msr": "0xC0000103", "action": "Trap" },
+        { "msr": "0xC0000102", "action": "Trap" },
+        { "msr": "0xC0000084", "action": "Trap" }
+      ]
     },
     "cpuid": {
       "default": "Native",

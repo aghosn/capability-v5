@@ -44,6 +44,7 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     vmx.dom0
         .alloc_vmcs_regions(&capa.platform, num_vps, vmx.features.vmcs_revision_id);
     vmx.dom0.alloc_vapic_regions(&capa.platform, num_vps);
+    vmx.dom0.alloc_msr_list_regions(&capa.platform, num_vps);
     vmx.dom0.alloc_msr_bitmap(&capa.platform);
 
     serial_println!(
@@ -55,12 +56,15 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     // Set up the VMCS for the BSP VP (vp_index = bsp_index).
     // BSP's InactiveVcpu is created later in launch() after P7f patches RIP/RSP.
     let vp = vmx.bsp_index;
+    let hhdm = capa.platform.hhdm_offset();
 
     unsafe {
         setup_vmcs_for_vp(
             vmx.dom0.vmcs_phys(vp),
             vmx.dom0.vapic_phys(vp),
             vmx.dom0.msr_bitmap_phys(),
+            vmx.dom0.msr_list_phys(vp),
+            hhdm,
             eptp,
             vp,
         );
@@ -88,6 +92,8 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
                 vmx.dom0.vmcs_phys(ap_vp),
                 vmx.dom0.vapic_phys(ap_vp),
                 vmx.dom0.msr_bitmap_phys(),
+                vmx.dom0.msr_list_phys(ap_vp),
+                hhdm,
                 eptp,
                 ap_vp,
             );

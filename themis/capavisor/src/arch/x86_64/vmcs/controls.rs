@@ -35,6 +35,8 @@ pub(super) unsafe fn write_control_fields(
     eptp: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    msr_list_phys: u64,
+    msr_list_count: u32,
     pid_phys: u64,
     apic_access_phys: u64,
     io_bitmap_a_phys: u64,
@@ -266,9 +268,20 @@ pub(super) unsafe fn write_control_fields(
     // MSR bitmap: allocated from META pool, initialized to trap perf MSRs.
     vmx::vmwrite(control::MSR_BITMAPS_ADDR_FULL as u32, msr_bitmap_phys)
         .expect("vmwrite MSR bitmap");
-    vmx::vmwrite(control::VMENTRY_MSR_LOAD_COUNT as u32, 0)
+    // ── MSR entry-load / exit-store lists (SDM Vol 3C §26.4 & §27.4) ───── //
+    // Same page for both directions: hardware captures the guest's last
+    // MSR values on VMEXIT and reloads them on the next VMENTRY. See
+    // `super::msr_lists` for the entry layout and the fixed MSR set.
+    // VMEXIT_MSR_LOAD is intentionally 0 — capavisor never uses the MSRs
+    // in the list itself (no SYSCALL from ring 0, no SWAPGS, no RDTSCP),
+    // so no host-restore is needed.
+    vmx::vmwrite(control::VMENTRY_MSR_LOAD_ADDR_FULL as u32, msr_list_phys)
+        .expect("vmwrite vmentry msr load addr");
+    vmx::vmwrite(control::VMENTRY_MSR_LOAD_COUNT as u32, msr_list_count as u64)
         .expect("vmwrite vmentry msr load count");
-    vmx::vmwrite(control::VMEXIT_MSR_STORE_COUNT as u32, 0)
+    vmx::vmwrite(control::VMEXIT_MSR_STORE_ADDR_FULL as u32, msr_list_phys)
+        .expect("vmwrite vmexit msr store addr");
+    vmx::vmwrite(control::VMEXIT_MSR_STORE_COUNT as u32, msr_list_count as u64)
         .expect("vmwrite vmexit msr store count");
     vmx::vmwrite(control::VMEXIT_MSR_LOAD_COUNT as u32, 0).expect("vmwrite vmexit msr load count");
 

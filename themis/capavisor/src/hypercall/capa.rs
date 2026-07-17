@@ -190,6 +190,17 @@ pub(super) fn do_seal(
 
     // intr-p3g: program IRTEs for the newly-sealed child domain.
     if let Some(child) = &child_cap {
+        // Enforcement (A1/A2): at seal time, re-project the domain's
+        // final MsrPolicy onto its VMCS MSR bitmap. Userspace is
+        // untrusted (A2) and may push SET_POLICY ioctls in any order
+        // relative to CREATE_VP; without this re-projection, a policy
+        // change that arrived after do_add_vp would leave the bitmap
+        // stale (do_add_vp snapshots the policy at first-VP time, and
+        // apply_policy_change silently no-ops when the bitmap page
+        // isn't allocated yet). Making seal the synchronization point
+        // guarantees policy ⊆ bitmap by the time any VP can run.
+        platform.reproject_msr_policy(child);
+
         platform.program_domain_irtes(child);
     }
     Ok(HypercallResult::success())

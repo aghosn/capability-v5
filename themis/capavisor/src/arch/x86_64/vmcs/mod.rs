@@ -31,6 +31,7 @@ use crate::serial_println;
 mod controls;
 mod guest;
 mod host;
+pub mod msr_lists;
 
 // ── VMCS constraint helpers (public — used by hypercall.rs apply_vmcs_reg) ── //
 
@@ -95,17 +96,22 @@ pub unsafe fn setup_vmcs_for_vp(
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    msr_list_phys: u64,
+    hhdm: u64,
     eptp: u64,
     vp_index: usize,
 ) {
     vmx::vmclear(vmcs_phys).expect("vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("vmptrld failed");
 
+    let msr_list_count = msr_lists::init(msr_list_phys, hhdm);
     // dom0 keeps its xAPIC MMIO EPT passthrough — no APIC access page.
     controls::write_control_fields(
         eptp,
         vapic_phys,
         msr_bitmap_phys,
+        msr_list_phys,
+        msr_list_count,
         0,
         0,
         0,
@@ -139,6 +145,8 @@ pub unsafe fn setup_child_vmcs(
     vmcs_phys: u64,
     vapic_phys: u64,
     msr_bitmap_phys: u64,
+    msr_list_phys: u64,
+    hhdm: u64,
     pid_phys: u64,
     apic_access_phys: u64,
     io_bitmap_a_phys: u64,
@@ -149,10 +157,13 @@ pub unsafe fn setup_child_vmcs(
     vmx::vmclear(vmcs_phys).expect("child vmclear failed");
     vmx::vmptrld(vmcs_phys).expect("child vmptrld failed");
 
+    let msr_list_count = msr_lists::init(msr_list_phys, hhdm);
     controls::write_control_fields(
         eptp,
         vapic_phys,
         msr_bitmap_phys,
+        msr_list_phys,
+        msr_list_count,
         pid_phys,
         apic_access_phys,
         io_bitmap_a_phys,

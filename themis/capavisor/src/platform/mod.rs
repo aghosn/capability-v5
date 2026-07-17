@@ -652,6 +652,44 @@ impl ThemisPlatform {
         let phys = d.lock().arch.msr_bitmap_phys();
         if phys == 0 { None } else { Some(phys) }
     }
+
+    /// Re-project the sealed domain's full MsrPolicy onto its VMCS MSR
+    /// bitmap. Called from `do_seal` so that seal is the authoritative
+    /// synchronization point between the engine's policy state and the
+    /// hardware bitmap — regardless of the order in which userspace
+    /// issued `THHV_SET_POLICY` and `THHV_CREATE_VP` (which cannot be
+    /// trusted per axiom A2).
+    ///
+    /// If the domain has no MSR bitmap yet (no VP was ever added,
+    /// therefore the bitmap page was never allocated), this is a no-op:
+    /// there is no hardware state to stale. Any future `do_add_vp` will
+    /// project the current policy at that time.
+    #[cfg(target_arch = "x86_64")]
+    pub fn reproject_msr_policy(&self, child: &CapabilityRef<Domain>) {
+        let domain_id = child.read().data.id;
+        let Some(phys) = self.msr_bitmap_phys(domain_id) else {
+            return;
+        };
+        let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
+        // SAFETY: `phys` is the domain's dedicated MSR bitmap page; the
+        // domain is sealed but its VPs have not been dispatched to any
+        // physical core yet (dispatch happens after seal on the userspace
+        // side via THHV_RUN_VP). Rewriting the bitmap here races only
+        // with subsequent SetPolicy calls which serialize through the
+        // capa-engine op-lock via apply_update.
+        unsafe {
+            let guard = child.read();
+            crate::arch::x86_64::msr_bitmap::populate_from_policy(
+                phys,
+                hhdm,
+                &guard.data.policy.msrs,
+            );
+        }
+    }
+
+    /// Non-x86 stub for `reproject_msr_policy` — no MSR bitmap exists.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn reproject_msr_policy(&self, _child: &CapabilityRef<Domain>) {}
 }
 
 impl Platform for ThemisPlatform {

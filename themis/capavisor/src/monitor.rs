@@ -115,10 +115,19 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                                 continue;
                             }
                             InterpositionAction::Emulate(_) => {
+                                // Try capavisor's internal WRMSR registry first
+                                // (TSC_DEADLINE, APIC_BASE, …).  If no handler
+                                // is registered, treat the MSR as a per-domain
+                                // scratch register: store `value` in the policy
+                                // (so the next RDMSR returns it) and advance
+                                // RIP without a parent round-trip.
                                 match vp.try_emulate_wrmsr(*number, *value) {
                                     Ok(()) => continue,
                                     Err(()) => {
-                                        vp.forward_exit(reason);
+                                        let _ = update_msr_emulate_value(
+                                            platform, *number, *value,
+                                        );
+                                        vp.next_rip();
                                         continue;
                                     }
                                 }
@@ -214,6 +223,23 @@ fn lookup_msr_action(platform: &ThemisPlatform, msr: u32) -> InterpositionAction
             DefaultAction::Native => InterpositionAction::Native,
         },
     }
+}
+
+/// Update the stored Emulate value for an MSR in the current core's
+/// domain policy.  Returns `true` if an Emulate entry existed and was
+/// updated, `false` otherwise (caller falls back to Trap semantics).
+fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> bool {
+    let core_id = platform.get_current_core().unwrap_or(0) as usize;
+    let Some(cap) = platform.get_core_cap(core_id) else {
+        return false;
+    };
+    let mut guard = cap.write();
+    guard
+        .data
+        .policy
+        .msrs
+        .update_emulate_value(&msr, value)
+        .is_ok()
 }
 
 // ── Interrupt handling (generic policy, arch primitives) ───────────────────── //

@@ -56,8 +56,18 @@ const MSR_FMASK: u32 = 0xC000_0084;
 
 // Fresh magic per MSR — distinct so a stray Emulate-to-wrong-MSR
 // mistake would show up as an unexpected readback.
-const MAGIC_TSC_AUX: u64 = 0xDEAD_BEEF_0000_0001;
-const MAGIC_KERNEL_GS_BASE: u64 = 0xDEAD_BEEF_0000_0002;
+//
+// Values MUST be hardware-legal for the target MSR, because Native
+// policy passes WRMSR straight to silicon and #GPs surface as guest
+// exceptions:
+//   • TSC_AUX (0xC000_0103) — Intel reserved bits [63:32] must be 0.
+//   • KERNEL_GS_BASE (0xC000_0102) — must be canonical (bits [63:48]
+//     equal bit 47; sign-extension of the 48-bit address).
+//   • FMASK (0xC000_0084) — bits [63:32] reserved / zero on Intel.
+// All three magics are kept in the low canonical half (bits [63:47]=0),
+// which satisfies every constraint above with a single template.
+const MAGIC_TSC_AUX: u64 = 0x0000_0000_CAFE_0001;
+const MAGIC_KERNEL_GS_BASE: u64 = 0x0000_0000_CAFE_0002;
 const MAGIC_FMASK: u64 = 0x0000_0000_CAFE_0003; // FMASK is 32-bit reserved-high on some CPUs
 
 // ── Expectations ────────────────────────────────────────────────────────

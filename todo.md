@@ -316,6 +316,47 @@ GPA and HPA fields — fixed by using `mapped_gpas` via structured attestation A
 
 ## Tech Debt (must address)
 
+- **CHV forwarded-WRMSR trap handler (real trap semantic)**:
+  `cloud-hypervisor/hypervisor/src/themis/vcpu.rs::handle_wrmsr_exit`
+  (~lines 605-642) currently only reacts to `IA32_TSC_DEADLINE` (0x6E0)
+  and `IA32_X2APIC_ICR` (0x830). For any other MSR the trapped WRMSR
+  silently no-ops (no register update, no RIP advance, no #GP injection),
+  and the outer dispatch returns `VmExit::Ignore` → capavisor resumes
+  the child. This makes `MsrPolicy::Trap` unusable for architectural
+  MSRs the guest actually writes during boot (`IA32_EFER`, `IA32_PAT`,
+  `IA32_SYSENTER_*`, etc.) — the write is dropped, guest state diverges,
+  boot triple-faults (observed for scenario 02-trap-default of the
+  eunomia `wrmsr` policy suite: WRMSR EFER during PVH long-mode entry
+  is trapped, no LME set, triple fault at first paged instruction).
+  As a workaround the wrmsr policy suite was switched to
+  `default=Native + explicit Trap/Emulate overrides on the 3 target
+  MSRs` (see `eunomia/policies/wrmsr/0{2,3,4}-*.json`), which lets the
+  guest boot on Native for everything except the tested MSRs. This
+  papers over the missing CHV logic. Proper fix (needed before we can
+  claim MSR trap is a real capability):
+  * Add a forwarded-WRMSR handler in CHV that maps allowed MSRs to
+    `VpRegister` writes via the existing dirty-COMM staging path
+    (mirror the CR-access handler at `vcpu.rs:729-778` which already
+    does `updates.push(reg(VpRegister::Efer, ...))`).
+  * Cover at minimum `IA32_EFER` (0xC0000080), `IA32_PAT` (0x277),
+    `IA32_SYSENTER_CS/ESP/EIP` (0x174/0x175/0x176), and the FS/GS
+    base MSRs — all have `VpRegister` mappings in
+    `themis/capavisor/src/arch/x86_64/reg_apply.rs`.
+  * Advance guest RIP by `msg.instruction_length` after applying.
+  * For unknown/policy-rejected MSRs: inject `#GP(0)` and advance RIP
+    (need to plumb an exception-injection helper into the dirty-COMM
+    path — capavisor already has `inject_exception` primitives used
+    by the local WRMSR handler in `arch/x86_64/vmexit/msr.rs`).
+  * Once implemented, revert the `default=Native` workaround in the
+    three wrmsr scenario JSONs so `02-trap-default` actually exercises
+    the trap-default configuration end-to-end.
+  Design context: `themis/capavisor/src/arch/x86_64/hypercall/switch.rs::forward_child_exit`
+  does NOT auto-advance RIP for forwarded exits — the parent domain
+  owns that responsibility, which is the correct trust model
+  (axiom A2: policy is authoritative, parent decides trap semantics).
+
+## Tech Debt (previously listed)
+
 - **Coco isolation test — host access attempt after CARVE+SEND**:
   add a eunomia test (or extend `eunomia/workloads/coco/`) where dom0
   deliberately tries to read/write the guest RAM after CARVE+SEND has

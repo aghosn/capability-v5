@@ -79,6 +79,7 @@ pub(super) fn do_add_vp(
         vmcs_phys,
         vapic_phys,
         pid_phys,
+        msr_list_phys,
         msr_bitmap_phys,
         apic_access_phys,
         io_bitmap_a_phys,
@@ -91,12 +92,8 @@ pub(super) fn do_add_vp(
         pd_vp_count = pd.arch.vps().len(); // VP index for this new VP
                                            // Check if this is the first VP (need extra pages for MSR + IO bitmaps).
         first_vp = pd.arch.msr_bitmap_phys() == 0;
-        // Per VP: VMCS + VAPIC + PID (+ MSR bitmap + 2 IO bitmaps if first VP).
-        // apic_access_phys comes from the ChangeRights mapping of GPA 0xFEE00000,
-        // established during THHV_SEND_SHARED_META — not allocated from META.
-        // THHV_META_PAGES_SHARED (4: MSR bitmap + IO bitmaps + EPT root) +
-        // THHV_META_PAGES_PER_VP (3) = 7 total for first VP.
-        let pages_needed = if first_vp { 6 } else { 3 };
+        // Per VP: VMCS + VAPIC + PID + MSR-list (+ MSR bitmap + 2 IO bitmaps if first VP).
+        let pages_needed = if first_vp { 7 } else { 4 };
         if pd.meta.free_pages() < pages_needed as u64 {
             serial_println!(
                 "[ADD_VP] not enough META pages: need {} have {}",
@@ -108,6 +105,7 @@ pub(super) fn do_add_vp(
         vmcs_phys = pd.meta.alloc_frame();
         vapic_phys = pd.meta.alloc_frame();
         pid_phys = pd.meta.alloc_frame();
+        msr_list_phys = pd.meta.alloc_frame();
         if first_vp {
             let msr_phys = pd.meta.alloc_frame();
             pd.arch.set_msr_bitmap_phys(msr_phys);
@@ -129,6 +127,10 @@ pub(super) fn do_add_vp(
     let hhdm = platform.hhdm_offset();
     unsafe {
         core::ptr::write_bytes((pid_phys + hhdm) as *mut u8, 0, 64);
+        // Pre-populate the VMENTRY-MSR-LOAD / VMEXIT-MSR-STORE list with the
+        // fixed SYSCALL_MSRS entries; hardware handles save/restore across
+        // VMEXITs from this VP's VMCS.
+        let _ = crate::arch::x86_64::vmcs::msr_lists::init(msr_list_phys, hhdm);
     }
 
     // Initialize the VAPIC page with sane LAPIC defaults so that
@@ -245,6 +247,7 @@ pub(super) fn do_add_vp(
             pd.meta.free_frame(vmcs_phys);
             pd.meta.free_frame(vapic_phys);
             pd.meta.free_frame(pid_phys);
+            pd.meta.free_frame(msr_list_phys);
             if first_vp {
                 pd.meta.free_frame(msr_bitmap_phys);
                 pd.arch.set_msr_bitmap_phys(0);
@@ -284,6 +287,8 @@ pub(super) fn do_add_vp(
                     vmcs_phys,
                     vapic_phys,
                     msr_bitmap_phys,
+                    msr_list_phys,
+                    hhdm,
                     pid_phys,
                     apic_access_phys,
                     io_bitmap_a_phys,
