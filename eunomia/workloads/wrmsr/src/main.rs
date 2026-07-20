@@ -20,15 +20,14 @@
 //! Verification per MSR (in order):
 //!   1. `try_rdmsr(msr)` — matches expected policy:
 //!        Native   → Ok(_) (whatever the host reports)
-//!        Trap     → Err(())
+//!        Trap     → Ok(0) (CHV owns a per-vCPU shadow; unwritten = 0)
 //!        Emulate  → Ok(seed) (the value the policy declared)
 //!   2. `try_wrmsr(msr, magic)`:
-//!        Native/Emulate → Ok(())
-//!        Trap           → Err(())
-//!   3. `try_rdmsr(msr)` readback (only if step 2 succeeded):
+//!        Native/Emulate/Trap → Ok(()) (Trap: CHV records into its shadow)
+//!   3. `try_rdmsr(msr)` readback:
 //!        Native   → Ok(magic)  (real hardware stored the write)
 //!        Emulate  → Ok(magic)  (capavisor's per-VP store)
-//!        Trap     → skipped
+//!        Trap     → Ok(magic)  (CHV's per-vCPU shadow)
 //!
 //! The workload emits structured serial output that `run-eunomia.sh
 //! --policy-suite` greps.  On any mismatch the test returns `Err` and
@@ -78,8 +77,11 @@ enum Expect {
     /// (unpredictable); WRMSR succeeds; readback returns the value we
     /// just wrote.
     Native,
-    /// #GP on any RDMSR/WRMSR — capavisor injected the fault, our
-    /// fixup handler caught it.
+    /// CHV-owned per-vCPU shadow.  RDMSR returns 0 before any WRMSR
+    /// on this vCPU; WRMSR succeeds and records into the shadow; a
+    /// subsequent RDMSR returns the last written value.  The physical
+    /// MSR is never accessed — capavisor forwards every access to the
+    /// parent (CHV) which owns the guest-visible value.
     Trap,
     /// Capavisor-stored value.  RDMSR returns `initial` before any
     /// WRMSR; WRMSR succeeds and updates the store; a subsequent
@@ -191,7 +193,8 @@ fn policy_matches_expectations() -> Result<(), &'static str> {
         // Step 1: initial RDMSR must match expected policy.
         let rd1_ok = match (case.expect, rd1) {
             (Expect::Native, Ok(_)) => true,
-            (Expect::Trap, Err(())) => true,
+            // Trap: CHV shadow returns 0 for an MSR never written on this vCPU.
+            (Expect::Trap, Ok(0)) => true,
             (Expect::Emulate { initial }, Ok(v)) if v == initial => true,
             _ => false,
         };
@@ -200,7 +203,8 @@ fn policy_matches_expectations() -> Result<(), &'static str> {
         let wr_ok = match (case.expect, wr) {
             (Expect::Native, Ok(())) => true,
             (Expect::Emulate { .. }, Ok(())) => true,
-            (Expect::Trap, Err(())) => true,
+            // Trap: CHV records the write into its per-vCPU shadow.
+            (Expect::Trap, Ok(())) => true,
             _ => false,
         };
         // Step 3: readback if write succeeded.
@@ -209,7 +213,8 @@ fn policy_matches_expectations() -> Result<(), &'static str> {
             let ok = match (case.expect, r) {
                 (Expect::Native, Ok(v)) if v == case.magic => true,
                 (Expect::Emulate { .. }, Ok(v)) if v == case.magic => true,
-                // Trap can never reach here — wr would have been Err.
+                // Trap: readback must be the value the previous WRMSR shadowed.
+                (Expect::Trap, Ok(v)) if v == case.magic => true,
                 _ => false,
             };
             (r, ok)
