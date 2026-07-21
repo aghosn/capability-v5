@@ -124,6 +124,19 @@ pub struct CoreContext {
     /// The VMCALL handler's entry point into the capability tree.
     /// `None` only during early boot before dom0 is initialised.
     pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
+    /// Raw pointer to this core's `ActiveVcpu` on the monitor-loop stack.
+    ///
+    /// Set once at the top of `monitor_loop` (never cleared: `monitor_loop`
+    /// is divergent and the `Vp<A>` it owns lives at a fixed stack address
+    /// forever).  Only the owning core reads it, and only between VMEXITs
+    /// (i.e. while no `&mut ActiveVcpu` is otherwise live in the arch code),
+    /// so no aliasing violation.
+    ///
+    /// Used by `Platform::poll_and_respond_cross_core` to reach the vcpu
+    /// for `CoreUpdate::Switch` (VMCLEAR/VMPTRLD).  Opaque `u8` here to
+    /// keep `CoreContext` arch-neutral; consumers on x86 cast to
+    /// `*mut crate::vcpu::ActiveVcpu`.
+    pub active_vcpu: AtomicPtr<u8>,
     /// (quantum-sched) Parent-bound vector deferred during child execution.
     /// 0 = no deferred vector; 1–255 = vector number awaiting flush to parent.
     #[cfg(feature = "quantum-sched")]
@@ -136,6 +149,7 @@ impl CoreContext {
             domain_id: AtomicU64::new(IDLE_DOMAIN),
             vp_id: AtomicU32::new(IDLE_VP),
             domain_cap: Mutex::new(None),
+            active_vcpu: AtomicPtr::new(core::ptr::null_mut()),
             #[cfg(feature = "quantum-sched")]
             deferred_vector: AtomicU16::new(0),
         }

@@ -795,6 +795,15 @@ impl Domain {
     /// checks the *owner* of a child capability — appropriate for operations
     /// on resources owned by the caller.
     pub fn require_api(&self, required_api: u16) -> Result<()> {
+        // A revoked caller cannot be sealed, so today this returns
+        // DomainNotSealed accidentally.  Reject explicitly with the correct
+        // error so callers that obtained a `CapabilityRef<Domain>` outside
+        // an engine lock (e.g. capavisor's `get_core_cap` at hypercall entry)
+        // and got beaten to the punch by a concurrent revocation see the
+        // real reason instead of a misleading "not sealed" error.
+        if self.is_revoked() {
+            return Err(CapaError::DomainRevoked);
+        }
         if !self.is_sealed() {
             return Err(CapaError::DomainNotSealed);
         }

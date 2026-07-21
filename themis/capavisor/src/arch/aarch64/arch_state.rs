@@ -114,3 +114,12 @@ impl ArchDomain for ArchDomainState {
 pub fn flush_tlb_handle(_handle: u64) {
     // TODO(arm): TLBI by VMID once Stage-2 is wired.
 }
+
+/// Cross-core revoke-return handler (AArch64 stub).
+pub unsafe fn apply_cross_core_switch(
+    _platform: &crate::platform::ThemisPlatform,
+    _core_id: capability_engine::CoreId,
+    _dst: (capability_engine::DomainId, usize),
+) {
+    unimplemented!("apply_cross_core_switch: aarch64 backend not yet implemented")
+}

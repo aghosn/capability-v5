@@ -256,6 +256,46 @@ pub struct UpdateBatch {
 
     /// Snapshot of domain states before updates (for rollback)
     snapshots: BTreeMap<DomainId, Vec<u8>>,
+
+    /// Per-core switch orders emitted by domain revocations.
+    ///
+    /// Populated during `revoke_domain_subtree`: for every VP found in
+    /// `VpRunState::Running{core, caller: Some(_)}` inside a revoked
+    /// domain, the engine walks the caller chain (skipping any ancestor
+    /// whose domain is also being revoked by this batch) and appends a
+    /// `CoreSwitch` naming the resume target.  The initiating core hands
+    /// each entry to `Platform::push_core_switch` **before** IPI/barrier
+    /// so target cores observe the queued switch when they drain the
+    /// per-core update queue.
+    core_switches: Vec<CoreSwitch>,
+}
+
+/// Per-core "switch to this VP on revocation" order.
+///
+/// Emitted by the engine during `revoke_domain_subtree` for every core
+/// currently running a VP in the revoked subtree.  Consumed by the initiating
+/// core inside `execute()` before it sends cross-core IPIs.
+#[derive(Clone)]
+pub struct CoreSwitch {
+    /// Physical core to redirect.
+    pub core: CoreId,
+    /// Capability of the domain to resume on `core`.  Held as a strong
+    /// reference so the ancestor domain cannot be dropped before the
+    /// platform observes the switch.
+    pub target_domain: crate::capability::CapabilityRef<crate::domain::Domain>,
+    /// VP id of the resume target within `target_domain`.
+    pub target_vp: u64,
+}
+
+impl core::fmt::Debug for CoreSwitch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let target_id = self.target_domain.read().data.id;
+        f.debug_struct("CoreSwitch")
+            .field("core", &self.core)
+            .field("target_domain_id", &target_id)
+            .field("target_vp", &self.target_vp)
+            .finish()
+    }
 }
 
 impl UpdateBatch {
@@ -397,6 +437,17 @@ impl UpdateBatch {
         &self.affected_domains
     }
 
+    /// Get per-core switch orders (see [`CoreSwitch`]).
+    pub fn core_switches(&self) -> &[CoreSwitch] {
+        &self.core_switches
+    }
+
+    /// Append a per-core switch order.  Called from `revoke_domain_subtree`
+    /// after walking a running VP's caller chain to its resume target.
+    pub fn add_core_switch(&mut self, switch: CoreSwitch) {
+        self.core_switches.push(switch);
+    }
+
     /// Check if the batch is empty
     pub fn is_empty(&self) -> bool {
         self.updates.is_empty()
@@ -412,6 +463,7 @@ impl UpdateBatch {
         self.updates.clear();
         self.affected_domains.clear();
         self.snapshots.clear();
+        self.core_switches.clear();
     }
 
     /// Merge another batch into this one
@@ -419,6 +471,7 @@ impl UpdateBatch {
         self.updates.extend(other.updates);
         self.affected_domains.extend(other.affected_domains);
         self.snapshots.extend(other.snapshots);
+        self.core_switches.extend(other.core_switches);
     }
 }
 

@@ -9,7 +9,7 @@ use capability_engine::{
     execute, Capability, CoreId, Domain, DomainId, DomainPolicy, MonitorAPI, Platform, Update,
 };
 use capability_engine::memory::Rights;
-use common::TestPlatform;
+use common::{CallLogEntry, TestPlatform};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -252,4 +252,377 @@ fn test_revoke_domain_carries_fallback() {
             "fallback should be the parent domain id"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. Domain revocation ordering — on_domain_revoked must precede
+//    apply_update(RevokeDomain{d}) for the same d.
+//
+// Rationale: on bare metal, apply_update(RevokeDomain) calls the platform's
+// per-domain `arch.destroy()` which frees the domain's second-stage page
+// tables and IOMMU tables.  If a remote core is still bound to that domain
+// at the moment destroy() runs, its VMCS's EPTP references freed memory
+// and the next VMRESUME on that core is a use-after-free.
+//
+// The Platform contract therefore requires `on_domain_revoked(d, fb)` to
+// run FIRST — inside the barrier window when all affected cores are
+// stopped — so the platform can atomically re-bind those cores to the
+// fallback domain (swapping the per-core `domain_cap`, VMCLEAR-ing the
+// stale VMCS, installing the fallback's VMCS) *before* apply_update runs
+// the teardown.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_execute_on_domain_revoked_precedes_apply_update() {
+    let platform = TestPlatform::new();
+    const CORE_0: CoreId = 0;
+    const ROOT_ID: DomainId = 0;
+
+    reg(&platform, ROOT_ID, None);
+
+    // Simulate a remote core actively bound to the child domain — this is
+    // exactly the "domain is running on a remote core" case the fix must
+    // handle safely.
+    let root_cap = Capability::new_root(0, 0, Domain::new_root(4));
+    let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let child_h = Capability::create(&platform, &root_cap, child_policy)
+        .unwrap()
+        .0;
+    Capability::seal(&platform, &root_cap, child_h).unwrap();
+    let child_cap = root_cap.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    let child_id = child_cap.read().data.id;
+    reg(&platform, child_id, Some(ROOT_ID));
+    platform.set_core_context(CORE_0, &child_cap, 0);
+
+    // Sanity: core is bound to the child.
+    assert_eq!(platform.get_core_domain(CORE_0), Some(child_id));
+
+    // Trigger a RevokeDomain update through the engine's execute() so we
+    // exercise the real ordering (barrier + apply_update + on_domain_revoked).
+    execute(&platform, true, || {
+        let mut batch = capability_engine::UpdateBatch::new();
+        batch.add_revoke_domain_with_fallback(child_id, Some(ROOT_ID));
+        Ok(((), batch))
+    })
+    .expect("revoke should succeed");
+
+    // Inspect the ordered call log.
+    let log = platform.drain_call_log();
+
+    let on_revoked_idx = log
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                CallLogEntry::OnDomainRevoked { domain, .. } if *domain == child_id
+            )
+        })
+        .expect("on_domain_revoked(child_id) must have been called");
+
+    let apply_idx = log
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                CallLogEntry::ApplyUpdate(Update::RevokeDomain { domain, .. })
+                    if *domain == child_id
+            )
+        })
+        .expect("apply_update(RevokeDomain{child_id}) must have been called");
+
+    assert!(
+        on_revoked_idx < apply_idx,
+        "on_domain_revoked(child_id) must precede apply_update(RevokeDomain{{child_id}}) \
+         so the platform re-binds remote cores off the doomed domain BEFORE destroy() \
+         runs.  Got log order: on_domain_revoked at #{on_revoked_idx}, \
+         apply_update(RevokeDomain) at #{apply_idx}.  \
+         Full log:\n{:#?}",
+        log,
+    );
+
+    // After ordering is correct, the routing must have flipped to the fallback.
+    assert_eq!(
+        platform.get_core_domain(CORE_0),
+        Some(ROOT_ID),
+        "core should have been redirected to the fallback (root)"
+    );
+    assert!(
+        platform.is_domain_revoked(child_id),
+        "child domain must be marked revoked"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Cross-core domain revocation — Platform::push_core_switch is invoked
+//    with the correct resume target for every affected core, BEFORE the
+//    initiator's IPI/apply_update phase.
+//
+// See docs/design/cross-core-revoke.md — Tyche-aligned protocol.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use capability_engine::{CapabilityRef, LocalHandle, VpRunState};
+
+/// Put `domain`'s VP[vp_id] into `Running { core, caller: None }`.  Used
+/// as a seed state before `Capability::switch` gets called.
+fn seed_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: CoreId) {
+    let d = domain.read();
+    let vp = d.data.policy.vprocessor_states[vp_id].clone();
+    drop(d);
+    *vp.run_state.write() = VpRunState::Running { core, caller: None };
+}
+
+/// Create + seal a child domain under `parent` with all 4 cores and 4 VPs.
+fn make_child(
+    platform: &TestPlatform,
+    parent: &CapabilityRef<Domain>,
+) -> (CapabilityRef<Domain>, LocalHandle) {
+    let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let num_vps = policy.num_vprocessors;
+    let h = Capability::create(platform, parent, policy).unwrap().0;
+    let child = parent.read().data.domain_capabilities[&h]
+        .upgrade()
+        .unwrap();
+    for _ in 0..num_vps {
+        child.write().data.add_vprocessor().unwrap();
+    }
+    Capability::seal(platform, parent, h).unwrap();
+    let child_id = child.read().data.id;
+    let parent_id = parent.read().data.id;
+    platform.register_domain(child_id, Some(parent_id));
+    (child, h)
+}
+
+/// Extract the (target_domain_id, target_vp) of every `PushCoreSwitch`
+/// entry in the log, in order.
+fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64)> {
+    log.iter()
+        .filter_map(|e| match e {
+            CallLogEntry::PushCoreSwitch { core, target_domain, target_vp } => {
+                Some((*core, *target_domain, *target_vp))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Index of the last `PushCoreSwitch` entry (or `None`).
+fn last_push_idx(log: &[CallLogEntry]) -> Option<usize> {
+    log.iter()
+        .rposition(|e| matches!(e, CallLogEntry::PushCoreSwitch { .. }))
+}
+
+/// Index of the first `ApplyUpdate(RevokeDomain{d})` entry for `d`.
+fn first_apply_revoke_idx(log: &[CallLogEntry], d: DomainId) -> Option<usize> {
+    log.iter().position(|e| {
+        matches!(
+            e,
+            CallLogEntry::ApplyUpdate(Update::RevokeDomain { domain, .. }) if *domain == d
+        )
+    })
+}
+
+/// **T-basic** — root + one child, remote core running child.
+///
+/// Revoking child from root must emit exactly one `push_core_switch`
+/// naming (remote_core, root, root_vp_id_that_did_the_switch), and it
+/// must be recorded BEFORE the `apply_update(RevokeDomain{child})` entry.
+#[test]
+fn test_revoke_basic_pushes_switch_to_root() {
+    const REMOTE_CORE: CoreId = 1;
+    const INIT_CORE: CoreId = 0;
+
+    let platform = TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+
+    // Remote core: seed root VP[REMOTE_CORE] as Running on REMOTE_CORE,
+    // then switch it into the child.  After the switch, child.VP[0] is
+    // Running{core: REMOTE_CORE, caller: root.VP[REMOTE_CORE]}.
+    seed_running(&root, REMOTE_CORE as usize, REMOTE_CORE);
+    platform.set_current_core(Some(REMOTE_CORE));
+    let (child, child_h) = make_child(&platform, &root);
+    let child_id = child.read().data.id;
+    Capability::switch(&platform, &root, child_h, 0).unwrap();
+
+    // Sanity: remote core is bound to child.
+    assert_eq!(platform.get_core_domain(REMOTE_CORE), Some(child_id));
+
+    // Move to the initiator core to trigger the revocation from a
+    // different core.  This is the cross-core path exercised by
+    // execute()'s affected_cores set.
+    platform.set_current_core(Some(INIT_CORE));
+    let _ = platform.drain_call_log(); // discard setup entries
+
+    capability_engine::Capability::<Domain>::revoke_domain(&platform, &root, child_h)
+        .expect("revoke_domain should succeed");
+
+    let log = platform.drain_call_log();
+    let switches = switches_in(&log);
+
+    assert_eq!(
+        switches,
+        vec![(REMOTE_CORE, root_id, REMOTE_CORE)],
+        "expected exactly one push_core_switch to (REMOTE_CORE, root, VP[REMOTE_CORE]); \
+         got: {:#?}\nfull log: {:#?}",
+        switches,
+        log,
+    );
+
+    let last_push = last_push_idx(&log).expect("push_core_switch missing");
+    let first_apply = first_apply_revoke_idx(&log, child_id)
+        .expect("apply_update(RevokeDomain{child}) missing");
+    assert!(
+        last_push < first_apply,
+        "push_core_switch must be recorded BEFORE apply_update(RevokeDomain{{child}}); \
+         push idx={last_push}, apply idx={first_apply}\nlog: {:#?}",
+        log,
+    );
+}
+
+/// **T-chain** — A→B→C, remote core running C, revoke B.
+///
+/// Because B is revoked (subtree ⇒ C is too), the walk must skip past B
+/// and emit a switch back to A on the remote core.
+#[test]
+fn test_revoke_chain_walks_past_revoked_ancestor() {
+    const REMOTE_CORE: CoreId = 1;
+    const INIT_CORE: CoreId = 0;
+
+    let platform = TestPlatform::new();
+    // A = root
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+
+    seed_running(&root, REMOTE_CORE as usize, REMOTE_CORE);
+    platform.set_current_core(Some(REMOTE_CORE));
+
+    // B under A
+    let (child_b, child_b_h) = make_child(&platform, &root);
+
+    // A → B
+    Capability::switch(&platform, &root, child_b_h, 0).unwrap();
+
+    // C under B
+    let (child_c, child_c_h) = make_child(&platform, &child_b);
+    let child_c_id = child_c.read().data.id;
+
+    // B → C
+    Capability::switch(&platform, &child_b, child_c_h, 0).unwrap();
+
+    // Sanity: remote core is bound to C.
+    assert_eq!(platform.get_core_domain(REMOTE_CORE), Some(child_c_id));
+
+    // Initiate the revocation of B from the initiator core.
+    platform.set_current_core(Some(INIT_CORE));
+    let _ = platform.drain_call_log();
+
+    capability_engine::Capability::<Domain>::revoke_domain(&platform, &root, child_b_h)
+        .expect("revoke_domain should succeed");
+
+    let log = platform.drain_call_log();
+    let switches = switches_in(&log);
+
+    // Should be exactly one switch pointing at A (root), on REMOTE_CORE.
+    // The VP id is A's VP that did the A→B switch (which was VP[REMOTE_CORE]).
+    assert_eq!(
+        switches,
+        vec![(REMOTE_CORE, root_id, REMOTE_CORE)],
+        "chain walk should skip revoked B and resume in A; got: {:#?}\nlog: {:#?}",
+        switches,
+        log,
+    );
+}
+
+/// **T-multi** — two siblings under root, each on its own remote core;
+/// revoke one sibling only, the other must not be touched.
+#[test]
+fn test_revoke_multi_only_affected_core_pushed() {
+    const CORE_A: CoreId = 1;
+    const CORE_B: CoreId = 2;
+    const INIT_CORE: CoreId = 0;
+
+    let platform = TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+
+    // Two children, each bound to a different remote core via a switch
+    // originating from a distinct root VP.
+    seed_running(&root, CORE_A as usize, CORE_A);
+    platform.set_current_core(Some(CORE_A));
+    let (child_a, child_a_h) = make_child(&platform, &root);
+    let child_a_id = child_a.read().data.id;
+    Capability::switch(&platform, &root, child_a_h, 0).unwrap();
+
+    seed_running(&root, CORE_B as usize, CORE_B);
+    platform.set_current_core(Some(CORE_B));
+    let (child_b, child_b_h) = make_child(&platform, &root);
+    let child_b_id = child_b.read().data.id;
+    Capability::switch(&platform, &root, child_b_h, 0).unwrap();
+
+    // Revoke ONLY child_a.
+    platform.set_current_core(Some(INIT_CORE));
+    let _ = platform.drain_call_log();
+
+    capability_engine::Capability::<Domain>::revoke_domain(&platform, &root, child_a_h)
+        .expect("revoke_domain should succeed");
+
+    let log = platform.drain_call_log();
+    let switches = switches_in(&log);
+
+    assert_eq!(
+        switches,
+        vec![(CORE_A, root_id, CORE_A)],
+        "only CORE_A should have a push; child_b's core (CORE_B) must be untouched. \
+         got: {:#?}\nlog: {:#?}",
+        switches,
+        log,
+    );
+
+    // child_b's binding must remain intact.
+    assert_eq!(platform.get_core_domain(CORE_B), Some(child_b_id));
+    let _ = child_a_id; // silence unused warning
+}
+
+/// **T-none** — revoke a domain bound to no core.  Zero pushes.
+#[test]
+fn test_revoke_no_running_vp_no_pushes() {
+    const INIT_CORE: CoreId = 0;
+
+    let platform = TestPlatform::new();
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+    platform.set_current_core(Some(INIT_CORE));
+
+    // Create + seal a child but never switch into it — no VP is Running.
+    let (child, child_h) = make_child(&platform, &root);
+    let child_id = child.read().data.id;
+    assert_eq!(platform.get_core_domain(INIT_CORE), None);
+
+    let _ = platform.drain_call_log();
+    capability_engine::Capability::<Domain>::revoke_domain(&platform, &root, child_h)
+        .expect("revoke_domain should succeed");
+
+    let log = platform.drain_call_log();
+    let switches = switches_in(&log);
+
+    assert!(
+        switches.is_empty(),
+        "no core is running the child; expected 0 pushes, got: {:#?}\nlog: {:#?}",
+        switches,
+        log,
+    );
+
+    // Sanity: apply_update(RevokeDomain{child}) must still be emitted.
+    assert!(
+        first_apply_revoke_idx(&log, child_id).is_some(),
+        "apply_update(RevokeDomain{{child}}) must still fire even with 0 switches\n\
+         log: {:#?}",
+        log,
+    );
 }

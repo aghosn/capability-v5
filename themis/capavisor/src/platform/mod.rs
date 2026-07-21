@@ -29,9 +29,11 @@
 //!
 //! responding core (via poll_and_respond_cross_core / P3b IDT handler):
 //!   clear ipi_pending[self]
-//!   sync_barrier(0, 0)    — signal "I have stopped"
-//!   INVEPT(single-context) — flush stale EPT TLB entries for current domain
-//!   sync_barrier(1, 0)    — signal "local flush done"
+//!   drain per-core update queue (VMCLEAR/VMPTRLD for Switch, INVEPT for
+//!     TlbShootdown, …) — this is where the responder actually switches
+//!     off the doomed domain.
+//!   sync_barrier(0, 0)    — signal "I have switched off the doomed domain"
+//!   sync_barrier(1, 0)    — wait for initiator's apply_update to finish
 //! ```
 //!
 //! ## Update barrier and locking invariants
@@ -411,6 +413,44 @@ impl ThemisPlatform {
 
     // ── CoreContext access ─────────────────────────────────────────────── //
 
+    /// Pin the calling core's `ActiveVcpu` pointer.
+    ///
+    /// Called once from `monitor_loop` before entering the exit-handling
+    /// loop.  The pointer lives at a fixed stack address for the entire
+    /// (divergent) lifetime of `monitor_loop`, so it is never cleared.
+    ///
+    /// SAFETY: `ptr` must point to a valid `ActiveVcpu` on this core's
+    /// monitor-loop stack that will remain live and unmoved for the rest
+    /// of the core's execution.  Only the owning core will dereference it,
+    /// and only between VMEXITs.
+    pub fn pin_active_vcpu(&self, core_id: CoreId, ptr: *mut u8) {
+        self.cores[core_id as usize]
+            .active_vcpu
+            .store(ptr, Ordering::Release);
+    }
+
+    /// Read the calling core's pinned `ActiveVcpu` pointer, if any.
+    ///
+    /// Returns `null` before `pin_active_vcpu` has been called on this
+    /// core (early boot only).  Callers cast to the arch-specific
+    /// `ActiveVcpu` type.
+    pub fn active_vcpu_ptr(&self, core_id: CoreId) -> *mut u8 {
+        self.cores[core_id as usize]
+            .active_vcpu
+            .load(Ordering::Acquire)
+    }
+
+    /// Read the currently-scheduled (domain, vp) on `core_id` from Tier‑1.
+    ///
+    /// Lock-free — used by the cross-core Switch handler to identify the
+    /// `src` half of a VMCLEAR/VMPTRLD swap.
+    pub fn core_current_binding(&self, core_id: CoreId) -> (DomainId, usize) {
+        let cc = &self.cores[core_id as usize];
+        let dom = cc.domain_id.load(Ordering::Acquire);
+        let vp = cc.vp_id.load(Ordering::Acquire) as usize;
+        (dom, vp)
+    }
+
     /// Store the dom0 `CapabilityRef<Domain>` as the tree root anchor.
     ///
     /// Must be called exactly once during boot.  Keeps the entire capability
@@ -530,8 +570,9 @@ impl ThemisPlatform {
 
     /// Drain and apply all pending `CoreUpdate`s for the current core.
     ///
-    /// Called between barriers 0 and 1 in `poll_and_respond_cross_core`.
-    /// Returns `true` if any update was processed.
+    /// Called BEFORE barrier 0 in `poll_and_respond_cross_core` (Tyche-
+    /// aligned drain-first protocol) — so `Switch` handlers can VMCLEAR
+    /// and rebind the vcpu before the initiator applies global updates.
     fn apply_local_core_updates(&self, core_id: CoreId) {
         let mut queue = self.core_updates[core_id as usize].lock();
         while let Some(update) = queue.pop_front() {
@@ -551,8 +592,43 @@ impl ThemisPlatform {
                         arc.lock().clear_cached_on(core_id);
                     }
                 }
-                CoreUpdate::Switch { .. } => {
-                    todo!("P9: cross-core domain switch");
+                CoreUpdate::Switch { domain_cap, vp_id } => {
+                    // Revoke-driven cross-core switch (see docs/design/
+                    // cross-core-revoke.md).  Runs BEFORE B0 so the target
+                    // has already switched off the doomed domain by the
+                    // time the initiator's apply_update tears it down.
+                    //
+                    // Order matters:
+                    //   1. Engine state transition first (VP Locked →
+                    //      Running), which also updates Tier‑1/Tier‑3 via
+                    //      set_core_context.
+                    //   2. Then the hardware VMCLEAR/VMPTRLD swap, which
+                    //      reads Tier‑1 as `src` — must match the OLD
+                    //      binding, so we grab it BEFORE step 1.
+                    let src = self.core_current_binding(core_id);
+                    let dst_dom = domain_cap.read().data.id;
+                    let dst_vp_idx = vp_id as usize;
+
+                    capability_engine::Capability::<Domain>::switch_after_callee_revoked(
+                        self,
+                        &domain_cap,
+                        vp_id as u64,
+                    )
+                    .expect("[REVOKE_SWITCH] engine transition failed");
+
+                    // SAFETY: pinned active_vcpu is valid on this core;
+                    // src is the currently-loaded VMCS (captured before
+                    // the engine mutation).
+                    unsafe {
+                        crate::arch::apply_cross_core_switch(
+                            self,
+                            core_id,
+                            (dst_dom, dst_vp_idx),
+                        );
+                    }
+                    // Consume unused src outside the arch call — kept for
+                    // symmetry / documentation of the captured binding.
+                    let _ = src;
                 }
                 CoreUpdate::Revoke { .. } => {
                     todo!("P9: cross-core domain revocation");
@@ -694,11 +770,11 @@ impl ThemisPlatform {
 
 impl Platform for ThemisPlatform {
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(SharedGuard::new(&self.op_lock)))
+        Ok(Box::new(SharedGuard::new(&self.op_lock, self)))
     }
 
     fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>> {
-        Ok(Box::new(ExclusiveGuard::new(&self.op_lock)))
+        Ok(Box::new(ExclusiveGuard::new(&self.op_lock, self)))
     }
 
     fn send_ipi(&self, core_id: CoreId) {
@@ -744,12 +820,32 @@ impl Platform for ThemisPlatform {
         {
             return;
         }
-        // Barrier 0: rendezvous with initiator.
-        self.barriers[0].wait(0);
-        // Drain per-core update queue between the two barriers.
+        // Tyche-aligned protocol (see docs/design/cross-core-revoke.md):
+        //   1. Drain queue FIRST — this is where Switch handlers do
+        //      VMCLEAR/VMPTRLD.  When we release B0, the initiator relies
+        //      on the invariant "no affected core still points at the
+        //      doomed VMCS", so the drain must precede B0.
+        //   2. B0: "I've switched off the doomed domain — you may apply
+        //      global updates now (EPT/IOMMU frees)."
+        //   3. B1: "You've finished applying — I may resume execution."
         self.apply_local_core_updates(core_id);
-        // Barrier 1: signal completion.
+        self.barriers[0].wait(0);
         self.barriers[1].wait(0);
+    }
+
+    fn push_core_switch(
+        &self,
+        core_id: CoreId,
+        target_domain: &CapabilityRef<Domain>,
+        target_vp: u64,
+    ) {
+        self.push_core_update(
+            core_id,
+            CoreUpdate::Switch {
+                domain_cap: target_domain.clone(),
+                vp_id: target_vp as u32,
+            },
+        );
     }
 
     fn apply_update(&self, update: &Update) {

@@ -58,6 +58,29 @@ pub struct TestPlatformInner {
     pub current_core: Option<CoreId>,
     /// VP register storage: (domain_id, vp_id, reg_id) → value
     pub registers: BTreeMap<(DomainId, u64, u64), u64>,
+    /// Ordered log of `apply_update` / `on_domain_revoked` calls, in the
+    /// exact order the engine invoked them.  Used by ordering tests to
+    /// verify that `on_domain_revoked` fires strictly before
+    /// `apply_update(RevokeDomain{d})` for the same `d`.
+    pub call_log: Vec<CallLogEntry>,
+}
+
+/// One entry in the ordered platform-call log; see [`TestPlatformInner::call_log`].
+#[derive(Clone, Debug)]
+pub enum CallLogEntry {
+    /// `apply_update(update)` was invoked.
+    ApplyUpdate(Update),
+    /// `on_domain_revoked(domain, fallback)` was invoked.
+    OnDomainRevoked {
+        domain: DomainId,
+        fallback: Option<DomainId>,
+    },
+    /// `push_core_switch(core, target_domain, target_vp)` was invoked.
+    PushCoreSwitch {
+        core: CoreId,
+        target_domain: DomainId,
+        target_vp: u64,
+    },
 }
 
 struct DomainEntry {
@@ -161,6 +184,12 @@ impl TestPlatform {
         self.inner.lock().is_revoked(domain_id)
     }
 
+    /// Drain the ordered call log of `apply_update` / `on_domain_revoked`
+    /// invocations recorded since the last drain.  Used by ordering tests.
+    pub fn drain_call_log(&self) -> Vec<CallLogEntry> {
+        self.inner.lock().call_log.drain(..).collect()
+    }
+
     /// Set the "currently executing" core ID for VP-aware operations.
     pub fn set_current_core(&self, core: Option<CoreId>) {
         self.inner.lock().current_core = core;
@@ -185,11 +214,16 @@ impl Platform for TestPlatform {
     fn sync_barrier(&self, _id: u8, _participants: usize) {}
 
     fn apply_update(&self, update: &Update) {
-        self.inner.lock().applied_updates.push(update.clone());
+        let mut inner = self.inner.lock();
+        inner.applied_updates.push(update.clone());
+        inner.call_log.push(CallLogEntry::ApplyUpdate(update.clone()));
     }
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
         let mut inner = self.inner.lock();
+        inner
+            .call_log
+            .push(CallLogEntry::OnDomainRevoked { domain: domain_id, fallback });
         inner.redirect_core_for_revoked(domain_id, fallback);
         inner.mark_revoked(domain_id);
         // Unregister: keep the entry (with revoked=true) so late TOCTOU checks work.
@@ -222,6 +256,20 @@ impl Platform for TestPlatform {
         if let Some(domain_id) = inner.core_to_domain.remove(&core_id) {
             inner.domain_to_core.remove(&domain_id);
         }
+    }
+
+    fn push_core_switch(
+        &self,
+        core_id: CoreId,
+        target_cap: &CapabilityRef<Domain>,
+        target_vp_id: u64,
+    ) {
+        let target_domain = target_cap.read().data.id;
+        self.inner.lock().call_log.push(CallLogEntry::PushCoreSwitch {
+            core: core_id,
+            target_domain,
+            target_vp: target_vp_id,
+        });
     }
 
     fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId> {

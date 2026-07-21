@@ -1,10 +1,10 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy, MonitorAPI};
+use crate::domain::{Domain, DomainPolicy, MonitorAPI, VpCallContext, VpRunState};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
 use crate::sync::RwLock;
-use crate::update::{DomainId, UpdateBatch};
+use crate::update::{CoreSwitch, DomainId, UpdateBatch};
 use crate::view::AddressSpaceView;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -696,6 +696,66 @@ impl Capability<Domain> {
         Ok(child)
     }
 
+    /// Walk the caller chain from the direct caller of a revoked Running VP
+    /// up to the first non-revoked ancestor.  Returns the resume target
+    /// `(target_domain_cap, target_vp_id)` — the ancestor VP that will
+    /// receive control on the affected core when the initiator finishes
+    /// applying updates.
+    ///
+    /// Preconditions:
+    /// - `first_caller` is the `VpCallContext` taken from the revoked
+    ///   `Running{ caller: Some(_) }` VP.
+    /// - Each ancestor whose domain is revoked must have its VP in
+    ///   `Locked{ prev_caller }` state (invariant maintained by
+    ///   `Capability::switch` when the callee is entered).
+    ///
+    /// Returns [`CapaError::NotFound`] if the chain terminates without
+    /// reaching a non-revoked ancestor (D1 violation — should not happen
+    /// under the "root is unrevokable" invariant).
+    fn walk_revoke_caller_chain(
+        first_caller: VpCallContext,
+    ) -> Result<(CapabilityRef<Domain>, u64)> {
+        let mut ctx = Some(first_caller);
+        while let Some(c) = ctx {
+            let cap = c.domain.upgrade().ok_or(CapaError::NotFound)?;
+
+            // If this ancestor is not revoked, it is our resume target.
+            {
+                let guard = cap.read();
+                if !guard.data.is_revoked() {
+                    return Ok((cap.clone(), c.vp_id));
+                }
+            }
+
+            // Ancestor is revoked — step to its own caller via the Locked VP.
+            let ancestor_vp = {
+                let guard = cap.read();
+                guard
+                    .data
+                    .policy
+                    .vprocessor_states
+                    .iter()
+                    .find(|v| v.id == c.vp_id)
+                    .cloned()
+                    .ok_or(CapaError::NotFound)?
+            };
+            let rs = ancestor_vp.run_state.read();
+            ctx = match &*rs {
+                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
+                VpRunState::Suspended { .. } => {
+                    // Suspended = interrupt preempted a switch; treat prev
+                    // context as chain-root (there's no further caller to
+                    // walk to for revocation return).  Fail so the caller
+                    // sees an engine invariant violation rather than
+                    // silently attaching to the wrong VP.
+                    return Err(CapaError::InvalidValue);
+                }
+                _ => return Err(CapaError::InvalidValue),
+            };
+        }
+        Err(CapaError::NotFound)
+    }
+
     /// Revoke a child domain and all its descendants by SubHandle
     ///
     /// Internal implementation called by [`revoke_domain`].
@@ -749,7 +809,42 @@ impl Capability<Domain> {
         domain.data.revoke();
         updates.add_revoke_domain_with_fallback(domain_id, fallback);
 
+        // Snapshot Running VPs so we can walk their caller chains after
+        // releasing the domain lock (the walk touches ancestor domains).
+        //
+        // Each `Running { core, caller: Some(ctx) }` VP produces one
+        // `CoreSwitch` naming the resume target — the first non-revoked
+        // ancestor of the doomed VP in its caller chain.  Descendant
+        // revocations (children of this domain) contribute additional
+        // switches at their own recursion levels via `updates.merge`
+        // below.  Because this level marks `domain.data.revoke()` before
+        // recursing, ancestor-of-a-child walks correctly see this domain
+        // as revoked and skip past it.
+        let running_vps: Vec<(crate::update::CoreId, VpCallContext)> = domain
+            .data
+            .policy
+            .vprocessor_states
+            .iter()
+            .filter_map(|vp| {
+                let rs = vp.run_state.read();
+                if let VpRunState::Running { core, caller: Some(ctx) } = &*rs {
+                    Some((*core, ctx.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         drop(domain);
+
+        for (core, first_caller) in running_vps {
+            let (target_domain, target_vp) = Self::walk_revoke_caller_chain(first_caller)?;
+            updates.add_core_switch(CoreSwitch {
+                core,
+                target_domain,
+                target_vp,
+            });
+        }
 
         for child_ref in children {
             let child_updates = Self::revoke_domain_subtree(&child_ref, fallback)?;

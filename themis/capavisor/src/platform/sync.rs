@@ -6,7 +6,7 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::RwLock;
 
-use capability_engine::OpLockGuard;
+use capability_engine::{OpLockGuard, Platform};
 
 // ── Two-phase synchronisation barrier ─────────────────────────────────────── //
 
@@ -77,12 +77,28 @@ impl Barrier {
 pub(super) struct SharedGuard(ManuallyDrop<spin::RwLockReadGuard<'static, ()>>);
 
 impl SharedGuard {
-    pub(super) fn new(lock: &RwLock<()>) -> Self {
-        // SAFETY: `lock` lives as long as `ThemisPlatform` which outlives
-        // any guard it produces ('static in practice).
-        let guard: spin::RwLockReadGuard<'static, ()> =
-            unsafe { core::mem::transmute(lock.read()) };
-        SharedGuard(ManuallyDrop::new(guard))
+    /// Acquire the shared lock, polling the cross-core protocol while
+    /// waiting.
+    ///
+    /// Using a plain `lock.read()` here would spin without ever draining
+    /// this core's per-core update queue.  If another core is at the
+    /// moment holding exclusive (e.g. a revoke initiator sitting at
+    /// barrier 0 waiting for us to acknowledge), we would deadlock: it
+    /// waits for our poll to arrive, we wait for its exclusive guard to
+    /// drop.  Poll-while-spinning breaks that cycle — same reason
+    /// `execute()` polls on `try_acquire_update_lock`.
+    pub(super) fn new(lock: &RwLock<()>, platform: &super::ThemisPlatform) -> Self {
+        loop {
+            if let Some(guard) = lock.try_read() {
+                // SAFETY: `lock` lives as long as `ThemisPlatform`
+                // which outlives any guard it produces ('static in
+                // practice).
+                let guard: spin::RwLockReadGuard<'static, ()> =
+                    unsafe { core::mem::transmute(guard) };
+                return SharedGuard(ManuallyDrop::new(guard));
+            }
+            platform.poll_and_respond_cross_core();
+        }
     }
 }
 impl Drop for SharedGuard {
@@ -99,10 +115,17 @@ unsafe impl Send for SharedGuard {}
 pub(super) struct ExclusiveGuard(ManuallyDrop<spin::RwLockWriteGuard<'static, ()>>);
 
 impl ExclusiveGuard {
-    pub(super) fn new(lock: &RwLock<()>) -> Self {
-        let guard: spin::RwLockWriteGuard<'static, ()> =
-            unsafe { core::mem::transmute(lock.write()) };
-        ExclusiveGuard(ManuallyDrop::new(guard))
+    /// Acquire the exclusive lock, polling the cross-core protocol while
+    /// waiting.  See `SharedGuard::new` for the deadlock rationale.
+    pub(super) fn new(lock: &RwLock<()>, platform: &super::ThemisPlatform) -> Self {
+        loop {
+            if let Some(guard) = lock.try_write() {
+                let guard: spin::RwLockWriteGuard<'static, ()> =
+                    unsafe { core::mem::transmute(guard) };
+                return ExclusiveGuard(ManuallyDrop::new(guard));
+            }
+            platform.poll_and_respond_cross_core();
+        }
     }
 }
 impl Drop for ExclusiveGuard {

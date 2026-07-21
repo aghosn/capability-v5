@@ -87,3 +87,52 @@ pub(crate) unsafe fn swap_active_vp(
         PidPage::new(vcpu.pid_phys(), platform.hhdm_offset()).set_ndst(current_lapic_id());
     }
 }
+
+/// Cross-core revoke-return handler: our currently-running domain is
+/// being revoked by another core, and the engine has selected `dst`
+/// (domain, vp) as the resume target (its first non-revoked ancestor).
+///
+/// Reads `vcpu` from the pinned per-core slot, VMCLEARs the doomed VMCS,
+/// VMPTRLDs the target, and delivers a synthetic `THEMIS_EXIT_CALLEE_REVOKED`
+/// exit reason to the target so its SWITCH VMCALL sees the revocation.
+///
+/// Called by `ThemisPlatform::apply_local_core_updates` on the target core
+/// while draining a `CoreUpdate::Switch`, i.e. BEFORE barrier 0.  The
+/// initiator is parked spinning on barrier 0.
+///
+/// # Safety
+/// The pinned `active_vcpu` pointer for `core_id` must reference a valid
+/// `ActiveVcpu` on this core's monitor-loop stack.
+pub(crate) unsafe fn apply_cross_core_switch(
+    platform: &ThemisPlatform,
+    core_id: capability_engine::CoreId,
+    dst: (DomainId, usize),
+) {
+    use crate::vcpu::Reg;
+    use themis_abi::{errors, synthetic_exits::THEMIS_EXIT_CALLEE_REVOKED};
+
+    let vcpu_ptr = platform.active_vcpu_ptr(core_id) as *mut ActiveVcpu;
+    assert!(
+        !vcpu_ptr.is_null(),
+        "[REVOKE_SWITCH] active_vcpu not pinned on core {}",
+        core_id
+    );
+    // SAFETY: pinned at monitor_loop entry, valid for the whole lifetime
+    // of this core; only read here on this core between VMEXITs.
+    let vcpu = unsafe { &mut *vcpu_ptr };
+
+    let (src_dom, src_vp) = platform.core_current_binding(core_id);
+
+    // SAFETY: `vcpu` is the currently-loaded ActiveVcpu; caller invariants
+    // upheld (src is the currently-running VP; dst was validated by the
+    // engine's `switch_after_callee_revoked`).
+    unsafe {
+        swap_active_vp(vcpu, platform, (src_dom, src_vp), dst, "REVOKE_SWITCH");
+    }
+
+    // Deliver the synthetic "callee revoked" exit reason.  Target's RIP is
+    // already past its SWITCH VMCALL (same invariant as normal switch
+    // return); only the result registers need to be set.
+    vcpu.set_reg(Reg::Rax, errors::SUCCESS);
+    vcpu.set_reg(Reg::Rdi, THEMIS_EXIT_CALLEE_REVOKED as u64);
+}

@@ -32,3 +32,4 @@ pub mod hypercall;
 pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};
 pub use iommu_dev::{assign_device, release_device};
 pub use iommu_ir::{invalidate_domain_irtes, program_domain_irtes};
+pub(crate) use vcpu_switch::apply_cross_core_switch;

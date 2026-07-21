@@ -238,6 +238,31 @@ pub trait Platform: Send + Sync {
     ) {
     }
 
+    /// Push a per-core "switch to another domain" update onto core `core_id`.
+    ///
+    /// Called by the initiating core **before** `send_ipi` when revoking a
+    /// domain that is currently running on other cores.  Each affected core
+    /// receives the target (a non-revoked caller-chain ancestor) it should
+    /// resume on.  The push happens-before the IPI so the target core observes
+    /// the queued switch when it drains between the barriers of the
+    /// cross-core protocol.
+    ///
+    /// `target_cap` and `target_vp_id` identify the VP to resume; both are
+    /// pre-computed by the engine's caller-chain walk over `VpRunState`.
+    /// The ancestor VP resumes as if the callee had exited with a
+    /// "callee revoked" exit reason (delivered through the existing
+    /// exit-forwarding path).
+    ///
+    /// **Default implementation** is a no-op (single-core / test platforms
+    /// that override this record the call for verification).
+    fn push_core_switch(
+        &self,
+        _core_id: CoreId,
+        _target_cap: &CapabilityRef<Domain>,
+        _target_vp_id: u64,
+    ) {
+    }
+
     /// Record that `core_id` is no longer executing any domain (idle).
     fn clear_core_domain(&self, core_id: CoreId);
 
@@ -408,33 +433,47 @@ where
             .filter(|&c| Some(c) != current_core)
             .collect();
 
+        // Step 5a — push per-core switch orders and notify the platform of
+        // domain revocations BEFORE sending IPIs.  Under the Tyche-aligned
+        // barrier protocol, target cores drain their per-core update queue
+        // BEFORE barrier 0 (that is what B0 attests to: "targets have
+        // switched off the doomed domain").  So every `CoreSwitch` that
+        // the initiator wants a target to observe must be enqueued
+        // happens-before the target's `send_ipi` here — otherwise the
+        // target drains an empty queue and B0 releases with the target
+        // still bound to the doomed domain, breaking `apply_update`'s
+        // "no live reference" precondition.
+        for switch in batch.core_switches() {
+            platform.push_core_switch(switch.core, &switch.target_domain, switch.target_vp);
+        }
+        for update in batch.updates() {
+            if let Update::RevokeDomain { domain, fallback } = update {
+                platform.on_domain_revoked(*domain, *fallback);
+            }
+        }
+
         if !affected_cores.is_empty() {
             // Cross-core path: preempt affected cores, apply updates, release them
             for &core_id in &affected_cores {
                 platform.send_ipi(core_id);
             }
-            // Barrier 0: wait until all affected cores have stopped executing
+            // Barrier 0: wait until all affected cores have drained their
+            // per-core update queue and switched off the doomed domain.
             platform.sync_barrier(0, affected_cores.len() + 1);
 
+            // Step 5b — apply the global updates (EPT/IOMMU frees, etc.).
+            // Safe: every affected core is parked at B1.wait, no live
+            // reference to the doomed domain remains.
             for update in batch.updates() {
                 platform.apply_update(update);
             }
 
-            // Barrier 1: release cores to apply their local state (TLB flush…)
+            // Barrier 1: release cores to resume execution.
             platform.sync_barrier(1, affected_cores.len() + 1);
         } else {
             // Local path: no remote core is running an affected domain.
             for update in batch.updates() {
                 platform.apply_update(update);
-            }
-        }
-
-        // Step 6 — notify platform about domain revocations.
-        // Inside the update lock: modifying core↔domain mappings here keeps
-        // them consistent with the domain_cores queries above.
-        for update in batch.updates() {
-            if let Update::RevokeDomain { domain, fallback } = update {
-                platform.on_domain_revoked(*domain, *fallback);
             }
         }
 

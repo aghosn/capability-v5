@@ -855,6 +855,15 @@ impl Capability<Domain> {
         pending_id: u64,
     ) -> Result<UpdateBatch> {
         let ((), batch) = crate::platform::execute(platform, false, || {
+            // Stale-caller guard: `receiver` was cloned from PlatformCore::domain_cap
+            // (in capavisor) BEFORE we entered execute(), so a concurrent revoke
+            // may have completed since.  All other migrated ops go through
+            // `require_api` which now rejects Revoked explicitly; reject() has
+            // no api check, so it needs its own guard.
+            if receiver.read().data.is_revoked() {
+                return Err(CapaError::DomainRevoked);
+            }
+
             // 1. Remove pending from receiver
             let pending = {
                 let mut recv = receiver.write();
@@ -2031,6 +2040,82 @@ impl Capability<Domain> {
         crate::platform::execute(platform, false, || {
             let ctx = Self::switch_domain_return(caller, core_id, platform, Some(exit_reason))?;
             Ok((ctx, UpdateBatch::new()))
+        })
+    }
+
+    /// Revoke-driven return: bring `target`'s VP back to `Running` on this
+    /// core after its callee (a descendant) was revoked.
+    ///
+    /// Called by the platform's `CoreUpdate::Switch` handler on the target
+    /// core, between the drain and B0 of `poll_and_respond_cross_core`.
+    ///
+    /// The engine's `revoke_domain_subtree` (running on the initiator, under
+    /// the exclusive capability lock and the update lock) has already
+    /// computed `(target, target_vp)` — the first non-revoked ancestor of
+    /// the running doomed VP — via `walk_revoke_caller_chain`, and pushed a
+    /// `CoreSwitch` naming this pair.  This function is the target-side
+    /// counterpart: it transitions the target VP `Locked { prev_caller } →
+    /// Running { core, caller: prev_caller }` and updates the platform's
+    /// core context.
+    ///
+    /// **Concurrency note:** unlike the other switch entry points, this
+    /// does NOT enter `execute()`.  The initiator already holds the
+    /// exclusive capability lock and the update lock and is parked at B0
+    /// waiting for us; no other core can concurrently mutate engine state.
+    ///
+    /// The doomed domain's VP state is intentionally not touched here —
+    /// its teardown is fully owned by `revoke_domain_subtree` +
+    /// `apply_update(RevokeDomain)` running on the initiator.
+    pub fn switch_after_callee_revoked(
+        platform: &dyn Platform,
+        target: &CapabilityRef<Domain>,
+        target_vp: u64,
+    ) -> Result<SwitchContext> {
+        let core_id = platform
+            .get_current_core()
+            .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
+
+        let (target_id, target_vp_arc) = {
+            let g = target.read();
+            let id = g.data.id;
+            let vp = g
+                .data
+                .policy
+                .vprocessor_states
+                .iter()
+                .find(|v| v.id == target_vp)
+                .cloned()
+                .ok_or(CapaError::NotFound)?;
+            (id, vp)
+        };
+
+        // Extract prev_caller from the Locked state, then rewrite as Running.
+        {
+            let mut rs = target_vp_arc.run_state.write();
+            let prev_caller = match &*rs {
+                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "target VP not in Locked state on revoke-return".to_string(),
+                    ))
+                }
+            };
+            *rs = VpRunState::Running {
+                core: core_id,
+                caller: prev_caller,
+            };
+        }
+
+        platform.set_core_context(core_id, target, target_vp);
+
+        Ok(SwitchContext {
+            from_domain: 0, // caller is being torn down; no meaningful id
+            to_domain: target_id,
+            core_id,
+            is_return: true,
+            from_vp_id: None,
+            to_vp_id: Some(target_vp),
+            interrupt_return: None,
         })
     }
 
