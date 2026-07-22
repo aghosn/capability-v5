@@ -34,7 +34,8 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Update,
+    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result,
+    SwitchManager, Update,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,7 +155,15 @@ pub struct TestPlatform {
     /// Update-application serialisation lock (see Platform::try_acquire_update_lock).
     /// An AtomicBool CAS spinlock: false = unlocked, true = locked.
     update_lock: Arc<AtomicBool>,
+    /// Per-core switch/call-chain authority — a plain field like `op_lock`/
+    /// `update_lock` above, never behind `inner`'s coarse mutex (see
+    /// `Platform::switch_manager`'s doc comment for why).
+    switch_manager: Arc<SwitchManager>,
 }
+
+/// Fixed core count for the test platform. Tests observed to use core IDs
+/// 0/1 only; generous headroom for future multi-core test scenarios.
+const TEST_PLATFORM_NUM_CORES: usize = 16;
 
 impl Default for TestPlatform {
     fn default() -> Self {
@@ -162,6 +171,7 @@ impl Default for TestPlatform {
             op_lock: Arc::new(RwLock::new(())),
             inner: Arc::new(parking_lot::Mutex::new(TestPlatformInner::default())),
             update_lock: Arc::new(AtomicBool::new(false)),
+            switch_manager: Arc::new(SwitchManager::new(TEST_PLATFORM_NUM_CORES)),
         }
     }
 }
@@ -340,5 +350,9 @@ impl Platform for TestPlatform {
             .registers
             .insert((domain_id, vp_id, reg_id), value);
         Ok(())
+    }
+
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_manager
     }
 }

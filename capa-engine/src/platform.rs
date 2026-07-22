@@ -350,6 +350,22 @@ pub trait Platform: Send + Sync {
     fn measure_region(&self, _address: u64, _size: u64) -> [u8; 32] {
         [0u8; 32]
     }
+
+    // -----------------------------------------------------------------------
+    // Per-core switch / call-chain authority
+    // -----------------------------------------------------------------------
+
+    /// Return this platform's [`crate::switch::SwitchManager`] — the single
+    /// per-core authority for "which domain/VP is running where" and each
+    /// core's live call chain.
+    ///
+    /// `SwitchManager`'s per-core table is fixed-size and built once at
+    /// construction; each core's mutable state is lock-scoped to that one
+    /// core only (see [`crate::switch::CoreContext`]). Implementers must
+    /// store their `SwitchManager` as a plain field — like `op_lock` /
+    /// `update_lock` — never behind a coarser platform-wide mutex, so that
+    /// reaching one core's state can never contend with an unrelated core.
+    fn switch_manager(&self) -> &crate::switch::SwitchManager;
 }
 
 /// Execute a capability operation atomically using the given platform.

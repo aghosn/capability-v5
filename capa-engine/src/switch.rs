@@ -1,7 +1,7 @@
 //! Switch and interrupt routing mechanisms
 
 use crate::capability::CapabilityRef;
-use crate::domain::{Domain, InterruptVisibility};
+use crate::domain::{Domain, InterruptVisibility, VpCallContext};
 use crate::error::{CapaError, Result};
 use crate::sync::RwLock;
 use alloc::format;
@@ -26,6 +26,27 @@ pub struct CoreContext {
     pub core_id: u64,
     /// Which VP (by ID) is currently executing on this core, if any.
     pub running_vp: RwLock<Option<u64>>,
+    /// Live call chain for this core, bottom (root-most caller) to top
+    /// (most recent switch target).
+    ///
+    /// **Scaffolding, additive only (P2b): not yet consulted by
+    /// `switch_domain_forward`/`switch_domain_return`/`deliver_interrupt_vp`
+    /// or revoke's `walk_revoke_caller_chain`** — those still derive
+    /// ordering from `VpRunState`'s `caller`/`prev_caller` links. This field
+    /// exists so a later cutover step can push/pop it alongside the
+    /// existing logic (dual-write, cross-validated) before switching over
+    /// to trust it alone.
+    ///
+    /// Single-writer per core in steady state: only the physical core
+    /// owning this `CoreContext` pushes/pops during its own synchronous
+    /// switches and interrupt entry/exit. The one cross-core exception is
+    /// revoke, where — per the engine's locking model — the initiator holds
+    /// the exclusive op-lock for the entire operation, which blocks every
+    /// other core from starting a new switch/interrupt in the meantime; the
+    /// *affected* core itself (not the initiator) is the one that walks/pops
+    /// its own stack once released, so there is still never a genuine
+    /// concurrent writer.
+    pub call_stack: RwLock<Vec<VpCallContext>>,
 }
 
 impl CoreContext {
@@ -34,6 +55,7 @@ impl CoreContext {
             state: RwLock::new(CoreState::Idle),
             core_id,
             running_vp: RwLock::new(None),
+            call_stack: RwLock::new(Vec::new()),
         }
     }
 
@@ -49,6 +71,22 @@ impl CoreContext {
             CoreState::Running(domain_id) => Some(domain_id),
             CoreState::Idle => None,
         }
+    }
+
+    /// Push a new frame (the caller we are switching away from) onto this
+    /// core's call chain.
+    pub fn push_frame(&self, frame: VpCallContext) {
+        self.call_stack.write().push(frame);
+    }
+
+    /// Pop and return the most recent frame (the caller to resume), if any.
+    pub fn pop_frame(&self) -> Option<VpCallContext> {
+        self.call_stack.write().pop()
+    }
+
+    /// Peek at the most recent frame without removing it.
+    pub fn top_frame(&self) -> Option<VpCallContext> {
+        self.call_stack.read().last().cloned()
     }
 }
 

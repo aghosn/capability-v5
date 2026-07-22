@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 
 use capability_engine::{
     Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy, LocalHandle, MonitorAPI,
-    OpLockGuard, Platform, Result, Update, VpCallContext, VpRunState,
+    OpLockGuard, Platform, Result, SwitchManager, Update, VpCallContext, VpRunState,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -69,6 +69,12 @@ struct LoomPlatformState {
 struct LoomPlatform {
     current_core: CoreId,
     state: Arc<Mutex<LoomPlatformState>>,
+    /// Not yet exercised by these tests: `domain_api.rs` doesn't call
+    /// `Platform::switch_manager()` anywhere yet (P2b scaffolding only), so
+    /// an instance private to each `LoomPlatform` (rather than shared like
+    /// `state`) is sufficient for now — revisit once the P2 cutover makes
+    /// this genuinely load-bearing across cores.
+    switch_manager: Arc<SwitchManager>,
 }
 
 impl LoomPlatform {
@@ -76,6 +82,7 @@ impl LoomPlatform {
         LoomPlatform {
             current_core,
             state,
+            switch_manager: Arc::new(SwitchManager::new(4)),
         }
     }
 }
@@ -117,6 +124,14 @@ impl Platform for NullPlatform {
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<CoreId> { None }
+    fn switch_manager(&self) -> &SwitchManager {
+        // NullPlatform is a unit struct used only for sequential setup calls
+        // before loom threads spawn; nothing exercises per-core switch/
+        // call-chain state through it, so a lazily-initialised static is
+        // sufficient (not part of the modeled concurrency under test).
+        static NULL_SWITCH_MANAGER: std::sync::OnceLock<SwitchManager> = std::sync::OnceLock::new();
+        NULL_SWITCH_MANAGER.get_or_init(|| SwitchManager::new(4))
+    }
 }
 
 
@@ -156,6 +171,9 @@ impl Platform for LoomPlatform {
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<CoreId> {
         Some(self.current_core)
+    }
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_manager
     }
 }
 

@@ -1239,4 +1239,8 @@ impl Platform for ThemisPlatform {
     fn get_current_core(&self) -> Option<CoreId> {
         self.arch.current_core_id()
     }
+
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_mgr
+    }
 }

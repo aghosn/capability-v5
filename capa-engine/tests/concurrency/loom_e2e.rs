@@ -105,6 +105,11 @@ impl capability_engine::Platform for NullPlatform {
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<capability_engine::CoreId> { None }
+    fn switch_manager(&self) -> &capability_engine::SwitchManager {
+        static NULL_SWITCH_MANAGER: std::sync::OnceLock<capability_engine::SwitchManager> =
+            std::sync::OnceLock::new();
+        NULL_SWITCH_MANAGER.get_or_init(|| capability_engine::SwitchManager::new(4))
+    }
 }
 
 

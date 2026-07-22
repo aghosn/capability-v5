@@ -20,7 +20,6 @@ struct CliDomainEntry {
 
 struct CliPlatformInner {
     domains: BTreeMap<DomainId, CliDomainEntry>,
-    switch_manager: SwitchManager,
     num_cores: usize,
     /// The core ID "currently executing" (set by the CLI before VP-aware calls).
     current_core: Option<CoreId>,
@@ -50,6 +49,11 @@ impl OpLockGuard for CliExclusiveLock {}
 pub struct CliPlatform {
     op_lock: Arc<RwLock<()>>,
     inner: Arc<Mutex<CliPlatformInner>>,
+    /// Per-core switch/call-chain authority — a plain field, not behind
+    /// `inner`'s coarse mutex (see `Platform::switch_manager`'s doc
+    /// comment for why: reaching one core's state must never contend
+    /// with an unrelated core).
+    switch_manager: SwitchManager,
 }
 
 impl CliPlatform {
@@ -58,11 +62,11 @@ impl CliPlatform {
             op_lock: Arc::new(RwLock::new(())),
             inner: Arc::new(Mutex::new(CliPlatformInner {
                 domains: BTreeMap::new(),
-                switch_manager: SwitchManager::new(num_cores),
                 num_cores,
                 current_core: None,
                 registers: BTreeMap::new(),
             })),
+            switch_manager: SwitchManager::new(num_cores),
         }
     }
 
@@ -77,18 +81,17 @@ impl CliPlatform {
         domain: &CapabilityRef<Domain>,
         core: u64,
     ) -> Result<(u64, Vec<u64>)> {
-        self.inner.lock().switch_manager.route_interrupt(vector, domain, core)
+        self.switch_manager.route_interrupt(vector, domain, core)
     }
 
     pub fn get_core(&self, core_id: u64) -> Result<Arc<capability_engine::CoreContext>> {
-        self.inner.lock().switch_manager.get_core(core_id).cloned()
+        self.switch_manager.get_core(core_id).cloned()
     }
 
     /// CLI-only helper: set core domain by DomainId (no CapabilityRef needed).
     /// Used for non-VP interrupt fallback where only the DomainId is known.
     pub fn set_core_domain_by_id(&self, core_id: CoreId, domain_id: DomainId) {
-        let inner = self.inner.lock();
-        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
+        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
             *core_ref.state.write() = CoreState::Running(domain_id);
         }
     }
@@ -128,7 +131,7 @@ impl Platform for CliPlatform {
         // Find which core (if any) is running this domain
         let mut affected_core: Option<(u64, Arc<capability_engine::CoreContext>)> = None;
         for i in 0..num_cores as u64 {
-            if let Ok(core_ref) = inner.switch_manager.get_core(i) {
+            if let Ok(core_ref) = self.switch_manager.get_core(i) {
                 if core_ref.current_domain() == Some(domain_id) {
                     affected_core = Some((i, core_ref.clone()));
                     break;
@@ -171,16 +174,14 @@ impl Platform for CliPlatform {
         vp_id: u64,
     ) {
         let domain_id = domain_cap.read().data.id;
-        let inner = self.inner.lock();
-        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
+        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
             *core_ref.state.write() = CoreState::Running(domain_id);
             *core_ref.running_vp.write() = Some(vp_id);
         }
     }
 
     fn clear_core_domain(&self, core_id: CoreId) {
-        let inner = self.inner.lock();
-        if let Ok(core_ref) = inner.switch_manager.get_core(core_id) {
+        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
             *core_ref.state.write() = CoreState::Idle;
         }
     }
@@ -231,5 +232,9 @@ impl Platform for CliPlatform {
             .registers
             .insert((domain_id, vp_id, reg_id), value);
         Ok(())
+    }
+
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_manager
     }
 }
