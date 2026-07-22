@@ -2518,28 +2518,13 @@ impl Capability<Domain> {
         vector: u8,
     ) -> Result<(VpInterruptContext, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
-        let handler_domain_id = {
-            let mut current = interrupted_cap.clone();
-            loop {
-                let domain = current.read();
-                let visibility = domain
-                    .data
-                    .policy
-                    .interrupts
-                    .get_policy(vector)
-                    .visibility;
-                if visibility == InterruptVisibility::Deliver {
-                    break domain.data.id;
-                }
-                let parent = domain.get_parent().ok_or_else(|| {
-                    CapaError::InvalidOperation(
-                        "no Deliver interrupt handler in ancestor chain".to_string(),
-                    )
-                })?;
-                drop(domain);
-                current = parent;
-            }
-        };
+        // Find the Deliver-policy ancestor via the same CDT walk used by
+        // `SwitchManager::route_interrupt` (see `find_interrupt_handler`).
+        // The loop below independently walks the *live* VP call chain and
+        // cross-checks it lands on this same domain — see that loop's
+        // comment for why the two must agree.
+        let (handler_domain_id, _reported_to) =
+            crate::switch::find_interrupt_handler(vector, interrupted_cap)?;
 
         let (interrupted_domain_id, leaf_vp_arc) = {
             let d = interrupted_cap.read();

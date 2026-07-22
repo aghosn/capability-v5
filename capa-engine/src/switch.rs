@@ -224,41 +224,71 @@ impl SwitchManager {
         interrupted: &CapabilityRef<Domain>,
         _core_id: u64,
     ) -> Result<(u64, Vec<u64>)> {
-        let mut current_ref = interrupted.clone();
-        let mut reported_to = Vec::new();
+        find_interrupt_handler(vector, interrupted)
+    }
 
-        loop {
-            let current = current_ref.read();
-            let policy = current.data.policy.interrupts.get_policy(vector);
+}
 
-            match policy.visibility {
-                InterruptVisibility::Deliver => {
-                    // This domain handles the interrupt
-                    return Ok((current.data.id, reported_to));
-                }
-                InterruptVisibility::Report => {
-                    // Report to this domain but continue walking up
-                    reported_to.push(current.data.id);
-                }
-                InterruptVisibility::NotReport => {
-                    // Skip this domain
-                }
+/// Walk the domain CDT upward from `interrupted`, applying each ancestor's
+/// per-vector [`InterruptVisibility`] policy, until reaching the first
+/// `Deliver` domain (the handler).  `Report` ancestors along the way are
+/// collected into the returned list; `NotReport` ancestors are skipped.
+///
+/// This is a pure capability-tree query — it does not touch any VP call
+/// state — shared by [`SwitchManager::route_interrupt`] (the simple,
+/// non-VP-aware entry point used directly by the CLI simulator and its
+/// own unit/integration tests) and by
+/// [`crate::domain_api::deliver_interrupt_vp`] (the VP-aware lazy-unwind
+/// path), so the "which domain handles this vector" decision has exactly
+/// one implementation.
+///
+/// Under this engine's model, switches only ever cross a domain's direct
+/// CDT parent/child edge (see [`SwitchManager::switch`]'s direct-relationship
+/// check), so the live VP call chain of any Running VP is always identical
+/// in domain sequence to its CDT ancestor chain — `deliver_interrupt_vp`
+/// relies on that invariant to cross-check the handler this function finds
+/// against the domain it actually reaches by walking VP `caller`/`prev_caller`
+/// links.
+///
+/// Returns [`CapaError::InvalidOperation`] if the root is reached without
+/// finding a `Deliver` ancestor.
+pub fn find_interrupt_handler(
+    vector: u8,
+    interrupted: &CapabilityRef<Domain>,
+) -> Result<(u64, Vec<u64>)> {
+    let mut current_ref = interrupted.clone();
+    let mut reported_to = Vec::new();
+
+    loop {
+        let current = current_ref.read();
+        let policy = current.data.policy.interrupts.get_policy(vector);
+
+        match policy.visibility {
+            InterruptVisibility::Deliver => {
+                // This domain handles the interrupt
+                return Ok((current.data.id, reported_to));
             }
+            InterruptVisibility::Report => {
+                // Report to this domain but continue walking up
+                reported_to.push(current.data.id);
+            }
+            InterruptVisibility::NotReport => {
+                // Skip this domain
+            }
+        }
 
-            // Move to parent
-            let parent = current.get_parent();
-            drop(current);
+        // Move to parent
+        let parent = current.get_parent();
+        drop(current);
 
-            match parent {
-                Some(parent_ref) => current_ref = parent_ref,
-                None => {
-                    // Reached root without finding a handler
-                    return Err(CapaError::InvalidOperation(
-                        "No interrupt handler found".to_string(),
-                    ));
-                }
+        match parent {
+            Some(parent_ref) => current_ref = parent_ref,
+            None => {
+                // Reached root without finding a handler
+                return Err(CapaError::InvalidOperation(
+                    "No interrupt handler found".to_string(),
+                ));
             }
         }
     }
-
 }
