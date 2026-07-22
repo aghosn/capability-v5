@@ -106,6 +106,7 @@ pub(crate) unsafe fn swap_active_vp(
 pub(crate) unsafe fn apply_cross_core_switch(
     platform: &ThemisPlatform,
     core_id: capability_engine::CoreId,
+    src: (DomainId, usize),
     dst: (DomainId, usize),
 ) {
     use crate::vcpu::Reg;
@@ -121,13 +122,11 @@ pub(crate) unsafe fn apply_cross_core_switch(
     // of this core; only read here on this core between VMEXITs.
     let vcpu = unsafe { &mut *vcpu_ptr };
 
-    let (src_dom, src_vp) = platform.core_current_binding(core_id);
-
     // SAFETY: `vcpu` is the currently-loaded ActiveVcpu; caller invariants
     // upheld (src is the currently-running VP; dst was validated by the
     // engine's `switch_after_callee_revoked`).
     unsafe {
-        swap_active_vp(vcpu, platform, (src_dom, src_vp), dst, "REVOKE_SWITCH");
+        swap_active_vp(vcpu, platform, src, dst, "REVOKE_SWITCH");
     }
 
     // Deliver the synthetic "callee revoked" exit reason.  Target's RIP is

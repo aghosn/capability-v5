@@ -343,6 +343,9 @@ attest_unlock_err:
 	case THHV_DEBUG_LIST_HPAS:
 		return thhv_debug_list_hpas(uarg);
 
+	case THHV_DEBUG_REVOKE_ALL:
+		return thhv_debug_revoke_all();
+
 	default:
 		return -ENOTTY;
 	}
@@ -421,6 +424,64 @@ long thhv_debug_list_hpas(void __user *uarg)
 	if (copy_to_user(uarg, &args, sizeof(args)))
 		return -EFAULT;
 	return 0;
+}
+
+/* ── THHV_DEBUG_REVOKE_ALL implementation ─────────────────────────────────
+ *
+ * Debug entry point: fire REVOKE_DOMAIN on every child partition
+ * currently registered.  Snapshots the domain handles under
+ * partitions_lock (a spinlock; can't hold across a hypercall), drops the
+ * lock, then issues themis_revoke_domain on each snapshot.  A partition
+ * that was destroyed between snapshot and revoke simply produces an
+ * error from the capavisor, which we log and ignore.
+ *
+ * Intended use: pin this caller to a specific dom0 core with
+ * `taskset -c N ...` so REVOKE_DOMAIN fires from a different physical
+ * core than the CHV vCPU thread that has switched into the child,
+ * exercising the cross-core revoke swap path.
+ */
+long thhv_debug_revoke_all(void)
+{
+	struct thhv_partition *part;
+	u64 *handles = NULL;
+	u32 nr = 0, i, cap = 0;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	/* Two-pass: count under lock, allocate, snapshot under lock. */
+	spin_lock(&thhv_partitions_lock);
+	list_for_each_entry(part, &thhv_partitions, global_node)
+		cap++;
+	spin_unlock(&thhv_partitions_lock);
+
+	if (cap == 0)
+		return 0;
+
+	handles = kvcalloc(cap, sizeof(*handles), GFP_KERNEL);
+	if (!handles)
+		return -ENOMEM;
+
+	spin_lock(&thhv_partitions_lock);
+	list_for_each_entry(part, &thhv_partitions, global_node) {
+		if (nr >= cap)
+			break;
+		if (part->domain_handle)
+			handles[nr++] = part->domain_handle;
+	}
+	spin_unlock(&thhv_partitions_lock);
+
+	for (i = 0; i < nr; i++) {
+		pr_info("thhv: DEBUG_REVOKE_ALL → revoke_domain(0x%llx)\n",
+			handles[i]);
+		ret = themis_revoke_domain(handles[i]);
+		if (ret)
+			pr_warn("thhv: DEBUG_REVOKE_ALL: revoke 0x%llx failed (%d)\n",
+				handles[i], ret);
+	}
+	kvfree(handles);
+	return (long)nr;
 }
 
 /* ── Device fd file_operations ─────────────────────────────────────────────── */

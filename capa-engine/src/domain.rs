@@ -368,8 +368,12 @@ pub enum VpRunState {
         callee_domain_id: u64,
         /// VP ID of the callee within its domain.
         callee_vp_id: u64,
+        /// This VP's caller before the interrupt unwind.
+        prev_caller: Option<VpCallContext>,
         /// The interrupt vector that caused the callee chain to be suspended.
         vector: u8,
+        /// Whether this frame must observe the interrupt on descent.
+        report: bool,
     },
     /// VP was Running when an interrupt fired and preempted it.
     ///
@@ -378,6 +382,10 @@ pub enum VpRunState {
     Interrupted {
         /// The interrupt vector that caused this VP to be preempted.
         vector: u8,
+        /// The exact caller that owns the interrupted execution context.
+        caller: Option<VpCallContext>,
+        /// Whether this leaf must observe the interrupt on resume.
+        report: bool,
     },
 }
 

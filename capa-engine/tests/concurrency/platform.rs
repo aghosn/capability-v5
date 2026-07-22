@@ -396,11 +396,17 @@ fn make_child(
 
 /// Extract the (target_domain_id, target_vp) of every `PushCoreSwitch`
 /// entry in the log, in order.
-fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64)> {
+fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64, DomainId, u64)> {
     log.iter()
         .filter_map(|e| match e {
-            CallLogEntry::PushCoreSwitch { core, target_domain, target_vp } => {
-                Some((*core, *target_domain, *target_vp))
+            CallLogEntry::PushCoreSwitch {
+                core,
+                source_domain,
+                source_vp,
+                target_domain,
+                target_vp,
+            } => {
+                Some((*core, *source_domain, *source_vp, *target_domain, *target_vp))
             }
             _ => None,
         })
@@ -464,7 +470,7 @@ fn test_revoke_basic_pushes_switch_to_root() {
 
     assert_eq!(
         switches,
-        vec![(REMOTE_CORE, root_id, REMOTE_CORE)],
+        vec![(REMOTE_CORE, child_id, 0, root_id, REMOTE_CORE)],
         "expected exactly one push_core_switch to (REMOTE_CORE, root, VP[REMOTE_CORE]); \
          got: {:#?}\nfull log: {:#?}",
         switches,
@@ -530,7 +536,7 @@ fn test_revoke_chain_walks_past_revoked_ancestor() {
     // The VP id is A's VP that did the A→B switch (which was VP[REMOTE_CORE]).
     assert_eq!(
         switches,
-        vec![(REMOTE_CORE, root_id, REMOTE_CORE)],
+        vec![(REMOTE_CORE, child_c_id, 0, root_id, REMOTE_CORE)],
         "chain walk should skip revoked B and resume in A; got: {:#?}\nlog: {:#?}",
         switches,
         log,
@@ -576,7 +582,7 @@ fn test_revoke_multi_only_affected_core_pushed() {
 
     assert_eq!(
         switches,
-        vec![(CORE_A, root_id, CORE_A)],
+        vec![(CORE_A, child_a_id, 0, root_id, CORE_A)],
         "only CORE_A should have a push; child_b's core (CORE_B) must be untouched. \
          got: {:#?}\nlog: {:#?}",
         switches,
@@ -585,7 +591,7 @@ fn test_revoke_multi_only_affected_core_pushed() {
 
     // child_b's binding must remain intact.
     assert_eq!(platform.get_core_domain(CORE_B), Some(child_b_id));
-    let _ = child_a_id; // silence unused warning
+    let _ = child_b_id;
 }
 
 /// **T-none** — revoke a domain bound to no core.  Zero pushes.

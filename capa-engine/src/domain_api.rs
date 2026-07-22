@@ -26,7 +26,7 @@
 
 use crate::attest::{self, AttestationReport};
 use crate::capability::{
-    Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership, SubHandle,
+    Capability, CapabilityRef, LocalHandle, Ownership, SubHandle,
 };
 #[cfg(feature = "address_translation")]
 use crate::capability::{add_footprint, insert_view_aware, remove_footprint};
@@ -2106,8 +2106,6 @@ impl Capability<Domain> {
             };
         }
 
-        platform.set_core_context(core_id, target, target_vp);
-
         Ok(SwitchContext {
             from_domain: 0, // caller is being torn down; no meaningful id
             to_domain: target_id,
@@ -2298,66 +2296,172 @@ impl Capability<Domain> {
             }
         };
 
-        // Claim target VP: Available → Running, or Suspended → Running.
-        // If Suspended, record callee info so the Interrupted callee can be freed,
-        // and capture the interrupt vector for SwitchContext.interrupt_return.
-        let suspended_info: Option<(CapabilityWeak<Domain>, u64, u8)> = {
-            let mut state = to_vp_arc.run_state.write();
-
-            let callee_info = if let VpRunState::Suspended {
-                callee_domain,
-                callee_vp_id,
-                vector,
-                ..
-            } = &*state
-            {
-                Some((callee_domain.clone(), *callee_vp_id, *vector))
-            } else {
-                None
-            };
-
-            match &*state {
-                VpRunState::Available { .. } | VpRunState::Suspended { .. } => {}
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "target VP is not available".to_string(),
-                    ))
-                }
-            }
-
-            *state = VpRunState::Running {
-                core: core_id,
-                caller: Some(VpCallContext {
-                    domain: Arc::downgrade(caller),
-                    domain_id: caller_id,
-                    vp_id: caller_vp_id,
-                }),
-            };
-            callee_info
+        let caller_ctx = VpCallContext {
+            domain: Arc::downgrade(caller),
+            domain_id: caller_id,
+            vp_id: caller_vp_id,
         };
 
-        // interrupt_return: Some(vector) if the target VP was Suspended (interrupt return path).
-        // This is used by do_switch to set RDI=vector on the synthetic SWITCH return.
-        let interrupt_return: Option<u8> = suspended_info.as_ref().map(|(_, _, v)| *v);
+        let initial_state = to_vp_arc.run_state.read().clone();
+        let mut resume_chain: Vec<(CapabilityRef<Domain>, u64, VProcessorRef, VpRunState)> =
+            Vec::new();
+        let mut actual_cap = to_domain_ref.clone();
+        let mut actual_domain_id = to_domain_id;
+        let mut actual_vp = to_vp_arc.clone();
+        let mut interrupt_return = None;
 
-        // If the target VP was Suspended, free its Interrupted callee.
-        if let Some((callee_weak, callee_vp_id, _)) = suspended_info {
-            if let Some(callee_cap) = callee_weak.upgrade() {
-                let vp_opt = callee_cap
-                    .read()
-                    .data
-                    .policy
-                    .vprocessor_states
-                    .get(callee_vp_id as usize)
-                    .cloned();
-                if let Some(vp) = vp_opt {
-                    let mut s = vp.run_state.write();
-                    if matches!(*s, VpRunState::Interrupted { .. }) {
-                        *s = VpRunState::Available {
-                            last_exit_reason: None,
-                        };
+        match initial_state {
+            VpRunState::Available { .. } => {
+                let mut state = to_vp_arc.run_state.write();
+                if !matches!(*state, VpRunState::Available { .. }) {
+                    return Err(CapaError::InvalidOperation(
+                        "target VP is not available".to_string(),
+                    ));
+                }
+                *state = VpRunState::Running {
+                    core: core_id,
+                    caller: Some(caller_ctx.clone()),
+                };
+            }
+            VpRunState::Suspended { .. } | VpRunState::Interrupted { .. } => {
+                let mut expected_owner_cap = caller.clone();
+                let mut expected_owner_id = caller_id;
+                let mut expected_owner_vp = caller_vp_id;
+                loop {
+                    let state = actual_vp.run_state.read().clone();
+                    match &state {
+                        VpRunState::Suspended {
+                            callee_domain,
+                            callee_domain_id,
+                            callee_vp_id,
+                            prev_caller,
+                            vector,
+                            report,
+                        } => {
+                            let valid_owner = prev_caller.as_ref().is_some_and(|ctx| {
+                                ctx.domain_id == expected_owner_id
+                                    && ctx.vp_id == expected_owner_vp
+                                    && ctx
+                                        .domain
+                                        .upgrade()
+                                        .is_some_and(|cap| Arc::ptr_eq(&cap, &expected_owner_cap))
+                            });
+                            if !valid_owner {
+                                return Err(CapaError::InvalidOperation(
+                                    "suspended VP is owned by another caller".to_string(),
+                                ));
+                            }
+                            resume_chain.push((
+                                actual_cap.clone(),
+                                actual_domain_id,
+                                actual_vp.clone(),
+                                state.clone(),
+                            ));
+                            if *report {
+                                interrupt_return = Some(*vector);
+                                break;
+                            }
+                            expected_owner_cap = actual_cap.clone();
+                            expected_owner_id = actual_domain_id;
+                            expected_owner_vp = actual_vp.id;
+                            actual_cap = callee_domain.upgrade().ok_or(CapaError::NotFound)?;
+                            actual_domain_id = *callee_domain_id;
+                            actual_vp = actual_cap
+                                .read()
+                                .data
+                                .policy
+                                .vprocessor_states
+                                .get(*callee_vp_id as usize)
+                                .cloned()
+                                .ok_or(CapaError::NotFound)?;
+                        }
+                        VpRunState::Interrupted {
+                            vector,
+                            caller: owner,
+                            report,
+                        } => {
+                            let valid_owner = owner.as_ref().is_some_and(|ctx| {
+                                ctx.domain_id == expected_owner_id
+                                    && ctx.vp_id == expected_owner_vp
+                                    && ctx
+                                        .domain
+                                        .upgrade()
+                                        .is_some_and(|cap| Arc::ptr_eq(&cap, &expected_owner_cap))
+                            });
+                            if !valid_owner {
+                                return Err(CapaError::InvalidOperation(
+                                    "interrupted VP is owned by another caller".to_string(),
+                                ));
+                            }
+                            resume_chain.push((
+                                actual_cap.clone(),
+                                actual_domain_id,
+                                actual_vp.clone(),
+                                state.clone(),
+                            ));
+                            if *report {
+                                interrupt_return = Some(*vector);
+                            }
+                            break;
+                        }
+                        _ => {
+                            return Err(CapaError::InvalidOperation(
+                                "interrupt resume chain is inconsistent".to_string(),
+                            ))
+                        }
                     }
                 }
+
+                for (index, (_, _, vp, state)) in resume_chain.iter().enumerate() {
+                    let is_final = index + 1 == resume_chain.len();
+                    let replacement = if is_final {
+                        let final_caller = match state {
+                            VpRunState::Suspended { prev_caller, .. } => prev_caller.clone(),
+                            VpRunState::Interrupted { caller, .. } => caller.clone(),
+                            _ => unreachable!(),
+                        };
+                        VpRunState::Running {
+                            core: core_id,
+                            caller: final_caller,
+                        }
+                    } else {
+                        match state {
+                            VpRunState::Suspended {
+                                callee_domain_id,
+                                callee_vp_id,
+                                prev_caller,
+                                ..
+                            } => VpRunState::Locked {
+                                callee_domain_id: *callee_domain_id,
+                                callee_vp_id: *callee_vp_id,
+                                prev_caller: prev_caller.clone(),
+                            },
+                            _ => unreachable!(),
+                        }
+                    };
+
+                    let mut current = vp.run_state.write();
+                    if index == 0
+                        && !matches!(
+                            (&*current, state),
+                            (VpRunState::Suspended { .. }, VpRunState::Suspended { .. })
+                                | (
+                                    VpRunState::Interrupted { .. },
+                                    VpRunState::Interrupted { .. }
+                                )
+                        )
+                    {
+                        return Err(CapaError::InvalidOperation(
+                            "target VP was claimed concurrently".to_string(),
+                        ));
+                    }
+                    *current = replacement;
+                }
+            }
+            _ => {
+                return Err(CapaError::InvalidOperation(
+                    "target VP is not available".to_string(),
+                ))
             }
         }
 
@@ -2367,15 +2471,15 @@ impl Capability<Domain> {
             prev_caller: caller_prev_caller,
         };
 
-        platform.set_core_context(core_id, &to_domain_ref, to_vp_id);
+        platform.set_core_context(core_id, &actual_cap, actual_vp.id);
 
         Ok(SwitchContext {
             from_domain: caller_id,
-            to_domain: to_domain_id,
+            to_domain: actual_domain_id,
             core_id,
             is_return: false,
             from_vp_id: Some(caller_vp_id),
-            to_vp_id: Some(to_vp_id),
+            to_vp_id: Some(actual_vp.id),
             interrupt_return,
         })
     }
@@ -2410,11 +2514,33 @@ impl Capability<Domain> {
     pub fn deliver_interrupt_vp(
         platform: &dyn Platform,
         interrupted_cap: &CapabilityRef<Domain>,
-        handler_domain_id: u64,
         core_id: CoreId,
         vector: u8,
     ) -> Result<(VpInterruptContext, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
+        let handler_domain_id = {
+            let mut current = interrupted_cap.clone();
+            loop {
+                let domain = current.read();
+                let visibility = domain
+                    .data
+                    .policy
+                    .interrupts
+                    .get_policy(vector)
+                    .visibility;
+                if visibility == InterruptVisibility::Deliver {
+                    break domain.data.id;
+                }
+                let parent = domain.get_parent().ok_or_else(|| {
+                    CapaError::InvalidOperation(
+                        "no Deliver interrupt handler in ancestor chain".to_string(),
+                    )
+                })?;
+                drop(domain);
+                current = parent;
+            }
+        };
+
         let (interrupted_domain_id, leaf_vp_arc) = {
             let d = interrupted_cap.read();
             let id = d.data.id;
@@ -2522,26 +2648,58 @@ impl Capability<Domain> {
         // For n>2 the callee is Suspended (already claimable).  For n==2 the
         // callee is the leaf itself, so we set it to Available directly.
 
-        // Leaf: Running → Interrupted, unless the handler is the direct caller
-        // (n==2) in which case the handler becoming Running unlocks it immediately.
-        if n > 2 {
-            *chain[0].2.run_state.write() = VpRunState::Interrupted { vector };
-        } else {
-            *chain[0].2.run_state.write() = VpRunState::Available {
-                last_exit_reason: None,
-            };
-        }
+        let leaf_caller = match &*chain[0].2.run_state.read() {
+            VpRunState::Running { caller, .. } => caller.clone(),
+            _ => {
+                return Err(CapaError::InvalidOperation(
+                    "leaf VP changed state during interrupt delivery".to_string(),
+                ))
+            }
+        };
+        let leaf_report = chain[0]
+            .0
+            .read()
+            .data
+            .policy
+            .interrupts
+            .get_policy(vector)
+            .visibility
+            == InterruptVisibility::Report;
+        *chain[0].2.run_state.write() = VpRunState::Interrupted {
+            vector,
+            caller: leaf_caller,
+            report: leaf_report,
+        };
 
         // Intermediate VPs: Locked → Suspended.
         for i in 1..n - 1 {
             let callee_domain = Arc::downgrade(&chain[i - 1].0);
             let callee_domain_id = chain[i - 1].1;
             let callee_vp_id = chain[i - 1].2.id;
+            let prev_caller = match &*chain[i].2.run_state.read() {
+                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
+                _ => {
+                    return Err(CapaError::InvalidOperation(
+                        "intermediate VP changed state during interrupt delivery".to_string(),
+                    ))
+                }
+            };
+            let report = chain[i]
+                .0
+                .read()
+                .data
+                .policy
+                .interrupts
+                .get_policy(vector)
+                .visibility
+                == InterruptVisibility::Report;
             *chain[i].2.run_state.write() = VpRunState::Suspended {
                 callee_domain,
                 callee_domain_id,
                 callee_vp_id,
+                prev_caller,
                 vector,
+                report,
             };
         }
 
@@ -3234,7 +3392,7 @@ fn register_access_check(
     // - Available without exit reason (fresh VP) or Locked: use InterruptPolicy
     //   default (VECTOR_AVAILABLE).
     let bitmap = match &*run_state {
-        VpRunState::Interrupted { vector } | VpRunState::Suspended { vector, .. } => {
+        VpRunState::Interrupted { vector, .. } | VpRunState::Suspended { vector, .. } => {
             let policy = child_r.data.policy.interrupts.get_policy(*vector);
             if want_read { policy.read_set } else { policy.write_set }
         }

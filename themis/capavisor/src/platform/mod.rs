@@ -156,7 +156,7 @@ pub struct ThemisPlatform {
     /// methods on the concrete `ArchPlatformState`.
     pub arch: ArchPlatformState,
     /// Engine-level switch manager — owns per-core `CoreContext` for
-    /// `route_interrupt()` and `resume_after_interrupt()`.  Kept in sync
+    /// legacy non-VP routing helpers. Kept in sync
     /// with the capavisor's own `CoreContext` via `set_core_context()`.
     switch_mgr: SwitchManager,
 }
@@ -203,18 +203,6 @@ impl ThemisPlatform {
     /// Number of physical cores (set at boot from Limine MP response).
     pub fn num_cores(&self) -> usize {
         self.num_cores
-    }
-
-    /// Route an interrupt through the domain hierarchy per `InterruptPolicy`.
-    /// Delegates to `SwitchManager::route_interrupt()`.
-    pub fn route_interrupt(
-        &self,
-        vector: u8,
-        interrupted: &CapabilityRef<Domain>,
-        core_id: u64,
-    ) -> capability_engine::error::Result<(u64, alloc::vec::Vec<u64>)> {
-        self.switch_mgr
-            .route_interrupt(vector, interrupted, core_id)
     }
 
     /// Reprogram a PCI device's IOMMU context entry to use `domain_id`'s
@@ -479,7 +467,10 @@ impl ThemisPlatform {
         // cached — the engine's IPI/barrier path cannot reach root-mode
         // cores, so the queue is the asynchronous channel.
         self.apply_local_core_updates(core_id as CoreId);
+        self.commit_core_context(core_id, cap, vp_id);
+    }
 
+    fn commit_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
         let dom_id = cap.read().data.id;
         self.cores[core_id]
             .domain_id
@@ -574,7 +565,9 @@ impl ThemisPlatform {
     /// aligned drain-first protocol) — so `Switch` handlers can VMCLEAR
     /// and rebind the vcpu before the initiator applies global updates.
     fn apply_local_core_updates(&self, core_id: CoreId) {
-        let mut queue = self.core_updates[core_id as usize].lock();
+        let Some(mut queue) = self.core_updates[core_id as usize].try_lock() else {
+            return;
+        };
         while let Some(update) = queue.pop_front() {
             match update {
                 CoreUpdate::TlbShootdown { domain, handle } => {
@@ -592,7 +585,12 @@ impl ThemisPlatform {
                         arc.lock().clear_cached_on(core_id);
                     }
                 }
-                CoreUpdate::Switch { domain_cap, vp_id } => {
+                CoreUpdate::Switch {
+                    source_cap,
+                    source_vp,
+                    target_cap,
+                    target_vp,
+                } => {
                     // Revoke-driven cross-core switch (see docs/design/
                     // cross-core-revoke.md).  Runs BEFORE B0 so the target
                     // has already switched off the doomed domain by the
@@ -605,14 +603,19 @@ impl ThemisPlatform {
                     //   2. Then the hardware VMCLEAR/VMPTRLD swap, which
                     //      reads Tier‑1 as `src` — must match the OLD
                     //      binding, so we grab it BEFORE step 1.
-                    let src = self.core_current_binding(core_id);
-                    let dst_dom = domain_cap.read().data.id;
-                    let dst_vp_idx = vp_id as usize;
+                    let source_dom = source_cap.read().data.id;
+                    let target_dom = target_cap.read().data.id;
+                    let observed = self.core_current_binding(core_id);
+                    let expected = (source_dom, source_vp as usize);
+                    assert_eq!(
+                        observed, expected,
+                        "[REVOKE_SWITCH] source binding changed before owner-core drain"
+                    );
 
                     capability_engine::Capability::<Domain>::switch_after_callee_revoked(
                         self,
-                        &domain_cap,
-                        vp_id as u64,
+                        &target_cap,
+                        target_vp as u64,
                     )
                     .expect("[REVOKE_SWITCH] engine transition failed");
 
@@ -623,15 +626,11 @@ impl ThemisPlatform {
                         crate::arch::apply_cross_core_switch(
                             self,
                             core_id,
-                            (dst_dom, dst_vp_idx),
+                            expected,
+                            (target_dom, target_vp as usize),
                         );
                     }
-                    // Consume unused src outside the arch call — kept for
-                    // symmetry / documentation of the captured binding.
-                    let _ = src;
-                }
-                CoreUpdate::Revoke { .. } => {
-                    todo!("P9: cross-core domain revocation");
+                    self.commit_core_context(core_id as usize, target_cap, target_vp);
                 }
             }
         }
@@ -836,14 +835,18 @@ impl Platform for ThemisPlatform {
     fn push_core_switch(
         &self,
         core_id: CoreId,
+        source_domain: &CapabilityRef<Domain>,
+        source_vp: u64,
         target_domain: &CapabilityRef<Domain>,
         target_vp: u64,
     ) {
         self.push_core_update(
             core_id,
             CoreUpdate::Switch {
-                domain_cap: target_domain.clone(),
-                vp_id: target_vp as u32,
+                source_cap: source_domain.clone(),
+                source_vp: source_vp as u32,
+                target_cap: target_domain.clone(),
+                target_vp: target_vp as u32,
             },
         );
     }

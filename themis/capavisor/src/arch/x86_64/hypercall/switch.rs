@@ -68,7 +68,7 @@ pub(crate) fn do_switch(
     // MUST happen before Capability::switch transitions the target VP to Running,
     // because set_register (used to validate the dirty COMM page registers)
     // rejects writes to a VP that is already in Running state.
-    let (_to_domain_id_pre, comm_hpa) = {
+    let (to_domain_id_pre, comm_hpa) = {
         let c = caller.read();
         let to_weak = match c.data.get_domain_capability(to_domain_handle) {
             Some(w) => w.clone(),
@@ -142,6 +142,7 @@ pub(crate) fn do_switch(
     };
 
     let to_domain_id: DomainId = switch_ctx.to_domain;
+    let to_vp_idx = switch_ctx.to_vp_id.unwrap_or(vp_id) as usize;
     let from_domain_id: DomainId = switch_ctx.from_domain;
     let from_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
 
@@ -162,7 +163,7 @@ pub(crate) fn do_switch(
             vcpu,
             platform,
             (from_domain_id, from_vp_id),
-            (to_domain_id, vp_idx),
+            (to_domain_id, to_vp_idx),
             "SWITCH",
         );
     }
@@ -170,11 +171,7 @@ pub(crate) fn do_switch(
     // ── 5. Sync IRTE.NDST so hardware-posted device interrupts for Deliver
     //       vectors are routed to this core by the IOMMU.
     {
-        let to_ref = caller
-            .read()
-            .data
-            .get_domain_capability(to_domain_handle)
-            .and_then(|w| w.upgrade());
+        let to_ref = platform.get_core_cap(switch_ctx.core_id as usize);
         if let Some(to_cap) = to_ref {
             sync_irte_ndst(platform, &to_cap, current_lapic);
         }
@@ -204,8 +201,10 @@ pub(crate) fn do_switch(
 
     // ── 8. Apply all pending COMM-page registers to the now-active target.
     //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
-    for (reg, val) in &pending {
-        apply_pending_reg(vcpu, *reg, *val);
+    if to_domain_id == to_domain_id_pre && to_vp_idx == vp_idx {
+        for (reg, val) in &pending {
+            apply_pending_reg(vcpu, *reg, *val);
+        }
     }
 
     // ── 9. Interrupt return: if the target VP was Suspended (multi-hop
@@ -595,29 +594,14 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.
-        if vcpu.posted_interrupts_enabled() {
-            let pid_phys = vcpu.pid_phys();
-            let hhdm = platform.hhdm_offset();
-            unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
-            return;
+        if vcpu.guest_can_accept_external() {
+            vcpu.inject_external_vector(vector);
         } else {
-            vcpu.inject_external_vector(vector as u8);
-            return;
+            unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
+            vcpu.set_interrupt_window_exit(true);
         }
+        return;
     }
-
-    // Route via SwitchManager (A9): walk domain hierarchy per InterruptPolicy.
-    let handler_domain_id = match platform.route_interrupt(vector, &child_cap, core_id) {
-        Ok((id, _reported)) => {
-            serial_rtdbg!("[INTR_FWD] route vec={} → handler_dom={}", vector, id);
-            id
-        }
-        Err(_e) => {
-            serial_debug!("[INTR_FWD] no handler for vec={}: {:?}", vector, _e);
-            vcpu.inject_external_vector(vector as u8);
-            return;
-        }
-    };
 
     // Look up the interrupt policy read_set for register filtering.
     let read_set = child_cap
@@ -632,29 +616,42 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     let intr_ctx = match Capability::deliver_interrupt_vp(
         platform,
         &child_cap,
-        handler_domain_id,
         core_id,
         vector,
     ) {
         Ok((ctx, _batch)) => ctx,
         Err(_e) => {
             serial_debug!(
-                "[INTR_FWD] deliver_interrupt_vp failed: {:?} — re-entering child",
+                "[INTR_FWD] interrupt routing failed: {:?}",
                 _e
             );
-            vcpu.inject_external_vector(vector as u8);
             return;
         }
     };
 
     // Copy child registers allowed by InterruptPolicy.read_set into comm page.
+    use themis_abi::regs::{
+        InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT,
+    };
+    let msg = InterceptMessage {
+        header: ThemicMessageHeader {
+            message_type: THEMIC_MSG_VP_INTERCEPT,
+            payload_size: (core::mem::size_of::<InterceptMessage>()
+                - core::mem::size_of::<ThemicMessageHeader>())
+                as u32,
+            sequence: 0,
+        },
+        exit_reason: crate::arch::x86_64::vmexit::EXIT_REASON_EXTERNAL_INTERRUPT,
+        exit_qualification: vector as u64,
+        ..InterceptMessage::default()
+    };
     copy_filtered_regs_to_comm(
         platform,
         vcpu,
         intr_ctx.interrupted_domain_id,
         intr_ctx.interrupted_vp_id as usize,
         read_set,
-        None,
+        Some(&msg),
     );
 
     // ── Swap child → handler via the shared helper. ──
@@ -672,7 +669,10 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
     // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
     if vcpu.guest_can_accept_external() {
-        vcpu.inject_external_vector(vector as u8);
+        vcpu.inject_external_vector(vector);
+    } else {
+        unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
+        vcpu.set_interrupt_window_exit(true);
     }
 
     // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).

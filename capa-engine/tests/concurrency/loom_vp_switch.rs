@@ -535,7 +535,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, state_t0);
-            Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, dom0_id, 0, 0)
+            Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, 0, 0)
         });
 
         // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.
@@ -594,6 +594,8 @@ fn vp_two_cores_race_suspended_vp() {
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
         let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
         let (dom2, _) = make_sealed_child(&dom0);
+        let dom0_id = dom0.read().data.id;
+        let dom1_id = dom1.read().data.id;
         let dom2_id = dom2.read().data.id;
 
         // dom0 has two Running VPs: one on core 0, one on core 1.
@@ -611,14 +613,28 @@ fn vp_two_cores_race_suspended_vp() {
                 callee_domain: dom2_weak,
                 callee_domain_id: dom2_id,
                 callee_vp_id: 0,
+                prev_caller: Some(VpCallContext {
+                    domain: std::sync::Arc::downgrade(&dom0),
+                    domain_id: dom0_id,
+                    vp_id: 0,
+                }),
                 vector: 0,
+                report: true,
             };
         }
         {
             let d = dom2.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Interrupted { vector: 0 };
+            *vp0.run_state.write() = VpRunState::Interrupted {
+                vector: 0,
+                caller: Some(VpCallContext {
+                    domain: std::sync::Arc::downgrade(&dom1),
+                    domain_id: dom1_id,
+                    vp_id: 0,
+                }),
+                report: false,
+            };
         }
 
         // ── Arcs for threads ─────────────────────────────────────────────────
@@ -647,13 +663,8 @@ fn vp_two_cores_race_suspended_vp() {
 
         // ── Invariants ───────────────────────────────────────────────────────
 
-        // Exactly one core wins the Suspended → Running transition.
-        assert!(
-            r0.is_ok() ^ r1.is_ok(),
-            "exactly one core should claim the Suspended VP: r0={} r1={}",
-            r0.is_ok(),
-            r1.is_ok()
-        );
+        assert!(r0.is_ok(), "the exact owner must resume the Suspended VP");
+        assert!(r1.is_err(), "a different VP must not steal the Suspended VP");
 
         // dom1.vp0 must be Running (held by the winner).
         {
@@ -666,15 +677,14 @@ fn vp_two_cores_race_suspended_vp() {
             );
         }
 
-        // dom2.vp0 must be Available — freed exactly once by the winner.
-        // The loser never reaches the callee-free path because it sees Running and returns early.
+        // dom2.vp0 remains reserved for dom1.vp0.
         {
             let d = dom2.read();
             let vp = d.data.policy.vprocessor_states[0].clone();
             drop(d);
             assert!(
-                matches!(*vp.run_state.read(), VpRunState::Available { .. }),
-                "dom2.vp0 must be Available after its Suspended parent was claimed"
+                matches!(*vp.run_state.read(), VpRunState::Interrupted { .. }),
+                "dom2.vp0 must remain Interrupted until its exact caller resumes it"
             );
         }
     });

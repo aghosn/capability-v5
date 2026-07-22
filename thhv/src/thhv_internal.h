@@ -334,6 +334,7 @@ long thhv_set_guest_memory(struct thhv_partition *part, void __user *uarg);
  * args.domain_handle is 0, returns carved HPAs for ALL partitions; otherwise
  * filters to the matching one.  Skips THHV_MEM_F_ALIAS regions. */
 long thhv_debug_list_hpas(void __user *uarg);
+long thhv_debug_revoke_all(void);
 
 /* Per-partition collector used by thhv_debug_list_hpas (thhv_part_mem.c). */
 void thhv_collect_carved_runs(struct thhv_partition *part,

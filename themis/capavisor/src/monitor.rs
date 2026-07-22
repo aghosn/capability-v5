@@ -264,21 +264,6 @@ fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> 
 #[allow(unused_variables)]
 fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform, vector: u32) {
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    let exit_trap = platform
-        .get_core_cap(core_id)
-        .map(|c| {
-            c.read()
-                .data
-                .policy
-                .exits
-                .get_action(A::EXTERNAL_INTERRUPT_EXIT_REASON)
-                .trap
-        })
-        .unwrap_or(true);
-
-    if !exit_trap {
-        return;
-    }
 
     #[cfg(feature = "quantum-sched")]
     {

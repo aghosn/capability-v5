@@ -718,19 +718,18 @@ impl Backend for RustBackend {
     ) -> Result<()> {
         let domain_arc = self.get_domain(domain)?;
 
-        let (handler_id, _reported_to) = self.platform
-            .route_interrupt(vector, &domain_arc, core)
-            .map_err(convert_error)?;
-
         let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
-            self.platform.as_ref(), &domain_arc, handler_id, core, vector,
+            self.platform.as_ref(), &domain_arc, core, vector,
         );
 
-        if vp_delivery.is_err() && handler_id != domain {
-            self.platform.set_core_domain_by_id(core, handler_id);
+        if let Ok((ctx, _)) = &vp_delivery {
+            if ctx.handler_domain_id != domain {
+                self.platform
+                    .set_core_domain_by_id(core, ctx.handler_domain_id);
+            }
         }
 
-        Ok(())
+        vp_delivery.map(|_| ()).map_err(convert_error)
     }
 
     // ── Policy & Registers ──────────────────────────────────────────────

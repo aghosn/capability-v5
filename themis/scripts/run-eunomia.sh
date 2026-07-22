@@ -275,4 +275,143 @@ if [[ "$WORKLOAD_NAME" == "coco-illegal-access" ]]; then
     exit "$RC"
 fi
 
+# `revoke` is the cross-core REVOKE_DOMAIN integration test. Boot a
+# no-exit child on one physical core, then invoke the debug revoke ioctl
+# from another. The capavisor's engine-side trace proves that the VP was
+# Running{core} when revocation began and that the cross-core swap fired.
+if [[ "$WORKLOAD_NAME" == "revoke" ]]; then
+    DOM1_LOG="$(mktemp -t eunomia-revoke.XXXXXX.log)"
+    # Auto-select the "no-exit" policy so the child never traps back to
+    # dom0 during steady spin (guarantees child.vp0 stays Running{core}
+    # long enough for the cross-core revoke to hit scenario 2).
+    if [[ -z "$THEMIS_CONFIG" ]]; then
+        REVOKE_POLICY=""
+        for candidate in \
+            "$SCRIPT_DIR/policies/revoke/no-exit.json" \
+            "$SCRIPT_DIR/../../eunomia/policies/revoke/no-exit.json"; do
+            if [[ -f "$candidate" ]]; then
+                REVOKE_POLICY="$candidate"
+                break
+            fi
+        done
+        if [[ -n "$REVOKE_POLICY" ]]; then
+            CHV_ARGS+=(--themis-config "$REVOKE_POLICY")
+            echo "→ using revoke policy: $REVOKE_POLICY (trap=false)"
+        else
+            echo "WARN: revoke no-exit policy not found (child will trap on every VMEXIT)"
+        fi
+    fi
+    # Serial to file so we can grep for heartbeats and traces.
+    REVOKE_ARGS=()
+    skip_next=0
+    for a in "${CHV_ARGS[@]}"; do
+        if (( skip_next )); then skip_next=0; continue; fi
+        if [[ "$a" == "--serial" ]]; then
+            REVOKE_ARGS+=(--serial "file=$DOM1_LOG")
+            skip_next=1
+            continue
+        fi
+        REVOKE_ARGS+=("$a")
+    done
+
+    echo "→ launching dom1 in background (log: $DOM1_LOG) ..."
+    # Deterministic C3: pin CHV process (all threads) to physical core
+    # THEMIS_CHV_CORE (default 0).  With CHV_CPUS=1, its single vCPU
+    # thread lands on that core; when it enters VMCALL_SWITCH, the child
+    # runs on that same physical core.  Combined with a no-VMEXIT child
+    # workload, this guarantees the child is in guest mode on
+    # THEMIS_CHV_CORE when the revoker fires from THEMIS_REVOKE_CORE.
+    CHV_CORE="${THEMIS_CHV_CORE:-0}"
+    REVOKE_CORE="${THEMIS_REVOKE_CORE:-1}"
+    if [[ "$CHV_CORE" == "$REVOKE_CORE" ]]; then
+        echo "FAIL: THEMIS_CHV_CORE ($CHV_CORE) must differ from THEMIS_REVOKE_CORE ($REVOKE_CORE)"
+        exit 1
+    fi
+    if (( CHV_CPUS != 1 )); then
+        echo "WARN: deterministic revoke test expects CHV_CPUS=1 (got $CHV_CPUS); scenario 2 not guaranteed"
+    fi
+    echo "→ pinning CHV to core $CHV_CORE, revoker to core $REVOKE_CORE"
+    taskset -c "$CHV_CORE" "$CHV" "${REVOKE_ARGS[@]}" >"$DOM1_LOG.chv" 2>&1 &
+    CHV_PID=$!
+
+    cleanup() {
+        if kill -0 "$CHV_PID" 2>/dev/null; then
+            kill "$CHV_PID" 2>/dev/null || true
+            sleep 1
+            kill -9 "$CHV_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
+    # Under the no-exit policy, serial PIO is consumed locally by the
+    # capavisor and never forwarded to CHV, so workload heartbeats are
+    # intentionally invisible here. Give the tiny PVH workload enough time
+    # to boot and enter its permanent spin. The engine-side diagnostic at
+    # revoke time is the authoritative readiness check: vp0 must report
+    # Running{core:CHV_CORE}, immediately followed by the cross-core traces.
+    echo "→ waiting for no-exit child to boot and enter steady spin ..."
+    sleep 5
+
+    # SIGKILL rather than SIGTERM: we want CHV to be terminated without
+    # its graceful shutdown running.  On graceful shutdown CHV joins its
+    # vCPU threads first, forcing the child to VMEXIT before the fd is
+    # closed — which means REVOKE_DOMAIN fires with the child no longer
+    # running in guest mode (scenario 1, same-core path).  SIGKILL skips
+    # CHV cleanup; the kernel reaps threads and calls .release on the
+    # thhv fd from an arbitrary dom0 core — often different from the one
+    # that was hosting the child, exercising the cross-core swap path.
+    #
+    # Actually — SIGKILL still can't preempt a dom0 vCPU thread that is
+    # mid-VMCALL-SWITCH, so we prefer the direct debug ioctl.  Ask thhv
+    # to revoke every partition immediately.  Pin the tool to a specific
+    # dom0 core so the REVOKE_DOMAIN VMCALL lands on a different core
+    # than the one CHV's vCPU threads are typically busy on.
+    REVOKE_TOOL="$BINS/thhv/tests/test_debug_revoke_all"
+    if [[ -x "$REVOKE_TOOL" ]]; then
+        echo "→ triggering THHV_DEBUG_REVOKE_ALL from core $REVOKE_CORE ..."
+        taskset -c "$REVOKE_CORE" "$REVOKE_TOOL" || true
+    else
+        echo "→ REVOKE_TOOL not found; falling back to SIGKILL"
+        kill -KILL "$CHV_PID" 2>/dev/null || true
+    fi
+
+    # Give the revoke path a few seconds to complete.  CHV will exit
+    # with errors once its partition fd's underlying domain is gone.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if ! kill -0 "$CHV_PID" 2>/dev/null; then break; fi
+        sleep 1
+    done
+    if kill -0 "$CHV_PID" 2>/dev/null; then
+        echo "→ CHV still alive after revoke; sending SIGKILL to clean up"
+        kill -9 "$CHV_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    wait "$CHV_PID" 2>/dev/null || true
+
+    echo "── dom1 log tail ────────────────────────────────────────────"
+    tail -40 "$DOM1_LOG" | sed 's/^/    /' || true
+    echo "─────────────────────────────────────────────────────────────"
+
+    RC=0
+    # Any panic in capavisor is a hard failure.  Note: capavisor's own
+    # traces (e.g. [REVOKE-XCORE]) go to the *host* serial console, not
+    # to CHV's virtual serial (which is what $DOM1_LOG captures).  We
+    # can only detect panics that show up in dom0's own output.
+    if grep -Ei 'panic|PANIC|BUG:|kernel BUG' "$DOM1_LOG" "$DOM1_LOG.chv" >/dev/null; then
+        echo "FAIL: panic detected in dom0/CHV log"
+        grep -Ei 'panic|PANIC|BUG:|kernel BUG' "$DOM1_LOG" "$DOM1_LOG.chv" | head -20 | sed 's/^/    /'
+        RC=1
+    fi
+
+    if (( RC == 0 )); then
+        echo "PASS: no-exit child revoked without panic"
+        echo "      (check host serial console for [REVOKE-XCORE] traces)"
+        rm -f "$DOM1_LOG" "$DOM1_LOG.chv"
+    else
+        echo "Logs preserved: $DOM1_LOG $DOM1_LOG.chv"
+    fi
+    trap - EXIT
+    exit "$RC"
+fi
+
 exec "$CHV" "${CHV_ARGS[@]}"

@@ -17,8 +17,6 @@ use super::domain::PlatformDomain;
 /// Command pushed by the initiating core into a target core's update queue,
 /// consumed by that core between barriers 0 and 1 in `poll_and_respond_cross_core`.
 ///
-/// `TlbShootdown` is the only variant used today.  `Switch` and `Revoke` are
-/// stubs for Phase 9 (domain switching / revocation).
 #[derive(Clone)]
 pub enum CoreUpdate {
     /// Flush per-LP second-stage cache for `domain` using the provided
@@ -31,18 +29,12 @@ pub enum CoreUpdate {
     /// `PlatformDomain::cached_on` after flushing — a best-effort cleanup
     /// (silently skipped if the domain was already revoked).
     TlbShootdown { domain: DomainId, handle: u64 },
-    /// Switch this core to a different domain/VP (Phase 9).
-    #[allow(dead_code)]
+    /// Atomically switch this core from the exact source VP to the target VP.
     Switch {
-        domain_cap: CapabilityRef<Domain>,
-        vp_id: u32,
-    },
-    /// Domain was revoked; switch to fallback (Phase 9).
-    #[allow(dead_code)]
-    Revoke {
-        revoked: DomainId,
-        fallback_cap: CapabilityRef<Domain>,
-        fallback_vp: u32,
+        source_cap: CapabilityRef<Domain>,
+        source_vp: u32,
+        target_cap: CapabilityRef<Domain>,
+        target_vp: u32,
     },
 }
 
@@ -54,18 +46,15 @@ impl core::fmt::Debug for CoreUpdate {
                 "TlbShootdown {{ domain: {:?}, handle: {:#x} }}",
                 domain, handle
             ),
-            CoreUpdate::Switch { vp_id, .. } => {
-                write!(f, "Switch {{ vp_id: {} }}", vp_id)
-            }
-            CoreUpdate::Revoke {
-                revoked,
-                fallback_vp,
+            CoreUpdate::Switch {
+                source_vp,
+                target_vp,
                 ..
             } => {
                 write!(
                     f,
-                    "Revoke {{ revoked: {:?}, fallback_vp: {} }}",
-                    revoked, fallback_vp
+                    "Switch {{ source_vp: {}, target_vp: {} }}",
+                    source_vp, target_vp
                 )
             }
         }

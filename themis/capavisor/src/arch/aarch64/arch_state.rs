@@ -119,6 +119,7 @@ pub fn flush_tlb_handle(_handle: u64) {
 pub unsafe fn apply_cross_core_switch(
     _platform: &crate::platform::ThemisPlatform,
     _core_id: capability_engine::CoreId,
+    _src: (capability_engine::DomainId, usize),
     _dst: (capability_engine::DomainId, usize),
 ) {
     unimplemented!("apply_cross_core_switch: aarch64 backend not yet implemented")

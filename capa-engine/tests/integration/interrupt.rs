@@ -122,39 +122,6 @@ fn test_interrupt_immediate_delivery() {
 }
 
 #[test]
-fn test_resume_after_interrupt() {
-    let platform = common::TestPlatform::new();
-    // Setup hierarchy with multiple Report domains
-    let root_domain = Domain::new_root(4);
-    let dom0 = Capability::new_root(0, 0, root_domain);
-
-    let mut dom1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let mut report_policy = VectorPolicy::default_report();
-    report_policy.visibility = InterruptVisibility::Report;
-    dom1_policy.interrupts.set_policy(8, report_policy.clone());
-    let dom1_h = Capability::create(&platform, &dom0, dom1_policy).unwrap().0;
-    let dom1 = dom0.read().data.domain_capabilities[&dom1_h]
-        .upgrade()
-        .unwrap();
-    Capability::seal(&platform, &dom0, dom1_h).unwrap();
-
-    let mut dom2_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    dom2_policy.interrupts.set_policy(8, report_policy);
-    let dom2_h = Capability::create(&platform, &dom1, dom2_policy).unwrap().0;
-    let dom2 = dom1.read().data.domain_capabilities[&dom2_h]
-        .upgrade()
-        .unwrap();
-    Capability::seal(&platform, &dom1, dom2_h).unwrap();
-
-    let switch_mgr = SwitchManager::new(4);
-    let (handler_id, _) = switch_mgr.route_interrupt(8, &dom2, 0).unwrap();
-    assert_eq!(handler_id, 0);
-
-    let notified = switch_mgr.resume_after_interrupt(8, &dom0, &dom2).unwrap();
-    assert_eq!(notified.len(), 2, "Both dom1 and dom2 should be notified");
-}
-
-#[test]
 fn test_mixed_report_and_not_report() {
     let platform = common::TestPlatform::new();
     // Test a mix of Report and NotReport in the path

@@ -7,6 +7,154 @@
 
 ## Current Status
 
+- **2026-07-22 — deterministic cross-core revoke C3 (IN PROGRESS).**
+  Goal: revoke a child that is continuously running on core 0 from dom0
+  core 1, then audit that all per-domain/per-VP state is reclaimed.
+
+  Root cause found and fixed in the test setup: CHV parsed
+  `policies.exits` from `--themis-config` but `policy_walker.rs` emitted
+  only MSR and CPUID policy operations. The child therefore silently kept
+  the engine default `exits.default.trap=true` and was `Available` at
+  revoke time. CHV now emits `DEFAULT_EXIT_TRAP` and per-reason exit policy
+  operations before sealing. The revoke harness no longer waits for serial
+  heartbeats because serial PIO is intentionally local under `trap=false`.
+
+  Last known trace before the fix:
+  ```
+  [REVOKE-XCORE] child dom_id=1 #vps=1
+  [REVOKE-XCORE]   vp=0 state=Available
+  ```
+
+  Next step: rerun the pinned revoke test. Expected host trace starts with
+  `vp=0 state=Running core=0 caller=Some`, followed by
+  `push_core_switch`, `apply_switch`, and `swap complete`.
+
+  First true cross-core run exposed the lifecycle corruption behind the
+  second-run hang: `Platform::on_domain_revoked()` was writing the remote
+  core's Tier-1 `domain_id=dom0` before that core drained its queued switch.
+  Hardware still had the child VMCS loaded, so the swap was misidentified
+  as dom0→dom0 and the deactivated child VMCS was returned into dom0's
+  occupied `VcpuSlot`. Fixed by making `on_domain_revoked()` Tier-3 routing
+  cleanup only; only the owning core now updates Tier 1 during the actual
+  VMCS swap. A same-source/destination revoke-swap assertion prevents this
+  class of corruption from becoming a delayed hang again.
+
+  The ownership protocol has now been refactored end-to-end:
+  - Every queued revoke switch carries the exact source domain/VP and target
+    domain/VP. The owner core verifies the source before touching hardware.
+  - The engine includes every switch core in the IPI/barrier set and rejects
+    duplicate orders for one core.
+  - Target metadata is committed only after the VMCS/VcpuSlot swap succeeds;
+    `on_domain_revoked()` is residual routing cleanup after barrier 0.
+  - Revoke preflight rejects a running doomed VP with no caller before
+    detaching or marking any subtree node.
+  - The unused parallel `CoreUpdate::Revoke` path was removed.
+
+  Engine tests, full loom concurrency tests, capa-cli release build, capavisor
+  release build, and `cargo build-bins` all pass. The pinned no-exit Eunomia
+  revoke harness also passed twice consecutively in one Themis boot. Both
+  owner-core transitions named the actual running child as the source:
+  ```
+  apply_switch core=0 src=(dom=1,vp=0) dst=(dom=0,vp=0)
+  swap complete core=0
+  apply_switch core=0 src=(dom=2,vp=0) dst=(dom=0,vp=0)
+  swap complete core=0
+  ```
+  There was no second-run hang and no `VcpuSlot::put` panic, so the explicit
+  VP/VMCS ownership transition is fixed. However, roughly 60 seconds later
+  dom0 reported an RCU stall on CPU 0 in `pv_native_safe_halt`; timer progress
+  on the revoke target core had stopped.
+
+  Two hypotheses remain and must be distinguished before changing design:
+  1. the INIT IPI used for cross-core wakeup perturbs processor/LAPIC state;
+  2. the emulated TSC deadline is incorrectly stored per physical core, so a
+     dom0 deadline can expire while the child is active and be injected into
+     the child before dom0 resumes.
+
+  A temporary ownership diagnostic now records which domain/VP armed each
+  per-core deadline and prints `[TIMER-OWNER-MISMATCH]` only if that deadline
+  fires on a different active domain/VP. The first rerun produced no marker,
+  then domain 2 hung before revoke and dom0 reported another CPU0 RCU stall.
+
+  The next diagnostic recorded:
+  ```
+  [EXTINT-DROPPED] core=0 active=(dom=1,vp=0) vector=0xec
+  ```
+  Vector `0xec` is dom0's local timer. The generic monitor was consulting
+  `ExitPolicy` for an external-interrupt VM exit and returning immediately
+  when `trap=false`, bypassing `InterruptPolicy` and lazy-unwind entirely.
+  This branch originated in `5f5f9d215` from a dom0-only assumption that
+  `trap=false` implied external-interrupt exiting was disabled.
+
+  The interrupt-policy audit also found that `c2820b5ec` integrated
+  `SwitchManager::route_interrupt()` but discarded its `reported_to` result.
+  Consequently the current VP unwind stores the vector in every intermediate
+  `Suspended` VP, so `NotReport` is not transparent, while the intended
+  Report/NotReport distinction is absent from the resume state machine.
+
+  Required fix:
+  - External interrupts are governed only by `InterruptPolicy`.
+  - Route selection and VP-chain mutation become one atomic engine operation;
+    the current route-then-deliver split can observe different policy/chain
+    states.
+  - Lazy-unwind records which suspended call frames must observe the event.
+  - On descent, the engine restores `NotReport` frames directly to `Locked`
+    without executing them, then performs one switch to the first `Report`
+    frame or directly to the interrupted leaf if no report is required.
+  - The interrupted leaf remains reserved until that atomic descent; it must
+    never become globally `Available` while the handler is still running.
+  - Remove the unused parallel `resume_after_interrupt()` list API once the
+    VP state machine is the single authority.
+
+  **Engine/capavisor correction implemented (uncommitted, ready for review):**
+  - Removed the external-interrupt `ExitPolicy` gate. Interrupt routing now
+    always follows `InterruptPolicy`.
+  - Combined handler selection and VP-chain unwind in
+    `deliver_interrupt_vp()` under one engine operation.
+  - `Suspended` and `Interrupted` states retain exact caller ownership and
+    per-frame `Report` disposition.
+  - Descent skips `NotReport` frames atomically, stopping at the first
+    `Report` frame or restoring the original leaf directly.
+  - The interrupted leaf remains reserved; unrelated VPs cannot claim it.
+  - Capavisor swaps to the engine-selected actual destination VP, publishes
+    an interrupt intercept message, fails closed on routing errors, and queues
+    blocked injection in PIR with interrupt-window exiting.
+  - Removed the obsolete `resume_after_interrupt()` list API.
+  - Restored the explicit source→target cross-core revoke ownership changes
+    that were lost during the formatter incident.
+
+  Validation: full engine suite passes; 32 interrupt/switch unit tests pass;
+  all 5 VP loom tests pass; capa-cli release build and capavisor release check
+  pass. No formatter was run. Nested A→B→C Eunomia coverage remains a separate
+  integration task.
+
+  Integration acceptance requires a reusable three-domain Eunomia topology
+  A→B→C, not only dom0→child. The preferred harness is a small bare-metal
+  nested-monitor workload for B that uses the Themis hypercall ABI to create,
+  seal, and switch to a spinning C. One launcher should run a policy matrix:
+  A=`Deliver`, B=`Report` must expose a synthetic SWITCH return; B=`NotReport`
+  must resume C transparently. This topology should become reusable for
+  nested switch, interrupt, and revocation tests.
+
+  Remaining cleanup is separate from the ownership fix:
+  `REVOKE_MEM parent=14 sub=24 failed (-2)` is the known redundant per-memory
+  revoke attempted after whole-domain revocation.
+
+  Files modified for this step:
+  - `cloud-hypervisor/hypervisor/src/themis/policy_walker.rs` — emit VMEXIT policy operations and test default/override encoding.
+  - `cloud-hypervisor/hypervisor/src/themis/vm_state.rs` — push VMEXIT policy before partition seal.
+  - `eunomia/policies/revoke/no-exit.json` — select local handling for all VMEXITs.
+  - `themis/scripts/run-eunomia.sh` — auto-select no-exit policy and use a fixed boot window rather than invisible serial markers.
+  - `themis/capavisor/src/hypercall/capa.rs` — temporary pre-revoke VP-state diagnostic.
+  - `themis/capavisor/src/platform/mod.rs` — preserve remote Tier-1 binding until its owning core performs the revoke switch.
+  - `themis/capavisor/src/platform/maps.rs` — retain one explicit source→target switch command; remove the unused revoke variant.
+  - `capa-engine/src/capability.rs` — emit exact source→target orders and preflight invalid running VPs before mutation.
+  - `capa-engine/src/domain_api.rs` — make revoke-return transition engine state only; owner metadata commits after hardware.
+  - `capa-engine/src/platform.rs` — include switch cores in barriers and perform residual revoke cleanup after barrier 0.
+  - `capa-engine/src/update.rs` — carry source domain/VP in `CoreSwitch`.
+  - `capa-engine/tests/common/mod.rs` — record complete switch orders.
+  - `capa-engine/tests/concurrency/platform.rs` — assert exact transitions, ordering, and mutation-free invalid-caller rejection.
+
 - **2026-07-20 — MSR interposition end-to-end (wrmsr suite 4/4 PASS)** ✅ DONE.
   Completed Phase 2 (hardware VMCS MSR entry-load/exit-store lists), Emulate
   WRMSR store-to-policy fallback, and Option B (CHV per-vCPU shadow for

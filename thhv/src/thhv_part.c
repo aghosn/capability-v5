@@ -30,10 +30,12 @@ static void thhv_partition_destroy(struct kref *ref)
 	 * partition (its rb-tree is freed below). */
 	thhv_partitions_unregister(part);
 
-	/* Revoke the domain in the capavisor (recursively tears down children). */
+	/* Revoke the domain in the capavisor (recursively tears down children).
+	 * -ENOENT means the domain was already revoked (e.g. via
+	 * THHV_DEBUG_REVOKE_ALL) — silently ignore. */
 	if (part->domain_handle) {
 		ret = themis_revoke_domain(part->domain_handle);
-		if (ret)
+		if (ret && ret != -ENOENT)
 			pr_warn("thhv: REVOKE_DOMAIN 0x%llx failed (%d)\n",
 				part->domain_handle, ret);
 	}

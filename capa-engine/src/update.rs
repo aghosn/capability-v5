@@ -279,6 +279,10 @@ pub struct UpdateBatch {
 pub struct CoreSwitch {
     /// Physical core to redirect.
     pub core: CoreId,
+    /// Capability of the domain currently running on `core`.
+    pub source_domain: crate::capability::CapabilityRef<crate::domain::Domain>,
+    /// VP id currently running within `source_domain`.
+    pub source_vp: u64,
     /// Capability of the domain to resume on `core`.  Held as a strong
     /// reference so the ancestor domain cannot be dropped before the
     /// platform observes the switch.
@@ -289,9 +293,12 @@ pub struct CoreSwitch {
 
 impl core::fmt::Debug for CoreSwitch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let source_id = self.source_domain.read().data.id;
         let target_id = self.target_domain.read().data.id;
         f.debug_struct("CoreSwitch")
             .field("core", &self.core)
+            .field("source_domain_id", &source_id)
+            .field("source_vp", &self.source_vp)
             .field("target_domain_id", &target_id)
             .field("target_vp", &self.target_vp)
             .finish()

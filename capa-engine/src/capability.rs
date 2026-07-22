@@ -6,6 +6,7 @@ use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
 use crate::sync::RwLock;
 use crate::update::{CoreSwitch, DomainId, UpdateBatch};
 use crate::view::AddressSpaceView;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -756,6 +757,28 @@ impl Capability<Domain> {
         Err(CapaError::NotFound)
     }
 
+    fn validate_revoke_domain_subtree(domain_ref: &CapabilityRef<Domain>) -> Result<()> {
+        let children = {
+            let domain = domain_ref.read();
+            for vp in &domain.data.policy.vprocessor_states {
+                if matches!(
+                    *vp.run_state.read(),
+                    VpRunState::Running { caller: None, .. }
+                ) {
+                    return Err(CapaError::InvalidOperation(
+                        String::from("revoked running VP has no caller"),
+                    ));
+                }
+            }
+            domain.children.clone()
+        };
+
+        for child in children {
+            Self::validate_revoke_domain_subtree(&child)?;
+        }
+        Ok(())
+    }
+
     /// Revoke a child domain and all its descendants by SubHandle
     ///
     /// Internal implementation called by [`revoke_domain`].
@@ -763,14 +786,24 @@ impl Capability<Domain> {
         parent_ref: &CapabilityRef<Domain>,
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {
-        let mut parent = parent_ref.write();
+        let (parent_id, child_ref) = {
+            let parent = parent_ref.read();
+            parent.data.require_api(MonitorAPI::REVOKE)?;
+            let child = parent
+                .children
+                .iter()
+                .find(|child| child.read().sub_handle == child_sub)
+                .cloned()
+                .ok_or(CapaError::NotFound)?;
+            (parent.data.id, child)
+        };
 
-        parent.data.require_api(MonitorAPI::REVOKE)?;
+        Self::validate_revoke_domain_subtree(&child_ref)?;
 
-        let child_ref = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
-
-        let parent_id = parent.data.id;
-        drop(parent);
+        parent_ref
+            .write()
+            .remove_child(child_sub)
+            .ok_or(CapaError::NotFound)?;
 
         let updates = Self::revoke_domain_subtree(&child_ref, Some(parent_id))?;
 
@@ -820,7 +853,7 @@ impl Capability<Domain> {
         // below.  Because this level marks `domain.data.revoke()` before
         // recursing, ancestor-of-a-child walks correctly see this domain
         // as revoked and skip past it.
-        let running_vps: Vec<(crate::update::CoreId, VpCallContext)> = domain
+        let running_vps: Vec<(crate::update::CoreId, u64, VpCallContext)> = domain
             .data
             .policy
             .vprocessor_states
@@ -828,7 +861,7 @@ impl Capability<Domain> {
             .filter_map(|vp| {
                 let rs = vp.run_state.read();
                 if let VpRunState::Running { core, caller: Some(ctx) } = &*rs {
-                    Some((*core, ctx.clone()))
+                    Some((*core, vp.id, ctx.clone()))
                 } else {
                     None
                 }
@@ -837,10 +870,12 @@ impl Capability<Domain> {
 
         drop(domain);
 
-        for (core, first_caller) in running_vps {
+        for (core, source_vp, first_caller) in running_vps {
             let (target_domain, target_vp) = Self::walk_revoke_caller_chain(first_caller)?;
             updates.add_core_switch(CoreSwitch {
                 core,
+                source_domain: domain_ref.clone(),
+                source_vp,
                 target_domain,
                 target_vp,
             });
@@ -1140,4 +1175,3 @@ pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView
     w.data.ensure_view_fresh();
     w.data.cached_view.clone()
 }
-

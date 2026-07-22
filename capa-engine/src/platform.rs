@@ -44,10 +44,11 @@
 
 use crate::capability::CapabilityRef;
 use crate::domain::Domain;
-use crate::error::Result;
+use crate::error::{CapaError, Result};
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A RAII guard that holds a platform operation lock (shared or exclusive).
@@ -258,6 +259,8 @@ pub trait Platform: Send + Sync {
     fn push_core_switch(
         &self,
         _core_id: CoreId,
+        _source_cap: &CapabilityRef<Domain>,
+        _source_vp_id: u64,
         _target_cap: &CapabilityRef<Domain>,
         _target_vp_id: u64,
     ) {
@@ -426,15 +429,22 @@ where
         // The current core (handling the hypercall) is excluded: it already
         // stopped running guest code (VMEXIT) and will apply updates directly.
         let current_core = platform.get_current_core();
-        let affected_cores: BTreeSet<CoreId> = batch
+        let mut affected_cores: BTreeSet<CoreId> = batch
             .affected_domains()
             .iter()
             .flat_map(|&d| platform.domain_cores(d))
             .filter(|&c| Some(c) != current_core)
             .collect();
+        affected_cores.extend(
+            batch
+                .core_switches()
+                .iter()
+                .map(|switch| switch.core)
+                .filter(|&c| Some(c) != current_core),
+        );
 
-        // Step 5a — push per-core switch orders and notify the platform of
-        // domain revocations BEFORE sending IPIs.  Under the Tyche-aligned
+        // Step 5a — push per-core switch orders BEFORE sending IPIs.
+        // Under the Tyche-aligned
         // barrier protocol, target cores drain their per-core update queue
         // BEFORE barrier 0 (that is what B0 attests to: "targets have
         // switched off the doomed domain").  So every `CoreSwitch` that
@@ -443,13 +453,21 @@ where
         // target drains an empty queue and B0 releases with the target
         // still bound to the doomed domain, breaking `apply_update`'s
         // "no live reference" precondition.
+        let mut switched_cores = BTreeSet::new();
         for switch in batch.core_switches() {
-            platform.push_core_switch(switch.core, &switch.target_domain, switch.target_vp);
-        }
-        for update in batch.updates() {
-            if let Update::RevokeDomain { domain, fallback } = update {
-                platform.on_domain_revoked(*domain, *fallback);
+            if !switched_cores.insert(switch.core) {
+                platform.release_update_lock();
+                return Err(CapaError::InvalidOperation(
+                    String::from("multiple revoke switch orders for one core"),
+                ));
             }
+            platform.push_core_switch(
+                switch.core,
+                &switch.source_domain,
+                switch.source_vp,
+                &switch.target_domain,
+                switch.target_vp,
+            );
         }
 
         if !affected_cores.is_empty() {
@@ -465,6 +483,11 @@ where
             // Safe: every affected core is parked at B1.wait, no live
             // reference to the doomed domain remains.
             for update in batch.updates() {
+                if let Update::RevokeDomain { domain, fallback } = update {
+                    platform.on_domain_revoked(*domain, *fallback);
+                }
+            }
+            for update in batch.updates() {
                 platform.apply_update(update);
             }
 
@@ -472,6 +495,11 @@ where
             platform.sync_barrier(1, affected_cores.len() + 1);
         } else {
             // Local path: no remote core is running an affected domain.
+            for update in batch.updates() {
+                if let Update::RevokeDomain { domain, fallback } = update {
+                    platform.on_domain_revoked(*domain, *fallback);
+                }
+            }
             for update in batch.updates() {
                 platform.apply_update(update);
             }
