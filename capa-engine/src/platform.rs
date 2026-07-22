@@ -438,7 +438,6 @@ where
         affected_cores.extend(
             batch
                 .core_switches()
-                .iter()
                 .map(|switch| switch.core)
                 .filter(|&c| Some(c) != current_core),
         );

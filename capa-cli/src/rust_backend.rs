@@ -140,7 +140,7 @@ fn convert_error(e: CapaError) -> BackendError {
 // ─── Update conversion ──────────────────────────────────────────────────────
 
 fn convert_updates(batch: &UpdateBatch) -> Vec<HwUpdate> {
-    batch.updates().iter().map(|u| match u {
+    batch.updates().iter().filter_map(|u| Some(match u {
         Update::ChangeRights { domain, address, size, physical, rights, .. } => {
             if *rights == Rights::NONE {
                 HwUpdate {
@@ -226,7 +226,11 @@ fn convert_updates(batch: &UpdateBatch) -> Vec<HwUpdate> {
             hpa: 0,
             rights: None,
         },
-    }).collect()
+        // Core-keyed, not a hardware/address-space projection — the CLI
+        // backend is single-core and has no notion of cross-core routing,
+        // so there is nothing meaningful to display here.
+        Update::Switch(_) => return None,
+    })).collect()
 }
 
 fn format_rights_val(r: Rights) -> String {

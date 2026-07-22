@@ -1009,6 +1009,11 @@ impl Platform for ThemisPlatform {
             Update::PolicyChanged { domain, change } => {
                 self.apply_policy_change(*domain, change);
             }
+
+            // Already actioned by `push_core_switch` inside `execute()`
+            // (queued happens-before the IPI/barrier, before `apply_update`
+            // ever runs) — no separate hardware projection here.
+            Update::Switch(_) => {}
         }
     }
 

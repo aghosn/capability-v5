@@ -15,7 +15,7 @@ pub type DomainId = u64;
 pub type CoreId = u64;
 
 /// Types of updates that affect domain address spaces
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Update {
     /// Set access rights for a memory range in a domain.
     /// `rights == Rights::NONE` means no access (full unmap).
@@ -111,6 +111,19 @@ pub enum Update {
         domain: DomainId,
         change: PolicyChange,
     },
+
+    /// Redirect a physical core off a doomed VP onto its nearest non-revoked
+    /// caller-chain ancestor.
+    ///
+    /// Emitted by [`crate::capability::Capability::revoke_domain_subtree`]
+    /// for every core found running a VP inside the revoked subtree (see
+    /// [`CoreSwitch`] for field semantics). Core-keyed, not domain-keyed:
+    /// [`Update::affected_domain`] returns `None` for this variant —
+    /// `UpdateBatch::core_switches` is the accessor `Platform::execute`
+    /// uses to compute which cores must be IPI'd and to call
+    /// [`crate::platform::Platform::push_core_switch`] before the barrier
+    /// protocol, exactly like every other update in the same batch.
+    Switch(CoreSwitch),
 }
 
 /// Concrete policy delta carried by `Update::PolicyChanged`.
@@ -241,6 +254,8 @@ impl Update {
             Update::CommRegion { .. } | Update::UncommRegion { .. } => None,
             Update::ZeroMemory { .. } => None,
             Update::PolicyChanged { domain, .. } => Some(*domain),
+            // Core-keyed, not domain-keyed — see `UpdateBatch::core_switches`.
+            Update::Switch(_) => None,
         }
     }
 }
@@ -248,7 +263,9 @@ impl Update {
 /// A batch of updates that should be applied atomically
 #[derive(Debug, Default, Clone)]
 pub struct UpdateBatch {
-    /// List of updates to apply
+    /// List of updates to apply. Per-core switch orders (see [`CoreSwitch`])
+    /// are ordinary [`Update::Switch`] entries in this same list — see
+    /// `core_switches()` for the filtered view `Platform::execute` uses.
     updates: Vec<Update>,
 
     /// Domains affected by these updates
@@ -256,18 +273,6 @@ pub struct UpdateBatch {
 
     /// Snapshot of domain states before updates (for rollback)
     snapshots: BTreeMap<DomainId, Vec<u8>>,
-
-    /// Per-core switch orders emitted by domain revocations.
-    ///
-    /// Populated during `revoke_domain_subtree`: for every VP found in
-    /// `VpRunState::Running{core, caller: Some(_)}` inside a revoked
-    /// domain, the engine walks the caller chain (skipping any ancestor
-    /// whose domain is also being revoked by this batch) and appends a
-    /// `CoreSwitch` naming the resume target.  The initiating core hands
-    /// each entry to `Platform::push_core_switch` **before** IPI/barrier
-    /// so target cores observe the queued switch when they drain the
-    /// per-core update queue.
-    core_switches: Vec<CoreSwitch>,
 }
 
 /// Per-core "switch to this VP on revocation" order.
@@ -444,15 +449,19 @@ impl UpdateBatch {
         &self.affected_domains
     }
 
-    /// Get per-core switch orders (see [`CoreSwitch`]).
-    pub fn core_switches(&self) -> &[CoreSwitch] {
-        &self.core_switches
+    /// Get per-core switch orders (see [`CoreSwitch`]) — the `Update::Switch`
+    /// entries within `updates()`, in batch order.
+    pub fn core_switches(&self) -> impl Iterator<Item = &CoreSwitch> {
+        self.updates.iter().filter_map(|u| match u {
+            Update::Switch(switch) => Some(switch),
+            _ => None,
+        })
     }
 
     /// Append a per-core switch order.  Called from `revoke_domain_subtree`
     /// after walking a running VP's caller chain to its resume target.
     pub fn add_core_switch(&mut self, switch: CoreSwitch) {
-        self.core_switches.push(switch);
+        self.add(Update::Switch(switch));
     }
 
     /// Check if the batch is empty
@@ -470,7 +479,6 @@ impl UpdateBatch {
         self.updates.clear();
         self.affected_domains.clear();
         self.snapshots.clear();
-        self.core_switches.clear();
     }
 
     /// Merge another batch into this one
@@ -478,7 +486,6 @@ impl UpdateBatch {
         self.updates.extend(other.updates);
         self.affected_domains.extend(other.affected_domains);
         self.snapshots.extend(other.snapshots);
-        self.core_switches.extend(other.core_switches);
     }
 }
 
