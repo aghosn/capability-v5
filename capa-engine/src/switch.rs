@@ -98,6 +98,27 @@ impl CoreContext {
     pub fn top_frame(&self) -> Option<VpCallContext> {
         self.call_stack.read().last().cloned()
     }
+
+    /// Peek at the frame `depth` entries below the top, without removing
+    /// anything. `depth == 0` is equivalent to [`Self::top_frame`]; `depth
+    /// == 1` is the frame that would become the new top after one
+    /// `pop_frame()`, and so on. Returns `None` if the stack is shallower
+    /// than `depth + 1` frames.
+    ///
+    /// Used for read-only cross-validation of the stack against
+    /// `VpRunState`'s own `caller`/`prev_caller` fields (P2e dual-write)
+    /// without mutating the stack — callers that need this data purely for
+    /// an assertion should prefer this over `pop_frame()`, so that an
+    /// unrelated error path elsewhere in the caller can't leave the stack
+    /// desynchronized from a partially-applied `VpRunState` change.
+    pub fn peek_at(&self, depth: usize) -> Option<VpCallContext> {
+        let stack = self.call_stack.read();
+        let len = stack.len();
+        if depth >= len {
+            return None;
+        }
+        stack.get(len - 1 - depth).cloned()
+    }
 }
 
 /// Switch context for a domain transition

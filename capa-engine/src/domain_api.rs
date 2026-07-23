@@ -2102,6 +2102,12 @@ impl Capability<Domain> {
             }
         };
 
+        // Dual-write (P2e): the target's own `Locked.prev_caller` (about to
+        // be read below) must always equal whatever this pop loop just left
+        // on top of the stack — the resume target's own frame was the last
+        // one popped, so the new top is exactly its predecessor.
+        let stack_prev_caller = core_ctx.top_frame();
+
         let target_vp_arc = {
             let g = target_cap.read();
             g.data
@@ -2124,6 +2130,10 @@ impl Capability<Domain> {
                     ))
                 }
             };
+            debug_assert!(
+                same_caller_ctx(&prev_caller, &stack_prev_caller),
+                "call_stack diverged from VpRunState on revoke-return"
+            );
             *rs = VpRunState::Running {
                 core: core_id,
                 caller: prev_caller,
@@ -2220,7 +2230,7 @@ impl Capability<Domain> {
 
         *prev_vp_arc.run_state.write() = VpRunState::Running {
             core: core_id,
-            caller: prev_prev_caller,
+            caller: prev_prev_caller.clone(),
         };
         *caller_vp_arc.run_state.write() = VpRunState::Available {
             last_exit_reason: exit_reason,
@@ -2245,6 +2255,14 @@ impl Capability<Domain> {
                 prev_domain_id, prev_vp_id
             ),
         }
+
+        // Dual-write (P2e): the popped frame's own predecessor (now the new
+        // stack top) must equal the `Locked.prev_caller` we just restored
+        // into `prev_vp_arc`'s `Running.caller`.
+        debug_assert!(
+            same_caller_ctx(&prev_prev_caller, &core_ctx.top_frame()),
+            "call_stack diverged from VpRunState's prev_caller on return"
+        );
 
         Ok(SwitchContext {
             from_domain: Some(caller.clone()),
@@ -2528,7 +2546,7 @@ impl Capability<Domain> {
         *caller_vp_arc.run_state.write() = VpRunState::Locked {
             callee_domain_id: to_domain_id,
             callee_vp_id: to_vp_id,
-            prev_caller: caller_prev_caller,
+            prev_caller: caller_prev_caller.clone(),
         };
 
         platform.set_core_context(core_id, &actual_cap, actual_vp.id);
@@ -2545,6 +2563,13 @@ impl Capability<Domain> {
         // segments not currently active on this core (see module docs on
         // `CoreContext::call_stack`).
         let core_ctx = platform.switch_manager().get_core(core_id)?;
+        // Dual-write (P2e): the caller was never itself on the stack (it was
+        // `Running`), so whatever is on top right now — before we push its
+        // own frame below — is exactly its own saved caller/prev_caller.
+        debug_assert!(
+            same_caller_ctx(&caller_prev_caller, &core_ctx.top_frame()),
+            "call_stack diverged from VpRunState's caller on forward switch"
+        );
         core_ctx.push_frame(caller_ctx);
         for frame in intermediate_frames {
             core_ctx.push_frame(frame);
@@ -2700,6 +2725,31 @@ impl Capability<Domain> {
         let n = chain.len();
         let handler_vp_id = chain[n - 1].2.id;
 
+        // Dual-write (P2e): read-only cross-validation of the same
+        // caller/prev_caller values via the per-core call stack, computed
+        // via non-destructive `peek_at` rather than `pop_frame` — this
+        // function still has several fallible state-consistency checks
+        // ahead (chain[k] may have changed state concurrently, since this
+        // runs under only the *shared* capability lock); using peeks here
+        // means an early `Err` return below can never leave `core_ctx`
+        // partially popped while some/all of the `VpRunState` writes it
+        // would have mirrored never happened. The stack's actual mutation
+        // (popping the `n-1` frames this call chain consumes) still happens
+        // at its original position, after every `VpRunState` write below
+        // has committed — unchanged from before this dual-write addition.
+        //
+        // `chain[1..n]` are exactly the frames this core's stack holds for
+        // the currently-active segment (chain[0], the leaf, was never
+        // itself pushed — only its callers were, each time a forward
+        // switch built this chain). `peek_at(0)` is the current top (=
+        // chain[1]'s own frame = the leaf's caller); `peek_at(k)` for
+        // `k in 1..=n-1` is the frame that would surface as the new top
+        // once chain[1..=k]'s frames are popped — i.e. exactly chain[k]'s
+        // own prev_caller.
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        let stack_leaf_caller = core_ctx.peek_at(0);
+        let stack_prev_caller_at = |chain_index: usize| core_ctx.peek_at(chain_index);
+
         // Apply state changes (all VP locks are independent — no deadlock risk).
         //
         // chain[0]:      Running → Interrupted (or Available when n==2)
@@ -2718,6 +2768,10 @@ impl Capability<Domain> {
                 ))
             }
         };
+        debug_assert!(
+            same_caller_ctx(&leaf_caller, &stack_leaf_caller),
+            "call_stack diverged from VpRunState's caller for interrupted leaf"
+        );
         let leaf_report = chain[0]
             .0
             .read()
@@ -2746,6 +2800,10 @@ impl Capability<Domain> {
                     ))
                 }
             };
+            debug_assert!(
+                same_caller_ctx(&prev_caller, &stack_prev_caller_at(i)),
+                "call_stack diverged from VpRunState's prev_caller for intermediate VP"
+            );
             let report = chain[i]
                 .0
                 .read()
@@ -2776,6 +2834,10 @@ impl Capability<Domain> {
                 }
             }
         };
+        debug_assert!(
+            same_caller_ctx(&handler_prev_caller, &stack_prev_caller_at(n - 1)),
+            "call_stack diverged from VpRunState's prev_caller for handler VP"
+        );
         *chain[n - 1].2.run_state.write() = VpRunState::Running {
             core: core_id,
             caller: handler_prev_caller,
@@ -2784,17 +2846,19 @@ impl Capability<Domain> {
         // Update platform core tracking.
         platform.set_core_context(core_id, &chain[n - 1].0, handler_vp_id);
 
-        // Dual-write (P2c): undo the n-1 forward-switch pushes that built
-        // this call chain — the handler becomes the new leaf on this core,
-        // so its own caller/prev_caller pointer (already restored above) is
-        // exactly what the stack's new top frame should expose. The frozen
-        // segment (chain[0..n-1]) is NOT lost: it lives on in each VP's own
+        // Pop the `n-1` frames this call chain consumed from the per-core
+        // stack — the handler becomes the new leaf on this core, so its own
+        // caller/prev_caller pointer (already restored above) is exactly
+        // what the stack's new top frame should expose. The frozen segment
+        // (chain[0..n-1]) is NOT lost: it lives on in each VP's own
         // Suspended/Interrupted callee_*/prev_caller/caller fields, ready to
         // be re-pushed onto whichever core later resumes it (see
         // `switch_domain_forward`'s resume branch) — possibly a different
         // core than this one, which is exactly why this data can't live in
-        // any per-core stack while dormant.
-        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        // any per-core stack while dormant. This runs last, after every
+        // `VpRunState` write above has committed, so an early `Err` return
+        // anywhere above never leaves the stack popped without a matching
+        // state transition.
         for entry in chain.iter().skip(1) {
             let expected_domain_id = entry.1;
             let expected_vp_id = entry.2.id;
@@ -3407,6 +3471,25 @@ impl Capability<Domain> {
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Cross-validates a `VpRunState`-derived caller/prev_caller context against
+/// the per-core `call_stack`-derived one (P2e dual-write stage: `Running`'s
+/// `caller` and `Locked`'s `prev_caller` are always exactly "whatever is now
+/// on top of this core's stack", so every site that still reads those fields
+/// also computes the stack-derived equivalent and asserts they agree here,
+/// before the fields themselves are retired).
+///
+/// `VpCallContext` doesn't derive `PartialEq` (its `Weak` domain ref isn't
+/// meaningfully comparable across an upgrade), so identity is compared by
+/// `(domain_id, vp_id)` only — the same identity pair already used
+/// everywhere else in this file to validate call-chain frames.
+fn same_caller_ctx(a: &Option<VpCallContext>, b: &Option<VpCallContext>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.domain_id == y.domain_id && x.vp_id == y.vp_id,
+        _ => false,
+    }
+}
 
 /// Encode [`InterruptVisibility`] as a `u64` (0=Deliver, 1=Report, 2=NotReport).
 fn visibility_to_u64(v: InterruptVisibility) -> u64 {
