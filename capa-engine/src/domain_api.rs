@@ -2204,6 +2204,24 @@ impl Capability<Domain> {
 
         platform.set_core_context(core_id, &prev_domain_ref, prev_vp_id);
 
+        // Dual-write (P2c): pop the matching frame from the per-core call
+        // stack and cross-validate it against the VpRunState-derived resume
+        // target, catching any divergence between the two mechanisms before
+        // the stack becomes authoritative (P2d/P2e).
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        match core_ctx.pop_frame() {
+            Some(frame) => debug_assert!(
+                frame.domain_id == prev_domain_id && frame.vp_id == prev_vp_id,
+                "call_stack frame diverged from VpRunState on return: expected domain {} vp {}, got domain {} vp {}",
+                prev_domain_id, prev_vp_id, frame.domain_id, frame.vp_id
+            ),
+            None => debug_assert!(
+                false,
+                "call_stack empty on return; expected frame for domain {} vp {}",
+                prev_domain_id, prev_vp_id
+            ),
+        }
+
         Ok(SwitchContext {
             from_domain: caller_id,
             to_domain: prev_domain_id,
@@ -2309,6 +2327,10 @@ impl Capability<Domain> {
         let mut actual_domain_id = to_domain_id;
         let mut actual_vp = to_vp_arc.clone();
         let mut interrupt_return = None;
+        // Dual-write (P2c): frames to push onto the current core's per-core
+        // call stack for each intermediate level re-established as Locked
+        // by an interrupt-chain resume (see push loop after this match).
+        let mut intermediate_frames: Vec<VpCallContext> = Vec::new();
 
         match initial_state {
             VpRunState::Available { .. } => {
@@ -2412,7 +2434,7 @@ impl Capability<Domain> {
                     }
                 }
 
-                for (index, (_, _, vp, state)) in resume_chain.iter().enumerate() {
+                for (index, (cap, domain_id, vp, state)) in resume_chain.iter().enumerate() {
                     let is_final = index + 1 == resume_chain.len();
                     let replacement = if is_final {
                         let final_caller = match state {
@@ -2456,6 +2478,20 @@ impl Capability<Domain> {
                         ));
                     }
                     *current = replacement;
+
+                    // Dual-write (P2c): every non-final entry re-becomes
+                    // Locked with its own callee — i.e. it is re-pinned to
+                    // this core as an active caller — so it needs its own
+                    // frame pushed, in the same order these levels were
+                    // originally pushed by the forward switches that built
+                    // the chain (bottom of resume_chain = shallowest level).
+                    if !is_final {
+                        intermediate_frames.push(VpCallContext {
+                            domain: Arc::downgrade(cap),
+                            domain_id: *domain_id,
+                            vp_id: vp.id,
+                        });
+                    }
                 }
             }
             _ => {
@@ -2472,6 +2508,23 @@ impl Capability<Domain> {
         };
 
         platform.set_core_context(core_id, &actual_cap, actual_vp.id);
+
+        // Dual-write (P2c): mirror this switch onto the current core's
+        // per-core call stack, which will become the sole source of truth
+        // once VpRunState's own Running/Locked caller/prev_caller fields
+        // are retired (P2e). The caller is always pushed — it just became
+        // Locked, waiting on its callee. For an interrupt-chain resume,
+        // each intermediate level re-established as Locked is pushed too,
+        // in the same order the original forward switches pushed them.
+        // Suspended/Interrupted VPs' own callee_*/prev_caller/caller links
+        // are untouched by this: they remain the sole storage for chain
+        // segments not currently active on this core (see module docs on
+        // `CoreContext::call_stack`).
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        core_ctx.push_frame(caller_ctx);
+        for frame in intermediate_frames {
+            core_ctx.push_frame(frame);
+        }
 
         Ok(SwitchContext {
             from_domain: caller_id,
@@ -2706,6 +2759,34 @@ impl Capability<Domain> {
 
         // Update platform core tracking.
         platform.set_core_context(core_id, &chain[n - 1].0, handler_vp_id);
+
+        // Dual-write (P2c): undo the n-1 forward-switch pushes that built
+        // this call chain — the handler becomes the new leaf on this core,
+        // so its own caller/prev_caller pointer (already restored above) is
+        // exactly what the stack's new top frame should expose. The frozen
+        // segment (chain[0..n-1]) is NOT lost: it lives on in each VP's own
+        // Suspended/Interrupted callee_*/prev_caller/caller fields, ready to
+        // be re-pushed onto whichever core later resumes it (see
+        // `switch_domain_forward`'s resume branch) — possibly a different
+        // core than this one, which is exactly why this data can't live in
+        // any per-core stack while dormant.
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        for entry in chain.iter().skip(1) {
+            let expected_domain_id = entry.1;
+            let expected_vp_id = entry.2.id;
+            match core_ctx.pop_frame() {
+                Some(frame) => debug_assert!(
+                    frame.domain_id == expected_domain_id && frame.vp_id == expected_vp_id,
+                    "call_stack frame diverged during interrupt delivery: expected domain {} vp {}, got domain {} vp {}",
+                    expected_domain_id, expected_vp_id, frame.domain_id, frame.vp_id
+                ),
+                None => debug_assert!(
+                    false,
+                    "call_stack empty during interrupt delivery; expected frame for domain {} vp {}",
+                    expected_domain_id, expected_vp_id
+                ),
+            }
+        }
 
         Ok((VpInterruptContext {
             interrupted_domain_id,

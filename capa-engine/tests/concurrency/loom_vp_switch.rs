@@ -417,6 +417,21 @@ fn vp_concurrent_return_and_claim() {
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
         let switch_mgr = Arc::new(SwitchManager::new(4));
 
+        // The hand-rolled setup above puts B.VP[0] Running on core 0 with
+        // root.VP[0] as its caller *without* going through a real
+        // `switch_domain_forward` call, so core 0's call_stack needs the
+        // matching frame pushed by hand too — mirroring what a real forward
+        // switch (root → B) would have pushed.
+        {
+            let root_id = root.read().data.id;
+            let root_vp0_weak = std::sync::Arc::downgrade(&root);
+            switch_mgr.get_core(0).unwrap().push_frame(VpCallContext {
+                domain: root_vp0_weak,
+                domain_id: root_id,
+                vp_id: 0,
+            });
+        }
+
         let root_t1 = root.clone();
         let b_t0 = b_domain.clone();
         let state_t0 = shared.clone();

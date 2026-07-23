@@ -29,13 +29,19 @@ pub struct CoreContext {
     /// Live call chain for this core, bottom (root-most caller) to top
     /// (most recent switch target).
     ///
-    /// **Scaffolding, additive only (P2b): not yet consulted by
-    /// `switch_domain_forward`/`switch_domain_return`/`deliver_interrupt_vp`
-    /// or revoke's `walk_revoke_caller_chain`** — those still derive
-    /// ordering from `VpRunState`'s `caller`/`prev_caller` links. This field
-    /// exists so a later cutover step can push/pop it alongside the
-    /// existing logic (dual-write, cross-validated) before switching over
-    /// to trust it alone.
+    /// **Dual-write, not yet authoritative (P2c):** `switch_domain_forward`,
+    /// `switch_domain_return`, and `deliver_interrupt_vp` all push/pop this
+    /// stack alongside the existing `VpRunState` `caller`/`prev_caller`
+    /// links, cross-validated via `debug_assert!` on every pop. `VpRunState`
+    /// remains the sole source of truth actually consulted for control
+    /// flow — this field only mirrors it for now. Revoke's
+    /// `walk_revoke_caller_chain` does not consult it yet (P2d). Once P2d
+    /// cuts real reads over to this stack and the mirroring is proven
+    /// correct, `VpRunState`'s `Running`/`Locked` `caller`/`prev_caller`
+    /// fields (but *not* `Suspended`/`Interrupted`'s — those remain the sole
+    /// storage for chain segments frozen off of any specific core, since a
+    /// dormant segment can later resume on a different physical core than
+    /// the one that froze it) can be retired (P2e).
     ///
     /// Single-writer per core in steady state: only the physical core
     /// owning this `CoreContext` pushes/pops during its own synchronous
