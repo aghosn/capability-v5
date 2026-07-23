@@ -135,8 +135,8 @@ fn test_vp_switch_domain_basic() {
 
     let ctx = Capability::switch(&platform, &root, child_h, 0).unwrap().0;
 
-    assert_eq!(ctx.from_domain, root_id);
-    assert_eq!(ctx.to_domain, child_id);
+    assert_eq!(ctx.from_domain.as_ref().unwrap().read().data.id, root_id);
+    assert_eq!(ctx.to_domain.read().data.id, child_id);
     assert_eq!(ctx.core_id, 0);
     assert!(!ctx.is_return);
     assert_eq!(ctx.from_vp_id, Some(0));
@@ -158,8 +158,8 @@ fn test_vp_return_domain_basic() {
     // Now platform says core 0 is running child; child VP[0] is Running{caller=root.VP[0]}
     let ret_ctx = Capability::switch(&platform, &child, 0, 0).unwrap().0;
 
-    assert_eq!(ret_ctx.from_domain, child_id);
-    assert_eq!(ret_ctx.to_domain, root_id);
+    assert_eq!(ret_ctx.from_domain.as_ref().unwrap().read().data.id, child_id);
+    assert_eq!(ret_ctx.to_domain.read().data.id, root_id);
     assert!(ret_ctx.is_return);
     assert_eq!(ret_ctx.from_vp_id, Some(0));
     assert_eq!(ret_ctx.to_vp_id, Some(0));
@@ -225,15 +225,15 @@ fn test_vp_nested_switch_and_return() {
 
     // child1 → child2
     let ctx12 = Capability::switch(&platform, &child1, child2_h, 0).unwrap().0;
-    assert_eq!(ctx12.to_domain, child2_id);
+    assert_eq!(ctx12.to_domain.read().data.id, child2_id);
 
     // return child2 → child1
     let ret1 = Capability::switch(&platform, &child2, 0, 0).unwrap().0;
-    assert_eq!(ret1.to_domain, child1_id);
+    assert_eq!(ret1.to_domain.read().data.id, child1_id);
 
     // return child1 → root
     let ret0 = Capability::switch(&platform, &child1, 0, 0).unwrap().0;
-    assert_eq!(ret0.to_domain, root_id);
+    assert_eq!(ret0.to_domain.read().data.id, root_id);
 }
 
 // ── VP-aware domain switching (adversarial / error cases) ────────────────────
@@ -611,9 +611,9 @@ fn test_deliver_interrupt_vp_2domain() {
     // Deliver interrupt: handler is root, interrupted is child
     let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &child, 0, 0).unwrap().0;
 
-    assert_eq!(ctx.interrupted_domain_id, child_id);
+    assert_eq!(ctx.interrupted_domain.read().data.id, child_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
-    assert_eq!(ctx.handler_domain_id, root_id);
+    assert_eq!(ctx.handler_domain.read().data.id, root_id);
     assert_eq!(ctx.handler_vp_id, 0);
 
     // The interrupted leaf stays reserved for its exact caller.
@@ -651,9 +651,9 @@ fn test_deliver_interrupt_vp_3domain() {
 
     let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0).unwrap().0;
 
-    assert_eq!(ctx.interrupted_domain_id, dom2_id);
+    assert_eq!(ctx.interrupted_domain.read().data.id, dom2_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
-    assert_eq!(ctx.handler_domain_id, dom0_id);
+    assert_eq!(ctx.handler_domain.read().data.id, dom0_id);
     assert_eq!(ctx.handler_vp_id, 0);
 
     // dom2.vp0 → Interrupted
@@ -719,7 +719,7 @@ fn test_interrupt_resume_frees_interrupted_callee() {
 
     // Switch dom0 → dom1 (Suspended → Running)
     let switch_ctx = Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0).unwrap().0;
-    assert_eq!(switch_ctx.to_domain, dom1_id);
+    assert_eq!(switch_ctx.to_domain.read().data.id, dom1_id);
 
     // dom1.vp0 should now be Running
     let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
@@ -1055,7 +1055,7 @@ fn test_interrupt_resume_all_not_report_descends_to_leaf() {
     let dom1_handle = domain_handle_for(&dom0, dom1_id);
     let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
 
-    assert_eq!(ctx.to_domain, dom3_id);
+    assert_eq!(ctx.to_domain.read().data.id, dom3_id);
     assert_eq!(ctx.to_vp_id, Some(0));
     assert_eq!(ctx.interrupt_return, None);
     assert!(matches!(
@@ -1109,7 +1109,7 @@ fn test_interrupt_resume_stops_at_first_report_frame() {
     let dom1_handle = domain_handle_for(&dom0, dom1_id);
     let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
 
-    assert_eq!(ctx.to_domain, dom2_id);
+    assert_eq!(ctx.to_domain.read().data.id, dom2_id);
     assert_eq!(ctx.to_vp_id, Some(0));
     assert_eq!(ctx.interrupt_return, Some(vector));
     assert!(matches!(

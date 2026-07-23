@@ -76,13 +76,12 @@ pub enum CallLogEntry {
         domain: DomainId,
         fallback: Option<DomainId>,
     },
-    /// `push_core_switch(core, source, target)` was invoked.
+    /// `push_core_switch(core, source)` was invoked. No resume target is
+    /// carried anymore (P2d) — the affected core resolves that locally.
     PushCoreSwitch {
         core: CoreId,
         source_domain: DomainId,
         source_vp: u64,
-        target_domain: DomainId,
-        target_vp: u64,
     },
 }
 
@@ -275,17 +274,12 @@ impl Platform for TestPlatform {
         core_id: CoreId,
         source_cap: &CapabilityRef<Domain>,
         source_vp_id: u64,
-        target_cap: &CapabilityRef<Domain>,
-        target_vp_id: u64,
     ) {
         let source_domain = source_cap.read().data.id;
-        let target_domain = target_cap.read().data.id;
         self.inner.lock().call_log.push(CallLogEntry::PushCoreSwitch {
             core: core_id,
             source_domain,
             source_vp: source_vp_id,
-            target_domain,
-            target_vp: target_vp_id,
         });
     }
 

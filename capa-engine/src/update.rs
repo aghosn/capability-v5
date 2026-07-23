@@ -275,11 +275,22 @@ pub struct UpdateBatch {
     snapshots: BTreeMap<DomainId, Vec<u8>>,
 }
 
-/// Per-core "switch to this VP on revocation" order.
+/// Per-core "your currently-running VP is being revoked" order.
 ///
 /// Emitted by the engine during `revoke_domain_subtree` for every core
 /// currently running a VP in the revoked subtree.  Consumed by the initiating
 /// core inside `execute()` before it sends cross-core IPIs.
+///
+/// **No resume target is carried here (P2d).** Earlier revisions had the
+/// initiator remotely walk the doomed VP's caller chain (`VpRunState`
+/// ancestors, possibly spanning several domain locks) to precompute
+/// `(target_domain, target_vp)` here. That walk is gone: the *affected* core
+/// now resolves its own resume target locally, by popping its own per-core
+/// `call_stack` until it finds a frame whose domain is not revoked (see
+/// `Capability::switch_after_callee_revoked`). The initiator only needs to
+/// know *which core* to notify and *what it's currently running*, for the
+/// sanity check that the affected core hasn't already moved on — no ancestor
+/// walk, no remote domain-lock reads.
 #[derive(Clone)]
 pub struct CoreSwitch {
     /// Physical core to redirect.
@@ -288,24 +299,15 @@ pub struct CoreSwitch {
     pub source_domain: crate::capability::CapabilityRef<crate::domain::Domain>,
     /// VP id currently running within `source_domain`.
     pub source_vp: u64,
-    /// Capability of the domain to resume on `core`.  Held as a strong
-    /// reference so the ancestor domain cannot be dropped before the
-    /// platform observes the switch.
-    pub target_domain: crate::capability::CapabilityRef<crate::domain::Domain>,
-    /// VP id of the resume target within `target_domain`.
-    pub target_vp: u64,
 }
 
 impl core::fmt::Debug for CoreSwitch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let source_id = self.source_domain.read().data.id;
-        let target_id = self.target_domain.read().data.id;
         f.debug_struct("CoreSwitch")
             .field("core", &self.core)
             .field("source_domain_id", &source_id)
             .field("source_vp", &self.source_vp)
-            .field("target_domain_id", &target_id)
-            .field("target_vp", &self.target_vp)
             .finish()
     }
 }
@@ -459,7 +461,8 @@ impl UpdateBatch {
     }
 
     /// Append a per-core switch order.  Called from `revoke_domain_subtree`
-    /// after walking a running VP's caller chain to its resume target.
+    /// for every core found running a VP within the revoked subtree — no
+    /// resume target is computed here (see [`CoreSwitch`]).
     pub fn add_core_switch(&mut self, switch: CoreSwitch) {
         self.add(Update::Switch(switch));
     }

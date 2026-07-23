@@ -394,23 +394,36 @@ fn make_child(
     (child, h)
 }
 
-/// Extract the (target_domain_id, target_vp) of every `PushCoreSwitch`
-/// entry in the log, in order.
-fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64, DomainId, u64)> {
+/// Extract the `(core, source_domain_id, source_vp)` of every `PushCoreSwitch`
+/// entry in the log, in order. No resume target is carried on the wire
+/// anymore (P2d) — the affected core resolves that locally from its own
+/// `call_stack`; see `resolve_revoke_target` below for how tests verify it.
+fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64)> {
     log.iter()
         .filter_map(|e| match e {
             CallLogEntry::PushCoreSwitch {
                 core,
                 source_domain,
                 source_vp,
-                target_domain,
-                target_vp,
-            } => {
-                Some((*core, *source_domain, *source_vp, *target_domain, *target_vp))
-            }
+            } => Some((*core, *source_domain, *source_vp)),
             _ => None,
         })
         .collect()
+}
+
+/// Simulate what the affected core does in `apply_local_core_updates`:
+/// call `switch_after_callee_revoked` on `core`, which pops that core's own
+/// `call_stack` to resolve its resume target locally. Returns
+/// `(target_domain_id, target_vp)`.
+fn resolve_revoke_target(platform: &TestPlatform, core: CoreId) -> (DomainId, u64) {
+    platform.set_current_core(Some(core));
+    let ctx = capability_engine::Capability::<Domain>::switch_after_callee_revoked(platform)
+        .expect("switch_after_callee_revoked should resolve a target from the call_stack");
+    let to_domain_id = ctx.to_domain.read().data.id;
+    (
+        to_domain_id,
+        ctx.to_vp_id.expect("revoke-return always names a target VP"),
+    )
 }
 
 /// Index of the last `PushCoreSwitch` entry (or `None`).
@@ -470,11 +483,18 @@ fn test_revoke_basic_pushes_switch_to_root() {
 
     assert_eq!(
         switches,
-        vec![(REMOTE_CORE, child_id, 0, root_id, REMOTE_CORE)],
-        "expected exactly one push_core_switch to (REMOTE_CORE, root, VP[REMOTE_CORE]); \
+        vec![(REMOTE_CORE, child_id, 0)],
+        "expected exactly one push_core_switch naming (REMOTE_CORE, child, VP[0]); \
          got: {:#?}\nfull log: {:#?}",
         switches,
         log,
+    );
+
+    // Simulate the affected core resolving its own resume target locally.
+    assert_eq!(
+        resolve_revoke_target(&platform, REMOTE_CORE),
+        (root_id, REMOTE_CORE),
+        "affected core should resolve its own call_stack back to root.VP[REMOTE_CORE]"
     );
 
     let last_push = last_push_idx(&log).expect("push_core_switch missing");
@@ -532,14 +552,21 @@ fn test_revoke_chain_walks_past_revoked_ancestor() {
     let log = platform.drain_call_log();
     let switches = switches_in(&log);
 
-    // Should be exactly one switch pointing at A (root), on REMOTE_CORE.
-    // The VP id is A's VP that did the A→B switch (which was VP[REMOTE_CORE]).
+    // Exactly one push, naming the actually-Running leaf (C) on REMOTE_CORE.
     assert_eq!(
         switches,
-        vec![(REMOTE_CORE, child_c_id, 0, root_id, REMOTE_CORE)],
-        "chain walk should skip revoked B and resume in A; got: {:#?}\nlog: {:#?}",
+        vec![(REMOTE_CORE, child_c_id, 0)],
+        "chain revoke should push exactly one switch for the leaf VP; got: {:#?}\nlog: {:#?}",
         switches,
         log,
+    );
+
+    // The affected core must skip past revoked B and resolve back to A
+    // (root), on the VP that originally did the A→B switch (VP[REMOTE_CORE]).
+    assert_eq!(
+        resolve_revoke_target(&platform, REMOTE_CORE),
+        (root_id, REMOTE_CORE),
+        "chain walk should skip revoked B and resume in A"
     );
 }
 
@@ -582,11 +609,18 @@ fn test_revoke_multi_only_affected_core_pushed() {
 
     assert_eq!(
         switches,
-        vec![(CORE_A, child_a_id, 0, root_id, CORE_A)],
+        vec![(CORE_A, child_a_id, 0)],
         "only CORE_A should have a push; child_b's core (CORE_B) must be untouched. \
          got: {:#?}\nlog: {:#?}",
         switches,
         log,
+    );
+
+    // CORE_A must resolve back to root, on the VP that did the root→A switch.
+    assert_eq!(
+        resolve_revoke_target(&platform, CORE_A),
+        (root_id, CORE_A),
+        "CORE_A should resolve its own call_stack back to root.VP[CORE_A]"
     );
 
     // child_b's binding must remain intact.

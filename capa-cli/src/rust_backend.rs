@@ -670,8 +670,14 @@ impl Backend for RustBackend {
         self.platform.set_current_core(None);
 
         Ok(SwitchContextDto {
-            from_domain: ctx.from_domain,
-            to_domain: ctx.to_domain,
+            from_domain: ctx
+                .from_domain
+                .as_ref()
+                .expect("forward switch always names a source domain")
+                .read()
+                .data
+                .id,
+            to_domain: ctx.to_domain.read().data.id,
             core_id: ctx.core_id,
             from_vp: ctx.from_vp_id,
             to_vp: ctx.to_vp_id,
@@ -704,8 +710,14 @@ impl Backend for RustBackend {
         self.platform.set_current_core(None);
 
         Ok(SwitchContextDto {
-            from_domain: ctx.from_domain,
-            to_domain: ctx.to_domain,
+            from_domain: ctx
+                .from_domain
+                .as_ref()
+                .expect("return switch always names a source domain")
+                .read()
+                .data
+                .id,
+            to_domain: ctx.to_domain.read().data.id,
             core_id: ctx.core_id,
             from_vp: ctx.from_vp_id,
             to_vp: ctx.to_vp_id,
@@ -727,9 +739,10 @@ impl Backend for RustBackend {
         );
 
         if let Ok((ctx, _)) = &vp_delivery {
-            if ctx.handler_domain_id != domain {
+            let handler_domain_id = ctx.handler_domain.read().data.id;
+            if handler_domain_id != domain {
                 self.platform
-                    .set_core_domain_by_id(core, ctx.handler_domain_id);
+                    .set_core_domain_by_id(core, handler_domain_id);
             }
         }
 

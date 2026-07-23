@@ -29,19 +29,23 @@ pub struct CoreContext {
     /// Live call chain for this core, bottom (root-most caller) to top
     /// (most recent switch target).
     ///
-    /// **Dual-write, not yet authoritative (P2c):** `switch_domain_forward`,
+    /// **Dual-write (P2c) for the normal switch/interrupt paths, sole
+    /// source of truth (P2d) for revoke:** `switch_domain_forward`,
     /// `switch_domain_return`, and `deliver_interrupt_vp` all push/pop this
     /// stack alongside the existing `VpRunState` `caller`/`prev_caller`
-    /// links, cross-validated via `debug_assert!` on every pop. `VpRunState`
-    /// remains the sole source of truth actually consulted for control
-    /// flow — this field only mirrors it for now. Revoke's
-    /// `walk_revoke_caller_chain` does not consult it yet (P2d). Once P2d
-    /// cuts real reads over to this stack and the mirroring is proven
-    /// correct, `VpRunState`'s `Running`/`Locked` `caller`/`prev_caller`
-    /// fields (but *not* `Suspended`/`Interrupted`'s — those remain the sole
-    /// storage for chain segments frozen off of any specific core, since a
-    /// dormant segment can later resume on a different physical core than
-    /// the one that froze it) can be retired (P2e).
+    /// links, cross-validated via `debug_assert!` on every pop — `VpRunState`
+    /// remains the source of truth actually consulted for control flow on
+    /// those paths, this field only mirrors it for now. Revoke's resume-target
+    /// resolution (`Capability::switch_after_callee_revoked`) is the first
+    /// real consumer: the affected core pops its own stack, skipping frames
+    /// whose domain is already marked revoked, to find its resume target —
+    /// no remote caller-chain walk is performed by the initiator at all.
+    /// Once the normal paths' mirroring is proven correct, `VpRunState`'s
+    /// `Running`/`Locked` `caller`/`prev_caller` fields (but *not*
+    /// `Suspended`/`Interrupted`'s — those remain the sole storage for chain
+    /// segments frozen off of any specific core, since a dormant segment can
+    /// later resume on a different physical core than the one that froze it)
+    /// can be retired (P2e).
     ///
     /// Single-writer per core in steady state: only the physical core
     /// owning this `CoreContext` pushes/pops during its own synchronous
@@ -97,12 +101,18 @@ impl CoreContext {
 }
 
 /// Switch context for a domain transition
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SwitchContext {
-    /// Source domain ID (caller)
-    pub from_domain: u64,
-    /// Target domain ID (callee)
-    pub to_domain: u64,
+    /// Source domain (caller). `None` only for the revoke-return path,
+    /// where the source domain is being torn down concurrently by the
+    /// initiator and has no meaningful identity to hand back — there is no
+    /// bare id substitute for "no source": a `CapabilityRef` is either the
+    /// real caller or absent, never a stale/recycled id.
+    pub from_domain: Option<CapabilityRef<Domain>>,
+    /// Target domain (callee). Always present: every switch/interrupt/
+    /// revoke-return path resolves a concrete resume target before
+    /// constructing this context.
+    pub to_domain: CapabilityRef<Domain>,
     /// Core performing the switch
     pub core_id: u64,
     /// Whether this is a return (switch with no target)
@@ -116,6 +126,22 @@ pub struct SwitchContext {
     /// SWITCH return rather than `RDI = exit_reason` from a normal child exit.
     /// `None` for all normal SWITCH forward operations.
     pub interrupt_return: Option<u8>,
+}
+
+impl core::fmt::Debug for SwitchContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let from_id = self.from_domain.as_ref().map(|d| d.read().data.id);
+        let to_id = self.to_domain.read().data.id;
+        f.debug_struct("SwitchContext")
+            .field("from_domain_id", &from_id)
+            .field("to_domain_id", &to_id)
+            .field("core_id", &self.core_id)
+            .field("is_return", &self.is_return)
+            .field("from_vp_id", &self.from_vp_id)
+            .field("to_vp_id", &self.to_vp_id)
+            .field("interrupt_return", &self.interrupt_return)
+            .finish()
+    }
 }
 
 /// Interrupt context
@@ -135,18 +161,32 @@ pub struct InterruptContext {
 /// lazy-unwind model: the interrupted VP is frozen (`Interrupted`), all
 /// intermediate VPs are frozen (`Suspended`), and the handler VP is woken
 /// to `Running`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VpInterruptContext {
-    /// Domain ID of the VP that was preempted (leaf of the call chain).
-    pub interrupted_domain_id: u64,
+    /// Domain of the VP that was preempted (leaf of the call chain).
+    pub interrupted_domain: CapabilityRef<Domain>,
     /// VP ID within the interrupted domain.
     pub interrupted_vp_id: u64,
-    /// Domain ID of the interrupt handler (DELIVER policy ancestor).
-    pub handler_domain_id: u64,
+    /// Domain of the interrupt handler (DELIVER policy ancestor).
+    pub handler_domain: CapabilityRef<Domain>,
     /// VP ID within the handler domain that is now Running.
     pub handler_vp_id: u64,
     /// Core on which the interrupt was delivered.
     pub core_id: u64,
+}
+
+impl core::fmt::Debug for VpInterruptContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let interrupted_id = self.interrupted_domain.read().data.id;
+        let handler_id = self.handler_domain.read().data.id;
+        f.debug_struct("VpInterruptContext")
+            .field("interrupted_domain_id", &interrupted_id)
+            .field("interrupted_vp_id", &self.interrupted_vp_id)
+            .field("handler_domain_id", &handler_id)
+            .field("handler_vp_id", &self.handler_vp_id)
+            .field("core_id", &self.core_id)
+            .finish()
+    }
 }
 
 /// Switch manager handles domain transitions and interrupt routing
@@ -196,7 +236,7 @@ impl SwitchManager {
             ));
         }
 
-        let (to_id, is_return) = if let Some(to_ref) = to {
+        let (to_id, to_domain_ref, is_return) = if let Some(to_ref) = to {
             let to_domain = to_ref.read();
 
             // Verify target domain is sealed
@@ -233,14 +273,14 @@ impl SwitchManager {
                 ));
             }
 
-            (to_domain.data.id, false)
+            (to_domain.data.id, to_ref.clone(), false)
         } else {
             // Returning to parent
             let parent_ref = from_domain.get_parent().ok_or(CapaError::InvalidOperation(
                 "No parent to return to".to_string(),
             ))?;
             let parent_id = parent_ref.read().data.id;
-            (parent_id, true)
+            (parent_id, parent_ref, true)
         };
 
         drop(from_domain);
@@ -249,8 +289,8 @@ impl SwitchManager {
         *core.state.write() = CoreState::Running(to_id);
 
         Ok(SwitchContext {
-            from_domain: from_id,
-            to_domain: to_id,
+            from_domain: Some(from.clone()),
+            to_domain: to_domain_ref,
             core_id,
             is_return,
             from_vp_id: None,

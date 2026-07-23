@@ -1,6 +1,6 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy, MonitorAPI, VpCallContext, VpRunState};
+use crate::domain::{Domain, DomainPolicy, MonitorAPI, VpRunState};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
 use crate::sync::{no_arcs_past_here, RwLock};
@@ -697,66 +697,6 @@ impl Capability<Domain> {
         Ok(child)
     }
 
-    /// Walk the caller chain from the direct caller of a revoked Running VP
-    /// up to the first non-revoked ancestor.  Returns the resume target
-    /// `(target_domain_cap, target_vp_id)` — the ancestor VP that will
-    /// receive control on the affected core when the initiator finishes
-    /// applying updates.
-    ///
-    /// Preconditions:
-    /// - `first_caller` is the `VpCallContext` taken from the revoked
-    ///   `Running{ caller: Some(_) }` VP.
-    /// - Each ancestor whose domain is revoked must have its VP in
-    ///   `Locked{ prev_caller }` state (invariant maintained by
-    ///   `Capability::switch` when the callee is entered).
-    ///
-    /// Returns [`CapaError::NotFound`] if the chain terminates without
-    /// reaching a non-revoked ancestor (D1 violation — should not happen
-    /// under the "root is unrevokable" invariant).
-    fn walk_revoke_caller_chain(
-        first_caller: VpCallContext,
-    ) -> Result<(CapabilityRef<Domain>, u64)> {
-        let mut ctx = Some(first_caller);
-        while let Some(c) = ctx {
-            let cap = c.domain.upgrade().ok_or(CapaError::NotFound)?;
-
-            // If this ancestor is not revoked, it is our resume target.
-            no_arcs_past_here!({
-                let guard = cap.read();
-                if !guard.data.is_revoked() {
-                    return Ok((cap.clone(), c.vp_id));
-                }
-            });
-
-            // Ancestor is revoked — step to its own caller via the Locked VP.
-            let ancestor_vp = no_arcs_past_here!({
-                let guard = cap.read();
-                guard
-                    .data
-                    .policy
-                    .vprocessor_states
-                    .iter()
-                    .find(|v| v.id == c.vp_id)
-                    .cloned()
-                    .ok_or(CapaError::NotFound)?
-            });
-            let rs = ancestor_vp.run_state.read();
-            ctx = match &*rs {
-                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                VpRunState::Suspended { .. } => {
-                    // Suspended = interrupt preempted a switch; treat prev
-                    // context as chain-root (there's no further caller to
-                    // walk to for revocation return).  Fail so the caller
-                    // sees an engine invariant violation rather than
-                    // silently attaching to the wrong VP.
-                    return Err(CapaError::InvalidValue);
-                }
-                _ => return Err(CapaError::InvalidValue),
-            };
-        }
-        Err(CapaError::NotFound)
-    }
-
     fn validate_revoke_domain_subtree(domain_ref: &CapabilityRef<Domain>) -> Result<()> {
         let children = no_arcs_past_here!({
             let domain = domain_ref.read();
@@ -843,26 +783,27 @@ impl Capability<Domain> {
             domain.data.revoke();
             updates.add_revoke_domain_with_fallback(domain_id, fallback);
 
-            // Snapshot Running VPs so we can walk their caller chains after
-            // releasing the domain lock (the walk touches ancestor domains).
+            // Snapshot Running VPs so we can emit a `CoreSwitch` for each
+            // affected core after releasing the domain lock.
             //
-            // Each `Running { core, caller: Some(ctx) }` VP produces one
-            // `CoreSwitch` naming the resume target — the first non-revoked
-            // ancestor of the doomed VP in its caller chain.  Descendant
-            // revocations (children of this domain) contribute additional
-            // switches at their own recursion levels via `updates.merge`
-            // below.  Because this level marks `domain.data.revoke()` before
-            // recursing, ancestor-of-a-child walks correctly see this domain
-            // as revoked and skip past it.
-            let running_vps: Vec<(crate::update::CoreId, u64, VpCallContext)> = domain
+            // Each `Running { core, caller: Some(_) }` VP produces one
+            // `CoreSwitch` naming only the *source* (this domain/VP/core) —
+            // no resume target is precomputed here (P2d): the affected core
+            // resolves its own resume target locally, by popping its own
+            // per-core call_stack until it finds a non-revoked domain (see
+            // `Capability::switch_after_callee_revoked`). `caller: None`
+            // means this VP has no ancestor to fall back to (e.g. a
+            // directly-launched VP, not reached via a vmcall switch) — no
+            // switch is possible for it, so it is excluded here.
+            let running_vps: Vec<(crate::update::CoreId, u64)> = domain
                 .data
                 .policy
                 .vprocessor_states
                 .iter()
                 .filter_map(|vp| {
                     let rs = vp.run_state.read();
-                    if let VpRunState::Running { core, caller: Some(ctx) } = &*rs {
-                        Some((*core, vp.id, ctx.clone()))
+                    if let VpRunState::Running { core, caller: Some(_) } = &*rs {
+                        Some((*core, vp.id))
                     } else {
                         None
                     }
@@ -872,14 +813,11 @@ impl Capability<Domain> {
             (children, mem_weak_refs, domain_id, running_vps)
         });
 
-        for (core, source_vp, first_caller) in running_vps {
-            let (target_domain, target_vp) = Self::walk_revoke_caller_chain(first_caller)?;
+        for (core, source_vp) in running_vps {
             updates.add_core_switch(CoreSwitch {
                 core,
                 source_domain: domain_ref.clone(),
                 source_vp,
-                target_domain,
-                target_vp,
             });
         }
 

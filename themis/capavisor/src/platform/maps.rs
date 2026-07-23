@@ -29,12 +29,13 @@ pub enum CoreUpdate {
     /// `PlatformDomain::cached_on` after flushing — a best-effort cleanup
     /// (silently skipped if the domain was already revoked).
     TlbShootdown { domain: DomainId, handle: u64 },
-    /// Atomically switch this core from the exact source VP to the target VP.
+    /// Atomically switch this core off its doomed VP. The resume target is
+    /// resolved locally by the receiving core itself (see
+    /// `Capability::switch_after_callee_revoked`), not carried here — see
+    /// module doc / `CoreSwitch` (capa-engine) for why.
     Switch {
         source_cap: CapabilityRef<Domain>,
         source_vp: u32,
-        target_cap: CapabilityRef<Domain>,
-        target_vp: u32,
     },
 }
 
@@ -46,16 +47,8 @@ impl core::fmt::Debug for CoreUpdate {
                 "TlbShootdown {{ domain: {:?}, handle: {:#x} }}",
                 domain, handle
             ),
-            CoreUpdate::Switch {
-                source_vp,
-                target_vp,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Switch {{ source_vp: {}, target_vp: {} }}",
-                    source_vp, target_vp
-                )
+            CoreUpdate::Switch { source_vp, .. } => {
+                write!(f, "Switch {{ source_vp: {} }}", source_vp)
             }
         }
     }

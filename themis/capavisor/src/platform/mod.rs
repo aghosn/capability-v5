@@ -588,23 +588,27 @@ impl ThemisPlatform {
                 CoreUpdate::Switch {
                     source_cap,
                     source_vp,
-                    target_cap,
-                    target_vp,
                 } => {
                     // Revoke-driven cross-core switch (see docs/design/
                     // cross-core-revoke.md).  Runs BEFORE B0 so the target
                     // has already switched off the doomed domain by the
                     // time the initiator's apply_update tears it down.
                     //
+                    // The resume target is NOT carried by this update — the
+                    // engine resolves it locally, from this core's own
+                    // `call_stack` (see `Capability::switch_after_callee_
+                    // revoked`), so there is no bare id/ref shipped from the
+                    // initiator to go stale.
+                    //
                     // Order matters:
-                    //   1. Engine state transition first (VP Locked →
-                    //      Running), which also updates Tier‑1/Tier‑3 via
-                    //      set_core_context.
-                    //   2. Then the hardware VMCLEAR/VMPTRLD swap, which
-                    //      reads Tier‑1 as `src` — must match the OLD
-                    //      binding, so we grab it BEFORE step 1.
+                    //   1. Capture the OLD Tier‑1 binding as `src` — must
+                    //      happen before the engine transition below.
+                    //   2. Engine state transition (VP Locked → Running),
+                    //      which resolves the target and returns its
+                    //      `CapabilityRef` directly (never a bare id).
+                    //   3. Hardware VMCLEAR/VMPTRLD swap using `src`/`dst`.
+                    //   4. Commit Tier‑1/Tier‑3 to the resolved target.
                     let source_dom = source_cap.read().data.id;
-                    let target_dom = target_cap.read().data.id;
                     let observed = self.core_current_binding(core_id);
                     let expected = (source_dom, source_vp as usize);
                     assert_eq!(
@@ -612,12 +616,18 @@ impl ThemisPlatform {
                         "[REVOKE_SWITCH] source binding changed before owner-core drain"
                     );
 
-                    capability_engine::Capability::<Domain>::switch_after_callee_revoked(
-                        self,
-                        &target_cap,
-                        target_vp as u64,
-                    )
-                    .expect("[REVOKE_SWITCH] engine transition failed");
+                    let switch_ctx =
+                        capability_engine::Capability::<Domain>::switch_after_callee_revoked(
+                            self,
+                        )
+                        .expect("[REVOKE_SWITCH] engine transition failed");
+
+                    let target_cap = switch_ctx.to_domain;
+                    let target_vp = switch_ctx
+                        .to_vp_id
+                        .expect("revoke-return always names a target VP")
+                        as u32;
+                    let target_dom = target_cap.read().data.id;
 
                     // SAFETY: pinned active_vcpu is valid on this core;
                     // src is the currently-loaded VMCS (captured before
@@ -837,16 +847,12 @@ impl Platform for ThemisPlatform {
         core_id: CoreId,
         source_domain: &CapabilityRef<Domain>,
         source_vp: u64,
-        target_domain: &CapabilityRef<Domain>,
-        target_vp: u64,
     ) {
         self.push_core_update(
             core_id,
             CoreUpdate::Switch {
                 source_cap: source_domain.clone(),
                 source_vp: source_vp as u32,
-                target_cap: target_domain.clone(),
-                target_vp: target_vp as u32,
             },
         );
     }

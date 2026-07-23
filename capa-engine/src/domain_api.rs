@@ -2043,50 +2043,74 @@ impl Capability<Domain> {
         })
     }
 
-    /// Revoke-driven return: bring `target`'s VP back to `Running` on this
-    /// core after its callee (a descendant) was revoked.
+    /// Revoke-driven return: bring the doomed VP's caller-chain ancestor
+    /// back to `Running` on this core after the callee it was locked
+    /// waiting on was revoked.
     ///
-    /// Called by the platform's `CoreUpdate::Switch` handler on the target
-    /// core, between the drain and B0 of `poll_and_respond_cross_core`.
+    /// Called by the platform's `CoreUpdate::Switch` handler on the
+    /// *affected* core, between the drain and B0 of
+    /// `poll_and_respond_cross_core` — the same core the doomed VP was
+    /// actually running on.
     ///
-    /// The engine's `revoke_domain_subtree` (running on the initiator, under
-    /// the exclusive capability lock and the update lock) has already
-    /// computed `(target, target_vp)` — the first non-revoked ancestor of
-    /// the running doomed VP — via `walk_revoke_caller_chain`, and pushed a
-    /// `CoreSwitch` naming this pair.  This function is the target-side
-    /// counterpart: it transitions the target VP `Locked { prev_caller } →
-    /// Running { core, caller: prev_caller }` and updates the platform's
-    /// core context.
+    /// **No resume target is passed in (P2d).** Earlier revisions had the
+    /// initiator remotely walk the doomed VP's `VpRunState` caller chain to
+    /// precompute `(target, target_vp)`. That's gone: this function resolves
+    /// its own resume target **locally**, by popping this core's own
+    /// `call_stack` until it finds a frame whose domain has not been
+    /// revoked — the only domains skipped along the way are ones the
+    /// initiator has already marked revoked as part of the very same
+    /// subtree teardown (top-down, before recursing into children), so this
+    /// is safe without reading any live-in-flight remote state. Once found,
+    /// it transitions that ancestor VP `Locked { prev_caller } → Running {
+    /// core, caller: prev_caller }` and updates the platform's core context.
     ///
     /// **Concurrency note:** unlike the other switch entry points, this
     /// does NOT enter `execute()`.  The initiator already holds the
     /// exclusive capability lock and the update lock and is parked at B0
-    /// waiting for us; no other core can concurrently mutate engine state.
+    /// waiting for us; no other core can concurrently mutate engine state,
+    /// so it's safe for this core to pop/read its own stack without any
+    /// lock beyond the per-VP `run_state` locks already used elsewhere.
     ///
     /// The doomed domain's VP state is intentionally not touched here —
     /// its teardown is fully owned by `revoke_domain_subtree` +
     /// `apply_update(RevokeDomain)` running on the initiator.
-    pub fn switch_after_callee_revoked(
-        platform: &dyn Platform,
-        target: &CapabilityRef<Domain>,
-        target_vp: u64,
-    ) -> Result<SwitchContext> {
+    pub fn switch_after_callee_revoked(platform: &dyn Platform) -> Result<SwitchContext> {
         let core_id = platform
             .get_current_core()
             .ok_or_else(|| CapaError::InvalidOperation("current core unknown".to_string()))?;
 
-        let (target_id, target_vp_arc) = {
-            let g = target.read();
-            let id = g.data.id;
-            let vp = g
-                .data
+        // Pop this core's own call_stack until we land on a frame whose
+        // domain is not (yet) revoked — that's our resume target. Frames
+        // popped along the way belong to domains within the same doomed
+        // subtree (the initiator marks each `domain.revoke()` before
+        // recursing into its children), so skipping them here needs no
+        // further validation.
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        let (target_cap, target_vp) = loop {
+            let frame = core_ctx.pop_frame().ok_or_else(|| {
+                CapaError::InvalidOperation(
+                    "call_stack exhausted resolving revoke resume target".to_string(),
+                )
+            })?;
+            let cap = frame.domain.upgrade().ok_or_else(|| {
+                CapaError::InvalidOperation(
+                    "revoke resume target's domain capability dropped".to_string(),
+                )
+            })?;
+            if !cap.read().data.is_revoked() {
+                break (cap, frame.vp_id);
+            }
+        };
+
+        let target_vp_arc = {
+            let g = target_cap.read();
+            g.data
                 .policy
                 .vprocessor_states
                 .iter()
                 .find(|v| v.id == target_vp)
                 .cloned()
-                .ok_or(CapaError::NotFound)?;
-            (id, vp)
+                .ok_or(CapaError::NotFound)?
         };
 
         // Extract prev_caller from the Locked state, then rewrite as Running.
@@ -2107,8 +2131,8 @@ impl Capability<Domain> {
         }
 
         Ok(SwitchContext {
-            from_domain: 0, // caller is being torn down; no meaningful id
-            to_domain: target_id,
+            from_domain: None, // caller is being torn down; no meaningful source
+            to_domain: target_cap,
             core_id,
             is_return: true,
             from_vp_id: None,
@@ -2223,8 +2247,8 @@ impl Capability<Domain> {
         }
 
         Ok(SwitchContext {
-            from_domain: caller_id,
-            to_domain: prev_domain_id,
+            from_domain: Some(caller.clone()),
+            to_domain: prev_domain_ref,
             core_id,
             is_return: true,
             from_vp_id: Some(caller_vp_id),
@@ -2527,8 +2551,8 @@ impl Capability<Domain> {
         }
 
         Ok(SwitchContext {
-            from_domain: caller_id,
-            to_domain: actual_domain_id,
+            from_domain: Some(caller.clone()),
+            to_domain: actual_cap,
             core_id,
             is_return: false,
             from_vp_id: Some(caller_vp_id),
@@ -2594,9 +2618,9 @@ impl Capability<Domain> {
         // Short-circuit: handler is the interrupted domain itself.
         if interrupted_domain_id == handler_domain_id {
             return Ok((VpInterruptContext {
-                interrupted_domain_id,
+                interrupted_domain: interrupted_cap.clone(),
                 interrupted_vp_id: leaf_vp_id,
-                handler_domain_id,
+                handler_domain: interrupted_cap.clone(),
                 handler_vp_id: leaf_vp_id,
                 core_id,
             }, UpdateBatch::new()));
@@ -2789,9 +2813,9 @@ impl Capability<Domain> {
         }
 
         Ok((VpInterruptContext {
-            interrupted_domain_id,
+            interrupted_domain: interrupted_cap.clone(),
             interrupted_vp_id: leaf_vp_id,
-            handler_domain_id,
+            handler_domain: chain[n - 1].0.clone(),
             handler_vp_id,
             core_id,
         }, UpdateBatch::new()))

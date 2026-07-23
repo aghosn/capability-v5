@@ -303,8 +303,8 @@ fn test_sandbox_inside_cvm() {
 
     // VP-aware switch from CVM to sandbox (sandbox VP[0])
     let switch_ctx = Capability::switch(&platform, &cvm, sandbox_h, 0).unwrap().0;
-    assert_eq!(switch_ctx.from_domain, cvm_id);
-    assert_eq!(switch_ctx.to_domain, sandbox_id);
+    assert_eq!(switch_ctx.from_domain.as_ref().unwrap().read().data.id, cvm_id);
+    assert_eq!(switch_ctx.to_domain.read().data.id, sandbox_id);
     assert_eq!(switch_ctx.core_id, 0);
     assert!(!switch_ctx.is_return);
     assert_eq!(switch_ctx.from_vp_id, Some(0));
@@ -315,8 +315,8 @@ fn test_sandbox_inside_cvm() {
 
     // VP-aware return from sandbox back to CVM
     let ret_ctx = Capability::switch(&platform, &sandbox, 0, 0).unwrap().0;
-    assert_eq!(ret_ctx.from_domain, sandbox_id);
-    assert_eq!(ret_ctx.to_domain, cvm_id);
+    assert_eq!(ret_ctx.from_domain.as_ref().unwrap().read().data.id, sandbox_id);
+    assert_eq!(ret_ctx.to_domain.read().data.id, cvm_id);
     assert!(ret_ctx.is_return);
 }
 

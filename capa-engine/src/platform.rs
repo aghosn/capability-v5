@@ -239,20 +239,21 @@ pub trait Platform: Send + Sync {
     ) {
     }
 
-    /// Push a per-core "switch to another domain" update onto core `core_id`.
+    /// Push a per-core "your running VP is being revoked" update onto core
+    /// `core_id`.
     ///
     /// Called by the initiating core **before** `send_ipi` when revoking a
-    /// domain that is currently running on other cores.  Each affected core
-    /// receives the target (a non-revoked caller-chain ancestor) it should
-    /// resume on.  The push happens-before the IPI so the target core observes
-    /// the queued switch when it drains between the barriers of the
-    /// cross-core protocol.
+    /// domain that is currently running on other cores. The push happens-
+    /// before the IPI so the target core observes the queued switch when it
+    /// drains between the barriers of the cross-core protocol.
     ///
-    /// `target_cap` and `target_vp_id` identify the VP to resume; both are
-    /// pre-computed by the engine's caller-chain walk over `VpRunState`.
-    /// The ancestor VP resumes as if the callee had exited with a
-    /// "callee revoked" exit reason (delivered through the existing
-    /// exit-forwarding path).
+    /// `source_cap`/`source_vp_id` identify the VP being torn down — for a
+    /// sanity check on the platform side that the affected core hasn't
+    /// already moved on. **No resume target is passed here (P2d):** the
+    /// affected core resolves its own resume target locally, by popping its
+    /// own `call_stack` (see `Capability::switch_after_callee_revoked`) —
+    /// the initiator never needs to walk the doomed VP's ancestor chain or
+    /// read another core's state.
     ///
     /// **Default implementation** is a no-op (single-core / test platforms
     /// that override this record the call for verification).
@@ -261,8 +262,6 @@ pub trait Platform: Send + Sync {
         _core_id: CoreId,
         _source_cap: &CapabilityRef<Domain>,
         _source_vp_id: u64,
-        _target_cap: &CapabilityRef<Domain>,
-        _target_vp_id: u64,
     ) {
     }
 
@@ -476,13 +475,7 @@ where
                     String::from("multiple revoke switch orders for one core"),
                 ));
             }
-            platform.push_core_switch(
-                switch.core,
-                &switch.source_domain,
-                switch.source_vp,
-                &switch.target_domain,
-                switch.target_vp,
-            );
+            platform.push_core_switch(switch.core, &switch.source_domain, switch.source_vp);
         }
 
         if !affected_cores.is_empty() {

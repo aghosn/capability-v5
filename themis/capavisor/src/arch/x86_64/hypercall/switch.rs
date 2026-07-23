@@ -141,9 +141,15 @@ pub(crate) fn do_switch(
         }
     };
 
-    let to_domain_id: DomainId = switch_ctx.to_domain;
+    let to_domain_id: DomainId = switch_ctx.to_domain.read().data.id;
     let to_vp_idx = switch_ctx.to_vp_id.unwrap_or(vp_id) as usize;
-    let from_domain_id: DomainId = switch_ctx.from_domain;
+    let from_domain_id: DomainId = switch_ctx
+        .from_domain
+        .as_ref()
+        .expect("do_switch's forward path always names a source domain")
+        .read()
+        .data
+        .id;
     let from_vp_id = switch_ctx.from_vp_id.unwrap_or(0) as usize;
 
     // ── 3. Advance caller (from-VP) RIP past SWITCH VMCALL (while its VMCS
@@ -405,9 +411,15 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
         Capability::switch_return_with_exit(platform, &child_cap, exit_reason)
             .expect("[CHILD_EXIT] return switch failed");
 
-    let child_domain_id = return_ctx.from_domain;
+    let child_domain_id = return_ctx
+        .from_domain
+        .as_ref()
+        .expect("child-exit return switch always names a source domain")
+        .read()
+        .data
+        .id;
     let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
-    let parent_domain_id = return_ctx.to_domain;
+    let parent_domain_id = return_ctx.to_domain.read().data.id;
     let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
 
     // ── Build the slim intercept message (with optional MMIO bytes) ──
@@ -648,7 +660,7 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     copy_filtered_regs_to_comm(
         platform,
         vcpu,
-        intr_ctx.interrupted_domain_id,
+        intr_ctx.interrupted_domain.read().data.id,
         intr_ctx.interrupted_vp_id as usize,
         read_set,
         Some(&msg),
@@ -659,8 +671,14 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         swap_active_vp(
             vcpu,
             platform,
-            (intr_ctx.interrupted_domain_id, intr_ctx.interrupted_vp_id as usize),
-            (intr_ctx.handler_domain_id, intr_ctx.handler_vp_id as usize),
+            (
+                intr_ctx.interrupted_domain.read().data.id,
+                intr_ctx.interrupted_vp_id as usize,
+            ),
+            (
+                intr_ctx.handler_domain.read().data.id,
+                intr_ctx.handler_vp_id as usize,
+            ),
             "INTR_FWD",
         );
     }
