@@ -77,7 +77,7 @@ pub enum CallLogEntry {
         fallback: Option<DomainId>,
     },
     /// `push_core_switch(core, source)` was invoked. No resume target is
-    /// carried anymore (P2d) — the affected core resolves that locally.
+    /// carried — the affected core resolves that locally.
     PushCoreSwitch {
         core: CoreId,
         source_domain: DomainId,

@@ -249,9 +249,9 @@ pub trait Platform: Send + Sync {
     ///
     /// `source_cap`/`source_vp_id` identify the VP being torn down — for a
     /// sanity check on the platform side that the affected core hasn't
-    /// already moved on. **No resume target is passed here (P2d):** the
-    /// affected core resolves its own resume target locally, by popping its
-    /// own `call_stack` (see `Capability::switch_after_callee_revoked`) —
+    /// already moved on. No resume target is passed here: the affected core
+    /// resolves its own resume target locally, by popping its own
+    /// `call_stack` (see `Capability::switch_after_callee_revoked`) —
     /// the initiator never needs to walk the doomed VP's ancestor chain or
     /// read another core's state.
     ///

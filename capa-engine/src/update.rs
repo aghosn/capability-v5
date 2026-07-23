@@ -281,14 +281,11 @@ pub struct UpdateBatch {
 /// currently running a VP in the revoked subtree.  Consumed by the initiating
 /// core inside `execute()` before it sends cross-core IPIs.
 ///
-/// **No resume target is carried here (P2d).** Earlier revisions had the
-/// initiator remotely walk the doomed VP's caller chain (`VpRunState`
-/// ancestors, possibly spanning several domain locks) to precompute
-/// `(target_domain, target_vp)` here. That walk is gone: the *affected* core
-/// now resolves its own resume target locally, by popping its own per-core
-/// `call_stack` until it finds a frame whose domain is not revoked (see
+/// No resume target is carried here: the *affected* core resolves its own
+/// resume target locally, by popping its own per-core `call_stack` until it
+/// finds a frame whose domain is not revoked (see
 /// `Capability::switch_after_callee_revoked`). The initiator only needs to
-/// know *which core* to notify and *what it's currently running*, for the
+/// know *which core* to notify and *what it's currently running*, for a
 /// sanity check that the affected core hasn't already moved on — no ancestor
 /// walk, no remote domain-lock reads.
 #[derive(Clone)]

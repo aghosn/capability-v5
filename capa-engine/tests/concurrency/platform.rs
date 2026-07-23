@@ -395,9 +395,9 @@ fn make_child(
 }
 
 /// Extract the `(core, source_domain_id, source_vp)` of every `PushCoreSwitch`
-/// entry in the log, in order. No resume target is carried on the wire
-/// anymore (P2d) — the affected core resolves that locally from its own
-/// `call_stack`; see `resolve_revoke_target` below for how tests verify it.
+/// entry in the log, in order. No resume target is carried on the wire —
+/// the affected core resolves that locally from its own `call_stack`; see
+/// `resolve_revoke_target` below for how tests verify it.
 fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64)> {
     log.iter()
         .filter_map(|e| match e {

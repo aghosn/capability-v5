@@ -29,23 +29,18 @@ pub struct CoreContext {
     /// Live call chain for this core, bottom (root-most caller) to top
     /// (most recent switch target).
     ///
-    /// **Dual-write (P2c) for the normal switch/interrupt paths, sole
-    /// source of truth (P2d) for revoke:** `switch_domain_forward`,
-    /// `switch_domain_return`, and `deliver_interrupt_vp` all push/pop this
-    /// stack alongside the existing `VpRunState` `caller`/`prev_caller`
-    /// links, cross-validated via `debug_assert!` on every pop — `VpRunState`
-    /// remains the source of truth actually consulted for control flow on
-    /// those paths, this field only mirrors it for now. Revoke's resume-target
-    /// resolution (`Capability::switch_after_callee_revoked`) is the first
-    /// real consumer: the affected core pops its own stack, skipping frames
-    /// whose domain is already marked revoked, to find its resume target —
-    /// no remote caller-chain walk is performed by the initiator at all.
-    /// Once the normal paths' mirroring is proven correct, `VpRunState`'s
-    /// `Running`/`Locked` `caller`/`prev_caller` fields (but *not*
-    /// `Suspended`/`Interrupted`'s — those remain the sole storage for chain
-    /// segments frozen off of any specific core, since a dormant segment can
-    /// later resume on a different physical core than the one that froze it)
-    /// can be retired (P2e).
+    /// Mirrors `VpRunState`'s `Running`/`Locked` `caller`/`prev_caller`
+    /// links for the normal switch/interrupt paths (`switch_domain_forward`,
+    /// `switch_domain_return`, `deliver_interrupt_vp` push/pop this stack
+    /// alongside those fields, cross-checked via `debug_assert!`), and is
+    /// the sole source of truth for resolving a revoke-driven return's
+    /// resume target: `Capability::switch_after_callee_revoked` pops this
+    /// stack directly, with no remote caller-chain walk.
+    ///
+    /// `Suspended`/`Interrupted` VPs keep their own `prev_caller`/`caller`
+    /// fields regardless — those describe chain segments frozen off any
+    /// specific core, which may later resume on a *different* physical core
+    /// than the one that froze them, so they can't live in a per-core stack.
     ///
     /// Single-writer per core in steady state: only the physical core
     /// owning this `CoreContext` pushes/pops during its own synchronous
@@ -105,12 +100,11 @@ impl CoreContext {
     /// `pop_frame()`, and so on. Returns `None` if the stack is shallower
     /// than `depth + 1` frames.
     ///
-    /// Used for read-only cross-validation of the stack against
-    /// `VpRunState`'s own `caller`/`prev_caller` fields (P2e dual-write)
-    /// without mutating the stack — callers that need this data purely for
-    /// an assertion should prefer this over `pop_frame()`, so that an
-    /// unrelated error path elsewhere in the caller can't leave the stack
-    /// desynchronized from a partially-applied `VpRunState` change.
+    /// Read-only cross-check against `VpRunState`'s own `caller`/
+    /// `prev_caller` fields, without mutating the stack — prefer this over
+    /// `pop_frame()` when the value is only needed for an assertion, so an
+    /// unrelated error path elsewhere can't leave the stack popped without
+    /// a matching `VpRunState` change.
     pub fn peek_at(&self, depth: usize) -> Option<VpCallContext> {
         let stack = self.call_stack.read();
         let len = stack.len();

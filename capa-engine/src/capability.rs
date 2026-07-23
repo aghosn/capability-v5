@@ -788,7 +788,7 @@ impl Capability<Domain> {
             //
             // Each `Running { core, caller: Some(_) }` VP produces one
             // `CoreSwitch` naming only the *source* (this domain/VP/core) —
-            // no resume target is precomputed here (P2d): the affected core
+            // no resume target is precomputed here: the affected core
             // resolves its own resume target locally, by popping its own
             // per-core call_stack until it finds a non-revoked domain (see
             // `Capability::switch_after_callee_revoked`). `caller: None`
