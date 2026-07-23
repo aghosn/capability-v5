@@ -320,7 +320,7 @@ fn revoke_vs_carve() {
         let c = child.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::revoke_child_ref(&r, &c)
+            Capability::revoke_child_ref(&NullPlatform, &r, &c)
         });
 
         let pl = platform_lock.clone();
@@ -563,7 +563,7 @@ fn alias_while_sibling_revoked() {
         let c = carved_child.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::revoke_child_ref(&r, &c)
+            Capability::revoke_child_ref(&NullPlatform, &r, &c)
         });
 
         let pl = platform_lock.clone();
@@ -701,7 +701,7 @@ fn revoke_after_send() {
         let c = child.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap();
-            Capability::revoke_child_ref(&r, &c)
+            Capability::revoke_child_ref(&NullPlatform, &r, &c)
         });
 
         let updates = revoker.join().unwrap().expect("revoke must succeed");
@@ -773,7 +773,7 @@ fn region_reuse_after_revoke() {
         let c = child_c.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::revoke_child_ref(&r, &c)
+            Capability::revoke_child_ref(&NullPlatform, &r, &c)
         });
 
         let pl = platform_lock.clone();

@@ -346,21 +346,17 @@ pub enum VpRunState {
     /// VP is currently executing on the given core.
     Running {
         core: CoreId,
-        /// The VP context that switched to us (None = no call-chain predecessor).
-        caller: Option<VpCallContext>,
     },
     /// VP is locked because it called switch; waiting for the callee to return.
     Locked {
         callee_domain_id: u64,
         callee_vp_id: u64,
-        /// This VP's own caller context (restored when the callee returns).
-        prev_caller: Option<VpCallContext>,
     },
     /// VP was preempted by an interrupt while Locked on a callee.
     ///
     /// The callee VP is now `Interrupted` (or also `Suspended` for deeper chains).
     /// This VP is claimable by a forward `switch` (same as `Available`).
-    /// When claimed, its direct callee is freed to `Available` if it is `Interrupted`.
+    /// When claimed, its direct callee is transitioned to `Running` if it is `Interrupted`.
     Suspended {
         /// Weak reference to the callee domain's capability.
         callee_domain: CapabilityWeak<Domain>,

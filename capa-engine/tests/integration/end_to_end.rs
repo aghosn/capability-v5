@@ -295,10 +295,7 @@ fn test_sandbox_inside_cvm() {
         let c = cvm.read();
         let vp0 = c.data.policy.vprocessor_states[0].clone();
         drop(c);
-        *vp0.run_state.write() = VpRunState::Running {
-            core: 0,
-            caller: None,
-        };
+        *vp0.run_state.write() = VpRunState::Running { core: 0 };
     }
 
     // VP-aware switch from CVM to sandbox (sandbox VP[0])

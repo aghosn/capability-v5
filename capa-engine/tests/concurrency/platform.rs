@@ -364,13 +364,13 @@ fn test_execute_on_domain_revoked_precedes_apply_update() {
 
 use capability_engine::{CapabilityRef, LocalHandle, VpRunState};
 
-/// Put `domain`'s VP[vp_id] into `Running { core, caller: None }`.  Used
+/// Put `domain`'s VP[vp_id] into `Running { core }`.  Used
 /// as a seed state before `Capability::switch` gets called.
 fn seed_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: CoreId) {
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Running { core, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core };
 }
 
 /// Create + seal a child domain under `parent` with all 4 cores and 4 VPs.

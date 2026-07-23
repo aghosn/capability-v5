@@ -183,13 +183,13 @@ impl Platform for LoomPlatform {
 // Test helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Forcibly set VP[`vp_id`] of `domain` to `Running { core, caller: None }`.
+/// Forcibly set VP[`vp_id`] of `domain` to `Running { core }`.
 /// Call this BEFORE spawning loom threads (sequential setup only).
 fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Running { core, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core };
 }
 
 /// Create a sealed child domain under `parent` and return `(child_ref, handle)`.
@@ -388,30 +388,16 @@ fn vp_concurrent_return_and_claim() {
             *vp0.run_state.write() = VpRunState::Locked {
                 callee_domain_id: b_domain.read().data.id,
                 callee_vp_id: 0,
-                prev_caller: None,
             };
             // root.VP[1]: Running on core 1
-            *vp1.run_state.write() = VpRunState::Running {
-                core: 1,
-                caller: None,
-            };
+            *vp1.run_state.write() = VpRunState::Running { core: 1 };
         }
         {
             let bd = b_domain.read();
             let bvp0 = bd.data.policy.vprocessor_states[0].clone();
             drop(bd);
 
-            let root_id = root.read().data.id;
-            let root_vp0_weak = std::sync::Arc::downgrade(&root);
-
-            *bvp0.run_state.write() = VpRunState::Running {
-                core: 0,
-                caller: Some(VpCallContext {
-                    domain: root_vp0_weak,
-                    domain_id: root_id,
-                    vp_id: 0,
-                }),
-            };
+            *bvp0.run_state.write() = VpRunState::Running { core: 0 };
         }
 
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));

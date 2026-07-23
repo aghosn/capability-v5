@@ -391,7 +391,6 @@ pub extern "C" fn _start() -> ! {
             if let Some(vp) = dom.data.policy.vprocessor_states.get(core_id) {
                 *vp.run_state.write() = VpRunState::Running {
                     core: core_id as capability_engine::CoreId,
-                    caller: None,
                 };
             }
         }

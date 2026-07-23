@@ -301,7 +301,7 @@ impl Backend for RustBackend {
             self.platform.set_core_context(core_id, &root, core_id);
             let vp = root.read().data.policy.vprocessor_states.get(core_id as usize).cloned();
             if let Some(vp_arc) = vp {
-                *vp_arc.run_state.write() = VpRunState::Running { core: core_id, caller: None };
+                *vp_arc.run_state.write() = VpRunState::Running { core: core_id };
             }
         }
 

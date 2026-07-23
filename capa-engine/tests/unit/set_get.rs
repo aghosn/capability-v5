@@ -69,11 +69,10 @@ fn set_vp_interrupted(domain: &CapabilityRef<Domain>, vp_id: usize, vector: u8) 
 
 /// Force VP[vp_id] of `domain` into `Running { core: 0 }`.
 fn set_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize) {
-    let platform = common::TestPlatform::new();
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Running { core: 0, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core: 0 };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

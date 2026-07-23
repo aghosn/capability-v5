@@ -1331,7 +1331,7 @@ impl Capability<Domain> {
         // revoke_child operates only on CapabilityRef<MemoryRegion> arcs
         // (independent of the domain lock) — no deadlock risk.
         #[allow(unused_mut)]
-        let mut updates = Capability::revoke_child(&region_ref, child_sub)?;
+        let mut updates = Capability::revoke_child(platform, &region_ref, child_sub)?;
         w.data.prune_stale_memory_capabilities();
 
         // Unblock parent's AddressMap entries that were blocked during send.
@@ -1482,7 +1482,7 @@ impl Capability<Domain> {
             return Err(CapaError::ApiNotAllowed);
         }
         let child_sub = child_ref.read().sub_handle;
-        let updates = Capability::revoke_child_domain(caller, child_sub)?;
+        let updates = Capability::revoke_child_domain(platform, caller, child_sub)?;
         // Remove the now-revoked child from caller's domain table so the
         // LocalHandle is reclaimed by allocate_domain_handle.
         caller.write().data.remove_domain_capability(child_handle);
@@ -2059,8 +2059,8 @@ impl Capability<Domain> {
     /// revoked as part of the very same subtree teardown (top-down, before
     /// recursing into children), so this is safe without reading any
     /// live-in-flight remote state. Once found, it transitions that ancestor
-    /// VP `Locked { prev_caller } → Running { core, caller: prev_caller }`
-    /// and updates the platform's core context.
+    /// VP `Locked → Running { core }` and updates the platform's core
+    /// context.
     ///
     /// **Concurrency note:** unlike the other switch entry points, this
     /// does NOT enter `execute()`.  The initiator already holds the
@@ -2100,11 +2100,6 @@ impl Capability<Domain> {
             }
         };
 
-        // The resume target's own frame was the last one popped above, so
-        // the new stack top is exactly its predecessor — must match the
-        // `Locked.prev_caller` we're about to read below.
-        let stack_prev_caller = core_ctx.top_frame();
-
         let target_vp_arc = {
             let g = target_cap.read();
             g.data
@@ -2116,25 +2111,19 @@ impl Capability<Domain> {
                 .ok_or(CapaError::NotFound)?
         };
 
-        // Extract prev_caller from the Locked state, then rewrite as Running.
+        // Confirm the target is actually Locked (waiting on the doomed
+        // callee), then rewrite as Running. The caller/prev_caller it had
+        // recorded is gone (Running/Locked no longer carry it) — whatever
+        // this VP's own predecessor is now lives implicitly on the stack,
+        // below the frame we just popped above.
         {
             let mut rs = target_vp_arc.run_state.write();
-            let prev_caller = match &*rs {
-                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "target VP not in Locked state on revoke-return".to_string(),
-                    ))
-                }
-            };
-            debug_assert!(
-                same_caller_ctx(&prev_caller, &stack_prev_caller),
-                "call_stack diverged from VpRunState on revoke-return"
-            );
-            *rs = VpRunState::Running {
-                core: core_id,
-                caller: prev_caller,
-            };
+            if !matches!(&*rs, VpRunState::Locked { .. }) {
+                return Err(CapaError::InvalidOperation(
+                    "target VP not in Locked state on revoke-return".to_string(),
+                ));
+            }
+            *rs = VpRunState::Running { core: core_id };
         }
 
         Ok(SwitchContext {
@@ -2152,7 +2141,7 @@ impl Capability<Domain> {
     ///
     /// Transitions:
     /// - Caller VP: `Running → Available { last_exit_reason }`
-    /// - Previous (Locked) VP: `Locked → Running { core, caller: prev_prev_caller }`
+    /// - Previous (Locked) VP: `Locked → Running { core }`
     fn switch_domain_return(
         caller: &CapabilityRef<Domain>,
         core_id: CoreId,
@@ -2172,23 +2161,21 @@ impl Capability<Domain> {
         };
         let caller_vp_id = caller_vp_arc.id;
 
-        let prev_ctx = {
-            match &*caller_vp_arc.run_state.read() {
-                VpRunState::Running {
-                    caller: Some(ctx), ..
-                } => ctx.clone(),
-                VpRunState::Running { caller: None, .. } => {
-                    return Err(CapaError::InvalidOperation(
-                        "no caller to return to".to_string(),
-                    ));
-                }
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "caller VP not in Running state".to_string(),
-                    ))
-                }
-            }
-        };
+        if !matches!(&*caller_vp_arc.run_state.read(), VpRunState::Running { .. }) {
+            return Err(CapaError::InvalidOperation(
+                "caller VP not in Running state".to_string(),
+            ));
+        }
+
+        // The VP we're returning to is whichever frame is on top of this
+        // core's call stack: it was pushed there when it issued the
+        // forward switch that made `caller_vp_arc` Running. Peek (not pop)
+        // until every fallible check below has passed, so an early `Err`
+        // can't leave the stack popped without the state writes it implies.
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        let prev_ctx = core_ctx
+            .top_frame()
+            .ok_or_else(|| CapaError::InvalidOperation("no caller to return to".to_string()))?;
 
         let prev_domain_id = prev_ctx.domain_id;
         let prev_vp_id = prev_ctx.vp_id;
@@ -2207,41 +2194,33 @@ impl Capability<Domain> {
                 .clone()
         };
 
-        // Verify previous VP is Locked waiting for this callee and extract its saved caller.
-        let prev_prev_caller = {
-            match &*prev_vp_arc.run_state.read() {
-                VpRunState::Locked {
-                    callee_domain_id,
-                    callee_vp_id,
-                    prev_caller,
-                } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {
-                    prev_caller.clone()
-                }
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "previous VP is not locked waiting for this callee".to_string(),
-                    ))
-                }
+        // Verify previous VP is Locked waiting for this callee.
+        match &*prev_vp_arc.run_state.read() {
+            VpRunState::Locked {
+                callee_domain_id,
+                callee_vp_id,
+                ..
+            } if *callee_domain_id == caller_id && *callee_vp_id == caller_vp_id => {}
+            _ => {
+                return Err(CapaError::InvalidOperation(
+                    "previous VP is not locked waiting for this callee".to_string(),
+                ))
             }
-        };
+        }
 
-        *prev_vp_arc.run_state.write() = VpRunState::Running {
-            core: core_id,
-            caller: prev_prev_caller.clone(),
-        };
+        *prev_vp_arc.run_state.write() = VpRunState::Running { core: core_id };
         *caller_vp_arc.run_state.write() = VpRunState::Available {
             last_exit_reason: exit_reason,
         };
 
         platform.set_core_context(core_id, &prev_domain_ref, prev_vp_id);
 
-        // Pop the matching frame from the per-core call stack and
-        // cross-validate it against the VpRunState-derived resume target.
-        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        // Now pop the frame we peeked above — every fallible check has
+        // passed, so this can't strand the stack out of sync.
         match core_ctx.pop_frame() {
             Some(frame) => debug_assert!(
                 frame.domain_id == prev_domain_id && frame.vp_id == prev_vp_id,
-                "call_stack frame diverged from VpRunState on return: expected domain {} vp {}, got domain {} vp {}",
+                "call_stack top changed between peek and pop on return: expected domain {} vp {}, got domain {} vp {}",
                 prev_domain_id, prev_vp_id, frame.domain_id, frame.vp_id
             ),
             None => debug_assert!(
@@ -2250,14 +2229,6 @@ impl Capability<Domain> {
                 prev_domain_id, prev_vp_id
             ),
         }
-
-        // The popped frame's own predecessor (now the new stack top) must
-        // equal the `Locked.prev_caller` we just restored into
-        // `prev_vp_arc`'s `Running.caller`.
-        debug_assert!(
-            same_caller_ctx(&prev_prev_caller, &core_ctx.top_frame()),
-            "call_stack diverged from VpRunState's prev_caller on return"
-        );
 
         Ok(SwitchContext {
             from_domain: Some(caller.clone()),
@@ -2339,17 +2310,12 @@ impl Capability<Domain> {
         };
         let caller_vp_id = caller_vp_arc.id;
 
-        // Capture caller's saved-caller context before mutating anything.
-        let caller_prev_caller = {
-            match &*caller_vp_arc.run_state.read() {
-                VpRunState::Running { caller: prev, .. } => prev.clone(),
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "caller VP not in Running state".to_string(),
-                    ))
-                }
-            }
-        };
+        // Confirm the caller is Running before mutating anything.
+        if !matches!(&*caller_vp_arc.run_state.read(), VpRunState::Running { .. }) {
+            return Err(CapaError::InvalidOperation(
+                "caller VP not in Running state".to_string(),
+            ));
+        }
 
         let caller_ctx = VpCallContext {
             domain: Arc::downgrade(caller),
@@ -2377,10 +2343,7 @@ impl Capability<Domain> {
                         "target VP is not available".to_string(),
                     ));
                 }
-                *state = VpRunState::Running {
-                    core: core_id,
-                    caller: Some(caller_ctx.clone()),
-                };
+                *state = VpRunState::Running { core: core_id };
             }
             VpRunState::Suspended { .. } | VpRunState::Interrupted { .. } => {
                 let mut expected_owner_cap = caller.clone();
@@ -2474,26 +2437,16 @@ impl Capability<Domain> {
                 for (index, (cap, domain_id, vp, state)) in resume_chain.iter().enumerate() {
                     let is_final = index + 1 == resume_chain.len();
                     let replacement = if is_final {
-                        let final_caller = match state {
-                            VpRunState::Suspended { prev_caller, .. } => prev_caller.clone(),
-                            VpRunState::Interrupted { caller, .. } => caller.clone(),
-                            _ => unreachable!(),
-                        };
-                        VpRunState::Running {
-                            core: core_id,
-                            caller: final_caller,
-                        }
+                        VpRunState::Running { core: core_id }
                     } else {
                         match state {
                             VpRunState::Suspended {
                                 callee_domain_id,
                                 callee_vp_id,
-                                prev_caller,
                                 ..
                             } => VpRunState::Locked {
                                 callee_domain_id: *callee_domain_id,
                                 callee_vp_id: *callee_vp_id,
-                                prev_caller: prev_caller.clone(),
                             },
                             _ => unreachable!(),
                         }
@@ -2541,7 +2494,6 @@ impl Capability<Domain> {
         *caller_vp_arc.run_state.write() = VpRunState::Locked {
             callee_domain_id: to_domain_id,
             callee_vp_id: to_vp_id,
-            prev_caller: caller_prev_caller.clone(),
         };
 
         platform.set_core_context(core_id, &actual_cap, actual_vp.id);
@@ -2556,13 +2508,6 @@ impl Capability<Domain> {
         // remain the sole storage for chain segments not currently active
         // on this core.
         let core_ctx = platform.switch_manager().get_core(core_id)?;
-        // The caller was never itself on the stack (it was `Running`), so
-        // whatever is on top right now — before we push its own frame
-        // below — is exactly its own saved caller/prev_caller.
-        debug_assert!(
-            same_caller_ctx(&caller_prev_caller, &core_ctx.top_frame()),
-            "call_stack diverged from VpRunState's caller on forward switch"
-        );
         core_ctx.push_frame(caller_ctx);
         for frame in intermediate_frames {
             core_ctx.push_frame(frame);
@@ -2586,7 +2531,7 @@ impl Capability<Domain> {
     /// (`handler_domain_id`), applying the following state changes:
     ///
     /// ```text
-    /// handler.vp  (Locked)  → Running { core, caller: handler's prev_caller }
+    /// handler.vp  (Locked)  → Running { core }
     /// ...report.vp(Locked)  → Suspended { callee = next VP down the chain }
     /// interrupted.vp(Running)→ Interrupted
     /// ```
@@ -2652,20 +2597,25 @@ impl Capability<Domain> {
             leaf_vp_arc.clone(),
         )];
 
-        // Seed: read caller context from leaf VP.
-        let mut next_ctx: Option<VpCallContext> = {
-            match &*leaf_vp_arc.run_state.read() {
-                VpRunState::Running { caller, .. } => caller.clone(),
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "leaf VP not Running during interrupt delivery".to_string(),
-                    ))
-                }
-            }
-        };
+        // Leaf must actually be Running — this isn't visible on the stack
+        // (Running VPs are never themselves pushed), so it's still read
+        // from the VP's own state.
+        if !matches!(&*leaf_vp_arc.run_state.read(), VpRunState::Running { .. }) {
+            return Err(CapaError::InvalidOperation(
+                "leaf VP not Running during interrupt delivery".to_string(),
+            ));
+        }
 
+        // Walk the rest of the chain directly off this core's call_stack —
+        // depth 0 is the leaf's caller, depth 1 that VP's own caller, and so
+        // on — instead of following VpRunState links (Running/Locked no
+        // longer carry them). Each entry's actual Locked state is verified
+        // where it's consumed below (the Suspended-rewrite loop and the
+        // handler section), so it isn't re-checked here.
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        let mut depth = 0;
         loop {
-            let ctx = next_ctx.ok_or_else(|| {
+            let ctx = core_ctx.peek_at(depth).ok_or_else(|| {
                 CapaError::InvalidOperation(
                     "VP chain exhausted before reaching handler domain".to_string(),
                 )
@@ -2688,23 +2638,12 @@ impl Capability<Domain> {
                     .clone()
             };
 
-            chain.push((domain_cap, domain_id, vp_arc.clone()));
+            chain.push((domain_cap, domain_id, vp_arc));
 
             if domain_id == handler_domain_id {
                 break;
             }
-
-            // Walk further up via the Locked VP's prev_caller.
-            next_ctx = {
-                match &*vp_arc.run_state.read() {
-                    VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                    _ => {
-                        return Err(CapaError::InvalidOperation(
-                            "expected Locked VP in interrupt call chain".to_string(),
-                        ))
-                    }
-                }
-            };
+            depth += 1;
         }
 
         // Verify handler was reached.
@@ -2718,21 +2657,13 @@ impl Capability<Domain> {
         let n = chain.len();
         let handler_vp_id = chain[n - 1].2.id;
 
-        // Read-only cross-check of the same caller/prev_caller values via
-        // the per-core call stack, using non-destructive `peek_at` instead
-        // of `pop_frame` — this function still has fallible state checks
-        // ahead (it runs under the shared, not exclusive, capability lock,
-        // so a concurrent state change is possible), and peeking means an
-        // early `Err` return can never leave the stack popped without the
-        // matching `VpRunState` writes it would mirror. The stack's actual
-        // pop happens later, once every write below has committed.
-        //
         // `chain[1..n]` are exactly the frames this core's stack holds for
         // the active segment (chain[0], the leaf, was never itself pushed
         // — only its callers were). `peek_at(0)` is the leaf's caller;
-        // `peek_at(k)` for `k` in `1..=n-1` is chain[k]'s own prev_caller
-        // (the frame that would surface once chain[1..=k] are popped).
-        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        // `peek_at(k)` for `k` in `1..=n-1` is chain[k]'s own caller (the
+        // frame that would surface once chain[1..=k] are popped). These are
+        // the sole source for Interrupted.caller/Suspended.prev_caller now
+        // that Running/Locked no longer carry that linkage themselves.
         let stack_leaf_caller = core_ctx.peek_at(0);
         let stack_prev_caller_at = |chain_index: usize| core_ctx.peek_at(chain_index);
 
@@ -2740,24 +2671,17 @@ impl Capability<Domain> {
         //
         // chain[0]:      Running → Interrupted (or Available when n==2)
         // chain[1..n-2]: Locked  → Suspended { callee = chain[i-1] }
-        // chain[n-1]:    Locked  → Running { core, caller: handler's prev_caller }
+        // chain[n-1]:    Locked  → Running { core }
         //
         // When the handler VP becomes Running it "unlocks" its immediate callee.
         // For n>2 the callee is Suspended (already claimable).  For n==2 the
         // callee is the leaf itself, so we set it to Available directly.
 
-        let leaf_caller = match &*chain[0].2.run_state.read() {
-            VpRunState::Running { caller, .. } => caller.clone(),
-            _ => {
-                return Err(CapaError::InvalidOperation(
-                    "leaf VP changed state during interrupt delivery".to_string(),
-                ))
-            }
-        };
-        debug_assert!(
-            same_caller_ctx(&leaf_caller, &stack_leaf_caller),
-            "call_stack diverged from VpRunState's caller for interrupted leaf"
-        );
+        if !matches!(&*chain[0].2.run_state.read(), VpRunState::Running { .. }) {
+            return Err(CapaError::InvalidOperation(
+                "leaf VP changed state during interrupt delivery".to_string(),
+            ));
+        }
         let leaf_report = chain[0]
             .0
             .read()
@@ -2769,7 +2693,7 @@ impl Capability<Domain> {
             == InterruptVisibility::Report;
         *chain[0].2.run_state.write() = VpRunState::Interrupted {
             vector,
-            caller: leaf_caller,
+            caller: stack_leaf_caller,
             report: leaf_report,
         };
 
@@ -2778,18 +2702,11 @@ impl Capability<Domain> {
             let callee_domain = Arc::downgrade(&chain[i - 1].0);
             let callee_domain_id = chain[i - 1].1;
             let callee_vp_id = chain[i - 1].2.id;
-            let prev_caller = match &*chain[i].2.run_state.read() {
-                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "intermediate VP changed state during interrupt delivery".to_string(),
-                    ))
-                }
-            };
-            debug_assert!(
-                same_caller_ctx(&prev_caller, &stack_prev_caller_at(i)),
-                "call_stack diverged from VpRunState's prev_caller for intermediate VP"
-            );
+            if !matches!(&*chain[i].2.run_state.read(), VpRunState::Locked { .. }) {
+                return Err(CapaError::InvalidOperation(
+                    "intermediate VP changed state during interrupt delivery".to_string(),
+                ));
+            }
             let report = chain[i]
                 .0
                 .read()
@@ -2803,40 +2720,26 @@ impl Capability<Domain> {
                 callee_domain,
                 callee_domain_id,
                 callee_vp_id,
-                prev_caller,
+                prev_caller: stack_prev_caller_at(i),
                 vector,
                 report,
             };
         }
 
-        // Handler: Locked → Running (restoring its own prev_caller).
-        let handler_prev_caller = {
-            match &*chain[n - 1].2.run_state.read() {
-                VpRunState::Locked { prev_caller, .. } => prev_caller.clone(),
-                _ => {
-                    return Err(CapaError::InvalidOperation(
-                        "handler VP not in Locked state".to_string(),
-                    ))
-                }
-            }
-        };
-        debug_assert!(
-            same_caller_ctx(&handler_prev_caller, &stack_prev_caller_at(n - 1)),
-            "call_stack diverged from VpRunState's prev_caller for handler VP"
-        );
-        *chain[n - 1].2.run_state.write() = VpRunState::Running {
-            core: core_id,
-            caller: handler_prev_caller,
-        };
+        // Handler: Locked → Running.
+        if !matches!(&*chain[n - 1].2.run_state.read(), VpRunState::Locked { .. }) {
+            return Err(CapaError::InvalidOperation(
+                "handler VP not in Locked state".to_string(),
+            ));
+        }
+        *chain[n - 1].2.run_state.write() = VpRunState::Running { core: core_id };
 
         // Update platform core tracking.
         platform.set_core_context(core_id, &chain[n - 1].0, handler_vp_id);
 
         // Pop the `n-1` frames this call chain consumed from the per-core
-        // stack — the handler becomes the new leaf on this core, so its own
-        // caller/prev_caller pointer (already restored above) is exactly
-        // what the stack's new top frame should expose. The frozen segment
-        // (chain[0..n-1]) is NOT lost: it lives on in each VP's own
+        // stack — the handler becomes the new leaf on this core. The frozen
+        // segment (chain[0..n-1]) is NOT lost: it lives on in each VP's own
         // Suspended/Interrupted callee_*/prev_caller/caller fields, ready to
         // be re-pushed onto whichever core later resumes it (see
         // `switch_domain_forward`'s resume branch) — possibly a different
@@ -3457,22 +3360,6 @@ impl Capability<Domain> {
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
-
-/// Compares a `VpRunState`-derived caller/prev_caller context against the
-/// per-core `call_stack`-derived one, for cross-checking that the two stay
-/// in sync.
-///
-/// `VpCallContext` doesn't derive `PartialEq` (its `Weak` domain ref isn't
-/// meaningfully comparable across an upgrade), so identity is compared by
-/// `(domain_id, vp_id)` only — the same identity pair already used
-/// everywhere else in this file to validate call-chain frames.
-fn same_caller_ctx(a: &Option<VpCallContext>, b: &Option<VpCallContext>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => x.domain_id == y.domain_id && x.vp_id == y.vp_id,
-        _ => false,
-    }
-}
 
 /// Encode [`InterruptVisibility`] as a `u64` (0=Deliver, 1=Report, 2=NotReport).
 fn visibility_to_u64(v: InterruptVisibility) -> u64 {

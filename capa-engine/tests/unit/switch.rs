@@ -12,13 +12,12 @@ mod common;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Initialise a domain's VP[vp_id] to `Running { core, caller: None }`.
+/// Initialise a domain's VP[vp_id] to `Running { core }`.
 fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
-    let platform = common::TestPlatform::new();
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Running { core, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core };
 }
 
 /// Build a sealed child domain inside `parent`, returning `(child_ref, child_handle)`.
@@ -270,10 +269,7 @@ fn test_vp_switch_target_not_available() {
         let c = child.read();
         let vp0 = c.data.policy.vprocessor_states[0].clone();
         drop(c);
-        *vp0.run_state.write() = VpRunState::Running {
-            core: 99,
-            caller: None,
-        };
+        *vp0.run_state.write() = VpRunState::Running { core: 99 };
     }
 
     // Now try to switch again — should fail because VP[0] is Running on core 99
@@ -389,7 +385,7 @@ fn test_vp_return_no_caller() {
     let platform = common::TestPlatform::new();
     let (root, _, _, platform) = fixture();
 
-    // root VP[0] is Running{caller: None} — no one called us
+    // root VP[0] is Running with an empty call_stack on its core — no one called us
     let result = Capability::switch(&platform, &root, 0, 0);
     assert!(
         result.is_err(),
@@ -782,10 +778,7 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
         let d = dom1.read();
         let vp1 = d.data.policy.vprocessor_states[1].clone();
         drop(d);
-        *vp1.run_state.write() = VpRunState::Running {
-            core: 1,
-            caller: None,
-        };
+        *vp1.run_state.write() = VpRunState::Running { core: 1 };
     }
     platform.set_current_core(Some(1));
 
