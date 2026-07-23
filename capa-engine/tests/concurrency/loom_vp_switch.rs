@@ -65,24 +65,26 @@ struct LoomPlatformState {
 
 /// Per-core platform instance.  Each "core" (thread) creates its own
 /// `LoomPlatform` with a fixed `current_core`, but shares the same
-/// `Arc<Mutex<LoomPlatformState>>` with other cores.
+/// `Arc<Mutex<LoomPlatformState>>` AND the same `Arc<SwitchManager>` with
+/// other cores — mirroring the real invariant that a `SwitchManager` is a
+/// single per-platform authority shared by every core, not a per-core
+/// private instance (see `Platform::switch_manager`'s doc comment).
 struct LoomPlatform {
     current_core: CoreId,
     state: Arc<Mutex<LoomPlatformState>>,
-    /// Not yet exercised by these tests: `domain_api.rs` doesn't call
-    /// `Platform::switch_manager()` anywhere yet (P2b scaffolding only), so
-    /// an instance private to each `LoomPlatform` (rather than shared like
-    /// `state`) is sufficient for now — revisit once the P2 cutover makes
-    /// this genuinely load-bearing across cores.
     switch_manager: Arc<SwitchManager>,
 }
 
 impl LoomPlatform {
-    fn new(current_core: CoreId, state: Arc<Mutex<LoomPlatformState>>) -> Self {
+    fn new(
+        current_core: CoreId,
+        state: Arc<Mutex<LoomPlatformState>>,
+        switch_manager: Arc<SwitchManager>,
+    ) -> Self {
         LoomPlatform {
             current_core,
             state,
-            switch_manager: Arc::new(SwitchManager::new(4)),
+            switch_manager,
         }
     }
 }
@@ -227,24 +229,27 @@ fn vp_race_two_cores_same_vp() {
 
         // ── Shared platform state ───────────────────────────────────────────
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
 
         // Clone Arcs for each thread.
         let root_t0 = root.clone();
         let root_t1 = root.clone();
         let target_t0 = target.clone();
         let state_t0 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
         let state_t1 = shared.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
             let _target = target_t0; // keep alive
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, state_t0, switch_mgr_t0);
             // Core 0 claims target VP[0].
             Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, state_t1, switch_mgr_t1);
             // Core 1 also tries to claim target VP[0].
             Capability::switch(&plat, &root_t1, target_h, 0)
         });
@@ -291,23 +296,26 @@ fn vp_two_cores_different_vps() {
                                       // target VP[0] and VP[1] start Available.
 
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
 
         let root_t0 = root.clone();
         let root_t1 = root.clone();
         let target_t0 = target.clone();
         let state_t0 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
         let state_t1 = shared.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
             let _target = target_t0;
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, state_t0, switch_mgr_t0);
             // Core 0 claims VP[0].
             Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, state_t1, switch_mgr_t1);
             // Core 1 claims VP[1].
             Capability::switch(&plat, &root_t1, target_h, 1)
         });
@@ -407,23 +415,26 @@ fn vp_concurrent_return_and_claim() {
         }
 
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
 
         let root_t1 = root.clone();
         let b_t0 = b_domain.clone();
         let state_t0 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
         let state_t1 = shared.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
 
         // Thread 0 (core 0): return from B → root.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, state_t0, switch_mgr_t0);
             Capability::switch(&plat, &b_t0, 0, 0)
         });
 
         // Thread 1 (core 1): try to switch from root → B, claiming VP[0].
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, state_t1, switch_mgr_t1);
             Capability::switch(&plat, &root_t1, b_h, 0)
         });
 
@@ -509,7 +520,8 @@ fn vp_interrupt_delivery_vs_claim_race() {
     loom::model(|| {
         // ── Sequential setup ────────────────────────────────────────────────
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
-        let plat_setup = LoomPlatform::new(0, shared.clone());
+        let switch_mgr = Arc::new(SwitchManager::new(4));
+        let plat_setup = LoomPlatform::new(0, shared.clone(), switch_mgr.clone());
 
         // dom0: root with 4 VPs — will be the DELIVER handler.
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
@@ -545,14 +557,16 @@ fn vp_interrupt_delivery_vs_claim_race() {
         let dom2_t0 = dom2.clone();
         let dom1_t1 = dom1.clone();
         let state_t0 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
         let state_t1 = shared.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Concurrent phase ─────────────────────────────────────────────────
 
         // Thread 0 (core 0): deliver interrupt — dom0 is the DELIVER handler.
         // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, state_t0, switch_mgr_t0);
             Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, 0, 0)
         });
 
@@ -560,7 +574,7 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // dom2.vp0 is either Running (before Thread 0's write) or Interrupted
         // (after Thread 0's write) — neither is Available or Suspended — always fails.
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, state_t1, switch_mgr_t1);
             Capability::switch(&plat, &dom1_t1, dom2_h_in_dom1, 0)
         });
 
@@ -657,22 +671,25 @@ fn vp_two_cores_race_suspended_vp() {
 
         // ── Arcs for threads ─────────────────────────────────────────────────
         let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
         let dom0_t0 = dom0.clone();
         let dom0_t1 = dom0.clone();
         let state_t0 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
         let state_t1 = shared.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Concurrent phase ─────────────────────────────────────────────────
 
         // Thread 0 (core 0, dom0.vp0): try to claim dom1.vp0.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, state_t0, switch_mgr_t0);
             Capability::switch(&plat, &dom0_t0, dom1_h_in_dom0, 0)
         });
 
         // Thread 1 (core 1, dom0.vp1): same target.
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, state_t1, switch_mgr_t1);
             Capability::switch(&plat, &dom0_t1, dom1_h_in_dom0, 0)
         });
 
