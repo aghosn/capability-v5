@@ -39,7 +39,7 @@ use crate::error::{CapaError, Result};
 use crate::interposition::{CpuidPolicy, CpuidResult, MsrPolicy, ProcFeaturePolicy};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
 use crate::platform::Platform;
-use crate::switch::{SwitchContext, VpInterruptContext};
+use crate::switch::{CoreUpdate, SwitchContext, VpInterruptContext};
 #[cfg(feature = "address_translation")]
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 #[cfg(not(feature = "address_translation"))]
@@ -2126,6 +2126,8 @@ impl Capability<Domain> {
             *rs = VpRunState::Running { core: core_id };
         }
 
+        core_ctx.set_binding(target_cap.clone(), target_vp);
+
         Ok(SwitchContext {
             from_domain: None, // caller is being torn down; no meaningful source
             to_domain: target_cap,
@@ -2213,7 +2215,14 @@ impl Capability<Domain> {
             last_exit_reason: exit_reason,
         };
 
-        platform.set_core_context(core_id, &prev_domain_ref, prev_vp_id);
+        // Drain any cross-core updates queued for this core (e.g. a
+        // `TlbShootdown` left behind while this core was idle/cache-only
+        // and not IPI'd) BEFORE rebinding to `prev_domain_ref` — otherwise
+        // this core could resume guest execution with stale cached
+        // entries for a domain another core has since torn down.
+        let _ = apply_core_updates(platform, core_id);
+
+        core_ctx.set_binding(prev_domain_ref.clone(), prev_vp_id);
 
         // Now pop the frame we peeked above — every fallible check has
         // passed, so this can't strand the stack out of sync.
@@ -2496,7 +2505,12 @@ impl Capability<Domain> {
             callee_vp_id: to_vp_id,
         };
 
-        platform.set_core_context(core_id, &actual_cap, actual_vp.id);
+        // Drain any cross-core updates queued for this core before rebinding
+        // to `actual_cap` — see the matching comment in `switch_domain_return`.
+        let _ = apply_core_updates(platform, core_id);
+
+        let core_ctx = platform.switch_manager().get_core(core_id)?;
+        core_ctx.set_binding(actual_cap.clone(), actual_vp.id);
 
         // Mirror this switch onto the current core's per-core call stack
         // (see `CoreContext::call_stack` for why this exists). The caller
@@ -2507,7 +2521,6 @@ impl Capability<Domain> {
         // own callee_*/prev_caller/caller links are untouched by this: they
         // remain the sole storage for chain segments not currently active
         // on this core.
-        let core_ctx = platform.switch_manager().get_core(core_id)?;
         core_ctx.push_frame(caller_ctx);
         for frame in intermediate_frames {
             core_ctx.push_frame(frame);
@@ -2734,8 +2747,13 @@ impl Capability<Domain> {
         }
         *chain[n - 1].2.run_state.write() = VpRunState::Running { core: core_id };
 
+        // Drain any cross-core updates queued for this core before rebinding
+        // to the handler domain — see the matching comment in
+        // `switch_domain_return`.
+        let _ = apply_core_updates(platform, core_id);
+
         // Update platform core tracking.
-        platform.set_core_context(core_id, &chain[n - 1].0, handler_vp_id);
+        core_ctx.set_binding(chain[n - 1].0.clone(), handler_vp_id);
 
         // Pop the `n-1` frames this call chain consumed from the per-core
         // stack — the handler becomes the new leaf on this core. The frozen
@@ -3357,6 +3375,75 @@ impl Capability<Domain> {
         Ok((hash, UpdateBatch::new()))
         })
     }
+}
+
+/// Drain and apply this core's own queued [`CoreUpdate`]s.
+///
+/// Called by the platform in three situations, all equivalent from this
+/// function's point of view: an IPI-driven poll of a remote initiator's
+/// transaction, this core's own natural VMEXIT into the monitor, or a
+/// spin-wait for an operation lock (see [`Platform::poll_and_respond_cross_core`]).
+/// Whichever caller wins the race to drain a non-empty queue is the one that
+/// rendezvous on the batch's [`CoreSyncBarriers`] — this makes participation
+/// independent of *why* this core ended up here.
+///
+/// Non-blocking: if the queue is already being drained by a concurrent
+/// caller on this same core, returns immediately (`Ok(())`) — the other
+/// caller is responsible for every entry.
+pub fn apply_core_updates(platform: &dyn Platform, core_id: CoreId) -> Result<()> {
+    let core_ctx = platform.switch_manager().get_core(core_id)?;
+    let Some(updates) = core_ctx.try_drain_updates() else {
+        return Ok(());
+    };
+
+    let mut found_sync = None;
+    for update in updates {
+        match update {
+            CoreUpdate::TlbShootdown { domain, handle, sync } => {
+                // Flush by snapshotted handle — the domain may already be
+                // revoked by the initiator's `apply_update(RevokeDomain)`,
+                // but the hardware structures it pointed to remain valid
+                // until every affected core has flushed (the engine's
+                // second barrier enforces this before any teardown-freed
+                // memory is reused).
+                platform.flush_tlb(domain, handle, core_id);
+                core_ctx.clear_cached(domain);
+                if let Some(sync) = sync {
+                    found_sync = Some(sync);
+                }
+            }
+            CoreUpdate::Switch { source_cap, source_vp, sync } => {
+                // Revoke-driven cross-core switch: runs strictly before the
+                // first barrier, so this core has already switched off the
+                // doomed domain by the time the initiator's `apply_update`
+                // tears it down. The resume target is not carried by this
+                // update — it is resolved locally, from this core's own
+                // call stack (see `switch_after_callee_revoked`).
+                let source_id = source_cap.read().data.id;
+                let src = (source_id, source_vp);
+                debug_assert_eq!(
+                    core_ctx.current_binding().map(|b| (b.domain.read().data.id, b.vp_id)),
+                    Some(src),
+                    "core_updates queue drained on a core whose binding no longer matches the queued source"
+                );
+
+                let switch_ctx = Capability::<Domain>::switch_after_callee_revoked(platform)?;
+                let target_id = switch_ctx.to_domain.read().data.id;
+                let target_vp = switch_ctx
+                    .to_vp_id
+                    .expect("revoke-return always names a target VP");
+                platform.apply_cross_core_switch(core_id, src, (target_id, target_vp));
+
+                found_sync = Some(sync);
+            }
+        }
+    }
+
+    if let Some(sync) = found_sync {
+        sync.switched.wait(0);
+        sync.applied.wait(0);
+    }
+    Ok(())
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

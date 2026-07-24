@@ -21,19 +21,22 @@
 //!   run capability mutation → UpdateBatch
 //!   spin on update_lock (poll_and_respond_cross_core while waiting)
 //!   for each affected core: send IPI (sets ipi_pending[core])
-//!   sync_barrier(0, n+1)          — wait for all affected cores to stop
+//!   sync.switched.wait(n+1)      — wait for all affected cores to stop
 //!   apply_update for each entry   — EPT/memory changes
-//!   sync_barrier(1, n+1)          — release cores to flush local state
+//!   sync.applied.wait(n+1)       — release cores to flush local state
 //!   release update_lock
 //!   release op_lock
 //!
 //! responding core (via poll_and_respond_cross_core / P3b IDT handler):
 //!   clear ipi_pending[self]
-//!   drain per-core update queue (VMCLEAR/VMPTRLD for Switch, INVEPT for
-//!     TlbShootdown, …) — this is where the responder actually switches
-//!     off the doomed domain.
-//!   sync_barrier(0, 0)    — signal "I have switched off the doomed domain"
-//!   sync_barrier(1, 0)    — wait for initiator's apply_update to finish
+//!   capability_engine::domain_api::apply_core_updates(platform, core) —
+//!     drains this core's own engine-owned queue (VMCLEAR/VMPTRLD for
+//!     Switch, INVEPT for TlbShootdown, …) and rendezvous on the same
+//!     transaction's barriers (found embedded in the queue entries it
+//!     just drained) — this is where the responder actually switches off
+//!     the doomed domain:
+//!   sync.switched.wait(0)    — signal "I have switched off the doomed domain"
+//!   sync.applied.wait(0)     — wait for initiator's apply_update to finish
 //! ```
 //!
 //! ## Update barrier and locking invariants
@@ -41,45 +44,37 @@
 //! 1. **No deadlock between apply_update and barrier**: `apply_update` acquires
 //!    per-domain `Mutex<PlatformDomain>` AFTER barrier 0 (all affected cores have
 //!    stopped).  Responding cores (in `poll_and_respond_cross_core`) do NOT hold
-//!    domain locks when they call `sync_barrier(0, 0)`.  Therefore there is no
+//!    domain locks when they call `sync.switched.wait(0)`.  Therefore there is no
 //!    deadlock.
 //!
 //! 2. **Domain lock ordering**: `apply_update` must NOT acquire two domain locks
 //!    simultaneously (no such case today).  When this becomes necessary, locks must
 //!    be acquired in ascending DomainId order to prevent deadlock.
 //!
-//! 3. **Tier 1/3 consistency**: `set_core_context` writes both
-//!    `cores[core_id].domain_id` (Tier 1, Release) and `routing.write()`
-//!    (Tier 3).  Readers of domain-for-core should prefer Tier 1 (lock-free) for
-//!    hot-path decisions (e.g., INVEPT targeting).  Tier 3 is authoritative for
-//!    reverse lookup (domain → core, needed for IPI targeting on domain switch).
+//! 3. **Single source of truth for "who is running what"**: which domain/VP
+//!    is scheduled on each core lives exclusively in the capability engine's
+//!    `SwitchManager`/`CoreContext` (`capability_engine::switch`) — this
+//!    platform has no shadow copy (Tier 1 atomics/Tier 3 routing maps were
+//!    removed once the engine took ownership). `get_core_cap`/
+//!    `core_domain_id` read the engine's binding directly.
 //!
-//! 4. **INVEPT scope optimization**: After barrier 0, before INVEPT (currently
-//!    TODO(P3c)), the initiating core can check
-//!    `cores[c].domain_id.load(Relaxed) == affected_domain` for each c to
-//!    send INVEPT only to affected cores, avoiding unnecessary shootdowns.  This
-//!    is safe because Tier 1 cells are written only by their owning core (under
-//!    the barrier protocol, all affected cores are stopped).
-//!
-//! 5. **Domain switch race with UpdateBatch**: A core performing a domain switch
-//!    must complete (Tier 1 + Tier 3 update + VMPTRLD of new VMCS) BEFORE
-//!    handling any VMEXIT that could trigger a new UpdateBatch for the new domain.
-//!    This is guaranteed because the switch is atomic from the perspective of the
-//!    barrier: the core is either "stopped at barrier" or "running in a domain".
-//!    A core cannot be simultaneously doing a switch and responding to a barrier.
+//! 4. **Domain switch race with UpdateBatch**: A core performing a domain switch
+//!    must complete its engine-side `set_binding` + VMPTRLD of the new VMCS
+//!    BEFORE handling any VMEXIT that could trigger a new UpdateBatch for the
+//!    new domain. This is guaranteed because the switch is atomic from the
+//!    perspective of the barrier: the core is either "stopped at barrier" or
+//!    "running in a domain". A core cannot be simultaneously doing a switch
+//!    and responding to a barrier.
 
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use spin::{Mutex, RwLock};
 
-use capability_engine::{
-    CapabilityRef, CoreId, CoreState, Domain, DomainId, OpLockGuard, Platform, Result,
-    SwitchManager, Update,
-};
+use capability_engine::{CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update};
 
 use crate::arch::{ArchDomainState, ArchPlatformState};
 #[cfg(target_arch = "x86_64")]
@@ -105,11 +100,10 @@ pub(crate) mod vcpu_slot;
 pub use domain::{DoorbellEntry, PlatformDomain, THEMIC_DOORBELL_FLAG_ANY_SIZE,
     THEMIC_DOORBELL_FLAG_ANY_VALUE, THEMIC_MAX_DOORBELLS,
 };
-pub use maps::CoreUpdate;
 pub use vcpu_slot::CoreContext;
 
-use maps::{DomainTable, RoutingMaps};
-use sync::{Barrier, ExclusiveGuard, SharedGuard};
+use maps::DomainTable;
+use sync::{ExclusiveGuard, SharedGuard};
 
 // ── Constants ─────────────────────────────────────────────────────────────── //
 
@@ -118,8 +112,6 @@ use sync::{Barrier, ExclusiveGuard, SharedGuard};
 /// heap-allocated.  ThemisPlatform sizes its per-core arrays dynamically.
 pub const MAX_CORES: usize = 256;
 
-const IDLE_DOMAIN: u64 = u64::MAX;
-const IDLE_VP: u32 = u32::MAX;
 // ── ThemisPlatform ────────────────────────────────────────────────────────── //
 
 /// Domain ID reserved for the root (dom0) domain.
@@ -133,21 +125,17 @@ pub struct ThemisPlatform {
     // Hot path: no lock needed
     op_lock: RwLock<()>,
     update_lock: AtomicBool,
-    barriers: [Barrier; 2],
     pub ipi_pending: Box<[AtomicBool]>,
-    // Per-core update queue: written by initiating core (under update_lock),
-    // drained by the local core in poll_and_respond_cross_core.
-    core_updates: Box<[Mutex<VecDeque<CoreUpdate>>]>,
     // Immutable after bootstrap
     num_cores: usize,
     hhdm_offset: AtomicU64,
     uc_ranges: alloc::sync::Arc<UncacheableRanges>,
-    // Tier 1: per-core scheduling state
+    // Hardware-only per-core state (pinned ActiveVcpu pointer, deferred
+    // vector). "Which domain/VP is running here" is NOT tracked here — see
+    // `switch_mgr` below.
     cores: Box<[CoreContext]>,
     // Tier 2: per-domain hardware state
     domains: DomainTable,
-    // Tier 3: global routing
-    routing: RwLock<RoutingMaps>,
     // Tree root anchor — keeps dom0's capability tree alive.
     dom0_cap: Mutex<Option<CapabilityRef<Domain>>>,
     /// Architecture-specific platform state (VMXON, DRHD, LAPIC IDs on x86;
@@ -155,9 +143,9 @@ pub struct ThemisPlatform {
     /// the [`ArchPlatform`] trait; arch-specific accessors are inherent
     /// methods on the concrete `ArchPlatformState`.
     pub arch: ArchPlatformState,
-    /// Engine-level switch manager — owns per-core `CoreContext` for
-    /// legacy non-VP routing helpers. Kept in sync
-    /// with the capavisor's own `CoreContext` via `set_core_context()`.
+    /// The single authoritative source for "which domain/VP is running on
+    /// each core", the per-core cross-core update queue, and each core's
+    /// live call chain. See [`capability_engine::switch::SwitchManager`].
     switch_mgr: SwitchManager,
 }
 
@@ -174,10 +162,6 @@ impl ThemisPlatform {
             .map(|_| AtomicBool::new(false))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let core_updates: Box<[Mutex<VecDeque<CoreUpdate>>]> = (0..num_cores)
-            .map(|_| Mutex::new(VecDeque::new()))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         let cores: Box<[CoreContext]> = (0..num_cores)
             .map(|_| CoreContext::new())
             .collect::<Vec<_>>()
@@ -185,15 +169,12 @@ impl ThemisPlatform {
         ThemisPlatform {
             op_lock: RwLock::new(()),
             update_lock: AtomicBool::new(false),
-            barriers: [Barrier::new(), Barrier::new()],
             ipi_pending,
-            core_updates,
             num_cores,
             hhdm_offset: AtomicU64::new(0),
             uc_ranges,
             cores,
             domains: DomainTable::new(),
-            routing: RwLock::new(RoutingMaps::new()),
             dom0_cap: Mutex::new(None),
             arch: ArchPlatformState::new(),
             switch_mgr: SwitchManager::new(num_cores),
@@ -293,7 +274,7 @@ impl ThemisPlatform {
         self.hhdm_offset.store(hhdm_offset, Ordering::Relaxed);
         if !self.domains.contains(domain_id) {
             self.domains
-                .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id, self.num_cores));
+                .insert(domain_id, PlatformDomain::new(hhdm_offset, parent_id));
         }
     }
 
@@ -394,7 +375,9 @@ impl ThemisPlatform {
             let pd = arc.lock();
             pd.arch.flush_tlb();
             if let Some(core) = self.get_current_core() {
-                pd.clear_cached_on(core);
+                if let Ok(core_ctx) = self.switch_mgr.get_core(core) {
+                    core_ctx.clear_cached(domain_id);
+                }
             }
         }
     }
@@ -428,17 +411,6 @@ impl ThemisPlatform {
             .load(Ordering::Acquire)
     }
 
-    /// Read the currently-scheduled (domain, vp) on `core_id` from Tier‑1.
-    ///
-    /// Lock-free — used by the cross-core Switch handler to identify the
-    /// `src` half of a VMCLEAR/VMPTRLD swap.
-    pub fn core_current_binding(&self, core_id: CoreId) -> (DomainId, usize) {
-        let cc = &self.cores[core_id as usize];
-        let dom = cc.domain_id.load(Ordering::Acquire);
-        let vp = cc.vp_id.load(Ordering::Acquire) as usize;
-        (dom, vp)
-    }
-
     /// Store the dom0 `CapabilityRef<Domain>` as the tree root anchor.
     ///
     /// Must be called exactly once during boot.  Keeps the entire capability
@@ -457,69 +429,36 @@ impl ThemisPlatform {
             .clone()
     }
 
-    /// Set the per-core scheduling state: domain capability ref and VP index.
-    ///
-    /// Called during bootstrap (BSP and AP init) and on domain switch.
-    pub fn set_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
-        // Drain any pending cross-core flushes BEFORE re-entering non-root
-        // mode.  This catches stale TlbShootdowns queued for a core that
-        // was in root mode while another core mutated an EPT it had
-        // cached — the engine's IPI/barrier path cannot reach root-mode
-        // cores, so the queue is the asynchronous channel.
-        self.apply_local_core_updates(core_id as CoreId);
-        self.commit_core_context(core_id, cap, vp_id);
-    }
-
-    fn commit_core_context(&self, core_id: usize, cap: CapabilityRef<Domain>, vp_id: u32) {
-        let dom_id = cap.read().data.id;
-        self.cores[core_id]
-            .domain_id
-            .store(dom_id, Ordering::Release);
-        self.cores[core_id].vp_id.store(vp_id, Ordering::Release);
-        *self.cores[core_id].domain_cap.lock() = Some(cap);
-        // Also keep the routing maps consistent so that execute() sends IPIs
-        // to ALL cores running this domain during EPT updates.
-        let mut routing = self.routing.write();
-        if let Some(old_domain) = routing.core_to_domain.remove(&(core_id as CoreId)) {
-            if let Some(set) = routing.domain_to_cores.get_mut(&old_domain) {
-                set.remove(&(core_id as CoreId));
-                if set.is_empty() {
-                    routing.domain_to_cores.remove(&old_domain);
-                }
-            }
-        }
-        routing.core_to_domain.insert(core_id as CoreId, dom_id);
-        routing
-            .domain_to_cores
-            .entry(dom_id)
-            .or_default()
-            .insert(core_id as CoreId);
-        drop(routing);
-        // Cache-presence: mark this core as having (potentially) cached
-        // second-stage entries for the new domain.  Set BEFORE any guest
-        // code can run on this core so a concurrent ChangeRights on the
-        // same domain (under update_lock) cannot miss us.
-        if let Some(arc) = self.domains.get(dom_id) {
-            arc.lock().mark_cached_on(core_id as CoreId);
-        }
-    }
-
     /// Get the `CapabilityRef<Domain>` for the domain running on `core_id`.
     ///
-    /// Returns `None` during early boot before the core is initialised.
+    /// Reads the capability engine's `SwitchManager` — the single
+    /// authoritative source for "which domain/VP is running where".
+    /// Returns `None` during early boot before the core is bound.
     pub fn get_core_cap(&self, core_id: usize) -> Option<CapabilityRef<Domain>> {
-        self.cores[core_id].domain_cap.lock().clone()
+        self.switch_mgr
+            .get_core(core_id as CoreId)
+            .ok()
+            .and_then(|c| c.current_binding())
+            .map(|b| b.domain)
     }
 
-    /// Lock-free read of the domain ID currently scheduled on `core_id`.
+    /// Read the domain ID currently scheduled on `core_id`.
     pub fn core_domain_id(&self, core_id: usize) -> u64 {
-        self.cores[core_id].domain_id.load(Ordering::Acquire)
+        self.switch_mgr
+            .get_core(core_id as CoreId)
+            .ok()
+            .and_then(|c| c.current_domain())
+            .unwrap_or(u64::MAX)
     }
 
     /// Get the VP index currently running on `core_id`.
     #[allow(dead_code)]
     pub fn get_core_vp(&self, core_id: usize) -> u32 {
-        self.cores[core_id].vp_id.load(Ordering::Acquire)
+        self.switch_mgr
+            .get_core(core_id as CoreId)
+            .ok()
+            .and_then(|c| c.current_vp())
+            .unwrap_or(u32::MAX as u64) as u32
     }
 
     // ── quantum-sched deferred vector helpers ────────────────────────── //
@@ -548,104 +487,7 @@ impl ThemisPlatform {
             Some(val as u8)
         }
     }
-
-    // ── Per-core update queue ─────────────────────────────────────────── //
-
-    /// Push a `CoreUpdate` to a target core's queue.
-    ///
-    /// Called by the initiating core (under `update_lock`) before sending
-    /// the INIT assert.
-    pub fn push_core_update(&self, core_id: CoreId, update: CoreUpdate) {
-        self.core_updates[core_id as usize].lock().push_back(update);
-    }
-
-    /// Drain and apply all pending `CoreUpdate`s for the current core.
-    ///
-    /// Called BEFORE barrier 0 in `poll_and_respond_cross_core` (Tyche-
-    /// aligned drain-first protocol) — so `Switch` handlers can VMCLEAR
-    /// and rebind the vcpu before the initiator applies global updates.
-    fn apply_local_core_updates(&self, core_id: CoreId) {
-        let Some(mut queue) = self.core_updates[core_id as usize].try_lock() else {
-            return;
-        };
-        while let Some(update) = queue.pop_front() {
-            match update {
-                CoreUpdate::TlbShootdown { domain, handle } => {
-                    // Flush by snapshotted handle — domain may already be
-                    // revoked by the initiator's apply_update(RevokeDomain),
-                    // but the EPT structures it pointed to are still valid
-                    // until *all* affected cores have INVEPT'd, so this is
-                    // safe (the destroyed domain freed its EPT pages back
-                    // into META, and META re-use is gated on these flushes
-                    // completing — the engine's barrier-1 enforces this).
-                    crate::arch::flush_tlb_handle(handle);
-                    // Best-effort: clear our cache-presence bit now that
-                    // the LP no longer has stale entries for this domain.
-                    if let Some(arc) = self.domains.get(domain) {
-                        arc.lock().clear_cached_on(core_id);
-                    }
-                }
-                CoreUpdate::Switch {
-                    source_cap,
-                    source_vp,
-                } => {
-                    // Revoke-driven cross-core switch (see docs/design/
-                    // cross-core-revoke.md).  Runs BEFORE B0 so the target
-                    // has already switched off the doomed domain by the
-                    // time the initiator's apply_update tears it down.
-                    //
-                    // The resume target is NOT carried by this update — the
-                    // engine resolves it locally, from this core's own
-                    // `call_stack` (see `Capability::switch_after_callee_
-                    // revoked`), so there is no bare id/ref shipped from the
-                    // initiator to go stale.
-                    //
-                    // Order matters:
-                    //   1. Capture the OLD Tier‑1 binding as `src` — must
-                    //      happen before the engine transition below.
-                    //   2. Engine state transition (VP Locked → Running),
-                    //      which resolves the target and returns its
-                    //      `CapabilityRef` directly (never a bare id).
-                    //   3. Hardware VMCLEAR/VMPTRLD swap using `src`/`dst`.
-                    //   4. Commit Tier‑1/Tier‑3 to the resolved target.
-                    let source_dom = source_cap.read().data.id;
-                    let observed = self.core_current_binding(core_id);
-                    let expected = (source_dom, source_vp as usize);
-                    assert_eq!(
-                        observed, expected,
-                        "[REVOKE_SWITCH] source binding changed before owner-core drain"
-                    );
-
-                    let switch_ctx =
-                        capability_engine::Capability::<Domain>::switch_after_callee_revoked(
-                            self,
-                        )
-                        .expect("[REVOKE_SWITCH] engine transition failed");
-
-                    let target_cap = switch_ctx.to_domain;
-                    let target_vp = switch_ctx
-                        .to_vp_id
-                        .expect("revoke-return always names a target VP")
-                        as u32;
-                    let target_dom = target_cap.read().data.id;
-
-                    // SAFETY: pinned active_vcpu is valid on this core;
-                    // src is the currently-loaded VMCS (captured before
-                    // the engine mutation).
-                    unsafe {
-                        crate::arch::apply_cross_core_switch(
-                            self,
-                            core_id,
-                            expected,
-                            (target_dom, target_vp as usize),
-                        );
-                    }
-                    self.commit_core_context(core_id as usize, target_cap, target_vp);
-                }
-            }
-        }
-    }
-} //
+}
 
 impl ThemisPlatform {
     /// Public wrapper around the Platform trait's get_current_core for
@@ -788,10 +630,10 @@ impl Platform for ThemisPlatform {
 
     fn send_ipi(&self, core_id: CoreId) {
         // NOTE: this only signals the target core to enter the cross-core
-        // poll/barrier protocol.  Per-domain TLB-shootdown payloads are
-        // pushed by `domain_cores` (called earlier in `Platform::execute`)
-        // so each affected core has the correct, eptp-snapshotted flush
-        // commands queued before the IPI lands.
+        // poll/barrier protocol.  Per-domain TLB-shootdown / revoke-switch
+        // payloads are pushed onto the engine's own per-core queue (see
+        // `Platform::execute`'s per-domain/per-switch push loops) so each
+        // affected core has the correct entries queued before the IPI lands.
 
         // Set the flag so the target core (if polling) can respond.
         self.ipi_pending[core_id as usize].store(true, Ordering::Release);
@@ -802,8 +644,8 @@ impl Platform for ThemisPlatform {
             .send_ipi(core_id, self.hhdm_offset.load(Ordering::Relaxed));
     }
 
-    fn sync_barrier(&self, id: u8, participants: usize) {
-        self.barriers[id as usize].wait(participants);
+    fn new_barrier(&self) -> Arc<dyn capability_engine::Barrier> {
+        Arc::new(sync::Barrier::new())
     }
 
     fn try_acquire_update_lock(&self) -> bool {
@@ -829,32 +671,14 @@ impl Platform for ThemisPlatform {
         {
             return;
         }
-        // Tyche-aligned protocol (see docs/design/cross-core-revoke.md):
-        //   1. Drain queue FIRST — this is where Switch handlers do
-        //      VMCLEAR/VMPTRLD.  When we release B0, the initiator relies
-        //      on the invariant "no affected core still points at the
-        //      doomed VMCS", so the drain must precede B0.
-        //   2. B0: "I've switched off the doomed domain — you may apply
-        //      global updates now (EPT/IOMMU frees)."
-        //   3. B1: "You've finished applying — I may resume execution."
-        self.apply_local_core_updates(core_id);
-        self.barriers[0].wait(0);
-        self.barriers[1].wait(0);
-    }
-
-    fn push_core_switch(
-        &self,
-        core_id: CoreId,
-        source_domain: &CapabilityRef<Domain>,
-        source_vp: u64,
-    ) {
-        self.push_core_update(
-            core_id,
-            CoreUpdate::Switch {
-                source_cap: source_domain.clone(),
-                source_vp: source_vp as u32,
-            },
-        );
+        // Drain this core's own engine-owned update queue — this is where
+        // Switch handlers do VMCLEAR/VMPTRLD, and where rendezvous on the
+        // transaction's barriers happens (inside `apply_core_updates`,
+        // so it fires exactly once regardless of which caller drains the
+        // entry first).  Must precede the initiator's first rendezvous, so
+        // the initiator can rely on "no affected core still points at the
+        // doomed VMCS" before tearing anything down.
+        let _ = capability_engine::domain_api::apply_core_updates(self, core_id);
     }
 
     fn apply_update(&self, update: &Update) {
@@ -925,13 +749,16 @@ impl Platform for ThemisPlatform {
                 pd.arch
                     .change_rights(&self.arch, *address, *physical, *size as usize, rights, &mut ctx);
                 // Local flush when this is a permission-reduction or unmap
-                // (the engine pushes shootdowns to remote cores via
-                // `domain_cores` already; the initiator flushes itself
-                // here so the next VMENTER on this LP sees the new EPT).
+                // (the engine pushes shootdowns to remote cores directly
+                // via `execute()`'s per-domain push loop; the initiator
+                // flushes itself here so the next VMENTER on this LP sees
+                // the new EPT).
                 if *shootdown_required {
                     pd.arch.flush_tlb();
                     if let Some(core) = self.get_current_core() {
-                        pd.clear_cached_on(core);
+                        if let Ok(core_ctx) = self.switch_mgr.get_core(core) {
+                            core_ctx.clear_cached(*domain);
+                        }
                     }
                 }
             }
@@ -948,8 +775,8 @@ impl Platform for ThemisPlatform {
                     // Local flush BEFORE tearing down EPT structures —
                     // otherwise the next VMENTER on this LP could TLB-hit
                     // a freed EPT entry.  Remote-core flushes were queued
-                    // earlier by `domain_cores` with a snapshot of the
-                    // EPTP, so `destroy` freeing the EPT here is safe.
+                    // earlier by `execute()` with a snapshot of the EPTP,
+                    // so `destroy` freeing the EPT here is safe.
                     d.arch.flush_tlb();
                     d.arch.destroy(
                         &mut d.meta,
@@ -1016,9 +843,10 @@ impl Platform for ThemisPlatform {
                 self.apply_policy_change(*domain, change);
             }
 
-            // Already actioned by `push_core_switch` inside `execute()`
-            // (queued happens-before the IPI/barrier, before `apply_update`
-            // ever runs) — no separate hardware projection here.
+            // Already actioned before the barrier via the per-core
+            // `CoreUpdate::Switch` push in `Platform::execute` (drained by
+            // `apply_core_updates` strictly before `apply_update` runs) —
+            // no separate hardware projection here.
             Update::Switch(_) => {}
         }
     }
@@ -1027,146 +855,50 @@ impl Platform for ThemisPlatform {
         if !self.domains.contains(domain_id) {
             let hhdm = self.hhdm_offset.load(Ordering::Relaxed);
             self.domains
-                .insert(domain_id, PlatformDomain::new(hhdm, parent_id, self.num_cores));
+                .insert(domain_id, PlatformDomain::new(hhdm, parent_id));
         }
     }
 
-    fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
-        let mut routing = self.routing.write();
-        if let Some(cores) = routing.domain_to_cores.remove(&domain_id) {
-            for core_id in cores {
-                routing.core_to_domain.remove(&core_id);
-                self.cores[core_id as usize]
-                    .domain_id
-                    .store(fallback.unwrap_or(IDLE_DOMAIN), Ordering::Release);
-                // TODO(Phase 9): also update CoreContext.domain_cap to the fallback's
-                // CapabilityRef once on_domain_revoked carries it (switch-based unification).
-                if let Some(fb) = fallback {
-                    routing.core_to_domain.insert(core_id, fb);
-                    routing
-                        .domain_to_cores
-                        .entry(fb)
-                        .or_default()
-                        .insert(core_id);
-                }
-            }
-        }
+    fn on_domain_revoked(&self, _domain_id: DomainId, _fallback: Option<DomainId>) {
+        // Redirecting cores off the doomed domain is now handled entirely
+        // by the `CoreUpdate::Switch` mechanism: the engine pushes a
+        // per-core switch order (drained by `apply_core_updates`, which
+        // calls `Capability::switch_after_callee_revoked` to resolve the
+        // resume target and commits the new binding on
+        // `SwitchManager`/`CoreContext`) strictly before this callback
+        // runs. There is no capavisor-side routing state left to clean up:
+        // "which domain/VP is running where" lives solely in the engine's
+        // `SwitchManager`, and Tier-2 domain unregistration is handled by
+        // `apply_update(RevokeDomain)`'s `self.domains.remove(*domain)`.
     }
 
-    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
-        // Drain any pending cross-core flushes BEFORE re-entering non-root
-        // mode (see comment on inherent `set_core_context`).
-        self.apply_local_core_updates(core_id);
-
-        let domain_id = domain_cap.read().data.id;
-        // Tier 1: capavisor's lock-free per-core state
-        self.cores[core_id as usize]
-            .domain_id
-            .store(domain_id, Ordering::Release);
-        self.cores[core_id as usize]
-            .vp_id
-            .store(vp_id as u32, Ordering::Release);
-        *self.cores[core_id as usize].domain_cap.lock() = Some(domain_cap.clone());
-        // Engine's SwitchManager CoreContext (for route_interrupt et al.)
-        if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
-            *engine_core.state.write() = CoreState::Running(domain_id);
-            *engine_core.running_vp.write() = Some(vp_id);
-        }
-        // Tier 3: routing maps for IPI targeting
-        let mut routing = self.routing.write();
-        if let Some(old_domain) = routing.core_to_domain.remove(&core_id) {
-            if let Some(set) = routing.domain_to_cores.get_mut(&old_domain) {
-                set.remove(&core_id);
-                if set.is_empty() {
-                    routing.domain_to_cores.remove(&old_domain);
-                }
-            }
-        }
-        routing.core_to_domain.insert(core_id, domain_id);
-        routing
-            .domain_to_cores
-            .entry(domain_id)
-            .or_default()
-            .insert(core_id);
-        drop(routing);
-        // Cache-presence bitmap (used by domain_cores for flush dispatch).
-        // Set BEFORE any guest code runs on this core.
-        if let Some(arc) = self.domains.get(domain_id) {
-            arc.lock().mark_cached_on(core_id);
-        }
+    fn tlb_flush_handle(&self, domain_id: DomainId) -> u64 {
+        self.domains
+            .get(domain_id)
+            .and_then(|arc| arc.lock().arch.slat())
+            .unwrap_or(0)
     }
 
-    fn clear_core_domain(&self, core_id: CoreId) {
-        self.cores[core_id as usize]
-            .domain_id
-            .store(IDLE_DOMAIN, Ordering::Release);
-        self.cores[core_id as usize]
-            .vp_id
-            .store(IDLE_VP, Ordering::Release);
-        *self.cores[core_id as usize].domain_cap.lock() = None;
-        // Engine's SwitchManager CoreContext
-        if let Ok(engine_core) = self.switch_mgr.get_core(core_id) {
-            *engine_core.state.write() = CoreState::Idle;
-            *engine_core.running_vp.write() = None;
-        }
-        let mut routing = self.routing.write();
-        if let Some(domain_id) = routing.core_to_domain.remove(&core_id) {
-            if let Some(set) = routing.domain_to_cores.get_mut(&domain_id) {
-                set.remove(&core_id);
-                if set.is_empty() {
-                    routing.domain_to_cores.remove(&domain_id);
-                }
-            }
-        }
+    fn flush_tlb(&self, _domain_id: DomainId, handle: u64, _core_id: CoreId) {
+        crate::arch::flush_tlb_handle(handle);
     }
 
-    fn domain_cores(&self, domain_id: DomainId) -> alloc::vec::Vec<CoreId> {
-        // Drives the engine's `Platform::execute` cross-core dispatch in
-        // two complementary ways:
-        //
-        // (a) Pushes per-domain `TlbShootdown { domain, handle }` payloads
-        //     to *every* core that may have cached second-stage entries
-        //     for this domain (the `cached_on` bitmap — set on entry via
-        //     `set_core_context`, cleared lazily after each per-LP
-        //     INVEPT).  Cores currently in non-root mode will drain the
-        //     queue when they take the engine's IPI; cores currently in
-        //     root mode (capavisor monitor) will drain it on their next
-        //     VMENTER via `set_core_context` BEFORE running guest code.
-        //
-        // (b) Returns only the cores currently RUNNING this domain
-        //     (the `routing.domain_to_cores` live mapping).  These are
-        //     the cores the engine will IPI and wait for at barrier 0;
-        //     cores in root mode cannot take INIT VMEXITs and would
-        //     deadlock the barrier if returned here.
-        //
-        // The two paths together ensure every cached LP gets an INVEPT
-        // before its next VMENTER, without making the barrier protocol
-        // wait on cores that aren't in non-root mode.
-        if let Some(arc) = self.domains.get(domain_id) {
-            let pd = arc.lock();
-            let cached = pd.snapshot_cached_on();
-            let handle = pd.arch.slat().unwrap_or(0);
-            drop(pd);
-            if handle != 0 {
-                let current = self.get_current_core();
-                for &c in &cached {
-                    if Some(c) == current {
-                        // Local flush is performed inline by `apply_update`.
-                        continue;
-                    }
-                    self.push_core_update(
-                        c,
-                        CoreUpdate::TlbShootdown { domain: domain_id, handle },
-                    );
-                }
-            }
+    fn apply_cross_core_switch(&self, core_id: CoreId, src: (DomainId, u64), dst: (DomainId, u64)) {
+        // SAFETY: called by `capability_engine::domain_api::apply_core_updates`
+        // strictly on the affected core itself (this platform never invokes
+        // it cross-core), after the engine has already resolved and
+        // committed the new `SwitchManager` binding — matching
+        // `apply_cross_core_switch`'s (arch) documented precondition. The
+        // pinned `active_vcpu` pointer for `core_id` is valid because we are
+        // running on `core_id`.
+        unsafe {
+            crate::arch::apply_cross_core_switch(
+                self,
+                core_id,
+                (src.0, src.1 as usize),
+                (dst.0, dst.1 as usize),
+            );
         }
-        self.routing
-            .read()
-            .domain_to_cores
-            .get(&domain_id)
-            .map(|s| s.iter().copied().collect())
-            .unwrap_or_default()
     }
 
     // ── Register access (validation-only; actual VMCS writes batched by handler) ──

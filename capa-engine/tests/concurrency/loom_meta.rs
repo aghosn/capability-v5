@@ -42,9 +42,19 @@ struct NullGuard;
 impl capability_engine::OpLockGuard for NullGuard {}
 unsafe impl Send for NullGuard {}
 
-struct NullPlatform;
+struct NullPlatform {
+    switch_manager: capability_engine::SwitchManager,
+}
 unsafe impl Send for NullPlatform {}
 unsafe impl Sync for NullPlatform {}
+
+impl NullPlatform {
+    fn new() -> Self {
+        Self {
+            switch_manager: capability_engine::SwitchManager::new(4),
+        }
+    }
+}
 
 impl capability_engine::Platform for NullPlatform {
     fn acquire_shared_lock(&self) -> capability_engine::Result<Box<dyn capability_engine::OpLockGuard>> {
@@ -54,20 +64,14 @@ impl capability_engine::Platform for NullPlatform {
         Ok(Box::new(NullGuard))
     }
     fn send_ipi(&self, _: capability_engine::CoreId) {}
-    fn sync_barrier(&self, _: u8, _: usize) {}
     fn apply_update(&self, _: &capability_engine::Update) {}
     fn on_domain_revoked(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
     fn register_domain(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
-    fn set_core_context(&self, _: capability_engine::CoreId, _: &capability_engine::CapabilityRef<capability_engine::Domain>, _: u64) {}
-    fn clear_core_domain(&self, _: capability_engine::CoreId) {}
-    fn domain_cores(&self, _: capability_engine::DomainId) -> Vec<capability_engine::CoreId> { Vec::new() }
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<capability_engine::CoreId> { None }
     fn switch_manager(&self) -> &capability_engine::SwitchManager {
-        static NULL_SWITCH_MANAGER: std::sync::OnceLock<capability_engine::SwitchManager> =
-            std::sync::OnceLock::new();
-        NULL_SWITCH_MANAGER.get_or_init(|| capability_engine::SwitchManager::new(4))
+        &self.switch_manager
     }
 }
 
@@ -180,7 +184,7 @@ fn loom_meta_concurrent_send_race() {
 
         // Carve one child that both threads will race to send as META.
         let (h_c, _sub, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0, 0x1000, Rights::RWX),
         )
@@ -216,7 +220,7 @@ fn loom_meta_concurrent_send_race() {
         let ta = thread::spawn(move || {
             execute_shared(&op_a, &ul_a, &st_a, || {
                 let upd = Capability::<Domain>::send(
-                    &NullPlatform, &dom_a,
+                    &NullPlatform::new(), &dom_a,
                     h_c,
                     dh_a,
                     Attributes::from_bits(Attributes::META),
@@ -228,7 +232,7 @@ fn loom_meta_concurrent_send_race() {
         let tb = thread::spawn(move || {
             execute_shared(&op_b, &ul_b, &st_b, || {
                 let upd = Capability::<Domain>::send(
-                    &NullPlatform, &dom_b,
+                    &NullPlatform::new(), &dom_b,
                     h_c,
                     dh_b,
                     Attributes::from_bits(Attributes::META),
@@ -307,7 +311,7 @@ fn loom_meta_send_vs_revoke() {
         let (dom, h_root, _root_mem) = make_root(0x2000);
 
         let (h_c, sub_c, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0, 0x1000, Rights::RWX),
         )
@@ -334,7 +338,7 @@ fn loom_meta_send_vs_revoke() {
         let ta = thread::spawn(move || {
             execute_shared(&op_a, &ul_a, &st_a, || {
                 let upd = Capability::<Domain>::send(
-                    &NullPlatform, &dom_a,
+                    &NullPlatform::new(), &dom_a,
                     h_c,
                     dh_recv,
                     Attributes::from_bits(Attributes::META),
@@ -347,7 +351,7 @@ fn loom_meta_send_vs_revoke() {
         let tb = thread::spawn(move || {
             execute_exclusive(&op_b, &ul_b, &st_b, || {
                 let upd =
-                    Capability::<Domain>::revoke(&NullPlatform, &dom_b, h_root, sub_c)?;
+                    Capability::<Domain>::revoke(&NullPlatform::new(), &dom_b, h_root, sub_c)?;
                 Ok(((), upd))
             })
         });

@@ -9,29 +9,15 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CapaError, CoreId, CoreState, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
+    CapaError, CoreId, DomainId, OpLockGuard, Platform, Result, SwitchManager, Update,
 };
 use capability_engine::{CapabilityRef, Domain};
 
-struct CliDomainEntry {
-    revoked: bool,
-    parent_id: Option<DomainId>,
-}
-
 struct CliPlatformInner {
-    domains: BTreeMap<DomainId, CliDomainEntry>,
-    num_cores: usize,
     /// The core ID "currently executing" (set by the CLI before VP-aware calls).
     current_core: Option<CoreId>,
     /// VP register storage: (domain_id, vp_id, reg_id) → value
     registers: BTreeMap<(DomainId, u64, u64), u64>,
-}
-
-impl CliPlatformInner {
-    #[allow(dead_code)]
-    fn is_revoked(&self, id: DomainId) -> bool {
-        self.domains.get(&id).map(|e| e.revoked).unwrap_or(true)
-    }
 }
 
 struct CliSharedLock {
@@ -61,8 +47,6 @@ impl CliPlatform {
         CliPlatform {
             op_lock: Arc::new(RwLock::new(())),
             inner: Arc::new(Mutex::new(CliPlatformInner {
-                domains: BTreeMap::new(),
-                num_cores,
                 current_core: None,
                 registers: BTreeMap::new(),
             })),
@@ -87,14 +71,6 @@ impl CliPlatform {
     pub fn get_core(&self, core_id: u64) -> Result<Arc<capability_engine::CoreContext>> {
         self.switch_manager.get_core(core_id).cloned()
     }
-
-    /// CLI-only helper: set core domain by DomainId (no CapabilityRef needed).
-    /// Used for non-VP interrupt fallback where only the DomainId is known.
-    pub fn set_core_domain_by_id(&self, core_id: CoreId, domain_id: DomainId) {
-        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
-            *core_ref.state.write() = CoreState::Running(domain_id);
-        }
-    }
 }
 
 impl Platform for CliPlatform {
@@ -114,10 +90,6 @@ impl Platform for CliPlatform {
         // no-op in CLI
     }
 
-    fn sync_barrier(&self, _id: u8, _participants: usize) {
-        // no-op in CLI
-    }
-
     fn apply_update(&self, update: &Update) {
         if let Update::CreateDomain { domain_id, parent_id } = update {
             self.register_domain(*domain_id, *parent_id);
@@ -125,70 +97,44 @@ impl Platform for CliPlatform {
     }
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
-        let mut inner = self.inner.lock();
-        let num_cores = inner.num_cores;
-
-        // Find which core (if any) is running this domain
-        let mut affected_core: Option<(u64, Arc<capability_engine::CoreContext>)> = None;
-        for i in 0..num_cores as u64 {
-            if let Ok(core_ref) = self.switch_manager.get_core(i) {
-                if core_ref.current_domain() == Some(domain_id) {
-                    affected_core = Some((i, core_ref.clone()));
-                    break;
-                }
-            }
+        // Redirecting a core off `domain_id` is now done purely via the
+        // `CoreUpdate::Switch` mechanism: `execute()` already queued one
+        // for every core `revoke_domain_subtree` found actually running
+        // this domain (see `batch.core_switches()`), naming only the
+        // *source* — the resume target is resolved by
+        // `Capability::switch_after_callee_revoked` popping that core's own
+        // `call_stack` down to the first non-revoked ancestor. On bare
+        // metal that drain happens asynchronously via IPI
+        // (`apply_core_updates`, called from the target core's own
+        // interrupt handler). The CLI simulator has no separate execution
+        // context to deliver that IPI to, so it must drain inline, here,
+        // by momentarily impersonating the affected core — this matters
+        // because `switch_after_callee_revoked` resolves its target via
+        // `Platform::get_current_core()`.
+        //
+        // `fallback` (the first non-revoked *structural* CDT ancestor,
+        // pre-computed by `revoke_child_domain`/`revoke_subtree`) is not
+        // consulted here: by this engine's switch-locality invariant (see
+        // `find_interrupt_handler`'s doc comment), the live call chain a
+        // Running VP followed to reach `domain_id` always matches its CDT
+        // ancestor chain, so `switch_after_callee_revoked`'s call-stack walk
+        // already derives the identical (and, for multi-level chains, more
+        // precise) target without it.
+        for core_id in self.switch_manager.cores_running(domain_id) {
+            let saved = self.inner.lock().current_core;
+            self.set_current_core(Some(core_id));
+            let _ = capability_engine::domain_api::apply_core_updates(self, core_id);
+            self.set_current_core(saved);
         }
-
-        let new_domain = fallback.or_else(|| {
-            inner.domains.get(&domain_id).and_then(|e| e.parent_id)
-        });
-
-        if let Some((core_id, core_ref)) = affected_core {
-            let new_state = new_domain
-                .map(CoreState::Running)
-                .unwrap_or(CoreState::Idle);
-            *core_ref.state.write() = new_state;
-            println!(
-                "  → Core {} domain revoked, switching to {:?}",
-                core_id,
-                new_domain
-            );
-        }
-
-        if let Some(entry) = inner.domains.get_mut(&domain_id) {
-            entry.revoked = true;
-        }
+        let _ = fallback;
     }
 
-    fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
-        self.inner.lock().domains.insert(domain_id, CliDomainEntry {
-            revoked: false,
-            parent_id,
-        });
-    }
-
-    fn set_core_context(
-        &self,
-        core_id: CoreId,
-        domain_cap: &CapabilityRef<Domain>,
-        vp_id: u64,
-    ) {
-        let domain_id = domain_cap.read().data.id;
-        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
-            *core_ref.state.write() = CoreState::Running(domain_id);
-            *core_ref.running_vp.write() = Some(vp_id);
-        }
-    }
-
-    fn clear_core_domain(&self, core_id: CoreId) {
-        if let Ok(core_ref) = self.switch_manager.get_core(core_id) {
-            *core_ref.state.write() = CoreState::Idle;
-        }
-    }
-
-    fn domain_cores(&self, _domain_id: DomainId) -> Vec<CoreId> {
-        // Return empty vec so execute() uses the local path (no IPI/barriers needed in CLI)
-        Vec::new()
+    fn register_domain(&self, _domain_id: DomainId, _parent_id: Option<DomainId>) {
+        // No local domain bookkeeping needed: revoked-ness and CDT structure
+        // are already authoritative in the capability tree itself, and
+        // `on_domain_revoked` above resolves resume targets purely via
+        // `SwitchManager`'s per-core `call_stack`, not via any shadow map
+        // kept here.
     }
 
     fn get_current_core(&self) -> Option<CoreId> {

@@ -355,14 +355,13 @@ fn test_execute_on_domain_revoked_precedes_apply_update() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. Cross-core domain revocation — Platform::push_core_switch is invoked
-//    with the correct resume target for every affected core, BEFORE the
-//    initiator's IPI/apply_update phase.
+// 8. Cross-core domain revocation — `execute()` must enqueue the correct
+//    per-core `CoreUpdate::Switch` orders for affected remote cores.
 //
 // See docs/design/cross-core-revoke.md — Tyche-aligned protocol.
 // ─────────────────────────────────────────────────────────────────────────────
 
-use capability_engine::{CapabilityRef, LocalHandle, VpRunState};
+use capability_engine::{CapabilityRef, CoreUpdate, LocalHandle, VpRunState};
 
 /// Put `domain`'s VP[vp_id] into `Running { core }`.  Used
 /// as a seed state before `Capability::switch` gets called.
@@ -394,21 +393,29 @@ fn make_child(
     (child, h)
 }
 
-/// Extract the `(core, source_domain_id, source_vp)` of every `PushCoreSwitch`
-/// entry in the log, in order. No resume target is carried on the wire —
-/// the affected core resolves that locally from its own `call_stack`; see
-/// `resolve_revoke_target` below for how tests verify it.
-fn switches_in(log: &[CallLogEntry]) -> Vec<(CoreId, DomainId, u64)> {
-    log.iter()
-        .filter_map(|e| match e {
-            CallLogEntry::PushCoreSwitch {
-                core,
-                source_domain,
+/// Extract every queued revoke-driven switch order for the listed cores, in
+/// `(core, source_domain_id, source_vp)` form.
+fn queued_switches(platform: &TestPlatform, cores: &[CoreId]) -> Vec<(CoreId, DomainId, u64)> {
+    let mut out = Vec::new();
+    for &core in cores {
+        let updates = platform
+            .switch_manager()
+            .get_core(core)
+            .expect("test core id must be valid")
+            .try_drain_updates()
+            .expect("test should have uncontended access to queued core updates");
+        for update in updates {
+            if let CoreUpdate::Switch {
+                source_cap,
                 source_vp,
-            } => Some((*core, *source_domain, *source_vp)),
-            _ => None,
-        })
-        .collect()
+                ..
+            } = update
+            {
+                out.push((core, source_cap.read().data.id, source_vp));
+            }
+        }
+    }
+    out
 }
 
 /// Simulate what the affected core does in `apply_local_core_updates`:
@@ -426,12 +433,6 @@ fn resolve_revoke_target(platform: &TestPlatform, core: CoreId) -> (DomainId, u6
     )
 }
 
-/// Index of the last `PushCoreSwitch` entry (or `None`).
-fn last_push_idx(log: &[CallLogEntry]) -> Option<usize> {
-    log.iter()
-        .rposition(|e| matches!(e, CallLogEntry::PushCoreSwitch { .. }))
-}
-
 /// Index of the first `ApplyUpdate(RevokeDomain{d})` entry for `d`.
 fn first_apply_revoke_idx(log: &[CallLogEntry], d: DomainId) -> Option<usize> {
     log.iter().position(|e| {
@@ -444,9 +445,8 @@ fn first_apply_revoke_idx(log: &[CallLogEntry], d: DomainId) -> Option<usize> {
 
 /// **T-basic** — root + one child, remote core running child.
 ///
-/// Revoking child from root must emit exactly one `push_core_switch`
-/// naming (remote_core, root, root_vp_id_that_did_the_switch), and it
-/// must be recorded BEFORE the `apply_update(RevokeDomain{child})` entry.
+/// Revoking child from root must queue exactly one `CoreUpdate::Switch`
+/// naming the running child VP on the affected remote core.
 #[test]
 fn test_revoke_basic_pushes_switch_to_root() {
     const REMOTE_CORE: CoreId = 1;
@@ -473,21 +473,36 @@ fn test_revoke_basic_pushes_switch_to_root() {
     // different core.  This is the cross-core path exercised by
     // execute()'s affected_cores set.
     platform.set_current_core(Some(INIT_CORE));
+    assert!(
+        platform
+            .switch_manager()
+            .get_core(REMOTE_CORE)
+            .expect("test core id must be valid")
+            .try_drain_updates()
+            .expect("test should have uncontended access to queued core updates")
+            .is_empty(),
+        "remote core queue must start empty"
+    );
     let _ = platform.drain_call_log(); // discard setup entries
 
     capability_engine::Capability::<Domain>::revoke_domain(&platform, &root, child_h)
         .expect("revoke_domain should succeed");
 
     let log = platform.drain_call_log();
-    let switches = switches_in(&log);
+    let switches = queued_switches(&platform, &[REMOTE_CORE]);
 
     assert_eq!(
         switches,
         vec![(REMOTE_CORE, child_id, 0)],
-        "expected exactly one push_core_switch naming (REMOTE_CORE, child, VP[0]); \
+        "expected exactly one queued revoke switch naming (REMOTE_CORE, child, VP[0]); \
          got: {:#?}\nfull log: {:#?}",
         switches,
         log,
+    );
+    assert_eq!(
+        platform.get_core_domain(REMOTE_CORE),
+        Some(child_id),
+        "owner core must keep the source binding until it drains its queued switch"
     );
 
     // Simulate the affected core resolving its own resume target locally.
@@ -496,14 +511,14 @@ fn test_revoke_basic_pushes_switch_to_root() {
         (root_id, REMOTE_CORE),
         "affected core should resolve its own call_stack back to root.VP[REMOTE_CORE]"
     );
-
-    let last_push = last_push_idx(&log).expect("push_core_switch missing");
-    let first_apply = first_apply_revoke_idx(&log, child_id)
-        .expect("apply_update(RevokeDomain{child}) missing");
+    assert_eq!(
+        platform.get_core_domain(REMOTE_CORE),
+        Some(root_id),
+        "once the remote core applies the switch locally it should resume in root"
+    );
     assert!(
-        last_push < first_apply,
-        "push_core_switch must be recorded BEFORE apply_update(RevokeDomain{{child}}); \
-         push idx={last_push}, apply idx={first_apply}\nlog: {:#?}",
+        first_apply_revoke_idx(&log, child_id).is_some(),
+        "apply_update(RevokeDomain{{child}}) must still run\nlog: {:#?}",
         log,
     );
 }
@@ -550,13 +565,13 @@ fn test_revoke_chain_walks_past_revoked_ancestor() {
         .expect("revoke_domain should succeed");
 
     let log = platform.drain_call_log();
-    let switches = switches_in(&log);
+    let switches = queued_switches(&platform, &[REMOTE_CORE]);
 
-    // Exactly one push, naming the actually-Running leaf (C) on REMOTE_CORE.
+    // Exactly one queued switch, naming the actually-Running leaf (C) on REMOTE_CORE.
     assert_eq!(
         switches,
         vec![(REMOTE_CORE, child_c_id, 0)],
-        "chain revoke should push exactly one switch for the leaf VP; got: {:#?}\nlog: {:#?}",
+        "chain revoke should queue exactly one switch for the leaf VP; got: {:#?}\nlog: {:#?}",
         switches,
         log,
     );
@@ -568,6 +583,7 @@ fn test_revoke_chain_walks_past_revoked_ancestor() {
         (root_id, REMOTE_CORE),
         "chain walk should skip revoked B and resume in A"
     );
+    assert_eq!(platform.get_core_domain(REMOTE_CORE), Some(root_id));
 }
 
 /// **T-multi** — two siblings under root, each on its own remote core;
@@ -605,12 +621,12 @@ fn test_revoke_multi_only_affected_core_pushed() {
         .expect("revoke_domain should succeed");
 
     let log = platform.drain_call_log();
-    let switches = switches_in(&log);
+    let switches = queued_switches(&platform, &[CORE_A, CORE_B]);
 
     assert_eq!(
         switches,
         vec![(CORE_A, child_a_id, 0)],
-        "only CORE_A should have a push; child_b's core (CORE_B) must be untouched. \
+        "only CORE_A should have a queued switch; child_b's core (CORE_B) must be untouched. \
          got: {:#?}\nlog: {:#?}",
         switches,
         log,
@@ -649,11 +665,11 @@ fn test_revoke_no_running_vp_no_pushes() {
         .expect("revoke_domain should succeed");
 
     let log = platform.drain_call_log();
-    let switches = switches_in(&log);
+    let switches = queued_switches(&platform, &[0, 1, 2, 3]);
 
     assert!(
         switches.is_empty(),
-        "no core is running the child; expected 0 pushes, got: {:#?}\nlog: {:#?}",
+        "no core is running the child; expected 0 queued switches, got: {:#?}\nlog: {:#?}",
         switches,
         log,
     );

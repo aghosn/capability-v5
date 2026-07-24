@@ -160,7 +160,7 @@ fn main() {
 
     {
         let core = switch_mgr.get_core(0).unwrap();
-        *core.state.write() = CoreState::Running(0);
+        core.set_binding(root.clone(), 0);
         println!("✓ Core 0 initialized, running root domain");
     }
 

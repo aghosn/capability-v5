@@ -4,11 +4,9 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
-use capability_engine::{CoreId, DomainId};
+use capability_engine::DomainId;
 
 use crate::arch::ArchDomainState;
 use crate::mem::MetaAllocator;
@@ -45,17 +43,6 @@ pub struct PlatformDomain {
     pub doorbells: Vec<DoorbellEntry>,
     /// Counter for assigning unique doorbell IDs. Monotonically increasing.
     pub next_doorbell_id: u32,
-
-    /// Per-LP "may have cached second-stage entries" bitmap.  Bit `c` is
-    /// set whenever core `c` enters this domain (`set_core_context`) and
-    /// cleared by core `c` *after* it has executed an INVEPT for this
-    /// domain's EPTP.  Used by `Platform::domain_cores` to drive the
-    /// engine's existing cross-core IPI dispatch in `Platform::execute`.
-    ///
-    /// Sized at construction from the boot-time core count; one
-    /// `AtomicU64` word per 64 logical cores, so a 256-core system uses
-    /// 32 bytes per domain.
-    cached_on: Box<[AtomicU64]>,
 }
 
 /// Maximum number of doorbell entries per child domain.
@@ -106,9 +93,7 @@ pub struct DomainCommState {
 }
 
 impl PlatformDomain {
-    pub(super) fn new(hhdm_offset: u64, parent: Option<DomainId>, num_cores: usize) -> Self {
-        let words = (num_cores + 63) / 64;
-        let cached_on: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
+    pub(super) fn new(hhdm_offset: u64, parent: Option<DomainId>) -> Self {
         PlatformDomain {
             arch: ArchDomainState::new(),
             meta: MetaAllocator::new(hhdm_offset),
@@ -119,55 +104,7 @@ impl PlatformDomain {
             pending_domcomm_hpas: Vec::new(),
             doorbells: Vec::new(),
             next_doorbell_id: 1,
-            cached_on,
         }
-    }
-
-    /// Mark `core` as having (potentially) cached second-stage entries
-    /// for this domain.  Called by `set_core_context` on every domain
-    /// switch — the bit is set before any guest code runs on that core,
-    /// so `Platform::domain_cores` always sees the right cores during a
-    /// subsequent EPT mutation.
-    ///
-    /// Lock-free.  Idempotent.
-    pub fn mark_cached_on(&self, core: CoreId) {
-        let idx = core as usize;
-        let word = idx / 64;
-        let bit = 1u64 << (idx % 64);
-        if word < self.cached_on.len() {
-            self.cached_on[word].fetch_or(bit, Ordering::AcqRel);
-        }
-    }
-
-    /// Clear the cache-presence bit for `core`.  Called by the receiver
-    /// of a `CoreUpdate::TlbShootdown` *after* the local INVEPT (and by
-    /// the initiator when applying a local flush) so that the bitmap
-    /// authoritatively reflects "may have cached entries".
-    pub fn clear_cached_on(&self, core: CoreId) {
-        let idx = core as usize;
-        let word = idx / 64;
-        let bit = !(1u64 << (idx % 64));
-        if word < self.cached_on.len() {
-            self.cached_on[word].fetch_and(bit, Ordering::AcqRel);
-        }
-    }
-
-    /// Snapshot (read-only) the set of cores that may have cached
-    /// second-stage entries for this domain.  Does *not* clear the
-    /// bitmap — clearing happens on each per-core flush so that
-    /// no-shootdown additive updates do not lose tracking of cores that
-    /// are still running the domain.
-    pub fn snapshot_cached_on(&self) -> Vec<CoreId> {
-        let mut out = Vec::new();
-        for (i, w) in self.cached_on.iter().enumerate() {
-            let mut bits = w.load(Ordering::Acquire);
-            while bits != 0 {
-                let b = bits.trailing_zeros() as usize;
-                out.push((i * 64 + b) as CoreId);
-                bits &= bits - 1;
-            }
-        }
-        out
     }
 
     /// Initialize DomainComm from a list of page HPAs (possibly non-contiguous).

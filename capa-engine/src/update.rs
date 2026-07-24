@@ -502,7 +502,7 @@ pub enum UpdateStatus {
 
 /// Per-core update queue entry
 #[derive(Debug, Clone)]
-pub struct CoreUpdate {
+pub struct QueuedUpdateBatch {
     /// The update batch
     pub batch: UpdateBatch,
     /// Status of this update on this core
@@ -512,7 +512,7 @@ pub struct CoreUpdate {
 /// Update processor that manages distributing updates to cores
 pub struct UpdateProcessor {
     /// Mapping from core ID to pending updates
-    core_queues: Arc<RwLock<BTreeMap<CoreId, Vec<CoreUpdate>>>>,
+    core_queues: Arc<RwLock<BTreeMap<CoreId, Vec<QueuedUpdateBatch>>>>,
     /// Mapping from domain ID to currently running core (if any)
     domain_to_core: Arc<RwLock<BTreeMap<DomainId, CoreId>>>,
 }
@@ -563,7 +563,7 @@ impl UpdateProcessor {
         let mut queues = self.core_queues.write();
         for core_id in &cores_to_notify {
             let queue = queues.entry(*core_id).or_insert_with(Vec::new);
-            queue.push(CoreUpdate {
+            queue.push(QueuedUpdateBatch {
                 batch: batch.clone(),
                 status: UpdateStatus::Pending,
             });
@@ -573,7 +573,7 @@ impl UpdateProcessor {
     }
 
     /// Get pending updates for a specific core
-    pub fn get_pending_updates(&self, core_id: CoreId) -> Vec<CoreUpdate> {
+    pub fn get_pending_updates(&self, core_id: CoreId) -> Vec<QueuedUpdateBatch> {
         let queues = self.core_queues.read();
         queues
             .get(&core_id)

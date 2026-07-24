@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use capability_engine::{
-    Access, Attributes, Capability, CapaError, CoreState, Domain, DomainPolicy, LocalHandle,
+    Access, Attributes, Capability, CapaError, Domain, DomainPolicy, LocalHandle,
     MemoryRegion, MonitorAPI, Platform, PolicyIdentifier, ResourceKind, Rights, Update,
     UpdateBatch, VpRunState, attest_domain, compute_address_space,
 };
@@ -298,7 +298,9 @@ impl Backend for RustBackend {
         self.platform.register_domain(domain_id, None);
         let num_cores = self.num_cores as u64;
         for core_id in 0..num_cores {
-            self.platform.set_core_context(core_id, &root, core_id);
+            if let Ok(core_ref) = self.platform.get_core(core_id) {
+                core_ref.set_binding(root.clone(), core_id);
+            }
             let vp = root.read().data.policy.vprocessor_states.get(core_id as usize).cloned();
             if let Some(vp_arc) = vp {
                 *vp_arc.run_state.write() = VpRunState::Running { core: core_id };
@@ -646,14 +648,9 @@ impl Backend for RustBackend {
     ) -> Result<SwitchContextDto> {
         let core_ref = self.platform.get_core(core).map_err(convert_error)?;
 
-        let current_state = core_ref.state.read();
-        let from_id = match *current_state {
-            CoreState::Running(id) => id,
-            CoreState::Idle => return Err(BackendError::InvalidOperation(
-                "Core is idle".to_string(),
-            )),
-        };
-        drop(current_state);
+        let from_id = core_ref.current_domain().ok_or_else(|| {
+            BackendError::InvalidOperation("Core is idle".to_string())
+        })?;
 
         let from_ref = self.get_domain(from_id)?;
         let to_ref = self.get_domain(domain)?;
@@ -689,14 +686,9 @@ impl Backend for RustBackend {
     fn switch_return(&mut self, core: u64) -> Result<SwitchContextDto> {
         let core_ref = self.platform.get_core(core).map_err(convert_error)?;
 
-        let current_state = core_ref.state.read();
-        let from_id = match *current_state {
-            CoreState::Running(id) => id,
-            CoreState::Idle => return Err(BackendError::InvalidOperation(
-                "Core is idle".to_string(),
-            )),
-        };
-        drop(current_state);
+        let from_id = core_ref.current_domain().ok_or_else(|| {
+            BackendError::InvalidOperation("Core is idle".to_string())
+        })?;
 
         let from_ref = self.get_domain(from_id)?;
 
@@ -734,17 +726,12 @@ impl Backend for RustBackend {
     ) -> Result<()> {
         let domain_arc = self.get_domain(domain)?;
 
+        // `deliver_interrupt_vp` already rebinds the core to the handler
+        // domain internally (`core_ctx.set_binding(...)`) when the handler
+        // differs from `domain` — no separate platform-side fixup needed.
         let vp_delivery = Capability::<Domain>::deliver_interrupt_vp(
             self.platform.as_ref(), &domain_arc, core, vector,
         );
-
-        if let Ok((ctx, _)) = &vp_delivery {
-            let handler_domain_id = ctx.handler_domain.read().data.id;
-            if handler_domain_id != domain {
-                self.platform
-                    .set_core_domain_by_id(core, handler_domain_id);
-            }
-        }
 
         vp_delivery.map(|_| ()).map_err(convert_error)
     }
@@ -977,12 +964,11 @@ impl Backend for RustBackend {
         let mut result = Vec::new();
         for i in 0..self.num_cores as u64 {
             if let Ok(core_ref) = self.platform.get_core(i) {
-                let state = core_ref.state.read();
-                let (state_str, domain_id) = match *state {
-                    CoreState::Running(id) => ("Running".to_string(), Some(id)),
-                    CoreState::Idle => ("Idle".to_string(), None),
+                let (state_str, domain_id) = match core_ref.current_domain() {
+                    Some(id) => ("Running".to_string(), Some(id)),
+                    None => ("Idle".to_string(), None),
                 };
-                let vp_id = *core_ref.running_vp.read();
+                let vp_id = core_ref.current_vp();
                 result.push(CoreStateDto {
                     core_id: i,
                     state: state_str,

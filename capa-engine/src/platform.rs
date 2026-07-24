@@ -21,14 +21,19 @@
 //! # Cross-core atomicity (§5.2 of the paper)
 //!
 //! After the lock is acquired and the tree mutation runs, hardware state
-//! (EPT, TLB) is updated via a **two-barrier IPI protocol**:
+//! (EPT, TLB) is updated via a two-rendezvous IPI protocol, using a fresh
+//! pair of [`Barrier`]s ([`CoreSyncBarriers`], constructed per transaction
+//! by [`Platform::new_barrier`]) embedded directly into the per-core update
+//! data each affected core drains — not a fixed set of global barrier slots:
 //!
 //! 1. Acquire shared or exclusive lock.
 //! 2. Run the pure tree mutation → collect `UpdateBatch`.
 //! 3. For each core running an affected domain, send an IPI.
-//! 4. **Barrier 0**: all affected cores are preempted and waiting.
+//! 4. **First rendezvous**: all affected cores have drained their queue and
+//!    switched off the doomed domain.
 //! 5. Initiating core applies hardware updates (EPT changes, zero memory…).
-//! 6. **Barrier 1**: affected cores resume and apply local state (TLB flush…).
+//! 6. **Second rendezvous**: affected cores resume and apply local state
+//!    (TLB flush…).
 //! 7. `on_domain_revoked` is called for any revoked domains.
 //! 8. Lock is released.
 //!
@@ -42,14 +47,13 @@
 //! ensures that by the time a revoke operation completes and releases the lock,
 //! no other thread is accessing the revoked domains.
 
-use crate::capability::CapabilityRef;
-use crate::domain::Domain;
 use crate::error::{CapaError, Result};
+use crate::switch::CoreUpdate;
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::sync::Arc;
 
 /// A RAII guard that holds a platform operation lock (shared or exclusive).
 ///
@@ -57,6 +61,40 @@ use alloc::vec::Vec;
 /// The guard must remain alive for the entire duration of the capability
 /// operation — including the IPI/barrier phase and update application.
 pub trait OpLockGuard: Send {}
+
+/// A single rendezvous point: every participant calls `wait`, and all of
+/// them block until every one of them has arrived.
+///
+/// The initiator calls `wait(participants)` with the total participant
+/// count (including itself), exactly once. Every other participant calls
+/// `wait(0)`, spinning until the initiator's count becomes visible.
+pub trait Barrier: Send + Sync {
+    fn wait(&self, participants: usize);
+}
+
+/// No-op [`Barrier`] for platforms where the cross-core path is never
+/// exercised (single-core simulators, tests).
+struct NoOpBarrier;
+impl Barrier for NoOpBarrier {
+    fn wait(&self, _participants: usize) {}
+}
+
+/// The two rendezvous points for one cross-core transaction: `switched`
+/// (every affected core has switched off the doomed domain) and `applied`
+/// (the initiator has finished applying updates, cores may resume).
+///
+/// Constructed fresh per transaction via [`Platform::new_barrier`], then
+/// embedded directly into the per-core update data each affected core
+/// already drains (see [`crate::platform::execute`]'s per-domain push loop)
+/// — so the initiator and every affected core consult the exact same
+/// objects, instead of independently-hardcoded barrier slots that only
+/// agree by convention.
+#[derive(Clone)]
+pub struct CoreSyncBarriers {
+    pub switched: Arc<dyn Barrier>,
+    pub applied: Arc<dyn Barrier>,
+}
+
 
 /// Platform-specific primitives required by the capability engine.
 ///
@@ -89,21 +127,28 @@ pub trait Platform: Send + Sync {
 
     /// Send a platform-specific IPI to preempt core `core_id`.
     ///
-    /// The preempted core should trap into the monitor and wait at
-    /// `sync_barrier(0, …)`. Called once per affected core before barrier 0.
+    /// The preempted core should trap into the monitor and drain its update
+    /// queue, then rendezvous on the transaction's [`CoreSyncBarriers`] (found
+    /// embedded in the queue entries it just drained — see
+    /// [`crate::platform::execute`]'s per-domain push loop).
+    /// Called once per affected core before the first rendezvous.
     /// No-op for single-core or simulation platforms.
     fn send_ipi(&self, core_id: CoreId);
 
-    /// Wait at a two-phase synchronisation barrier.
+    /// Construct one rendezvous point for a cross-core transaction.
     ///
-    /// - `id == 0` — "pre-update" barrier: the initiating core waits until
-    ///   every preempted core has stopped executing and reached this barrier.
-    /// - `id == 1` — "post-update" barrier: cores are released to apply local
-    ///   hardware state (e.g. TLB shootdown).
+    /// Called twice per cross-core transaction (once for `switched`, once
+    /// for `applied` — see [`CoreSyncBarriers`]), before any per-core
+    /// update is pushed, so the same `Arc`s can be cloned into every
+    /// affected core's queue entries (see [`crate::platform::execute`]'s
+    /// per-domain push loop) as well as kept by the initiator itself.
     ///
-    /// `participants` is the total number of cores expected (including the
-    /// initiating core). No-op for platforms without parallel core execution.
-    fn sync_barrier(&self, id: u8, participants: usize);
+    /// **Default implementation** returns a no-op barrier, suitable for
+    /// single-core/simulation platforms where the cross-core path is never
+    /// taken (no core is ever a rendezvous participant).
+    fn new_barrier(&self) -> Arc<dyn Barrier> {
+        Arc::new(NoOpBarrier)
+    }
 
     // -----------------------------------------------------------------------
     // Update-application serialisation
@@ -117,7 +162,7 @@ pub trait Platform: Send + Sync {
     ///
     /// 1. **Deadlock** — if core A and core B both hold a shared capability
     ///    lock and send IPIs to each other, they would each block at their own
-    ///    `sync_barrier(0)` waiting for the other to acknowledge, with neither
+    ///    its own barrier wait, waiting for the other to acknowledge, with neither
     ///    able to proceed.  With the update lock, only one core enters the IPI
     ///    protocol at a time; the other spins and responds to incoming IPIs via
     ///    [`poll_and_respond_cross_core`].
@@ -149,7 +194,7 @@ pub trait Platform: Send + Sync {
     /// Called in the spin loop while waiting for the update-application lock.
     /// On bare metal, this checks whether a cross-core IPI from another
     /// initiating core is pending and, if so, executes the IPI-handler path
-    /// (i.e. signals that core's `sync_barrier(0, …)` so it can proceed with
+    /// (i.e. rendezvous on that core's barrier so it can proceed with
     /// its own update application).
     ///
     /// A core running a capability operation in the monitor will have
@@ -218,58 +263,40 @@ pub trait Platform: Send + Sync {
     fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>);
 
     // -----------------------------------------------------------------------
-    // Core state tracking
+    // Hardware core-state actions
     // -----------------------------------------------------------------------
+    //
+    // The engine owns "which domain/VP is running where", the per-core
+    // update queue, and the "which cores may have cached entries for a
+    // domain" tracking directly (see [`crate::switch::CoreContext`]) — these
+    // two hooks are the only genuinely hardware-specific actions the
+    // platform must still provide.
 
-    /// Update the full per-core scheduling context after a domain switch.
+    /// Return the TLB/second-stage flush handle for `domain_id` (e.g. the
+    /// EPTP/SLAT physical address) — a pure hardware fact, opaque to the
+    /// engine.
     ///
-    /// Called by [`Capability::switch`] (forward, return, and interrupt-delivery
-    /// paths) after VP state transitions.  The platform must update:
-    /// - Which domain is running on `core_id` (for IPI targeting / routing).
-    /// - Which VP of that domain is active.
-    /// - The domain's `CapabilityRef` (so the VMCALL handler can access the
-    ///   capability tree without a lookup).
+    /// **Default implementation** returns `0`.
+    fn tlb_flush_handle(&self, _domain_id: DomainId) -> u64 {
+        0
+    }
+
+    /// Flush any second-stage entries `core_id` may have cached for
+    /// `domain_id`, using the handle from
+    /// [`tlb_flush_handle`](Self::tlb_flush_handle).
     ///
     /// **Default implementation** is a no-op.
-    fn set_core_context(
-        &self,
-        _core_id: CoreId,
-        _domain_cap: &CapabilityRef<Domain>,
-        _vp_id: u64,
-    ) {
-    }
+    fn flush_tlb(&self, _domain_id: DomainId, _handle: u64, _core_id: CoreId) {}
 
-    /// Push a per-core "your running VP is being revoked" update onto core
-    /// `core_id`.
+    /// Perform the hardware swap (e.g. VMCLEAR/VMPTRLD) moving `core_id`
+    /// from `src` to `dst`, each given as `(domain_id, vp_id)`.
     ///
-    /// Called by the initiating core **before** `send_ipi` when revoking a
-    /// domain that is currently running on other cores. The push happens-
-    /// before the IPI so the target core observes the queued switch when it
-    /// drains between the barriers of the cross-core protocol.
+    /// Called by [`crate::domain_api::apply_core_updates`] for a
+    /// revoke-driven `CoreUpdate::Switch`, strictly after the engine has
+    /// already resolved and committed the new binding.
     ///
-    /// `source_cap`/`source_vp_id` identify the VP being torn down — for a
-    /// sanity check on the platform side that the affected core hasn't
-    /// already moved on. No resume target is passed here: the affected core
-    /// resolves its own resume target locally, by popping its own
-    /// `call_stack` (see `Capability::switch_after_callee_revoked`) —
-    /// the initiator never needs to walk the doomed VP's ancestor chain or
-    /// read another core's state.
-    ///
-    /// **Default implementation** is a no-op (single-core / test platforms
-    /// that override this record the call for verification).
-    fn push_core_switch(
-        &self,
-        _core_id: CoreId,
-        _source_cap: &CapabilityRef<Domain>,
-        _source_vp_id: u64,
-    ) {
-    }
-
-    /// Record that `core_id` is no longer executing any domain (idle).
-    fn clear_core_domain(&self, core_id: CoreId);
-
-    /// Return all core IDs that `domain_id` is currently running on, if any.
-    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId>;
+    /// **Default implementation** is a no-op.
+    fn apply_cross_core_switch(&self, _core_id: CoreId, _src: (DomainId, u64), _dst: (DomainId, u64)) {}
 
     // -----------------------------------------------------------------------
     // Virtual processor tracking
@@ -390,15 +417,17 @@ pub trait Platform: Send + Sync {
 /// 4. **Synchronise** (cross-core path — only if affected domains are running
 ///    on remote cores):
 ///    - Send IPIs to preempt every affected core.
-///    - Wait at barrier 0 (all affected cores have stopped).
+///    - Rendezvous once every affected core has switched off (see
+///      [`CoreSyncBarriers::switched`]).
 ///    - Apply hardware updates (EPT, zero memory…).
-///    - Wait at barrier 1 (cores apply local state: TLB flush…).
+///    - Rendezvous once more so cores may resume (see
+///      [`CoreSyncBarriers::applied`]).
 /// 5. **Local path**: if no remote cores are affected, apply updates directly.
 /// 6. **Revocations**: for each `RevokeDomain` update, call
 ///    [`Platform::on_domain_revoked`] so the platform can redirect cores.
 ///    This is done inside the update-application lock so that
-///    `domain_cores` queries from concurrent initiators see a consistent
-///    core-to-domain mapping.
+///    `SwitchManager::cores_running`/`cores_with_cached` queries from
+///    concurrent initiators see a consistent core-binding snapshot.
 /// 7. **Release update lock**, then drop the capability lock guard.
 ///
 /// Returns `(R, UpdateBatch)` so callers can inspect the updates.
@@ -424,32 +453,78 @@ where
     if !batch.updates().is_empty() {
         // Step 3 — acquire the update-application serialisation lock.
         //
-        // Only one initiating core at a time runs the IPI/barrier/apply
+        // Only one initiating core at a time runs the IPI/rendezvous/apply
         // sequence.  While spinning, we call poll_and_respond_cross_core()
         // so that if another core has already acquired this lock and sent us
-        // an IPI (waiting at its own barrier_0 for our acknowledgement), we
-        // signal back before we proceed.  This breaks the A↔B deadlock:
+        // an IPI (waiting on its own transaction's barriers for our
+        // acknowledgement), we signal back before we proceed.  This breaks
+        // the A↔B deadlock:
         //
-        //   A holds update_lock → sends IPI to B → blocks at sync_barrier(0)
-        //   B spins here → poll detects A's IPI → B signals barrier_A(0)
+        //   A holds update_lock → sends IPI to B → waits on its barrier
+        //   B spins here → poll detects A's IPI → B rendezvous on A's barrier
         //   A applies updates → releases update_lock
-        //   B acquires update_lock → runs its own IPI/barrier/apply
+        //   B acquires update_lock → runs its own IPI/rendezvous/apply
         while !platform.try_acquire_update_lock() {
             platform.poll_and_respond_cross_core();
         }
 
+        // This transaction's two rendezvous points — constructed once,
+        // before any per-core update is pushed, so the very same `Arc`s can
+        // be embedded into every affected core's queue entries below (see
+        // `domain_cores`/`push_core_switch`) as well as kept here by the
+        // initiator. No global/fixed-size barrier state is involved: each
+        // barrier lives exactly as long as this transaction.
+        let sync = CoreSyncBarriers {
+            switched: platform.new_barrier(),
+            applied: platform.new_barrier(),
+        };
+
         // Step 4/5 — determine affected cores and choose path.
-        // domain_cores is queried inside the update lock so that concurrent
-        // on_domain_revoked calls (also inside the lock) cannot race here.
+        //
+        // For each affected domain, the engine already knows both which
+        // cores are genuine rendezvous participants (currently running it)
+        // and which cores may have cached stale entries for it (bound to it
+        // in the past, not yet flushed) — both are scans of engine-owned
+        // per-core state (see `SwitchManager::cores_running`/
+        // `cores_with_cached`). The union of the two gets a `TlbShootdown`
+        // pushed, but only participants are rendezvous-counted and get
+        // `sync`. Queried inside the update lock so concurrent
+        // `on_domain_revoked` calls (also inside the lock) cannot race here.
         // The current core (handling the hypercall) is excluded: it already
         // stopped running guest code (VMEXIT) and will apply updates directly.
         let current_core = platform.get_current_core();
-        let mut affected_cores: BTreeSet<CoreId> = batch
-            .affected_domains()
-            .iter()
-            .flat_map(|&d| platform.domain_cores(d))
-            .filter(|&c| Some(c) != current_core)
-            .collect();
+        let switch_mgr = platform.switch_manager();
+        let mut affected_cores: BTreeSet<CoreId> = BTreeSet::new();
+        for &domain_id in batch.affected_domains() {
+            let participants: BTreeSet<CoreId> = switch_mgr
+                .cores_running(domain_id)
+                .into_iter()
+                .filter(|&c| Some(c) != current_core)
+                .collect();
+            let handle = platform.tlb_flush_handle(domain_id);
+            let mut targets: BTreeSet<CoreId> =
+                switch_mgr.cores_with_cached(domain_id).into_iter().collect();
+            targets.extend(participants.iter().copied());
+            for c in targets {
+                if Some(c) == current_core {
+                    // Local flush is performed inline by `apply_update`.
+                    continue;
+                }
+                let entry_sync = if participants.contains(&c) {
+                    Some(sync.clone())
+                } else {
+                    None
+                };
+                if let Ok(core_ctx) = switch_mgr.get_core(c) {
+                    core_ctx.push_update(CoreUpdate::TlbShootdown {
+                        domain: domain_id,
+                        handle,
+                        sync: entry_sync,
+                    });
+                }
+            }
+            affected_cores.extend(participants);
+        }
         affected_cores.extend(
             batch
                 .core_switches()
@@ -460,11 +535,11 @@ where
         // Step 5a — push per-core switch orders BEFORE sending IPIs.
         // Under the Tyche-aligned
         // barrier protocol, target cores drain their per-core update queue
-        // BEFORE barrier 0 (that is what B0 attests to: "targets have
-        // switched off the doomed domain").  So every `CoreSwitch` that
-        // the initiator wants a target to observe must be enqueued
-        // happens-before the target's `send_ipi` here — otherwise the
-        // target drains an empty queue and B0 releases with the target
+        // BEFORE rendezvousing (that is what the first rendezvous attests
+        // to: "targets have switched off the doomed domain").  So every
+        // `CoreSwitch` that the initiator wants a target to observe must be
+        // enqueued happens-before the target's `send_ipi` here — otherwise
+        // the target drains an empty queue and rendezvouses with the target
         // still bound to the doomed domain, breaking `apply_update`'s
         // "no live reference" precondition.
         let mut switched_cores = BTreeSet::new();
@@ -475,7 +550,13 @@ where
                     String::from("multiple revoke switch orders for one core"),
                 ));
             }
-            platform.push_core_switch(switch.core, &switch.source_domain, switch.source_vp);
+            if let Ok(core_ctx) = switch_mgr.get_core(switch.core) {
+                core_ctx.push_update(CoreUpdate::Switch {
+                    source_cap: switch.source_domain.clone(),
+                    source_vp: switch.source_vp,
+                    sync: sync.clone(),
+                });
+            }
         }
 
         if !affected_cores.is_empty() {
@@ -483,13 +564,13 @@ where
             for &core_id in &affected_cores {
                 platform.send_ipi(core_id);
             }
-            // Barrier 0: wait until all affected cores have drained their
-            // per-core update queue and switched off the doomed domain.
-            platform.sync_barrier(0, affected_cores.len() + 1);
+            // Rendezvous once all affected cores have drained their per-core
+            // update queue and switched off the doomed domain.
+            sync.switched.wait(affected_cores.len() + 1);
 
             // Step 5b — apply the global updates (EPT/IOMMU frees, etc.).
-            // Safe: every affected core is parked at B1.wait, no live
-            // reference to the doomed domain remains.
+            // Safe: every affected core is parked at the rendezvous above, no
+            // live reference to the doomed domain remains.
             for update in batch.updates() {
                 if let Update::RevokeDomain { domain, fallback } = update {
                     platform.on_domain_revoked(*domain, *fallback);
@@ -499,8 +580,8 @@ where
                 platform.apply_update(update);
             }
 
-            // Barrier 1: release cores to resume execution.
-            platform.sync_barrier(1, affected_cores.len() + 1);
+            // Rendezvous once more to release cores to resume execution.
+            sync.applied.wait(affected_cores.len() + 1);
         } else {
             // Local path: no remote core is running an affected domain.
             for update in batch.updates() {

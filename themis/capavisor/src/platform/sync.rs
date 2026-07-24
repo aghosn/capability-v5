@@ -6,14 +6,18 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::RwLock;
 
-use capability_engine::{OpLockGuard, Platform};
+use capability_engine::{Barrier as EngineBarrier, OpLockGuard, Platform};
 
 // ── Two-phase synchronisation barrier ─────────────────────────────────────── //
 
-/// Reusable two-phase barrier for the cross-core IPI protocol.
+/// Reusable rendezvous point for the cross-core IPI protocol.
 ///
 /// The initiating core calls `wait(participants)` which stores the expected
 /// count.  Responding cores call `wait(0)` to read the stored count and wait.
+/// A transaction embeds two of these directly (see `CoreSyncBarriers`), one
+/// per rendezvous phase — there is no wrapper type: the two barrier
+/// instances the initiator constructs and clones into queue entries ARE the
+/// transaction's synchronisation state.
 pub(super) struct Barrier {
     /// Total participants expected; written by the initiating core (participants > 0)
     /// before it begins spinning.  Responding cores use the stored value (pass 0).
@@ -37,7 +41,7 @@ impl Barrier {
     ///
     /// * `participants > 0` — store as new expected count (initiating core).
     /// * `participants == 0` — use the previously stored count (responding core).
-    pub(super) fn wait(&self, participants: usize) {
+    fn wait(&self, participants: usize) {
         if participants > 0 {
             self.expected.store(participants, Ordering::Release);
         }
@@ -63,6 +67,13 @@ impl Barrier {
         }
     }
 }
+
+impl EngineBarrier for Barrier {
+    fn wait(&self, participants: usize) {
+        Barrier::wait(self, participants)
+    }
+}
+
 // ── RW-spinlock guards ─────────────────────────────────────────────────────── //
 //
 // `spin::RwLock` guards carry a lifetime tied to the lock reference.  Since

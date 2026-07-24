@@ -3,29 +3,71 @@
 use crate::capability::CapabilityRef;
 use crate::domain::{Domain, InterruptVisibility, VpCallContext};
 use crate::error::{CapaError, Result};
+use crate::platform::CoreSyncBarriers;
 use crate::sync::RwLock;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-/// Core state tracking which domain is running
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreState {
-    /// Core is idle
-    Idle,
-    /// Core is running a domain
-    Running(u64), // domain_id
+/// One core's live scheduling binding: which domain + VP is running there.
+///
+/// The sole authoritative source for "what is core X running right now" —
+/// shared by every backend (bare-metal capavisor, hosted capa-cli) so this
+/// fact is never independently tracked in more than one place.
+#[derive(Clone)]
+pub struct CoreBinding {
+    pub domain: CapabilityRef<Domain>,
+    pub vp_id: u64,
+}
+
+/// A cross-core update queued for a specific core to drain and apply.
+///
+/// Pushed by the initiating core (under the update lock) before sending an
+/// IPI; drained by the target core via [`crate::domain_api::apply_core_updates`].
+#[derive(Clone)]
+pub enum CoreUpdate {
+    /// Flush any second-stage entries this core may have cached for
+    /// `domain`. `sync` is `Some` only for cores that are genuine rendezvous
+    /// participants (currently running `domain`); lazily-cached,
+    /// non-participant cores get `None` and flush asynchronously without
+    /// rendezvousing.
+    TlbShootdown {
+        domain: u64,
+        handle: u64,
+        sync: Option<CoreSyncBarriers>,
+    },
+    /// Revoke-driven cross-core switch: the VP `source_vp` of `source_cap`
+    /// running on this core is being torn down. The resume target is not
+    /// carried here — it is resolved locally from this core's own
+    /// `call_stack` (see `Capability::switch_after_callee_revoked`).
+    Switch {
+        source_cap: CapabilityRef<Domain>,
+        source_vp: u64,
+        sync: CoreSyncBarriers,
+    },
 }
 
 /// Per-core execution context
 pub struct CoreContext {
-    /// Current state of the core
-    pub state: RwLock<CoreState>,
     /// Core ID
     pub core_id: u64,
-    /// Which VP (by ID) is currently executing on this core, if any.
-    pub running_vp: RwLock<Option<u64>>,
+    /// Currently bound (domain, vp) on this core, if any. `None` when idle.
+    binding: RwLock<Option<CoreBinding>>,
+    /// Pending cross-core updates for this core, drained via
+    /// [`crate::domain_api::apply_core_updates`].
+    updates: RwLock<VecDeque<CoreUpdate>>,
+    /// Domain ids this core may have cached second-stage entries for.
+    ///
+    /// Set automatically by [`Self::set_binding`] (binding to a domain is
+    /// exactly the event that may leave cached entries behind); cleared by
+    /// [`crate::domain_api::apply_core_updates`] once the corresponding
+    /// `TlbShootdown` has actually been flushed. This is the authoritative
+    /// per-domain flush-target set — a domain being revoked queries every
+    /// core's set via [`SwitchManager::cores_with_cached`] rather than the
+    /// platform maintaining its own shadow copy.
+    cached_domains: RwLock<BTreeSet<u64>>,
     /// Live call chain for this core, bottom (root-most caller) to top
     /// (most recent switch target).
     ///
@@ -57,9 +99,10 @@ pub struct CoreContext {
 impl CoreContext {
     pub fn new(core_id: u64) -> Self {
         CoreContext {
-            state: RwLock::new(CoreState::Idle),
             core_id,
-            running_vp: RwLock::new(None),
+            binding: RwLock::new(None),
+            updates: RwLock::new(VecDeque::new()),
+            cached_domains: RwLock::new(BTreeSet::new()),
             call_stack: RwLock::new(Vec::new()),
         }
     }
@@ -72,10 +115,58 @@ impl CoreContext {
 
     /// Get the currently running domain (if any)
     pub fn current_domain(&self) -> Option<u64> {
-        match *self.state.read() {
-            CoreState::Running(domain_id) => Some(domain_id),
-            CoreState::Idle => None,
-        }
+        self.binding.read().as_ref().map(|b| b.domain.read().data.id)
+    }
+
+    /// Get the currently running VP (if any)
+    pub fn current_vp(&self) -> Option<u64> {
+        self.binding.read().as_ref().map(|b| b.vp_id)
+    }
+
+    /// Get a clone of the full current binding (if any).
+    pub fn current_binding(&self) -> Option<CoreBinding> {
+        self.binding.read().clone()
+    }
+
+    /// Bind this core to `domain`/`vp_id`. Called on every switch/interrupt
+    /// entry (forward, return, revoke-driven) so this is always the single
+    /// authoritative record of what is running here. Also marks `domain` as
+    /// possibly-cached on this core (see `cached_domains`).
+    pub fn set_binding(&self, domain: CapabilityRef<Domain>, vp_id: u64) {
+        let domain_id = domain.read().data.id;
+        self.cached_domains.write().insert(domain_id);
+        *self.binding.write() = Some(CoreBinding { domain, vp_id });
+    }
+
+    /// Mark this core idle (no domain/VP running).
+    pub fn clear_binding(&self) {
+        *self.binding.write() = None;
+    }
+
+    /// Forget that this core may have cached entries for `domain_id`.
+    ///
+    /// Called after the corresponding `TlbShootdown` has actually been
+    /// flushed (see [`crate::domain_api::apply_core_updates`]).
+    pub fn clear_cached(&self, domain_id: u64) {
+        self.cached_domains.write().remove(&domain_id);
+    }
+
+    /// Push a `CoreUpdate` onto this core's queue.
+    ///
+    /// Called by the initiating core (under the update lock) before sending
+    /// the IPI.
+    pub fn push_update(&self, update: CoreUpdate) {
+        self.updates.write().push_back(update);
+    }
+
+    /// Non-blocking drain of all currently-queued updates for this core, in
+    /// FIFO order. Returns `None` if the queue is contended (drained
+    /// concurrently by the other caller that can race here — see
+    /// `apply_core_updates`), in which case the caller should simply do
+    /// nothing: whichever caller wins the race handles every entry.
+    pub fn try_drain_updates(&self) -> Option<Vec<CoreUpdate>> {
+        let mut queue = self.updates.try_write()?;
+        Some(queue.drain(..).collect())
     }
 
     /// Push a new frame (the caller we are switching away from) onto this
@@ -230,6 +321,30 @@ impl SwitchManager {
             )))
     }
 
+    /// Scan every core's binding and return the ones currently running
+    /// `domain_id`. Replaces a platform-maintained routing map: this fact is
+    /// derived directly from the authoritative per-core bindings, so there
+    /// is exactly one place it can ever be tracked.
+    pub fn cores_running(&self, domain_id: u64) -> Vec<u64> {
+        self.cores
+            .iter()
+            .filter(|c| c.current_domain() == Some(domain_id))
+            .map(|c| c.core_id)
+            .collect()
+    }
+
+    /// Scan every core's `cached_domains` and return the ones that may have
+    /// cached second-stage entries for `domain_id` — the flush target set
+    /// for a revoke, replacing a platform-maintained bitmap (see
+    /// [`CoreContext::set_binding`]/[`CoreContext::clear_cached`]).
+    pub fn cores_with_cached(&self, domain_id: u64) -> Vec<u64> {
+        self.cores
+            .iter()
+            .filter(|c| c.cached_domains.read().contains(&domain_id))
+            .map(|c| c.core_id)
+            .collect()
+    }
+
     /// Perform a switch from one domain to another
     ///
     /// Returns the switch context for the transition
@@ -251,7 +366,7 @@ impl SwitchManager {
             ));
         }
 
-        let (to_id, to_domain_ref, is_return) = if let Some(to_ref) = to {
+        let (_to_id, to_domain_ref, is_return) = if let Some(to_ref) = to {
             let to_domain = to_ref.read();
 
             // Verify target domain is sealed
@@ -300,8 +415,9 @@ impl SwitchManager {
 
         drop(from_domain);
 
-        // Update core state
-        *core.state.write() = CoreState::Running(to_id);
+        // Update core binding. This simple, non-VP-aware entry point has no
+        // VP identity to track — `vp_id` is always 0 by convention here.
+        core.set_binding(to_domain_ref.clone(), 0);
 
         Ok(SwitchContext {
             from_domain: Some(from.clone()),

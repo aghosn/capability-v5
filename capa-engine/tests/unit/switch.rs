@@ -67,17 +67,19 @@ fn fixture() -> (
 
 #[test]
 fn test_core_context() {
-    let platform = common::TestPlatform::new();
     let ctx = CoreContext::new(0);
     assert_eq!(ctx.current_domain(), None);
+    assert_eq!(ctx.current_vp(), None);
 
-    *ctx.state.write() = CoreState::Running(1);
-    assert_eq!(ctx.current_domain(), Some(1));
+    let domain = Capability::new_root(1, 0, Domain::new_root(1));
+    let domain_id = domain.read().data.id;
+    ctx.set_binding(domain, 7);
+    assert_eq!(ctx.current_domain(), Some(domain_id));
+    assert_eq!(ctx.current_vp(), Some(7));
 }
 
 #[test]
 fn test_core_can_run_domain() {
-    let platform = common::TestPlatform::new();
     let ctx = CoreContext::new(2); // Core 2
 
     let mut policy = DomainPolicy::new_root(4);
@@ -89,7 +91,6 @@ fn test_core_can_run_domain() {
 
 #[test]
 fn test_core_cannot_run_domain() {
-    let platform = common::TestPlatform::new();
     let ctx = CoreContext::new(3); // Core 3
 
     let mut policy = DomainPolicy::new_root(4);
@@ -101,7 +102,6 @@ fn test_core_cannot_run_domain() {
 
 #[test]
 fn test_switch_manager() {
-    let platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(4);
     assert!(mgr.get_core(0).is_ok());
     assert!(mgr.get_core(3).is_ok());
@@ -110,7 +110,6 @@ fn test_switch_manager() {
 
 #[test]
 fn test_switch_manager_core_count() {
-    let platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(8);
 
     for i in 0..8 {

@@ -46,12 +46,6 @@ use capability_engine::{
 pub struct TestPlatformInner {
     /// Domain registry: revoked flag + parent for fallback lookup
     domains: BTreeMap<DomainId, DomainEntry>,
-    /// Core → domain (which domain a core is currently running)
-    core_to_domain: BTreeMap<CoreId, DomainId>,
-    /// Domain → core (reverse index)
-    domain_to_core: BTreeMap<DomainId, CoreId>,
-    /// Core → VP currently executing on that core
-    core_to_vp: BTreeMap<CoreId, u64>,
     /// All updates applied since the last call to `drain_updates`
     pub applied_updates: Vec<Update>,
     /// The "current core" returned by get_current_core().
@@ -76,13 +70,6 @@ pub enum CallLogEntry {
         domain: DomainId,
         fallback: Option<DomainId>,
     },
-    /// `push_core_switch(core, source)` was invoked. No resume target is
-    /// carried — the affected core resolves that locally.
-    PushCoreSwitch {
-        core: CoreId,
-        source_domain: DomainId,
-        source_vp: u64,
-    },
 }
 
 struct DomainEntry {
@@ -101,27 +88,6 @@ impl TestPlatformInner {
     fn mark_revoked(&mut self, domain_id: DomainId) {
         if let Some(e) = self.domains.get_mut(&domain_id) {
             e.revoked = true;
-        }
-    }
-
-    fn parent_of(&self, domain_id: DomainId) -> Option<DomainId> {
-        self.domains.get(&domain_id)?.parent_id
-    }
-
-    /// Redirect any core running `domain_id` to `fallback`.
-    /// If `fallback` is None, walk up the parent chain in the registry.
-    fn redirect_core_for_revoked(&mut self, domain_id: DomainId, fallback: Option<DomainId>) {
-        let Some(&core_id) = self.domain_to_core.get(&domain_id) else {
-            return;
-        };
-        self.core_to_domain.remove(&core_id);
-        self.domain_to_core.remove(&domain_id);
-
-        // Determine which domain the core should run next
-        let next = fallback.or_else(|| self.parent_of(domain_id));
-        if let Some(next_domain) = next {
-            self.core_to_domain.insert(core_id, next_domain);
-            self.domain_to_core.insert(next_domain, core_id);
         }
     }
 }
@@ -187,9 +153,25 @@ impl TestPlatform {
 
     /// Return the domain a core is currently running, if any.
     pub fn get_core_domain(&self, core_id: CoreId) -> Option<DomainId> {
-        self.inner.lock().core_to_domain.get(&core_id).copied()
+        self.switch_manager
+            .get_core(core_id)
+            .ok()
+            .and_then(|ctx| ctx.current_domain())
     }
 
+    /// Seed a core binding directly for tests that need pre-existing run-state
+    /// without going through `Capability::switch`.
+    pub fn set_core_context(
+        &self,
+        core_id: CoreId,
+        domain_cap: &CapabilityRef<Domain>,
+        vp_id: u64,
+    ) {
+        self.switch_manager
+            .get_core(core_id)
+            .expect("test core id must be valid")
+            .set_binding(domain_cap.clone(), vp_id);
+    }
     /// True iff the domain has been marked revoked by `on_domain_revoked`.
     pub fn is_domain_revoked(&self, domain_id: DomainId) -> bool {
         self.inner.lock().is_revoked(domain_id)
@@ -220,9 +202,11 @@ impl Platform for TestPlatform {
         }))
     }
 
-    // IPIs and barriers are no-ops in the test platform.
+    // IPIs are no-ops in the test platform. `new_barrier` uses the
+    // default no-op impl (unused participant counts are harmless here — this
+    // platform is sequential, not truly concurrent; real cross-core
+    // rendezvous behaviour is validated by the loom/monitor platforms).
     fn send_ipi(&self, _core_id: CoreId) {}
-    fn sync_barrier(&self, _id: u8, _participants: usize) {}
 
     fn apply_update(&self, update: &Update) {
         let mut inner = self.inner.lock();
@@ -231,13 +215,58 @@ impl Platform for TestPlatform {
     }
 
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>) {
-        let mut inner = self.inner.lock();
-        inner
-            .call_log
-            .push(CallLogEntry::OnDomainRevoked { domain: domain_id, fallback });
-        inner.redirect_core_for_revoked(domain_id, fallback);
-        inner.mark_revoked(domain_id);
-        // Unregister: keep the entry (with revoked=true) so late TOCTOU checks work.
+        {
+            let mut inner = self.inner.lock();
+            inner
+                .call_log
+                .push(CallLogEntry::OnDomainRevoked { domain: domain_id, fallback });
+            inner.mark_revoked(domain_id);
+            // Unregister: keep the entry (with revoked=true) so late TOCTOU checks work.
+        }
+
+        for core_id in self.switch_manager.cores_running(domain_id) {
+            let Ok(core_ctx) = self.switch_manager.get_core(core_id) else {
+                continue;
+            };
+            if core_ctx.top_frame().is_some() {
+                continue;
+            }
+            let Some(binding) = core_ctx.current_binding() else {
+                continue;
+            };
+            if binding.domain.read().data.id != domain_id {
+                continue;
+            }
+
+            let next_cap = if let Some(target_id) = fallback {
+                let mut cursor = binding.domain.read().get_parent();
+                let mut found = None;
+                while let Some(candidate) = cursor {
+                    let next = {
+                        let guard = candidate.read();
+                        if guard.data.id == target_id {
+                            found = Some(candidate.clone());
+                            None
+                        } else {
+                            guard.get_parent()
+                        }
+                    };
+                    if found.is_some() {
+                        break;
+                    }
+                    cursor = next;
+                }
+                found
+            } else {
+                binding.domain.read().get_parent()
+            };
+
+            if let Some(next_cap) = next_cap {
+                core_ctx.set_binding(next_cap, binding.vp_id);
+            } else {
+                core_ctx.clear_binding();
+            }
+        }
     }
 
     fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>) {
@@ -248,45 +277,6 @@ impl Platform for TestPlatform {
                 parent_id,
             },
         );
-    }
-
-    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
-        let domain_id = domain_cap.read().data.id;
-        let mut inner = self.inner.lock();
-        // Remove any old mapping for this core
-        if let Some(old_domain) = inner.core_to_domain.remove(&core_id) {
-            inner.domain_to_core.remove(&old_domain);
-        }
-        inner.core_to_domain.insert(core_id, domain_id);
-        inner.domain_to_core.insert(domain_id, core_id);
-        inner.core_to_vp.insert(core_id, vp_id);
-    }
-
-    fn clear_core_domain(&self, core_id: CoreId) {
-        let mut inner = self.inner.lock();
-        if let Some(domain_id) = inner.core_to_domain.remove(&core_id) {
-            inner.domain_to_core.remove(&domain_id);
-        }
-    }
-
-    fn push_core_switch(
-        &self,
-        core_id: CoreId,
-        source_cap: &CapabilityRef<Domain>,
-        source_vp_id: u64,
-    ) {
-        let source_domain = source_cap.read().data.id;
-        self.inner.lock().call_log.push(CallLogEntry::PushCoreSwitch {
-            core: core_id,
-            source_domain,
-            source_vp: source_vp_id,
-        });
-    }
-
-    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId> {
-        self.inner.lock().domain_to_core.get(&domain_id)
-            .map(|&c| vec![c])
-            .unwrap_or_default()
     }
 
     fn try_acquire_update_lock(&self) -> bool {

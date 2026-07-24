@@ -83,9 +83,19 @@ struct NullGuard;
 impl capability_engine::OpLockGuard for NullGuard {}
 unsafe impl Send for NullGuard {}
 
-struct NullPlatform;
+struct NullPlatform {
+    switch_manager: capability_engine::SwitchManager,
+}
 unsafe impl Send for NullPlatform {}
 unsafe impl Sync for NullPlatform {}
+
+impl NullPlatform {
+    fn new() -> Self {
+        Self {
+            switch_manager: capability_engine::SwitchManager::new(4),
+        }
+    }
+}
 
 impl capability_engine::Platform for NullPlatform {
     fn acquire_shared_lock(&self) -> capability_engine::Result<Box<dyn capability_engine::OpLockGuard>> {
@@ -95,20 +105,14 @@ impl capability_engine::Platform for NullPlatform {
         Ok(Box::new(NullGuard))
     }
     fn send_ipi(&self, _: capability_engine::CoreId) {}
-    fn sync_barrier(&self, _: u8, _: usize) {}
     fn apply_update(&self, _: &capability_engine::Update) {}
     fn on_domain_revoked(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
     fn register_domain(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
-    fn set_core_context(&self, _: capability_engine::CoreId, _: &capability_engine::CapabilityRef<capability_engine::Domain>, _: u64) {}
-    fn clear_core_domain(&self, _: capability_engine::CoreId) {}
-    fn domain_cores(&self, _: capability_engine::DomainId) -> Vec<capability_engine::CoreId> { Vec::new() }
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<capability_engine::CoreId> { None }
     fn switch_manager(&self) -> &capability_engine::SwitchManager {
-        static NULL_SWITCH_MANAGER: std::sync::OnceLock<capability_engine::SwitchManager> =
-            std::sync::OnceLock::new();
-        NULL_SWITCH_MANAGER.get_or_init(|| capability_engine::SwitchManager::new(4))
+        &self.switch_manager
     }
 }
 
@@ -265,22 +269,22 @@ fn loom_e2e_concurrent_sends() {
 
         // Sequential setup: carve two non-overlapping children.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
         let (h_c2, _sub2, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x2000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c2");
 
         // Create two unsealed child domains as receivers via the domain-mediated API.
-        let dh_a = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_a = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a").0;
-        let dh_b = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b").0;
         let recv_a = {
             let r = dom.read();
@@ -297,7 +301,7 @@ fn loom_e2e_concurrent_sends() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, dh_a, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, dh_a, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -306,7 +310,7 @@ fn loom_e2e_concurrent_sends() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c2, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c2, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -384,9 +388,9 @@ fn loom_e2e_accept_race() {
 
         // Sealed child domain as receiver (supports receive_after_seal).
         // Use create + seal so it is properly parented under sender.
-        let dh_recv = Capability::<Domain>::create(&NullPlatform, &sender, DomainPolicy::new_root(1))
+        let dh_recv = Capability::<Domain>::create(&NullPlatform::new(), &sender, DomainPolicy::new_root(1))
             .expect("setup: create recv").0;
-        Capability::<Domain>::seal(&NullPlatform, &sender, dh_recv)
+        Capability::<Domain>::seal(&NullPlatform::new(), &sender, dh_recv)
             .expect("setup: seal recv");
         let recv = {
             let r = sender.read();
@@ -396,12 +400,12 @@ fn loom_e2e_accept_race() {
 
         // Carve c1 and send to the sealed receiver → pending queue path.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &sender,
+            &NullPlatform::new(), &sender,
             h_root,
             Access::new(0x0, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
-        Capability::<Domain>::send(&NullPlatform, &sender, h_c1, dh_recv, Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &sender, h_c1, dh_recv, Attributes::NONE)
             .expect("setup: send to sealed receiver");
 
         // Capture the single pending_id (setup is sequential, so exactly one).
@@ -413,7 +417,7 @@ fn loom_e2e_accept_race() {
         let (opl, ul_a, st, r) = (op_lock.clone(), ul.clone(), state.clone(), recv.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let (handle, batch) = Capability::<Domain>::accept(&NullPlatform, &r, pending_id)?;
+                let (handle, batch) = Capability::<Domain>::accept(&NullPlatform::new(), &r, pending_id)?;
                 Ok((handle, batch))
             })
         });
@@ -422,7 +426,7 @@ fn loom_e2e_accept_race() {
         let (opl, ul_b, st, r) = (op_lock.clone(), ul.clone(), state.clone(), recv.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let (handle, batch) = Capability::<Domain>::accept(&NullPlatform, &r, pending_id)?;
+                let (handle, batch) = Capability::<Domain>::accept(&NullPlatform::new(), &r, pending_id)?;
                 Ok((handle, batch))
             })
         });
@@ -504,20 +508,20 @@ fn loom_e2e_revoke_child_vs_send() {
 
         // Carve c1 and c2.
         let (h_c1, sub_c1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
         let (h_c2, _sub2, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x2000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c2");
 
         // Create recv_a and recv_b as proper child domains via create.
-        let dh_a = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_a = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a").0;
         let recv_a = {
             let r = dom.read();
@@ -526,12 +530,12 @@ fn loom_e2e_revoke_child_vs_send() {
         let recv_a_id = recv_a.read().data.id;
 
         // Immediately send c1 to unsealed recv_a (updates discarded — setup only).
-        Capability::<Domain>::send(&NullPlatform, &dom, h_c1, dh_a, Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &dom, h_c1, dh_a, Attributes::NONE)
             .expect("setup: send c1 to recv_a");
         // After send: h_c1 removed from dom's table; c1.owner = recv_a_id.
 
         // Register recv_b for Thread B's send.
-        let dh_b = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b").0;
         let recv_b = {
             let r = dom.read();
@@ -543,7 +547,7 @@ fn loom_e2e_revoke_child_vs_send() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke(&NullPlatform, &d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&NullPlatform::new(), &d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -552,7 +556,7 @@ fn loom_e2e_revoke_child_vs_send() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c2, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c2, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -657,14 +661,14 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 
         // Carve c1 for Thread B to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
 
         // Create child domain ch1 under dom.
-        let h_child = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let h_child = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create child domain").0;
         let ch1_id: DomainId = dom
             .read()
@@ -679,7 +683,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
 
         // Create an unsealed memory receiver as a proper child domain.
         // h_child was allocated as handle 1; recv_m gets handle 2.
-        let dh_r = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_r = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_m").0;
         let recv_m = {
             let r = dom.read();
@@ -691,7 +695,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke_domain(&NullPlatform, &d, h_child)?;
+                let batch = Capability::<Domain>::revoke_domain(&NullPlatform::new(), &d, h_child)?;
                 Ok(((), batch))
             })
         });
@@ -700,7 +704,7 @@ fn loom_e2e_domain_revoke_vs_mem_send() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, dh_r, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, dh_r, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -789,14 +793,14 @@ fn loom_e2e_send_to_domain_being_revoked() {
 
         // Carve c1 for Thread B to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
 
         // Create child domain ch1 under dom (unsealed — supports immediate send).
-        let h_child = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let h_child = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create ch1").0;
         let ch1_id: DomainId = dom
             .read()
@@ -813,7 +817,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke_domain(&NullPlatform, &d, h_child)?;
+                let batch = Capability::<Domain>::revoke_domain(&NullPlatform::new(), &d, h_child)?;
                 Ok(((), batch))
             })
         });
@@ -822,7 +826,7 @@ fn loom_e2e_send_to_domain_being_revoked() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, h_child, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, h_child, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -946,16 +950,16 @@ fn loom_e2e_two_cores_race_send_same_cap() {
 
         // One cap that both threads will race to send.
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
 
         // Two distinct unsealed child domains as receivers.
-        let dh_a = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_a = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_a").0;
-        let dh_b = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_b = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv_b").0;
         let recv_a = {
             let r = dom.read();
@@ -972,7 +976,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, dh_a, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, dh_a, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -981,7 +985,7 @@ fn loom_e2e_two_cores_race_send_same_cap() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, dh_b, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, dh_b, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -1085,14 +1089,14 @@ fn loom_e2e_send_vs_revoke_same_cap() {
 
         // Carve c1; keep both the LocalHandle and the SubHandle.
         let (h_c1, sub_c1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
 
         // Unsealed child domain as receiver for Thread A's immediate send.
-        let dh_recv = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_recv = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv").0;
         let recv = {
             let r = dom.read();
@@ -1104,7 +1108,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_shared(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c1, dh_recv, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c1, dh_recv, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
@@ -1113,7 +1117,7 @@ fn loom_e2e_send_vs_revoke_same_cap() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_exclusive(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::revoke(&NullPlatform, &d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&NullPlatform::new(), &d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -1251,7 +1255,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
 
         // Carve c1 — both threads will race to revoke it.
         let (_h_c1, sub_c1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
@@ -1261,7 +1265,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke(&NullPlatform, &d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&NullPlatform::new(), &d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -1270,7 +1274,7 @@ fn loom_e2e_two_cores_double_revoke_same_child() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_exclusive(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::revoke(&NullPlatform, &d, h_root, sub_c1)?;
+                let batch = Capability::<Domain>::revoke(&NullPlatform::new(), &d, h_root, sub_c1)?;
                 Ok(((), batch))
             })
         });
@@ -1337,13 +1341,13 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
 
         // Carve c1 [0x0, 0x1000) and send to ch1 (so ch1 owns memory).
         let (h_c1, _sub1, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x0000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c1");
 
-        let h_child = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let h_child = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create ch1").0;
         let ch1_id: DomainId = dom
             .read()
@@ -1357,19 +1361,19 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
             .id;
 
         // Send c1 to ch1 — immediate transfer (ch1 is unsealed).
-        Capability::<Domain>::send(&NullPlatform, &dom, h_c1, h_child, Attributes::NONE)
+        Capability::<Domain>::send(&NullPlatform::new(), &dom, h_c1, h_child, Attributes::NONE)
             .expect("setup: send c1 to ch1");
 
         // Carve c2 [0x2000, 0x1000) for Thread B to send.
         let (h_c2, _sub2, _) = Capability::<Domain>::carve(
-            &NullPlatform, &dom,
+            &NullPlatform::new(), &dom,
             h_root,
             Access::new(0x2000, 0x1000, Rights::RW),
         )
         .expect("setup: carve c2");
 
         // Create unsealed receiver for Thread B.
-        let dh_r = Capability::<Domain>::create(&NullPlatform, &dom, DomainPolicy::new_root(1))
+        let dh_r = Capability::<Domain>::create(&NullPlatform::new(), &dom, DomainPolicy::new_root(1))
             .expect("setup: create recv").0;
         let recv_id: DomainId = dom
             .read()
@@ -1386,7 +1390,7 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
         let (opl, ul_a, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let ta = thread::spawn(move || {
             execute_exclusive(&opl, &ul_a, &st, || {
-                let batch = Capability::<Domain>::revoke_domain(&NullPlatform, &d, h_child)?;
+                let batch = Capability::<Domain>::revoke_domain(&NullPlatform::new(), &d, h_child)?;
                 Ok(((), batch))
             })
         });
@@ -1395,7 +1399,7 @@ fn loom_e2e_domain_revoke_with_memory_vs_send() {
         let (opl, ul_b, st, d) = (op_lock.clone(), ul.clone(), state.clone(), dom.clone());
         let tb = thread::spawn(move || {
             execute_shared(&opl, &ul_b, &st, || {
-                let batch = Capability::<Domain>::send(&NullPlatform, &d, h_c2, dh_r, Attributes::NONE)?;
+                let batch = Capability::<Domain>::send(&NullPlatform::new(), &d, h_c2, dh_r, Attributes::NONE)?;
                 Ok(((), batch))
             })
         });
