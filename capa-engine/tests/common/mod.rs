@@ -26,7 +26,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
 use parking_lot::{
     lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard},
@@ -34,9 +35,82 @@ use parking_lot::{
 };
 
 use capability_engine::{
-    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result,
+    CapaError, CapabilityRef, CoreId, Domain, DomainId, OpLockGuard, Platform, Result, Semaphore,
     SwitchManager, Update,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RealSemaphore — a genuinely blocking counting semaphore, opt-in
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A real (non-no-op) [`Semaphore`], for tests that need to prove the
+/// cross-core rendezvous protocol's permit counting is actually correct
+/// under real concurrency — not just that the right entries get queued
+/// (which the default `NoOpSemaphore`-backed `TestPlatform` already covers
+/// sequentially). `acquire` genuinely blocks on a condvar until enough
+/// permits have accumulated; `release` never blocks (briefly takes the lock
+/// only to update the count and notify waiters).
+struct RealSemaphore {
+    permits: StdMutex<usize>,
+    cv: Condvar,
+}
+
+impl RealSemaphore {
+    fn new() -> Self {
+        RealSemaphore {
+            permits: StdMutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+}
+
+impl Semaphore for RealSemaphore {
+    fn acquire(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let mut permits = self.permits.lock().unwrap();
+        while *permits < n {
+            permits = self.cv.wait(permits).unwrap();
+        }
+        *permits -= n;
+    }
+
+    fn release(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        *self.permits.lock().unwrap() += n;
+        self.cv.notify_all();
+    }
+}
+
+/// No-op [`Semaphore`] — mirrors the engine's own private `NoOpSemaphore`
+/// default, duplicated here so `TestPlatform` can choose between it and
+/// [`RealSemaphore`] per-instance (the engine's default impl is not
+/// selectable per-instance since it is hardwired into `Platform::new_semaphore`'s
+/// default trait method).
+struct NoOpTestSemaphore;
+impl Semaphore for NoOpTestSemaphore {
+    fn acquire(&self, _n: usize) {}
+    fn release(&self, _n: usize) {}
+}
+
+thread_local! {
+    /// The "current core" returned by `get_current_core()`/set via
+    /// `set_current_core()`. Deliberately **thread-local**, not a field on
+    /// `TestPlatformInner`: real hardware's "current core" is inherently
+    /// per-CPU, i.e. per-thread when simulated with real OS threads (see
+    /// multi-threaded tests in `tests/concurrency/platform.rs` that use
+    /// `TestPlatform::new_with_real_semaphore()` — each background thread
+    /// stands in for a distinct core and must have its own independent
+    /// `current_core`, or two such threads calling `set_current_core`
+    /// concurrently would race on a single shared field and could corrupt
+    /// each other's call-stack resolution inside `apply_core_updates`).
+    /// Single-threaded tests are unaffected either way, since they only
+    /// ever have one thread to begin with.
+    static CURRENT_CORE: std::cell::Cell<Option<CoreId>> = const { std::cell::Cell::new(None) };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal state
@@ -48,9 +122,6 @@ pub struct TestPlatformInner {
     domains: BTreeMap<DomainId, DomainEntry>,
     /// All updates applied since the last call to `drain_updates`
     pub applied_updates: Vec<Update>,
-    /// The "current core" returned by get_current_core().
-    /// Set via set_current_core() before VP-aware operations.
-    pub current_core: Option<CoreId>,
     /// VP register storage: (domain_id, vp_id, reg_id) → value
     pub registers: BTreeMap<(DomainId, u64, u64), u64>,
     /// Ordered log of `apply_update` / `on_domain_revoked` calls, in the
@@ -124,6 +195,17 @@ pub struct TestPlatform {
     /// `update_lock` above, never behind `inner`'s coarse mutex (see
     /// `Platform::switch_manager`'s doc comment for why).
     switch_manager: Arc<SwitchManager>,
+    /// If true, `new_semaphore()` returns a genuinely blocking
+    /// [`RealSemaphore`] instead of the sequential-test default
+    /// [`NoOpTestSemaphore`]. Opt-in via [`TestPlatform::new_with_real_semaphore`]
+    /// — every other constructor keeps the existing no-op behaviour so no
+    /// existing sequential test can be affected (and none can deadlock).
+    real_semaphore: bool,
+    /// Optional hook so multi-threaded tests can be notified when
+    /// `send_ipi` is called, to wake a background thread that simulates the
+    /// named core and drains its queue via the real `apply_core_updates`.
+    /// `None` (the default) makes `send_ipi` the same no-op it always was.
+    ipi_sender: Arc<parking_lot::Mutex<Option<Sender<CoreId>>>>,
 }
 
 /// Fixed core count for the test platform. Tests observed to use core IDs
@@ -137,6 +219,8 @@ impl Default for TestPlatform {
             inner: Arc::new(parking_lot::Mutex::new(TestPlatformInner::default())),
             update_lock: Arc::new(AtomicBool::new(false)),
             switch_manager: Arc::new(SwitchManager::new(TEST_PLATFORM_NUM_CORES)),
+            real_semaphore: false,
+            ipi_sender: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }
@@ -144,6 +228,29 @@ impl Default for TestPlatform {
 impl TestPlatform {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Like [`TestPlatform::new`], but `new_semaphore()` returns a real
+    /// blocking [`RealSemaphore`] instead of the default no-op. For tests
+    /// that drive the cross-core rendezvous protocol with actual background
+    /// threads (see [`TestPlatform::set_ipi_sender`]) to prove the
+    /// `switched`/`applied` permit counts introduced by the semaphore
+    /// rework are exactly right — a counting bug would hang or race here,
+    /// not just silently pass as it would under the no-op.
+    pub fn new_with_real_semaphore() -> Self {
+        TestPlatform {
+            real_semaphore: true,
+            ..Self::default()
+        }
+    }
+
+    /// Register a channel that receives the target `CoreId` every time
+    /// `send_ipi` is called. Used by multi-threaded tests to wake a
+    /// background thread standing in for that core, which then calls the
+    /// real `apply_core_updates(platform, core_id)` to drain its queue —
+    /// exactly what a real platform's IPI handler would do.
+    pub fn set_ipi_sender(&self, sender: Sender<CoreId>) {
+        *self.ipi_sender.lock() = Some(sender);
     }
 
     /// Consume all updates recorded since the last drain (useful in assertions).
@@ -183,9 +290,10 @@ impl TestPlatform {
         self.inner.lock().call_log.drain(..).collect()
     }
 
-    /// Set the "currently executing" core ID for VP-aware operations.
+    /// Set the "currently executing" core ID for VP-aware operations —
+    /// affects only the calling thread (see `CURRENT_CORE`).
     pub fn set_current_core(&self, core: Option<CoreId>) {
-        self.inner.lock().current_core = core;
+        CURRENT_CORE.with(|c| c.set(core));
     }
 }
 
@@ -202,11 +310,27 @@ impl Platform for TestPlatform {
         }))
     }
 
-    // IPIs are no-ops in the test platform. `new_semaphore` uses the
-    // default no-op impl (unused permit counts are harmless here — this
-    // platform is sequential, not truly concurrent; real cross-core
-    // rendezvous behaviour is validated by the loom/monitor platforms).
-    fn send_ipi(&self, _core_id: CoreId) {}
+    // IPIs are no-ops by default in the test platform (send_ipi only does
+    // something if a test registered a channel via `set_ipi_sender`).
+    // `new_semaphore` returns the real-vs-no-op choice made at construction
+    // (see `real_semaphore`); the no-op default (unused permit counts are
+    // harmless) is what every purely-sequential test still uses — real
+    // cross-core rendezvous behaviour with a genuine blocking semaphore is
+    // opt-in via `TestPlatform::new_with_real_semaphore`, additionally to
+    // the loom/monitor platforms.
+    fn send_ipi(&self, core_id: CoreId) {
+        if let Some(sender) = self.ipi_sender.lock().as_ref() {
+            let _ = sender.send(core_id);
+        }
+    }
+
+    fn new_semaphore(&self) -> Arc<dyn Semaphore> {
+        if self.real_semaphore {
+            Arc::new(RealSemaphore::new())
+        } else {
+            Arc::new(NoOpTestSemaphore)
+        }
+    }
 
     fn apply_update(&self, update: &Update) {
         let mut inner = self.inner.lock();
@@ -291,7 +415,7 @@ impl Platform for TestPlatform {
     }
 
     fn get_current_core(&self) -> Option<CoreId> {
-        self.inner.lock().current_core
+        CURRENT_CORE.with(|c| c.get())
     }
 
     // poll_and_respond_cross_core: default no-op is correct for TestPlatform

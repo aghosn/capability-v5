@@ -682,3 +682,240 @@ fn test_revoke_no_running_vp_no_pushes() {
         log,
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Real-concurrency rendezvous tests — genuine Semaphore, real threads.
+//
+// The tests above use `TestPlatform::new()` (the default `NoOpSemaphore`),
+// which validates *what* gets queued but never actually blocks, so it can
+// never catch a `switched`/`applied` permit-counting bug (see
+// `switched_events` in `platform.rs`'s `execute()`): a wrong count would
+// simply never be exercised. These tests use
+// `TestPlatform::new_with_real_semaphore()` plus real background threads
+// standing in for a remote core (driven by `send_ipi` via a channel, and
+// draining via the real, public `apply_core_updates` — not a hand-rolled
+// simulation) to prove the counting is exactly right, including the
+// specific scenario the barrier→semaphore rework was about: a single core
+// queued for *both* a `TlbShootdown` and a `Switch` for the same revoke.
+//
+// Every blocking wait below is bounded by a timeout and reported through a
+// channel rather than joined directly, so a counting regression that hangs
+// the initiator or the remote core fails the test with a clear message
+// instead of hanging the whole suite.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **T-real-dual** — remote core has a VP Running in the child being
+/// revoked, so it is queued for *both* a `TlbShootdown` (it's a rendezvous
+/// participant for the revoked domain) and a `Switch` (its Running VP must
+/// be forced off). `switched_events` must count both (2), the initiator's
+/// `revoke_domain` call must unblock only once the remote thread has
+/// released both via the real `apply_core_updates`, and the remote thread's
+/// two `applied.acquire(1)` calls must in turn be satisfied by the
+/// initiator's single `applied.release(switched_events)`.
+#[test]
+fn test_revoke_cross_core_dual_events_real_semaphore() {
+    const REMOTE_CORE: CoreId = 1;
+    const INIT_CORE: CoreId = 0;
+    let timeout = std::time::Duration::from_secs(10);
+
+    let platform = std::sync::Arc::new(TestPlatform::new_with_real_semaphore());
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+
+    // Remote core: seed root VP[REMOTE_CORE] as Running on REMOTE_CORE, then
+    // switch it into the child — after this, child.VP[0] is
+    // Running{core: REMOTE_CORE}, making REMOTE_CORE both a TlbShootdown
+    // rendezvous participant (it's `cores_running(child_id)`) and the
+    // target of a revoke-driven `Switch` (it has a Running VP in the
+    // subtree being revoked).
+    seed_running(&root, REMOTE_CORE as usize, REMOTE_CORE);
+    platform.set_current_core(Some(REMOTE_CORE));
+    let (child, child_h) = make_child(&platform, &root);
+    let child_id = child.read().data.id;
+    Capability::switch(&*platform, &root, child_h, 0).unwrap();
+    assert_eq!(platform.get_core_domain(REMOTE_CORE), Some(child_id));
+
+    // Wire up the IPI channel: `send_ipi(REMOTE_CORE)` (called by `execute()`
+    // right before it blocks on `switched.acquire`) notifies our background
+    // thread that it's time to act as REMOTE_CORE and drain its queue for
+    // real.
+    let (ipi_tx, ipi_rx) = std::sync::mpsc::channel::<CoreId>();
+    platform.set_ipi_sender(ipi_tx);
+
+    let remote_platform = std::sync::Arc::clone(&platform);
+    let remote = std::thread::spawn(move || -> Result<(), String> {
+        let core_id = ipi_rx
+            .recv_timeout(timeout)
+            .map_err(|e| format!("remote core never received its IPI: {e}"))?;
+        if core_id != REMOTE_CORE {
+            return Err(format!("unexpected IPI target: {core_id:?}"));
+        }
+        // `current_core` is thread-local (see `CURRENT_CORE` in
+        // `common/mod.rs`), so this only ever affects this thread's own
+        // view — it can't race with the initiator thread's `current_core`.
+        remote_platform.set_current_core(Some(REMOTE_CORE));
+        capability_engine::domain_api::apply_core_updates(&*remote_platform, REMOTE_CORE)
+            .map_err(|e| format!("apply_core_updates failed: {e:?}"))
+    });
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let init_platform = std::sync::Arc::clone(&platform);
+    std::thread::spawn(move || {
+        init_platform.set_current_core(Some(INIT_CORE));
+        let result =
+            capability_engine::Capability::<Domain>::revoke_domain(&*init_platform, &root, child_h)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"));
+        let _ = done_tx.send(result);
+    });
+
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("revoke_domain failed: {e}"),
+        Err(_) => panic!(
+            "revoke_domain did not complete within {timeout:?} — the initiator is stuck on \
+             switched.acquire/applied.release, most likely a switched_events permit-counting \
+             regression (expected exactly 2 events: one TlbShootdown participant release, one \
+             Switch release)"
+        ),
+    }
+
+    match remote.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("remote core failed to drain its queue: {e}"),
+        Err(_) => panic!("remote core thread panicked"),
+    }
+
+    // Both queued entries must be fully consumed: nothing left pending.
+    assert!(
+        platform
+            .switch_manager()
+            .get_core(REMOTE_CORE)
+            .unwrap()
+            .try_drain_updates()
+            .unwrap()
+            .is_empty(),
+        "remote core's queue should be fully drained after apply_core_updates"
+    );
+    // The remote core must have resolved its own resume target (root) as
+    // part of processing its `Switch` entry inside `apply_core_updates`.
+    assert_eq!(
+        platform.get_core_domain(REMOTE_CORE),
+        Some(root_id),
+        "remote core should have resumed root after draining its Switch entry"
+    );
+}
+
+/// **T-real-two-cores** — a second remote core (`REMOTE_CORE_2`) also has a
+/// VP Running in the same child being revoked (e.g. the child runs on two
+/// cores at once). `switched_events` must sum across *both* cores (4 total:
+/// one `TlbShootdown` + one `Switch` per core) — not just across event
+/// kinds on a single core, as in the test above. Both remote threads race
+/// to drain concurrently; the initiator must unblock only once every one of
+/// the 4 releases has happened.
+#[test]
+fn test_revoke_cross_core_two_participant_cores_real_semaphore() {
+    const REMOTE_CORE_1: CoreId = 1;
+    const REMOTE_CORE_2: CoreId = 2;
+    const INIT_CORE: CoreId = 0;
+    let timeout = std::time::Duration::from_secs(10);
+
+    let platform = std::sync::Arc::new(TestPlatform::new_with_real_semaphore());
+    let root = Capability::new_root(0, 0, Domain::new_root(4));
+    let root_id = root.read().data.id;
+    platform.register_domain(root_id, None);
+
+    // Seed both remote cores as Running root VPs, then switch each into the
+    // same child domain — after this, child.VP[0] and child.VP[1] are each
+    // Running on a different remote core.
+    seed_running(&root, REMOTE_CORE_1 as usize, REMOTE_CORE_1);
+    seed_running(&root, REMOTE_CORE_2 as usize, REMOTE_CORE_2);
+    platform.set_current_core(Some(REMOTE_CORE_1));
+    let (child, child_h) = make_child(&platform, &root);
+    let child_id = child.read().data.id;
+    Capability::switch(&*platform, &root, child_h, 0).unwrap();
+    platform.set_current_core(Some(REMOTE_CORE_2));
+    Capability::switch(&*platform, &root, child_h, 1).unwrap();
+    assert_eq!(platform.get_core_domain(REMOTE_CORE_1), Some(child_id));
+    assert_eq!(platform.get_core_domain(REMOTE_CORE_2), Some(child_id));
+
+    let (ipi_tx, ipi_rx) = std::sync::mpsc::channel::<CoreId>();
+    platform.set_ipi_sender(ipi_tx);
+
+    // Each remote core is drained by its own thread — genuinely concurrent
+    // with the other, and with the initiator's blocking `switched.acquire`
+    // below. This is safe now that `TestPlatform`'s `current_core` is
+    // thread-local (see `CURRENT_CORE` in `common/mod.rs`): each thread's
+    // `set_current_core` only affects its own view, so two cores' drains
+    // can't race on a shared field the way they would have with a single
+    // process-wide `current_core`. True concurrency here matters: draining
+    // the two cores sequentially would deadlock, since the initiator's
+    // `switched.acquire(4)` needs releases from BOTH cores before it can
+    // proceed to release `applied`, but a core's own `apply_core_updates`
+    // call doesn't return until it receives its `applied` permits — so the
+    // second core must be free to release its `switched` permits while the
+    // first is still blocked waiting on `applied`.
+    let remote_platform = std::sync::Arc::clone(&platform);
+    let dispatcher = std::thread::spawn(move || -> Result<(), String> {
+        let mut drainers = Vec::new();
+        for _ in 0..2 {
+            let core_id = ipi_rx
+                .recv_timeout(timeout)
+                .map_err(|e| format!("expected 2 IPIs, dispatcher stalled: {e}"))?;
+            let p = std::sync::Arc::clone(&remote_platform);
+            drainers.push(std::thread::spawn(move || -> Result<(), String> {
+                p.set_current_core(Some(core_id));
+                capability_engine::domain_api::apply_core_updates(&*p, core_id)
+                    .map_err(|e| format!("apply_core_updates({core_id:?}) failed: {e:?}"))
+            }));
+        }
+        for d in drainers {
+            d.join().map_err(|_| "drainer thread panicked".to_string())??;
+        }
+        Ok(())
+    });
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let init_platform = std::sync::Arc::clone(&platform);
+    std::thread::spawn(move || {
+        init_platform.set_current_core(Some(INIT_CORE));
+        let result =
+            capability_engine::Capability::<Domain>::revoke_domain(&*init_platform, &root, child_h)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"));
+        let _ = done_tx.send(result);
+    });
+
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("revoke_domain failed: {e}"),
+        Err(_) => panic!(
+            "revoke_domain did not complete within {timeout:?} — expected exactly 4 \
+             switched_events (2 cores x [TlbShootdown, Switch] each)"
+        ),
+    }
+    match dispatcher.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("remote cores failed to drain their queues: {e}"),
+        Err(_) => panic!("dispatcher thread panicked"),
+    }
+
+    for core in [REMOTE_CORE_1, REMOTE_CORE_2] {
+        assert!(
+            platform
+                .switch_manager()
+                .get_core(core)
+                .unwrap()
+                .try_drain_updates()
+                .unwrap()
+                .is_empty(),
+            "core {core:?}'s queue should be fully drained"
+        );
+        assert_eq!(
+            platform.get_core_domain(core),
+            Some(root_id),
+            "core {core:?} should have resumed root"
+        );
+    }
+}
