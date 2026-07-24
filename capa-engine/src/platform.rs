@@ -21,24 +21,36 @@
 //! # Cross-core atomicity (§5.2 of the paper)
 //!
 //! After the lock is acquired and the tree mutation runs, hardware state
-//! (EPT, TLB) is updated via a two-rendezvous IPI protocol, using a fresh
-//! pair of [`Barrier`]s ([`CoreSyncBarriers`], constructed per transaction
-//! by [`Platform::new_barrier`]) embedded directly into the per-core update
+//! (EPT, TLB) is updated via a two-phase IPI protocol, using a fresh pair of
+//! [`Semaphore`]s ([`CoreSyncPoints`], constructed per transaction by
+//! [`Platform::new_semaphore`]) embedded directly into the per-core update
 //! data each affected core drains — not a fixed set of global barrier slots:
 //!
 //! 1. Acquire shared or exclusive lock.
 //! 2. Run the pure tree mutation → collect `UpdateBatch`.
 //! 3. For each core running an affected domain, send an IPI.
-//! 4. **First rendezvous**: all affected cores have drained their queue and
-//!    switched off the doomed domain.
+//! 4. **`switched` phase**: the initiator blocks (`acquire`) until every
+//!    affected core has drained its queue and switched off the doomed
+//!    domain — each drained entry (`TlbShootdown` or `Switch`) is one
+//!    `release`, so a core with both queued contributes two.
 //! 5. Initiating core applies hardware updates (EPT changes, zero memory…).
-//! 6. **Second rendezvous**: affected cores resume and apply local state
-//!    (TLB flush…).
+//! 6. **`applied` phase**: the initiator releases the same `switched_events`
+//!    count of permits (non-blocking — it does not itself wait for cores to
+//!    resume), so each core's queued entry can `acquire(1)` — a core with
+//!    both a `TlbShootdown` and a `Switch` queued acquires twice.
 //! 7. `on_domain_revoked` is called for any revoked domains.
 //! 8. Lock is released.
 //!
 //! For operations whose affected domains are not currently running on any
 //! remote core ("local path"), steps 3-6 are skipped.
+//!
+//! Unlike a barrier, a [`Semaphore`] has no notion of participant count or
+//! generation: `release(n)` unconditionally adds `n` permits and never
+//! blocks; `acquire(n)` blocks until `n` cumulative permits are available,
+//! then consumes them. This maps directly onto "count of events that must
+//! occur before I may proceed" without the `participants == 0` vs `> 0`
+//! overloaded convention the previous `Barrier::wait` used to distinguish
+//! initiator from responder.
 //!
 //! # Memory lifecycle safety
 //!
@@ -62,37 +74,44 @@ use alloc::sync::Arc;
 /// operation — including the IPI/barrier phase and update application.
 pub trait OpLockGuard: Send {}
 
-/// A single rendezvous point: every participant calls `wait`, and all of
-/// them block until every one of them has arrived.
+/// A counting semaphore used for per-transaction cross-core rendezvous.
 ///
-/// The initiator calls `wait(participants)` with the total participant
-/// count (including itself), exactly once. Every other participant calls
-/// `wait(0)`, spinning until the initiator's count becomes visible.
-pub trait Barrier: Send + Sync {
-    fn wait(&self, participants: usize);
+/// `release(n)` adds `n` permits and never blocks. `acquire(n)` blocks the
+/// calling core until `n` permits are cumulatively available (across
+/// possibly many `release` calls, from possibly many callers), then
+/// consumes them. There is no "generation"/reuse concept — each transaction
+/// constructs a fresh instance via [`Platform::new_semaphore`], used exactly
+/// once, so there is nothing to reset.
+pub trait Semaphore: Send + Sync {
+    /// Block until `n` permits are available, then consume them. `n == 0`
+    /// returns immediately.
+    fn acquire(&self, n: usize);
+    /// Add `n` permits. Never blocks. `n == 0` is a no-op.
+    fn release(&self, n: usize);
 }
 
-/// No-op [`Barrier`] for platforms where the cross-core path is never
+/// No-op [`Semaphore`] for platforms where the cross-core path is never
 /// exercised (single-core simulators, tests).
-struct NoOpBarrier;
-impl Barrier for NoOpBarrier {
-    fn wait(&self, _participants: usize) {}
+struct NoOpSemaphore;
+impl Semaphore for NoOpSemaphore {
+    fn acquire(&self, _n: usize) {}
+    fn release(&self, _n: usize) {}
 }
 
 /// The two rendezvous points for one cross-core transaction: `switched`
 /// (every affected core has switched off the doomed domain) and `applied`
 /// (the initiator has finished applying updates, cores may resume).
 ///
-/// Constructed fresh per transaction via [`Platform::new_barrier`], then
+/// Constructed fresh per transaction via [`Platform::new_semaphore`], then
 /// embedded directly into the per-core update data each affected core
 /// already drains (see [`crate::platform::execute`]'s per-domain push loop)
 /// — so the initiator and every affected core consult the exact same
 /// objects, instead of independently-hardcoded barrier slots that only
 /// agree by convention.
 #[derive(Clone)]
-pub struct CoreSyncBarriers {
-    pub switched: Arc<dyn Barrier>,
-    pub applied: Arc<dyn Barrier>,
+pub struct CoreSyncPoints {
+    pub switched: Arc<dyn Semaphore>,
+    pub applied: Arc<dyn Semaphore>,
 }
 
 
@@ -122,32 +141,32 @@ pub trait Platform: Send + Sync {
     fn acquire_exclusive_lock(&self) -> Result<Box<dyn OpLockGuard>>;
 
     // -----------------------------------------------------------------------
-    // Cross-core synchronisation (two-barrier protocol)
+    // Cross-core synchronisation (two-phase semaphore protocol)
     // -----------------------------------------------------------------------
 
     /// Send a platform-specific IPI to preempt core `core_id`.
     ///
     /// The preempted core should trap into the monitor and drain its update
-    /// queue, then rendezvous on the transaction's [`CoreSyncBarriers`] (found
+    /// queue, then release the transaction's [`CoreSyncPoints`] (found
     /// embedded in the queue entries it just drained — see
     /// [`crate::platform::execute`]'s per-domain push loop).
-    /// Called once per affected core before the first rendezvous.
+    /// Called once per affected core before the `switched` phase.
     /// No-op for single-core or simulation platforms.
     fn send_ipi(&self, core_id: CoreId);
 
-    /// Construct one rendezvous point for a cross-core transaction.
+    /// Construct one fresh semaphore for a cross-core transaction.
     ///
     /// Called twice per cross-core transaction (once for `switched`, once
-    /// for `applied` — see [`CoreSyncBarriers`]), before any per-core
-    /// update is pushed, so the same `Arc`s can be cloned into every
-    /// affected core's queue entries (see [`crate::platform::execute`]'s
-    /// per-domain push loop) as well as kept by the initiator itself.
+    /// for `applied` — see [`CoreSyncPoints`]), before any per-core update
+    /// is pushed, so the same `Arc`s can be cloned into every affected
+    /// core's queue entries (see [`crate::platform::execute`]'s per-domain
+    /// push loop) as well as kept by the initiator itself.
     ///
-    /// **Default implementation** returns a no-op barrier, suitable for
+    /// **Default implementation** returns a no-op semaphore, suitable for
     /// single-core/simulation platforms where the cross-core path is never
     /// taken (no core is ever a rendezvous participant).
-    fn new_barrier(&self) -> Arc<dyn Barrier> {
-        Arc::new(NoOpBarrier)
+    fn new_semaphore(&self) -> Arc<dyn Semaphore> {
+        Arc::new(NoOpSemaphore)
     }
 
     // -----------------------------------------------------------------------
@@ -240,18 +259,23 @@ pub trait Platform: Send + Sync {
     // Domain lifecycle
     // -----------------------------------------------------------------------
 
-    /// Called after updates are applied when domain `domain_id` is revoked.
+    /// Called for each revoked domain, after the `switched` phase (all
+    /// affected cores have already drained their own `CoreUpdate::Switch`/
+    /// `TlbShootdown` entries and switched off `domain_id`) but before
+    /// [`Platform::apply_update`] tears down its hardware state.
     ///
-    /// The platform must:
-    /// 1. Redirect any core currently running `domain_id` to `fallback`
-    ///    (or set it idle if `fallback` is `None` and the domain has no parent).
-    /// 2. Unregister `domain_id` from its internal tracking structures.
-    ///
-    /// `fallback` is the first non-revoked ancestor domain ID, pre-computed by
-    /// the capability engine during `revoke_child_domain`. When revocation
-    /// originates from a **vital memory capability** (`Update::RevokeDomain`
-    /// with `fallback: None`), the platform must look up the parent from its
-    /// own domain-parent map (set via [`Platform::register_domain`]).
+    /// Core redirection is **not** this callback's job any more: any core
+    /// that was running `domain_id` already popped its own `call_stack` to
+    /// the first non-revoked ancestor via the `CoreUpdate::Switch` queued by
+    /// `execute` (see [`crate::domain_api::apply_core_updates`] /
+    /// `Capability::switch_after_callee_revoked`) — `fallback` is not
+    /// consulted for that purpose (the live call-stack walk always agrees
+    /// with it, per the engine's switch-locality invariant). Platforms with
+    /// no local bookkeeping to update (e.g. bare-metal capavisor) may
+    /// implement this as a no-op; platforms whose cross-core path cannot
+    /// otherwise reach a remote core (e.g. capa-cli's single-process
+    /// simulation, which must drain affected cores' queues inline here
+    /// since it has no real IPI delivery) use it as their hook to do so.
     fn on_domain_revoked(&self, domain_id: DomainId, fallback: Option<DomainId>);
 
     /// Register a newly-created domain with the platform.
@@ -417,11 +441,14 @@ pub trait Platform: Send + Sync {
 /// 4. **Synchronise** (cross-core path — only if affected domains are running
 ///    on remote cores):
 ///    - Send IPIs to preempt every affected core.
-///    - Rendezvous once every affected core has switched off (see
-///      [`CoreSyncBarriers::switched`]).
+///    - Block (`switched.acquire`) until every queued `TlbShootdown`/
+///      `Switch` entry has been drained and released — see
+///      [`CoreSyncPoints::switched`].
 ///    - Apply hardware updates (EPT, zero memory…).
-///    - Rendezvous once more so cores may resume (see
-///      [`CoreSyncBarriers::applied`]).
+///    - Release one `applied` permit per `switched`-phase event so each
+///      affected core may resume (same event count on both phases, so a
+///      core with two entries queued acquires two `applied` permits)
+///      (non-blocking — see [`CoreSyncPoints::applied`]).
 /// 5. **Local path**: if no remote cores are affected, apply updates directly.
 /// 6. **Revocations**: for each `RevokeDomain` update, call
 ///    [`Platform::on_domain_revoked`] so the platform can redirect cores.
@@ -456,27 +483,27 @@ where
         // Only one initiating core at a time runs the IPI/rendezvous/apply
         // sequence.  While spinning, we call poll_and_respond_cross_core()
         // so that if another core has already acquired this lock and sent us
-        // an IPI (waiting on its own transaction's barriers for our
-        // acknowledgement), we signal back before we proceed.  This breaks
+        // an IPI (waiting on its own transaction's semaphore for our
+        // release), we signal back before we proceed.  This breaks
         // the A↔B deadlock:
         //
-        //   A holds update_lock → sends IPI to B → waits on its barrier
-        //   B spins here → poll detects A's IPI → B rendezvous on A's barrier
+        //   A holds update_lock → sends IPI to B → waits on its semaphore
+        //   B spins here → poll detects A's IPI → B releases A's semaphore
         //   A applies updates → releases update_lock
         //   B acquires update_lock → runs its own IPI/rendezvous/apply
         while !platform.try_acquire_update_lock() {
             platform.poll_and_respond_cross_core();
         }
 
-        // This transaction's two rendezvous points — constructed once,
-        // before any per-core update is pushed, so the very same `Arc`s can
-        // be embedded into every affected core's queue entries below (see
+        // This transaction's two semaphores — constructed once, before any
+        // per-core update is pushed, so the very same `Arc`s can be
+        // embedded into every affected core's queue entries below (see
         // `domain_cores`/`push_core_switch`) as well as kept here by the
         // initiator. No global/fixed-size barrier state is involved: each
-        // barrier lives exactly as long as this transaction.
-        let sync = CoreSyncBarriers {
-            switched: platform.new_barrier(),
-            applied: platform.new_barrier(),
+        // semaphore lives exactly as long as this transaction.
+        let sync = CoreSyncPoints {
+            switched: platform.new_semaphore(),
+            applied: platform.new_semaphore(),
         };
 
         // Step 4/5 — determine affected cores and choose path.
@@ -487,14 +514,22 @@ where
         // in the past, not yet flushed) — both are scans of engine-owned
         // per-core state (see `SwitchManager::cores_running`/
         // `cores_with_cached`). The union of the two gets a `TlbShootdown`
-        // pushed, but only participants are rendezvous-counted and get
-        // `sync`. Queried inside the update lock so concurrent
-        // `on_domain_revoked` calls (also inside the lock) cannot race here.
-        // The current core (handling the hypercall) is excluded: it already
-        // stopped running guest code (VMEXIT) and will apply updates directly.
+        // pushed, but only participants are rendezvous-counted (contribute a
+        // `switched.release(1)` when drained) and get `sync`. Queried inside
+        // the update lock so concurrent `on_domain_revoked` calls (also
+        // inside the lock) cannot race here. The current core (handling the
+        // hypercall) is excluded: it already stopped running guest code
+        // (VMEXIT) and will apply updates directly.
         let current_core = platform.get_current_core();
         let switch_mgr = platform.switch_manager();
         let mut affected_cores: BTreeSet<CoreId> = BTreeSet::new();
+        // Total `switched`-phase releases the initiator must collect: one
+        // per queued `TlbShootdown`/`Switch` entry actually pushed to a
+        // rendezvous participant. A core with BOTH queued (it is currently
+        // running the doomed domain, and also has a stale cache entry from
+        // an unrelated earlier domain) contributes two releases, not one —
+        // counted here per-entry rather than per-core.
+        let mut switched_events: usize = 0;
         for &domain_id in batch.affected_domains() {
             let participants: BTreeSet<CoreId> = switch_mgr
                 .cores_running(domain_id)
@@ -510,12 +545,13 @@ where
                     // Local flush is performed inline by `apply_update`.
                     continue;
                 }
-                let entry_sync = if participants.contains(&c) {
-                    Some(sync.clone())
-                } else {
-                    None
-                };
                 if let Ok(core_ctx) = switch_mgr.get_core(c) {
+                    let entry_sync = if participants.contains(&c) {
+                        switched_events += 1;
+                        Some(sync.clone())
+                    } else {
+                        None
+                    };
                     core_ctx.push_update(CoreUpdate::TlbShootdown {
                         domain: domain_id,
                         handle,
@@ -535,12 +571,12 @@ where
         // Step 5a — push per-core switch orders BEFORE sending IPIs.
         // Under the Tyche-aligned
         // barrier protocol, target cores drain their per-core update queue
-        // BEFORE rendezvousing (that is what the first rendezvous attests
-        // to: "targets have switched off the doomed domain").  So every
-        // `CoreSwitch` that the initiator wants a target to observe must be
-        // enqueued happens-before the target's `send_ipi` here — otherwise
-        // the target drains an empty queue and rendezvouses with the target
-        // still bound to the doomed domain, breaking `apply_update`'s
+        // BEFORE releasing `switched` (that is what the `switched` phase
+        // attests to: "targets have switched off the doomed domain").  So
+        // every `CoreSwitch` that the initiator wants a target to observe
+        // must be enqueued happens-before the target's `send_ipi` here —
+        // otherwise the target drains an empty queue and releases with the
+        // target still bound to the doomed domain, breaking `apply_update`'s
         // "no live reference" precondition.
         let mut switched_cores = BTreeSet::new();
         for switch in batch.core_switches() {
@@ -556,6 +592,7 @@ where
                     source_vp: switch.source_vp,
                     sync: sync.clone(),
                 });
+                switched_events += 1;
             }
         }
 
@@ -564,13 +601,13 @@ where
             for &core_id in &affected_cores {
                 platform.send_ipi(core_id);
             }
-            // Rendezvous once all affected cores have drained their per-core
-            // update queue and switched off the doomed domain.
-            sync.switched.wait(affected_cores.len() + 1);
+            // Block until every queued entry above has been drained and
+            // released — one release per entry (see `switched_events`).
+            sync.switched.acquire(switched_events);
 
             // Step 5b — apply the global updates (EPT/IOMMU frees, etc.).
-            // Safe: every affected core is parked at the rendezvous above, no
-            // live reference to the doomed domain remains.
+            // Safe: every affected core has already drained/switched off
+            // above, no live reference to the doomed domain remains.
             for update in batch.updates() {
                 if let Update::RevokeDomain { domain, fallback } = update {
                     platform.on_domain_revoked(*domain, *fallback);
@@ -580,8 +617,20 @@ where
                 platform.apply_update(update);
             }
 
-            // Rendezvous once more to release cores to resume execution.
-            sync.applied.wait(affected_cores.len() + 1);
+            // Release one `applied` permit per `switched`-phase event above
+            // — the same count, so each core's `apply_core_updates` can
+            // consume exactly one `applied` permit per entry it drained,
+            // with no need to track distinct transactions by identity (a
+            // core with two entries for this transaction just calls
+            // `acquire(1)` twice, consuming two of these permits — see
+            // `apply_core_updates`). Non-blocking: unlike the old symmetric
+            // barrier, the initiator does not itself wait for cores to
+            // observe this before releasing the update lock below — a core
+            // that hasn't yet consumed its permit simply finds it already
+            // available whenever it next calls `acquire`, so there is
+            // nothing to gain by blocking here and it only added a needless
+            // rendezvous.
+            sync.applied.release(switched_events);
         } else {
             // Local path: no remote core is running an affected domain.
             for update in batch.updates() {

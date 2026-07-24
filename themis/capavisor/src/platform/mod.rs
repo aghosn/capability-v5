@@ -644,8 +644,8 @@ impl Platform for ThemisPlatform {
             .send_ipi(core_id, self.hhdm_offset.load(Ordering::Relaxed));
     }
 
-    fn new_barrier(&self) -> Arc<dyn capability_engine::Barrier> {
-        Arc::new(sync::Barrier::new())
+    fn new_semaphore(&self) -> Arc<dyn capability_engine::Semaphore> {
+        Arc::new(sync::Semaphore::new())
     }
 
     fn try_acquire_update_lock(&self) -> bool {

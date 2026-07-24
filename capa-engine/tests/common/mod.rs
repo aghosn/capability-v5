@@ -202,8 +202,8 @@ impl Platform for TestPlatform {
         }))
     }
 
-    // IPIs are no-ops in the test platform. `new_barrier` uses the
-    // default no-op impl (unused participant counts are harmless here — this
+    // IPIs are no-ops in the test platform. `new_semaphore` uses the
+    // default no-op impl (unused permit counts are harmless here — this
     // platform is sequential, not truly concurrent; real cross-core
     // rendezvous behaviour is validated by the loom/monitor platforms).
     fn send_ipi(&self, _core_id: CoreId) {}

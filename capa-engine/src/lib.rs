@@ -55,7 +55,7 @@ pub use interposition::{
     ProcFeature, ProcFeatureConfig, ProcFeaturePolicy,
 };
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
-pub use platform::{Barrier, CoreSyncBarriers, OpLockGuard, Platform};
+pub use platform::{CoreSyncPoints, OpLockGuard, Platform, Semaphore};
 
 /// Test-only shim that exposes the crate-internal `execute()` wrapper for
 /// integration tests to validate lock discipline and update dispatch

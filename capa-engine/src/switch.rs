@@ -3,7 +3,7 @@
 use crate::capability::CapabilityRef;
 use crate::domain::{Domain, InterruptVisibility, VpCallContext};
 use crate::error::{CapaError, Result};
-use crate::platform::CoreSyncBarriers;
+use crate::platform::CoreSyncPoints;
 use crate::sync::RwLock;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
@@ -36,7 +36,7 @@ pub enum CoreUpdate {
     TlbShootdown {
         domain: u64,
         handle: u64,
-        sync: Option<CoreSyncBarriers>,
+        sync: Option<CoreSyncPoints>,
     },
     /// Revoke-driven cross-core switch: the VP `source_vp` of `source_cap`
     /// running on this core is being torn down. The resume target is not
@@ -45,7 +45,7 @@ pub enum CoreUpdate {
     Switch {
         source_cap: CapabilityRef<Domain>,
         source_vp: u64,
-        sync: CoreSyncBarriers,
+        sync: CoreSyncPoints,
     },
 }
 

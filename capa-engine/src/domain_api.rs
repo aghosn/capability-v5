@@ -38,7 +38,7 @@ use crate::domain::{
 use crate::error::{CapaError, Result};
 use crate::interposition::{CpuidPolicy, CpuidResult, MsrPolicy, ProcFeaturePolicy};
 use crate::memory::{Access, Attributes, CommBinding, MemoryRegion, RegionKind, RegionStatus};
-use crate::platform::Platform;
+use crate::platform::{CoreSyncPoints, Platform};
 use crate::switch::{CoreUpdate, SwitchContext, VpInterruptContext};
 #[cfg(feature = "address_translation")]
 use crate::update::{CoreId, DomainId, Update, UpdateBatch};
@@ -3384,8 +3384,8 @@ impl Capability<Domain> {
 /// transaction, this core's own natural VMEXIT into the monitor, or a
 /// spin-wait for an operation lock (see [`Platform::poll_and_respond_cross_core`]).
 /// Whichever caller wins the race to drain a non-empty queue is the one that
-/// rendezvous on the batch's [`CoreSyncBarriers`] — this makes participation
-/// independent of *why* this core ended up here.
+/// releases the batch's [`CoreSyncPoints::switched`] semaphore — this makes
+/// participation independent of *why* this core ended up here.
 ///
 /// Non-blocking: if the queue is already being drained by a concurrent
 /// caller on this same core, returns immediately (`Ok(())`) — the other
@@ -3396,7 +3396,15 @@ pub fn apply_core_updates(platform: &dyn Platform, core_id: CoreId) -> Result<()
         return Ok(());
     };
 
-    let mut found_sync = None;
+    // One `CoreSyncPoints` clone per queued entry that carried a sync
+    // (duplicates allowed: a core with both a `TlbShootdown` and a `Switch`
+    // for the same transaction pushes the same `sync` twice here). The
+    // initiator releases `applied` using the identical event count it used
+    // for `switched` (see `execute`), so each pushed clone below corresponds
+    // to exactly one `applied` permit reserved for this core — no need to
+    // dedupe by `Arc` identity, just acquire once per entry.
+    let mut syncs: Vec<CoreSyncPoints> = Vec::new();
+
     for update in updates {
         match update {
             CoreUpdate::TlbShootdown { domain, handle, sync } => {
@@ -3404,21 +3412,28 @@ pub fn apply_core_updates(platform: &dyn Platform, core_id: CoreId) -> Result<()
                 // revoked by the initiator's `apply_update(RevokeDomain)`,
                 // but the hardware structures it pointed to remain valid
                 // until every affected core has flushed (the engine's
-                // second barrier enforces this before any teardown-freed
+                // `applied` phase enforces this before any teardown-freed
                 // memory is reused).
                 platform.flush_tlb(domain, handle, core_id);
                 core_ctx.clear_cached(domain);
                 if let Some(sync) = sync {
-                    found_sync = Some(sync);
+                    // One `release(1)` per queued entry, immediately as it
+                    // is drained — not deferred/batched — so a core with
+                    // both a `TlbShootdown` and a `Switch` queued for the
+                    // same transaction correctly contributes two releases
+                    // toward the initiator's `switched.acquire(n)`.
+                    sync.switched.release(1);
+                    syncs.push(sync);
                 }
             }
             CoreUpdate::Switch { source_cap, source_vp, sync } => {
                 // Revoke-driven cross-core switch: runs strictly before the
-                // first barrier, so this core has already switched off the
-                // doomed domain by the time the initiator's `apply_update`
-                // tears it down. The resume target is not carried by this
-                // update — it is resolved locally, from this core's own
-                // call stack (see `switch_after_callee_revoked`).
+                // `switched` phase releases, so this core has already
+                // switched off the doomed domain by the time the
+                // initiator's `apply_update` tears it down. The resume
+                // target is not carried by this update — it is resolved
+                // locally, from this core's own call stack (see
+                // `switch_after_callee_revoked`).
                 let source_id = source_cap.read().data.id;
                 let src = (source_id, source_vp);
                 debug_assert_eq!(
@@ -3434,14 +3449,20 @@ pub fn apply_core_updates(platform: &dyn Platform, core_id: CoreId) -> Result<()
                     .expect("revoke-return always names a target VP");
                 platform.apply_cross_core_switch(core_id, src, (target_id, target_vp));
 
-                found_sync = Some(sync);
+                sync.switched.release(1);
+                syncs.push(sync);
             }
         }
     }
 
-    if let Some(sync) = found_sync {
-        sync.switched.wait(0);
-        sync.applied.wait(0);
+    // Wait for the initiator to finish applying hardware updates before
+    // resuming — one `applied.acquire(1)` per entry drained above. The
+    // initiator releases `applied` using the same total event count it used
+    // for `switched`, so this exactly drains the permits this core is owed:
+    // one per entry, in any order, all before this core touches anything
+    // the initiator's `apply_update` phase may have torn down.
+    for sync in syncs {
+        sync.applied.acquire(1);
     }
     Ok(())
 }
