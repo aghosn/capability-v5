@@ -263,3 +263,106 @@ fn test_send_rejects_revoked_receiver() {
         "send must reject an already-revoked receiver domain"
     );
 }
+
+// ---------------------------------------------------------------------------
+// rewire-compute-memory-hash-on-send — HASH attribute is computed inline
+// ---------------------------------------------------------------------------
+//
+// `compute_memory_hash` used to be a standalone, caller-invoked API. It was
+// rewired to run automatically as part of `send`/`send_at` whenever the
+// capability carries `Attributes::HASH`, since a content hash only makes
+// sense as a snapshot taken at handoff time. `send_at`'s pre-flight also
+// requires the region be an Exclusive carve when HASH is requested — mirrors
+// the existing META-on-Exclusive-only validation.
+
+/// Sending an Exclusive carve with `Attributes::HASH` set via the unsealed
+/// (immediate-transfer) path must compute and store the content hash.
+#[test]
+fn test_send_unsealed_with_hash_computes_content_hash() {
+    let platform = common::TestPlatform::new();
+    let (root, r0_h) = setup_root();
+
+    let r1_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (r1_h, _, _) = Capability::carve(&platform, &root, r0_h, r1_access).unwrap();
+    let (_dom1, dom1_h) = make_unsealed_child(&root);
+    let dom1 = root.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
+
+    Capability::send(&platform, &root, r1_h, dom1_h, Attributes::from_bits(Attributes::HASH))
+        .unwrap();
+
+    let recv_cap = dom1
+        .read()
+        .data
+        .memory_capabilities
+        .values()
+        .next()
+        .unwrap()
+        .upgrade()
+        .unwrap();
+    assert_eq!(
+        recv_cap.read().data.content_hash,
+        Some([0u8; 32]),
+        "unsealed send with HASH must compute and store content_hash (TestPlatform's \
+         default measure_region returns all-zero)"
+    );
+}
+
+/// Sending an Exclusive carve with `Attributes::HASH` set via the sealed
+/// (pending-queue) path must compute and store the content hash immediately
+/// at send time, before the receiver ever calls `accept`.
+#[test]
+fn test_send_sealed_with_hash_computes_content_hash() {
+    let platform = common::TestPlatform::new();
+    let (root, r0_h) = setup_root();
+
+    let r1_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (r1_h, _, _) = Capability::carve(&platform, &root, r0_h, r1_access).unwrap();
+    let (_dom1, dom1_h) = make_unsealed_child(&root);
+    Capability::seal(&platform, &root, dom1_h).unwrap();
+
+    Capability::send(&platform, &root, r1_h, dom1_h, Attributes::from_bits(Attributes::HASH))
+        .unwrap();
+
+    // Caller's own handle is frozen (not removed) by a sealed send, so it
+    // still resolves to the same cap_ref whose content_hash was just set.
+    let cap_ref = root
+        .read()
+        .data
+        .get_memory_capability(r1_h)
+        .unwrap()
+        .upgrade()
+        .unwrap();
+    assert_eq!(
+        cap_ref.read().data.content_hash,
+        Some([0u8; 32]),
+        "sealed send with HASH must compute and store content_hash at send time, \
+         before accept"
+    );
+}
+
+/// `Attributes::HASH` on a non-Exclusive (aliased) region must be rejected,
+/// mirroring the existing META-on-Exclusive-only validation.
+#[test]
+fn test_send_hash_requires_exclusive_carve() {
+    let platform = common::TestPlatform::new();
+    let (root, r0_h) = setup_root();
+
+    let alias_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (alias_h, _, _) = Capability::alias(&platform, &root, r0_h, alias_access).unwrap();
+    let (_dom1, dom1_h) = make_unsealed_child(&root);
+
+    let result = Capability::send(
+        &platform,
+        &root,
+        alias_h,
+        dom1_h,
+        Attributes::from_bits(Attributes::HASH),
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::PermissionDenied,
+        "send with HASH on a non-Exclusive (aliased) region must be rejected"
+    );
+}

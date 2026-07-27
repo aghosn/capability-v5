@@ -388,9 +388,9 @@ pub trait Platform: Send + Sync {
     /// Measure the physical memory region `[address, address + size)` and
     /// return a cryptographic hash of its contents.
     ///
-    /// Called by [`Capability::compute_memory_hash`] to populate
-    /// `MemoryRegion::content_hash` for capabilities that carry the
-    /// [`Attributes::HASH`] flag.
+    /// Called internally when sending a memory capability that carries the
+    /// [`Attributes::HASH`] flag, to populate `MemoryRegion::content_hash`
+    /// (see `send_memory_sealed`/`send_memory_unsealed` in `domain_api.rs`).
     ///
     /// The hash algorithm is platform-defined. Returning a 32-byte value
     /// matches the SHA-256 / SHA3-256 conventions used by most attestation

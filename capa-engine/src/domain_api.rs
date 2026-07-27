@@ -433,6 +433,15 @@ impl Capability<Domain> {
                 if attrs.meta() && !c.children.is_empty() {
                     return Err(CapaError::PermissionDenied);
                 }
+                // Only exclusive (unbroken chain of carves) regions may carry
+                // HASH: the hash captures a stable content snapshot taken at
+                // send time, which is only well-defined for a region the
+                // caller exclusively owned up to this point (aliased regions
+                // can be mutated concurrently through other aliases, making
+                // "the content at send time" ill-defined).
+                if attrs.hash() && c.data.status != RegionStatus::Exclusive {
+                    return Err(CapaError::PermissionDenied);
+                }
             }
 
             // Materialize META → META|CLEAN|VITAL so that revoke_subtree's existing
@@ -447,9 +456,9 @@ impl Capability<Domain> {
             }
 
             let batch = if recv_sealed {
-                Self::send_memory_sealed(caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)?
+                Self::send_memory_sealed(platform, caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)?
             } else {
-                Self::send_memory_unsealed(caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)?
+                Self::send_memory_unsealed(platform, caller, cap, &receiver_ref, caller_id, attrs, _gpa_hint)?
             };
             Ok(((), batch))
         })
@@ -459,6 +468,7 @@ impl Capability<Domain> {
     /// Sealed send: freeze the caller's handle and enqueue in the receiver's pending table.
     /// No MMU updates are emitted — those are deferred to `accept`.
     fn send_memory_sealed(
+        platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
         receiver_ref: &CapabilityRef<Domain>,
@@ -514,6 +524,16 @@ impl Capability<Domain> {
         // freeze (concurrent send) never leaves attributes in an inconsistent state.
         cap_ref.write().owned.attributes = attrs;
 
+        // Compute and store the content hash inline at send time, before the
+        // receiver has any visibility into the region (sealed sends only
+        // expose it via the pending queue until `accept`). `send_at`'s
+        // pre-flight validated HASH is only set on an Exclusive carve.
+        // See `rewire-compute-memory-hash-on-send`: this replaces the old
+        // standalone caller-invoked `compute_memory_hash` API.
+        if attrs.hash() {
+            compute_and_store_memory_hash(platform, &cap_ref);
+        }
+
         let pending = PendingCapability {
             cap: Arc::downgrade(&cap_ref),
             sender_domain_id: caller_id,
@@ -532,6 +552,7 @@ impl Capability<Domain> {
     /// Acquires both domain write locks in domain-ID order (ABBA-safe).  The
     /// ownership change and view refresh happen atomically under both locks.
     fn send_memory_unsealed(
+        platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
         cap: LocalHandle,
         receiver_ref: &CapabilityRef<Domain>,
@@ -624,6 +645,15 @@ impl Capability<Domain> {
             c.owned.owner_domain = Some(Arc::downgrade(receiver_ref));
             (start, size)
         };
+
+        // Compute and store the content hash inline at send time, capturing
+        // the region's content as of this handoff. `send_at`'s pre-flight
+        // validated HASH is only set on an Exclusive carve. See
+        // `rewire-compute-memory-hash-on-send`: this replaces the old
+        // standalone caller-invoked `compute_memory_hash` API.
+        if attrs.hash() {
+            compute_and_store_memory_hash(platform, &cap_ref);
+        }
 
         recv_w
             .data
@@ -3460,56 +3490,31 @@ impl Capability<Domain> {
         })
     }
 
-    /// Compute a cryptographic hash of the physical memory backing a memory
-    /// capability and store it in the capability's `content_hash` field.
-    ///
-    /// Intended for capabilities carrying [`crate::memory::Attributes::HASH`].
-    /// The hash is computed by delegating to [`Platform::measure_region`], which
-    /// is free to use any algorithm (SHA-256, SHA3-256, …). The result is stored
-    /// as a 32-byte opaque array in [`MemoryRegion::content_hash`].
-    ///
-    /// # Errors
-    /// - [`CapaError::NotFound`] if the handle does not resolve to a memory capability.
-    /// - [`CapaError::PermissionDenied`] if the caller does not own the capability.
-    /// - [`CapaError::DomainRevoked`] if the caller has been revoked.
-    /// - [`CapaError::DomainNotSealed`] if the caller is not yet sealed.
-    /// - [`CapaError::ApiNotAllowed`] if the caller lacks `MonitorAPI::ATTEST`.
-    pub fn compute_memory_hash(
-        platform: &dyn Platform,
-        caller: &CapabilityRef<Domain>,
-        handle: LocalHandle,
-    ) -> Result<([u8; 32], UpdateBatch)> {
-        //TODO: figure out whether this will be internal rather than API-level call.
-        crate::platform::execute(platform, false, || {
-            // This function previously performed no caller-permission check at
-            // all (same class of gap as `add_vp`'s missing check, see
-            // `p8-require-api-inside-execute`).  Measuring/hashing memory
-            // content is an attestation-adjacent operation — gate it on
-            // `MonitorAPI::ATTEST`, matching `attest`/`attest_self`.
-            caller.read().data.require_api(MonitorAPI::ATTEST)?;
-            let caller_id = caller.read().data.id;
+}
 
-            let cap_weak = caller
-                .read()
-                .data
-                .get_memory_capability(handle)
-                .ok_or(CapaError::NotFound)?
-                .clone();
-            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-
-            let (address, size) = {
-                let cap_r = cap_ref.read();
-                if cap_r.owned.owner != caller_id {
-                    return Err(CapaError::PermissionDenied);
-                }
-                (cap_r.data.access.start, cap_r.data.access.size)
-            };
-
-            let hash = platform.measure_region(address, size);
-            cap_ref.write().data.content_hash = Some(hash);
-            Ok((hash, UpdateBatch::new()))
-        })
-    }
+/// Compute a cryptographic hash of the physical memory backing a memory
+/// capability and store it in the capability's `content_hash` field.
+///
+/// Internal helper only — not a caller-invoked API. Called inline from
+/// `send_memory_sealed`/`send_memory_unsealed` for capabilities carrying
+/// [`crate::memory::Attributes::HASH`] (validated by `send_at`'s pre-flight
+/// to be an Exclusive carve before either function is reached). The hash is
+/// computed by delegating to [`Platform::measure_region`], which is free to
+/// use any algorithm (SHA-256, SHA3-256, …). The result is stored as a
+/// 32-byte opaque array in [`MemoryRegion::content_hash`].
+///
+/// Previously this was a standalone, publicly-callable `compute_memory_hash`
+/// API gated on `MonitorAPI::ATTEST`. It was rewired to run automatically as
+/// part of `send` instead — see `rewire-compute-memory-hash-on-send` — since
+/// hashing only makes sense as a snapshot taken at handoff time, not as an
+/// arbitrary caller-invoked operation.
+fn compute_and_store_memory_hash(platform: &dyn Platform, cap_ref: &CapabilityRef<MemoryRegion>) {
+    let (address, size) = {
+        let cap_r = cap_ref.read();
+        (cap_r.data.access.start, cap_r.data.access.size)
+    };
+    let hash = platform.measure_region(address, size);
+    cap_ref.write().data.content_hash = Some(hash);
 }
 
 /// Drain and apply this core's own queued [`CoreUpdate`]s.
