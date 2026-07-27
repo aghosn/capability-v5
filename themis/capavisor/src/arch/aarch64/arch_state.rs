@@ -116,11 +116,11 @@ pub fn flush_tlb_handle(_handle: u64) {
 }
 
 /// Cross-core revoke-return handler (AArch64 stub).
-pub unsafe fn apply_cross_core_switch(
+pub unsafe fn complete_revoke_switch(
     _platform: &crate::platform::ThemisPlatform,
     _core_id: capability_engine::CoreId,
     _src: (capability_engine::DomainId, usize),
     _dst: (capability_engine::DomainId, usize),
 ) {
-    unimplemented!("apply_cross_core_switch: aarch64 backend not yet implemented")
+    unimplemented!("complete_revoke_switch: aarch64 backend not yet implemented")
 }

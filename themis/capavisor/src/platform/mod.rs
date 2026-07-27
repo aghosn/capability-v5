@@ -394,6 +394,14 @@ impl ThemisPlatform {
     /// monitor-loop stack that will remain live and unmoved for the rest
     /// of the core's execution.  Only the owning core will dereference it,
     /// and only between VMEXITs.
+    ///
+    /// Does not overlap with `VcpuSlot::take`/`put`: this pointer identifies
+    /// *which stack slot* `monitor_loop` currently reads/writes into on this
+    /// core (fixed for the core's whole lifetime, never cleared), whereas
+    /// `VcpuSlot` tracks *which VP's* `InactiveVcpu` is checked in/out of a
+    /// per-VP slot (changes on every cross-domain switch). `swap_active_vp`
+    /// uses both: it `take`/`put`s VP-level slots while VMCLEAR/VMPTRLD-ing
+    /// the contents pointed to by this same pinned `active_vcpu` pointer.
     pub fn pin_active_vcpu(&self, core_id: CoreId, ptr: *mut u8) {
         self.cores[core_id as usize]
             .active_vcpu
@@ -883,16 +891,16 @@ impl Platform for ThemisPlatform {
         crate::arch::flush_tlb_handle(handle);
     }
 
-    fn apply_cross_core_switch(&self, core_id: CoreId, src: (DomainId, u64), dst: (DomainId, u64)) {
+    fn complete_revoke_switch(&self, core_id: CoreId, src: (DomainId, u64), dst: (DomainId, u64)) {
         // SAFETY: called by `capability_engine::domain_api::apply_core_updates`
         // strictly on the affected core itself (this platform never invokes
         // it cross-core), after the engine has already resolved and
         // committed the new `SwitchManager` binding — matching
-        // `apply_cross_core_switch`'s (arch) documented precondition. The
+        // `complete_revoke_switch`'s (arch) documented precondition. The
         // pinned `active_vcpu` pointer for `core_id` is valid because we are
         // running on `core_id`.
         unsafe {
-            crate::arch::apply_cross_core_switch(
+            crate::arch::complete_revoke_switch(
                 self,
                 core_id,
                 (src.0, src.1 as usize),

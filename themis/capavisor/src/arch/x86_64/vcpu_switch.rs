@@ -103,7 +103,7 @@ pub(crate) unsafe fn swap_active_vp(
 /// # Safety
 /// The pinned `active_vcpu` pointer for `core_id` must reference a valid
 /// `ActiveVcpu` on this core's monitor-loop stack.
-pub(crate) unsafe fn apply_cross_core_switch(
+pub(crate) unsafe fn complete_revoke_switch(
     platform: &ThemisPlatform,
     core_id: capability_engine::CoreId,
     src: (DomainId, usize),

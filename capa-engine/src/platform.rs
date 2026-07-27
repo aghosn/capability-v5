@@ -320,7 +320,7 @@ pub trait Platform: Send + Sync {
     /// already resolved and committed the new binding.
     ///
     /// **Default implementation** is a no-op.
-    fn apply_cross_core_switch(&self, _core_id: CoreId, _src: (DomainId, u64), _dst: (DomainId, u64)) {}
+    fn complete_revoke_switch(&self, _core_id: CoreId, _src: (DomainId, u64), _dst: (DomainId, u64)) {}
 
     // -----------------------------------------------------------------------
     // Virtual processor tracking

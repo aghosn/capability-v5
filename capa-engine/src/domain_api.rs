@@ -3595,7 +3595,7 @@ pub fn apply_core_updates(platform: &dyn Platform, core_id: CoreId) -> Result<()
                 let target_vp = switch_ctx
                     .to_vp_id
                     .expect("revoke-return always names a target VP");
-                platform.apply_cross_core_switch(core_id, src, (target_id, target_vp));
+                platform.complete_revoke_switch(core_id, src, (target_id, target_vp));
 
                 sync.switched.release(1);
                 syncs.push(sync);

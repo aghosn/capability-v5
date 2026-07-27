@@ -369,6 +369,18 @@ pub enum VpRunState {
         /// The interrupt vector that caused the callee chain to be suspended.
         vector: u8,
         /// Whether this frame must observe the interrupt on descent.
+        ///
+        /// A **frozen snapshot** of `InterruptPolicy::get_policy(vector).visibility
+        /// == Report`, taken at delivery time (see `deliver_interrupt_vp` in
+        /// `domain_api.rs`) — not re-derived from the domain's current policy
+        /// when the resume chain is later walked by `switch`. This is
+        /// intentional: re-deriving live would let a policy change made
+        /// while this interrupt is in flight retroactively alter whether an
+        /// already-suspended frame observes it, which would make the
+        /// resume-chain walk depend on state that changed after the
+        /// interrupt context was fixed. Freezing at delivery keeps the
+        /// resume outcome deterministic and tied to the policy that was
+        /// actually in effect when the interrupt happened.
         report: bool,
     },
     /// VP was Running when an interrupt fired and preempted it.
@@ -381,6 +393,9 @@ pub enum VpRunState {
         /// The exact caller that owns the interrupted execution context.
         caller: Option<VpCallContext>,
         /// Whether this leaf must observe the interrupt on resume.
+        ///
+        /// Same frozen-at-delivery-time semantics as `Suspended::report` —
+        /// see that field's doc for the rationale.
         report: bool,
     },
 }

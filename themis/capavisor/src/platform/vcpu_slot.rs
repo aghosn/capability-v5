@@ -120,7 +120,7 @@ pub struct CoreContext {
     /// (i.e. while no `&mut ActiveVcpu` is otherwise live in the arch code),
     /// so no aliasing violation.
     ///
-    /// Used by `Platform::apply_cross_core_switch` to reach the vcpu for a
+    /// Used by `Platform::complete_revoke_switch` to reach the vcpu for a
     /// revoke-driven VMCLEAR/VMPTRLD.  Opaque `u8` here to keep
     /// `CoreContext` arch-neutral; consumers on x86 cast to
     /// `*mut crate::vcpu::ActiveVcpu`.
