@@ -14,6 +14,9 @@
 //! 11. seal on a channel handle is rejected (ApiNotAllowed)
 //! 12. revoke_domain on a channel handle is rejected (NotFound — channel is not a CDT child of caller)
 //! 13. switch using a channel handle as target is rejected (DomainNotSealed — sentinel has no VPs)
+//! 14. accept_channel rejects a pending transfer whose sender has been revoked
+//! 15. accept_channel rejects a stale-revoked receiver (caller) itself
+//! 16. reject_channel rejects a stale-revoked receiver (caller) itself
 
 use capability_engine::*;
 use parking_lot::RwLock;
@@ -455,4 +458,135 @@ fn test_switch_to_channel_rejected() {
         result
     );
     let _ = target;
+}
+
+// ── Test 14: accept_channel rejects an already-revoked sender ───────────────
+//
+// `sender_domain` in a `PendingDomainCapability` is a `Weak<Domain>` captured
+// at `send_channel` time.  If the sender is later revoked by its own
+// (unrelated) parent while the pending entry still sits in the receiver's
+// queue, `accept_channel` must reject the stale transfer rather than
+// silently completing it.  Mirrors `accept_at`'s existing revoked-sender
+// guard.  Covers the `accept_channel` fix for
+// `p8-check-operand-domains-not-revoked`.
+#[test]
+fn test_accept_channel_rejects_revoked_sender() {
+    let platform = common::TestPlatform::new();
+    let root = root_domain();
+
+    // Target: the domain the channel will point at (irrelevant to this test
+    // beyond being a valid get_chan target).
+    let (_target, target_h) = sealed_child(&root);
+    let chan_h = Capability::get_chan(&platform, &root, target_h).unwrap().0;
+
+    // Sender: will hold and forward the channel, then get revoked.
+    let (sender, sender_h) = sealed_child(&root);
+    root.write()
+        .data
+        .add_domain_capability(sender_h, Arc::downgrade(&sender));
+    Capability::<Domain>::send_channel(&platform, &root, chan_h, sender_h, Attributes::NONE)
+        .unwrap();
+    let pending_id_1 = *sender
+        .read()
+        .data
+        .get_pending_domain_ids()
+        .first()
+        .unwrap();
+    let chan_h2 = Capability::<Domain>::accept_channel(&platform, &sender, pending_id_1)
+        .unwrap()
+        .0;
+
+    // Receiver: final recipient. sender doesn't naturally have a handle to
+    // it (only its own creator would), so register it directly in sender's
+    // table for test topology purposes — mirrors the existing
+    // `add_domain_capability` scaffolding pattern used elsewhere in this file.
+    let (receiver, receiver_h) = sealed_child(&root);
+    sender
+        .write()
+        .data
+        .add_domain_capability(receiver_h, Arc::downgrade(&receiver));
+
+    Capability::<Domain>::send_channel(&platform, &sender, chan_h2, receiver_h, Attributes::NONE)
+        .unwrap();
+    let pending_id_2 = *receiver
+        .read()
+        .data
+        .get_pending_domain_ids()
+        .first()
+        .unwrap();
+
+    // Root (sender's own parent) revokes sender — a normal, natural revoke,
+    // unrelated to the receiver's pending queue.
+    Capability::<Domain>::revoke_domain(&platform, &root, sender_h).unwrap();
+
+    // Receiver attempts to accept the now-stale pending transfer.
+    let result = Capability::<Domain>::accept_channel(&platform, &receiver, pending_id_2);
+    assert!(
+        matches!(result, Err(CapaError::PermissionDenied)),
+        "accept_channel must reject a transfer whose sender has been revoked, got {:?}",
+        result
+    );
+}
+
+// ── Test 15: accept_channel rejects a stale-revoked receiver ────────────────
+//
+// Mirrors `reject()`'s existing stale-caller guard: `accept_channel`
+// previously only checked the *sender* for revocation, never the receiver
+// (caller) itself, even though the receiver's `CapabilityRef` may have been
+// resolved before a concurrent revoke completed (e.g. via capavisor's
+// `PlatformCore::domain_cap` at hypercall entry, before `execute()`'s lock
+// is acquired).
+#[test]
+fn test_accept_channel_rejects_revoked_receiver() {
+    let platform = common::TestPlatform::new();
+    let root = root_domain();
+    let (_target, target_h) = sealed_child(&root);
+    let chan_h = Capability::get_chan(&platform, &root, target_h).unwrap().0;
+
+    let (receiver, receiver_h) = sealed_child(&root);
+    root.write()
+        .data
+        .add_domain_capability(receiver_h, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_channel(&platform, &root, chan_h, receiver_h, Attributes::NONE)
+        .unwrap();
+    let pending_id = receiver.read().data.get_pending_domain_ids()[0];
+
+    // Simulate a concurrent revoke of the receiver completing between the
+    // caller resolving its own `Arc<Domain>` and `accept_channel` acquiring
+    // the engine lock.
+    receiver.write().data.revoke();
+
+    let result = Capability::<Domain>::accept_channel(&platform, &receiver, pending_id);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "accept_channel must reject an already-revoked receiver (stale-caller guard)"
+    );
+}
+
+// ── Test 16: reject_channel rejects a stale-revoked receiver ────────────────
+
+#[test]
+fn test_reject_channel_rejects_revoked_receiver() {
+    let platform = common::TestPlatform::new();
+    let root = root_domain();
+    let (_target, target_h) = sealed_child(&root);
+    let chan_h = Capability::get_chan(&platform, &root, target_h).unwrap().0;
+
+    let (receiver, receiver_h) = sealed_child(&root);
+    root.write()
+        .data
+        .add_domain_capability(receiver_h, Arc::downgrade(&receiver));
+    Capability::<Domain>::send_channel(&platform, &root, chan_h, receiver_h, Attributes::NONE)
+        .unwrap();
+    let pending_id = receiver.read().data.get_pending_domain_ids()[0];
+
+    receiver.write().data.revoke();
+
+    let result = Capability::<Domain>::reject_channel(&platform, &receiver, pending_id);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "reject_channel must reject an already-revoked receiver (stale-caller guard)"
+    );
 }

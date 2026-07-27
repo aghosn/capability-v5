@@ -581,3 +581,156 @@ fn test_comm_child_revocation_releases_bindings() {
     }).count();
     assert_eq!(uncomm_count, 2, "must emit UncommRegion for each released COMM binding");
 }
+
+// ── 19. add_vp requires caller SET API (p8-require-api-inside-execute) ──────
+
+/// `Capability::add_vp` previously performed no caller-permission check at
+/// all.  A caller lacking `SET` (but otherwise holding valid COMM-cap and
+/// child-domain handles) must now be rejected with `ApiNotAllowed`, matching
+/// `register_comm`'s established gating.
+#[test]
+fn test_add_vp_requires_set_api() {
+    let platform = common::TestPlatform::new();
+    // ALL minus SET.
+    let api_no_set = MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::SET);
+    let policy = DomainPolicy::new_restricted(0b1111, api_no_set);
+    let mut domain = Domain::new(policy);
+    domain.seal().unwrap();
+    let parent = Capability::new_root(0, 0, domain);
+    let _root = register_root_mem(&parent, 1);
+
+    // Child API must be a subset of parent's (monotonicity).
+    let (child_dh, _) =
+        Capability::create(&platform, &parent, DomainPolicy::new_restricted(0b1111, api_no_set))
+            .unwrap();
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&platform, &parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    let result = Capability::<Domain>::add_vp(&platform, &parent, child_dh, carved_h);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::ApiNotAllowed,
+        "add_vp without SET API must fail with ApiNotAllowed"
+    );
+}
+
+/// Happy-path sanity check: `add_vp` with a properly-authorized caller still
+/// succeeds (guards against the permission-check fix being over-broad).
+#[test]
+fn test_add_vp_happy_path() {
+    let platform = common::TestPlatform::new();
+    let (parent, _child, child_dh, _root) = setup_parent_child();
+
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&platform, &parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    let result = Capability::<Domain>::add_vp(&platform, &parent, child_dh, carved_h);
+    assert!(result.is_ok(), "add_vp with a properly-authorized caller must succeed: {:?}", result.err());
+}
+
+// ── 20. Operand-domain revoked checks (defense-in-depth) ────────────────────
+//
+// `register_comm` and `register_access_check` (backing `get_register`/
+// `set_register`) resolve their `child_ref` operand through a plain domain
+// handle in the caller's own table.  Because `revoke_domain` always cleans
+// the calling parent's own table entry as part of the same call, a caller
+// can never *naturally* observe its own direct child handle still resolving
+// to a domain it just revoked — these checks are defense-in-depth against
+// future code paths, not directly reachable via today's public API surface.
+// These tests construct the operand-revoked state directly (via the public
+// `Domain::revoke()` method, matching the existing manual-state-construction
+// precedent used above for the unsealed-caller test) to verify the guards
+// added for `p8-check-operand-domains-not-revoked` actually reject the
+// operation, rather than merely existing as unreachable dead code.
+
+/// `register_comm` must reject a child domain that has been revoked, even
+/// though the caller still holds a (stale) resolvable handle to it.
+#[test]
+fn test_register_comm_rejects_revoked_child() {
+    let platform = common::TestPlatform::new();
+    let (parent, child, child_dh, _root) = setup_parent_child();
+
+    let (carved_h, _, _) =
+        Capability::<Domain>::carve(&platform, &parent, 1, Access::new(0x0, 0x1000, Rights::RW)).unwrap();
+
+    // Directly mark the child as revoked without going through
+    // `revoke_domain` (which would also clear parent's table entry).
+    child.write().data.revoke();
+
+    let result = Capability::<Domain>::register_comm(&platform, &parent, carved_h, child_dh, 0);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "register_comm must reject an already-revoked child domain"
+    );
+}
+
+/// `get_register`/`set_register` (via `register_access_check`) must reject a
+/// child domain that has been revoked, even though the caller still holds a
+/// (stale) resolvable handle to it.
+#[test]
+fn test_get_set_register_rejects_revoked_child() {
+    let platform = common::TestPlatform::new();
+    let (parent, child, child_dh, _root) = setup_parent_child();
+    child.write().data.add_vprocessor().unwrap();
+
+    child.write().data.revoke();
+
+    let set_result = Capability::<Domain>::set_register(&platform, &parent, child_dh, 0, 0, 0xCAFE);
+    assert_eq!(
+        set_result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "set_register must reject an already-revoked child domain"
+    );
+    let get_result = Capability::<Domain>::get_register(&platform, &parent, child_dh, 0, 0);
+    assert_eq!(
+        get_result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "get_register must reject an already-revoked child domain"
+    );
+}
+
+// ── 21. `compute_memory_hash` caller-permission check ──────────────────────
+//
+// `compute_memory_hash` previously performed no caller-permission check at
+// all (same bug class as `add_vp`'s originally-missing `require_api(SET)`
+// check, see `p8-require-api-inside-execute`). It is currently dead code
+// (never called from capavisor/capa-cli/tests) but was fixed anyway as
+// forward-looking defense-in-depth, gated on `MonitorAPI::ATTEST` to match
+// `attest`/`attest_self`'s existing gating.
+
+/// `compute_memory_hash` must reject a caller lacking `MonitorAPI::ATTEST`.
+#[test]
+fn test_compute_memory_hash_requires_attest_api() {
+    let platform = common::TestPlatform::new();
+    // ALL minus ATTEST.
+    let api_no_attest = MonitorAPI::from_bits(MonitorAPI::ALL.bits() & !MonitorAPI::ATTEST);
+    let policy = DomainPolicy::new_restricted(0b1111, api_no_attest);
+    let mut domain = Domain::new(policy);
+    domain.seal().unwrap();
+    let caller = Capability::new_root(0, 0, domain);
+    let _root = register_root_mem(&caller, 1);
+
+    let result = Capability::<Domain>::compute_memory_hash(&platform, &caller, 1);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::ApiNotAllowed,
+        "compute_memory_hash without ATTEST API must fail with ApiNotAllowed"
+    );
+}
+
+/// Happy-path sanity check: `compute_memory_hash` with a properly-authorized
+/// caller still succeeds (guards against the permission-check fix being
+/// over-broad) and sets the region's `content_hash`.
+#[test]
+fn test_compute_memory_hash_happy_path() {
+    let platform = common::TestPlatform::new();
+    let caller = make_domain();
+    let root = register_root_mem(&caller, 1);
+
+    let result = Capability::<Domain>::compute_memory_hash(&platform, &caller, 1);
+    assert!(result.is_ok(), "compute_memory_hash with a properly-authorized caller must succeed: {:?}", result.err());
+    let (hash, _batch) = result.unwrap();
+    assert_eq!(hash, [0u8; 32], "TestPlatform's default measure_region returns all-zero hash");
+    assert_eq!(root.read().data.content_hash, Some(hash));
+}

@@ -201,3 +201,65 @@ fn a1c_send_received_capability_always_emits_unmap() {
         .any(|u| matches!(u, Update::ChangeRights { domain, shootdown_required: false, .. } if *domain == dom3_id));
     assert!(has_map, "send must emit Map for the receiver");
 }
+
+// ---------------------------------------------------------------------------
+// p8-check-operand-domains-not-revoked — send() must reject a revoked receiver
+// ---------------------------------------------------------------------------
+
+/// `send`/`send_at` only ever checked the CALLER's permissions; the receiver
+/// operand domain was never checked for `is_revoked()` before its capability
+/// tables were mutated.  In practice a caller can't observe its own direct
+/// child handle still resolving to a domain it just revoked (`revoke_domain`
+/// always cleans the calling parent's own table entry as part of the same
+/// call — see `test_comm_child_revocation_releases_bindings` and friends),
+/// so this is defense-in-depth rather than reachable via a single natural
+/// call sequence.  This test constructs the operand-revoked state directly
+/// (via the public `Domain::revoke()` method, bypassing `revoke_domain` so
+/// the caller's own table entry deliberately stays stale/resolvable) to
+/// verify the `send_memory_unsealed` guard added for
+/// `p8-check-operand-domains-not-revoked` actually rejects the transfer.
+#[test]
+fn test_send_rejects_revoked_receiver() {
+    let platform = common::TestPlatform::new();
+    let (root, r0_h) = setup_root();
+
+    // root carves r1 from r0 and sends it to dom1 (unsealed receiver — immediate
+    // transfer), so dom1 ends up owning a memory capability directly.
+    let r1_access = Access::new(0x1000, 0x1000, Rights::RW);
+    let (r1_h, _, _) = Capability::carve(&platform, &root, r0_h, r1_access).unwrap();
+    let (_dom1, dom1_h) = make_unsealed_child(&root);
+    let dom1 = root.read().data.domain_capabilities[&dom1_h]
+        .upgrade()
+        .unwrap();
+    Capability::send(&platform, &root, r1_h, dom1_h, Attributes::NONE).unwrap();
+    let r1_h_in_dom1 = *dom1.read().data.memory_capabilities.keys().next().unwrap();
+
+    // Seal dom1 so it can CREATE (require_api needs a sealed caller).
+    Capability::seal(&platform, &root, dom1_h).unwrap();
+
+    // dom1 creates dom3 as its own child (an unsealed receiver — revoked
+    // status is orthogonal to sealed status, so the unsealed branch is what
+    // the fix guards).
+    let dom3_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
+    let dom3_h_in_dom1 = Capability::create(&platform, &dom1, dom3_policy).unwrap().0;
+    let dom3 = dom1.read().data.domain_capabilities[&dom3_h_in_dom1]
+        .upgrade()
+        .unwrap();
+
+    // Directly mark dom3 as revoked without going through `revoke_domain`
+    // (which would also clear dom1's table entry for it).
+    dom3.write().data.revoke();
+
+    let result = Capability::send(
+        &platform,
+        &dom1,
+        r1_h_in_dom1,
+        dom3_h_in_dom1,
+        Attributes::NONE,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "send must reject an already-revoked receiver domain"
+    );
+}

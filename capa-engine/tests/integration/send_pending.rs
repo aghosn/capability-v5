@@ -471,3 +471,72 @@ fn send_sealed_success_applies_attrs() {
         "attributes must be applied on a successful sealed send"
     );
 }
+
+// ── Test 8 — accept_at rejects a stale-revoked receiver (stale-caller guard) ─
+
+/// `reject()` has an explicit "stale-caller guard": the `receiver` argument
+/// is typically resolved (e.g. by capavisor's `PlatformCore::domain_cap`)
+/// BEFORE entering `execute()`'s lock, so a concurrent revoke can complete
+/// in between resolution and the call actually running.  `reject()` guards
+/// against this by checking `receiver.is_revoked()` first thing inside
+/// `execute()`.  `accept_at` (and therefore `accept`) previously had no such
+/// guard: only the *sender* was checked for revocation, never the receiver
+/// itself.  This simulates the race by revoking the receiver directly (via
+/// `Domain::revoke()`, bypassing `revoke_domain` — matching how a genuine
+/// concurrent revoke would leave the caller's own already-resolved `Arc`
+/// pointing at a domain that flips to `Revoked` between resolution and lock
+/// acquisition) and confirms `accept_at` now rejects it.
+#[test]
+fn accept_rejects_revoked_receiver() {
+    let platform = common::TestPlatform::new();
+    let sender = make_sealed_domain();
+    let receiver = make_sealed_domain();
+    let _mem = register_root_mem(&sender, 1);
+
+    sender
+        .write()
+        .data
+        .add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send(&platform, &sender, 1, 1, Attributes::NONE).unwrap();
+    let pending_id = receiver.read().data.get_pending_ids()[0];
+
+    // Simulate a concurrent revoke of the receiver completing between the
+    // caller resolving its own `Arc<Domain>` and `accept_at` acquiring the
+    // engine lock.
+    receiver.write().data.revoke();
+
+    let result = Capability::<Domain>::accept(&platform, &receiver, pending_id);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "accept must reject an already-revoked receiver (stale-caller guard)"
+    );
+}
+
+// ── Test 9 — reject rejects a stale-revoked receiver (regression guard) ─────
+
+/// Sanity check for `reject()`'s existing stale-caller guard (previously
+/// untested at the API level).
+#[test]
+fn reject_rejects_revoked_receiver() {
+    let platform = common::TestPlatform::new();
+    let sender = make_sealed_domain();
+    let receiver = make_sealed_domain();
+    let _mem = register_root_mem(&sender, 1);
+
+    sender
+        .write()
+        .data
+        .add_domain_capability(1, Arc::downgrade(&receiver));
+    Capability::<Domain>::send(&platform, &sender, 1, 1, Attributes::NONE).unwrap();
+    let pending_id = receiver.read().data.get_pending_ids()[0];
+
+    receiver.write().data.revoke();
+
+    let result = Capability::<Domain>::reject(&platform, &receiver, pending_id);
+    assert_eq!(
+        result.unwrap_err(),
+        CapaError::DomainRevoked,
+        "reject must reject an already-revoked receiver (stale-caller guard)"
+    );
+}
