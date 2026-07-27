@@ -75,6 +75,15 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 .get_domain_name(ctx.from_domain)
                 .unwrap_or("unknown")
                 .to_string();
+            // The actual resumed domain/VP can differ from the requested
+            // target: resuming a Suspended VP walks its interrupt-resume
+            // chain, which may transparently collapse past NOTREPORT
+            // domains straight to the interrupted leaf. Report what the
+            // engine actually did, not just what was requested.
+            let actual_to_name = state
+                .get_domain_name(ctx.to_domain)
+                .unwrap_or("unknown")
+                .to_string();
 
             state.session.add_command(Command::Switch {
                 core,
@@ -91,11 +100,29 @@ pub fn cmd_switch(state: &mut CliState, args: &[&str]) -> std::result::Result<()
                 ctx.from_vp
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "?".to_string()),
-                to_name.bright_white(),
+                actual_to_name.bright_white(),
                 ctx.to_vp
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "?".to_string()),
             );
+
+            if actual_to_name != to_name {
+                println!(
+                    "  {} Requested '{}', but the resume chain collapsed through \
+                     to '{}' (intermediate domains had NOTREPORT for the pending \
+                     interrupt)",
+                    "ℹ".bright_blue().bold(),
+                    to_name,
+                    actual_to_name.bright_white(),
+                );
+            }
+            if let Some(vector) = ctx.interrupt_return {
+                println!(
+                    "  {} Resumed with a pending interrupt to observe: vector {}",
+                    "ℹ".bright_blue().bold(),
+                    vector,
+                );
+            }
 
             Ok(())
         }

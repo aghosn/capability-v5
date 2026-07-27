@@ -31,11 +31,12 @@ send parent_mem parent
 
 # Configure parent's interrupt policy BEFORE sealing
 @msg 📋 Step 3: Configure parent interrupt policy (before sealing)
-@msg   • parent: NOTREPORT for vector 55 — routing continues up to root
-set-interrupt-policy parent 55 NOTREPORT
+@msg   • parent: REPORT for vector 55 — routing continues up to root, but
+@msg     parent is notified and freezes here until explicitly rescheduled
+set-interrupt-policy parent 55 REPORT
 
 @msg
-@msg ✓ Parent will not handle vector 55
+@msg ✓ Parent will observe vector 55 (but not handle it directly)
 @msg
 
 # Seal parent
@@ -62,7 +63,7 @@ set-interrupt-policy child 55 NOTREPORT
 set-default-interrupt-policy child REPORT
 
 @msg
-@msg ✓ Vector 55 routing chain: child(NOTREPORT) → parent(NOTREPORT) → root(DELIVER)
+@msg ✓ Vector 55 routing chain: child(NOTREPORT) → parent(REPORT) → root(DELIVER)
 @msg ✓ Root always delivers interrupts that reach it (default policy)
 @msg
 
@@ -98,7 +99,7 @@ list
 interrupt 55 0
 
 @msg
-@msg ✓ Interrupt routed: child(NOTREPORT) → parent(NOTREPORT) → root(DELIVER)
+@msg ✓ Interrupt routed: child(NOTREPORT) → parent(REPORT) → root(DELIVER)
 @msg
 @msg   The VP call chain was updated atomically:
 @msg     child  VP[0]: Running → Interrupted  (frozen — NOT directly resumable)
