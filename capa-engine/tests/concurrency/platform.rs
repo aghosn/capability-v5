@@ -299,14 +299,14 @@ fn test_execute_on_domain_revoked_precedes_apply_update() {
     // Sanity: core is bound to the child.
     assert_eq!(platform.get_core_domain(CORE_0), Some(child_id));
 
-    // Trigger a RevokeDomain update through the engine's execute() so we
-    // exercise the real ordering (barrier + apply_update + on_domain_revoked).
-    execute(&platform, true, || {
-        let mut batch = capability_engine::UpdateBatch::new();
-        batch.add_revoke_domain_with_fallback(child_id, Some(ROOT_ID));
-        Ok(((), batch))
-    })
-    .expect("revoke should succeed");
+    // Trigger revocation through the real public API (`Capability::
+    // revoke_domain`), not by hand-building an `UpdateBatch` and calling the
+    // internal `execute()` directly — `execute()` is not a test entry point;
+    // going through `revoke_domain` exercises the actual caller-facing path
+    // (permission check + child lookup + `revoke_child_domain`) while still
+    // producing the same `RevokeDomain{child_id, fallback: Some(ROOT_ID)}`
+    // update, since `child_id`'s parent is `root_cap` (ROOT_ID).
+    Capability::revoke_domain(&platform, &root_cap, child_h).expect("revoke should succeed");
 
     // Inspect the ordered call log.
     let log = platform.drain_call_log();

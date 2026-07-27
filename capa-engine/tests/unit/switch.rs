@@ -995,23 +995,6 @@ fn test_4domain_transitive_suspended_chain_cleanup() {
     );
 }
 
-fn domain_handle_for(parent: &CapabilityRef<Domain>, child_id: u64) -> u64 {
-    parent
-        .read()
-        .data
-        .domain_capability_handles()
-        .into_iter()
-        .find(|&handle| {
-            parent
-                .read()
-                .data
-                .get_domain_capability(handle)
-                .and_then(|cap| cap.upgrade())
-                .is_some_and(|cap| cap.read().data.id == child_id)
-        })
-        .expect("parent must hold child capability")
-}
-
 fn not_report_policy() -> VectorPolicy {
     VectorPolicy {
         visibility: InterruptVisibility::NotReport,
@@ -1044,7 +1027,7 @@ fn test_interrupt_resume_all_not_report_descends_to_leaf() {
 
     let dom1_id = dom1.read().data.id;
     let dom3_id = dom3.read().data.id;
-    let dom1_handle = domain_handle_for(&dom0, dom1_id);
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
     let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
 
     assert_eq!(ctx.to_domain.read().data.id, dom3_id);
@@ -1098,7 +1081,7 @@ fn test_interrupt_resume_stops_at_first_report_frame() {
 
     let dom1_id = dom1.read().data.id;
     let dom2_id = dom2.read().data.id;
-    let dom1_handle = domain_handle_for(&dom0, dom1_id);
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
     let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
 
     assert_eq!(ctx.to_domain.read().data.id, dom2_id);
