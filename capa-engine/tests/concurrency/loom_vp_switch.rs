@@ -25,14 +25,22 @@
 //!                                             core 1 tries to claim B's VP; VP state
 //!                                             is verified consistent in all orderings.
 //! V4. `vp_interrupt_delivery_vs_claim_race` — core 0 delivers an interrupt (setting
-//!                                             dom2.vp0 Running→Interrupted) while
-//!                                             core 1 tries to claim dom2.vp0; the
-//!                                             claim must always fail regardless of
-//!                                             scheduling order.
-//! V5. `vp_two_cores_race_suspended_vp`      — two cores concurrently try to claim
-//!                                             the same Suspended VP; exactly one wins
-//!                                             and the Interrupted callee is freed
-//!                                             exactly once.
+//!                                             dom2.vp0 Running→Waiting) while core 1
+//!                                             tries to claim dom2.vp0 via forward
+//!                                             switch. Unlike the old ownership-gated
+//!                                             model, a `Waiting` VP IS claimable by
+//!                                             any authorized caller — so the claim's
+//!                                             outcome depends on scheduling: it fails
+//!                                             if it observes dom2.vp0 still `Running`,
+//!                                             succeeds if it observes `Waiting`. Both
+//!                                             outcomes are verified consistent.
+//! V5. `vp_two_cores_race_waiting_vp`        — two VPs of the same domain concurrently
+//!                                             try to claim the same `Waiting` VP;
+//!                                             exactly one wins (ordinary claim race,
+//!                                             no identity/ownership check). The
+//!                                             winner's own callee (a deeper `Waiting`
+//!                                             frame) is left untouched — no release
+//!                                             step happens.
 //!
 //! # Running
 //!
@@ -453,7 +461,7 @@ fn vp_concurrent_return_and_claim() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// V4 — Interrupted VP cannot be claimed during or after interrupt delivery
+// V4 — claim race against a concurrently-interrupted VP
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Pre-state: 3-domain call chain on core 0.
@@ -462,19 +470,26 @@ fn vp_concurrent_return_and_claim() {
 ///
 /// Concurrently:
 /// * Thread 0 (core 0): `deliver_interrupt_vp(&dom2, dom0_id, 0)` —
-///                       sets dom2.vp0 Running→Interrupted, dom1.vp0 Locked→Suspended,
+///                       sets dom2.vp0 Running→Waiting, dom1.vp0 Locked→Waiting,
 ///                       dom0.vp0 Locked→Running.
 /// * Thread 1 (core 1): `switch(&dom1, dom2_h, 0)` —
 ///                       dom1.vp1 tries to forward-switch to dom2.vp0.
 ///
-/// Invariants in **all** loom-explored orderings:
-/// * Thread 0 always succeeds — the chain is well-formed throughout.
-/// * Thread 1 always fails — dom2.vp0 is either `Running` or `Interrupted`,
-///   never `Available` or `Suspended`, so the forward-switch rejects it.
+/// Under the unified `Waiting` model, a `Waiting` VP is claimable by any
+/// authorized caller — there is no per-VP/per-core ownership gate. So
+/// Thread 1's outcome depends on scheduling relative to Thread 0's write to
+/// dom2.vp0's `run_state` (a single per-VP lock, so the transition is
+/// atomic — no torn/corrupted state is possible in any interleaving):
+/// * If Thread 1 observes dom2.vp0 still `Running`, it fails (a `Running`
+///   VP cannot be claimed by anyone else).
+/// * If Thread 1 observes dom2.vp0 already `Waiting`, it succeeds and
+///   dom2.vp0 becomes `Running` under Thread 1.
 ///
-/// This is the key safety property of the lazy-unwind interrupt model:
-/// the interrupted VP cannot be stolen by any concurrent claim, regardless
-/// of how `deliver_interrupt_vp` and `switch` interleave.
+/// Invariants verified in **all** loom-explored orderings:
+/// * Thread 0 (`deliver_interrupt_vp`) always succeeds.
+/// * Whichever way Thread 1 goes, the final state of dom2.vp0 is exactly
+///   what that outcome implies — no interleaving leaves it in an
+///   inconsistent state.
 #[test]
 fn vp_interrupt_delivery_vs_claim_race() {
     loom::model(|| {
@@ -521,15 +536,16 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // ── Concurrent phase ─────────────────────────────────────────────────
 
         // Thread 0 (core 0): deliver interrupt — dom0 is the DELIVER handler.
-        // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
+        // Walks the VP chain: dom2.vp0→Waiting{None}, dom1.vp0→Waiting{Some(dom2)},
+        // dom0.vp0→Running.
         let t0 = thread::spawn(move || {
             let plat = LoomPlatform::new(0, switch_mgr_t0);
             Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, 0, 0)
         });
 
         // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.
-        // dom2.vp0 is either Running (before Thread 0's write) or Interrupted
-        // (after Thread 0's write) — neither is Available or Suspended — always fails.
+        // Outcome depends on scheduling relative to Thread 0's write — see doc
+        // comment above.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, switch_mgr_t1);
             Capability::switch(&plat, &dom1_t1, dom2_h_in_dom1, 0)
@@ -547,44 +563,75 @@ fn vp_interrupt_delivery_vs_claim_race() {
             r0.err()
         );
 
-        // The claim attempt must always fail — dom2.vp0 is never Available or Suspended.
-        assert!(
-            r1.is_err(),
-            "switch to a Running/Interrupted VP must always fail"
-        );
+        // dom2.vp0's final state must be exactly consistent with Thread 1's
+        // outcome — no torn/corrupted state in any interleaving. By the time
+        // both threads have joined, Thread 0's delivery has always completed
+        // (its write to dom2.vp0 is a single atomic per-VP lock transition),
+        // so dom2.vp0 is `Running` (claimed by Thread 1) exactly when Thread 1
+        // succeeded, and `Waiting` (untouched by Thread 1) exactly when it failed.
+        let dom2_vp0_state = {
+            let d = dom2.read();
+            let vp = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            let guard = vp.run_state.read();
+            if matches!(*guard, VpRunState::Running { .. }) {
+                "Running"
+            } else if matches!(*guard, VpRunState::Waiting { .. }) {
+                "Waiting"
+            } else {
+                "other"
+            }
+        };
+        if r1.is_ok() {
+            assert_eq!(
+                dom2_vp0_state, "Running",
+                "if the claim succeeded, dom2.vp0 must be Running under Thread 1"
+            );
+        } else {
+            assert_eq!(
+                dom2_vp0_state, "Waiting",
+                "if the claim failed, dom2.vp0 must remain Waiting (delivery completed, \
+                 Thread 1 never claimed it)"
+            );
+        }
     });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// V5 — Two cores race to claim the same Suspended VP
+// V5 — Two VPs race to claim the same Waiting VP
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Pre-state (after an interrupt has been delivered to a 3-domain chain):
-///   dom0.vp0  Running  { core: 0 }   — handler VP; first to try to resume
-///   dom0.vp1  Running  { core: 1 }   — second VP; also wants dom1.vp0
-///   dom1.vp0  Suspended{ callee = dom2.vp0 }
-///   dom2.vp0  Interrupted
+///   dom0.vp0  Running { core: 0 }                        — first to try to resume
+///   dom0.vp1  Running { core: 1 }                         — second VP; also wants dom1.vp0
+///   dom1.vp0  Waiting { unlocks: Some(dom2.vp0), report: true, blocked: false }
+///   dom2.vp0  Waiting { unlocks: None, blocked: true }
 ///
 /// Concurrently:
 /// * Thread 0 (core 0, dom0.vp0): `switch(&dom0, dom1_h, 0)` — claim dom1.vp0.
 /// * Thread 1 (core 1, dom0.vp1): `switch(&dom0, dom1_h, 0)` — same target.
 ///
+/// A `Waiting` VP with `blocked == false` is claimable by **any** authorized
+/// caller VP, not only the exact VP that originally froze it. dom0.vp1 is
+/// not the VP that originally froze dom1.vp0's chain, but it holds the same
+/// handle and is otherwise a perfectly valid caller — so this is an ordinary
+/// claim race, exactly like V1, not an identity-gated rejection.
+///
 /// Invariants in **all** loom-explored orderings:
-/// * Exactly one core wins the write-lock on dom1.vp0's run_state.
+/// * Exactly one of the two threads wins the write-lock on dom1.vp0's run_state.
 /// * dom1.vp0 ends up `Running` (claimed by the winner).
-/// * dom2.vp0 ends up `Available` — the winner's `Suspended → Running` path frees
-///   the `Interrupted` callee exactly once (inside the same write-lock block, so the
-///   loser never reaches the callee-freeing code).
+/// * dom2.vp0 is left **untouched** — still `Waiting { unlocks: None }`. Its
+///   `blocked` flag is cleared to `false` as a side effect of dom1.vp0 being
+///   resumed (dom1 was dom2's caller), so dom2 becomes independently
+///   claimable, but dom2 itself is not resumed by this call.
 /// * The losing thread returns an error.
 #[test]
-fn vp_two_cores_race_suspended_vp() {
+fn vp_two_cores_race_waiting_vp() {
     loom::model(|| {
         // ── Sequential setup ────────────────────────────────────────────────
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
         let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
         let (dom2, _) = make_sealed_child(&dom0);
-        let dom0_id = dom0.read().data.id;
-        let dom1_id = dom1.read().data.id;
         let dom2_id = dom2.read().data.id;
 
         // dom0 has two Running VPs: one on core 0, one on core 1.
@@ -598,31 +645,26 @@ fn vp_two_cores_race_suspended_vp() {
             let d = dom1.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Suspended {
-                callee_domain: dom2_weak,
-                callee_domain_id: dom2_id,
-                callee_vp_id: 0,
-                prev_caller: Some(VpCallContext {
-                    domain: std::sync::Arc::downgrade(&dom0),
-                    domain_id: dom0_id,
+            *vp0.run_state.write() = VpRunState::Waiting {
+                unlocks: Some(VpCallContext {
+                    domain: dom2_weak,
+                    domain_id: dom2_id,
                     vp_id: 0,
                 }),
                 vector: 0,
                 report: true,
+                blocked: false,
             };
         }
         {
             let d = dom2.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Interrupted {
+            *vp0.run_state.write() = VpRunState::Waiting {
+                unlocks: None,
                 vector: 0,
-                caller: Some(VpCallContext {
-                    domain: std::sync::Arc::downgrade(&dom1),
-                    domain_id: dom1_id,
-                    vp_id: 0,
-                }),
                 report: false,
+                blocked: true,
             };
         }
 
@@ -641,7 +683,9 @@ fn vp_two_cores_race_suspended_vp() {
             Capability::switch(&plat, &dom0_t0, dom1_h_in_dom0, 0)
         });
 
-        // Thread 1 (core 1, dom0.vp1): same target.
+        // Thread 1 (core 1, dom0.vp1): same target — a *different* VP of the
+        // same caller domain, not the "original" one, exercising the fixed
+        // no-ownership-check claim behavior.
         let t1 = thread::spawn(move || {
             let plat = LoomPlatform::new(1, switch_mgr_t1);
             Capability::switch(&plat, &dom0_t1, dom1_h_in_dom0, 0)
@@ -652,8 +696,12 @@ fn vp_two_cores_race_suspended_vp() {
 
         // ── Invariants ───────────────────────────────────────────────────────
 
-        assert!(r0.is_ok(), "the exact owner must resume the Suspended VP");
-        assert!(r1.is_err(), "a different VP must not steal the Suspended VP");
+        assert!(
+            r0.is_ok() ^ r1.is_ok(),
+            "exactly one VP should claim dom1.vp0, got r0={} r1={}",
+            r0.is_ok(),
+            r1.is_ok()
+        );
 
         // dom1.vp0 must be Running (held by the winner).
         {
@@ -666,14 +714,17 @@ fn vp_two_cores_race_suspended_vp() {
             );
         }
 
-        // dom2.vp0 remains reserved for dom1.vp0.
+        // dom2.vp0 is left untouched — still Waiting{unlocks:None}. Winning
+        // the claim on dom1.vp0 does clear dom2.vp0's `blocked` flag as a
+        // side effect (dom1 was dom2's caller and is no longer Waiting), but
+        // dom2.vp0 itself is not resumed by this call.
         {
             let d = dom2.read();
             let vp = d.data.policy.vprocessor_states[0].clone();
             drop(d);
             assert!(
-                matches!(*vp.run_state.read(), VpRunState::Interrupted { .. }),
-                "dom2.vp0 must remain Interrupted until its exact caller resumes it"
+                matches!(&*vp.run_state.read(), VpRunState::Waiting { unlocks: None, .. }),
+                "dom2.vp0 must remain Waiting{{unlocks:None}} — no release step happens"
             );
         }
     });

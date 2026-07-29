@@ -71,18 +71,18 @@ pub struct CoreContext {
     /// Live call chain for this core, bottom (root-most caller) to top
     /// (most recent switch target).
     ///
-    /// Mirrors `VpRunState`'s `Running`/`Locked` `caller`/`prev_caller`
-    /// links for the normal switch/interrupt paths (`switch_domain_forward`,
-    /// `switch_domain_return`, `deliver_interrupt_vp` push/pop this stack
-    /// alongside those fields, cross-checked via `debug_assert!`), and is
-    /// the sole source of truth for resolving a revoke-driven return's
-    /// resume target: `Capability::switch_after_callee_revoked` pops this
-    /// stack directly, with no remote caller-chain walk.
+    /// This is the sole source of truth for the currently active,
+    /// single-core-pinned segment of a call chain (`Running`/`Locked` VPs):
+    /// `switch_domain_forward`, `switch_domain_return`, and
+    /// `deliver_interrupt_vp` push/pop this stack directly. It's also what
+    /// `Capability::switch_after_callee_revoked` pops to resolve a
+    /// revoke-driven return's resume target, with no remote caller-chain
+    /// walk.
     ///
-    /// `Suspended`/`Interrupted` VPs keep their own `prev_caller`/`caller`
-    /// fields regardless — those describe chain segments frozen off any
-    /// specific core, which may later resume on a *different* physical core
-    /// than the one that froze them, so they can't live in a per-core stack.
+    /// `Waiting` VPs carry their own `unlocks` link regardless — that
+    /// describes chain segments frozen off any specific core, which may
+    /// later resume on a *different* physical core than the one that froze
+    /// them, so they can't live in a per-core stack.
     ///
     /// Single-writer per core in steady state: only the physical core
     /// owning this `CoreContext` pushes/pops during its own synchronous
@@ -191,11 +191,10 @@ impl CoreContext {
     /// `pop_frame()`, and so on. Returns `None` if the stack is shallower
     /// than `depth + 1` frames.
     ///
-    /// Read-only cross-check against `VpRunState`'s own `caller`/
-    /// `prev_caller` fields, without mutating the stack — prefer this over
-    /// `pop_frame()` when the value is only needed for an assertion, so an
-    /// unrelated error path elsewhere can't leave the stack popped without
-    /// a matching `VpRunState` change.
+    /// Read-only: used by `deliver_interrupt_vp` to walk the active call
+    /// chain without mutating the stack, so an unrelated error path
+    /// elsewhere can't leave the stack popped without a matching
+    /// `VpRunState` change.
     pub fn peek_at(&self, depth: usize) -> Option<VpCallContext> {
         let stack = self.call_stack.read();
         let len = stack.len();
@@ -227,11 +226,23 @@ pub struct SwitchContext {
     pub from_vp_id: Option<u64>,
     /// VP ID of the target domain (None for non-VP switches)
     pub to_vp_id: Option<u64>,
-    /// If the target VP was Suspended due to an interrupt, this carries the
-    /// interrupt vector.  `do_switch` uses this to set `RDI = vector` on the
-    /// SWITCH return rather than `RDI = exit_reason` from a normal child exit.
+    /// If the target VP was `Waiting` and its own `report` was true and it
+    /// had a callee (i.e. it was blocked in its own `switch` call), this
+    /// carries the interrupt vector. `do_switch` uses this to set
+    /// `RDI = vector` on the SWITCH return rather than `RDI = exit_reason`
+    /// from a normal child exit — this VP was never itself directly
+    /// executing, so there's nothing to inject; it just needs to observe
+    /// its own switch call "returning" because its callee was interrupted.
     /// `None` for all normal SWITCH forward operations.
     pub interrupt_return: Option<u8>,
+    /// If the target VP was `Waiting`, its own `report` was true, and it had
+    /// **no** callee (i.e. it was itself the true leaf, actually executing
+    /// when the interrupt hit), this carries the interrupt vector.
+    /// `do_switch` uses this to actually inject the vector into the
+    /// now-active target (same mechanism as a real hardware interrupt),
+    /// since the VP has no switch-call return to observe it through.
+    /// `None` for all other cases.
+    pub interrupt_inject: Option<u8>,
 }
 
 impl core::fmt::Debug for SwitchContext {
@@ -264,9 +275,8 @@ pub struct InterruptContext {
 /// VP state context returned by [`Capability::deliver_interrupt_vp`].
 ///
 /// Describes the outcome of a VP-aware interrupt delivery using the
-/// lazy-unwind model: the interrupted VP is frozen (`Interrupted`), all
-/// intermediate VPs are frozen (`Suspended`), and the handler VP is woken
-/// to `Running`.
+/// lazy-unwind model: the interrupted VP and all intermediate VPs are
+/// frozen (`Waiting`), and the handler VP is woken to `Running`.
 #[derive(Clone)]
 pub struct VpInterruptContext {
     /// Domain of the VP that was preempted (leaf of the call chain).
@@ -427,6 +437,7 @@ impl SwitchManager {
             from_vp_id: None,
             to_vp_id: None,
             interrupt_return: None,
+            interrupt_inject: None,
         })
     }
 
@@ -462,8 +473,8 @@ impl SwitchManager {
 /// check), so the live VP call chain of any Running VP is always identical
 /// in domain sequence to its CDT ancestor chain — `deliver_interrupt_vp`
 /// relies on that invariant to cross-check the handler this function finds
-/// against the domain it actually reaches by walking VP `caller`/`prev_caller`
-/// links.
+/// against the domain it actually reaches by walking the core's own
+/// per-core call stack (see `CoreContext::call_stack`).
 ///
 /// Returns [`CapaError::InvalidOperation`] if the root is reached without
 /// finding a `Deliver` ancestor.

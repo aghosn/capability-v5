@@ -134,7 +134,7 @@ pub(crate) fn do_switch(
     let switch_ctx = match Capability::switch(platform, caller, to_domain_handle, vp_id) {
         Ok((ctx, _batch)) => ctx,
         Err(e) => {
-            serial_debug!("[SWITCH] validation failed: {:?}", e);
+            serial_debug!("[SWITCH] validation failed: target={} vp_id={} err={:?}", to_domain_handle, vp_id, e);
             write_reply(vcpu, HypercallResult::from(e));
             vcpu.next_rip();
             return;

@@ -720,11 +720,11 @@ struct domcomm_header {
 	__u8  reserved[4096 - 0x038];
 };
 
-/* ── DomainComm message header (16 bytes, 8-byte aligned) ───────────────── */
+/* ── DomainComm message header (16 bytes) ────────────────────────────────── */
 
 struct domcomm_msg_header {
 	__u32 message_type;           /* DOMCOMM_MSG_* */
-	__u32 total_size;             /* Total incl. header (8-byte aligned) */
+	__u32 total_size;             /* Exact total incl. header, no padding */
 	__u64 sequence;               /* Monotonic counter */
 };
 

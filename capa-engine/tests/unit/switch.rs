@@ -156,7 +156,10 @@ fn test_vp_return_domain_basic() {
     // Now platform says core 0 is running child; child VP[0] is Running{caller=root.VP[0]}
     let ret_ctx = Capability::switch(&platform, &child, 0, 0).unwrap().0;
 
-    assert_eq!(ret_ctx.from_domain.as_ref().unwrap().read().data.id, child_id);
+    assert_eq!(
+        ret_ctx.from_domain.as_ref().unwrap().read().data.id,
+        child_id
+    );
     assert_eq!(ret_ctx.to_domain.read().data.id, root_id);
     assert!(ret_ctx.is_return);
     assert_eq!(ret_ctx.from_vp_id, Some(0));
@@ -191,7 +194,9 @@ fn test_vp_nested_switch_and_return() {
 
     // child1 under root
     let child1_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child1_h = Capability::create(&platform, &root, child1_policy).unwrap().0;
+    let child1_h = Capability::create(&platform, &root, child1_policy)
+        .unwrap()
+        .0;
     let child1 = root.read().data.domain_capabilities[&child1_h]
         .upgrade()
         .unwrap();
@@ -204,7 +209,9 @@ fn test_vp_nested_switch_and_return() {
 
     // child2 under child1
     let child2_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child2_h = Capability::create(&platform, &child1, child2_policy).unwrap().0;
+    let child2_h = Capability::create(&platform, &child1, child2_policy)
+        .unwrap()
+        .0;
     let child2 = child1.read().data.domain_capabilities[&child2_h]
         .upgrade()
         .unwrap();
@@ -222,7 +229,9 @@ fn test_vp_nested_switch_and_return() {
     // (switch sets child1 VP[0] to Running when root switches into it)
 
     // child1 → child2
-    let ctx12 = Capability::switch(&platform, &child1, child2_h, 0).unwrap().0;
+    let ctx12 = Capability::switch(&platform, &child1, child2_h, 0)
+        .unwrap()
+        .0;
     assert_eq!(ctx12.to_domain.read().data.id, child2_id);
 
     // return child2 → child1
@@ -293,7 +302,9 @@ fn test_vp_switch_core_not_allowed() {
 
     // Child only allows core 0
     let child_policy = DomainPolicy::new_restricted(0b0001, MonitorAPI::ALL);
-    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
+    let child_h = Capability::create(&platform, &root, child_policy)
+        .unwrap()
+        .0;
     Capability::seal(&platform, &root, child_h).unwrap();
 
     // Try to switch from core 1 to child — child doesn't allow core 1
@@ -345,7 +356,9 @@ fn test_vp_switch_no_switch_api() {
     // Sealed caller without SWITCH permission.
     let no_switch_api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::ATTEST);
     let caller_policy = DomainPolicy::new_restricted(0b1111, no_switch_api);
-    let caller_h = Capability::create(&platform, &root, caller_policy).unwrap().0;
+    let caller_h = Capability::create(&platform, &root, caller_policy)
+        .unwrap()
+        .0;
     let caller = root.read().data.domain_capabilities[&caller_h]
         .upgrade()
         .unwrap();
@@ -371,7 +384,9 @@ fn test_vp_switch_target_unsealed() {
 
     // Create unsealed child
     let child_policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
-    let child_h = Capability::create(&platform, &root, child_policy).unwrap().0;
+    let child_h = Capability::create(&platform, &root, child_policy)
+        .unwrap()
+        .0;
     // NOT sealing
 
     let result = Capability::switch(&platform, &root, child_h, 0);
@@ -422,7 +437,9 @@ fn test_vp_return_no_vp_on_core() {
         let vp0 = c.data.policy.vprocessor_states[0].clone();
         drop(c);
         // VP[0] is Running{core:0}, change core to something else so find_vp_on_core fails
-        *vp0.run_state.write() = VpRunState::Available { last_exit_reason: None };
+        *vp0.run_state.write() = VpRunState::Available {
+            last_exit_reason: None,
+        };
     }
 
     let result = Capability::switch(&platform, &child, 0, 0);
@@ -585,7 +602,9 @@ fn setup_3domain_chain() -> (
     };
 
     // dom1 switches to dom2: dom1.vp0 → Locked, dom2.vp0 → Running
-    Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0).unwrap().0;
+    Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0)
+        .unwrap()
+        .0;
 
     (dom0, dom1, dom2, platform)
 }
@@ -604,18 +623,24 @@ fn test_deliver_interrupt_vp_2domain() {
     Capability::switch(&platform, &root, child_h, 0).unwrap().0;
 
     // Deliver interrupt: handler is root, interrupted is child
-    let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &child, 0, 0).unwrap().0;
+    let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &child, 0, 0)
+        .unwrap()
+        .0;
 
     assert_eq!(ctx.interrupted_domain.read().data.id, child_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
     assert_eq!(ctx.handler_domain.read().data.id, root_id);
     assert_eq!(ctx.handler_vp_id, 0);
 
-    // The interrupted leaf stays reserved for its exact caller.
+    // The interrupted leaf stays reserved (Waiting, unlocks: None) — it's
+    // the true leaf, no intermediate frame between it and the handler.
     let child_vp0 = child.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*child_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "child VP[0] should remain Interrupted after delivery"
+        matches!(
+            &*child_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: None, .. }
+        ),
+        "child VP[0] should be Waiting{{unlocks:None}} after delivery"
     );
 
     // root.vp0 must be Running on core 0
@@ -633,38 +658,42 @@ fn test_deliver_interrupt_vp_2domain() {
 /// dom0(handler,Locked) → dom1(report,Locked) → dom2(running).
 ///
 /// After delivery:
-/// - dom2.vp0 = Interrupted
-/// - dom1.vp0 = Suspended { callee: dom2.vp0 }
+/// - dom2.vp0 = Waiting { unlocks: None }         (true leaf)
+/// - dom1.vp0 = Waiting { unlocks: Some(dom2.vp0) }
 /// - dom0.vp0 = Running
 #[test]
 fn test_deliver_interrupt_vp_3domain() {
-    let platform = common::TestPlatform::new();
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
 
     let dom0_id = dom0.read().data.id;
     let dom2_id = dom2.read().data.id;
 
-    let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0).unwrap().0;
+    let ctx = Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
+        .unwrap()
+        .0;
 
     assert_eq!(ctx.interrupted_domain.read().data.id, dom2_id);
     assert_eq!(ctx.interrupted_vp_id, 0);
     assert_eq!(ctx.handler_domain.read().data.id, dom0_id);
     assert_eq!(ctx.handler_vp_id, 0);
 
-    // dom2.vp0 → Interrupted
+    // dom2.vp0 → Waiting { unlocks: None } (true leaf)
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "dom2 VP[0] should be Interrupted"
+        matches!(
+            &*dom2_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: None, .. }
+        ),
+        "dom2 VP[0] should be Waiting{{unlocks:None}}"
     );
 
-    // dom1.vp0 → Suspended { callee: dom2.vp0 }
+    // dom1.vp0 → Waiting { unlocks: Some(dom2.vp0) }
     let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom1_vp0.run_state.read(),
-        VpRunState::Suspended { callee_domain_id, callee_vp_id, .. }
-        if callee_domain_id == dom2_id && callee_vp_id == 0),
-        "dom1 VP[0] should be Suspended on dom2's VP[0]"
+        matches!(&*dom1_vp0.run_state.read(),
+        VpRunState::Waiting { unlocks: Some(callee), .. }
+        if callee.domain_id == dom2_id && callee.vp_id == 0),
+        "dom1 VP[0] should be Waiting on dom2's VP[0]"
     );
 
     // dom0.vp0 → Running
@@ -679,24 +708,48 @@ fn test_deliver_interrupt_vp_3domain() {
 }
 
 /// After interrupt delivery (3-domain chain), dom0 switches to dom1 via
-/// switch.  This resumes dom1.vp0 from Suspended → Running and
-/// simultaneously frees dom2.vp0 from Interrupted → Available.
+/// switch. Since dom1 defaults to `Report` policy, the walk stops
+/// immediately at dom1: dom1.vp0 → Running, `interrupt_return` carries the
+/// vector. dom2.vp0 (dom1's callee) is left untouched — still
+/// `Waiting{unlocks:None}` — no release step happens; it remains directly
+/// claimable whenever dom1 itself later targets it.
 #[test]
-fn test_interrupt_resume_frees_interrupted_callee() {
-    let platform = common::TestPlatform::new();
+fn test_interrupt_resume_leaves_untouched_callee_waiting() {
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
 
     let dom0_id = dom0.read().data.id;
     let dom1_id = dom1.read().data.id;
 
     // Deliver interrupt: dom0 becomes the handler
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0).unwrap().0;
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
+        .unwrap()
+        .0;
 
-    // After delivery: dom1.vp0 = Suspended, dom2.vp0 = Interrupted
+    // After delivery: dom1.vp0 = Waiting{Some(dom2), blocked:false} (directly
+    // called by the handler dom0), dom2.vp0 = Waiting{None, blocked:true}
+    // (its caller dom1.vp0 hasn't itself resumed yet).
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom1_vp0.run_state.read(),
+            VpRunState::Waiting {
+                blocked: false,
+                ..
+            }
+        ),
+        "dom1 VP[0] should start unblocked (directly called by the handler)"
+    );
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom2_vp0.run_state.read(),
+            VpRunState::Waiting { blocked: true, .. }
+        ),
+        "dom2 VP[0] should start blocked (its caller dom1.vp0 hasn't resumed)"
+    );
 
     // dom0 now does switch to dom1 (the REPORT domain).
-    // dom1.vp0 is Suspended — the forward switch should accept it.
-    // Build dom1's handle in dom0's table.
+    // dom1.vp0 is Waiting — the forward switch should accept it.
     let dom1_h_in_dom0 = dom0
         .read()
         .data
@@ -712,9 +765,13 @@ fn test_interrupt_resume_frees_interrupted_callee() {
         })
         .expect("dom0 should hold a handle to dom1");
 
-    // Switch dom0 → dom1 (Suspended → Running)
-    let switch_ctx = Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0).unwrap().0;
+    // Switch dom0 → dom1 (Waiting → Running)
+    let switch_ctx = Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0)
+        .unwrap()
+        .0;
     assert_eq!(switch_ctx.to_domain.read().data.id, dom1_id);
+    assert_eq!(switch_ctx.interrupt_return, Some(0));
+    assert_eq!(switch_ctx.interrupt_inject, None);
 
     // dom1.vp0 should now be Running
     let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
@@ -726,11 +783,97 @@ fn test_interrupt_resume_frees_interrupted_callee() {
         "dom1 VP[0] should be Running after resume"
     );
 
-    // dom2.vp0 stays reserved until dom1 explicitly resumes its exact callee.
+    // dom2.vp0 stays Waiting{unlocks:None} — no release step, untouched
+    // until dom1 explicitly resumes its exact callee. But since dom1.vp0 is
+    // no longer Waiting (it just got resumed), dom2.vp0's blocked flag is
+    // cleared as a side effect — it's now claimable by any authorized caller.
     let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
     assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "dom2 VP[0] should remain Interrupted after dom1 was resumed"
+        matches!(
+            &*dom2_vp0.run_state.read(),
+            VpRunState::Waiting {
+                unlocks: None,
+                blocked: false,
+                ..
+            }
+        ),
+        "dom2 VP[0] should remain Waiting{{unlocks:None}} and become unblocked \
+         after dom1 was resumed"
+    );
+
+    let _ = dom0_id;
+}
+
+/// Same 3-domain chain, but dom1 has `NotReport` policy: the resume walk
+/// from dom0 does not stop at dom1 — it transparently collapses through
+/// dom1 and lands on dom2 directly. dom1.vp0 is left re-pinned as `Locked`
+/// (an active caller again), not `Running`, and dom2.vp0 is the one that
+/// actually resumes.
+#[test]
+fn test_interrupt_resume_not_report_skips_to_callee() {
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    let dom1_id = dom1.read().data.id;
+    let dom2_id = dom2.read().data.id;
+
+    // Make dom1's policy for vector 0 NotReport, so switching to dom1
+    // transparently collapses down to its callee (dom2).
+    set_vector_policy(&dom1, 0, not_report_policy());
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
+        .unwrap()
+        .0;
+
+    // After delivery: dom1.vp0 = Waiting{Some(dom2), blocked:false},
+    // dom2.vp0 = Waiting{None, blocked:true} — same as the Report case,
+    // since blocking only depends on chain position, not visibility policy.
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom1_vp0.run_state.read(),
+            VpRunState::Waiting {
+                blocked: false,
+                ..
+            }
+        )
+    );
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(matches!(
+        &*dom2_vp0.run_state.read(),
+        VpRunState::Waiting { blocked: true, .. }
+    ));
+
+    // dom0 switches to dom1 (NotReport): the walk should skip through dom1
+    // and resume dom2 instead.
+    let dom1_h_in_dom0 = find_domain_handle(&dom0, dom1_id);
+    let switch_ctx = Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0)
+        .unwrap()
+        .0;
+
+    // The switch context reports dom2 as the actual target, not dom1.
+    assert_eq!(switch_ctx.to_domain.read().data.id, dom2_id);
+    assert_eq!(switch_ctx.to_vp_id, Some(0));
+
+    // dom2.vp0 is now Running — it's the frame that actually resumed.
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            *dom2_vp0.run_state.read(),
+            VpRunState::Running { core: 0, .. }
+        ),
+        "dom2 VP[0] should be Running after the transparent collapse through dom1"
+    );
+
+    // dom1.vp0 is re-pinned as Locked (an active caller again), not Running.
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            *dom1_vp0.run_state.read(),
+            VpRunState::Locked {
+                callee_domain_id,
+                callee_vp_id: 0,
+            } if callee_domain_id == dom2_id
+        ),
+        "dom1 VP[0] should be re-pinned Locked{{callee: dom2.vp0}}, not Running"
     );
 }
 
@@ -747,32 +890,111 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
         result.is_err(),
         "expected error when no VP is running on core"
     );
+    let _ = root_id;
 }
 
-/// The key invariant: after interrupt delivery, a *second* VP of the intermediate
-/// domain (dom1.vp1) cannot claim dom2.vp0 via `switch`.
+/// **The core eunomia-crash regression test.** After interrupt delivery, a
+/// *second* VP of the domain directly called by the handler (dom1.vp1, on a
+/// *different* physical core) resumes dom1 — this must succeed with no
+/// identity/ownership check: a `Waiting` VP with `blocked == false` is
+/// claimable by any authorized caller, regardless of which exact VP/core
+/// originally froze it (see `CoreContext::call_stack`'s doc). Prior to the
+/// fix, this was incorrectly rejected with "owned by another caller".
 ///
-/// After `deliver_interrupt_vp`, dom2.vp0 is `Interrupted`.  The forward switch
-/// path only accepts `Available` or `Suspended`; `Interrupted` is rejected.
-/// This prevents any VP from stealing the interrupted execution context.
+/// dom1 is the frame directly called by the handler (dom0), so it starts
+/// `blocked: false` immediately at delivery time — unlike a deeper frame
+/// (see `test_deep_waiting_vp_blocked_until_caller_resumes` below), which
+/// stays gated until its own caller resumes.
 #[test]
-fn test_interrupted_vp_not_claimable_by_other_vp() {
-    let platform = common::TestPlatform::new();
+fn test_waiting_vp_resumable_by_different_vp_same_domain() {
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
-    let dom0_id = dom0.read().data.id;
-    let dom2_id = dom2.read().data.id;
+    let dom1_id = dom1.read().data.id;
 
-    // Deliver interrupt: dom0 is handler, dom2.vp0 → Interrupted.
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0).unwrap().0;
+    // Deliver interrupt: dom0 is handler, dom2.vp0 → Waiting{unlocks:None},
+    // dom1.vp0 → Waiting{unlocks:Some(dom2), blocked:false}.
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
+        .unwrap()
+        .0;
 
-    // Sanity-check: dom2.vp0 is Interrupted.
-    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    // Sanity-check: dom1.vp0 is Waiting.
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
     assert!(matches!(
-        *dom2_vp0.run_state.read(),
-        VpRunState::Interrupted { .. }
+        &*dom1_vp0.run_state.read(),
+        VpRunState::Waiting {
+            unlocks: Some(_),
+            ..
+        }
     ));
 
-    // Set dom1.vp1 to Running on core 1 — simulates a second concurrent VP of dom1.
+    // Set dom0.vp1 to Running on core 1 — simulates a second, different VP
+    // of dom0 (e.g. a different physical core) than the one (dom0.vp0) that
+    // was originally frozen mid-call into dom1.
+    {
+        let d = dom0.read();
+        let vp1 = d.data.policy.vprocessor_states[1].clone();
+        drop(d);
+        *vp1.run_state.write() = VpRunState::Running { core: 1 };
+    }
+    platform.set_current_core(Some(1));
+
+    // Find dom1's handle in dom0's capability table.
+    let dom1_h_in_dom0 = dom0
+        .read()
+        .data
+        .domain_capability_handles()
+        .into_iter()
+        .find(|&h| {
+            dom0.read()
+                .data
+                .get_domain_capability(h)
+                .and_then(|w| w.upgrade())
+                .map(|c| c.read().data.id == dom1_id)
+                .unwrap_or(false)
+        })
+        .expect("dom0 should hold a handle to dom1");
+
+    // dom0.vp1 (not dom0.vp0!) claims dom1.vp0 — must succeed.
+    let (ctx, _) = Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0)
+        .expect("Waiting VP must be claimable by a different VP of the same domain");
+    assert_eq!(ctx.to_domain.read().data.id, dom1_id);
+    assert_eq!(ctx.to_vp_id, Some(0));
+
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            *dom1_vp0.run_state.read(),
+            VpRunState::Running { core: 1, .. }
+        ),
+        "dom1 VP[0] should now be Running on core 1, resumed by dom0.vp1"
+    );
+}
+
+/// **Regression test for the B2/C1 bug** (two independent call chains
+/// sharing a common intermediate domain): a deeper `Waiting` frame stays
+/// gated (`blocked: true`) until its own direct caller has actually
+/// resumed — a different VP of the caller's domain cannot skip ahead and
+/// claim the deeper frame first, even though it holds a valid handle to it.
+///
+/// Chain: dom0(handler) → dom1 → dom2(leaf). dom2.vp0 starts
+/// `blocked: true` (its caller dom1.vp0 is still Waiting). A different VP
+/// of dom1 (dom1.vp1) must NOT be able to claim dom2 directly. Only after
+/// dom1.vp0 itself is resumed (by any VP of dom0, the actual caller chain)
+/// does dom2 become claimable by dom1.vp1.
+#[test]
+fn test_deep_waiting_vp_blocked_until_caller_resumes() {
+    let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    let dom0_id = dom0.read().data.id;
+    let dom1_id = dom1.read().data.id;
+    let dom2_id = dom2.read().data.id;
+
+    // Deliver interrupt: dom0 is handler, dom2.vp0 → Waiting{unlocks:None,
+    // blocked:true}, dom1.vp0 → Waiting{unlocks:Some(dom2), blocked:false}.
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom2, 0, 0)
+        .unwrap()
+        .0;
+
+    // Set dom1.vp1 to Running on core 1 — a different VP of dom1 than the
+    // one (dom1.vp0) actually in the frozen chain.
     {
         let d = dom1.read();
         let vp1 = d.data.policy.vprocessor_states[1].clone();
@@ -781,7 +1003,6 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
     }
     platform.set_current_core(Some(1));
 
-    // Find dom2's handle in dom1's capability table.
     let dom2_h_in_dom1 = dom1
         .read()
         .data
@@ -797,32 +1018,61 @@ fn test_interrupted_vp_not_claimable_by_other_vp() {
         })
         .expect("dom1 should hold a handle to dom2");
 
-    // Attempt to claim dom2.vp0 from dom1.vp1 — must be rejected.
+    // dom1.vp1 tries to claim dom2 directly — must fail: dom2 is still
+    // blocked because its caller (dom1.vp0) hasn't itself resumed.
     let result = Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0);
     assert!(
         result.is_err(),
-        "Interrupted VP must not be claimable via switch"
+        "dom2 must not be claimable while its caller dom1.vp0 is still Waiting"
     );
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(&*dom2_vp0.run_state.read(), VpRunState::Waiting { .. }),
+        "dom2 must remain Waiting after the rejected claim"
+    );
+
+    // Now resume dom1.vp0 (its caller) via a different VP of dom0 — the
+    // actual A1/B1/C1 pattern: dom0.vp1 claims dom1.
+    {
+        let d = dom0.read();
+        let vp1 = d.data.policy.vprocessor_states[1].clone();
+        drop(d);
+        *vp1.run_state.write() = VpRunState::Running { core: 1 };
+    }
+    let dom1_h_in_dom0 = dom0
+        .read()
+        .data
+        .domain_capability_handles()
+        .into_iter()
+        .find(|&h| {
+            dom0.read()
+                .data
+                .get_domain_capability(h)
+                .and_then(|w| w.upgrade())
+                .map(|c| c.read().data.id == dom1_id)
+                .unwrap_or(false)
+        })
+        .expect("dom0 should hold a handle to dom1");
+    Capability::switch(&platform, &dom0, dom1_h_in_dom0, 0)
+        .expect("dom1 must be claimable once its own caller (the handler) targets it");
+
+    // dom2 is now unblocked as a side effect — dom1.vp1 can claim it.
+    platform.set_current_core(Some(1));
+    let (ctx, _) = Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0)
+        .expect("dom2 must become claimable once dom1 has actually resumed");
+    assert_eq!(ctx.to_domain.read().data.id, dom2_id);
+    let _ = dom0_id;
 }
 
-// ── T5: Multi-level Suspended chain cleanup ───────────────────────────────────
+// ── T5: 4-domain chain, multi-frame Waiting cleanup ──────────────────────────
 //
-// 4-domain chain: dom0(handler) → dom1(Locked) → dom2(Locked) → dom3(Running)
+// dom0(handler) → dom1(Locked) → dom2(Locked) → dom3(Running)
 //
 // After delivering an interrupt to dom3 with dom0 as handler:
-//   dom3.vp0 = Interrupted
-//   dom2.vp0 = Suspended { callee: dom3.vp0 }
-//   dom1.vp0 = Suspended { callee: dom2.vp0 }
+//   dom3.vp0 = Waiting { unlocks: None }
+//   dom2.vp0 = Waiting { unlocks: Some(dom3.vp0) }
+//   dom1.vp0 = Waiting { unlocks: Some(dom2.vp0) }
 //   dom0.vp0 = Running (handler)
-//
-// When dom0 claims dom1 (Suspended → Running):
-//   dom1.vp0 → Running
-//   dom2.vp0 must stay Suspended (it's not Interrupted; only Interrupted callees
-//   are freed when their parent is claimed)
-//
-// When dom1 then claims dom2 (Suspended → Running):
-//   dom2.vp0 → Running
-//   dom3.vp0 → Available (it was Interrupted, so it is freed)
 
 fn setup_4domain_chain() -> (
     CapabilityRef<Domain>,
@@ -855,7 +1105,9 @@ fn setup_4domain_chain() -> (
         d1.data.add_domain_capability(h, dom2_weak);
         h
     };
-    Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0).unwrap().0;
+    Capability::switch(&platform, &dom1, dom2_h_in_dom1, 0)
+        .unwrap()
+        .0;
 
     let (dom3, _dom3_h_in_dom0) = make_sealed_child(&dom0);
     let dom3_id = dom3.read().data.id;
@@ -867,14 +1119,15 @@ fn setup_4domain_chain() -> (
         d2.data.add_domain_capability(h, dom3_weak);
         h
     };
-    Capability::switch(&platform, &dom2, dom3_h_in_dom2, 0).unwrap().0;
+    Capability::switch(&platform, &dom2, dom3_h_in_dom2, 0)
+        .unwrap()
+        .0;
 
     let _ = (dom2_id, dom3_id); // silence unused warnings
     (dom0, dom1, dom2, dom3, platform)
 }
 
 fn find_domain_handle(holder: &CapabilityRef<Domain>, target_id: u64) -> LocalHandle {
-    let platform = common::TestPlatform::new();
     holder
         .read()
         .data
@@ -892,109 +1145,6 @@ fn find_domain_handle(holder: &CapabilityRef<Domain>, target_id: u64) -> LocalHa
         .expect("handle not found")
 }
 
-/// After interrupt delivery to a 4-domain chain, verify the intermediate states:
-/// dom3=Interrupted, dom2=Suspended{callee=dom3}, dom1=Suspended{callee=dom2}.
-#[test]
-fn test_4domain_interrupt_delivery_states() {
-    let platform = common::TestPlatform::new();
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
-    let dom0_id = dom0.read().data.id;
-    let dom2_id = dom2.read().data.id;
-    let dom3_id = dom3.read().data.id;
-
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0).unwrap().0;
-
-    // dom3.vp0 → Interrupted
-    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom3_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "dom3 VP[0] should be Interrupted"
-    );
-
-    // dom2.vp0 → Suspended { callee: dom3.vp0 }
-    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom2_vp0.run_state.read(),
-            VpRunState::Suspended { callee_domain_id, callee_vp_id, .. }
-            if callee_domain_id == dom3_id && callee_vp_id == 0),
-        "dom2 VP[0] should be Suspended on dom3.vp0"
-    );
-
-    // dom1.vp0 → Suspended { callee: dom2.vp0 }
-    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom1_vp0.run_state.read(),
-            VpRunState::Suspended { callee_domain_id, callee_vp_id, .. }
-            if callee_domain_id == dom2_id && callee_vp_id == 0),
-        "dom1 VP[0] should be Suspended on dom2.vp0"
-    );
-
-    // dom0.vp0 → Running (handler)
-    let dom0_vp0 = dom0.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom0_vp0.run_state.read(), VpRunState::Running { core: 0, .. }),
-        "dom0 VP[0] should be Running as handler"
-    );
-}
-
-/// When dom0 claims dom1 (Suspended → Running), dom2 stays Suspended
-/// because dom2's callee (dom3) is Interrupted, not dom2 itself.
-/// Only when dom1 subsequently claims dom2 is dom3 freed to Available.
-#[test]
-fn test_4domain_transitive_suspended_chain_cleanup() {
-    let platform = common::TestPlatform::new();
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
-    let dom0_id = dom0.read().data.id;
-    let dom1_id = dom1.read().data.id;
-
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0).unwrap().0;
-
-    // Step 1: dom0 claims dom1 (Suspended → Running).
-    let dom1_h = find_domain_handle(&dom0, dom1_id);
-    Capability::switch(&platform, &dom0, dom1_h, 0).unwrap().0;
-
-    // dom1.vp0 → Running
-    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom1_vp0.run_state.read(), VpRunState::Running { .. }),
-        "dom1 VP[0] must be Running after being claimed"
-    );
-
-    // dom2.vp0 must still be Suspended (dom3 is Interrupted, not dom2)
-    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Suspended { .. }),
-        "dom2 VP[0] must remain Suspended — it was dom1's callee, not Interrupted"
-    );
-
-    // dom3.vp0 must still be Interrupted
-    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom3_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "dom3 VP[0] must still be Interrupted"
-    );
-
-    // Step 2: dom1 claims dom2 (Suspended → Running).
-    // dom1 is now Running on core 0; it can switch to dom2.
-    let dom2_id = dom2.read().data.id;
-    let dom2_h = find_domain_handle(&dom1, dom2_id);
-    Capability::switch(&platform, &dom1, dom2_h, 0).unwrap().0;
-
-    // dom2.vp0 → Running
-    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom2_vp0.run_state.read(), VpRunState::Running { .. }),
-        "dom2 VP[0] must be Running after being claimed by dom1"
-    );
-
-    // dom3.vp0 → Available (freed because dom2's callee dom3 was Interrupted)
-    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
-    assert!(
-        matches!(*dom3_vp0.run_state.read(), VpRunState::Interrupted { .. }),
-        "dom3 VP[0] must remain reserved until its exact caller resumes it"
-    );
-}
-
 fn not_report_policy() -> VectorPolicy {
     VectorPolicy {
         visibility: InterruptVisibility::NotReport,
@@ -1003,27 +1153,153 @@ fn not_report_policy() -> VectorPolicy {
     }
 }
 
-#[test]
-fn test_interrupt_resume_all_not_report_descends_to_leaf() {
-    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
-    let vector = 0x40;
-    dom0
+fn set_vector_policy(domain: &CapabilityRef<Domain>, vector: u8, policy: VectorPolicy) {
+    domain
         .write()
         .data
         .policy
         .interrupts
-        .set_policy(vector, VectorPolicy::default_deliver());
+        .set_policy(vector, policy);
+}
+
+/// After interrupt delivery to a 4-domain chain, verify the intermediate
+/// states: dom3=Waiting{None}, dom2=Waiting{Some(dom3)}, dom1=Waiting{Some(dom2)}.
+#[test]
+fn test_4domain_interrupt_delivery_states() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let dom2_id = dom2.read().data.id;
+    let dom3_id = dom3.read().data.id;
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0)
+        .unwrap()
+        .0;
+
+    // dom3.vp0 → Waiting { unlocks: None }
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom3_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: None, .. }
+        ),
+        "dom3 VP[0] should be Waiting{{unlocks:None}}"
+    );
+
+    // dom2.vp0 → Waiting { unlocks: Some(dom3.vp0) }
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(&*dom2_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: Some(callee), .. }
+            if callee.domain_id == dom3_id && callee.vp_id == 0),
+        "dom2 VP[0] should be Waiting on dom3.vp0"
+    );
+
+    // dom1.vp0 → Waiting { unlocks: Some(dom2.vp0) }
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(&*dom1_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: Some(callee), .. }
+            if callee.domain_id == dom2_id && callee.vp_id == 0),
+        "dom1 VP[0] should be Waiting on dom2.vp0"
+    );
+
+    // dom0.vp0 → Running (handler)
+    let dom0_vp0 = dom0.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            *dom0_vp0.run_state.read(),
+            VpRunState::Running { core: 0, .. }
+        ),
+        "dom0 VP[0] should be Running as handler"
+    );
+}
+
+/// dom1/dom2/dom3 default to `Report`. Claiming dom1 stops immediately
+/// (dom1.report == true): dom1 → Running, dom2 and dom3 are left completely
+/// untouched (still Waiting) — no release step. Then claiming dom2 (also
+/// `Report`) likewise stops immediately, dom3 still untouched.
+#[test]
+fn test_4domain_default_report_chain_stops_one_level_at_a_time() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let dom1_id = dom1.read().data.id;
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0)
+        .unwrap()
+        .0;
+
+    // Step 1: dom0 claims dom1 (Waiting, report=true → Running immediately).
+    let dom1_h = find_domain_handle(&dom0, dom1_id);
+    let (ctx1, _) = Capability::switch(&platform, &dom0, dom1_h, 0).unwrap();
+    assert_eq!(ctx1.to_domain.read().data.id, dom1_id);
+    assert_eq!(ctx1.interrupt_return, Some(0));
+    assert_eq!(ctx1.interrupt_inject, None);
+
+    let dom1_vp0 = dom1.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom1_vp0.run_state.read(), VpRunState::Running { .. }),
+        "dom1 VP[0] must be Running after being claimed"
+    );
+
+    // dom2.vp0 untouched — still Waiting on dom3.
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom2_vp0.run_state.read(),
+            VpRunState::Waiting {
+                unlocks: Some(_),
+                ..
+            }
+        ),
+        "dom2 VP[0] must remain Waiting — no release step happens on claim"
+    );
+
+    // dom3.vp0 untouched — still Waiting{None}.
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom3_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: None, .. }
+        ),
+        "dom3 VP[0] must still be Waiting{{unlocks:None}}"
+    );
+
+    // Step 2: dom1 claims dom2 (Waiting, report=true → Running immediately).
+    let dom2_id = dom2.read().data.id;
+    let dom2_h = find_domain_handle(&dom1, dom2_id);
+    let (ctx2, _) = Capability::switch(&platform, &dom1, dom2_h, 0).unwrap();
+    assert_eq!(ctx2.interrupt_return, Some(0));
+
+    let dom2_vp0 = dom2.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(*dom2_vp0.run_state.read(), VpRunState::Running { .. }),
+        "dom2 VP[0] must be Running after being claimed by dom1"
+    );
+
+    // dom3.vp0 still untouched — still Waiting{None} until dom2 itself
+    // explicitly resumes it.
+    let dom3_vp0 = dom3.read().data.policy.vprocessor_states[0].clone();
+    assert!(
+        matches!(
+            &*dom3_vp0.run_state.read(),
+            VpRunState::Waiting { unlocks: None, .. }
+        ),
+        "dom3 VP[0] must remain Waiting{{unlocks:None}} until its exact caller resumes it"
+    );
+}
+
+/// All of dom1/dom2/dom3 set to `NotReport`: the walk transparently
+/// collapses through all three frames in a single switch call, landing
+/// directly on dom3 (the true leaf), which resumes silently — no
+/// `interrupt_return`/`interrupt_inject` signal at all.
+#[test]
+fn test_interrupt_resume_all_not_report_descends_to_leaf() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let vector = 0x40;
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
     for domain in [&dom1, &dom2, &dom3] {
-        domain
-            .write()
-            .data
-            .policy
-            .interrupts
-            .set_policy(vector, not_report_policy());
+        set_vector_policy(domain, vector, not_report_policy());
     }
 
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector)
-        .unwrap();
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
     let dom1_id = dom1.read().data.id;
     let dom3_id = dom3.read().data.id;
@@ -1033,51 +1309,41 @@ fn test_interrupt_resume_all_not_report_descends_to_leaf() {
     assert_eq!(ctx.to_domain.read().data.id, dom3_id);
     assert_eq!(ctx.to_vp_id, Some(0));
     assert_eq!(ctx.interrupt_return, None);
+    assert_eq!(ctx.interrupt_inject, None);
     assert!(matches!(
-        *dom1.read().data.policy.vprocessor_states[0].run_state.read(),
+        *dom1.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
         VpRunState::Locked { .. }
     ));
     assert!(matches!(
-        *dom2.read().data.policy.vprocessor_states[0].run_state.read(),
+        *dom2.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
         VpRunState::Locked { .. }
     ));
     assert!(matches!(
-        *dom3.read().data.policy.vprocessor_states[0].run_state.read(),
+        *dom3.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
         VpRunState::Running { core: 0, .. }
     ));
 }
 
+/// dom1=NotReport, dom2=Report, dom3=NotReport: the walk collapses through
+/// dom1 and stops at dom2 (report=true). dom2 has a callee (dom3), so this
+/// is the synthetic-return case: `interrupt_return = Some(vector)`,
+/// `interrupt_inject = None`. dom3 stays untouched (Waiting).
 #[test]
 fn test_interrupt_resume_stops_at_first_report_frame() {
     let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
     let vector = 0x41;
-    dom0
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, VectorPolicy::default_deliver());
-    dom1
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, not_report_policy());
-    dom2
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, VectorPolicy::default_report());
-    dom3
-        .write()
-        .data
-        .policy
-        .interrupts
-        .set_policy(vector, not_report_policy());
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
+    set_vector_policy(&dom1, vector, not_report_policy());
+    set_vector_policy(&dom2, vector, VectorPolicy::default_report());
+    set_vector_policy(&dom3, vector, not_report_policy());
 
-    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector)
-        .unwrap();
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
 
     let dom1_id = dom1.read().data.id;
     let dom2_id = dom2.read().data.id;
@@ -1087,16 +1353,268 @@ fn test_interrupt_resume_stops_at_first_report_frame() {
     assert_eq!(ctx.to_domain.read().data.id, dom2_id);
     assert_eq!(ctx.to_vp_id, Some(0));
     assert_eq!(ctx.interrupt_return, Some(vector));
+    assert_eq!(ctx.interrupt_inject, None);
     assert!(matches!(
-        *dom1.read().data.policy.vprocessor_states[0].run_state.read(),
+        *dom1.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
         VpRunState::Locked { .. }
     ));
     assert!(matches!(
-        *dom2.read().data.policy.vprocessor_states[0].run_state.read(),
+        *dom2.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
         VpRunState::Running { core: 0, .. }
     ));
     assert!(matches!(
-        *dom3.read().data.policy.vprocessor_states[0].run_state.read(),
-        VpRunState::Interrupted { .. }
+        &*dom3.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Waiting { unlocks: None, .. }
     ));
+}
+
+/// dom1=NotReport, dom2=NotReport, dom3(leaf)=Report: the walk collapses
+/// through dom1 and dom2, stopping at dom3 — the true leaf (`unlocks:
+/// None`). Since dom3 has no callee, this is the **injection** case:
+/// `interrupt_inject = Some(vector)`, `interrupt_return = None`.
+#[test]
+fn test_interrupt_resume_stops_at_leaf_with_report_injects() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let vector = 0x42;
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
+    set_vector_policy(&dom1, vector, not_report_policy());
+    set_vector_policy(&dom2, vector, not_report_policy());
+    set_vector_policy(&dom3, vector, VectorPolicy::default_report());
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
+
+    let dom1_id = dom1.read().data.id;
+    let dom3_id = dom3.read().data.id;
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
+    let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
+
+    assert_eq!(ctx.to_domain.read().data.id, dom3_id);
+    assert_eq!(ctx.to_vp_id, Some(0));
+    assert_eq!(ctx.interrupt_return, None);
+    assert_eq!(ctx.interrupt_inject, Some(vector));
+    assert!(matches!(
+        *dom1.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Locked { .. }
+    ));
+    assert!(matches!(
+        *dom2.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Locked { .. }
+    ));
+    assert!(matches!(
+        *dom3.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 0, .. }
+    ));
+}
+
+/// dom1=NotReport, dom2=NotReport, dom3(leaf)=NotReport: full transparent
+/// collapse all the way to the true leaf, which also resumes silently — no
+/// signal whatsoever, exactly as if the interrupt never happened.
+#[test]
+fn test_interrupt_resume_all_not_report_including_leaf_is_fully_silent() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let vector = 0x43;
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
+    for domain in [&dom1, &dom2, &dom3] {
+        set_vector_policy(domain, vector, not_report_policy());
+    }
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
+
+    let dom1_id = dom1.read().data.id;
+    let dom3_id = dom3.read().data.id;
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
+    let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
+
+    assert_eq!(ctx.to_domain.read().data.id, dom3_id);
+    assert_eq!(ctx.interrupt_return, None);
+    assert_eq!(ctx.interrupt_inject, None);
+}
+
+/// dom1(leaf's grandparent)=Report, dom2=Report, dom3(leaf)=Report: every
+/// frame stops immediately at its own level — one switch call per hop, each
+/// carrying its own `interrupt_return`, and the final hop into the true leaf
+/// carries `interrupt_inject` instead.
+#[test]
+fn test_interrupt_resume_all_report_stops_at_every_level() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let vector = 0x44;
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
+    for domain in [&dom1, &dom2, &dom3] {
+        set_vector_policy(domain, vector, VectorPolicy::default_report());
+    }
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
+
+    let dom1_id = dom1.read().data.id;
+    let dom2_id = dom2.read().data.id;
+    let dom3_id = dom3.read().data.id;
+
+    // Hop 1: dom0 → dom1, stops immediately (report=true, has callee dom2).
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
+    let (ctx1, _) = Capability::switch(&platform, &dom0, dom1_handle, 0).unwrap();
+    assert_eq!(ctx1.to_domain.read().data.id, dom1_id);
+    assert_eq!(ctx1.interrupt_return, Some(vector));
+    assert_eq!(ctx1.interrupt_inject, None);
+
+    // Hop 2: dom1 → dom2, stops immediately (report=true, has callee dom3).
+    let dom2_handle = find_domain_handle(&dom1, dom2_id);
+    let (ctx2, _) = Capability::switch(&platform, &dom1, dom2_handle, 0).unwrap();
+    assert_eq!(ctx2.to_domain.read().data.id, dom2_id);
+    assert_eq!(ctx2.interrupt_return, Some(vector));
+    assert_eq!(ctx2.interrupt_inject, None);
+
+    // Hop 3: dom2 → dom3, the true leaf (no callee) → injection.
+    let dom3_handle = find_domain_handle(&dom2, dom3_id);
+    let (ctx3, _) = Capability::switch(&platform, &dom2, dom3_handle, 0).unwrap();
+    assert_eq!(ctx3.to_domain.read().data.id, dom3_id);
+    assert_eq!(ctx3.interrupt_return, None);
+    assert_eq!(ctx3.interrupt_inject, Some(vector));
+}
+
+/// Regression for the eunomia crash: after interrupt delivery in a 4-domain
+/// chain, the handler resumes an intermediate frame from a VP other than
+/// the one recorded as its original caller (simulating dom0 retrying the
+/// switch hypercall from a different physical core after `-EAGAIN`
+/// migration). This must succeed — no ownership/identity check.
+#[test]
+fn test_4domain_resume_from_different_vp_and_core_succeeds() {
+    let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    let vector = 0x45;
+    set_vector_policy(&dom0, vector, VectorPolicy::default_deliver());
+    set_vector_policy(&dom1, vector, not_report_policy());
+    set_vector_policy(&dom2, vector, VectorPolicy::default_report());
+    set_vector_policy(&dom3, vector, not_report_policy());
+
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, vector).unwrap();
+
+    // dom0.vp1 (not vp0!) on a different core resumes dom1.
+    {
+        let d = dom0.read();
+        let vp1 = d.data.policy.vprocessor_states[1].clone();
+        drop(d);
+        *vp1.run_state.write() = VpRunState::Running { core: 2 };
+    }
+    platform.set_current_core(Some(2));
+
+    let dom1_id = dom1.read().data.id;
+    let dom2_id = dom2.read().data.id;
+    let dom1_handle = find_domain_handle(&dom0, dom1_id);
+    let (ctx, _) = Capability::switch(&platform, &dom0, dom1_handle, 0)
+        .expect("resuming a Waiting chain from a different VP/core must succeed");
+
+    // Collapses through dom1 (NotReport), stops at dom2 (Report).
+    assert_eq!(ctx.to_domain.read().data.id, dom2_id);
+    assert_eq!(ctx.from_vp_id, Some(1));
+    assert_eq!(ctx.core_id, 2);
+    assert!(matches!(
+        *dom2.read().data.policy.vprocessor_states[0]
+            .run_state
+            .read(),
+        VpRunState::Running { core: 2, .. }
+    ));
+}
+
+// ── Two independent chains sharing an intermediate domain ────────────────────
+//
+// Exact scenario the `blocked` field exists for: two independent call chains,
+// A1 -> B1 -> C1 (interrupted, frozen) and A2 -> B2 (separately active,
+// unrelated), both through the same domain B. B2 holds a valid handle to C
+// (handles belong to the domain, not the VP), but must NOT be able to claim
+// C1 until B1 has actually been resumed.
+
+/// A1 -> B1 -> C1 interrupted (handler A), plus a separate, concurrently
+/// active A2 -> B2 chain through the same domain B.
+///
+/// B2 must not be able to claim C1 directly (C1 is still blocked: its caller
+/// B1 hasn't itself resumed). Once A1 resumes B1 (from any VP of A), C1
+/// becomes independently claimable, and B2 can then claim it.
+#[test]
+fn test_independent_chain_cannot_steal_deeper_waiting_frame() {
+    let platform = common::TestPlatform::new();
+    platform.set_current_core(Some(0));
+
+    // Domain A (root), 4 VPs (vp0 = A1, vp1 = A2).
+    let a = Capability::new_root(0, 0, Domain::new_root(4));
+    init_vp_running(&a, 0, 0);
+    init_vp_running(&a, 1, 1);
+
+    // Domain B, child of A, 4 VPs (vp0 = B1, vp1 = B2).
+    let (b, b_h) = make_sealed_child(&a);
+
+    // Domain C, child of A (visible to B via a manually added handle, as in
+    // `setup_3domain_chain` above).
+    let (c, _c_h_in_a) = make_sealed_child(&a);
+    let c_id = c.read().data.id;
+    let c_h_in_b = {
+        let c_weak = Arc::downgrade(&c);
+        let mut bw = b.write();
+        let h = bw.data.allocate_domain_handle();
+        bw.data.add_domain_capability(h, c_weak);
+        h
+    };
+
+    // Chain 1: A1 (core 0) -> B1 (core 0) -> C1 (core 0).
+    Capability::switch(&platform, &a, b_h, 0).unwrap(); // A1 Locked, B1 Running(core0)
+    Capability::switch(&platform, &b, c_h_in_b, 0).unwrap(); // B1 Locked, C1 Running(core0)
+
+    // Chain 2: A2 (core 1) -> B2 (core 1). Independent, unrelated.
+    platform.set_current_core(Some(1));
+    Capability::switch(&platform, &a, b_h, 1).unwrap(); // A2 Locked, B2 Running(core1)
+
+    // Interrupt hits C1 on core 0; A is the handler.
+    Capability::<Domain>::deliver_interrupt_vp(&platform, &c, 0, 0).unwrap();
+
+    // B1 is now Waiting{unlocks:Some(C1), blocked:false} (directly called by
+    // the handler A). C1 is Waiting{unlocks:None, blocked:true}.
+    let b_vp0 = b.read().data.policy.vprocessor_states[0].clone();
+    assert!(matches!(
+        &*b_vp0.run_state.read(),
+        VpRunState::Waiting {
+            unlocks: Some(_),
+            ..
+        }
+    ));
+
+    // B2 tries to claim C1 directly, using B's (shared, domain-level) handle
+    // to C. Must fail: C1 is still blocked because B1 hasn't resumed.
+    platform.set_current_core(Some(1));
+    let result = Capability::switch(&platform, &b, c_h_in_b, 0);
+    assert!(
+        result.is_err(),
+        "B2 must not be able to claim C1 before B1 has resumed"
+    );
+    assert!(
+        matches!(
+            &*c.read().data.policy.vprocessor_states[0].run_state.read(),
+            VpRunState::Waiting { .. }
+        ),
+        "C1 must remain Waiting after the rejected claim"
+    );
+
+    // A1 resumes B1 (the actual caller chain, core 0).
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &a, b_h, 0)
+        .expect("B1 must be claimable by A (its actual caller) once targeted");
+    assert!(matches!(
+        &*b_vp0.run_state.read(),
+        VpRunState::Running { core: 0, .. }
+    ));
+
+    // Now C1 is unblocked as a side effect. B2 can claim it.
+    platform.set_current_core(Some(1));
+    let (ctx, _) = Capability::switch(&platform, &b, c_h_in_b, 0)
+        .expect("C1 must become claimable by B2 once B1 has actually resumed");
+    assert_eq!(ctx.to_domain.read().data.id, c_id);
 }

@@ -7,6 +7,197 @@
 
 ## Current Status
 
+- **2026-07-29 — DomainComm ring alignment + pointer-corruption fix, landed
+  and live-verified (UNCOMMITTED prior to this entry, now being committed).**
+  Follows on from the doorbell/interrupt redesign entry below — this is a
+  separate bug hit while retesting eunomia after that work.
+
+  **Bugs found and fixed in `themis/capavisor/src/platform/domain.rs`**:
+  1. **Alignment panic**: `domcomm_rx_enqueue`/`domcomm_tx_dequeue` wrote
+     `MsgHeader` (8-byte-aligned, has a `u64` field) through a typed
+     `&mut MsgHeader` reference at byte-packed ring offsets that aren't
+     guaranteed 8-aligned (ring has no per-message padding by design —
+     `total_size` must stay exact, see prior off-by-one history). Triggered
+     reliably whenever `test_attestation` ran first (attestation payload
+     lengths aren't 8-byte multiples, drifting the cursor). Fixed by
+     switching to `core::ptr::write_unaligned`/`copy_nonoverlapping`
+     everywhere instead of typed dereferences — also correct because this
+     memory is domain-shared, so forming an exclusive `&mut` over it is
+     unsound regardless of alignment.
+  2. **Untrusted-cursor hardening**: the DomainComm header page holds both
+     RX and TX `RingMeta` together, so it's entirely domain-writable — a
+     malicious/buggy domain could scribble on `rx.head`/`tx.tail`, the
+     fields capavisor considers authoritative. Fixed by adding
+     `DomainCommRing::local_cursor: u32`, a capavisor-private producer/
+     consumer cursor; capavisor now only ever *writes* its own cursor into
+     shared memory, never reads it back. Only the domain's own cursors
+     (`rx.tail`, `tx.head`) are read from shared memory (still via
+     `read_volatile` + fence).
+  3. **Bounds-checked pointers**: added `DomainCommRing::checked_ptr(offset,
+     len, hhdm_offset) -> Option<*mut u8>`, validating offset/len stay
+     within one ring page and within the ring's actual backing pages before
+     handing back a pointer — closes a real pre-existing OOB-read gap in
+     `domcomm_tx_dequeue` (a crafted domain-supplied `total_size` near a
+     page boundary could previously read past the ring page into unrelated
+     HHDM-mapped memory).
+  4. **Bug introduced then fixed within this same session**: initial
+     `checked_ptr` implementation computed `page_off` for the boundary
+     check but forgot to add it to the returned pointer — every access
+     silently landed at page offset 0 instead of the real offset, which
+     is what caused the "corrupted attestation nonce" symptom seen live
+     (TX payload copy read raw `MsgHeader` bytes at page start instead of
+     the actual nonce 16 bytes further in). Fixed: `checked_ptr` now
+     returns `page_hpa + hhdm_offset + page_off`.
+
+  **Validation**: `cargo build --release -p capavisor` clean, `cargo
+  build-bins` (repo root) clean, `capa-engine cargo test --release` all
+  green. Live-tested by user: `test_attestation` now passes end-to-end
+  (previously failed nonce mismatch), full eunomia suite (`coco`, `smoke`,
+  `sched`, `hypercall`, etc.) runs correctly including
+  `test_attestation`-first ordering that previously panicked.
+
+  **Also reviewed/cleaned this session**: debug-print artifacts from the
+  live crash-hunting session — reverted an accidental `serial_debug!` →
+  `serial_println!` downgrade in `arch/x86_64/hypercall/switch.rs` (kept
+  the added message detail), reverted `cloud-hypervisor`'s vcpu.rs
+  "log every VM exit" back to "first 5 exits only" (kept new `qual`/`gpa`
+  fields and the new I/O-error-path `eprintln!`s, which are legitimate).
+  Audited all `thhv/src/*.c` debug/log call sites — all pre-existing ones
+  already follow correct conventions (`pr_debug`/`pr_warn_ratelimited` for
+  hot paths, `pr_err`/`pr_warn` for genuine errors, `pr_info` for one-shot
+  setup) — nothing to clean up there. `tools/toggle-debug` (checked-in
+  binary) gets non-deterministically rebuilt by every `cargo build-bins`
+  run even with unchanged source — must `git checkout -- tools/toggle-debug`
+  before finalizing any diff that ran `build-bins`.
+
+  **Known outstanding, not yet done (low priority, not blocking this
+  commit)**: `send_grow_ack` (×2, `hypercall/domcomm.rs`) and the doorbell
+  notify path (`arch/x86_64/hypercall/doorbell.rs:~97`) silently discard
+  `enqueue_rx`'s return value on ring-full — should at least log a warning
+  for diagnosability; not a hang risk today since callers already degrade
+  to a clean error on failed dequeue, just harder to debug when it happens.
+
+- **2026-07-28 — doorbell/interrupt redesign: `blocked` flag on `Waiting` VP
+  state landed, fully validated, UNCOMMITTED (`fixing_domain_revocation`
+  branch).** Continues the interrupt lazy-unwind chain work (separate arc
+  from the P7/P8 code-quality audit below — that arc is paused, not
+  abandoned; resume it after this one).
+
+  **The bug**: under the `VpRunState::Waiting` unification (`unlocks`,
+  `report` fields, from an earlier segment), a VP was "uniformly
+  claimable" by any VP holding a capability handle to it. User caught a
+  concrete counter-example: two independent call chains sharing a common
+  intermediate domain B — `A1 -> B1 -> C1` (interrupted, frozen) and
+  `A2 -> B2` (separate, unrelated, concurrently-active). B2 holds a valid
+  handle to C (handles are domain-level, not per-VP), so it could illegally
+  claim C1 before B1 (its own chain's frame) had itself resumed.
+
+  **Fix** (user-specified): added `blocked: bool` to `VpRunState::Waiting`
+  (`capa-engine/src/domain.rs`); removed the now-unused `prev_caller` field
+  entirely (confirmed via grep it was never read for logic).
+  - **Up walk** = `deliver_interrupt_vp` (`capa-engine/src/domain_api.rs`):
+    walks leaf→handler via `core_ctx.peek_at`. Only the frame directly
+    called by the handler (`chain[n-2]`) starts `blocked: false`; every
+    deeper frame starts `blocked: true`.
+  - **Down walk** = `switch_domain_forward` (same file): rejects a claim on
+    `blocked == true`; otherwise walks down collapsing `report == false`
+    frames until a `report == true` frame or the true leaf resumes. After
+    resuming, clears `blocked` on the next frame down (`unlocks`'s callee)
+    — exactly one hop, regardless of who performs the resume.
+  - Cleaned up all stale `prev_caller`-referencing doc comments in
+    `domain_api.rs` and `switch.rs` (`CoreContext::call_stack`, `peek_at`,
+    `find_interrupt_handler`) — reworded to established vocabulary only
+    (`blocked`, `unlocks`, `report`, `resume_chain`, `Waiting`/`Running`/
+    `Locked`, `chain`, `handler`, `leaf`). **User explicitly rejected
+    invented terms** ("entry gate", "stopping frame", "propagate") —
+    stick to established vocabulary in any future comments/explanations
+    here.
+
+  **Tests**: rewrote `tests/unit/switch.rs::test_waiting_vp_resumable_by_different_vp_same_domain`
+  (was asserting the wrong/buggy behavior — a different VP stealing a
+  *deeper* frame should succeed; now correctly tests a different VP
+  resuming the frame directly called by the handler, the real
+  eunomia-crash regression). Added
+  `test_deep_waiting_vp_blocked_until_caller_resumes` and
+  `test_independent_chain_cannot_steal_deeper_waiting_frame` (the exact
+  A1/B1/C1 vs A2/B2 scenario). Fixed
+  `tests/concurrency/loom_vp_switch.rs::vp_two_cores_race_waiting_vp`'s
+  manual `Waiting` construction for the new field.
+
+  **Validation — all green**: `cargo test` (default), `cargo test
+  --features address_translation`, `cargo loom` (plain, 50/50),
+  `RUSTFLAGS="-C debug-assertions=on" cargo loom` (50/50), `themis/capavisor`
+  `cargo build --release` (clean), `capa-cli cargo test --release`
+  (**15/15 tutorials pass**, including `tutorial_05_basic_interrupts` which
+  was a previously-tracked P6 failure — not confirmed *why* it now passes,
+  worth a quick look but not a blocker), `cargo build-bins` at repo root
+  (full success).
+
+  **NOT yet done / next steps, in order**:
+  1. `update-do-switch-injection` (SQL todo id): wire capavisor's
+     `do_switch` handler to actually perform PIR injection based on
+     `SwitchContext.interrupt_inject: Option<u8>`, symmetric to the
+     existing `interrupt_return` handling. This is the last piece before a
+     live eunomia retest.
+  2. Live-boot eunomia CoCo retest end-to-end to confirm the original
+     doorbell/interrupt bug this whole redesign was chasing is actually
+     fixed in practice (not just at the capa-engine unit/loom level).
+  3. `lean-exec` sync: the executable Lean 4 model has **not** been
+     updated for `unlocks`/`report`/`blocked`/interrupt-chain semantics —
+     needs differential-testing parity once the Rust side is fully settled.
+  4. Debug-instrumentation cleanup (any `themis_trace()` scaffolding added
+     while chasing this bug) — sweep before committing.
+  5. **Nothing in this arc has been committed.** `git status` currently
+     shows modified: `capa-engine/src/domain.rs`, `domain_api.rs`,
+     `switch.rs`, `tests/concurrency/loom_vp_switch.rs`,
+     `tests/unit/switch.rs` (this segment) — plus other
+     already-modified-but-uncommitted files from earlier segments:
+     `themis/capavisor/src/arch/x86_64/hypercall/switch.rs`,
+     `themis/capavisor/src/platform/domain.rs`, `thhv/inc/thhv.h`,
+     `thhv/src/thhv_vp.c`; and an untracked `question.md`. **User standing
+     rule: do not commit automatically — wait for explicit go-ahead after
+     they inspect diffs and run tests themselves.** Likely a bundled commit
+     once (1)-(2) above land and eunomia is confirmed fixed live.
+
+  **Resume next session**: re-read this entry, then `git status` / `git
+  log --oneline -10` to confirm nothing drifted, then start on
+  `update-do-switch-injection` (item 1 above). The P7/P8 code-quality
+  audit entry directly below this one is a separate, paused arc — resume
+  it only after this doorbell/interrupt work is committed.
+
+- **2026-07-27 — code-quality redesign audit: P7 landed (`fixing_domain_revocation` branch).**
+  Fixed `capa-cli/src/session.rs`'s `export-as-unit-test` codegen, which
+  generated Rust regression tests that didn't compile at all: every
+  `Capability::*` call was missing the required `platform: &dyn Platform`
+  first arg, several calls had wrong return-tuple destructuring, Rights/
+  Attributes were bare undefined identifiers, `MonitorAPI` bits were
+  double-wrapped, `Command::Switch`/`Interrupt` used a disconnected
+  throwaway `SwitchManager::new(4)` instead of the real engine API, and
+  `cmd_init`'s hardcoded `"r0"` root-memory name didn't match the codegen's
+  derived key. Rewrote codegen for every `Command` variant against
+  `rust_backend.rs`/`domain_api.rs` as reference. Also fixed
+  `AcceptCapability` silently dropping its optional `at <gpa>` override.
+  Validated: all 17 tutorial scripts' generated tests compile and pass
+  under `capa-engine/tests/unit/`; capa-cli's own 15 runtime tests still
+  pass. Committed as `cf604b45e`.
+
+  Confirmed along the way (no changes needed): `capa-cli`'s live
+  `CliPlatform` already owns and correctly uses the engine's real
+  `SwitchManager` (not a duplicate) for both switch and interrupt
+  delivery — this was already done in the earlier P3 capa-cli cutover.
+  Simulated core count is hardcoded to `4` in `capa-cli/src/main.rs:66`
+  but every layer below it (`CliPlatform`, `RustBackend`, `Domain::new_root`)
+  is already parametrized, so raising it later is a one-line change plus
+  optionally exposing a CLI flag.
+
+  **Next**: P8 — code-style review (`&CapabilityRef<T>` non-idiomatic
+  reference-to-Copy-type convention; whether `acquire_shared_lock(&self)
+  -> Result<Box<dyn OpLockGuard>>` needs the `Box<dyn _>` or could avoid
+  the allocation/dynamic dispatch). Then the merge-gate pass over all
+  tutorials. Order agreed with user; do not start without discussing first
+  (standing process rule — do not commit or start new work without
+  explicit go-ahead).
+
 - **2026-07-22 — deterministic cross-core revoke C3 (IN PROGRESS).**
   Goal: revoke a child that is continuously running on core 0 from dom0
   core 1, then audit that all per-domain/per-VP state is reclaimed.

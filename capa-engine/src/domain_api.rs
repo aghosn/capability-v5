@@ -2229,10 +2229,9 @@ impl Capability<Domain> {
         };
 
         // Confirm the target is actually Locked (waiting on the doomed
-        // callee), then rewrite as Running. The caller/prev_caller it had
-        // recorded is gone (Running/Locked no longer carry it) — whatever
-        // this VP's own predecessor is now lives implicitly on the stack,
-        // below the frame we just popped above.
+        // callee), then rewrite as Running. Whatever this VP's own
+        // predecessor is now lives implicitly on the stack, below the
+        // frame we just popped above.
         {
             let mut rs = target_vp_arc.run_state.write();
             if !matches!(&*rs, VpRunState::Locked { .. }) {
@@ -2253,6 +2252,7 @@ impl Capability<Domain> {
             from_vp_id: None,
             to_vp_id: Some(target_vp),
             interrupt_return: None,
+            interrupt_inject: None,
         })
     }
 
@@ -2364,17 +2364,36 @@ impl Capability<Domain> {
             from_vp_id: Some(caller_vp_id),
             to_vp_id: Some(prev_vp_id),
             interrupt_return: None,
+            interrupt_inject: None,
         })
     }
 
     /// Forward switch: claim the target VP and lock the caller VP.
     ///
     /// Transitions:
-    /// - Target VP: `Available → Running` or `Suspended → Running` (interrupt-resume)
+    /// - Target VP: `Available → Running` or `Waiting → Running` (interrupt-resume)
     /// - Caller VP: `Running → Locked { callee: target }`
     ///
-    /// If the target VP was `Suspended`, its `Interrupted` callee is freed (`→ Available`)
-    /// after the target VP's lock is released.
+    /// If the target VP was `Waiting`, claiming it walks *downward* through
+    /// the frozen chain: any leading run of `report == false` frames is
+    /// transparently collapsed (each re-becomes `Locked { callee }`, exactly
+    /// as if the interrupt never happened) until reaching a `report == true`
+    /// frame or the true leaf (`unlocks == None`). That frame becomes
+    /// `Running`. No caller-identity check is done — a `Waiting` VP with
+    /// `blocked == false` is claimable by any caller authorized by the
+    /// ordinary CDT/capability/permission checks already run above, exactly
+    /// like `Available`, possibly from a different core/VP than the one
+    /// that froze it. A `Waiting` VP with `blocked == true` is rejected: its
+    /// own direct caller hasn't resumed yet.
+    ///
+    /// If the frame we land on had a callee (`unlocks == Some`), that callee
+    /// is left untouched, still `Waiting`, but its `blocked` field is set to
+    /// `false` — it becomes claimable from now on, even though it isn't
+    /// resumed by this call. If `report` is true, `SwitchContext` carries
+    /// either `interrupt_return` (frame had a callee — synthetic
+    /// SWITCH-return) or `interrupt_inject` (frame was the true leaf — real
+    /// interrupt injection needed) so the caller (`do_switch`) can act
+    /// accordingly.
     fn switch_domain_forward(
         caller: &CapabilityRef<Domain>,
         to_handle: LocalHandle,
@@ -2456,6 +2475,7 @@ impl Capability<Domain> {
         let mut actual_domain_id = to_domain_id;
         let mut actual_vp = to_vp_arc.clone();
         let mut interrupt_return = None;
+        let mut interrupt_inject = None;
         // Frames to push onto the current core's per-core call stack for
         // each intermediate level re-established as Locked by an
         // interrupt-chain resume (see push loop after this match).
@@ -2471,86 +2491,58 @@ impl Capability<Domain> {
                 }
                 *state = VpRunState::Running { core: core_id };
             }
-            VpRunState::Suspended { .. } | VpRunState::Interrupted { .. } => {
-                let mut expected_owner_cap = caller.clone();
-                let mut expected_owner_id = caller_id;
-                let mut expected_owner_vp = caller_vp_id;
+            VpRunState::Waiting { blocked, .. } => {
+                if blocked {
+                    return Err(CapaError::InvalidOperation(
+                        "target VP's direct caller has not yet resumed".to_string(),
+                    ));
+                }
+                // Walk downward. No caller-identity check at any step — a
+                // Waiting (unblocked) VP is claimable by any caller
+                // authorized by the ordinary checks already run above (see
+                // this match arm's doc and VpRunState::Waiting's doc for
+                // why).
                 loop {
                     let state = actual_vp.run_state.read().clone();
                     match &state {
-                        VpRunState::Suspended {
-                            callee_domain,
-                            callee_domain_id,
-                            callee_vp_id,
-                            prev_caller,
+                        VpRunState::Waiting {
+                            unlocks,
                             vector,
                             report,
+                            ..
                         } => {
-                            let valid_owner = prev_caller.as_ref().is_some_and(|ctx| {
-                                ctx.domain_id == expected_owner_id
-                                    && ctx.vp_id == expected_owner_vp
-                                    && ctx
-                                        .domain
-                                        .upgrade()
-                                        .is_some_and(|cap| Arc::ptr_eq(&cap, &expected_owner_cap))
-                            });
-                            if !valid_owner {
-                                return Err(CapaError::InvalidOperation(
-                                    "suspended VP is owned by another caller".to_string(),
-                                ));
-                            }
                             resume_chain.push((
                                 actual_cap.clone(),
                                 actual_domain_id,
                                 actual_vp.clone(),
                                 state.clone(),
                             ));
-                            if *report {
-                                interrupt_return = Some(*vector);
+                            if *report || unlocks.is_none() {
+                                // Stop: this frame must itself be observed,
+                                // or there is nothing further down to walk
+                                // into (the true leaf).
+                                if *report {
+                                    if unlocks.is_some() {
+                                        interrupt_return = Some(*vector);
+                                    } else {
+                                        interrupt_inject = Some(*vector);
+                                    }
+                                }
                                 break;
                             }
-                            expected_owner_cap = actual_cap.clone();
-                            expected_owner_id = actual_domain_id;
-                            expected_owner_vp = actual_vp.id;
-                            actual_cap = callee_domain.upgrade().ok_or(CapaError::NotFound)?;
-                            actual_domain_id = *callee_domain_id;
+                            // report == false && has a callee: transparently
+                            // collapse this frame and keep descending.
+                            let callee = unlocks.as_ref().unwrap();
+                            actual_cap = callee.domain.upgrade().ok_or(CapaError::NotFound)?;
+                            actual_domain_id = callee.domain_id;
                             actual_vp = actual_cap
                                 .read()
                                 .data
                                 .policy
                                 .vprocessor_states
-                                .get(*callee_vp_id as usize)
+                                .get(callee.vp_id as usize)
                                 .cloned()
                                 .ok_or(CapaError::NotFound)?;
-                        }
-                        VpRunState::Interrupted {
-                            vector,
-                            caller: owner,
-                            report,
-                        } => {
-                            let valid_owner = owner.as_ref().is_some_and(|ctx| {
-                                ctx.domain_id == expected_owner_id
-                                    && ctx.vp_id == expected_owner_vp
-                                    && ctx
-                                        .domain
-                                        .upgrade()
-                                        .is_some_and(|cap| Arc::ptr_eq(&cap, &expected_owner_cap))
-                            });
-                            if !valid_owner {
-                                return Err(CapaError::InvalidOperation(
-                                    "interrupted VP is owned by another caller".to_string(),
-                                ));
-                            }
-                            resume_chain.push((
-                                actual_cap.clone(),
-                                actual_domain_id,
-                                actual_vp.clone(),
-                                state.clone(),
-                            ));
-                            if *report {
-                                interrupt_return = Some(*vector);
-                            }
-                            break;
                         }
                         _ => {
                             return Err(CapaError::InvalidOperation(
@@ -2566,29 +2558,19 @@ impl Capability<Domain> {
                         VpRunState::Running { core: core_id }
                     } else {
                         match state {
-                            VpRunState::Suspended {
-                                callee_domain_id,
-                                callee_vp_id,
+                            VpRunState::Waiting {
+                                unlocks: Some(callee),
                                 ..
                             } => VpRunState::Locked {
-                                callee_domain_id: *callee_domain_id,
-                                callee_vp_id: *callee_vp_id,
+                                callee_domain_id: callee.domain_id,
+                                callee_vp_id: callee.vp_id,
                             },
                             _ => unreachable!(),
                         }
                     };
 
                     let mut current = vp.run_state.write();
-                    if index == 0
-                        && !matches!(
-                            (&*current, state),
-                            (VpRunState::Suspended { .. }, VpRunState::Suspended { .. })
-                                | (
-                                    VpRunState::Interrupted { .. },
-                                    VpRunState::Interrupted { .. }
-                                )
-                        )
-                    {
+                    if index == 0 && !matches!(&*current, VpRunState::Waiting { .. }) {
                         return Err(CapaError::InvalidOperation(
                             "target VP was claimed concurrently".to_string(),
                         ));
@@ -2607,6 +2589,32 @@ impl Capability<Domain> {
                             domain_id: *domain_id,
                             vp_id: vp.id,
                         });
+                    }
+                }
+
+                // If the last resume_chain entry had a callee, that callee
+                // is left as Waiting (not resumed by this call), but its
+                // caller is no longer Waiting, so set its blocked = false.
+                if let VpRunState::Waiting {
+                    unlocks: Some(callee),
+                    ..
+                } = &resume_chain.last().unwrap().3
+                {
+                    if let Some(callee_cap) = callee.domain.upgrade() {
+                        if let Some(callee_vp) = callee_cap
+                            .read()
+                            .data
+                            .policy
+                            .vprocessor_states
+                            .get(callee.vp_id as usize)
+                            .cloned()
+                        {
+                            if let VpRunState::Waiting { blocked, .. } =
+                                &mut *callee_vp.run_state.write()
+                            {
+                                *blocked = false;
+                            }
+                        }
                     }
                 }
             }
@@ -2634,10 +2642,9 @@ impl Capability<Domain> {
         // is always pushed — it just became Locked, waiting on its callee.
         // For an interrupt-chain resume, each intermediate level
         // re-established as Locked is pushed too, in the same order the
-        // original forward switches pushed them. Suspended/Interrupted VPs'
-        // own callee_*/prev_caller/caller links are untouched by this: they
-        // remain the sole storage for chain segments not currently active
-        // on this core.
+        // original forward switches pushed them. Waiting VPs' own unlocks
+        // links are untouched by this: they remain the sole storage for
+        // chain segments not currently active on this core.
         core_ctx.push_frame(caller_ctx);
         for frame in intermediate_frames {
             core_ctx.push_frame(frame);
@@ -2651,6 +2658,7 @@ impl Capability<Domain> {
             from_vp_id: Some(caller_vp_id),
             to_vp_id: Some(actual_vp.id),
             interrupt_return,
+            interrupt_inject,
         })
     }
 
@@ -2661,14 +2669,14 @@ impl Capability<Domain> {
     /// (`handler_domain_id`), applying the following state changes:
     ///
     /// ```text
-    /// handler.vp  (Locked)  → Running { core }
-    /// ...report.vp(Locked)  → Suspended { callee = next VP down the chain }
-    /// interrupted.vp(Running)→ Interrupted
+    /// handler.vp     (Locked)  → Running { core }
+    /// intermediate.vp(Locked)  → Waiting { unlocks: Some(next VP down the chain) }
+    /// interrupted.vp (Running) → Waiting { unlocks: None }
     /// ```
     ///
     /// This preserves the synchronous call chain: intermediate VPs stay frozen
-    /// (`Suspended`) so no other VP can claim the interrupted leaf prematurely.
-    /// The leaf is only freed (`Available`) when its direct `Suspended` parent
+    /// (`Waiting`) so no other VP can claim the interrupted leaf prematurely.
+    /// The leaf is only freed (`Available`) when its direct `Waiting` parent
     /// is later claimed via a forward `switch`.
     ///
     /// # Special case
@@ -2743,7 +2751,7 @@ impl Capability<Domain> {
             // depth 0 is the leaf's caller, depth 1 that VP's own caller, and so
             // on — instead of following VpRunState links (Running/Locked no
             // longer carry them). Each entry's actual Locked state is verified
-            // where it's consumed below (the Suspended-rewrite loop and the
+            // where it's consumed below (the Waiting-rewrite loop and the
             // handler section), so it isn't re-checked here.
             let core_ctx = platform.switch_manager().get_core(core_id)?;
             let mut depth = 0;
@@ -2790,25 +2798,17 @@ impl Capability<Domain> {
             let n = chain.len();
             let handler_vp_id = chain[n - 1].2.id;
 
-            // `chain[1..n]` are exactly the frames this core's stack holds for
-            // the active segment (chain[0], the leaf, was never itself pushed
-            // — only its callers were). `peek_at(0)` is the leaf's caller;
-            // `peek_at(k)` for `k` in `1..=n-1` is chain[k]'s own caller (the
-            // frame that would surface once chain[1..=k] are popped). These are
-            // the sole source for Interrupted.caller/Suspended.prev_caller now
-            // that Running/Locked no longer carry that linkage themselves.
-            let stack_leaf_caller = core_ctx.peek_at(0);
-            let stack_prev_caller_at = |chain_index: usize| core_ctx.peek_at(chain_index);
-
             // Apply state changes (all VP locks are independent — no deadlock risk).
             //
-            // chain[0]:      Running → Interrupted (or Available when n==2)
-            // chain[1..n-2]: Locked  → Suspended { callee = chain[i-1] }
+            // chain[0]:      Running → Waiting { unlocks: None }      (true leaf)
+            // chain[1..n-2]: Locked  → Waiting { unlocks: Some(chain[i-1]) }
             // chain[n-1]:    Locked  → Running { core }
             //
-            // When the handler VP becomes Running it "unlocks" its immediate callee.
-            // For n>2 the callee is Suspended (already claimable).  For n==2 the
-            // callee is the leaf itself, so we set it to Available directly.
+            // blocked: chain[n-2] (directly called by the handler) is set to
+            // false immediately, since the handler is already Running. Every
+            // other Waiting frame (chain[0..n-2]) starts blocked: true, and
+            // is only cleared later, one hop at a time, as
+            // `switch_domain_forward` actually resumes the frame above it.
 
             if !matches!(&*chain[0].2.run_state.read(), VpRunState::Running { .. }) {
                 return Err(CapaError::InvalidOperation(
@@ -2824,13 +2824,14 @@ impl Capability<Domain> {
                 .get_policy(vector)
                 .visibility
                 == InterruptVisibility::Report;
-            *chain[0].2.run_state.write() = VpRunState::Interrupted {
+            *chain[0].2.run_state.write() = VpRunState::Waiting {
+                unlocks: None,
                 vector,
-                caller: stack_leaf_caller,
                 report: leaf_report,
+                blocked: 0 != n - 2,
             };
 
-            // Intermediate VPs: Locked → Suspended.
+            // Intermediate VPs: Locked → Waiting { unlocks: Some(callee) }.
             for i in 1..n - 1 {
                 let callee_domain = Arc::downgrade(&chain[i - 1].0);
                 let callee_domain_id = chain[i - 1].1;
@@ -2849,13 +2850,15 @@ impl Capability<Domain> {
                     .get_policy(vector)
                     .visibility
                     == InterruptVisibility::Report;
-                *chain[i].2.run_state.write() = VpRunState::Suspended {
-                    callee_domain,
-                    callee_domain_id,
-                    callee_vp_id,
-                    prev_caller: stack_prev_caller_at(i),
+                *chain[i].2.run_state.write() = VpRunState::Waiting {
+                    unlocks: Some(VpCallContext {
+                        domain: callee_domain,
+                        domain_id: callee_domain_id,
+                        vp_id: callee_vp_id,
+                    }),
                     vector,
                     report,
+                    blocked: i != n - 2,
                 };
             }
 
@@ -2878,7 +2881,7 @@ impl Capability<Domain> {
             // Pop the `n-1` frames this call chain consumed from the per-core
             // stack — the handler becomes the new leaf on this core. The frozen
             // segment (chain[0..n-1]) is NOT lost: it lives on in each VP's own
-            // Suspended/Interrupted callee_*/prev_caller/caller fields, ready to
+            // Waiting state (unlocks field), ready to
             // be re-pushed onto whichever core later resumes it (see
             // `switch_domain_forward`'s resume branch) — possibly a different
             // core than this one, which is exactly why this data can't live in
@@ -3693,14 +3696,14 @@ fn register_access_check(
 
     // Select the correct policy source based on why the VP stopped.
     //
-    // - Interrupted / Suspended: interrupt-caused exit → use InterruptPolicy
+    // - Waiting: interrupt-caused exit → use InterruptPolicy
     //   for the vector that caused the preemption.
     // - Available with last_exit_reason: non-interrupt exit forwarded to parent
     //   → use ExitPolicy for that exit reason.
     // - Available without exit reason (fresh VP) or Locked: use InterruptPolicy
     //   default (VECTOR_AVAILABLE).
     let bitmap = match &*run_state {
-        VpRunState::Interrupted { vector, .. } | VpRunState::Suspended { vector, .. } => {
+        VpRunState::Waiting { vector, .. } => {
             let policy = child_r.data.policy.interrupts.get_policy(*vector);
             if want_read {
                 policy.read_set
