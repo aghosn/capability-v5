@@ -377,8 +377,12 @@ pub extern "C" fn _start() -> ! {
     capa.platform.set_dom0_cap(capa.root_domain.clone());
     let num_cores = cpus.len();
     for core_id in 0..num_cores {
+        use capability_engine::Platform;
         capa.platform
-            .set_core_context(core_id, capa.root_domain.clone(), core_id as u32);
+            .switch_manager()
+            .get_core(core_id as capability_engine::CoreId)
+            .unwrap_or_else(|_| panic!("boot: core {} not registered with SwitchManager", core_id))
+            .set_binding(capa.root_domain.clone(), core_id as u64);
     }
 
     // Initialize dom0 VP run states to Running so that the capability engine's
@@ -391,7 +395,6 @@ pub extern "C" fn _start() -> ! {
             if let Some(vp) = dom.data.policy.vprocessor_states.get(core_id) {
                 *vp.run_state.write() = VpRunState::Running {
                     core: core_id as capability_engine::CoreId,
-                    caller: None,
                 };
             }
         }

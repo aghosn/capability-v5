@@ -25,14 +25,22 @@
 //!                                             core 1 tries to claim B's VP; VP state
 //!                                             is verified consistent in all orderings.
 //! V4. `vp_interrupt_delivery_vs_claim_race` — core 0 delivers an interrupt (setting
-//!                                             dom2.vp0 Running→Interrupted) while
-//!                                             core 1 tries to claim dom2.vp0; the
-//!                                             claim must always fail regardless of
-//!                                             scheduling order.
-//! V5. `vp_two_cores_race_suspended_vp`      — two cores concurrently try to claim
-//!                                             the same Suspended VP; exactly one wins
-//!                                             and the Interrupted callee is freed
-//!                                             exactly once.
+//!                                             dom2.vp0 Running→Waiting) while core 1
+//!                                             tries to claim dom2.vp0 via forward
+//!                                             switch. Unlike the old ownership-gated
+//!                                             model, a `Waiting` VP IS claimable by
+//!                                             any authorized caller — so the claim's
+//!                                             outcome depends on scheduling: it fails
+//!                                             if it observes dom2.vp0 still `Running`,
+//!                                             succeeds if it observes `Waiting`. Both
+//!                                             outcomes are verified consistent.
+//! V5. `vp_two_cores_race_waiting_vp`        — two VPs of the same domain concurrently
+//!                                             try to claim the same `Waiting` VP;
+//!                                             exactly one wins (ordinary claim race,
+//!                                             no identity/ownership check). The
+//!                                             winner's own callee (a deeper `Waiting`
+//!                                             frame) is left untouched — no release
+//!                                             step happens.
 //!
 //! # Running
 //!
@@ -42,40 +50,35 @@
 
 #![allow(dead_code)]
 
-use loom::sync::{Arc, Mutex};
+use loom::sync::Arc;
 use loom::thread;
 
-use std::collections::BTreeMap;
-
 use capability_engine::{
-    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy, LocalHandle, MonitorAPI,
-    OpLockGuard, Platform, Result, Update, VpCallContext, VpRunState,
+    Capability, CapabilityRef, CoreId, Domain, DomainId, DomainPolicy,
+    LocalHandle, MonitorAPI, OpLockGuard, Platform, Result, SwitchManager, Update, VpCallContext,
+    VpRunState,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Minimal loom platform
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Shared mutable state tracked under a loom Mutex.
-#[derive(Default)]
-struct LoomPlatformState {
-    core_to_domain: BTreeMap<CoreId, DomainId>,
-    core_to_vp: BTreeMap<CoreId, u64>,
-}
-
 /// Per-core platform instance.  Each "core" (thread) creates its own
 /// `LoomPlatform` with a fixed `current_core`, but shares the same
-/// `Arc<Mutex<LoomPlatformState>>` with other cores.
+/// `Arc<SwitchManager>` with other cores — mirroring the real invariant
+/// that a `SwitchManager` is a single per-platform authority shared by
+/// every core, not a per-core private instance (see
+/// `Platform::switch_manager`'s doc comment).
 struct LoomPlatform {
     current_core: CoreId,
-    state: Arc<Mutex<LoomPlatformState>>,
+    switch_manager: Arc<SwitchManager>,
 }
 
 impl LoomPlatform {
-    fn new(current_core: CoreId, state: Arc<Mutex<LoomPlatformState>>) -> Self {
+    fn new(current_core: CoreId, switch_manager: Arc<SwitchManager>) -> Self {
         LoomPlatform {
             current_core,
-            state,
+            switch_manager,
         }
     }
 }
@@ -86,8 +89,8 @@ struct DummyGuard;
 impl OpLockGuard for DummyGuard {}
 unsafe impl Send for DummyGuard {}
 
-// Safety: LoomPlatform only contains CoreId (Copy) and Arc<Mutex<...>> which
-// is Send + Sync, so LoomPlatform is Send + Sync.
+// Safety: LoomPlatform only contains CoreId (Copy) and Arc<SwitchManager>,
+// so LoomPlatform is Send + Sync.
 unsafe impl Send for LoomPlatform {}
 unsafe impl Sync for LoomPlatform {}
 
@@ -95,9 +98,19 @@ unsafe impl Sync for LoomPlatform {}
 // NullPlatform — no-op Platform for sequential setup calls.
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct NullPlatform;
+struct NullPlatform {
+    switch_manager: SwitchManager,
+}
 unsafe impl Send for NullPlatform {}
 unsafe impl Sync for NullPlatform {}
+
+impl NullPlatform {
+    fn new() -> Self {
+        Self {
+            switch_manager: SwitchManager::new(4),
+        }
+    }
+}
 
 impl Platform for NullPlatform {
     fn acquire_shared_lock(&self) -> Result<Box<dyn OpLockGuard>> {
@@ -107,16 +120,15 @@ impl Platform for NullPlatform {
         Ok(Box::new(DummyGuard))
     }
     fn send_ipi(&self, _: CoreId) {}
-    fn sync_barrier(&self, _: u8, _: usize) {}
     fn apply_update(&self, _: &Update) {}
     fn on_domain_revoked(&self, _: DomainId, _: Option<DomainId>) {}
     fn register_domain(&self, _: DomainId, _: Option<DomainId>) {}
-    fn set_core_context(&self, _: CoreId, _: &CapabilityRef<Domain>, _: u64) {}
-    fn clear_core_domain(&self, _: CoreId) {}
-    fn domain_cores(&self, _: DomainId) -> Vec<CoreId> { Vec::new() }
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<CoreId> { None }
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_manager
+    }
 }
 
 
@@ -128,28 +140,9 @@ impl Platform for LoomPlatform {
         Ok(Box::new(DummyGuard))
     }
     fn send_ipi(&self, _: CoreId) {}
-    fn sync_barrier(&self, _: u8, _: usize) {}
     fn apply_update(&self, _: &Update) {}
     fn on_domain_revoked(&self, _: DomainId, _: Option<DomainId>) {}
     fn register_domain(&self, _: DomainId, _: Option<DomainId>) {}
-
-    fn set_core_context(&self, core_id: CoreId, domain_cap: &CapabilityRef<Domain>, vp_id: u64) {
-        let domain_id = domain_cap.read().data.id;
-        let mut st = self.state.lock().unwrap();
-        st.core_to_domain.insert(core_id, domain_id);
-        st.core_to_vp.insert(core_id, vp_id);
-    }
-    fn clear_core_domain(&self, core_id: CoreId) {
-        self.state.lock().unwrap().core_to_domain.remove(&core_id);
-    }
-    fn domain_cores(&self, domain_id: DomainId) -> Vec<CoreId> {
-        let st = self.state.lock().unwrap();
-        st.core_to_domain
-            .iter()
-            .filter(|(_, &did)| did == domain_id)
-            .map(|(&cid, _)| cid)
-            .collect()
-    }
     fn try_acquire_update_lock(&self) -> bool {
         true
     }
@@ -157,19 +150,22 @@ impl Platform for LoomPlatform {
     fn get_current_core(&self) -> Option<CoreId> {
         Some(self.current_core)
     }
+    fn switch_manager(&self) -> &SwitchManager {
+        &self.switch_manager
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Test helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Forcibly set VP[`vp_id`] of `domain` to `Running { core, caller: None }`.
+/// Forcibly set VP[`vp_id`] of `domain` to `Running { core }`.
 /// Call this BEFORE spawning loom threads (sequential setup only).
 fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Running { core, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core };
 }
 
 /// Create a sealed child domain under `parent` and return `(child_ref, handle)`.
@@ -177,14 +173,14 @@ fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
 fn make_sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, LocalHandle) {
     let policy = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let num_vps = policy.num_vprocessors;
-    let h = Capability::create(&NullPlatform, parent, policy).unwrap().0;
+    let h = Capability::create(&NullPlatform::new(), parent, policy).unwrap().0;
     let child = parent.read().data.domain_capabilities[&h]
         .upgrade()
         .unwrap();
     for _ in 0..num_vps as u64 {
         child.write().data.add_vprocessor().unwrap();
     }
-    Capability::seal(&NullPlatform, parent, h).unwrap();
+    Capability::seal(&NullPlatform::new(), parent, h).unwrap();
     (child, h)
 }
 
@@ -208,25 +204,25 @@ fn vp_race_two_cores_same_vp() {
         // target has 4 VPs, all Available.
 
         // ── Shared platform state ───────────────────────────────────────────
-        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
 
         // Clone Arcs for each thread.
         let root_t0 = root.clone();
         let root_t1 = root.clone();
         let target_t0 = target.clone();
-        let state_t0 = shared.clone();
-        let state_t1 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
             let _target = target_t0; // keep alive
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, switch_mgr_t0);
             // Core 0 claims target VP[0].
             Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, switch_mgr_t1);
             // Core 1 also tries to claim target VP[0].
             Capability::switch(&plat, &root_t1, target_h, 0)
         });
@@ -272,24 +268,24 @@ fn vp_two_cores_different_vps() {
         init_vp_running(&root, 1, 1); // core 1 runs root VP[1]
                                       // target VP[0] and VP[1] start Available.
 
-        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
 
         let root_t0 = root.clone();
         let root_t1 = root.clone();
         let target_t0 = target.clone();
-        let state_t0 = shared.clone();
-        let state_t1 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
         let t0 = thread::spawn(move || {
             let _target = target_t0;
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, switch_mgr_t0);
             // Core 0 claims VP[0].
             Capability::switch(&plat, &root_t0, target_h, 0)
         });
 
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, switch_mgr_t1);
             // Core 1 claims VP[1].
             Capability::switch(&plat, &root_t1, target_h, 1)
         });
@@ -362,50 +358,51 @@ fn vp_concurrent_return_and_claim() {
             *vp0.run_state.write() = VpRunState::Locked {
                 callee_domain_id: b_domain.read().data.id,
                 callee_vp_id: 0,
-                prev_caller: None,
             };
             // root.VP[1]: Running on core 1
-            *vp1.run_state.write() = VpRunState::Running {
-                core: 1,
-                caller: None,
-            };
+            *vp1.run_state.write() = VpRunState::Running { core: 1 };
         }
         {
             let bd = b_domain.read();
             let bvp0 = bd.data.policy.vprocessor_states[0].clone();
             drop(bd);
 
-            let root_id = root.read().data.id;
-            let root_vp0_weak = std::sync::Arc::downgrade(&root);
-
-            *bvp0.run_state.write() = VpRunState::Running {
-                core: 0,
-                caller: Some(VpCallContext {
-                    domain: root_vp0_weak,
-                    domain_id: root_id,
-                    vp_id: 0,
-                }),
-            };
+            *bvp0.run_state.write() = VpRunState::Running { core: 0 };
         }
 
-        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
+
+        // The hand-rolled setup above puts B.VP[0] Running on core 0 with
+        // root.VP[0] as its caller *without* going through a real
+        // `switch_domain_forward` call, so core 0's call_stack needs the
+        // matching frame pushed by hand too — mirroring what a real forward
+        // switch (root → B) would have pushed.
+        {
+            let root_id = root.read().data.id;
+            let root_vp0_weak = std::sync::Arc::downgrade(&root);
+            switch_mgr.get_core(0).unwrap().push_frame(VpCallContext {
+                domain: root_vp0_weak,
+                domain_id: root_id,
+                vp_id: 0,
+            });
+        }
 
         let root_t1 = root.clone();
         let b_t0 = b_domain.clone();
-        let state_t0 = shared.clone();
-        let state_t1 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Threads ─────────────────────────────────────────────────────────
 
         // Thread 0 (core 0): return from B → root.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, switch_mgr_t0);
             Capability::switch(&plat, &b_t0, 0, 0)
         });
 
         // Thread 1 (core 1): try to switch from root → B, claiming VP[0].
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, switch_mgr_t1);
             Capability::switch(&plat, &root_t1, b_h, 0)
         });
 
@@ -464,7 +461,7 @@ fn vp_concurrent_return_and_claim() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// V4 — Interrupted VP cannot be claimed during or after interrupt delivery
+// V4 — claim race against a concurrently-interrupted VP
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Pre-state: 3-domain call chain on core 0.
@@ -473,29 +470,36 @@ fn vp_concurrent_return_and_claim() {
 ///
 /// Concurrently:
 /// * Thread 0 (core 0): `deliver_interrupt_vp(&dom2, dom0_id, 0)` —
-///                       sets dom2.vp0 Running→Interrupted, dom1.vp0 Locked→Suspended,
+///                       sets dom2.vp0 Running→Waiting, dom1.vp0 Locked→Waiting,
 ///                       dom0.vp0 Locked→Running.
 /// * Thread 1 (core 1): `switch(&dom1, dom2_h, 0)` —
 ///                       dom1.vp1 tries to forward-switch to dom2.vp0.
 ///
-/// Invariants in **all** loom-explored orderings:
-/// * Thread 0 always succeeds — the chain is well-formed throughout.
-/// * Thread 1 always fails — dom2.vp0 is either `Running` or `Interrupted`,
-///   never `Available` or `Suspended`, so the forward-switch rejects it.
+/// Under the unified `Waiting` model, a `Waiting` VP is claimable by any
+/// authorized caller — there is no per-VP/per-core ownership gate. So
+/// Thread 1's outcome depends on scheduling relative to Thread 0's write to
+/// dom2.vp0's `run_state` (a single per-VP lock, so the transition is
+/// atomic — no torn/corrupted state is possible in any interleaving):
+/// * If Thread 1 observes dom2.vp0 still `Running`, it fails (a `Running`
+///   VP cannot be claimed by anyone else).
+/// * If Thread 1 observes dom2.vp0 already `Waiting`, it succeeds and
+///   dom2.vp0 becomes `Running` under Thread 1.
 ///
-/// This is the key safety property of the lazy-unwind interrupt model:
-/// the interrupted VP cannot be stolen by any concurrent claim, regardless
-/// of how `deliver_interrupt_vp` and `switch` interleave.
+/// Invariants verified in **all** loom-explored orderings:
+/// * Thread 0 (`deliver_interrupt_vp`) always succeeds.
+/// * Whichever way Thread 1 goes, the final state of dom2.vp0 is exactly
+///   what that outcome implies — no interleaving leaves it in an
+///   inconsistent state.
 #[test]
 fn vp_interrupt_delivery_vs_claim_race() {
     loom::model(|| {
         // ── Sequential setup ────────────────────────────────────────────────
-        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
-        let plat_setup = LoomPlatform::new(0, shared.clone());
+        let switch_mgr = Arc::new(SwitchManager::new(4));
+        let plat_setup = LoomPlatform::new(0, switch_mgr.clone());
 
         // dom0: root with 4 VPs — will be the DELIVER handler.
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
-        let dom0_id = dom0.read().data.id;
+        let _dom0_id = dom0.read().data.id;
 
         // dom1: child of dom0 with 4 VPs — intermediate (REPORT) domain.
         let (dom1, dom1_h_in_dom0) = make_sealed_child(&dom0);
@@ -526,23 +530,24 @@ fn vp_interrupt_delivery_vs_claim_race() {
         // ── Arcs for threads ─────────────────────────────────────────────────
         let dom2_t0 = dom2.clone();
         let dom1_t1 = dom1.clone();
-        let state_t0 = shared.clone();
-        let state_t1 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Concurrent phase ─────────────────────────────────────────────────
 
         // Thread 0 (core 0): deliver interrupt — dom0 is the DELIVER handler.
-        // Walks the VP chain: dom2.vp0→Interrupted, dom1.vp0→Suspended, dom0.vp0→Running.
+        // Walks the VP chain: dom2.vp0→Waiting{None}, dom1.vp0→Waiting{Some(dom2)},
+        // dom0.vp0→Running.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
-            Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, dom0_id, 0, 0)
+            let plat = LoomPlatform::new(0, switch_mgr_t0);
+            Capability::<Domain>::deliver_interrupt_vp(&plat, &dom2_t0, 0, 0)
         });
 
         // Thread 1 (core 1): dom1.vp1 tries to claim dom2.vp0 via forward switch.
-        // dom2.vp0 is either Running (before Thread 0's write) or Interrupted
-        // (after Thread 0's write) — neither is Available or Suspended — always fails.
+        // Outcome depends on scheduling relative to Thread 0's write — see doc
+        // comment above.
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, switch_mgr_t1);
             Capability::switch(&plat, &dom1_t1, dom2_h_in_dom1, 0)
         });
 
@@ -558,37 +563,70 @@ fn vp_interrupt_delivery_vs_claim_race() {
             r0.err()
         );
 
-        // The claim attempt must always fail — dom2.vp0 is never Available or Suspended.
-        assert!(
-            r1.is_err(),
-            "switch to a Running/Interrupted VP must always fail"
-        );
+        // dom2.vp0's final state must be exactly consistent with Thread 1's
+        // outcome — no torn/corrupted state in any interleaving. By the time
+        // both threads have joined, Thread 0's delivery has always completed
+        // (its write to dom2.vp0 is a single atomic per-VP lock transition),
+        // so dom2.vp0 is `Running` (claimed by Thread 1) exactly when Thread 1
+        // succeeded, and `Waiting` (untouched by Thread 1) exactly when it failed.
+        let dom2_vp0_state = {
+            let d = dom2.read();
+            let vp = d.data.policy.vprocessor_states[0].clone();
+            drop(d);
+            let guard = vp.run_state.read();
+            if matches!(*guard, VpRunState::Running { .. }) {
+                "Running"
+            } else if matches!(*guard, VpRunState::Waiting { .. }) {
+                "Waiting"
+            } else {
+                "other"
+            }
+        };
+        if r1.is_ok() {
+            assert_eq!(
+                dom2_vp0_state, "Running",
+                "if the claim succeeded, dom2.vp0 must be Running under Thread 1"
+            );
+        } else {
+            assert_eq!(
+                dom2_vp0_state, "Waiting",
+                "if the claim failed, dom2.vp0 must remain Waiting (delivery completed, \
+                 Thread 1 never claimed it)"
+            );
+        }
     });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// V5 — Two cores race to claim the same Suspended VP
+// V5 — Two VPs race to claim the same Waiting VP
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Pre-state (after an interrupt has been delivered to a 3-domain chain):
-///   dom0.vp0  Running  { core: 0 }   — handler VP; first to try to resume
-///   dom0.vp1  Running  { core: 1 }   — second VP; also wants dom1.vp0
-///   dom1.vp0  Suspended{ callee = dom2.vp0 }
-///   dom2.vp0  Interrupted
+///   dom0.vp0  Running { core: 0 }                        — first to try to resume
+///   dom0.vp1  Running { core: 1 }                         — second VP; also wants dom1.vp0
+///   dom1.vp0  Waiting { unlocks: Some(dom2.vp0), report: true, blocked: false }
+///   dom2.vp0  Waiting { unlocks: None, blocked: true }
 ///
 /// Concurrently:
 /// * Thread 0 (core 0, dom0.vp0): `switch(&dom0, dom1_h, 0)` — claim dom1.vp0.
 /// * Thread 1 (core 1, dom0.vp1): `switch(&dom0, dom1_h, 0)` — same target.
 ///
+/// A `Waiting` VP with `blocked == false` is claimable by **any** authorized
+/// caller VP, not only the exact VP that originally froze it. dom0.vp1 is
+/// not the VP that originally froze dom1.vp0's chain, but it holds the same
+/// handle and is otherwise a perfectly valid caller — so this is an ordinary
+/// claim race, exactly like V1, not an identity-gated rejection.
+///
 /// Invariants in **all** loom-explored orderings:
-/// * Exactly one core wins the write-lock on dom1.vp0's run_state.
+/// * Exactly one of the two threads wins the write-lock on dom1.vp0's run_state.
 /// * dom1.vp0 ends up `Running` (claimed by the winner).
-/// * dom2.vp0 ends up `Available` — the winner's `Suspended → Running` path frees
-///   the `Interrupted` callee exactly once (inside the same write-lock block, so the
-///   loser never reaches the callee-freeing code).
+/// * dom2.vp0 is left **untouched** — still `Waiting { unlocks: None }`. Its
+///   `blocked` flag is cleared to `false` as a side effect of dom1.vp0 being
+///   resumed (dom1 was dom2's caller), so dom2 becomes independently
+///   claimable, but dom2 itself is not resumed by this call.
 /// * The losing thread returns an error.
 #[test]
-fn vp_two_cores_race_suspended_vp() {
+fn vp_two_cores_race_waiting_vp() {
     loom::model(|| {
         // ── Sequential setup ────────────────────────────────────────────────
         let dom0 = Capability::new_root(0, 0, Domain::new_root(4));
@@ -607,38 +645,49 @@ fn vp_two_cores_race_suspended_vp() {
             let d = dom1.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Suspended {
-                callee_domain: dom2_weak,
-                callee_domain_id: dom2_id,
-                callee_vp_id: 0,
+            *vp0.run_state.write() = VpRunState::Waiting {
+                unlocks: Some(VpCallContext {
+                    domain: dom2_weak,
+                    domain_id: dom2_id,
+                    vp_id: 0,
+                }),
                 vector: 0,
+                report: true,
+                blocked: false,
             };
         }
         {
             let d = dom2.read();
             let vp0 = d.data.policy.vprocessor_states[0].clone();
             drop(d);
-            *vp0.run_state.write() = VpRunState::Interrupted { vector: 0 };
+            *vp0.run_state.write() = VpRunState::Waiting {
+                unlocks: None,
+                vector: 0,
+                report: false,
+                blocked: true,
+            };
         }
 
         // ── Arcs for threads ─────────────────────────────────────────────────
-        let shared = Arc::new(Mutex::new(LoomPlatformState::default()));
+        let switch_mgr = Arc::new(SwitchManager::new(4));
         let dom0_t0 = dom0.clone();
         let dom0_t1 = dom0.clone();
-        let state_t0 = shared.clone();
-        let state_t1 = shared.clone();
+        let switch_mgr_t0 = switch_mgr.clone();
+        let switch_mgr_t1 = switch_mgr.clone();
 
         // ── Concurrent phase ─────────────────────────────────────────────────
 
         // Thread 0 (core 0, dom0.vp0): try to claim dom1.vp0.
         let t0 = thread::spawn(move || {
-            let plat = LoomPlatform::new(0, state_t0);
+            let plat = LoomPlatform::new(0, switch_mgr_t0);
             Capability::switch(&plat, &dom0_t0, dom1_h_in_dom0, 0)
         });
 
-        // Thread 1 (core 1, dom0.vp1): same target.
+        // Thread 1 (core 1, dom0.vp1): same target — a *different* VP of the
+        // same caller domain, not the "original" one, exercising the fixed
+        // no-ownership-check claim behavior.
         let t1 = thread::spawn(move || {
-            let plat = LoomPlatform::new(1, state_t1);
+            let plat = LoomPlatform::new(1, switch_mgr_t1);
             Capability::switch(&plat, &dom0_t1, dom1_h_in_dom0, 0)
         });
 
@@ -647,10 +696,9 @@ fn vp_two_cores_race_suspended_vp() {
 
         // ── Invariants ───────────────────────────────────────────────────────
 
-        // Exactly one core wins the Suspended → Running transition.
         assert!(
             r0.is_ok() ^ r1.is_ok(),
-            "exactly one core should claim the Suspended VP: r0={} r1={}",
+            "exactly one VP should claim dom1.vp0, got r0={} r1={}",
             r0.is_ok(),
             r1.is_ok()
         );
@@ -666,15 +714,17 @@ fn vp_two_cores_race_suspended_vp() {
             );
         }
 
-        // dom2.vp0 must be Available — freed exactly once by the winner.
-        // The loser never reaches the callee-free path because it sees Running and returns early.
+        // dom2.vp0 is left untouched — still Waiting{unlocks:None}. Winning
+        // the claim on dom1.vp0 does clear dom2.vp0's `blocked` flag as a
+        // side effect (dom1 was dom2's caller and is no longer Waiting), but
+        // dom2.vp0 itself is not resumed by this call.
         {
             let d = dom2.read();
             let vp = d.data.policy.vprocessor_states[0].clone();
             drop(d);
             assert!(
-                matches!(*vp.run_state.read(), VpRunState::Available { .. }),
-                "dom2.vp0 must be Available after its Suspended parent was claimed"
+                matches!(&*vp.run_state.read(), VpRunState::Waiting { unlocks: None, .. }),
+                "dom2.vp0 must remain Waiting{{unlocks:None}} — no release step happens"
             );
         }
     });

@@ -346,38 +346,82 @@ pub enum VpRunState {
     /// VP is currently executing on the given core.
     Running {
         core: CoreId,
-        /// The VP context that switched to us (None = no call-chain predecessor).
-        caller: Option<VpCallContext>,
     },
     /// VP is locked because it called switch; waiting for the callee to return.
     Locked {
         callee_domain_id: u64,
         callee_vp_id: u64,
-        /// This VP's own caller context (restored when the callee returns).
-        prev_caller: Option<VpCallContext>,
     },
-    /// VP was preempted by an interrupt while Locked on a callee.
+    /// VP is frozen as part of an interrupt lazy-unwind chain — either it was
+    /// itself `Running` and directly preempted by the interrupt (`unlocks ==
+    /// None`), or it was `Locked` waiting on a callee that is itself part of
+    /// the same frozen chain (`unlocks == Some(callee)`).
     ///
-    /// The callee VP is now `Interrupted` (or also `Suspended` for deeper chains).
-    /// This VP is claimable by a forward `switch` (same as `Available`).
-    /// When claimed, its direct callee is freed to `Available` if it is `Interrupted`.
-    Suspended {
-        /// Weak reference to the callee domain's capability.
-        callee_domain: CapabilityWeak<Domain>,
-        /// Domain ID of the callee.
-        callee_domain_id: u64,
-        /// VP ID of the callee within its domain.
-        callee_vp_id: u64,
-        /// The interrupt vector that caused the callee chain to be suspended.
-        vector: u8,
-    },
-    /// VP was Running when an interrupt fired and preempted it.
+    /// Claimability is gated by `blocked`, not by any caller identity check:
+    /// a `Waiting` VP with `blocked == false` may be resumed by any caller
+    /// authorized by the normal CDT/capability/permission checks — including
+    /// from a different physical core/VP than the one that originally froze
+    /// it (see `CoreContext::call_stack`'s doc for why that's expected). A
+    /// `Waiting` VP with `blocked == true` cannot be claimed by anyone yet:
+    /// its own direct caller hasn't itself resumed, so resuming it now would
+    /// let an unrelated VP of the same domain skip ahead of the actual call
+    /// chain.
     ///
-    /// Cannot be claimed by normal `switch` (forward or return).
-    /// Freed to `Available` when its `Suspended` parent is claimed via `switch`.
-    Interrupted {
-        /// The interrupt vector that caused this VP to be preempted.
+    /// Claiming a `Waiting` (unblocked) VP walks downward through the chain:
+    /// consecutive `report == false` frames are transparently collapsed
+    /// (each becomes `Locked { callee }` again, exactly as if the interrupt
+    /// never happened) until reaching either a `report == true` frame or a
+    /// frame with `unlocks == None` (the true leaf) — that frame becomes
+    /// `Running`. Every time a frame with `unlocks == Some(callee)` leaves
+    /// `Waiting` this way (whether collapsed through or stopped at), its
+    /// callee's `blocked` flag is cleared to `false` — one hop at a time —
+    /// so the next frame down becomes independently claimable, even though
+    /// it otherwise stays untouched (still `Waiting`) until someone actually
+    /// targets it. See `Capability::switch_domain_forward` for the exact
+    /// algorithm.
+    Waiting {
+        /// The callee this VP was blocked on via its own `switch` call, if
+        /// any. `None` means this VP itself was actually `Running` — the
+        /// true leaf — when the interrupt fired directly on it.
+        unlocks: Option<VpCallContext>,
+        /// The interrupt vector that caused this chain segment to freeze.
         vector: u8,
+        /// Whether this frame must itself observe the interrupt when it is
+        /// (re-)scheduled.
+        ///
+        /// A **frozen snapshot** of `InterruptPolicy::get_policy(vector).visibility
+        /// == Report`, taken at delivery time (see `deliver_interrupt_vp` in
+        /// `domain_api.rs`) — not re-derived from the domain's current policy
+        /// when the chain is later walked by `switch`. This is intentional:
+        /// re-deriving live would let a policy change made while this
+        /// interrupt is in flight retroactively alter whether an
+        /// already-frozen frame observes it, which would make the walk
+        /// depend on state that changed after the interrupt context was
+        /// fixed. Freezing at delivery keeps the resume outcome
+        /// deterministic and tied to the policy that was actually in effect
+        /// when the interrupt happened.
+        ///
+        /// What "observe" means depends on `unlocks`: if `unlocks ==
+        /// Some(_)` (this VP was blocked in its own `switch` call), the
+        /// observation is a synthetic SWITCH-return telling it "my callee
+        /// was preempted by vector V" (this VP was never itself directly
+        /// executing, so there is nothing to inject). If `unlocks == None`
+        /// (this VP was itself the true leaf, actually running when the
+        /// interrupt hit), the observation is a real interrupt injection of
+        /// `vector` once it resumes.
+        report: bool,
+        /// Whether this frame is still gated on its own direct caller
+        /// resuming. `true` = not yet claimable by anyone (the VP that
+        /// directly called into this one is itself still `Waiting`).
+        /// `false` = claimable now.
+        ///
+        /// Set at delivery time (`deliver_interrupt_vp`): `false` only for
+        /// the single frame directly called by the interrupt handler (which
+        /// becomes `Running` immediately, so that frame's gate is already
+        /// open); `true` for every deeper frame. Cleared to `false` one hop
+        /// at a time as each frame above it actually leaves `Waiting` (see
+        /// `switch_domain_forward`) — never set back to `true`.
+        blocked: bool,
     },
 }
 
@@ -795,6 +839,15 @@ impl Domain {
     /// checks the *owner* of a child capability — appropriate for operations
     /// on resources owned by the caller.
     pub fn require_api(&self, required_api: u16) -> Result<()> {
+        // A revoked caller cannot be sealed, so today this returns
+        // DomainNotSealed accidentally.  Reject explicitly with the correct
+        // error so callers that obtained a `CapabilityRef<Domain>` outside
+        // an engine lock (e.g. capavisor's `get_core_cap` at hypercall entry)
+        // and got beaten to the punch by a concurrent revocation see the
+        // real reason instead of a misleading "not sealed" error.
+        if self.is_revoked() {
+            return Err(CapaError::DomainRevoked);
+        }
         if !self.is_sealed() {
             return Err(CapaError::DomainNotSealed);
         }

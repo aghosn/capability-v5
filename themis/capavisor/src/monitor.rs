@@ -33,6 +33,18 @@ use capability_engine::Platform as _;
 /// handle. All arch-specific operations go through `ArchVpOps` methods.
 /// Policy logic (exit trap lookup, interrupt routing) is generic.
 pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
+    // Pin the ActiveVcpu pointer in this core's CoreContext so that
+    // Platform::poll_and_respond_cross_core can reach it when applying
+    // cross-core Switch updates (VMCLEAR/VMPTRLD).  monitor_loop is
+    // divergent — the Vp<A> lives forever at this stack address, so
+    // no clear needed.
+    {
+        let platform = get_platform();
+        if let Some(core_id) = platform.get_current_core() {
+            platform.pin_active_vcpu(core_id, &mut vp.handle as *mut _ as *mut u8);
+        }
+    }
+
     loop {
         let platform = get_platform();
 
@@ -252,21 +264,6 @@ fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> 
 #[allow(unused_variables)]
 fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform, vector: u32) {
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
-    let exit_trap = platform
-        .get_core_cap(core_id)
-        .map(|c| {
-            c.read()
-                .data
-                .policy
-                .exits
-                .get_action(A::EXTERNAL_INTERRUPT_EXIT_REASON)
-                .trap
-        })
-        .unwrap_or(true);
-
-    if !exit_trap {
-        return;
-    }
 
     #[cfg(feature = "quantum-sched")]
     {

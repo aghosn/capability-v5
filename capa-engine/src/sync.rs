@@ -68,3 +68,26 @@ pub use parking_lot::RwLock;
 
 #[cfg(all(not(feature = "loom"), not(feature = "hosted")))]
 pub use spin::RwLock;
+
+// ── lock-scope discipline ────────────────────────────────────────────────────
+
+/// Marks a block whose only purpose is to acquire capability-tree locks
+/// (via `.read()` / `.write()` on a `CapabilityRef`) and extract owned,
+/// lock-independent data out of them (ids, `Arc`/`Weak` clones, copies).
+///
+/// This expands to nothing more than the block itself — every lock guard
+/// created inside is already guaranteed by the borrow checker to be dropped
+/// at the closing brace, exactly as if this macro were not used. Its entire
+/// purpose is to make that boundary *visible and named* at the call site,
+/// instead of leaving it implicit in drop-ordering or an explicit
+/// `drop(guard)` call: code that runs after a `no_arcs_past_here!` block
+/// must never assume a lock from inside it is still held.
+///
+/// This is documentation, not enforcement — it adds no runtime check and
+/// changes no behaviour. Use it to wrap the locked sections of revoke-path
+/// code (e.g. in `capability.rs`) so a reader can see at a glance which
+/// spans hold domain locks and which run with none held.
+macro_rules! no_arcs_past_here {
+    ($body:block) => {{ $body }};
+}
+pub(crate) use no_arcs_past_here;

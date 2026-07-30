@@ -1,11 +1,13 @@
 //! Core capability structures with thread-safe parent-child relationships
 
-use crate::domain::{Domain, DomainPolicy, MonitorAPI};
+use crate::domain::{Domain, DomainPolicy, MonitorAPI, VpRunState};
 use crate::error::{CapaError, Result};
 use crate::memory::{Access, Attributes, MemoryRegion, RegionKind};
-use crate::sync::RwLock;
-use crate::update::{DomainId, UpdateBatch};
+use crate::platform::Platform;
+use crate::sync::{no_arcs_past_here, RwLock};
+use crate::update::{CoreSwitch, DomainId, UpdateBatch};
 use crate::view::AddressSpaceView;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -322,6 +324,7 @@ impl Capability<MemoryRegion> {
     /// **Internal primitive.** Prefer the domain-mediated [`revoke`] instead.
     #[doc(hidden)]
     pub fn revoke_child_ref(
+        platform: &dyn Platform,
         parent_ref: &CapabilityRef<MemoryRegion>,
         child_ref: &CapabilityRef<MemoryRegion>,
     ) -> Result<UpdateBatch> {
@@ -336,7 +339,7 @@ impl Capability<MemoryRegion> {
         drop(parent);
 
         // Collect updates from revoking the entire subtree
-        let updates = Self::revoke_subtree(&child)?;
+        let updates = Self::revoke_subtree(platform, &child)?;
 
         Ok(updates)
     }
@@ -346,6 +349,7 @@ impl Capability<MemoryRegion> {
     /// **Internal primitive.** Prefer the domain-mediated [`revoke`] instead.
     #[doc(hidden)]
     pub fn revoke_child(
+        platform: &dyn Platform,
         parent_ref: &CapabilityRef<MemoryRegion>,
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {
@@ -358,13 +362,16 @@ impl Capability<MemoryRegion> {
         drop(parent);
 
         // Collect updates from revoking the entire subtree
-        let updates = Self::revoke_subtree(&child_ref)?;
+        let updates = Self::revoke_subtree(platform, &child_ref)?;
 
         Ok(updates)
     }
 
     /// Recursively revoke a capability subtree
-    pub(crate) fn revoke_subtree(capa_ref: &CapabilityRef<MemoryRegion>) -> Result<UpdateBatch> {
+    pub(crate) fn revoke_subtree(
+        platform: &dyn Platform,
+        capa_ref: &CapabilityRef<MemoryRegion>,
+    ) -> Result<UpdateBatch> {
         let mut capa = capa_ref.write();
 
         let mut updates = UpdateBatch::new();
@@ -374,7 +381,7 @@ impl Capability<MemoryRegion> {
         drop(capa); // Release lock before recursing
 
         for child_ref in children {
-            let child_updates = Self::revoke_subtree(&child_ref)?;
+            let child_updates = Self::revoke_subtree(platform, &child_ref)?;
             updates.merge(child_updates);
         }
 
@@ -578,7 +585,12 @@ impl Capability<MemoryRegion> {
         // NotFound and skip it — no duplicate updates.
         if vital && !child_revoked {
             if let Some(ref domain_ref) = vital_domain_ref {
-                let cascade = Capability::<Domain>::revoke_domain_subtree(domain_ref, None)?;
+                // revoke_domain_subtree relies on every Running VP in the
+                // subtree having a non-empty call-chain ancestor stack (see
+                // its own comment); unlike revoke_child_domain, this cascade
+                // path doesn't get that check for free, so run it explicitly.
+                Capability::<Domain>::validate_revoke_domain_subtree(platform, domain_ref)?;
+                let cascade = Capability::<Domain>::revoke_domain_subtree(platform, domain_ref, None)?;
                 updates.merge(cascade);
             } else {
                 // Fallback: domain ref unavailable (e.g. root cap without
@@ -696,23 +708,71 @@ impl Capability<Domain> {
         Ok(child)
     }
 
+    fn validate_revoke_domain_subtree(
+        platform: &dyn Platform,
+        domain_ref: &CapabilityRef<Domain>,
+    ) -> Result<()> {
+        let (children, running_cores) = no_arcs_past_here!({
+            let domain = domain_ref.read();
+            let running_cores: Vec<crate::update::CoreId> = domain
+                .data
+                .policy
+                .vprocessor_states
+                .iter()
+                .filter_map(|vp| match &*vp.run_state.read() {
+                    VpRunState::Running { core } => Some(*core),
+                    _ => None,
+                })
+                .collect();
+            (domain.children.clone(), running_cores)
+        });
+
+        // A Running VP with no call-chain ancestor (this core's stack empty)
+        // has nowhere to switch back to on revoke — reject upfront rather
+        // than leave the core stranded.
+        for core in running_cores {
+            let core_ctx = platform.switch_manager().get_core(core)?;
+            if core_ctx.top_frame().is_none() {
+                return Err(CapaError::InvalidOperation(String::from(
+                    "revoked running VP has no caller",
+                )));
+            }
+        }
+
+        for child in children {
+            Self::validate_revoke_domain_subtree(platform, &child)?;
+        }
+        Ok(())
+    }
+
     /// Revoke a child domain and all its descendants by SubHandle
     ///
     /// Internal implementation called by [`revoke_domain`].
     pub(crate) fn revoke_child_domain(
+        platform: &dyn Platform,
         parent_ref: &CapabilityRef<Domain>,
         child_sub: SubHandle,
     ) -> Result<UpdateBatch> {
-        let mut parent = parent_ref.write();
+        let (parent_id, child_ref) = no_arcs_past_here!({
+            let parent = parent_ref.read();
+            parent.data.require_api(MonitorAPI::REVOKE)?;
+            let child = parent
+                .children
+                .iter()
+                .find(|child| child.read().sub_handle == child_sub)
+                .cloned()
+                .ok_or(CapaError::NotFound)?;
+            (parent.data.id, child)
+        });
 
-        parent.data.require_api(MonitorAPI::REVOKE)?;
+        Self::validate_revoke_domain_subtree(platform, &child_ref)?;
 
-        let child_ref = parent.remove_child(child_sub).ok_or(CapaError::NotFound)?;
+        parent_ref
+            .write()
+            .remove_child(child_sub)
+            .ok_or(CapaError::NotFound)?;
 
-        let parent_id = parent.data.id;
-        drop(parent);
-
-        let updates = Self::revoke_domain_subtree(&child_ref, Some(parent_id))?;
+        let updates = Self::revoke_domain_subtree(platform, &child_ref, Some(parent_id))?;
 
         Ok(updates)
     }
@@ -729,30 +789,64 @@ impl Capability<Domain> {
     /// capabilities (only memory locks are acquired), then re-acquired for final
     /// domain processing.
     pub(crate) fn revoke_domain_subtree(
+        platform: &dyn Platform,
         domain_ref: &CapabilityRef<Domain>,
         fallback: Option<DomainId>,
     ) -> Result<UpdateBatch> {
-        let mut domain = domain_ref.write();
-
         let mut updates = UpdateBatch::new();
 
-        let children = mem::take(&mut domain.children);
+        let (children, mem_weak_refs, domain_id, running_vps) = no_arcs_past_here!({
+            let mut domain = domain_ref.write();
 
-        // Snapshot memory capability weak refs and domain id while we hold the lock.
-        let mem_weak_refs: Vec<CapabilityWeak<MemoryRegion>> =
-            domain.data.memory_capabilities.values().cloned().collect();
-        let domain_id = domain.data.id;
+            let children = mem::take(&mut domain.children);
 
-        // Mark revoked early so that revoke_subtree (called below for memory
-        // caps) sees this domain as revoked and skips redundant ChangeRights
-        // and VITAL-triggered RevokeDomain updates.
-        domain.data.revoke();
-        updates.add_revoke_domain_with_fallback(domain_id, fallback);
+            // Snapshot memory capability weak refs and domain id while we hold the lock.
+            let mem_weak_refs: Vec<CapabilityWeak<MemoryRegion>> =
+                domain.data.memory_capabilities.values().cloned().collect();
+            let domain_id = domain.data.id;
 
-        drop(domain);
+            // Mark revoked early so that revoke_subtree (called below for memory
+            // caps) sees this domain as revoked and skips redundant ChangeRights
+            // and VITAL-triggered RevokeDomain updates.
+            domain.data.revoke();
+            updates.add_revoke_domain_with_fallback(domain_id, fallback);
+
+            // Snapshot Running VPs so we can emit a `CoreSwitch` for each
+            // affected core after releasing the domain lock.
+            //
+            // Each `Running { core }` VP produces one `CoreSwitch` naming
+            // only the *source* (this domain/VP/core) — no resume target is
+            // precomputed here: the affected core resolves its own resume
+            // target locally, by popping its own per-core call_stack until
+            // it finds a non-revoked domain (see
+            // `Capability::switch_after_callee_revoked`). VPs whose core has
+            // no ancestor on its stack (no switch is possible for them) were
+            // already rejected by `validate_revoke_domain_subtree` before
+            // this function ever runs, so no such VP can appear here.
+            let running_vps: Vec<(crate::update::CoreId, u64)> = domain
+                .data
+                .policy
+                .vprocessor_states
+                .iter()
+                .filter_map(|vp| match &*vp.run_state.read() {
+                    VpRunState::Running { core } => Some((*core, vp.id)),
+                    _ => None,
+                })
+                .collect();
+
+            (children, mem_weak_refs, domain_id, running_vps)
+        });
+
+        for (core, source_vp) in running_vps {
+            updates.add_core_switch(CoreSwitch {
+                core,
+                source_domain: domain_ref.clone(),
+                source_vp,
+            });
+        }
 
         for child_ref in children {
-            let child_updates = Self::revoke_domain_subtree(&child_ref, fallback)?;
+            let child_updates = Self::revoke_domain_subtree(platform, &child_ref, fallback)?;
             updates.merge(child_updates);
         }
 
@@ -778,7 +872,7 @@ impl Capability<Domain> {
                         // NotFound means the capability was already revoked
                         // from the tree (e.g. by an explicit revoke before the
                         // domain revocation).  Safe to skip.
-                        match Capability::<MemoryRegion>::revoke_child(&parent_ref, sub) {
+                        match Capability::<MemoryRegion>::revoke_child(platform, &parent_ref, sub) {
                             Ok(mem_updates) => updates.merge(mem_updates),
                             Err(CapaError::NotFound) => {}
                             Err(e) => return Err(e),
@@ -787,7 +881,7 @@ impl Capability<Domain> {
                     None => {
                         // Parentless root: should only occur for the initial
                         // memory capability owned by the root domain.
-                        let mem_updates = Capability::<MemoryRegion>::revoke_subtree(&mem_ref)?;
+                        let mem_updates = Capability::<MemoryRegion>::revoke_subtree(platform, &mem_ref)?;
                         updates.merge(mem_updates);
                     }
                     _ => {} // Same-domain parent: handled transitively via a root ancestor.
@@ -795,51 +889,54 @@ impl Capability<Domain> {
             }
         }
 
-        let mut domain = domain_ref.write();
+        let (comm_bindings, revoked_domain_id) = no_arcs_past_here!({
+            let mut domain = domain_ref.write();
 
-        // If this is a channel capability currently frozen (in transit), cancel
-        // the pending entry in the receiver domain and unfreeze the sender's handle.
-        if domain.is_channel() {
-            if let Some(recv_ref) = domain
-                .owned
-                .pending_receiver
-                .as_ref()
-                .and_then(|w| w.upgrade())
-            {
-                let mut rw = recv_ref.write();
-                // Find and remove the pending entry for this channel
-                let pending_id = rw
-                    .data
-                    .pending_domain_capabilities
-                    .iter()
-                    .find(|(_, p)| {
-                        p.cap
-                            .upgrade()
-                            .map_or(false, |c| Arc::ptr_eq(&c, domain_ref))
-                    })
-                    .map(|(id, _)| *id);
-                if let Some(id) = pending_id {
-                    if let Some(pending) = rw.data.pending_domain_capabilities.remove(&id) {
-                        if let Some(sender_ref) = pending.sender_domain.upgrade() {
-                            if !Arc::ptr_eq(&sender_ref, domain_ref) {
-                                sender_ref
-                                    .write()
-                                    .data
-                                    .unfreeze_domain_handle(pending.sender_handle);
+            // If this is a channel capability currently frozen (in transit), cancel
+            // the pending entry in the receiver domain and unfreeze the sender's handle.
+            if domain.is_channel() {
+                if let Some(recv_ref) = domain
+                    .owned
+                    .pending_receiver
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                {
+                    let mut rw = recv_ref.write();
+                    // Find and remove the pending entry for this channel
+                    let pending_id = rw
+                        .data
+                        .pending_domain_capabilities
+                        .iter()
+                        .find(|(_, p)| {
+                            p.cap
+                                .upgrade()
+                                .map_or(false, |c| Arc::ptr_eq(&c, domain_ref))
+                        })
+                        .map(|(id, _)| *id);
+                    if let Some(id) = pending_id {
+                        if let Some(pending) = rw.data.pending_domain_capabilities.remove(&id) {
+                            if let Some(sender_ref) = pending.sender_domain.upgrade() {
+                                if !Arc::ptr_eq(&sender_ref, domain_ref) {
+                                    sender_ref
+                                        .write()
+                                        .data
+                                        .unfreeze_domain_handle(pending.sender_handle);
+                                }
                             }
                         }
                     }
                 }
+                domain.owned.pending_receiver = None;
             }
-            domain.owned.pending_receiver = None;
-        }
 
-        // Clean up COMM bindings: this domain is about to be revoked.
-        // Any parent-owned COMM capabilities bound to this child must have
-        // their COMM attribute and binding cleared.
-        let comm_bindings = mem::take(&mut domain.data.comm_bindings);
-        let revoked_domain_id = domain.data.id;
-        drop(domain);
+            // Clean up COMM bindings: this domain is about to be revoked.
+            // Any parent-owned COMM capabilities bound to this child must have
+            // their COMM attribute and binding cleared.
+            let comm_bindings = mem::take(&mut domain.data.comm_bindings);
+            let revoked_domain_id = domain.data.id;
+
+            (comm_bindings, revoked_domain_id)
+        });
 
         for weak in &comm_bindings {
             if let Some(cap_ref) = weak.upgrade() {
@@ -1045,4 +1142,3 @@ pub fn compute_address_space(domain: &CapabilityRef<Domain>) -> AddressSpaceView
     w.data.ensure_view_fresh();
     w.data.cached_view.clone()
 }
-

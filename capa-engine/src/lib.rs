@@ -55,7 +55,7 @@ pub use interposition::{
     ProcFeature, ProcFeatureConfig, ProcFeaturePolicy,
 };
 pub use memory::{Access, Attributes, MemoryRegion, RegionKind, RegionStatus, Rights};
-pub use platform::{OpLockGuard, Platform};
+pub use platform::{CoreSyncPoints, OpLockGuard, Platform, Semaphore};
 
 /// Test-only shim that exposes the crate-internal `execute()` wrapper for
 /// integration tests to validate lock discipline and update dispatch
@@ -73,10 +73,12 @@ where
     platform::execute(platform, exclusive, op)
 }
 pub use switch::{
-    CoreContext, CoreState, InterruptContext, SwitchContext, SwitchManager, VpInterruptContext,
+    CoreBinding, CoreContext, CoreUpdate, InterruptContext, SwitchContext, SwitchManager,
+    VpInterruptContext,
 };
 pub use update::{
-    CoreId, CoreUpdate, DomainId, PolicyChange, Update, UpdateBatch, UpdateProcessor, UpdateStatus,
+    CoreId, DomainId, PolicyChange, QueuedUpdateBatch, Update, UpdateBatch, UpdateProcessor,
+    UpdateStatus,
 };
 pub use view::{
     compute_view_from_capabilities, view_diff, AddressSpaceView, ViewRegion,

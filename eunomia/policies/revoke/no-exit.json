@@ -1,0 +1,15 @@
+{
+  "extends": "standard",
+  "general": { "name": "revoke-no-exit" },
+  "policies": {
+    "exits": {
+      "default": {
+        "trap": false,
+        "read_set": "ALL",
+        "write_set": "ALL"
+      }
+    },
+    "msrs": { "default": "Native", "overrides": [] },
+    "cpuid": { "default": "Native", "hypervisor_range_native": true }
+  }
+}

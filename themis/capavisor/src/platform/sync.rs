@@ -1,68 +1,75 @@
 //! Synchronisation primitives used by the cross-core `execute()` protocol:
-//! a reusable two-phase barrier and `OpLockGuard` wrappers around the
-//! `op_lock` RW spinlock.
+//! a counting semaphore and `OpLockGuard` wrappers around the `op_lock`
+//! RW spinlock.
 
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::RwLock;
 
-use capability_engine::OpLockGuard;
+use capability_engine::{OpLockGuard, Platform, Semaphore as EngineSemaphore};
 
-// ── Two-phase synchronisation barrier ─────────────────────────────────────── //
+// ── Counting semaphore ──────────────────────────────────────────────────── //
 
-/// Reusable two-phase barrier for the cross-core IPI protocol.
+/// A counting semaphore for one phase of the cross-core IPI protocol.
 ///
-/// The initiating core calls `wait(participants)` which stores the expected
-/// count.  Responding cores call `wait(0)` to read the stored count and wait.
-pub(super) struct Barrier {
-    /// Total participants expected; written by the initiating core (participants > 0)
-    /// before it begins spinning.  Responding cores use the stored value (pass 0).
-    expected: AtomicUsize,
-    /// How many cores have arrived so far in the current generation.
-    arrived: AtomicUsize,
-    /// Incremented when all participants arrive, allowing barrier reuse.
-    generation: AtomicUsize,
+/// `release(n)` adds `n` permits and never blocks. `acquire(n)` blocks the
+/// calling core until `n` permits are cumulatively available, atomically
+/// consuming them. Unlike the old two-phase reusable `Barrier`, there is no
+/// generation/reset logic: each transaction constructs a fresh `Semaphore`
+/// per phase (see `CoreSyncPoints`), used exactly once.
+pub(super) struct Semaphore {
+    permits: AtomicUsize,
 }
 
-impl Barrier {
+impl Semaphore {
     pub(super) const fn new() -> Self {
-        Barrier {
-            expected: AtomicUsize::new(0),
-            arrived: AtomicUsize::new(0),
-            generation: AtomicUsize::new(0),
+        Semaphore {
+            permits: AtomicUsize::new(0),
         }
     }
 
-    /// Arrive and wait until all expected participants have arrived.
-    ///
-    /// * `participants > 0` — store as new expected count (initiating core).
-    /// * `participants == 0` — use the previously stored count (responding core).
-    pub(super) fn wait(&self, participants: usize) {
-        if participants > 0 {
-            self.expected.store(participants, Ordering::Release);
+    /// Add `n` permits. Never blocks.
+    fn release(&self, n: usize) {
+        if n == 0 {
+            return;
         }
-        // Spin until the initiating core has stored a non-zero expected count.
-        let expected = loop {
-            let e = self.expected.load(Ordering::Acquire);
-            if e > 0 {
-                break e;
+        self.permits.fetch_add(n, Ordering::Release);
+    }
+
+    /// Block until `n` permits are available, then atomically consume them.
+    fn acquire(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        loop {
+            let current = self.permits.load(Ordering::Acquire);
+            if current >= n
+                && self
+                    .permits
+                    .compare_exchange_weak(
+                        current,
+                        current - n,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                return;
             }
             core::hint::spin_loop();
-        };
-        let gen = self.generation.load(Ordering::Acquire);
-        let n = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
-        if n >= expected {
-            // Last to arrive: reset for the next use, then advance generation.
-            self.arrived.store(0, Ordering::Release);
-            self.expected.store(0, Ordering::Release);
-            self.generation.fetch_add(1, Ordering::Release);
-        } else {
-            while self.generation.load(Ordering::Acquire) == gen {
-                core::hint::spin_loop();
-            }
         }
     }
 }
+
+impl EngineSemaphore for Semaphore {
+    fn acquire(&self, n: usize) {
+        Semaphore::acquire(self, n)
+    }
+    fn release(&self, n: usize) {
+        Semaphore::release(self, n)
+    }
+}
+
 // ── RW-spinlock guards ─────────────────────────────────────────────────────── //
 //
 // `spin::RwLock` guards carry a lifetime tied to the lock reference.  Since
@@ -77,12 +84,28 @@ impl Barrier {
 pub(super) struct SharedGuard(ManuallyDrop<spin::RwLockReadGuard<'static, ()>>);
 
 impl SharedGuard {
-    pub(super) fn new(lock: &RwLock<()>) -> Self {
-        // SAFETY: `lock` lives as long as `ThemisPlatform` which outlives
-        // any guard it produces ('static in practice).
-        let guard: spin::RwLockReadGuard<'static, ()> =
-            unsafe { core::mem::transmute(lock.read()) };
-        SharedGuard(ManuallyDrop::new(guard))
+    /// Acquire the shared lock, polling the cross-core protocol while
+    /// waiting.
+    ///
+    /// Using a plain `lock.read()` here would spin without ever draining
+    /// this core's per-core update queue.  If another core is at the
+    /// moment holding exclusive (e.g. a revoke initiator sitting at
+    /// barrier 0 waiting for us to acknowledge), we would deadlock: it
+    /// waits for our poll to arrive, we wait for its exclusive guard to
+    /// drop.  Poll-while-spinning breaks that cycle — same reason
+    /// `execute()` polls on `try_acquire_update_lock`.
+    pub(super) fn new(lock: &RwLock<()>, platform: &super::ThemisPlatform) -> Self {
+        loop {
+            if let Some(guard) = lock.try_read() {
+                // SAFETY: `lock` lives as long as `ThemisPlatform`
+                // which outlives any guard it produces ('static in
+                // practice).
+                let guard: spin::RwLockReadGuard<'static, ()> =
+                    unsafe { core::mem::transmute(guard) };
+                return SharedGuard(ManuallyDrop::new(guard));
+            }
+            platform.poll_and_respond_cross_core();
+        }
     }
 }
 impl Drop for SharedGuard {
@@ -99,10 +122,17 @@ unsafe impl Send for SharedGuard {}
 pub(super) struct ExclusiveGuard(ManuallyDrop<spin::RwLockWriteGuard<'static, ()>>);
 
 impl ExclusiveGuard {
-    pub(super) fn new(lock: &RwLock<()>) -> Self {
-        let guard: spin::RwLockWriteGuard<'static, ()> =
-            unsafe { core::mem::transmute(lock.write()) };
-        ExclusiveGuard(ManuallyDrop::new(guard))
+    /// Acquire the exclusive lock, polling the cross-core protocol while
+    /// waiting.  See `SharedGuard::new` for the deadlock rationale.
+    pub(super) fn new(lock: &RwLock<()>, platform: &super::ThemisPlatform) -> Self {
+        loop {
+            if let Some(guard) = lock.try_write() {
+                let guard: spin::RwLockWriteGuard<'static, ()> =
+                    unsafe { core::mem::transmute(guard) };
+                return ExclusiveGuard(ManuallyDrop::new(guard));
+            }
+            platform.poll_and_respond_cross_core();
+        }
     }
 }
 impl Drop for ExclusiveGuard {

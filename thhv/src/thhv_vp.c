@@ -105,10 +105,16 @@ static long thhv_run_vp(struct thhv_vp *vp, void __user *uarg)
 	} slot = {0};
 	int ret;
 
-	if (!part->sealed)
+	if (!part->sealed) {
+		pr_warn("thhv: run_vp: partition not sealed (vp_index=%u)\n",
+			vp->vp_index);
 		return -EINVAL;
-	if (!vp->comm_registered)
+	}
+	if (!vp->comm_registered) {
+		pr_warn("thhv: run_vp: comm not registered (vp_index=%u)\n",
+			vp->vp_index);
 		return -EINVAL;
+	}
 
 	if (!mutex_trylock(&vp->run_lock))
 		return -EBUSY;

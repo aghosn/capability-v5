@@ -18,7 +18,7 @@ pub mod vcpu;
 pub mod vectors;
 
 // Re-export arch-opaque types for uniform access via `crate::arch::*`.
-pub use arch_state::{flush_tlb_handle, ArchDomainState, ArchPlatformState};
+pub use arch_state::{complete_revoke_switch, flush_tlb_handle, ArchDomainState, ArchPlatformState};
 
 // IOMMU device-assignment stubs (no SMMU yet).
 #[allow(unused_variables)]

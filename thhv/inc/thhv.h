@@ -720,11 +720,11 @@ struct domcomm_header {
 	__u8  reserved[4096 - 0x038];
 };
 
-/* ── DomainComm message header (16 bytes, 8-byte aligned) ───────────────── */
+/* ── DomainComm message header (16 bytes) ────────────────────────────────── */
 
 struct domcomm_msg_header {
 	__u32 message_type;           /* DOMCOMM_MSG_* */
-	__u32 total_size;             /* Total incl. header (8-byte aligned) */
+	__u32 total_size;             /* Exact total incl. header, no padding */
 	__u64 sequence;               /* Monotonic counter */
 };
 
@@ -1123,6 +1123,23 @@ struct thhv_debug_list_hpas {
 
 #define THHV_DEBUG_LIST_HPAS \
 	_IOWR(THHV_IOCTL_MAGIC, 0xF1, struct thhv_debug_list_hpas)
+
+/*
+ * THHV_DEBUG_REVOKE_ALL — walk the global partitions list and issue
+ * REVOKE_DOMAIN on every live partition (excluding dom0 itself, which
+ * would be a suicide).  Debug-only: intended to exercise the capavisor's
+ * cross-core revoke protocol from a user process pinned to a specific
+ * core (typically different from the CHV vCPU thread hosting the child),
+ * without having to shut CHV down.
+ *
+ * On success, returns the number of partitions for which the
+ * REVOKE_DOMAIN hypercall was attempted.  Per-partition failures are
+ * logged via dmesg but do not fail the ioctl.
+ *
+ * Requires CAP_SYS_ADMIN.
+ */
+#define THHV_DEBUG_REVOKE_ALL \
+	_IO(THHV_IOCTL_MAGIC, 0xF2)
 
 
 #endif /* _THHV_H */

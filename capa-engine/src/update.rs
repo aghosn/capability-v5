@@ -15,7 +15,7 @@ pub type DomainId = u64;
 pub type CoreId = u64;
 
 /// Types of updates that affect domain address spaces
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Update {
     /// Set access rights for a memory range in a domain.
     /// `rights == Rights::NONE` means no access (full unmap).
@@ -111,6 +111,19 @@ pub enum Update {
         domain: DomainId,
         change: PolicyChange,
     },
+
+    /// Redirect a physical core off a doomed VP onto its nearest non-revoked
+    /// caller-chain ancestor.
+    ///
+    /// Emitted by [`crate::capability::Capability::revoke_domain_subtree`]
+    /// for every core found running a VP inside the revoked subtree (see
+    /// [`CoreSwitch`] for field semantics). Core-keyed, not domain-keyed:
+    /// [`Update::affected_domain`] returns `None` for this variant —
+    /// `UpdateBatch::core_switches` is the accessor `Platform::execute`
+    /// uses to compute which cores must be IPI'd and to call
+    /// [`crate::platform::Platform::push_core_switch`] before the barrier
+    /// protocol, exactly like every other update in the same batch.
+    Switch(CoreSwitch),
 }
 
 /// Concrete policy delta carried by `Update::PolicyChanged`.
@@ -241,6 +254,8 @@ impl Update {
             Update::CommRegion { .. } | Update::UncommRegion { .. } => None,
             Update::ZeroMemory { .. } => None,
             Update::PolicyChanged { domain, .. } => Some(*domain),
+            // Core-keyed, not domain-keyed — see `UpdateBatch::core_switches`.
+            Update::Switch(_) => None,
         }
     }
 }
@@ -248,7 +263,9 @@ impl Update {
 /// A batch of updates that should be applied atomically
 #[derive(Debug, Default, Clone)]
 pub struct UpdateBatch {
-    /// List of updates to apply
+    /// List of updates to apply. Per-core switch orders (see [`CoreSwitch`])
+    /// are ordinary [`Update::Switch`] entries in this same list — see
+    /// `core_switches()` for the filtered view `Platform::execute` uses.
     updates: Vec<Update>,
 
     /// Domains affected by these updates
@@ -256,6 +273,40 @@ pub struct UpdateBatch {
 
     /// Snapshot of domain states before updates (for rollback)
     snapshots: BTreeMap<DomainId, Vec<u8>>,
+}
+
+/// Per-core "your currently-running VP is being revoked" order.
+///
+/// Emitted by the engine during `revoke_domain_subtree` for every core
+/// currently running a VP in the revoked subtree.  Consumed by the initiating
+/// core inside `execute()` before it sends cross-core IPIs.
+///
+/// No resume target is carried here: the *affected* core resolves its own
+/// resume target locally, by popping its own per-core `call_stack` until it
+/// finds a frame whose domain is not revoked (see
+/// `Capability::switch_after_callee_revoked`). The initiator only needs to
+/// know *which core* to notify and *what it's currently running*, for a
+/// sanity check that the affected core hasn't already moved on — no ancestor
+/// walk, no remote domain-lock reads.
+#[derive(Clone)]
+pub struct CoreSwitch {
+    /// Physical core to redirect.
+    pub core: CoreId,
+    /// Capability of the domain currently running on `core`.
+    pub source_domain: crate::capability::CapabilityRef<crate::domain::Domain>,
+    /// VP id currently running within `source_domain`.
+    pub source_vp: u64,
+}
+
+impl core::fmt::Debug for CoreSwitch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let source_id = self.source_domain.read().data.id;
+        f.debug_struct("CoreSwitch")
+            .field("core", &self.core)
+            .field("source_domain_id", &source_id)
+            .field("source_vp", &self.source_vp)
+            .finish()
+    }
 }
 
 impl UpdateBatch {
@@ -397,6 +448,22 @@ impl UpdateBatch {
         &self.affected_domains
     }
 
+    /// Get per-core switch orders (see [`CoreSwitch`]) — the `Update::Switch`
+    /// entries within `updates()`, in batch order.
+    pub fn core_switches(&self) -> impl Iterator<Item = &CoreSwitch> {
+        self.updates.iter().filter_map(|u| match u {
+            Update::Switch(switch) => Some(switch),
+            _ => None,
+        })
+    }
+
+    /// Append a per-core switch order.  Called from `revoke_domain_subtree`
+    /// for every core found running a VP within the revoked subtree — no
+    /// resume target is computed here (see [`CoreSwitch`]).
+    pub fn add_core_switch(&mut self, switch: CoreSwitch) {
+        self.add(Update::Switch(switch));
+    }
+
     /// Check if the batch is empty
     pub fn is_empty(&self) -> bool {
         self.updates.is_empty()
@@ -435,7 +502,7 @@ pub enum UpdateStatus {
 
 /// Per-core update queue entry
 #[derive(Debug, Clone)]
-pub struct CoreUpdate {
+pub struct QueuedUpdateBatch {
     /// The update batch
     pub batch: UpdateBatch,
     /// Status of this update on this core
@@ -445,7 +512,7 @@ pub struct CoreUpdate {
 /// Update processor that manages distributing updates to cores
 pub struct UpdateProcessor {
     /// Mapping from core ID to pending updates
-    core_queues: Arc<RwLock<BTreeMap<CoreId, Vec<CoreUpdate>>>>,
+    core_queues: Arc<RwLock<BTreeMap<CoreId, Vec<QueuedUpdateBatch>>>>,
     /// Mapping from domain ID to currently running core (if any)
     domain_to_core: Arc<RwLock<BTreeMap<DomainId, CoreId>>>,
 }
@@ -496,7 +563,7 @@ impl UpdateProcessor {
         let mut queues = self.core_queues.write();
         for core_id in &cores_to_notify {
             let queue = queues.entry(*core_id).or_insert_with(Vec::new);
-            queue.push(CoreUpdate {
+            queue.push(QueuedUpdateBatch {
                 batch: batch.clone(),
                 status: UpdateStatus::Pending,
             });
@@ -506,7 +573,7 @@ impl UpdateProcessor {
     }
 
     /// Get pending updates for a specific core
-    pub fn get_pending_updates(&self, core_id: CoreId) -> Vec<CoreUpdate> {
+    pub fn get_pending_updates(&self, core_id: CoreId) -> Vec<QueuedUpdateBatch> {
         let queues = self.core_queues.read();
         queues
             .get(&core_id)

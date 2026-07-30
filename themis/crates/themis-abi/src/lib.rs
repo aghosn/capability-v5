@@ -179,6 +179,14 @@ pub mod synthetic_exits {
     /// ring and switched back to the parent.  thhv should drain the RX ring
     /// and signal matching ioeventfds.
     pub const THEMIS_EXIT_DOORBELL: u32 = 0x8000_0001;
+
+    /// Parent's callee (a descendant domain) was revoked.  The capavisor
+    /// walked the caller chain, found this domain as the first non-revoked
+    /// ancestor of the running doomed VP, and switched execution back here.
+    /// The parent's SWITCH VMCALL sees this in rdi and observes that its
+    /// callee is gone; the callee handle in its capability tree is also
+    /// no longer valid.
+    pub const THEMIS_EXIT_CALLEE_REVOKED: u32 = 0x8000_0002;
 }
 
 /// Maximum number of VPs that may be created in a single Themis domain.

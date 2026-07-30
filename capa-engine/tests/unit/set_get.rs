@@ -54,22 +54,16 @@ fn seal(parent: &CapabilityRef<Domain>, h: LocalHandle) {
     Capability::seal(&platform, parent, h).unwrap();
 }
 
-/// Force VP[vp_id] of `domain` into `Interrupted { vector }`.
-fn set_vp_interrupted(domain: &CapabilityRef<Domain>, vp_id: usize, vector: u8) {
-    let platform = common::TestPlatform::new();
+/// Initialise a domain's VP[vp_id] to `Running { core }`. Only used to
+/// bootstrap a root/dom0-level domain's own VP, which has no capability-op
+/// path to reach `Running` for the first time (a hardware/boot fact, not a
+/// capability-mediated transition) — matches `tests/unit/switch.rs`'s
+/// `init_vp_running` and `tests/concurrency/loom_vp_switch.rs`'s equivalent.
+fn init_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize, core: u64) {
     let d = domain.read();
     let vp = d.data.policy.vprocessor_states[vp_id].clone();
     drop(d);
-    *vp.run_state.write() = VpRunState::Interrupted { vector };
-}
-
-/// Force VP[vp_id] of `domain` into `Running { core: 0 }`.
-fn set_vp_running(domain: &CapabilityRef<Domain>, vp_id: usize) {
-    let platform = common::TestPlatform::new();
-    let d = domain.read();
-    let vp = d.data.policy.vprocessor_states[vp_id].clone();
-    drop(d);
-    *vp.run_state.write() = VpRunState::Running { core: 0, caller: None };
+    *vp.run_state.write() = VpRunState::Running { core };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -446,8 +440,16 @@ fn test_set_get_register_interrupted_vp_uses_vector_override() {
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(42, 0), bitmap).unwrap();
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(42, 0), bitmap).unwrap();
 
-    // Put VP[0] in Interrupted { vector: 42 }
-    set_vp_interrupted(&child, 0, 42);
+    // Put VP[0] into a real Interrupted { vector: 42 } state via the actual
+    // switch + deliver_interrupt_vp domain-mediated calls, not a raw
+    // run_state write. Child keeps the default Report policy so the
+    // interrupted leaf (child's own VP[0]) is what ends up Interrupted,
+    // while parent (Deliver by default) resumes to Running as the handler.
+    seal(&parent, h);
+    init_vp_running(&parent, 0, 0);
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &parent, h, 0).unwrap();
+    Capability::deliver_interrupt_vp(&platform, &child, 0, 42).unwrap();
 
     Capability::set_register(&platform, &parent, h, 0, 3, 0xBEEF).unwrap();
     let v = Capability::get_register(&platform, &parent, h, 0, 3).unwrap().0;
@@ -469,8 +471,15 @@ fn test_register_access_blocked_for_different_vector() {
     // Explicitly deny vector 99.
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(99, 0), 0).unwrap();
 
-    // VP is interrupted by vector 99 → override write_set = 0.
-    set_vp_interrupted(&child, 0, 99);
+    // VP is interrupted by vector 99 → override write_set = 0. Reached via
+    // the real switch + deliver_interrupt_vp calls, not a raw run_state
+    // write. Child keeps the default Report policy so the interrupted leaf
+    // (child's own VP[0]) is what ends up Interrupted.
+    seal(&parent, h);
+    init_vp_running(&parent, 0, 0);
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &parent, h, 0).unwrap();
+    Capability::deliver_interrupt_vp(&platform, &child, 0, 99).unwrap();
 
     let err = Capability::set_register(&platform, &parent, h, 0, 3, 0xBEEF).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
@@ -502,7 +511,7 @@ fn test_vector_override_does_not_affect_available_vp() {
 fn test_set_register_denied_when_vp_running() {
     let parent = root();
     let platform = common::TestPlatform::new();
-    let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    let (_child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full write access under VECTOR_AVAILABLE so bitmaps are not the obstacle.
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), u64::MAX)
@@ -511,8 +520,12 @@ fn test_set_register_denied_when_vp_running() {
     // Confirm write works while Available.
     Capability::set_register(&platform, &parent, h, 0, 0, 0x1).unwrap();
 
-    // Transition to Running — register access must now be denied.
-    set_vp_running(&child, 0);
+    // Transition to Running via a real `Capability::switch` call — register
+    // access must now be denied.
+    seal(&parent, h);
+    init_vp_running(&parent, 0, 0);
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &parent, h, 0).unwrap();
     let err = Capability::set_register(&platform, &parent, h, 0, 0, 0x2).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
@@ -521,7 +534,7 @@ fn test_set_register_denied_when_vp_running() {
 fn test_get_register_denied_when_vp_running() {
     let parent = root();
     let platform = common::TestPlatform::new();
-    let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    let (_child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Grant full read access under VECTOR_AVAILABLE.
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegReadSet(VECTOR_AVAILABLE, 0), u64::MAX)
@@ -530,8 +543,12 @@ fn test_get_register_denied_when_vp_running() {
     // Confirm read works while Available.
     Capability::get_register(&platform, &parent, h, 0, 0).unwrap().0;
 
-    // Transition to Running — register access must now be denied.
-    set_vp_running(&child, 0);
+    // Transition to Running via a real `Capability::switch` call — register
+    // access must now be denied.
+    seal(&parent, h);
+    init_vp_running(&parent, 0, 0);
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &parent, h, 0).unwrap();
     let err = Capability::get_register(&platform, &parent, h, 0, 0).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }
@@ -696,22 +713,35 @@ fn test_vector_visibility_independent_of_read_write_set() {
 fn test_effective_vector_switches_on_interrupt() {
     let parent = root();
     let platform = common::TestPlatform::new();
-    let (child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+    let (_child, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
 
     // Allow reg 0 write under VECTOR_AVAILABLE but NOT under vector 1.
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(VECTOR_AVAILABLE, 0), 1).unwrap();
     Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorRegWriteSet(1, 0), 0).unwrap();
 
-    // While Available: write should succeed.
+    seal(&parent, h);
+
+    // While Available (not yet switched into): write should succeed.
     Capability::set_register(&platform, &parent, h, 0, 0, 1).unwrap();
 
+    // Switch into the child (Available -> Running), then deliver an
+    // interrupt on vector 1. Child keeps the default Report policy so the
+    // interrupted leaf (child's own VP[0]) is what ends up Interrupted,
+    // with parent (Deliver by default) resuming to Running as the handler.
+    init_vp_running(&parent, 0, 0);
+    platform.set_current_core(Some(0));
+    Capability::switch(&platform, &parent, h, 0).unwrap();
+    Capability::deliver_interrupt_vp(&platform, &_child, 0, 1).unwrap();
+
     // After interrupt by vector 1: write must be denied.
-    set_vp_interrupted(&child, 0, 1);
     let err = Capability::set_register(&platform, &parent, h, 0, 0, 2).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 
+    // Switch into the child again: this resumes the Interrupted VP back to
+    // Running (real forward-switch resume path, not a raw run_state write).
+    Capability::switch(&platform, &parent, h, 0).unwrap();
+
     // Back to Running: write must still be denied (VP is executing).
-    set_vp_running(&child, 0);
     let err = Capability::set_register(&platform, &parent, h, 0, 0, 3).unwrap_err();
     assert_eq!(err, CapaError::RegisterAccessDenied);
 }

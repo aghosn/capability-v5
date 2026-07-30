@@ -4,11 +4,9 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
-use capability_engine::{CoreId, DomainId};
+use capability_engine::DomainId;
 
 use crate::arch::ArchDomainState;
 use crate::mem::MetaAllocator;
@@ -45,17 +43,6 @@ pub struct PlatformDomain {
     pub doorbells: Vec<DoorbellEntry>,
     /// Counter for assigning unique doorbell IDs. Monotonically increasing.
     pub next_doorbell_id: u32,
-
-    /// Per-LP "may have cached second-stage entries" bitmap.  Bit `c` is
-    /// set whenever core `c` enters this domain (`set_core_context`) and
-    /// cleared by core `c` *after* it has executed an INVEPT for this
-    /// domain's EPTP.  Used by `Platform::domain_cores` to drive the
-    /// engine's existing cross-core IPI dispatch in `Platform::execute`.
-    ///
-    /// Sized at construction from the boot-time core count; one
-    /// `AtomicU64` word per 64 logical cores, so a 256-core system uses
-    /// 32 bytes per domain.
-    cached_on: Box<[AtomicU64]>,
 }
 
 /// Maximum number of doorbell entries per child domain.
@@ -79,17 +66,56 @@ pub struct DoorbellEntry {
 pub struct DomainCommRing {
     /// Physical addresses of the ring's backing pages (growable).
     pub page_hpas: Vec<u64>,
+    /// Capavisor-authoritative cursor for whichever side of this ring
+    /// capavisor owns: the producer `head` for the RX ring, the consumer
+    /// `tail` for the TX ring.
+    ///
+    /// This field — not the mirrored copy in the shared DomainComm header
+    /// page — is the source of truth. The header page holds both rings'
+    /// metadata on a single page, so it is necessarily mapped read/write
+    /// to the domain (it must be able to write its own cursor there); a
+    /// malicious or buggy domain can therefore overwrite the *other*
+    /// ring's cursor fields too. Capavisor must never read its own cursor
+    /// back out of that shared copy — only ever write to it, to publish
+    /// progress for the domain to observe.
+    local_cursor: u32,
 }
 
 impl DomainCommRing {
     fn new() -> Self {
         DomainCommRing {
             page_hpas: Vec::new(),
+            local_cursor: 0,
         }
     }
 
     fn capacity(&self) -> usize {
         self.page_hpas.len() * 0x1000
+    }
+
+    /// Validate `offset` (already wrapped into `0..capacity()`) and
+    /// compute the HHDM virtual pointer for a `len`-byte region there.
+    ///
+    /// Returns `None` — without ever forming or dereferencing a pointer —
+    /// if the region would cross a page boundary, or if it would fall
+    /// outside the pages actually backing this ring. This is the single
+    /// choke point that guarantees every raw pointer used against this
+    /// ring stays inside the memory legitimately attributed to this
+    /// DomainComm channel (those HPAs are themselves only ever populated
+    /// from capability-engine-validated `REGISTER_COMM`/CARVE ranges),
+    /// even if a corrupted or adversarial cursor value is fed in.
+    fn checked_ptr(&self, offset: usize, len: usize, hhdm_offset: u64) -> Option<*mut u8> {
+        let capacity = self.capacity();
+        if capacity == 0 || offset >= capacity || len > capacity {
+            return None;
+        }
+        let page_idx = offset / 0x1000;
+        let page_off = offset % 0x1000;
+        if page_off + len > 0x1000 {
+            return None;
+        }
+        let page_hpa = *self.page_hpas.get(page_idx)?;
+        Some((page_hpa + hhdm_offset + page_off as u64) as *mut u8)
     }
 }
 
@@ -106,9 +132,7 @@ pub struct DomainCommState {
 }
 
 impl PlatformDomain {
-    pub(super) fn new(hhdm_offset: u64, parent: Option<DomainId>, num_cores: usize) -> Self {
-        let words = (num_cores + 63) / 64;
-        let cached_on: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
+    pub(super) fn new(hhdm_offset: u64, parent: Option<DomainId>) -> Self {
         PlatformDomain {
             arch: ArchDomainState::new(),
             meta: MetaAllocator::new(hhdm_offset),
@@ -119,55 +143,7 @@ impl PlatformDomain {
             pending_domcomm_hpas: Vec::new(),
             doorbells: Vec::new(),
             next_doorbell_id: 1,
-            cached_on,
         }
-    }
-
-    /// Mark `core` as having (potentially) cached second-stage entries
-    /// for this domain.  Called by `set_core_context` on every domain
-    /// switch — the bit is set before any guest code runs on that core,
-    /// so `Platform::domain_cores` always sees the right cores during a
-    /// subsequent EPT mutation.
-    ///
-    /// Lock-free.  Idempotent.
-    pub fn mark_cached_on(&self, core: CoreId) {
-        let idx = core as usize;
-        let word = idx / 64;
-        let bit = 1u64 << (idx % 64);
-        if word < self.cached_on.len() {
-            self.cached_on[word].fetch_or(bit, Ordering::AcqRel);
-        }
-    }
-
-    /// Clear the cache-presence bit for `core`.  Called by the receiver
-    /// of a `CoreUpdate::TlbShootdown` *after* the local INVEPT (and by
-    /// the initiator when applying a local flush) so that the bitmap
-    /// authoritatively reflects "may have cached entries".
-    pub fn clear_cached_on(&self, core: CoreId) {
-        let idx = core as usize;
-        let word = idx / 64;
-        let bit = !(1u64 << (idx % 64));
-        if word < self.cached_on.len() {
-            self.cached_on[word].fetch_and(bit, Ordering::AcqRel);
-        }
-    }
-
-    /// Snapshot (read-only) the set of cores that may have cached
-    /// second-stage entries for this domain.  Does *not* clear the
-    /// bitmap — clearing happens on each per-core flush so that
-    /// no-shootdown additive updates do not lose tracking of cores that
-    /// are still running the domain.
-    pub fn snapshot_cached_on(&self) -> Vec<CoreId> {
-        let mut out = Vec::new();
-        for (i, w) in self.cached_on.iter().enumerate() {
-            let mut bits = w.load(Ordering::Acquire);
-            while bits != 0 {
-                let b = bits.trailing_zeros() as usize;
-                out.push((i * 64 + b) as CoreId);
-                bits &= bits - 1;
-            }
-        }
-        out
     }
 
     /// Initialize DomainComm from a list of page HPAs (possibly non-contiguous).
@@ -249,21 +225,43 @@ impl PlatformDomain {
     pub fn domcomm_rx_enqueue(&mut self, msg_type: u32, payload: &[u8]) -> usize {
         use themis_abi::domcomm;
 
-        let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
-        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
-
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
-        let total_size = ((msg_hdr_size + payload.len() + 7) / 8) * 8; // 8-byte align
+        // NOTE: no alignment padding here. `total_size` is the exact
+        // header+payload length. `ring_read`/`ring_write` on the consumer
+        // side do plain byte-level memcpy (with page-boundary splitting,
+        // handled separately below), so no alignment is required. Padding
+        // this value used to inflate it past the real payload length,
+        // which the consumer (thhv's `domcomm_rx_dequeue`) derives
+        // `payload_size` directly from — any padding silently corrupted
+        // that accounting (see the attest.rs signed-tail off-by-one bug).
+        //
+        // Because messages are byte-packed (no padding), the header write
+        // offset is *not* guaranteed to be 8-byte aligned — writes below
+        // must use unaligned raw-pointer primitives, never a typed
+        // reference/dereference (`&mut MsgHeader`), both because that
+        // would trip Rust's alignment UB check and because this memory is
+        // shared with the (untrusted) domain, where forming an exclusive
+        // reference over concurrently-writable memory is unsound
+        // regardless of alignment.
+        let total_size = msg_hdr_size + payload.len();
 
+        let dc = self.domcomm.as_mut().expect("DomainComm not initialized");
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
+        let hhdm_offset = dc.hhdm_offset;
+
+        // Capavisor's own authoritative producer cursor — never read back
+        // from the shared header page (see `DomainCommRing::local_cursor`).
+        let head = dc.rx.local_cursor as usize;
         let capacity = dc.rx.capacity();
-        let nr_pages = dc.rx.page_hpas.len();
 
         unsafe {
             let hdr = &mut *hdr_virt;
             let rx = &mut hdr.rx;
-            let head = rx.head as usize;
 
             // Read tail (consumer = domain, monotonic) with acquire.
+            // This *is* the domain's own cursor, so reading it from shared
+            // memory is correct; still done via volatile + fence since the
+            // domain can write it concurrently.
             let tail = core::ptr::read_volatile(&rx.tail) as usize;
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
@@ -275,41 +273,44 @@ impl PlatformDomain {
 
             // Wrap head for page lookup.
             let wrapped_head = head % capacity;
-            let ring_page_idx = wrapped_head / 4096;
-            let page_off = wrapped_head % 4096;
+            let page_off = wrapped_head % 0x1000;
 
             // Check if message fits in current page.
-            if page_off + total_size > 4096 {
+            if page_off + total_size > 0x1000 {
                 // Write padding message to fill rest of page.
-                let pad_size = 4096 - page_off;
-                if ring_page_idx >= nr_pages {
-                    serial_println!("[domcomm] RX enqueue: page_idx {} OOB", ring_page_idx);
-                    return 0;
-                }
-                let pad_page_hpa = dc.rx.page_hpas[ring_page_idx];
-                let pad_virt = (pad_page_hpa + dc.hhdm_offset) as *mut u8;
-                let pad_hdr = pad_virt.add(page_off) as *mut domcomm::MsgHeader;
-                (*pad_hdr).message_type = domcomm::msg_types::NONE;
-                (*pad_hdr).total_size = pad_size as u32;
-                (*pad_hdr).sequence = 0;
+                let pad_size = 0x1000 - page_off;
+                let pad_ptr = match dc.rx.checked_ptr(wrapped_head, pad_size, hhdm_offset) {
+                    Some(p) => p,
+                    None => {
+                        serial_println!("[domcomm] RX enqueue: pad ptr out of ring bounds");
+                        return 0;
+                    }
+                };
+                let pad_hdr = domcomm::MsgHeader {
+                    message_type: domcomm::msg_types::NONE,
+                    total_size: pad_size as u32,
+                    sequence: 0,
+                };
+                core::ptr::write_unaligned(pad_ptr as *mut domcomm::MsgHeader, pad_hdr);
 
-                // Advance head monotonically (no wrapping).
+                // Advance head monotonically (no wrapping), private cursor
+                // first, then publish to the shared page for the domain.
+                let new_head = head + pad_size;
+                dc.rx.local_cursor = new_head as u32;
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-                rx.head = (head + pad_size) as u32;
+                core::ptr::write_volatile(&mut rx.head, new_head as u32);
 
                 // Recurse with the new head position.
                 return self.domcomm_rx_enqueue(msg_type, payload);
             }
 
-            if ring_page_idx >= nr_pages {
-                serial_println!("[domcomm] RX enqueue: page_idx {} OOB", ring_page_idx);
-                return 0;
-            }
-
-            // Write message within current page.
-            let ring_page_hpa = dc.rx.page_hpas[ring_page_idx];
-            let ring_page_virt = (ring_page_hpa + dc.hhdm_offset) as *mut u8;
-            let msg_ptr = ring_page_virt.add(page_off);
+            let msg_ptr = match dc.rx.checked_ptr(wrapped_head, total_size, hhdm_offset) {
+                Some(p) => p,
+                None => {
+                    serial_println!("[domcomm] RX enqueue: msg ptr out of ring bounds");
+                    return 0;
+                }
+            };
 
             // Write payload first, then header (producer protocol).
             if !payload.is_empty() {
@@ -320,15 +321,20 @@ impl PlatformDomain {
                 );
             }
 
-            // Write header.
-            let msg_hdr_ptr = msg_ptr as *mut domcomm::MsgHeader;
-            (*msg_hdr_ptr).message_type = msg_type;
-            (*msg_hdr_ptr).total_size = total_size as u32;
-            (*msg_hdr_ptr).sequence = 0; // TODO: monotonic counter per ring
+            // Write header (unaligned-safe, see NOTE above).
+            let msg_hdr = domcomm::MsgHeader {
+                message_type: msg_type,
+                total_size: total_size as u32,
+                sequence: 0, // TODO: monotonic counter per ring
+            };
+            core::ptr::write_unaligned(msg_ptr as *mut domcomm::MsgHeader, msg_hdr);
 
-            // Memory barrier + advance head monotonically.
+            // Advance head monotonically: private cursor first, then
+            // publish to the shared page for the domain to observe.
+            let new_head = head + total_size;
+            dc.rx.local_cursor = new_head as u32;
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-            rx.head = (head + total_size) as u32;
+            core::ptr::write_volatile(&mut rx.head, new_head as u32);
         }
 
         total_size
@@ -363,26 +369,30 @@ impl PlatformDomain {
     pub fn domcomm_tx_dequeue(&mut self, buf: &mut [u8]) -> Option<(u32, usize, u64)> {
         use themis_abi::domcomm;
 
-        let dc = self.domcomm.as_ref().expect("DomainComm not initialized");
-        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
-
         let msg_hdr_size = core::mem::size_of::<domcomm::MsgHeader>();
+
+        let dc = self.domcomm.as_mut().expect("DomainComm not initialized");
+        let hdr_virt = (dc.header_hpa + dc.hhdm_offset) as *mut domcomm::Header;
+        let hhdm_offset = dc.hhdm_offset;
 
         let capacity = dc.tx.capacity();
         if capacity == 0 {
             return None;
         }
-        let nr_pages = dc.tx.page_hpas.len();
+
+        // Capavisor's own authoritative consumer cursor — never read back
+        // from the shared header page (see `DomainCommRing::local_cursor`).
+        let tail = dc.tx.local_cursor as usize;
 
         unsafe {
             let hdr = &mut *hdr_virt;
             let tx = &mut hdr.tx;
 
             // Read head (producer = domain) with acquire fence.
-            // Head/tail are monotonic (never wrapped by the domain).
+            // This is the domain's own cursor, legitimately read from
+            // shared memory, but still untrusted content-wise.
             let head = core::ptr::read_volatile(&tx.head) as usize;
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            let tail = tx.tail as usize;
 
             if head == tail {
                 return None;
@@ -402,25 +412,19 @@ impl PlatformDomain {
 
             // Wrap tail for page lookup.
             let wrapped_tail = tail % capacity;
-            let ring_page_idx = wrapped_tail / 4096;
-            let page_off = wrapped_tail % 4096;
 
-            if ring_page_idx >= nr_pages {
-                serial_println!(
-                    "[domcomm] TX dequeue: page_idx {} out of range (nr_pages={})",
-                    ring_page_idx,
-                    nr_pages
-                );
-                return None;
-            }
-
-            let page_hpa = dc.tx.page_hpas[ring_page_idx];
-            let page_virt = (page_hpa + dc.hhdm_offset) as *const u8;
+            let hdr_ptr = match dc.tx.checked_ptr(wrapped_tail, msg_hdr_size, hhdm_offset) {
+                Some(p) => p,
+                None => {
+                    serial_println!("[domcomm] TX dequeue: header ptr out of ring bounds");
+                    return None;
+                }
+            };
 
             // Copy the message header to a local variable (TOCTOU defense).
             let mut msg_hdr: domcomm::MsgHeader = core::mem::zeroed();
             core::ptr::copy_nonoverlapping(
-                page_virt.add(page_off) as *const u8,
+                hdr_ptr as *const u8,
                 &mut msg_hdr as *mut domcomm::MsgHeader as *mut u8,
                 msg_hdr_size,
             );
@@ -428,12 +432,14 @@ impl PlatformDomain {
             // Skip padding — use monotonic tail (no wrapping).
             if msg_hdr.message_type == domcomm::msg_types::NONE {
                 let pad_size = msg_hdr.total_size as usize;
-                if pad_size == 0 || pad_size > 4096 {
+                if pad_size == 0 || pad_size > 4096 || pad_size > avail {
                     serial_println!("[domcomm] TX dequeue: invalid padding size {}", pad_size);
                     return None;
                 }
+                let new_tail = tail + pad_size;
+                dc.tx.local_cursor = new_tail as u32;
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-                tx.tail = (tail + pad_size) as u32;
+                core::ptr::write_volatile(&mut tx.tail, new_tail as u32);
                 return self.domcomm_tx_dequeue(buf);
             }
 
@@ -461,13 +467,26 @@ impl PlatformDomain {
 
             // Copy payload (skip header).
             if payload_size > 0 {
-                let payload_src = page_virt.add(page_off + msg_hdr_size);
+                let payload_src = match dc.tx.checked_ptr(
+                    wrapped_tail + msg_hdr_size,
+                    payload_size,
+                    hhdm_offset,
+                ) {
+                    Some(p) => p,
+                    None => {
+                        serial_println!("[domcomm] TX dequeue: payload ptr out of ring bounds");
+                        return None;
+                    }
+                };
                 core::ptr::copy_nonoverlapping(payload_src, buf.as_mut_ptr(), payload_size);
             }
 
-            // Advance tail monotonically (match driver protocol).
+            // Advance tail monotonically: private cursor first, then
+            // publish to the shared page for the domain to observe.
+            let new_tail = tail + total_size;
+            dc.tx.local_cursor = new_tail as u32;
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-            tx.tail = (tail + total_size) as u32;
+            core::ptr::write_volatile(&mut tx.tail, new_tail as u32);
 
             Some((msg_hdr.message_type, payload_size, msg_hdr.sequence))
         }

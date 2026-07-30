@@ -1,25 +1,22 @@
-//! Per-VP atomic-ownership slots and per-core scheduling state (Tier 1).
+//! Per-VP atomic-ownership slots and per-core hardware pinning (Tier 1).
 //!
 //! `VcpuSlot` provides safe atomic take/return semantics for the
-//! `InactiveVcpu` shared between cores.  `CoreContext` is the per-core
-//! Tier-1 view of which domain/VP is currently scheduled on each physical
-//! core, written only by its owning core.
+//! `InactiveVcpu` shared between cores.  `CoreContext` here holds only the
+//! genuinely hardware-specific per-core state capavisor still needs
+//! (the pinned `ActiveVcpu` pointer, and the quantum-sched deferred
+//! vector) — "which domain/VP is running on this core" itself is no
+//! longer tracked here: it is owned exclusively by the capability
+//! engine's own `SwitchManager`/`CoreContext` (see `capability_engine::switch`).
 
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 #[cfg(feature = "quantum-sched")]
 use core::sync::atomic::AtomicU16;
-use spin::Mutex;
-
-use capability_engine::{CapabilityRef, Domain};
 
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::InactiveVcpu;
-
-const IDLE_DOMAIN: u64 = u64::MAX;
-const IDLE_VP: u32 = u32::MAX;
 
 // ── Per-VP slot (atomic take/return for exclusive access) ──────────────────── //
 
@@ -37,7 +34,7 @@ pub struct VcpuSlot {
     /// Set by `put()` from the InactiveVcpu and never changes afterwards.
     /// Readable without taking the VP — safe because pid_phys is immutable
     /// after the first `put()`.  0 for dom0 VPs (no PID).
-    pid_phys: AtomicU64,
+    pid_phys: core::sync::atomic::AtomicU64,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -46,7 +43,7 @@ impl VcpuSlot {
     pub const fn empty() -> Self {
         VcpuSlot {
             ptr: AtomicPtr::new(core::ptr::null_mut()),
-            pid_phys: AtomicU64::new(0),
+            pid_phys: core::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -56,7 +53,7 @@ impl VcpuSlot {
         let pid = vcpu.pid_phys();
         VcpuSlot {
             ptr: AtomicPtr::new(Box::into_raw(Box::new(vcpu))),
-            pid_phys: AtomicU64::new(pid),
+            pid_phys: core::sync::atomic::AtomicU64::new(pid),
         }
     }
 
@@ -104,26 +101,30 @@ impl VcpuSlot {
         !self.ptr.load(Ordering::Relaxed).is_null()
     }
 }
-// ── Per-core scheduling state (Tier 1) ────────────────────────────────────── //
+// ── Per-core hardware pinning (Tier 1) ────────────────────────────────────── //
 
-/// Per-core scheduling state: identifies what domain and VP are currently
-/// executing on this physical core.
+/// Per-core hardware state that has no equivalent in the capability engine:
+/// the pinned `ActiveVcpu` pointer used for cross-core VMCLEAR/VMPTRLD, and
+/// (quantum-sched only) a deferred parent-bound vector.
 ///
-/// **Invariants**:
-/// - A core only writes to its own `CoreContext`.
-/// - Cross-core reads happen under the `execute()` barrier protocol
-///   (IPI + sync_barrier), so the `domain_cap` Mutex is never truly contended.
-/// - `domain_id` is a cached copy of the domain ID for fast lock-free
-///   observational reads (e.g., `domain_cores()` routing lookups).
+/// "Which domain/VP is scheduled on this core" is **not** tracked here —
+/// that fact lives exclusively in `capability_engine::switch::CoreContext`
+/// (via `SwitchManager`), the single authoritative source shared by every
+/// backend.
 pub struct CoreContext {
-    /// Cached domain ID — lock-free observational reads by other cores.
-    pub domain_id: AtomicU64,
-    /// Current VP index within the domain (dom0: VP i = core i, fixed).
-    pub vp_id: AtomicU32,
-    /// Capability reference to the currently-scheduled domain.
-    /// The VMCALL handler's entry point into the capability tree.
-    /// `None` only during early boot before dom0 is initialised.
-    pub domain_cap: Mutex<Option<CapabilityRef<Domain>>>,
+    /// Raw pointer to this core's `ActiveVcpu` on the monitor-loop stack.
+    ///
+    /// Set once at the top of `monitor_loop` (never cleared: `monitor_loop`
+    /// is divergent and the `Vp<A>` it owns lives at a fixed stack address
+    /// forever).  Only the owning core reads it, and only between VMEXITs
+    /// (i.e. while no `&mut ActiveVcpu` is otherwise live in the arch code),
+    /// so no aliasing violation.
+    ///
+    /// Used by `Platform::complete_revoke_switch` to reach the vcpu for a
+    /// revoke-driven VMCLEAR/VMPTRLD.  Opaque `u8` here to keep
+    /// `CoreContext` arch-neutral; consumers on x86 cast to
+    /// `*mut crate::vcpu::ActiveVcpu`.
+    pub active_vcpu: AtomicPtr<u8>,
     /// (quantum-sched) Parent-bound vector deferred during child execution.
     /// 0 = no deferred vector; 1–255 = vector number awaiting flush to parent.
     #[cfg(feature = "quantum-sched")]
@@ -133,9 +134,7 @@ pub struct CoreContext {
 impl CoreContext {
     pub(super) const fn new() -> Self {
         CoreContext {
-            domain_id: AtomicU64::new(IDLE_DOMAIN),
-            vp_id: AtomicU32::new(IDLE_VP),
-            domain_cap: Mutex::new(None),
+            active_vcpu: AtomicPtr::new(core::ptr::null_mut()),
             #[cfg(feature = "quantum-sched")]
             deferred_vector: AtomicU16::new(0),
         }

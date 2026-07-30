@@ -27,9 +27,19 @@ struct NullGuard;
 impl capability_engine::OpLockGuard for NullGuard {}
 unsafe impl Send for NullGuard {}
 
-struct NullPlatform;
+struct NullPlatform {
+    switch_manager: capability_engine::SwitchManager,
+}
 unsafe impl Send for NullPlatform {}
 unsafe impl Sync for NullPlatform {}
+
+impl NullPlatform {
+    fn new() -> Self {
+        Self {
+            switch_manager: capability_engine::SwitchManager::new(4),
+        }
+    }
+}
 
 impl capability_engine::Platform for NullPlatform {
     fn acquire_shared_lock(&self) -> capability_engine::Result<Box<dyn capability_engine::OpLockGuard>> {
@@ -39,16 +49,15 @@ impl capability_engine::Platform for NullPlatform {
         Ok(Box::new(NullGuard))
     }
     fn send_ipi(&self, _: capability_engine::CoreId) {}
-    fn sync_barrier(&self, _: u8, _: usize) {}
     fn apply_update(&self, _: &capability_engine::Update) {}
     fn on_domain_revoked(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
     fn register_domain(&self, _: capability_engine::DomainId, _: Option<capability_engine::DomainId>) {}
-    fn set_core_context(&self, _: capability_engine::CoreId, _: &capability_engine::CapabilityRef<capability_engine::Domain>, _: u64) {}
-    fn clear_core_domain(&self, _: capability_engine::CoreId) {}
-    fn domain_cores(&self, _: capability_engine::DomainId) -> Vec<capability_engine::CoreId> { Vec::new() }
     fn try_acquire_update_lock(&self) -> bool { true }
     fn release_update_lock(&self) {}
     fn get_current_core(&self) -> Option<capability_engine::CoreId> { None }
+    fn switch_manager(&self) -> &capability_engine::SwitchManager {
+        &self.switch_manager
+    }
 }
 
 
@@ -84,7 +93,7 @@ fn bootstrap() -> (CapabilityRef<Domain>, CapabilityRef<MemoryRegion>, LocalHand
 fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
     let api = MonitorAPI::from_bits(0xfff);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(&NullPlatform, root, policy).unwrap().0;
+    let h = Capability::create(&NullPlatform::new(), root, policy).unwrap().0;
     let dom = root
         .read()
         .data
@@ -98,8 +107,8 @@ fn make_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domai
 fn make_sealed_child(root: &CapabilityRef<Domain>) -> (LocalHandle, CapabilityRef<Domain>) {
     let api = MonitorAPI::from_bits(0xfff | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1111, api);
-    let h = Capability::create(&NullPlatform, root, policy).unwrap().0;
-    Capability::<Domain>::seal(&NullPlatform, root, h).unwrap();
+    let h = Capability::create(&NullPlatform::new(), root, policy).unwrap().0;
+    Capability::<Domain>::seal(&NullPlatform::new(), root, h).unwrap();
     let dom = root
         .read()
         .data
@@ -125,10 +134,10 @@ fn loom_concurrent_send_at_different_gpas() {
 
         // Carve two disjoint children from root's memory (handle 1).
         let (h_a, _, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
                 .unwrap();
         let (h_b, _, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW))
                 .unwrap();
 
         // Create an unsealed child domain via domain-mediated API.
@@ -138,14 +147,14 @@ fn loom_concurrent_send_at_different_gpas() {
         let r = root.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send_at(&NullPlatform, &r, h_a, dom_h, Attributes::NONE, Some(0xA_0000))
+            Capability::<Domain>::send_at(&NullPlatform::new(), &r, h_a, dom_h, Attributes::NONE, Some(0xA_0000))
         });
 
         let pl = platform_lock.clone();
         let r = root.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send_at(&NullPlatform, &r, h_b, dom_h, Attributes::NONE, Some(0xB_0000))
+            Capability::<Domain>::send_at(&NullPlatform::new(), &r, h_b, dom_h, Attributes::NONE, Some(0xB_0000))
         });
 
         let res_a = ta.join().unwrap();
@@ -178,10 +187,10 @@ fn loom_concurrent_send_at_same_gpa() {
         let (root, _r0, r0_h) = bootstrap();
 
         let (h_a, _, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
                 .unwrap();
         let (h_b, _, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x2000, 0x1000, Rights::RW))
                 .unwrap();
 
         let (dom_h, dom) = make_child(&root);
@@ -190,14 +199,14 @@ fn loom_concurrent_send_at_same_gpa() {
         let r = root.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send_at(&NullPlatform, &r, h_a, dom_h, Attributes::NONE, Some(0xA_0000))
+            Capability::<Domain>::send_at(&NullPlatform::new(), &r, h_a, dom_h, Attributes::NONE, Some(0xA_0000))
         });
 
         let pl = platform_lock.clone();
         let r = root.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::send_at(&NullPlatform, &r, h_b, dom_h, Attributes::NONE, Some(0xA_0000))
+            Capability::<Domain>::send_at(&NullPlatform::new(), &r, h_b, dom_h, Attributes::NONE, Some(0xA_0000))
         });
 
         let res_a = ta.join().unwrap();
@@ -234,13 +243,13 @@ fn loom_concurrent_accept_at() {
         let (root, _r0, r0_h) = bootstrap();
 
         let (c_h, _, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
                 .unwrap();
 
         // Sealed child: send goes to pending.
         let (dom_h, dom) = make_sealed_child(&root);
 
-        Capability::<Domain>::send_at(&NullPlatform, &root, c_h, dom_h, Attributes::NONE, Some(0xA_0000))
+        Capability::<Domain>::send_at(&NullPlatform::new(), &root, c_h, dom_h, Attributes::NONE, Some(0xA_0000))
             .unwrap();
 
         let pending_ids = dom.read().data.get_pending_ids();
@@ -251,14 +260,14 @@ fn loom_concurrent_accept_at() {
         let d = dom.clone();
         let ta = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::accept_at(&NullPlatform, &d, pid, None)
+            Capability::<Domain>::accept_at(&NullPlatform::new(), &d, pid, None)
         });
 
         let pl = platform_lock.clone();
         let d = dom.clone();
         let tb = thread::spawn(move || {
             let _guard = pl.read().unwrap();
-            Capability::<Domain>::accept_at(&NullPlatform, &d, pid, None)
+            Capability::<Domain>::accept_at(&NullPlatform::new(), &d, pid, None)
         });
 
         let res_a = ta.join().unwrap();
@@ -293,13 +302,13 @@ fn loom_revoke_vs_accept_at_map_consistency() {
         let (root, _r0, r0_h) = bootstrap();
 
         let (c_h, c_sub, _) =
-            Capability::<Domain>::carve(&NullPlatform, &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
+            Capability::<Domain>::carve(&NullPlatform::new(), &root, r0_h, Access::new(0x0000, 0x1000, Rights::RW))
                 .unwrap();
 
         // Sealed child: send goes to pending.
         let (dom_h, dom) = make_sealed_child(&root);
 
-        Capability::<Domain>::send_at(&NullPlatform, &root, c_h, dom_h, Attributes::NONE, Some(0xC_0000))
+        Capability::<Domain>::send_at(&NullPlatform::new(), &root, c_h, dom_h, Attributes::NONE, Some(0xC_0000))
             .unwrap();
 
         let pid = dom.read().data.get_pending_ids()[0];
@@ -308,14 +317,14 @@ fn loom_revoke_vs_accept_at_map_consistency() {
         let r = root.clone();
         let revoker = thread::spawn(move || {
             let _guard = pl.write().unwrap(); // exclusive
-            Capability::<Domain>::revoke(&NullPlatform, &r, r0_h, c_sub)
+            Capability::<Domain>::revoke(&NullPlatform::new(), &r, r0_h, c_sub)
         });
 
         let pl = platform_lock.clone();
         let d = dom.clone();
         let acceptor = thread::spawn(move || {
             let _guard = pl.read().unwrap(); // shared
-            Capability::<Domain>::accept_at(&NullPlatform, &d, pid, Some(0xC_0000))
+            Capability::<Domain>::accept_at(&NullPlatform::new(), &d, pid, Some(0xC_0000))
         });
 
         let revoke_res = revoker.join().unwrap();

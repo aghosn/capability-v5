@@ -7,6 +7,449 @@
 
 ## Current Status
 
+- **2026-07-30 — Root-caused eunomia-timer intermittent `#GP` + nested-Linux
+  spurious LAPIC-timer storm to `do_switch`'s "6a" `interrupt_inject` wiring
+  (added in the DomainComm-adjacent session below); applied a narrow
+  stop-gap, NOT a full fix.**
+
+  **Root cause**: `do_switch` step "6a" (`themis/capavisor/src/arch/x86_64/hypercall/switch.rs`)
+  re-injects `SwitchContext.interrupt_inject`'s vector raw into a resuming
+  domain's own PIR whenever `capa-engine` left it `Waiting{report:true,
+  unlocks:None}`. That state arises for ANY real external interrupt landing
+  on the core while a `Report`-policy domain (the default for every
+  non-root domain) is running — the vector gets fully routed to and
+  handled by a `Deliver`-policy ancestor (dom0) via `deliver_interrupt_vp`'s
+  lazy-unwind, but step 6a then redelivers the SAME vector a second time
+  once the domain resumes. `capa-engine/src/domain.rs` documents `Report`
+  as "reported to domain but handled by parent" — i.e. NOT meant to be
+  redelivered raw — so this is a genuine discrepancy between the doc'd
+  semantics and step 6a's behavior.
+  - For `eunomia-timer` (whose guest IDT only covers vectors 0-31 and its
+    own `0xEC`): a stray legacy vector (`0x23`/`0x24`, real COM1/IRQ4
+    hardware interrupts, matching the trapped `0x3F8-0x3FF` serial port)
+    gets redelivered into a domain with no handler for it → `#GP`
+    (`error_code` decodes to `EXT=1,IDT=1,index=35or36`; IDT[36]'s gate
+    type is `0` — invalid, not just not-present — hence `#GP` not `#NP`).
+    Only `timer` (not `coco`/`domcomm`/etc.) hits this because it's the
+    only eunomia workload that ever executes `sti` (`eunomia/workloads/timer/src/main.rs:29`)
+    and busy-waits with IF=1 for ~100ms; other workloads run entirely with
+    IF=0 so the CPU never actually takes an externally-injected vector.
+  - For a nested Linux (L2) guest (full IDT, so no crash): the SAME
+    mechanism instead produces a continuous spurious duplicate-interrupt
+    storm (real IPIs `0xfb`/`0xfd`, legacy IRQs, and `0xec` all getting
+    redelivered on every SWITCH resume) — this is what "dom1 getting
+    spurious LAPIC timer interrupts all the time" turned out to be.
+  - **Confirmed orthogonal / unaffected**: the domain's OWN emulated LAPIC
+    timer (`0xEC` via `msr_emulator.rs`'s `deliver_timer_vector`, gated by
+    `MsrPolicy` on `IA32_TSC_DEADLINE`/`0x6E0`) injects directly, bypassing
+    `InterruptPolicy`/`Report`/`Deliver` entirely — never touches step 6a.
+    This is why the timer workload's own tick delivery always "worked"
+    even before/regardless of this bug.
+
+  **Stop-gap applied (final, after two failed config-based attempts —
+  see below for why they didn't work) — `switch.rs`'s step 6a raw
+  re-injection is now disabled outright**:
+  - First attempt (`standard.json` interrupts override `{vector: 236,
+    visibility: Deliver}`) and second attempt (a per-workload
+    `--themis-config` for `timer` setting `interrupts.default: Suppress`,
+    plus a `run-eunomia.sh` auto-select for it) were BOTH live-tested and
+    had **zero effect** — `eunomia-timer` still `#GP`'d on other stray
+    vectors (`0x20`/`0x23`) and dom1's spurious LAPIC-timer storm persisted
+    unchanged.
+  - **Why they were inert**: `cloud-hypervisor/hypervisor/src/themis/
+    policy_walker.rs` (which turns a parsed `ThemisConfig` into the
+    `THHV_SET_POLICY` ops actually applied to a domain) walks `msrs`,
+    `cpuid`, and `exits` — but NEVER `policies.interrupts`.
+    `InterruptsConfig`/`Visibility` (`config.rs`) are parsed, validated,
+    and unit-tested, but are otherwise completely dead: **no code path
+    anywhere applies them to a domain's runtime `InterruptPolicy`.** Every
+    child domain's `InterruptPolicy` is therefore always whatever
+    `DomainPolicy::new_restricted()` defaults to (`Report` for every
+    vector), no matter what any `--themis-config`/`standard.json` says.
+    This is a separate, real bug in its own right (config schema exists,
+    is user-facing, and silently does nothing) — tracked below as a
+    prerequisite for the real fix.
+  - Given config can't help today, `switch.rs`'s step 6a now unconditionally
+    discards `switch_ctx.interrupt_inject` (`let _ = ...;`) instead of
+    calling `inject_via_pid` — i.e. `Report` now actually behaves as
+    documented ("reported to domain but handled by parent", never
+    redelivered), for every vector, unconditionally. Comment above the
+    line updated accordingly (still explains the full discrepancy and
+    points at the two things needed for a real fix).
+  - `standard.json` and the per-workload `eunomia/policies/timer/
+    no-report.json` + `run-eunomia.sh` auto-select from the two failed
+    attempts were all **reverted** (they did nothing and would only add
+    confusion) — this branch's diff is now just the `switch.rs` disable +
+    docs.
+  - **NOT fixed / deferred to a follow-up branch** (per-user direction:
+    document, stop-gap now, dedicated branch for semantics next):
+    1. Wire `policy_walker.rs` to actually apply `InterruptsConfig` (the
+       config plumbing bug above) — needed before ANY per-vector
+       `Deliver`/`Report`/`Suppress` policy can matter at all.
+    2. The deeper `capa-engine` design question: `VpRunState::Waiting`
+       needs a discriminant distinguishing "external-interrupt-routed,
+       already delivered to ancestor" (must never redeliver) from "genuine
+       SWITCH-chain preemption, callee should observe this" (legitimate
+       re-injection case that step 6a was originally meant to serve) —
+       needs design review before touching `capa-engine`'s state machine
+       (security-critical, see
+       `.github/instructions/capability-engine.instructions.md`).
+  - **Live-validated 2026-07-30**: with step 6a's injection disabled,
+    both `eunomia-timer` and dom1 run correctly (user-confirmed) — no more
+    `#GP`, no more spurious LAPIC-timer storm. Cleared to commit/merge per
+    plan below. Still an open risk long-term: whatever legitimate
+    re-injection case step 6a originally existed for (if any) is now also
+    disabled — not observed to regress anything in this round of testing,
+    but not proven absent either; worth keeping an eye out for in the
+    follow-up branch.
+  - Stripped all `[TEMP-DEBUG]` logging (4 call sites: `switch.rs` x2,
+    `msr_emulator.rs`, `vmexit/mod.rs`) — final diff for this branch is
+    now just `switch.rs` (step 6a disabled) + `todo.md`.
+  - Plan (per user, 2026-07-30): if live-validated, commit and merge this
+    branch as-is (step 6a disabled + docs), then open a NEW branch
+    dedicated solely to the interrupt-policy semantics (both the
+    `policy_walker.rs` plumbing gap and the `VpRunState::Waiting`
+    discriminant design).
+
+- **2026-07-29 — DomainComm ring alignment + pointer-corruption fix, landed
+  and live-verified (UNCOMMITTED prior to this entry, now being committed).**
+  Follows on from the doorbell/interrupt redesign entry below — this is a
+  separate bug hit while retesting eunomia after that work.
+
+  **Bugs found and fixed in `themis/capavisor/src/platform/domain.rs`**:
+  1. **Alignment panic**: `domcomm_rx_enqueue`/`domcomm_tx_dequeue` wrote
+     `MsgHeader` (8-byte-aligned, has a `u64` field) through a typed
+     `&mut MsgHeader` reference at byte-packed ring offsets that aren't
+     guaranteed 8-aligned (ring has no per-message padding by design —
+     `total_size` must stay exact, see prior off-by-one history). Triggered
+     reliably whenever `test_attestation` ran first (attestation payload
+     lengths aren't 8-byte multiples, drifting the cursor). Fixed by
+     switching to `core::ptr::write_unaligned`/`copy_nonoverlapping`
+     everywhere instead of typed dereferences — also correct because this
+     memory is domain-shared, so forming an exclusive `&mut` over it is
+     unsound regardless of alignment.
+  2. **Untrusted-cursor hardening**: the DomainComm header page holds both
+     RX and TX `RingMeta` together, so it's entirely domain-writable — a
+     malicious/buggy domain could scribble on `rx.head`/`tx.tail`, the
+     fields capavisor considers authoritative. Fixed by adding
+     `DomainCommRing::local_cursor: u32`, a capavisor-private producer/
+     consumer cursor; capavisor now only ever *writes* its own cursor into
+     shared memory, never reads it back. Only the domain's own cursors
+     (`rx.tail`, `tx.head`) are read from shared memory (still via
+     `read_volatile` + fence).
+  3. **Bounds-checked pointers**: added `DomainCommRing::checked_ptr(offset,
+     len, hhdm_offset) -> Option<*mut u8>`, validating offset/len stay
+     within one ring page and within the ring's actual backing pages before
+     handing back a pointer — closes a real pre-existing OOB-read gap in
+     `domcomm_tx_dequeue` (a crafted domain-supplied `total_size` near a
+     page boundary could previously read past the ring page into unrelated
+     HHDM-mapped memory).
+  4. **Bug introduced then fixed within this same session**: initial
+     `checked_ptr` implementation computed `page_off` for the boundary
+     check but forgot to add it to the returned pointer — every access
+     silently landed at page offset 0 instead of the real offset, which
+     is what caused the "corrupted attestation nonce" symptom seen live
+     (TX payload copy read raw `MsgHeader` bytes at page start instead of
+     the actual nonce 16 bytes further in). Fixed: `checked_ptr` now
+     returns `page_hpa + hhdm_offset + page_off`.
+
+  **Validation**: `cargo build --release -p capavisor` clean, `cargo
+  build-bins` (repo root) clean, `capa-engine cargo test --release` all
+  green. Live-tested by user: `test_attestation` now passes end-to-end
+  (previously failed nonce mismatch), full eunomia suite (`coco`, `smoke`,
+  `sched`, `hypercall`, etc.) runs correctly including
+  `test_attestation`-first ordering that previously panicked.
+
+  **Also reviewed/cleaned this session**: debug-print artifacts from the
+  live crash-hunting session — reverted an accidental `serial_debug!` →
+  `serial_println!` downgrade in `arch/x86_64/hypercall/switch.rs` (kept
+  the added message detail), reverted `cloud-hypervisor`'s vcpu.rs
+  "log every VM exit" back to "first 5 exits only" (kept new `qual`/`gpa`
+  fields and the new I/O-error-path `eprintln!`s, which are legitimate).
+  Audited all `thhv/src/*.c` debug/log call sites — all pre-existing ones
+  already follow correct conventions (`pr_debug`/`pr_warn_ratelimited` for
+  hot paths, `pr_err`/`pr_warn` for genuine errors, `pr_info` for one-shot
+  setup) — nothing to clean up there. `tools/toggle-debug` (checked-in
+  binary) gets non-deterministically rebuilt by every `cargo build-bins`
+  run even with unchanged source — must `git checkout -- tools/toggle-debug`
+  before finalizing any diff that ran `build-bins`.
+
+  **Known outstanding, not yet done (low priority, not blocking this
+  commit)**: `send_grow_ack` (×2, `hypercall/domcomm.rs`) and the doorbell
+  notify path (`arch/x86_64/hypercall/doorbell.rs:~97`) silently discard
+  `enqueue_rx`'s return value on ring-full — should at least log a warning
+  for diagnosability; not a hang risk today since callers already degrade
+  to a clean error on failed dequeue, just harder to debug when it happens.
+
+- **2026-07-28 — doorbell/interrupt redesign: `blocked` flag on `Waiting` VP
+  state landed, fully validated, UNCOMMITTED (`fixing_domain_revocation`
+  branch).** Continues the interrupt lazy-unwind chain work (separate arc
+  from the P7/P8 code-quality audit below — that arc is paused, not
+  abandoned; resume it after this one).
+
+  **The bug**: under the `VpRunState::Waiting` unification (`unlocks`,
+  `report` fields, from an earlier segment), a VP was "uniformly
+  claimable" by any VP holding a capability handle to it. User caught a
+  concrete counter-example: two independent call chains sharing a common
+  intermediate domain B — `A1 -> B1 -> C1` (interrupted, frozen) and
+  `A2 -> B2` (separate, unrelated, concurrently-active). B2 holds a valid
+  handle to C (handles are domain-level, not per-VP), so it could illegally
+  claim C1 before B1 (its own chain's frame) had itself resumed.
+
+  **Fix** (user-specified): added `blocked: bool` to `VpRunState::Waiting`
+  (`capa-engine/src/domain.rs`); removed the now-unused `prev_caller` field
+  entirely (confirmed via grep it was never read for logic).
+  - **Up walk** = `deliver_interrupt_vp` (`capa-engine/src/domain_api.rs`):
+    walks leaf→handler via `core_ctx.peek_at`. Only the frame directly
+    called by the handler (`chain[n-2]`) starts `blocked: false`; every
+    deeper frame starts `blocked: true`.
+  - **Down walk** = `switch_domain_forward` (same file): rejects a claim on
+    `blocked == true`; otherwise walks down collapsing `report == false`
+    frames until a `report == true` frame or the true leaf resumes. After
+    resuming, clears `blocked` on the next frame down (`unlocks`'s callee)
+    — exactly one hop, regardless of who performs the resume.
+  - Cleaned up all stale `prev_caller`-referencing doc comments in
+    `domain_api.rs` and `switch.rs` (`CoreContext::call_stack`, `peek_at`,
+    `find_interrupt_handler`) — reworded to established vocabulary only
+    (`blocked`, `unlocks`, `report`, `resume_chain`, `Waiting`/`Running`/
+    `Locked`, `chain`, `handler`, `leaf`). **User explicitly rejected
+    invented terms** ("entry gate", "stopping frame", "propagate") —
+    stick to established vocabulary in any future comments/explanations
+    here.
+
+  **Tests**: rewrote `tests/unit/switch.rs::test_waiting_vp_resumable_by_different_vp_same_domain`
+  (was asserting the wrong/buggy behavior — a different VP stealing a
+  *deeper* frame should succeed; now correctly tests a different VP
+  resuming the frame directly called by the handler, the real
+  eunomia-crash regression). Added
+  `test_deep_waiting_vp_blocked_until_caller_resumes` and
+  `test_independent_chain_cannot_steal_deeper_waiting_frame` (the exact
+  A1/B1/C1 vs A2/B2 scenario). Fixed
+  `tests/concurrency/loom_vp_switch.rs::vp_two_cores_race_waiting_vp`'s
+  manual `Waiting` construction for the new field.
+
+  **Validation — all green**: `cargo test` (default), `cargo test
+  --features address_translation`, `cargo loom` (plain, 50/50),
+  `RUSTFLAGS="-C debug-assertions=on" cargo loom` (50/50), `themis/capavisor`
+  `cargo build --release` (clean), `capa-cli cargo test --release`
+  (**15/15 tutorials pass**, including `tutorial_05_basic_interrupts` which
+  was a previously-tracked P6 failure — not confirmed *why* it now passes,
+  worth a quick look but not a blocker), `cargo build-bins` at repo root
+  (full success).
+
+  **NOT yet done / next steps, in order**:
+  1. `update-do-switch-injection` (SQL todo id): wire capavisor's
+     `do_switch` handler to actually perform PIR injection based on
+     `SwitchContext.interrupt_inject: Option<u8>`, symmetric to the
+     existing `interrupt_return` handling. This is the last piece before a
+     live eunomia retest.
+  2. Live-boot eunomia CoCo retest end-to-end to confirm the original
+     doorbell/interrupt bug this whole redesign was chasing is actually
+     fixed in practice (not just at the capa-engine unit/loom level).
+  3. `lean-exec` sync: the executable Lean 4 model has **not** been
+     updated for `unlocks`/`report`/`blocked`/interrupt-chain semantics —
+     needs differential-testing parity once the Rust side is fully settled.
+  4. Debug-instrumentation cleanup (any `themis_trace()` scaffolding added
+     while chasing this bug) — sweep before committing.
+  5. **Nothing in this arc has been committed.** `git status` currently
+     shows modified: `capa-engine/src/domain.rs`, `domain_api.rs`,
+     `switch.rs`, `tests/concurrency/loom_vp_switch.rs`,
+     `tests/unit/switch.rs` (this segment) — plus other
+     already-modified-but-uncommitted files from earlier segments:
+     `themis/capavisor/src/arch/x86_64/hypercall/switch.rs`,
+     `themis/capavisor/src/platform/domain.rs`, `thhv/inc/thhv.h`,
+     `thhv/src/thhv_vp.c`; and an untracked `question.md`. **User standing
+     rule: do not commit automatically — wait for explicit go-ahead after
+     they inspect diffs and run tests themselves.** Likely a bundled commit
+     once (1)-(2) above land and eunomia is confirmed fixed live.
+
+  **Resume next session**: re-read this entry, then `git status` / `git
+  log --oneline -10` to confirm nothing drifted, then start on
+  `update-do-switch-injection` (item 1 above). The P7/P8 code-quality
+  audit entry directly below this one is a separate, paused arc — resume
+  it only after this doorbell/interrupt work is committed.
+
+- **2026-07-27 — code-quality redesign audit: P7 landed (`fixing_domain_revocation` branch).**
+  Fixed `capa-cli/src/session.rs`'s `export-as-unit-test` codegen, which
+  generated Rust regression tests that didn't compile at all: every
+  `Capability::*` call was missing the required `platform: &dyn Platform`
+  first arg, several calls had wrong return-tuple destructuring, Rights/
+  Attributes were bare undefined identifiers, `MonitorAPI` bits were
+  double-wrapped, `Command::Switch`/`Interrupt` used a disconnected
+  throwaway `SwitchManager::new(4)` instead of the real engine API, and
+  `cmd_init`'s hardcoded `"r0"` root-memory name didn't match the codegen's
+  derived key. Rewrote codegen for every `Command` variant against
+  `rust_backend.rs`/`domain_api.rs` as reference. Also fixed
+  `AcceptCapability` silently dropping its optional `at <gpa>` override.
+  Validated: all 17 tutorial scripts' generated tests compile and pass
+  under `capa-engine/tests/unit/`; capa-cli's own 15 runtime tests still
+  pass. Committed as `cf604b45e`.
+
+  Confirmed along the way (no changes needed): `capa-cli`'s live
+  `CliPlatform` already owns and correctly uses the engine's real
+  `SwitchManager` (not a duplicate) for both switch and interrupt
+  delivery — this was already done in the earlier P3 capa-cli cutover.
+  Simulated core count is hardcoded to `4` in `capa-cli/src/main.rs:66`
+  but every layer below it (`CliPlatform`, `RustBackend`, `Domain::new_root`)
+  is already parametrized, so raising it later is a one-line change plus
+  optionally exposing a CLI flag.
+
+  **Next**: P8 — code-style review (`&CapabilityRef<T>` non-idiomatic
+  reference-to-Copy-type convention; whether `acquire_shared_lock(&self)
+  -> Result<Box<dyn OpLockGuard>>` needs the `Box<dyn _>` or could avoid
+  the allocation/dynamic dispatch). Then the merge-gate pass over all
+  tutorials. Order agreed with user; do not start without discussing first
+  (standing process rule — do not commit or start new work without
+  explicit go-ahead).
+
+- **2026-07-22 — deterministic cross-core revoke C3 (IN PROGRESS).**
+  Goal: revoke a child that is continuously running on core 0 from dom0
+  core 1, then audit that all per-domain/per-VP state is reclaimed.
+
+  Root cause found and fixed in the test setup: CHV parsed
+  `policies.exits` from `--themis-config` but `policy_walker.rs` emitted
+  only MSR and CPUID policy operations. The child therefore silently kept
+  the engine default `exits.default.trap=true` and was `Available` at
+  revoke time. CHV now emits `DEFAULT_EXIT_TRAP` and per-reason exit policy
+  operations before sealing. The revoke harness no longer waits for serial
+  heartbeats because serial PIO is intentionally local under `trap=false`.
+
+  Last known trace before the fix:
+  ```
+  [REVOKE-XCORE] child dom_id=1 #vps=1
+  [REVOKE-XCORE]   vp=0 state=Available
+  ```
+
+  Next step: rerun the pinned revoke test. Expected host trace starts with
+  `vp=0 state=Running core=0 caller=Some`, followed by
+  `push_core_switch`, `apply_switch`, and `swap complete`.
+
+  First true cross-core run exposed the lifecycle corruption behind the
+  second-run hang: `Platform::on_domain_revoked()` was writing the remote
+  core's Tier-1 `domain_id=dom0` before that core drained its queued switch.
+  Hardware still had the child VMCS loaded, so the swap was misidentified
+  as dom0→dom0 and the deactivated child VMCS was returned into dom0's
+  occupied `VcpuSlot`. Fixed by making `on_domain_revoked()` Tier-3 routing
+  cleanup only; only the owning core now updates Tier 1 during the actual
+  VMCS swap. A same-source/destination revoke-swap assertion prevents this
+  class of corruption from becoming a delayed hang again.
+
+  The ownership protocol has now been refactored end-to-end:
+  - Every queued revoke switch carries the exact source domain/VP and target
+    domain/VP. The owner core verifies the source before touching hardware.
+  - The engine includes every switch core in the IPI/barrier set and rejects
+    duplicate orders for one core.
+  - Target metadata is committed only after the VMCS/VcpuSlot swap succeeds;
+    `on_domain_revoked()` is residual routing cleanup after barrier 0.
+  - Revoke preflight rejects a running doomed VP with no caller before
+    detaching or marking any subtree node.
+  - The unused parallel `CoreUpdate::Revoke` path was removed.
+
+  Engine tests, full loom concurrency tests, capa-cli release build, capavisor
+  release build, and `cargo build-bins` all pass. The pinned no-exit Eunomia
+  revoke harness also passed twice consecutively in one Themis boot. Both
+  owner-core transitions named the actual running child as the source:
+  ```
+  apply_switch core=0 src=(dom=1,vp=0) dst=(dom=0,vp=0)
+  swap complete core=0
+  apply_switch core=0 src=(dom=2,vp=0) dst=(dom=0,vp=0)
+  swap complete core=0
+  ```
+  There was no second-run hang and no `VcpuSlot::put` panic, so the explicit
+  VP/VMCS ownership transition is fixed. However, roughly 60 seconds later
+  dom0 reported an RCU stall on CPU 0 in `pv_native_safe_halt`; timer progress
+  on the revoke target core had stopped.
+
+  Two hypotheses remain and must be distinguished before changing design:
+  1. the INIT IPI used for cross-core wakeup perturbs processor/LAPIC state;
+  2. the emulated TSC deadline is incorrectly stored per physical core, so a
+     dom0 deadline can expire while the child is active and be injected into
+     the child before dom0 resumes.
+
+  A temporary ownership diagnostic now records which domain/VP armed each
+  per-core deadline and prints `[TIMER-OWNER-MISMATCH]` only if that deadline
+  fires on a different active domain/VP. The first rerun produced no marker,
+  then domain 2 hung before revoke and dom0 reported another CPU0 RCU stall.
+
+  The next diagnostic recorded:
+  ```
+  [EXTINT-DROPPED] core=0 active=(dom=1,vp=0) vector=0xec
+  ```
+  Vector `0xec` is dom0's local timer. The generic monitor was consulting
+  `ExitPolicy` for an external-interrupt VM exit and returning immediately
+  when `trap=false`, bypassing `InterruptPolicy` and lazy-unwind entirely.
+  This branch originated in `5f5f9d215` from a dom0-only assumption that
+  `trap=false` implied external-interrupt exiting was disabled.
+
+  The interrupt-policy audit also found that `c2820b5ec` integrated
+  `SwitchManager::route_interrupt()` but discarded its `reported_to` result.
+  Consequently the current VP unwind stores the vector in every intermediate
+  `Suspended` VP, so `NotReport` is not transparent, while the intended
+  Report/NotReport distinction is absent from the resume state machine.
+
+  Required fix:
+  - External interrupts are governed only by `InterruptPolicy`.
+  - Route selection and VP-chain mutation become one atomic engine operation;
+    the current route-then-deliver split can observe different policy/chain
+    states.
+  - Lazy-unwind records which suspended call frames must observe the event.
+  - On descent, the engine restores `NotReport` frames directly to `Locked`
+    without executing them, then performs one switch to the first `Report`
+    frame or directly to the interrupted leaf if no report is required.
+  - The interrupted leaf remains reserved until that atomic descent; it must
+    never become globally `Available` while the handler is still running.
+  - Remove the unused parallel `resume_after_interrupt()` list API once the
+    VP state machine is the single authority.
+
+  **Engine/capavisor correction implemented (uncommitted, ready for review):**
+  - Removed the external-interrupt `ExitPolicy` gate. Interrupt routing now
+    always follows `InterruptPolicy`.
+  - Combined handler selection and VP-chain unwind in
+    `deliver_interrupt_vp()` under one engine operation.
+  - `Suspended` and `Interrupted` states retain exact caller ownership and
+    per-frame `Report` disposition.
+  - Descent skips `NotReport` frames atomically, stopping at the first
+    `Report` frame or restoring the original leaf directly.
+  - The interrupted leaf remains reserved; unrelated VPs cannot claim it.
+  - Capavisor swaps to the engine-selected actual destination VP, publishes
+    an interrupt intercept message, fails closed on routing errors, and queues
+    blocked injection in PIR with interrupt-window exiting.
+  - Removed the obsolete `resume_after_interrupt()` list API.
+  - Restored the explicit source→target cross-core revoke ownership changes
+    that were lost during the formatter incident.
+
+  Validation: full engine suite passes; 32 interrupt/switch unit tests pass;
+  all 5 VP loom tests pass; capa-cli release build and capavisor release check
+  pass. No formatter was run. Nested A→B→C Eunomia coverage remains a separate
+  integration task.
+
+  Integration acceptance requires a reusable three-domain Eunomia topology
+  A→B→C, not only dom0→child. The preferred harness is a small bare-metal
+  nested-monitor workload for B that uses the Themis hypercall ABI to create,
+  seal, and switch to a spinning C. One launcher should run a policy matrix:
+  A=`Deliver`, B=`Report` must expose a synthetic SWITCH return; B=`NotReport`
+  must resume C transparently. This topology should become reusable for
+  nested switch, interrupt, and revocation tests.
+
+  Remaining cleanup is separate from the ownership fix:
+  `REVOKE_MEM parent=14 sub=24 failed (-2)` is the known redundant per-memory
+  revoke attempted after whole-domain revocation.
+
+  Files modified for this step:
+  - `cloud-hypervisor/hypervisor/src/themis/policy_walker.rs` — emit VMEXIT policy operations and test default/override encoding.
+  - `cloud-hypervisor/hypervisor/src/themis/vm_state.rs` — push VMEXIT policy before partition seal.
+  - `eunomia/policies/revoke/no-exit.json` — select local handling for all VMEXITs.
+  - `themis/scripts/run-eunomia.sh` — auto-select no-exit policy and use a fixed boot window rather than invisible serial markers.
+  - `themis/capavisor/src/hypercall/capa.rs` — temporary pre-revoke VP-state diagnostic.
+  - `themis/capavisor/src/platform/mod.rs` — preserve remote Tier-1 binding until its owning core performs the revoke switch.
+  - `themis/capavisor/src/platform/maps.rs` — retain one explicit source→target switch command; remove the unused revoke variant.
+  - `capa-engine/src/capability.rs` — emit exact source→target orders and preflight invalid running VPs before mutation.
+  - `capa-engine/src/domain_api.rs` — make revoke-return transition engine state only; owner metadata commits after hardware.
+  - `capa-engine/src/platform.rs` — include switch cores in barriers and perform residual revoke cleanup after barrier 0.
+  - `capa-engine/src/update.rs` — carry source domain/VP in `CoreSwitch`.
+  - `capa-engine/tests/common/mod.rs` — record complete switch orders.
+  - `capa-engine/tests/concurrency/platform.rs` — assert exact transitions, ordering, and mutation-free invalid-caller rejection.
+
 - **2026-07-20 — MSR interposition end-to-end (wrmsr suite 4/4 PASS)** ✅ DONE.
   Completed Phase 2 (hardware VMCS MSR entry-load/exit-store lists), Emulate
   WRMSR store-to-policy fallback, and Option B (CHV per-vCPU shadow for

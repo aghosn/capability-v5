@@ -64,6 +64,7 @@ pub enum Command {
     AcceptCapability {
         domain: String,
         pending_id: u64,
+        gpa_hint: Option<u64>,
     },
     RejectCapability {
         domain: String,
@@ -173,8 +174,11 @@ impl Session {
                 Command::EnumeratePending { domain } => {
                     format!("enumerate-pending {}", domain)
                 }
-                Command::AcceptCapability { domain, pending_id } => {
-                    format!("accept-capability {} {}", domain, pending_id)
+                Command::AcceptCapability { domain, pending_id, gpa_hint } => {
+                    match gpa_hint {
+                        Some(gpa) => format!("accept-capability {} {} at 0x{:x}", domain, pending_id, gpa),
+                        None => format!("accept-capability {} {}", domain, pending_id),
+                    }
                 }
                 Command::RejectCapability { domain, pending_id } => {
                     format!("reject-capability {} {}", domain, pending_id)
@@ -205,15 +209,27 @@ impl Session {
     }
 
     /// Save the session as a Rust unit test
+    ///
+    /// The generated file must be placed one directory level under
+    /// `capa-engine/tests/` (e.g. `capa-engine/tests/unit/<name>.rs`) so that
+    /// its `#[path = "../common/mod.rs"] mod common;` resolves, and needs a
+    /// matching `[[test]]` entry added to `capa-engine/Cargo.toml` to be run
+    /// by `cargo test` (mirroring every other file under `tests/unit/`).
     pub fn save_as_test(&self, filename: &str) -> std::io::Result<()> {
         let mut file = File::create(filename)?;
 
         // Write test header
         writeln!(file, "//! Test generated from CLI session\n")?;
+        writeln!(file, "//! NOTE: place this file at capa-engine/tests/unit/<name>.rs")?;
+        writeln!(file, "//! and add a matching [[test]] entry to capa-engine/Cargo.toml.\n")?;
         writeln!(file, "use capability_engine::*;")?;
         writeln!(file, "use std::sync::Arc;\n")?;
+        writeln!(file, "#[path = \"../common/mod.rs\"]")?;
+        writeln!(file, "mod common;\n")?;
         writeln!(file, "#[test]")?;
         writeln!(file, "fn test_session() {{")?;
+        writeln!(file, "    let platform = common::TestPlatform::new();")?;
+        writeln!(file)?;
 
         // Maps tracking generated variable names and ownership for domain-mediated API calls.
         //   arc_map:    name  → Rust var name for the Arc (domain or memory capability)
@@ -231,7 +247,12 @@ impl Session {
                 Command::Init { name, size } => {
                     let domain_var = format!("{}_cap", sanitize_name(name));
                     let mem_var    = format!("{}_mem_cap", sanitize_name(name));
-                    let mem_name   = format!("{}_mem", sanitize_name(name));
+                    // `cmd_init` (commands/domain.rs) always tracks the root memory
+                    // region under the literal name "r0" regardless of the domain's
+                    // name, so tutorial scripts always refer to it as "r0" (e.g.
+                    // `carve r0 ...`). Mirror that literal key here, or later
+                    // Carve/Send/Revoke lookups on "r0" will silently miss.
+                    let mem_name   = "r0".to_string();
 
                     writeln!(file, "    // Initialize root domain and memory")?;
                     writeln!(file, "    let root_domain_data = Domain::new_root(4);")?;
@@ -240,6 +261,12 @@ impl Session {
                     writeln!(file, "    let {mem_var} = Capability::new_root(0, 1, root_region);")?;
                     writeln!(file, "    {domain_var}.write().data.add_memory_capability(1, Arc::downgrade(&{mem_var}));")?;
                     writeln!(file, "    let r0_handle: LocalHandle = 1;")?;
+                    writeln!(file, "    platform.register_domain({domain_var}.read().data.id, None);")?;
+                    writeln!(file, "    for core in 0..4u64 {{")?;
+                    writeln!(file, "        platform.set_core_context(core, &{domain_var}, core);")?;
+                    writeln!(file, "        let vp = {domain_var}.read().data.policy.vprocessor_states[core as usize].clone();")?;
+                    writeln!(file, "        *vp.run_state.write() = VpRunState::Running {{ core }};")?;
+                    writeln!(file, "    }}")?;
                     writeln!(file)?;
 
                     arc_map.insert(name.clone(), domain_var);
@@ -256,12 +283,17 @@ impl Session {
                     let handle_var   = format!("{}_handle", sanitize_name(name));
 
                     writeln!(file, "    // Create child domain: {name}")?;
-                    writeln!(file, "    let {name}_api = MonitorAPI::from_bits({api_bits});",
+                    writeln!(file, "    let {name}_api = {api_bits};",
                         api_bits = parse_api_bits(api))?;
                     writeln!(file, "    let {name}_policy = DomainPolicy::new_restricted(0x{cores:x}, {name}_api);")?;
-                    writeln!(file, "    let {handle_var} = Capability::create(&{parent_arc}, {name}_policy).unwrap();")?;
+                    writeln!(file, "    let {handle_var} = Capability::create(&platform, &{parent_arc}, {name}_policy).unwrap().0;")?;
                     writeln!(file, "    let {child_var} = {parent_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{handle_var}].upgrade().unwrap();")?;
+                    writeln!(file, "    platform.register_domain({child_var}.read().data.id, Some({parent_arc}.read().data.id));")?;
+                    writeln!(file, "    let {name}_num_vps = {child_var}.read().data.policy.num_vprocessors;")?;
+                    writeln!(file, "    for _ in 0..{name}_num_vps {{")?;
+                    writeln!(file, "        {child_var}.write().data.add_vprocessor().unwrap();")?;
+                    writeln!(file, "    }}")?;
                     writeln!(file)?;
 
                     arc_map.insert(name.clone(), child_var);
@@ -279,7 +311,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(domain)));
 
                     writeln!(file, "    // Seal domain: {domain}")?;
-                    writeln!(file, "    Capability::seal(&{owner_arc}, {handle_var}).unwrap();")?;
+                    writeln!(file, "    Capability::seal(&platform, &{owner_arc}, {handle_var}).unwrap();")?;
                     writeln!(file)?;
                 }
 
@@ -288,15 +320,16 @@ impl Session {
                         .cloned().unwrap_or_default();
                     let owner_arc    = arc_map.get(&parent_owner)
                         .cloned().unwrap_or_else(|| sanitize_name(&parent_owner));
-                    let parent_handle = handle_map.get(parent)
-                        .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
+                    let parent_arc   = arc_map.get(parent)
+                        .cloned().unwrap_or_else(|| sanitize_name(parent));
                     let child_var   = format!("{}_cap", sanitize_name(name));
                     let handle_var  = format!("{}_handle", sanitize_name(name));
                     let sub_var     = format!("{}_sub_handle", sanitize_name(name));
 
                     writeln!(file, "    // Carve memory region: {name}")?;
-                    writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::carve(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    let parent_handle = resolve_mem_handle(&mut file, &handle_map, parent, &parent_arc, &owner_arc)?;
+                    writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights_expr});", rights_expr = parse_rights_expr(rights))?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::carve(&platform, &{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -312,15 +345,16 @@ impl Session {
                         .cloned().unwrap_or_default();
                     let owner_arc    = arc_map.get(&parent_owner)
                         .cloned().unwrap_or_else(|| sanitize_name(&parent_owner));
-                    let parent_handle = handle_map.get(parent)
-                        .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
+                    let parent_arc   = arc_map.get(parent)
+                        .cloned().unwrap_or_else(|| sanitize_name(parent));
                     let child_var   = format!("{}_cap", sanitize_name(name));
                     let handle_var  = format!("{}_handle", sanitize_name(name));
                     let sub_var     = format!("{}_sub_handle", sanitize_name(name));
 
                     writeln!(file, "    // Alias memory region: {name}")?;
-                    writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights});")?;
-                    writeln!(file, "    let ({handle_var}, {sub_var}) = Capability::alias(&{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
+                    let parent_handle = resolve_mem_handle(&mut file, &handle_map, parent, &parent_arc, &owner_arc)?;
+                    writeln!(file, "    let {name}_access = Access::new(0x{start:x}, 0x{size:x}, {rights_expr});", rights_expr = parse_rights_expr(rights))?;
+                    writeln!(file, "    let ({handle_var}, {sub_var}, _) = Capability::alias(&platform, &{owner_arc}, {parent_handle}, {name}_access).unwrap();")?;
                     writeln!(file, "    let {child_var} = {owner_arc}.read().data")?;
                     writeln!(file, "        .memory_capabilities[&{handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -336,13 +370,14 @@ impl Session {
                         .cloned().unwrap_or_default();
                     let sender_arc  = arc_map.get(&mem_owner)
                         .cloned().unwrap_or_else(|| sanitize_name(&mem_owner));
-                    let mem_handle  = handle_map.get(mem)
-                        .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(mem)));
+                    let mem_arc     = arc_map.get(mem)
+                        .cloned().unwrap_or_else(|| sanitize_name(mem));
                     let recv_arc    = arc_map.get(domain)
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
                     let recv_domain_handle_var = format!("{}_recv_dom_h", sanitize_name(domain));
 
                     writeln!(file, "    // Send {mem} to {domain}")?;
+                    let mem_handle = resolve_mem_handle(&mut file, &handle_map, mem, &mem_arc, &sender_arc)?;
                     writeln!(file, "    let {recv_domain_handle_var} = {sender_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{recv_arc}))).map(|(h, _)| *h)")?;
                     writeln!(file, "        .unwrap_or_else(|| {{")?;
@@ -354,7 +389,7 @@ impl Session {
                         Some(gpa) => format!("Some(0x{:x})", gpa),
                         None => "None".to_string(),
                     };
-                    writeln!(file, "    let _ = Capability::send_at(&{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs}, {gpa_arg}).unwrap();")?;
+                    writeln!(file, "    let _ = Capability::send_at(&platform, &{sender_arc}, {mem_handle}, {recv_domain_handle_var}, {attrs_expr}, {gpa_arg}).unwrap();", attrs_expr = parse_attrs_expr(attrs))?;
                     writeln!(file, "    // Note: {mem} is now owned by {domain}; handle lookup needed for further ops.")?;
                     writeln!(file)?;
 
@@ -372,20 +407,21 @@ impl Session {
                             .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(child)));
 
                         writeln!(file, "    // Revoke domain {child} from {parent}")?;
-                        writeln!(file, "    let _ = Capability::revoke_domain(&{parent_arc}, {child_handle}).unwrap();")?;
+                        writeln!(file, "    let _ = Capability::revoke_domain(&platform, &{parent_arc}, {child_handle}).unwrap();")?;
                     } else {
                         // Memory revoke
                         let owner_name   = owner_map.get(parent)
                             .cloned().unwrap_or_default();
                         let owner_arc    = arc_map.get(&owner_name)
                             .cloned().unwrap_or_else(|| sanitize_name(&owner_name));
-                        let parent_handle = handle_map.get(parent)
-                            .cloned().unwrap_or_else(|| format!("{}_handle", sanitize_name(parent)));
+                        let parent_arc   = arc_map.get(parent)
+                            .cloned().unwrap_or_else(|| sanitize_name(parent));
                         let child_sub    = sub_handle_map.get(child)
                             .cloned().unwrap_or_else(|| format!("{}_sub_handle", sanitize_name(child)));
 
                         writeln!(file, "    // Revoke memory {child} from {parent}")?;
-                        writeln!(file, "    let _ = Capability::revoke(&{owner_arc}, {parent_handle}, {child_sub}).unwrap();")?;
+                        let parent_handle = resolve_mem_handle(&mut file, &handle_map, parent, &parent_arc, &owner_arc)?;
+                        writeln!(file, "    let _ = Capability::revoke(&platform, &{owner_arc}, {parent_handle}, {child_sub}).unwrap();")?;
                     }
                     writeln!(file)?;
                 }
@@ -410,19 +446,28 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::Switch { core, from, to, .. } => {
+                Command::Switch { core, from, to, vp_id } => {
                     let from_arc = arc_map.get(from)
                         .cloned().unwrap_or_else(|| sanitize_name(from));
-                    let to_arc   = arc_map.get(to)
-                        .cloned().unwrap_or_else(|| sanitize_name(to));
 
                     writeln!(file, "    // Switch on core {core} from {from} to {to}")?;
-                    writeln!(file, "    let switch_mgr = SwitchManager::new(4);")?;
-                    writeln!(file, "    {{")?;
-                    writeln!(file, "        let core_ref = switch_mgr.get_core({core}).unwrap();")?;
-                    writeln!(file, "        *core_ref.state.write() = CoreState::Running({from_arc}.read().data.id);")?;
-                    writeln!(file, "    }}")?;
-                    writeln!(file, "    let _ctx = switch_mgr.switch({core}, &{from_arc}, Some(&{to_arc})).unwrap();")?;
+                    writeln!(file, "    platform.set_current_core(Some({core}));")?;
+                    match vp_id {
+                        Some(vp) => {
+                            let to_arc = arc_map.get(to)
+                                .cloned().unwrap_or_else(|| sanitize_name(to));
+                            let to_handle_var = format!("{}_handle_in_{}", sanitize_name(to), sanitize_name(from));
+
+                            writeln!(file, "    let {to_handle_var} = {from_arc}.read().data")?;
+                            writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{to_arc}))).map(|(h, _)| *h)")?;
+                            writeln!(file, "        .expect(\"to-domain handle not found in from-domain's table\");")?;
+                            writeln!(file, "    let _ctx = Capability::<Domain>::switch(&platform, &{from_arc}, {to_handle_var}, {vp}).unwrap().0;")?;
+                        }
+                        None => {
+                            writeln!(file, "    let _ctx = Capability::<Domain>::switch(&platform, &{from_arc}, 0, 0).unwrap().0;")?;
+                        }
+                    }
+                    writeln!(file, "    platform.set_current_core(None);")?;
                     writeln!(file)?;
                 }
 
@@ -431,9 +476,8 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 
                     writeln!(file, "    // Route interrupt {vector} on {domain} (core {core})")?;
-                    writeln!(file, "    let switch_mgr = SwitchManager::new(4);")?;
-                    writeln!(file, "    let (handler_id, reported_to) = switch_mgr.route_interrupt({vector}, &{domain_arc}, {core}).unwrap();")?;
-                    writeln!(file, "    // Add assertions on handler_id and reported_to if needed")?;
+                    writeln!(file, "    let (_vp_delivery, _batch) = Capability::<Domain>::deliver_interrupt_vp(&platform, &{domain_arc}, {core}, {vector} as u8).unwrap();")?;
+                    writeln!(file, "    // Add assertions on _vp_delivery if needed")?;
                     writeln!(file)?;
                 }
 
@@ -447,12 +491,16 @@ impl Session {
                     writeln!(file)?;
                 }
 
-                Command::AcceptCapability { domain, pending_id } => {
+                Command::AcceptCapability { domain, pending_id, gpa_hint } => {
                     let domain_arc = arc_map.get(domain)
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
+                    let gpa_arg = match gpa_hint {
+                        Some(gpa) => format!("Some(0x{:x})", gpa),
+                        None => "None".to_string(),
+                    };
 
                     writeln!(file, "    // Accept pending capability {pending_id} for {domain}")?;
-                    writeln!(file, "    let (_handle, _updates) = Capability::accept(&{domain_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    let (_handle, _updates) = Capability::accept_at(&platform, &{domain_arc}, {pending_id}, {gpa_arg}).unwrap();")?;
                     writeln!(file)?;
                 }
 
@@ -461,7 +509,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 
                     writeln!(file, "    // Reject pending capability {pending_id} for {domain}")?;
-                    writeln!(file, "    Capability::reject(&{domain_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    Capability::reject(&platform, &{domain_arc}, {pending_id}).unwrap();")?;
                     writeln!(file)?;
                 }
 
@@ -474,7 +522,7 @@ impl Session {
                     let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
 
                     writeln!(file, "    // get-chan: create channel from {caller} to {target} as {chan_name}")?;
-                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan(&{caller_arc}, {target_handle}).unwrap();")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan(&platform, &{caller_arc}, {target_handle}).unwrap().0;")?;
                     writeln!(file, "    let {chan_var} = {caller_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -492,7 +540,7 @@ impl Session {
                     let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
 
                     writeln!(file, "    // get-chan-self: create self-channel for {domain} as {chan_name}")?;
-                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan_self(&{domain_arc}).unwrap();")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::get_chan_self(&platform, &{domain_arc}).unwrap().0;")?;
                     writeln!(file, "    let {chan_var} = {domain_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -516,7 +564,7 @@ impl Session {
                     writeln!(file, "    let {recv_handle_var} = {caller_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{recv_arc}))).map(|(h, _)| *h)")?;
                     writeln!(file, "        .expect(\"receiver handle not found in caller's table\");")?;
-                    writeln!(file, "    Capability::<Domain>::send_channel(&{caller_arc}, {chan_handle}, {recv_handle_var}, Attributes::NONE).unwrap();")?;
+                    writeln!(file, "    Capability::<Domain>::send_channel(&platform, &{caller_arc}, {chan_handle}, {recv_handle_var}, Attributes::NONE).unwrap();")?;
                     writeln!(file)?;
 
                     owner_map.insert(chan_name.clone(), receiver.clone());
@@ -530,7 +578,7 @@ impl Session {
                     let chan_handle_var = format!("{}_handle", sanitize_name(chan_name));
 
                     writeln!(file, "    // accept-channel: {receiver} accepts pending channel {pending_id} as {chan_name}")?;
-                    writeln!(file, "    let {chan_handle_var} = Capability::<Domain>::accept_channel(&{recv_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    let {chan_handle_var} = Capability::<Domain>::accept_channel(&platform, &{recv_arc}, {pending_id}).unwrap().0;")?;
                     writeln!(file, "    let {chan_var} = {recv_arc}.read().data")?;
                     writeln!(file, "        .domain_capabilities[&{chan_handle_var}].upgrade().unwrap();")?;
                     writeln!(file)?;
@@ -546,23 +594,30 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(receiver));
 
                     writeln!(file, "    // reject-channel: {receiver} rejects pending channel {pending_id}")?;
-                    writeln!(file, "    Capability::<Domain>::reject_channel(&{recv_arc}, {pending_id}).unwrap();")?;
+                    writeln!(file, "    Capability::<Domain>::reject_channel(&platform, &{recv_arc}, {pending_id}).unwrap();")?;
                     writeln!(file)?;
                 }
 
                 Command::RegisterComm { mem, child_domain, vp_id } => {
+                    let mem_owner = owner_map.get(mem)
+                        .cloned().unwrap_or_default();
+                    let owner_arc = arc_map.get(&mem_owner)
+                        .cloned().unwrap_or_else(|| sanitize_name(&mem_owner));
                     let mem_arc = arc_map.get(mem)
                         .cloned().unwrap_or_else(|| sanitize_name(mem));
                     let child_arc = arc_map.get(child_domain)
                         .cloned().unwrap_or_else(|| sanitize_name(child_domain));
-                    let owner_id_var = format!("{mem_arc}_owner_id");
+                    let mem_handle_var   = format!("{}_handle_in_owner", sanitize_name(mem));
+                    let child_handle_var = format!("{}_handle_in_owner", sanitize_name(child_domain));
 
                     writeln!(file, "    // register-comm: register '{mem}' as COMM page for '{child_domain}' VP {vp_id}")?;
-                    writeln!(file, "    let {owner_id_var} = {mem_arc}.read().owned.owner;")?;
-                    writeln!(file, "    let {mem_arc}_owner = domains.get(&{owner_id_var}).unwrap().clone();")?;
-                    writeln!(file, "    let {mem_arc}_handle = find_memory_handle(&{mem_arc}_owner, &{mem_arc}).unwrap();")?;
-                    writeln!(file, "    let {child_arc}_handle = find_domain_handle(&{mem_arc}_owner, &{child_arc}).unwrap();")?;
-                    writeln!(file, "    Capability::<Domain>::register_comm(&{mem_arc}_owner, {mem_arc}_handle, {child_arc}_handle, {vp_id}).unwrap();")?;
+                    writeln!(file, "    let {mem_handle_var} = {owner_arc}.read().data")?;
+                    writeln!(file, "        .memory_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{mem_arc}))).map(|(h, _)| *h)")?;
+                    writeln!(file, "        .expect(\"mem handle not found in owner's table\");")?;
+                    writeln!(file, "    let {child_handle_var} = {owner_arc}.read().data")?;
+                    writeln!(file, "        .domain_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{child_arc}))).map(|(h, _)| *h)")?;
+                    writeln!(file, "        .expect(\"child handle not found in owner's table\");")?;
+                    writeln!(file, "    Capability::<Domain>::register_comm(&platform, &{owner_arc}, {mem_handle_var}, {child_handle_var}, {vp_id}).unwrap();")?;
                     writeln!(file)?;
                 }
             }
@@ -575,11 +630,69 @@ impl Session {
     }
 }
 
+/// Resolve the current `LocalHandle` for a memory region's capability inside
+/// its (possibly new) owner's table. If `handle_map` still has a fresh entry
+/// for it (region hasn't changed hands since last tracked), reuse that
+/// directly. Otherwise — e.g. the region was `Send`-ed to a new owner since
+/// being tracked, which clears its now-stale handle — emit an inline
+/// pointer-identity lookup against the owner's table and return a fresh local
+/// variable bound to the freshly resolved handle.
+fn resolve_mem_handle(
+    file: &mut File,
+    handle_map: &std::collections::HashMap<String, String>,
+    mem_name: &str,
+    mem_arc: &str,
+    owner_arc: &str,
+) -> std::io::Result<String> {
+    if let Some(h) = handle_map.get(mem_name) {
+        return Ok(h.clone());
+    }
+    let lookup_var = format!("{}_handle_in_owner", sanitize_name(mem_name));
+    writeln!(file, "    let {lookup_var} = {owner_arc}.read().data")?;
+    writeln!(file, "        .memory_capabilities.iter().find(|(_, w)| w.upgrade().map_or(false, |a| std::sync::Arc::ptr_eq(&a, &{mem_arc}))).map(|(h, _)| *h)")?;
+    writeln!(file, "        .expect(\"mem handle not found in owner's table\");")?;
+    Ok(lookup_var)
+}
+
 /// Sanitize a name to be a valid Rust identifier
 fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
         .collect()
+}
+
+/// Convert a rights character string (e.g. "RWX", "RW", "-") to a
+/// `Rights::from_bits(…)` expression suitable for use in generated test code.
+/// Mirrors `parser::parse_rights`'s character-based bit computation.
+fn parse_rights_expr(rights: &str) -> String {
+    let mut bits: u8 = 0;
+    for c in rights.chars() {
+        bits |= match c {
+            'R' | 'r' => 1 << 0,
+            'W' | 'w' => 1 << 1,
+            'X' | 'x' => 1 << 2,
+            _ => 0,
+        };
+    }
+    format!("Rights::from_bits(0x{bits:x})")
+}
+
+/// Convert a comma/pipe-separated attributes string (e.g. "CLEAN,VITAL" or
+/// "NONE") to an `Attributes::from_bits(…)` expression suitable for use in
+/// generated test code. Mirrors `parser::parse_attributes`'s flag computation.
+fn parse_attrs_expr(attrs: &str) -> String {
+    let mut bits: u8 = 0;
+    for part in attrs.split(&[',', '|'][..]) {
+        bits |= match part.trim().to_uppercase().as_str() {
+            "HASH"  => 1 << 0,
+            "CLEAN" => 1 << 1,
+            "VITAL" => 1 << 2,
+            "META"  => 1 << 3,
+            "COMM"  => 1 << 4,
+            _       => 0,
+        };
+    }
+    format!("Attributes::from_bits(0x{bits:x})")
 }
 
 /// Convert a comma-separated API flag string (e.g. "GET,ATTEST,SWITCH") to a
