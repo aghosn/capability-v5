@@ -7,6 +7,110 @@
 
 ## Current Status
 
+- **2026-07-30 — Root-caused eunomia-timer intermittent `#GP` + nested-Linux
+  spurious LAPIC-timer storm to `do_switch`'s "6a" `interrupt_inject` wiring
+  (added in the DomainComm-adjacent session below); applied a narrow
+  stop-gap, NOT a full fix.**
+
+  **Root cause**: `do_switch` step "6a" (`themis/capavisor/src/arch/x86_64/hypercall/switch.rs`)
+  re-injects `SwitchContext.interrupt_inject`'s vector raw into a resuming
+  domain's own PIR whenever `capa-engine` left it `Waiting{report:true,
+  unlocks:None}`. That state arises for ANY real external interrupt landing
+  on the core while a `Report`-policy domain (the default for every
+  non-root domain) is running — the vector gets fully routed to and
+  handled by a `Deliver`-policy ancestor (dom0) via `deliver_interrupt_vp`'s
+  lazy-unwind, but step 6a then redelivers the SAME vector a second time
+  once the domain resumes. `capa-engine/src/domain.rs` documents `Report`
+  as "reported to domain but handled by parent" — i.e. NOT meant to be
+  redelivered raw — so this is a genuine discrepancy between the doc'd
+  semantics and step 6a's behavior.
+  - For `eunomia-timer` (whose guest IDT only covers vectors 0-31 and its
+    own `0xEC`): a stray legacy vector (`0x23`/`0x24`, real COM1/IRQ4
+    hardware interrupts, matching the trapped `0x3F8-0x3FF` serial port)
+    gets redelivered into a domain with no handler for it → `#GP`
+    (`error_code` decodes to `EXT=1,IDT=1,index=35or36`; IDT[36]'s gate
+    type is `0` — invalid, not just not-present — hence `#GP` not `#NP`).
+    Only `timer` (not `coco`/`domcomm`/etc.) hits this because it's the
+    only eunomia workload that ever executes `sti` (`eunomia/workloads/timer/src/main.rs:29`)
+    and busy-waits with IF=1 for ~100ms; other workloads run entirely with
+    IF=0 so the CPU never actually takes an externally-injected vector.
+  - For a nested Linux (L2) guest (full IDT, so no crash): the SAME
+    mechanism instead produces a continuous spurious duplicate-interrupt
+    storm (real IPIs `0xfb`/`0xfd`, legacy IRQs, and `0xec` all getting
+    redelivered on every SWITCH resume) — this is what "dom1 getting
+    spurious LAPIC timer interrupts all the time" turned out to be.
+  - **Confirmed orthogonal / unaffected**: the domain's OWN emulated LAPIC
+    timer (`0xEC` via `msr_emulator.rs`'s `deliver_timer_vector`, gated by
+    `MsrPolicy` on `IA32_TSC_DEADLINE`/`0x6E0`) injects directly, bypassing
+    `InterruptPolicy`/`Report`/`Deliver` entirely — never touches step 6a.
+    This is why the timer workload's own tick delivery always "worked"
+    even before/regardless of this bug.
+
+  **Stop-gap applied (final, after two failed config-based attempts —
+  see below for why they didn't work) — `switch.rs`'s step 6a raw
+  re-injection is now disabled outright**:
+  - First attempt (`standard.json` interrupts override `{vector: 236,
+    visibility: Deliver}`) and second attempt (a per-workload
+    `--themis-config` for `timer` setting `interrupts.default: Suppress`,
+    plus a `run-eunomia.sh` auto-select for it) were BOTH live-tested and
+    had **zero effect** — `eunomia-timer` still `#GP`'d on other stray
+    vectors (`0x20`/`0x23`) and dom1's spurious LAPIC-timer storm persisted
+    unchanged.
+  - **Why they were inert**: `cloud-hypervisor/hypervisor/src/themis/
+    policy_walker.rs` (which turns a parsed `ThemisConfig` into the
+    `THHV_SET_POLICY` ops actually applied to a domain) walks `msrs`,
+    `cpuid`, and `exits` — but NEVER `policies.interrupts`.
+    `InterruptsConfig`/`Visibility` (`config.rs`) are parsed, validated,
+    and unit-tested, but are otherwise completely dead: **no code path
+    anywhere applies them to a domain's runtime `InterruptPolicy`.** Every
+    child domain's `InterruptPolicy` is therefore always whatever
+    `DomainPolicy::new_restricted()` defaults to (`Report` for every
+    vector), no matter what any `--themis-config`/`standard.json` says.
+    This is a separate, real bug in its own right (config schema exists,
+    is user-facing, and silently does nothing) — tracked below as a
+    prerequisite for the real fix.
+  - Given config can't help today, `switch.rs`'s step 6a now unconditionally
+    discards `switch_ctx.interrupt_inject` (`let _ = ...;`) instead of
+    calling `inject_via_pid` — i.e. `Report` now actually behaves as
+    documented ("reported to domain but handled by parent", never
+    redelivered), for every vector, unconditionally. Comment above the
+    line updated accordingly (still explains the full discrepancy and
+    points at the two things needed for a real fix).
+  - `standard.json` and the per-workload `eunomia/policies/timer/
+    no-report.json` + `run-eunomia.sh` auto-select from the two failed
+    attempts were all **reverted** (they did nothing and would only add
+    confusion) — this branch's diff is now just the `switch.rs` disable +
+    docs.
+  - **NOT fixed / deferred to a follow-up branch** (per-user direction:
+    document, stop-gap now, dedicated branch for semantics next):
+    1. Wire `policy_walker.rs` to actually apply `InterruptsConfig` (the
+       config plumbing bug above) — needed before ANY per-vector
+       `Deliver`/`Report`/`Suppress` policy can matter at all.
+    2. The deeper `capa-engine` design question: `VpRunState::Waiting`
+       needs a discriminant distinguishing "external-interrupt-routed,
+       already delivered to ancestor" (must never redeliver) from "genuine
+       SWITCH-chain preemption, callee should observe this" (legitimate
+       re-injection case that step 6a was originally meant to serve) —
+       needs design review before touching `capa-engine`'s state machine
+       (security-critical, see
+       `.github/instructions/capability-engine.instructions.md`).
+  - **Live-validated 2026-07-30**: with step 6a's injection disabled,
+    both `eunomia-timer` and dom1 run correctly (user-confirmed) — no more
+    `#GP`, no more spurious LAPIC-timer storm. Cleared to commit/merge per
+    plan below. Still an open risk long-term: whatever legitimate
+    re-injection case step 6a originally existed for (if any) is now also
+    disabled — not observed to regress anything in this round of testing,
+    but not proven absent either; worth keeping an eye out for in the
+    follow-up branch.
+  - Stripped all `[TEMP-DEBUG]` logging (4 call sites: `switch.rs` x2,
+    `msr_emulator.rs`, `vmexit/mod.rs`) — final diff for this branch is
+    now just `switch.rs` (step 6a disabled) + `todo.md`.
+  - Plan (per user, 2026-07-30): if live-validated, commit and merge this
+    branch as-is (step 6a disabled + docs), then open a NEW branch
+    dedicated solely to the interrupt-policy semantics (both the
+    `policy_walker.rs` plumbing gap and the `VpRunState::Waiting`
+    discriminant design).
+
 - **2026-07-29 — DomainComm ring alignment + pointer-corruption fix, landed
   and live-verified (UNCOMMITTED prior to this entry, now being committed).**
   Follows on from the doorbell/interrupt redesign entry below — this is a

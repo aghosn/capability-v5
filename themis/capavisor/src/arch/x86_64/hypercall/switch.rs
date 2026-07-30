@@ -188,6 +188,58 @@ pub(crate) fn do_switch(
     // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
     // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
 
+    // ── 6a. Interrupt inject: the target VP was `Waiting`/`report`-true
+    // with no callee of its own — i.e. it was the true leaf actually
+    // executing when an interrupt hit a Deliver-policy handler somewhere
+    // up its chain (see `SwitchContext::interrupt_inject`). It has no
+    // switch-call return to observe the interrupt through, so the vector
+    // must be delivered the same way a real hardware interrupt would be:
+    // queue it into the target's own PIR here (same core, no IPI needed —
+    // `is_remote = false`) so step 7's drain picks it up under the same
+    // priority (device before timer) and IF-gating rules as any other
+    // pending vector.
+    //
+    // KNOWN DESIGN DISCREPANCY (tracked in todo.md, needs careful
+    // clarification before this can be considered settled): this fires
+    // whenever the leaf's OWN `InterruptVisibility` for `vector` was
+    // `Report` (see `capa-engine`'s `deliver_interrupt_vp` /
+    // `switch_domain_forward`) — i.e. the vector was already fully
+    // routed to and handled by a `Deliver`-policy ancestor via the
+    // external-interrupt lazy-unwind path. Re-injecting it here means
+    // the domain observes the SAME vector a second time, even though
+    // `Report` is documented (`capa-engine/src/domain.rs`) as "reported
+    // to domain but handled by parent" — i.e. NOT meant to be redelivered
+    // raw to this domain. For domains without a real handler for that
+    // vector (e.g. eunomia guests, whose IDT only covers 0-31 and their
+    // own owned vectors) this can produce a `#GP`; for domains with a
+    // full IDT (e.g. a real Linux child) it instead produces a spurious
+    // duplicate-interrupt storm. Root-caused 2026-07-30 against the
+    // eunomia-timer intermittent #GP and a nested Linux guest's spurious
+    // LAPIC-timer storm.
+    //
+    // STOP-GAP (2026-07-30): raw re-injection disabled entirely below.
+    // An attempt to instead scope the leaf's `InterruptVisibility` to
+    // `NotReport`/`Suppress` per-vector (both via a per-workload
+    // `--themis-config` and via `standard.json`'s built-in profile) had
+    // NO effect, because `cloud-hypervisor/hypervisor/src/themis/
+    // policy_walker.rs` never walks `ThemisConfig.policies.interrupts`
+    // into any `THHV_SET_POLICY` op at all — `InterruptsConfig` is parsed
+    // and validated by `config.rs` but is otherwise entirely dead: no code
+    // path applies it to a domain's runtime `InterruptPolicy`. Every child
+    // domain's `InterruptPolicy` is therefore always whatever
+    // `DomainPolicy::new_restricted()` defaults to (`Report`), regardless
+    // of any JSON policy file — so this can NOT be fixed from config today.
+    // Disabling the injection outright is the correct interim behavior:
+    // it makes `Report` actually mean "reported to domain but handled by
+    // parent, not redelivered", matching the documented semantics, at the
+    // cost of no longer being able to say `Deliver` vs `Report` distinctly
+    // at the injection site for now (both silently coalesce to
+    // "did not re-inject"). The proper fix needs BOTH (a) wiring
+    // `policy_walker.rs` to actually apply `InterruptsConfig`, and (b) the
+    // `VpRunState::Waiting` design review noted above — deferred to a
+    // follow-up branch focused solely on interrupt-policy semantics.
+    let _ = switch_ctx.interrupt_inject;
+
     // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
     // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs and A3), so the
     // processor never auto-delivers from the PID — capavisor uses PIR as a
@@ -279,7 +331,9 @@ pub(crate) fn drain_pir_inject_lowest(
         return false;
     }
 
-    if vcpu.guest_can_accept_external() {
+    let can_accept = vcpu.guest_can_accept_external();
+
+    if can_accept {
         // Find lowest pending vector (device-first).
         for i in 0..4usize {
             if pir_snapshot[i] != 0 {
