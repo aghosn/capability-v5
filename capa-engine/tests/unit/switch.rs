@@ -508,6 +508,7 @@ fn test_interrupt_no_handler() {
         visibility: InterruptVisibility::NotReport,
         read_set: RegBitmap::NONE,
         write_set: RegBitmap::NONE,
+        injectable: false,
     };
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -1150,6 +1151,7 @@ fn not_report_policy() -> VectorPolicy {
         visibility: InterruptVisibility::NotReport,
         read_set: RegBitmap::NONE,
         write_set: RegBitmap::NONE,
+        injectable: false,
     }
 }
 

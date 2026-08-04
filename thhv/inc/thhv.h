@@ -141,6 +141,11 @@
 #define THEMIS_POLICY_EXIT_REASON_TRAP         7
 #define THEMIS_POLICY_EXIT_REASON_REG_READ_SET 8
 #define THEMIS_POLICY_EXIT_REASON_REG_WRITE_SET 9
+/* CPUID/MSR interposition kinds 10-15 are defined in themis_abi::policy_kind
+ * (Rust) but intentionally not mirrored here — thhv passes kind/key/sub_key/
+ * value through to themis_set_policy() opaquely (see THHV_SET_POLICY below).
+ */
+#define THEMIS_POLICY_VECTOR_INJECTABLE        16
 
 /* ── Themis hypercall return codes (RAX) ───────────────────────────────────── */
 

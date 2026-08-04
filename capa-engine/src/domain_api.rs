@@ -2932,6 +2932,9 @@ impl Capability<Domain> {
     ///   corresponding parent field (monotonicity).
     /// - Register-access bitmaps (`VectorRegReadSet` / `VectorRegWriteSet`) are
     ///   **not** subject to monotonicity; the parent may freely configure them.
+    /// - `VectorInjectable` is likewise **not** subject to monotonicity: it
+    ///   only gates the parent's own future use of `THEMIS_INJECT_INTERRUPT`
+    ///   against this child, so the parent may freely enable or disable it.
     ///
     /// # Errors
     /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::SET`.
@@ -3020,6 +3023,7 @@ impl Capability<Domain> {
                     let default_vis = child_w.data.policy.interrupts.default.visibility;
                     let default_read = child_w.data.policy.interrupts.default.read_set;
                     let default_write = child_w.data.policy.interrupts.default.write_set;
+                    let default_injectable = child_w.data.policy.interrupts.default.injectable;
                     let entry = child_w
                         .data
                         .policy
@@ -3030,6 +3034,7 @@ impl Capability<Domain> {
                             visibility: default_vis,
                             read_set: default_read,
                             write_set: default_write,
+                            injectable: default_injectable,
                         });
                     entry.visibility = vis;
                     let snapshot = entry.clone();
@@ -3074,6 +3079,28 @@ impl Capability<Domain> {
                             vector: vec,
                             word,
                             bits: value,
+                        },
+                    );
+                }
+                PolicyIdentifier::VectorInjectable(vec) => {
+                    // Not subject to monotonicity, same as the register-access
+                    // bitmaps: this only controls whether a parent may later
+                    // call THEMIS_INJECT_INTERRUPT for this vector on this
+                    // child, which is entirely the parent's own call to make.
+                    let injectable = value != 0;
+                    let entry = child_w
+                        .data
+                        .policy
+                        .interrupts
+                        .overrides
+                        .entry(vec)
+                        .or_insert_with(VectorPolicy::default_report);
+                    entry.injectable = injectable;
+                    batch.add_policy_changed(
+                        child_id,
+                        PolicyChange::VectorInjectable {
+                            vector: vec,
+                            injectable,
                         },
                     );
                 }
@@ -3333,6 +3360,13 @@ impl Capability<Domain> {
                     .get_policy(vec)
                     .write_set
                     .word(word as usize),
+                PolicyIdentifier::VectorInjectable(vec) => {
+                    if child_r.data.policy.interrupts.get_policy(vec).injectable {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 PolicyIdentifier::DefaultExitTrap => {
                     if child_r.data.policy.exits.default.trap {
                         1

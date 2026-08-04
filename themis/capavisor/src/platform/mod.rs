@@ -571,6 +571,11 @@ impl ThemisPlatform {
             | PC::VectorRegReadSet { .. }
             | PC::VectorRegWriteSet { .. } => {}
 
+            // Per-vector explicit-injection permission — consumed directly
+            // by `do_inject_interrupt` at THEMIS_INJECT_INTERRUPT call time
+            // (reads `policy.interrupts` live); no derived hardware state.
+            PC::VectorInjectable { .. } => {}
+
             // Pure engine ACLs (no hardware effect).
             PC::Cores(_) | PC::ApiMonitor(_) => {}
         }

@@ -170,6 +170,13 @@ pub enum PolicyChange {
         word: u8,
         bits: u64,
     },
+    /// Per-vector explicit-injection permission changed. **No hardware
+    /// projection today** — `THEMIS_INJECT_INTERRUPT` consults the value at
+    /// call time.
+    VectorInjectable {
+        vector: u8,
+        injectable: bool,
+    },
 
     // ── Exit routing (`policy.exits`) ────────────────────────────────
     /// Default exit-reason trap flag changed (true = forward to parent).

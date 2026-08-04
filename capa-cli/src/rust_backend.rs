@@ -1109,6 +1109,11 @@ fn parse_policy_id(s: &str) -> Result<PolicyIdentifier> {
             BackendError::InvalidOperation(format!("Invalid vector: {}", vec_str)))?;
         return Ok(PolicyIdentifier::VectorRegWriteSet(v, word));
     }
+    if let Some(rest) = s.strip_prefix("vector-injectable:") {
+        let v = rest.parse::<u8>().map_err(|_|
+            BackendError::InvalidOperation(format!("Invalid vector: {}", rest)))?;
+        return Ok(PolicyIdentifier::VectorInjectable(v));
+    }
     // Interposition: cpuid-default, msr-default
     if s.eq_ignore_ascii_case("cpuid-default") {
         return Ok(PolicyIdentifier::ProcFeatureDefault(ResourceKind::Cpuid));

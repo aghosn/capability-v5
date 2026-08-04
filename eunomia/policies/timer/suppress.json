@@ -1,0 +1,34 @@
+{
+  "extends": "standard",
+  "general": { "name": "timer-vector-suppress" },
+  "policies": {
+    "interrupts": {
+      "default": {
+        "visibility": "Report",
+        "read_set": "ALL",
+        "write_set": "ALL",
+        "injectable": true
+      },
+      "overrides": [
+        {
+          "vector": 236,
+          "visibility": "Suppress",
+          "read_set": "ALL",
+          "write_set": "ALL",
+          "injectable": true
+        }
+      ]
+    },
+    "msrs": {
+      "default": "Native",
+      "overrides": [
+        {
+          "msr": "0x6E0",
+          "action": "Emulate",
+          "value": 0
+        }
+      ]
+    },
+    "cpuid": { "default": "Native", "hypervisor_range_native": true }
+  }
+}

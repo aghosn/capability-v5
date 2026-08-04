@@ -215,6 +215,20 @@ pub struct VectorPolicy {
     pub read_set: RegBitmap,
     /// Bitmask of registers that can be written during interrupt handling
     pub write_set: RegBitmap,
+    /// Whether a parent (any ancestor holding a domain capability over this
+    /// domain) may explicitly hand this vector to the domain via
+    /// `THEMIS_INJECT_INTERRUPT`.
+    ///
+    /// This is **orthogonal** to `visibility`: `visibility` governs only the
+    /// *automatic* routing decision made when a real hardware interrupt for
+    /// this vector lands on the core while the domain is running. It says
+    /// nothing about explicit, parent-initiated injection. In particular, a
+    /// vector set to `NotReport` (real hardware interrupts for it never
+    /// reach or wake this domain automatically) can still be `injectable`,
+    /// which is exactly the pattern a parent uses to act as the sole,
+    /// software-controlled source of that vector (e.g. an emulated device
+    /// model) instead of leaving delivery to real hardware timing.
+    pub injectable: bool,
 }
 
 impl VectorPolicy {
@@ -223,6 +237,7 @@ impl VectorPolicy {
             visibility: InterruptVisibility::Deliver,
             read_set: RegBitmap::NONE,
             write_set: RegBitmap::NONE,
+            injectable: true,
         }
     }
 
@@ -231,6 +246,11 @@ impl VectorPolicy {
             visibility: InterruptVisibility::Report,
             read_set: RegBitmap::ALL,
             write_set: RegBitmap::ALL,
+            // Default true to preserve today's THEMIS_INJECT_INTERRUPT
+            // behavior (capability-ownership-gated only) until policies
+            // explicitly restrict specific vectors. See policy_walker.rs
+            // for how JSON config now projects this into overrides.
+            injectable: true,
         }
     }
 }
@@ -461,6 +481,9 @@ pub enum PolicyIdentifier {
     /// Per-vector register write-access bitmap (one word at a time).
     /// First `u8` is the vector, second is the word index (0..3).
     VectorRegWriteSet(u8, u8),
+    /// Per-vector explicit-injection permission (`THEMIS_INJECT_INTERRUPT`),
+    /// independent of `VectorVisibility`. Value: 0 = not injectable, 1 = injectable.
+    VectorInjectable(u8),
 
     // ── VMEXIT exit policy identifiers ──
 

@@ -142,7 +142,16 @@ pub(super) fn do_inject_interrupt(
             Some(c) => c,
             None => return HypercallResult::error(errors::ERR_NOTFOUND),
         };
-        let id = child_ref.read().data.id;
+        let child_r = child_ref.read();
+        let id = child_r.data.id;
+        // `InterruptVisibility` only governs the automatic real-hardware
+        // routing decision; explicit parent-initiated injection is gated by
+        // the separate `injectable` bit so a parent can, e.g., mark a vector
+        // NotReport (isolate the child from real hardware timing for it)
+        // while still retaining sole, explicit control over delivering it.
+        if !child_r.data.policy.interrupts.get_policy(vector).injectable {
+            return HypercallResult::error(errors::ERR_NOPERM);
+        }
         id
     };
 

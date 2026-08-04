@@ -221,23 +221,24 @@ pub(crate) fn do_switch(
     // An attempt to instead scope the leaf's `InterruptVisibility` to
     // `NotReport`/`Suppress` per-vector (both via a per-workload
     // `--themis-config` and via `standard.json`'s built-in profile) had
-    // NO effect, because `cloud-hypervisor/hypervisor/src/themis/
-    // policy_walker.rs` never walks `ThemisConfig.policies.interrupts`
-    // into any `THHV_SET_POLICY` op at all — `InterruptsConfig` is parsed
-    // and validated by `config.rs` but is otherwise entirely dead: no code
-    // path applies it to a domain's runtime `InterruptPolicy`. Every child
-    // domain's `InterruptPolicy` is therefore always whatever
-    // `DomainPolicy::new_restricted()` defaults to (`Report`), regardless
-    // of any JSON policy file — so this can NOT be fixed from config today.
-    // Disabling the injection outright is the correct interim behavior:
+    // NO effect at the time, because `cloud-hypervisor/hypervisor/src/
+    // themis/policy_walker.rs` never walked `ThemisConfig.policies
+    // .interrupts` into any `THHV_SET_POLICY` op — `InterruptsConfig` was
+    // parsed/validated by `config.rs` but otherwise entirely dead.
+    // Disabling the injection outright was the correct interim behavior:
     // it makes `Report` actually mean "reported to domain but handled by
     // parent, not redelivered", matching the documented semantics, at the
     // cost of no longer being able to say `Deliver` vs `Report` distinctly
     // at the injection site for now (both silently coalesce to
-    // "did not re-inject"). The proper fix needs BOTH (a) wiring
-    // `policy_walker.rs` to actually apply `InterruptsConfig`, and (b) the
-    // `VpRunState::Waiting` design review noted above — deferred to a
-    // follow-up branch focused solely on interrupt-policy semantics.
+    // "did not re-inject").
+    //
+    // UPDATE (interrupt_semantics branch): `policy_walker.rs::walk_interrupts`
+    // now projects `policies.interrupts` into `THHV_SET_POLICY` calls, so
+    // per-vector `InterruptVisibility` (and the new, independent
+    // `injectable` bit gating `THEMIS_INJECT_INTERRUPT`) IS configurable
+    // from JSON today. Re-enabling raw redelivery for `Report`-visibility
+    // vectors here still needs the `VpRunState::Waiting`/semantics design
+    // review noted above before it's safe to flip back on.
     let _ = switch_ctx.interrupt_inject;
 
     // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──

@@ -283,6 +283,7 @@ pub(super) fn do_set_policy(
         policy_kind::VECTOR_REG_WRITE_SET => {
             PolicyIdentifier::VectorRegWriteSet(key as u8, sub_key as u8)
         }
+        policy_kind::VECTOR_INJECTABLE => PolicyIdentifier::VectorInjectable(key as u8),
         policy_kind::DEFAULT_EXIT_TRAP => PolicyIdentifier::DefaultExitTrap,
         policy_kind::EXIT_REASON_TRAP => PolicyIdentifier::ExitReasonTrap(key as u32),
         policy_kind::EXIT_REASON_REG_READ_SET => {
