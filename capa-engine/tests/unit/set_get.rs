@@ -706,8 +706,80 @@ fn test_vector_visibility_independent_of_read_write_set() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Transition from Available → Interrupted changes effective policy
+// VectorInjectable: orthogonal to visibility, not monotone, defaults from
+// the effective per-vector policy (default_report()'s injectable=true).
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_set_get_vector_injectable() {
+    let platform = common::TestPlatform::new();
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Default policy (default_report()) is injectable=true.
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(20)).unwrap().0;
+    assert_eq!(v, 1);
+
+    // Explicitly disable injection for this vector.
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(20), 0).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(20)).unwrap().0;
+    assert_eq!(v, 0);
+
+    // Other vectors are unaffected.
+    let other = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(21)).unwrap().0;
+    assert_eq!(other, 1);
+}
+
+#[test]
+fn test_vector_injectable_independent_of_visibility() {
+    let platform = common::TestPlatform::new();
+    let parent = root();
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    // Set visibility to NotReport (2) while keeping the vector injectable —
+    // this is exactly the "parent wants sole, explicit control over this
+    // vector" pattern: automatic real-hardware routing is suppressed, but
+    // THEMIS_INJECT_INTERRUPT for it remains permitted.
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(9), 2).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(9), 1).unwrap();
+
+    assert_eq!(
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(9)).unwrap().0,
+        2
+    );
+    assert_eq!(
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(9)).unwrap().0,
+        1
+    );
+
+    // Conversely: Deliver visibility with injection explicitly disabled.
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(11), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(11), 0).unwrap();
+    assert_eq!(
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorVisibility(11)).unwrap().0,
+        0
+    );
+    assert_eq!(
+        Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(11)).unwrap().0,
+        0
+    );
+}
+
+#[test]
+fn test_vector_injectable_not_monotone() {
+    let platform = common::TestPlatform::new();
+    let parent = root();
+    // Parent's own default policy has injectable=true (default_report()),
+    // but VectorInjectable must not be subject to any monotonicity check —
+    // a child may be set to false (more "restrictive" in one reading) or
+    // stay true; either way this must succeed without MonotonicityViolation.
+    let (_, h) = make_child(&parent, DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL));
+
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(3), 0).unwrap();
+    Capability::set_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(3), 1).unwrap();
+    let v = Capability::get_policy(&platform, &parent, h, PolicyIdentifier::VectorInjectable(3)).unwrap().0;
+    assert_eq!(v, 1);
+}
 
 #[test]
 fn test_effective_vector_switches_on_interrupt() {

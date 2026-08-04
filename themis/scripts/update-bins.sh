@@ -343,7 +343,14 @@ if should_package eunomia; then
     cp "$SCRIPT_DIR/run-eunomia.sh" "$MNT/eunomia/run-eunomia.sh"
     chmod +x "$MNT/eunomia/run-eunomia.sh"
     # Package per-workload policy JSONs for --policy-suite mode.
+    #
+    # NOTE: the destination is wiped first. `cp -r` alone is additive-only —
+    # it never removes files that were deleted or renamed in the source
+    # tree, so stale/renamed policy JSONs would otherwise accumulate in
+    # bins.img indefinitely across rebuilds (`--policy-suite` would then
+    # silently run leftover scenarios that no longer exist in the repo).
     if [[ -d "$EUNOMIA_POLICIES_SRC" ]]; then
+        rm -rf "$MNT/eunomia/policies"
         mkdir -p "$MNT/eunomia/policies"
         cp -r "$EUNOMIA_POLICIES_SRC/." "$MNT/eunomia/policies/"
     fi

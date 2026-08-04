@@ -222,6 +222,10 @@ pub mod policy_kind {
     pub const MSR_DEFAULT: u64 = 13;
     pub const MSR_RANGE: u64 = 14;
     pub const MSR_EMULATE: u64 = 15;
+
+    /// Per-vector explicit-injection permission (`THEMIS_INJECT_INTERRUPT`),
+    /// independent of `VECTOR_VISIBILITY`. See `VectorPolicy::injectable`.
+    pub const VECTOR_INJECTABLE: u64 = 16;
 }
 
 // ── REGISTER_COMM vp_id sentinel ──────────────────────────────────────────── //

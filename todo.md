@@ -7,6 +7,157 @@
 
 ## Current Status
 
+- **2026-08-04 — LAPIC-timer policy bypass: root-caused, attempted fix caused a
+  live hang, reverted to baseline. Now auditing capavisor broadly for ad-hoc
+  mechanisms that don't map to the capa-engine model — this is the current
+  active work on this branch.**
+
+  **Confirmed bug (still unfixed, capavisor at baseline)**: `msr_emulator.rs`'s
+  `deliver_timer_vector()` (IA32_TSC_DEADLINE / vector `0xEC` emulation)
+  injects directly into the running domain **unconditionally**, never
+  consulting `InterruptVisibility` at all (doc comment says so on purpose —
+  "the guest never round-trips through CHV's userspace timerfd path"). This is
+  purely an MSR-policy-driven emulated device; the fix belongs entirely inside
+  capavisor (no CHV/thhv changes needed, unlike the original 2026-08-03 plan
+  below which is now superseded).
+
+  **First fix attempt (reverted)**: delegated `deliver_timer_vector` straight to
+  `forward_interrupt_to_handler` (the same lazy-unwind path used for real
+  external interrupts). Live-tested on hardware: **both** the `Deliver` and
+  `Suppress` test policies (`eunomia/policies/timer/{deliver,suppress}.json`)
+  hung the whole stack — dom0 became fully unreachable (SSH timeout) while
+  `qemu-system-x86_64` spun at ~106% CPU (livelock, not a data hang or clean
+  guest-side failure). Root cause: `forward_interrupt_to_handler`'s full
+  cross-domain VP-swap (`swap_active_vp` + `write_swap_reply`) is designed for
+  *rare, asynchronous* real interrupts; delegating the *frequent, synchronous,
+  same-VP* emulated timer tick to it forces a full swap on every tick instead
+  of the batching/quantum-boundary real interrupts get — this is what
+  livelocked. **Reverted** `msr_emulator.rs` to the original (still-buggy but
+  safe) unconditional-inject baseline via `git checkout`. Confirmed
+  `quantum-sched` was NOT enabled during the hang (opt-in feature, off by
+  default — verified via build fingerprints), so the hang is not
+  quantum-sched-specific; it's inherent to reusing the full-swap path at
+  timer-tick frequency regardless.
+
+  **Also fixed in passing**: `update-bins.sh`'s eunomia-policy packaging did
+  `cp -r` into `bins.img` without ever clearing the destination first, so
+  deleted/renamed policy JSON files accumulated forever across
+  `cargo build-bins` runs. Added `rm -rf` before repackaging. (Same
+  `cp -r`-without-clean pattern may exist elsewhere in that script — not
+  audited.)
+
+  **Current direction (audit-first, per user)**: rather than patch this one
+  path again, doing a full inventory of capavisor for mechanisms that
+  duplicate/bypass the capa-engine's policy model instead of projecting it.
+  Findings so far (not yet acted on):
+  1. **`quantum-sched` feature** (`platform/vcpu_slot.rs` `CoreContext::
+     deferred_vector: AtomicU16`, `platform/mod.rs` `set_deferred`/
+     `take_deferred`, `monitor.rs` handlers, `hypercall/switch.rs` child-exit
+     drain) — a second, capa-engine-external interrupt-scheduling axis, opt-in,
+     explicitly documented (`docs/architecture/interrupt-virtualization.md`)
+     as a nested-virt-dev-environment-only shim ("should NOT be enabled on
+     bare metal"). Candidate for full removal.
+  2. **`SwitchContext::interrupt_inject` discarded** (`hypercall/switch.rs`
+     ~L242: `let _ = switch_ctx.interrupt_inject;`) — a real, tested capa-engine
+     field (lazy-unwind re-injection into the true leaf on `SWITCH`-return),
+     disabled by a 2026-07-30 stop-gap that says it's safe to re-enable now
+     that `policy_walker` wires `InterruptVisibility` correctly. Likely the
+     *correct* mechanism to route timer (and other) delivery through instead
+     of quantum-sched's defer hack.
+  3. **Duplicated interrupt-injection mechanisms**: `vcpu_ext.rs`
+     `inject_external_vector`, `pid.rs` `inject_via_pid`, and
+     `hypercall/switch.rs` `drain_pir_inject_lowest` all implement "deliver a
+     vector to a VP" independently; the `guest_can_accept_external() ? direct
+     : pid-inject` idiom is copy-pasted in `msr_emulator.rs`,
+     `forward_interrupt_to_handler`, and `doorbell.rs`.
+  4. **Overlapping policy axes**: `InterruptVisibility`, `injectable`,
+     quantum-sched's defer flag, and `guest_can_accept_external()` all
+     interact at `forward_interrupt_to_handler`/`doorbell.rs` without one
+     documented unified model.
+  5. **Parallel non-policy-driven MSR trapping**: `msr_virt.rs`'s
+     `TRAPPED_RANGES` (perf-counter MSRs) is a hardcoded, global table applied
+     identically to every domain via `alloc_msr_bitmap` — entirely separate
+     from `msr_bitmap.rs`'s real per-domain `MsrPolicy` projection.
+  6. **MSR `Emulate` WRMSR fallback mutates policy as scratch storage**
+     (`monitor.rs`): when no internal emulator claims an `Emulate` MSR, the
+     guest's write value is stored directly into the domain's policy object
+     as ad-hoc scratch state.
+
+  **Next steps**: work through items 1-4 (interrupt/timer-scoped, this
+  branch's stated goal) first, then 5-6 as follow-up. Plan to be built next.
+
+- **2026-08-03 — `interrupt_semantics` branch: added per-vector `injectable`
+  policy bit (item 2) + wired `policies.interrupts` config plumbing
+  (closes the item-1 prerequisite bug noted below) + unit/config-level
+  tests (item 3). No commit yet — pending final review.**
+
+  **Design resolved with user**: `InterruptVisibility` (`Deliver`/`Report`/
+  `NotReport`) governs ONLY the automatic real-hardware-interrupt routing
+  decision (`forward_interrupt_to_handler`/chain-walk/resume). It says
+  nothing about explicit, parent-initiated injection via
+  `THEMIS_INJECT_INTERRUPT`. That's now a second, independent axis: a new
+  `VectorPolicy::injectable: bool` field. This lets a parent set a vector
+  to `NotReport` (child gets zero automatic/ambient exposure to it — no
+  timing side-channel, no stray redelivery) while *keeping* `injectable:
+  true`, so the parent retains sole, deliberate, software-controlled
+  authority over when that vector ever reaches the child (e.g. acting as
+  an emulated interrupt controller for it) — this was the user's explicit
+  correction to an earlier (wrong) proposal that `NotReport` should be an
+  absolute blind spot blocking injection too.
+
+  **Changes**:
+  1. `capa-engine/src/domain.rs`: `VectorPolicy` gained `injectable: bool`.
+     `default_deliver()` → `injectable: true`; `default_report()` →
+     `injectable: true` (kept true for now — see prerequisite note below on
+     why flipping the *default* to `false` is deferred).
+  2. `PolicyIdentifier::VectorInjectable(u8)` / `PolicyChange::VectorInjectable
+     { vector, injectable }` added end-to-end: `domain_api.rs` set_policy
+     (NOT monotonicity-checked, like the register bitmaps) / get_policy,
+     `update.rs`, wire constant `policy_kind::VECTOR_INJECTABLE = 16` in
+     `themis-abi`, `cloud-hypervisor/.../consts.rs`, and `thhv/inc/thhv.h`,
+     capavisor's `hypercall/capa.rs::do_set_policy` match, and a no-op
+     (policy read directly at call time, no derived HW state) arm in
+     `platform/mod.rs::apply_policy_change`.
+  3. `themis/capavisor/src/arch/x86_64/hypercall/doorbell.rs::do_inject_interrupt`
+     now rejects (`ERR_NOPERM`) if `policy.interrupts.get_policy(vector)
+     .injectable` is false — this is the only enforcement point; ownership
+     of the child capability is still required as before (A9).
+  4. **Fixed the config-plumbing bug called out in the 2026-07-30 entry
+     below**: added `policy_walker.rs::walk_interrupts()` (mirrors
+     `walk_exits`) and wired it into `vm_state.rs`'s pre-seal sequence, so
+     `ThemisConfig.policies.interrupts` (`default` + per-vector `overrides`,
+     now including the new `injectable` field in `config.rs`'s
+     `VectorPolicyConfig`) actually reaches `THHV_SET_POLICY` today. Config
+     default for `injectable` is `true` (matches the engine default —
+     preserves existing `THEMIS_INJECT_INTERRUPT` behavior for anyone not
+     using the new field yet).
+  5. Added `eunomia/policies/timer/01-suppress-with-injectable.json`
+     demonstrating the pattern: default vector policy `Suppress` +
+     `injectable: false` (fully silent/non-injectable by default), with
+     vector 236 (`0xEC`, LAPIC timer) overridden to stay `injectable: true`.
+     Not yet live-booted (no hardware in this session) — parses/validates
+     cleanly (`eunomia_timer_interrupt_policies_parse` in `config.rs`);
+     user should live-test via `run-eunomia.sh --themis timer --themis-config
+     eunomia/policies/timer/01-suppress-with-injectable.json` next.
+  6. Tests added: 5 new `capa-engine/tests/unit/set_get.rs` cases
+     (`test_set_get_vector_injectable`,
+     `test_vector_injectable_independent_of_visibility`,
+     `test_vector_injectable_not_monotone`, + 2 helpers/assertions inline);
+     4 new `cloud-hypervisor/hypervisor/src/themis/{config,policy_walker}.rs`
+     tests (JSON parse/validate + `walk_interrupts` op-stream checks). All
+     pass; full existing `capa-engine`/`hypervisor --features themis`/
+     `capavisor` builds and test suites still pass (verified this session).
+  7. **Still open / not done this session**: item (1)'s broader question
+     (should `default_report()`'s blanket-`Report` default itself change to
+     `NotReport`, now that config can actually apply overrides?) was
+     deliberately NOT changed — kept `Report`/`injectable: true` as the
+     engine default to avoid a second simultaneous behavior change; worth
+     a dedicated follow-up decision once the `VpRunState::Waiting`
+     redesign (see 2026-07-30 entry, item 2) is scoped. No eunomia
+     boot-level (hardware) validation of the new `injectable` gate itself
+     was performed this session (sandboxed dev environment, no KVM) —
+     needs a live run before merge.
+
 - **2026-07-30 — Root-caused eunomia-timer intermittent `#GP` + nested-Linux
   spurious LAPIC-timer storm to `do_switch`'s "6a" `interrupt_inject` wiring
   (added in the DomainComm-adjacent session below); applied a narrow
