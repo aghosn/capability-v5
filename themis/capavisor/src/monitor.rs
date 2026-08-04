@@ -258,59 +258,23 @@ fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> 
 
 /// Handle an external interrupt exit.
 ///
-/// Generic policy logic: consults InterruptPolicy to decide routing,
-/// then delegates to `Vp::forward_interrupt` for the arch-specific
-/// register copy + context switch.
-#[allow(unused_variables)]
-fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform, vector: u32) {
-    let core_id = platform.get_current_core().unwrap_or(0) as usize;
-
-    #[cfg(feature = "quantum-sched")]
-    {
-        use capability_engine::InterruptVisibility;
-        if let Some(cap) = platform.get_core_cap(core_id) {
-            let vis = cap
-                .read()
-                .data
-                .policy
-                .interrupts
-                .get_policy(vector as u8)
-                .visibility;
-            if vis != InterruptVisibility::Deliver {
-                if let Some(old) = platform.take_deferred(core_id) {
-                    vp.forward_interrupt(old as u32);
-                    platform.set_deferred(core_id, vector as u8);
-                    return;
-                }
-                platform.set_deferred(core_id, vector as u8);
-                return;
-            }
-        }
-    }
-
+/// Generic policy logic: `Vp::forward_interrupt` (arch-specific) consults
+/// `InterruptPolicy` to route the vector — direct injection into the
+/// running child if it has `Deliver` visibility, otherwise lazy-unwind to
+/// the handler (dom0) — and performs the register copy + context switch.
+fn handle_external_interrupt<A: ArchVpOps>(vp: &mut Vp<A>, _platform: &ThemisPlatform, vector: u32) {
     vp.forward_interrupt(vector);
 }
 
 /// Handle preemption timer exit.
 ///
-/// First gives the arch-side MSR emulators a chance to consume the timer
-/// (e.g. injecting `0xEC` for an emulated TSC-deadline expiry). If
-/// consumed, no re-arm: the emulator already programmed any next deadline.
-/// Otherwise, the timer fired for the generic quantum-sched path.
-#[allow(unused_variables)]
-fn handle_preemption_timer<A: ArchVpOps>(vp: &mut Vp<A>, platform: &ThemisPlatform) {
+/// Gives the arch-side MSR emulators a chance to consume the timer (e.g.
+/// injecting `0xEC` for an emulated TSC-deadline expiry). If consumed, no
+/// re-arm: the emulator already programmed any next deadline. Otherwise
+/// just reset the timer for its next general-purpose use.
+fn handle_preemption_timer<A: ArchVpOps>(vp: &mut Vp<A>, _platform: &ThemisPlatform) {
     if vp.try_consume_preemption_timer() {
         return;
-    }
-
-    #[cfg(feature = "quantum-sched")]
-    {
-        let core_id = platform.get_current_core().unwrap_or(0) as usize;
-        if let Some(vec) = platform.take_deferred(core_id) {
-            vp.reset_timer();
-            vp.forward_interrupt(vec as u32);
-            return;
-        }
     }
 
     vp.reset_timer();

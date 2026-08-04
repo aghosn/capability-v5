@@ -76,7 +76,7 @@ fi
 
 cd "$WORKSPACE_ROOT"
 
-# Optional: CAPAVISOR_FEATURES="quantum-sched" to enable nested-virt scheduling.
+# Optional: CAPAVISOR_FEATURES="verbose" to enable per-VMEXIT/SWITCH tracing.
 PROFILE="${PROFILE:-debug}"
 FEATURES_FLAG=""
 if [[ -n "${CAPAVISOR_FEATURES:-}" ]]; then

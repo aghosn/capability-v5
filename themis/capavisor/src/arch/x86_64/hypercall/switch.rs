@@ -589,25 +589,6 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     // RAX = SUCCESS, RDI = exit_reason. (The parent's RIP was advanced past
     // the SWITCH VMCALL in `do_switch` before VMCLEAR-ing its VMCS.)
     write_swap_reply(vcpu, errors::SUCCESS, exit_reason as u64);
-
-    // ── quantum-sched: drain deferred vector into freshly-loaded parent ──
-    // The parent VMCS was just VMPTRLD'd, so KVM's shadow VMCS is in sync.
-    // Injecting here (rather than in do_switch with a stale VMCS) avoids
-    // RCU stalls under nested virtualisation.
-    #[cfg(feature = "quantum-sched")]
-    {
-        let core_id = platform
-            .get_current_core()
-            .expect("[CHILD_EXIT] get_current_core failed (quantum-sched drain)");
-        if let Some(vec) = platform.take_deferred(core_id as usize) {
-            // Check that parent can accept an external interrupt injection.
-            // Injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-            if vcpu.guest_can_accept_external() {
-                vcpu.inject_external_vector(vec as u8);
-            }
-            // If IF=0 or blocking, silently drop — dom0 gets its own timers anyway.
-        }
-    }
 }
 
 

@@ -1155,8 +1155,9 @@ QEMU+KVM (actual L0, physical host)
 ```
 
 On **real hardware**: VMRESUME takes ~1μs, and posted interrupts suppress
-timer exits entirely. This problem does not exist. The `quantum-sched` feature
-should NOT be enabled on bare metal.
+timer exits entirely. This problem does not exist. This is why the
+`quantum-sched` feature (below) was scoped as dev-environment-only and has
+since been **removed** — see "Status" at the end of this section.
 
 ### Approaches tried (all failed)
 
@@ -1187,9 +1188,24 @@ should NOT be enabled on bare metal.
 - **Result**: Dom0 hung_task warnings. SSH intermittently responsive. Too much
   VMCLEAR/VMPTRLD overhead at 1ms granularity.
 
-### Solution: `quantum-sched` feature
+### Solution (historical): `quantum-sched` feature
 
-Gate: `feature = "quantum-sched"` in `themis/capavisor/Cargo.toml`.
+> **Status: removed** (2026-08-04). This feature was a raw per-core
+> hardware-state mechanism (`CoreContext::deferred_vector`) sitting entirely
+> outside the capability engine's policy model — it deferred/batched
+> interrupt delivery independent of any capa-engine-tracked state, which was
+> flagged in a broader audit as exactly the kind of ad-hoc, non-policy-driven
+> mechanism this codebase is trying to eliminate. It was never enabled by
+> default (opt-in via `CAPAVISOR_FEATURES=quantum-sched`) and was documented
+> as dev-environment-only from the start. The description below is kept for
+> historical record of the nested-virt AP-boot-starvation problem and the
+> approaches tried; **the underlying dev-environment nested-virt scheduling
+> problem itself is not solved** by the removal — if it resurfaces, the fix
+> should be redesigned to route through capa-engine-native mechanisms (e.g.
+> `SwitchContext::interrupt_inject`) rather than reintroducing raw per-core
+> deferred state.
+
+Gate (removed): was `feature = "quantum-sched"` in `themis/capavisor/Cargo.toml`.
 
 Instead of immediately switching back to dom0 on every external interrupt,
 **defer** parent-bound interrupts and re-enter the child (same VMCS, no

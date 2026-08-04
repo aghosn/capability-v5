@@ -469,32 +469,6 @@ impl ThemisPlatform {
             .unwrap_or(u32::MAX as u64) as u32
     }
 
-    // ── quantum-sched deferred vector helpers ────────────────────────── //
-
-    /// Store a parent-bound vector to be flushed later (quantum-sched).
-    ///
-    /// The deferred vector is flushed to the parent domain on the next
-    /// preemption timer expiry or before the next SWITCH to a child.
-    #[cfg(feature = "quantum-sched")]
-    pub fn set_deferred(&self, core_id: usize, vector: u8) {
-        self.cores[core_id]
-            .deferred_vector
-            .store(vector as u16, Ordering::Release);
-    }
-
-    /// Atomically take the deferred vector for the given core (quantum-sched).
-    /// Returns `Some(vector)` if one was stored, `None` if empty (0).
-    #[cfg(feature = "quantum-sched")]
-    pub fn take_deferred(&self, core_id: usize) -> Option<u8> {
-        let val = self.cores[core_id]
-            .deferred_vector
-            .swap(0, Ordering::AcqRel);
-        if val == 0 {
-            None
-        } else {
-            Some(val as u8)
-        }
-    }
 }
 
 impl ThemisPlatform {
