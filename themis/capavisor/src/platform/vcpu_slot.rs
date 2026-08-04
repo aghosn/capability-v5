@@ -2,18 +2,16 @@
 //!
 //! `VcpuSlot` provides safe atomic take/return semantics for the
 //! `InactiveVcpu` shared between cores.  `CoreContext` here holds only the
-//! genuinely hardware-specific per-core state capavisor still needs
-//! (the pinned `ActiveVcpu` pointer, and the quantum-sched deferred
-//! vector) — "which domain/VP is running on this core" itself is no
-//! longer tracked here: it is owned exclusively by the capability
-//! engine's own `SwitchManager`/`CoreContext` (see `capability_engine::switch`).
+//! genuinely hardware-specific per-core state capavisor still needs (the
+//! pinned `ActiveVcpu` pointer) — "which domain/VP is running on this core"
+//! itself is no longer tracked here: it is owned exclusively by the
+//! capability engine's own `SwitchManager`/`CoreContext` (see
+//! `capability_engine::switch`).
 
 extern crate alloc;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, Ordering};
-#[cfg(feature = "quantum-sched")]
-use core::sync::atomic::AtomicU16;
 
 #[cfg(target_arch = "x86_64")]
 use crate::vcpu::InactiveVcpu;
@@ -104,8 +102,7 @@ impl VcpuSlot {
 // ── Per-core hardware pinning (Tier 1) ────────────────────────────────────── //
 
 /// Per-core hardware state that has no equivalent in the capability engine:
-/// the pinned `ActiveVcpu` pointer used for cross-core VMCLEAR/VMPTRLD, and
-/// (quantum-sched only) a deferred parent-bound vector.
+/// the pinned `ActiveVcpu` pointer used for cross-core VMCLEAR/VMPTRLD.
 ///
 /// "Which domain/VP is scheduled on this core" is **not** tracked here —
 /// that fact lives exclusively in `capability_engine::switch::CoreContext`
@@ -125,18 +122,12 @@ pub struct CoreContext {
     /// `CoreContext` arch-neutral; consumers on x86 cast to
     /// `*mut crate::vcpu::ActiveVcpu`.
     pub active_vcpu: AtomicPtr<u8>,
-    /// (quantum-sched) Parent-bound vector deferred during child execution.
-    /// 0 = no deferred vector; 1–255 = vector number awaiting flush to parent.
-    #[cfg(feature = "quantum-sched")]
-    pub deferred_vector: AtomicU16,
 }
 
 impl CoreContext {
     pub(super) const fn new() -> Self {
         CoreContext {
             active_vcpu: AtomicPtr::new(core::ptr::null_mut()),
-            #[cfg(feature = "quantum-sched")]
-            deferred_vector: AtomicU16::new(0),
         }
     }
 }

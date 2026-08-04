@@ -128,8 +128,8 @@ pub fn try_handle_wrmsr(vcpu: &mut ActiveVcpu, core_id: usize, msr: u32, value: 
 
 /// Called from the generic preemption-timer exit handler. Returns `true`
 /// if the timer fired for a capavisor-emulated TSC deadline (and the
-/// LAPIC timer vector was injected); `false` if the timer was for the
-/// generic quantum-sched re-arm path.
+/// LAPIC timer vector was injected); `false` otherwise (caller just
+/// resets the timer for its next general-purpose use).
 pub fn maybe_inject_tsc_deadline(vcpu: &mut ActiveVcpu, core_id: usize) -> bool {
     if core_id >= MAX_CORES {
         return false;
@@ -141,8 +141,7 @@ pub fn maybe_inject_tsc_deadline(vcpu: &mut ActiveVcpu, core_id: usize) -> bool 
 
     let now = rdtsc_now();
     if now < deadline {
-        // Spurious early fire (e.g. quantum-sched timer), or another
-        // wakeup raced with us. Reprogram preemption timer for the
+        // Spurious early fire, or another wakeup raced with us. Reprogram preemption timer for the
         // remaining TSC distance and return false so the caller still
         // resumes without injection.
         program_preemption_timer(vcpu, deadline.saturating_sub(now));
