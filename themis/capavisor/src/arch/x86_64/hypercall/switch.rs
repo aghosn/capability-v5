@@ -199,47 +199,27 @@ pub(crate) fn do_switch(
     // priority (device before timer) and IF-gating rules as any other
     // pending vector.
     //
-    // KNOWN DESIGN DISCREPANCY (tracked in todo.md, needs careful
-    // clarification before this can be considered settled): this fires
-    // whenever the leaf's OWN `InterruptVisibility` for `vector` was
-    // `Report` (see `capa-engine`'s `deliver_interrupt_vp` /
-    // `switch_domain_forward`) — i.e. the vector was already fully
-    // routed to and handled by a `Deliver`-policy ancestor via the
-    // external-interrupt lazy-unwind path. Re-injecting it here means
-    // the domain observes the SAME vector a second time, even though
-    // `Report` is documented (`capa-engine/src/domain.rs`) as "reported
-    // to domain but handled by parent" — i.e. NOT meant to be redelivered
-    // raw to this domain. For domains without a real handler for that
-    // vector (e.g. eunomia guests, whose IDT only covers 0-31 and their
-    // own owned vectors) this can produce a `#GP`; for domains with a
-    // full IDT (e.g. a real Linux child) it instead produces a spurious
-    // duplicate-interrupt storm. Root-caused 2026-07-30 against the
-    // eunomia-timer intermittent #GP and a nested Linux guest's spurious
-    // LAPIC-timer storm.
-    //
-    // STOP-GAP (2026-07-30): raw re-injection disabled entirely below.
-    // An attempt to instead scope the leaf's `InterruptVisibility` to
-    // `NotReport`/`Suppress` per-vector (both via a per-workload
-    // `--themis-config` and via `standard.json`'s built-in profile) had
-    // NO effect at the time, because `cloud-hypervisor/hypervisor/src/
-    // themis/policy_walker.rs` never walked `ThemisConfig.policies
-    // .interrupts` into any `THHV_SET_POLICY` op — `InterruptsConfig` was
-    // parsed/validated by `config.rs` but otherwise entirely dead.
-    // Disabling the injection outright was the correct interim behavior:
-    // it makes `Report` actually mean "reported to domain but handled by
-    // parent, not redelivered", matching the documented semantics, at the
-    // cost of no longer being able to say `Deliver` vs `Report` distinctly
-    // at the injection site for now (both silently coalesce to
-    // "did not re-inject").
-    //
-    // UPDATE (interrupt_semantics branch): `policy_walker.rs::walk_interrupts`
-    // now projects `policies.interrupts` into `THHV_SET_POLICY` calls, so
-    // per-vector `InterruptVisibility` (and the new, independent
-    // `injectable` bit gating `THEMIS_INJECT_INTERRUPT`) IS configurable
-    // from JSON today. Re-enabling raw redelivery for `Report`-visibility
-    // vectors here still needs the `VpRunState::Waiting`/semantics design
-    // review noted above before it's safe to flip back on.
-    let _ = switch_ctx.interrupt_inject;
+    // RESOLVED (audit item 2, interrupt_semantics branch): the 2026-07-30
+    // stop-gap that disabled this raw-injection outright was masking a
+    // capa-engine default-policy bug, not a bug in this mechanism itself.
+    // `deliver_interrupt_vp` only sets `report: true` on the true leaf
+    // (this code path) when *that leaf's own* `InterruptVisibility` for
+    // the vector is `Report` -- i.e. the domain explicitly declared it
+    // wants raw redelivery of this specific vector on resume, on top of
+    // (not instead of) the `Deliver`-ancestor handling it first. The
+    // #GP/duplicate-storm symptoms came from `DomainPolicy::new_restricted`
+    // defaulting *every* vector to `Report` for *every* child domain, so
+    // ambient/unowned core-local vectors (e.g. dom0's own LAPIC timer
+    // landing on whatever domain happened to be scheduled) were being
+    // raw-injected into domains that never asked for them. Fixed at the
+    // source: the blanket default is now `NotReport`
+    // (`VectorPolicy::default_not_report`, fully transparent, matching the
+    // design doc's canonical example) -- `Report` is opt-in per vector for
+    // domains that genuinely own/watch it. With that fixed, raw-injecting
+    // here is exactly the correct, intended mechanism again.
+    if let Some(vector) = switch_ctx.interrupt_inject {
+        unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
+    }
 
     // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
     // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs and A3), so the

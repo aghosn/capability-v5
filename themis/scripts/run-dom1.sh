@@ -40,6 +40,7 @@ CHV="$BINS/cloud-hypervisor/cloud-hypervisor"
 THHV_KO="$BINS/thhv/thhv.ko"
 DOM1_DISK="$BINS/dom1/dom1.raw"
 MODULES_DIR="$BINS/nested/modules"
+DOM1_POLICY_DIR="$BINS/dom1/policies"
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 CHV_CPUS="${CHV_CPUS:-2}"
@@ -270,6 +271,25 @@ if [[ "$CONFIDENTIAL" == "true" ]]; then
     echo "  mode:      CONFIDENTIAL (guest RAM carved, dom0 loses access)"
 fi
 
+# dom1 always gets its own explicit --themis-config (never the
+# cloud-hypervisor builtin standard/confidential profile baked into the
+# binary) -- an explicit, version-controlled policy file here is the only
+# way to guarantee dom1's actual interrupt/msr/cpuid policy is visible and
+# doesn't silently drift when the CHV builtin defaults change.
+if [[ "$CONFIDENTIAL" == "true" ]]; then
+    DOM1_THEMIS_CONFIG="$DOM1_POLICY_DIR/dom1-confidential.json"
+else
+    DOM1_THEMIS_CONFIG="$DOM1_POLICY_DIR/dom1-standard.json"
+fi
+THEMIS_CONFIG_ARGS=""
+if [[ -f "$DOM1_THEMIS_CONFIG" ]]; then
+    THEMIS_CONFIG_ARGS="--themis-config $DOM1_THEMIS_CONFIG"
+    echo "  policy:    $DOM1_THEMIS_CONFIG"
+else
+    echo "WARNING: dom1 policy file not found at $DOM1_THEMIS_CONFIG"
+    echo "         (run: cargo build-bins). Falling back to CHV builtin default."
+fi
+
 exec "$CHV" \
     -v \
     --kernel "$SELECTED_KERNEL" \
@@ -283,4 +303,5 @@ exec "$CHV" \
     --console tty \
     --seccomp false \
     ${PLATFORM_ARGS} \
+    ${THEMIS_CONFIG_ARGS} \
     ${CHV_EXTRA_ARGS:-} >/tmp/chv-stdout.log 2>/tmp/chv-stderr.log

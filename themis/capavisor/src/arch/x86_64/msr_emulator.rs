@@ -12,8 +12,12 @@
 //!
 //! ## Design
 //!
-//! - **Per-CPU state.** Each core owns one VP at a time, so a fixed
-//!   `[AtomicU64; MAX_CORES]` indexed by core id is sufficient.
+//! - **Per-VP state.** The pending deadline is stored on the `ActiveVcpu`/
+//!   `InactiveVcpu` itself (not indexed by physical core id), because a VP
+//!   can be switched onto a different physical core between the WRMSR that
+//!   armed it and the preemption-timer exit that consumes it (see
+//!   `VcpuSlot`) — a per-core array would leave the deadline behind on the
+//!   old core and let an unrelated VP later scheduled there inherit it.
 //! - **Lazy programming.** `wrmsr_tsc_deadline` writes the preemption-timer
 //!   VMCS field directly; the value is recomputed on every WRMSR.
 //! - **Timer rate.** The VMX preemption timer ticks at TSC>>N where N is
@@ -30,13 +34,12 @@
 //! Emulate without a handler, the policy's stored value is returned —
 //! that path lives in `monitor.rs` and does not pass through here.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use x86::vmx::vmcs;
 
 use crate::arch::x86_64::pid::inject_via_pid;
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
-use crate::platform::MAX_CORES;
 use crate::vcpu::ActiveVcpu;
 
 // ── Constants ─────────────────────────────────────────────────────────────── //
@@ -70,13 +73,6 @@ const PREEMPT_MAX: u64 = u32::MAX as u64;
 const NO_DEADLINE: u64 = 0;
 
 // ── Per-CPU state ─────────────────────────────────────────────────────────── //
-
-/// Per-core pending TSC deadline (TSC value at which to inject 0xEC),
-/// or `NO_DEADLINE` if no timer is currently armed for the guest.
-static TSC_DEADLINE: [AtomicU64; MAX_CORES] = {
-    const INIT: AtomicU64 = AtomicU64::new(NO_DEADLINE);
-    [INIT; MAX_CORES]
-};
 
 /// Cached `IA32_VMX_MISC[4:0]` divisor exponent. Latched on first use
 /// (any core); identical across cores in practice.
@@ -131,29 +127,32 @@ pub fn try_handle_wrmsr(vcpu: &mut ActiveVcpu, core_id: usize, msr: u32, value: 
 /// LAPIC timer vector was injected); `false` otherwise (caller just
 /// resets the timer for its next general-purpose use).
 pub fn maybe_inject_tsc_deadline(vcpu: &mut ActiveVcpu, core_id: usize) -> bool {
-    if core_id >= MAX_CORES {
-        return false;
-    }
-    let deadline = TSC_DEADLINE[core_id].load(Ordering::Relaxed);
+    let deadline = vcpu.tsc_deadline();
     if deadline == NO_DEADLINE {
         return false;
     }
 
     let now = rdtsc_now();
     if now < deadline {
-        // Spurious early fire, or another wakeup raced with us. Reprogram preemption timer for the
-        // remaining TSC distance and return false so the caller still
-        // resumes without injection.
+        // Spurious early fire, or another wakeup raced with us. Reprogram
+        // preemption timer for the remaining TSC distance and return
+        // `true` — the VMCS field now holds an accurate reprogrammed
+        // value and the caller (`monitor.rs::handle_preemption_timer`)
+        // must NOT overwrite it with the generic housekeeping reset;
+        // returning `false` here would let `reset_timer()` immediately
+        // clobber this reprogram with `PREEMPTION_TIMER_TICKS`, desyncing
+        // the hardware timer from the still-pending software deadline.
         program_preemption_timer(vcpu, deadline.saturating_sub(now));
-        return false;
+        return true;
     }
 
-    TSC_DEADLINE[core_id].store(NO_DEADLINE, Ordering::Relaxed);
-    deliver_timer_vector(vcpu);
+    vcpu.set_tsc_deadline(NO_DEADLINE);
+    deliver_timer_vector(vcpu, core_id);
     true
 }
 
-/// Inject `LOCAL_TIMER_VECTOR` into the guest, gated by interruptibility.
+/// Inject `LOCAL_TIMER_VECTOR` into the guest, gated by interruptibility
+/// and by the domain's own `injectable` policy for this vector.
 ///
 /// VM-entry consistency rejects external-interrupt injection via
 /// VMENTRY_INTR_INFO when RFLAGS.IF=0 or STI/MOV-SS shadowing — that
@@ -162,7 +161,17 @@ pub fn maybe_inject_tsc_deadline(vcpu: &mut ActiveVcpu, core_id: usize) -> bool 
 /// PIR and enable interrupt-window exiting so
 /// [`drain_pir_on_interrupt_window`] delivers it on the next IF=1
 /// transition.
-fn deliver_timer_vector(vcpu: &mut ActiveVcpu) {
+///
+/// `injectable` is orthogonal to `visibility` (see `VectorPolicy` doc in
+/// capa-engine): this is capavisor acting as the sole, policy-gated
+/// software source of vector `0xEC` (an emulated device model), so the
+/// domain must opt in via `injectable` regardless of the ambient
+/// hardware-interrupt `visibility` setting for the same vector.
+fn deliver_timer_vector(vcpu: &mut ActiveVcpu, core_id: usize) {
+    if !timer_vector_injectable(core_id) {
+        return;
+    }
+
     if vcpu.guest_can_accept_external() {
         vcpu.inject_external_vector(LOCAL_TIMER_VECTOR);
         return;
@@ -180,23 +189,41 @@ fn deliver_timer_vector(vcpu: &mut ActiveVcpu) {
     vcpu.set_interrupt_window_exit(true);
 }
 
+/// Look up whether the domain currently running on `core_id` has marked
+/// `LOCAL_TIMER_VECTOR` `injectable` in its own interrupt policy. Fails
+/// open (`true`) if the platform, core, or domain capability cannot be
+/// resolved, matching every other default in this module.
+fn timer_vector_injectable(core_id: usize) -> bool {
+    let ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return true;
+    }
+    let platform = unsafe { &*ptr };
+    match platform.get_core_cap(core_id) {
+        Some(cap) => cap
+            .read()
+            .data
+            .policy
+            .interrupts
+            .get_policy(LOCAL_TIMER_VECTOR)
+            .injectable,
+        None => true,
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────── //
 
-fn handle_wrmsr_tsc_deadline(vcpu: &mut ActiveVcpu, core_id: usize, deadline: u64) {
-    if core_id >= MAX_CORES {
-        return;
-    }
-
+fn handle_wrmsr_tsc_deadline(vcpu: &mut ActiveVcpu, _core_id: usize, deadline: u64) {
     if deadline == 0 {
         // Linux disarms the timer by writing 0.
-        TSC_DEADLINE[core_id].store(NO_DEADLINE, Ordering::Relaxed);
+        vcpu.set_tsc_deadline(NO_DEADLINE);
         // Push the preemption timer far out so it stops thrashing the
         // monitor; the next genuine arm will reprogram it.
         program_preemption_timer(vcpu, u64::MAX);
         return;
     }
 
-    TSC_DEADLINE[core_id].store(deadline, Ordering::Relaxed);
+    vcpu.set_tsc_deadline(deadline);
     let now = rdtsc_now();
     let delta_tsc = deadline.saturating_sub(now);
     program_preemption_timer(vcpu, delta_tsc);

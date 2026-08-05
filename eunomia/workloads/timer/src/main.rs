@@ -20,6 +20,13 @@ pub fn app_main(_services: &eunomia::KernelServices) -> ! {
 fn test_timer_fires() -> Result<(), &'static str> {
     eunomia::timer::init();
 
+    // The policy under test tells us, via IA32_TSC_DEADLINE's RDMSR-Emulate
+    // stored value, whether it expects the timer to actually fire
+    // (`deliver.json`, injectable: true) or to be suppressed
+    // (`suppress.json`, injectable: false) — see
+    // `eunomia::timer::expected_fire` doc comment.
+    let expect_fire = eunomia::timer::expected_fire();
+
     let before = eunomia::timer::TIMER_TICKS.load(Ordering::SeqCst);
 
     // Arm timer ~1ms in the future (assuming ~3 GHz TSC).
@@ -34,11 +41,19 @@ fn test_timer_fires() -> Result<(), &'static str> {
         let ticks = eunomia::timer::TIMER_TICKS.load(Ordering::SeqCst);
         if ticks > before {
             unsafe { core::arch::asm!("cli"); }
-            return Ok(());
+            return if expect_fire {
+                Ok(())
+            } else {
+                Err("timer fired but policy expected it to be suppressed")
+            };
         }
         if eunomia::timer::now() > timeout {
             unsafe { core::arch::asm!("cli"); }
-            return Err("timer did not fire within timeout");
+            return if expect_fire {
+                Err("timer did not fire within timeout")
+            } else {
+                Ok(())
+            };
         }
         core::hint::spin_loop();
     }

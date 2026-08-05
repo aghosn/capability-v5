@@ -253,6 +253,43 @@ impl VectorPolicy {
             injectable: true,
         }
     }
+
+    /// Non-root domains' blanket default for vectors with no explicit
+    /// per-vector override (see `DomainPolicy::new_restricted`).
+    ///
+    /// `Report` is **not** a safe blanket default: it means "notify me too
+    /// (via a raw vector re-injection on resume) when this vector fires
+    /// while I'm the running leaf" (see `deliver_interrupt_vp` /
+    /// `SwitchContext::interrupt_inject`). Most vectors a restricted domain
+    /// never explicitly asks about are *ambient* — core-local events (e.g.
+    /// the LAPIC timer) that land on whichever domain happens to be
+    /// physically scheduled at that instant, unrelated to that domain's own
+    /// virtual devices. Defaulting those to `Report` would raw-inject every
+    /// such vector back into a domain that never asked for it and may have
+    /// no handler for it at all. `NotReport` (fully transparent — the
+    /// domain never learns the interrupt happened) is the correct blanket
+    /// default; a domain that genuinely owns/wants visibility into a
+    /// specific vector opts in per-vector via `default_report()`.
+    ///
+    /// `read_set`/`write_set` are kept `ALL` (not `NONE`) despite the
+    /// interrupt-forwarding docs above suggesting they're about
+    /// interrupt-time register access: `register_access_check`
+    /// (`domain_api.rs`) also falls back to *this exact* `default`
+    /// `VectorPolicy` (via the `VECTOR_AVAILABLE` pseudo-vector) to gate
+    /// ordinary `GET_REG`/`SET_REG` on a VP that hasn't run yet or is
+    /// `Locked` — i.e. the read/write bitmaps here are a dual-purpose,
+    /// domain-wide default register-access gate, not solely an
+    /// interrupt-visibility concern. `NONE` here would (and did, before
+    /// this was caught) deny CHV's initial register setup on every
+    /// freshly-created VP domain-wide.
+    pub fn default_not_report() -> Self {
+        VectorPolicy {
+            visibility: InterruptVisibility::NotReport,
+            read_set: RegBitmap::ALL,
+            write_set: RegBitmap::ALL,
+            injectable: true,
+        }
+    }
 }
 
 /// Interrupt routing policy
@@ -598,12 +635,17 @@ impl DomainPolicy {
 
     /// Create a restricted policy.
     ///
+    /// Interrupt blanket default is `NotReport` (fully transparent) — see
+    /// `VectorPolicy::default_not_report` for why `Report` is unsafe as a
+    /// blanket default. Domains opt into `Report` per-vector for vectors
+    /// they genuinely own/want visibility into.
+    ///
     /// `num_vprocessors` defaults to the popcount of the `cores` bitmask.
     pub fn new_restricted(cores: u64, api: MonitorAPI) -> Self {
         DomainPolicy {
             cores,
             api,
-            interrupts: InterruptPolicy::new_default(VectorPolicy::default_report()),
+            interrupts: InterruptPolicy::new_default(VectorPolicy::default_not_report()),
             exits: ExitPolicy::new_default(ExitAction::default_trap()),
             cpuid: CpuidPolicy::new(DefaultAction::Trap),
             msrs: MsrPolicy::new(DefaultAction::Trap),

@@ -308,11 +308,24 @@ fi
 # ── Dom1 guest image ──────────────────────────────────────────────────────────
 DOM1_IMG="$WORKSPACE_ROOT/guest/dom1.raw"
 DOM1_HVF="$WORKSPACE_ROOT/guest/hypervisor-fw"
+DOM1_POLICIES_SRC="$REPO_ROOT/themis/policies"
 if [[ -f "$DOM1_IMG" ]]; then
     mkdir -p "$MNT/dom1"
     cp "$DOM1_IMG" "$MNT/dom1/dom1.raw"
     [[ -f "$DOM1_HVF" ]] && cp "$DOM1_HVF" "$MNT/dom1/hypervisor-fw"
     echo "  ✔ dom1/dom1.raw + hypervisor-fw packed into bins"
+fi
+# Package dom1's own explicit --themis-config policy files (dom1-standard.json
+# / dom1-confidential.json), wiped-then-copied for the same staleness reason
+# as the eunomia policies below: dom1 must never silently fall back to
+# cloud-hypervisor's builtin standard/confidential profiles, whose defaults
+# can drift independently of dom1's actual needs.
+if [[ -d "$DOM1_POLICIES_SRC" ]]; then
+    mkdir -p "$MNT/dom1"
+    rm -rf "$MNT/dom1/policies"
+    mkdir -p "$MNT/dom1/policies"
+    cp -r "$DOM1_POLICIES_SRC/." "$MNT/dom1/policies/"
+    echo "  ✔ dom1/policies/ (dom1-standard.json, dom1-confidential.json)"
 fi
 
 if should_package capa-engine; then

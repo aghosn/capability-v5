@@ -208,7 +208,7 @@ config, do not duplicate):
     // VectorPolicy = { visibility, read_set, write_set }.
     "interrupts": {
       "default": {
-        "visibility": "Report",    // "Deliver" | "Report" | "Suppress"
+        "visibility": "NotReport", // "Deliver" | "Report" | "NotReport"
         "read_set":  "ALL",
         "write_set": "ALL"
       },

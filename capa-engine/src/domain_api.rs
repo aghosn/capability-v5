@@ -3047,13 +3047,14 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::VectorRegReadSet(vec, word) => {
+                    let default_policy = child_w.data.policy.interrupts.default.clone();
                     let entry = child_w
                         .data
                         .policy
                         .interrupts
                         .overrides
                         .entry(vec)
-                        .or_insert_with(VectorPolicy::default_report);
+                        .or_insert_with(|| default_policy);
                     entry.read_set.set_word(word as usize, value);
                     batch.add_policy_changed(
                         child_id,
@@ -3065,13 +3066,14 @@ impl Capability<Domain> {
                     );
                 }
                 PolicyIdentifier::VectorRegWriteSet(vec, word) => {
+                    let default_policy = child_w.data.policy.interrupts.default.clone();
                     let entry = child_w
                         .data
                         .policy
                         .interrupts
                         .overrides
                         .entry(vec)
-                        .or_insert_with(VectorPolicy::default_report);
+                        .or_insert_with(|| default_policy);
                     entry.write_set.set_word(word as usize, value);
                     batch.add_policy_changed(
                         child_id,
@@ -3088,13 +3090,14 @@ impl Capability<Domain> {
                     // call THEMIS_INJECT_INTERRUPT for this vector on this
                     // child, which is entirely the parent's own call to make.
                     let injectable = value != 0;
+                    let default_policy = child_w.data.policy.interrupts.default.clone();
                     let entry = child_w
                         .data
                         .policy
                         .interrupts
                         .overrides
                         .entry(vec)
-                        .or_insert_with(VectorPolicy::default_report);
+                        .or_insert_with(|| default_policy);
                     entry.injectable = injectable;
                     batch.add_policy_changed(
                         child_id,
