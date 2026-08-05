@@ -10,6 +10,132 @@
 
 ---
 
+## Policy Axes: The Complete, Minimal Set
+
+This section is the authoritative reference for how interrupt-related policy
+axes compose. It was written 2026-08-05 after several bugs (timer hang, GET_REG
+EPERM regression) turned out to be caused by conflating axes that are, in fact,
+independent. If you are about to add a new interrupt-related check, read this
+first — the answer is very likely "reuse one of these four", not "add a fifth".
+
+There are exactly **four** axes, two policy-level (capa-engine, per-vector,
+per-domain) and two mechanism-level (VMX hardware state, not policy at all):
+
+### 1. `InterruptVisibility` (`VectorPolicy::visibility`) — policy
+
+Governs **only** the automatic routing decision made when a real *ambient*
+hardware interrupt for this vector lands on the core while some domain in the
+call chain is running. It has nothing to do with software/emulator-driven or
+explicit parent-initiated injection (see axis 2).
+
+- `Deliver` — the domain owns this vector; inject it directly, no context
+  switch, no parent notification.
+- `Report` — notify the domain (via a raw vector re-injection when it's next
+  resumed — see `VpRunState::Waiting{ report: true, .. }` /
+  `SwitchContext::interrupt_inject`) **in addition to**, not instead of,
+  whatever `Deliver`-owning ancestor actually handles it first.
+- `NotReport` — fully transparent; the domain never learns the interrupt
+  happened.
+
+**Blanket default is `NotReport`** (`VectorPolicy::default_not_report`,
+`DomainPolicy::new_restricted`). `Report` is *not* a safe blanket default:
+most vectors a domain never explicitly asks about are ambient/core-local
+(e.g. dom0's own LAPIC timer landing on whatever domain happens to be
+scheduled) and unrelated to that domain's own virtual devices — defaulting
+those to `Report` raw-injects them into domains that never asked for them
+(this was the root cause of a real #GP/duplicate-injection bug). A domain
+opts into `Report` per-vector only for vectors it genuinely owns/watches.
+
+### 2. `injectable` (`VectorPolicy::injectable`) — policy, orthogonal to #1
+
+Governs whether a parent (any ancestor holding a domain capability) or an
+internal capavisor emulator (e.g. the software LAPIC/TSC-deadline timer in
+`msr_emulator.rs`) may **explicitly** hand this vector to the domain —
+via `THEMIS_INJECT_INTERRUPT` or a direct internal delivery call — regardless
+of what real hardware is doing.
+
+Because this is orthogonal to `visibility`, the correct pattern for an
+emulated device model is `visibility: NotReport` (no ambient real-hardware
+leakage for this vector) + `injectable: true` (the emulator is the *sole*,
+policy-gated, software-controlled source of that vector). Conflating the two
+— e.g. gating an emulator's injection on `visibility` instead of `injectable`
+— either lets real ambient hardware interrupts leak in regardless of the
+emulator's own arm/disarm state (the original 2026-08 timer hang: `deliver.json`
+set `visibility: Deliver` for vector `0xEC`, so real ambient timer ticks were
+delivered whether or not the software timer was ever armed), or breaks the
+emulator for every domain using the `NotReport` blanket default (since
+*every* vector defaults to `NotReport` under axis 1, gating on visibility
+would silently disable the emulator domain-wide).
+
+### 3. `read_set` / `write_set` (`VectorPolicy::read_set/write_set`) — policy, dual-purpose
+
+Two distinct consumers share this same bitmap, which is easy to miss:
+
+- **Interrupt-time register filtering**: which COMM-page registers a parent
+  handling a `Report`'d interrupt may read/write for a VP it doesn't own
+  directly (`copy_filtered_regs_to_comm` in `hypercall/switch.rs`).
+- **General `GET_REG`/`SET_REG` gating**: `register_access_check`
+  (`domain_api.rs`) falls back to this *exact* bitmap — via the
+  `VECTOR_AVAILABLE` pseudo-vector — to gate ordinary register access on any
+  VP that hasn't run yet or is `Locked`. This is why `default_not_report()`
+  keeps `read_set`/`write_set` at `ALL` rather than `NONE`: it's a
+  domain-wide register-access default first, and an interrupt-time filter
+  second. Setting it to `NONE` here previously denied CHV's own initial
+  register setup on every freshly-created VP, domain-wide (a real regression
+  caught and fixed this session).
+
+### 4. `guest_can_accept_external()` / interrupt-window exiting — mechanism, not policy
+
+A pure VMX hardware-state check (RFLAGS.IF and STI/MOV-SS interruptibility
+shadow bits in the VMCS guest-state area) — **not** a capa-engine policy at
+all, and not per-domain or per-vector. It answers one question only: *can
+this VP accept a freshly VM-entry-injected external interrupt right now?*
+
+Every delivery path — real-hardware forwarding
+(`forward_interrupt_to_handler`), the timer emulator
+(`msr_emulator.rs::deliver_timer_vector`), and explicit
+`THEMIS_INJECT_INTERRUPT` handling — needs this same check before attempting
+`VMENTRY_INTERRUPTION_INFO_FIELD` injection: if the guest can't currently
+accept it, queue the vector in the VP's own PIR and arm interrupt-window
+exiting (`set_interrupt_window_exit(true)`) so hardware re-exits the moment
+IF flips to 1, at which point `drain_pir_on_interrupt_window` drains and
+retries. This exact "try immediate inject, else PIR-queue + arm
+interrupt-window" sequence is consolidated into one shared helper,
+`pid::deliver_vector_local`, used by all three delivery paths above (see
+`themis/capavisor/src/arch/x86_64/pid.rs`) — do not re-copy the pattern
+inline at a new call site; call the helper instead.
+
+This axis is purely mechanical: it never decides *whether* a vector should
+be delivered (that's axes 1/2), only *how* — immediately vs. deferred.
+
+### How they compose — two worked examples
+
+**Software timer emulation** (`msr_emulator.rs`): policy sets vector `0xEC`
+to `NotReport` (axis 1, blocks ambient real-HW leakage) + `injectable: true`
+(axis 2, capavisor's emulator is the sole source). When the deadline passes,
+`deliver_timer_vector` checks `injectable` via `timer_vector_injectable()`
+(policy gate), then calls `pid::deliver_vector_local()`, which checks
+`guest_can_accept_external()` (mechanism gate) to pick immediate injection vs.
+PIR-queue. `visibility` never enters this picture at all — this is explicit,
+`injectable`-gated delivery, not automatic ambient routing.
+
+**Real ambient hardware interrupt forwarding**
+(`forward_interrupt_to_handler`): `visibility` (axis 1) decides the routing
+*target* — the `Deliver`-owning ancestor gets it injected directly (no
+switch), `Report`-opted ancestors get raw-reinjected on their next resume (in
+addition, not instead), `NotReport` ancestors are skipped (transparent).
+`injectable` (axis 2) is **not consulted at all** on this path — it only
+gates *explicit* injection (the hypercall and internal emulators), never the
+ambient real-hardware routing decision. Once the target is picked,
+`guest_can_accept_external()` (axis 4) gates the actual injection mechanism,
+exactly as in the timer-emulation example.
+
+`quantum-sched`'s per-core `deferred_vector` flag no longer exists (removed
+2026-08-04 — see the historical section below); it sat entirely outside this
+model and is not one of the four axes.
+
+---
+
 ## Background: Relevant VT-x APIC Virtualization Features
 
 ### Virtual APIC Page (VAPIC)

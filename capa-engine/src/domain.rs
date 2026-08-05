@@ -207,7 +207,13 @@ impl core::fmt::LowerHex for RegBitmap {
     }
 }
 
-/// Policy for a specific interrupt vector
+/// Policy for a specific interrupt vector.
+///
+/// See `docs/architecture/interrupt-virtualization.md` §"Policy Axes: The
+/// Complete, Minimal Set" for the authoritative reference on how
+/// `visibility`, `injectable`, `read_set`/`write_set`, and the
+/// mechanism-level `guest_can_accept_external()` gate compose. Before
+/// adding a new interrupt-related check, read that section first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorPolicy {
     pub visibility: InterruptVisibility,
