@@ -3314,6 +3314,82 @@ impl Capability<Domain> {
         .map(|((), b)| b)
     }
 
+    /// Update the stored value of an existing MSR `Emulate` override on a
+    /// domain's *own* policy, at the domain's own runtime.
+    ///
+    /// This is deliberately distinct from [`Capability::set_policy`]: that
+    /// API is parent-over-child, requires `MonitorAPI::SET`, and only works
+    /// while the child is `Unsealed`. Here the caller is the platform,
+    /// acting on behalf of the domain that is *currently executing* (e.g. a
+    /// guest `WRMSR` trapped because the MSR policy is `Emulate` but has no
+    /// internal capavisor emulator handler — see
+    /// `themis/capavisor/src/monitor.rs`'s WRMSR dispatch). Guest WRMSRs are
+    /// only ever handled once a domain is sealed and running, so there is
+    /// no seal/permission gate to apply.
+    ///
+    /// **Policy classification vs. value, and why post-seal mutation here
+    /// doesn't violate the "policy is fixed at seal" invariant**: every
+    /// other policy mutation in this file (`set_policy` et al.) requires
+    /// `Unsealed` because it can change a domain's *classification* —
+    /// which MSRs/CPUID leaves are `Trap`/`Native`/`Emulate`, what a child
+    /// is monotonically allowed relative to its parent, etc. — which is
+    /// exactly what gets measured at seal and is meant to be fixed
+    /// thereafter. This function cannot do any of that: it only ever
+    /// narrows the *value held inside* an `Emulate` entry that already
+    /// existed at seal time (attested as the initial value); it can never
+    /// create an entry, remove one, or change what is trapped. The guest
+    /// itself drives the value via its own `WRMSR`/`RDMSR` pair — treating
+    /// this as an ordinary policy write would make the "scratch register"
+    /// behavior this exists for impossible, since guest code (and thus
+    /// this call) can only ever run post-seal.
+    ///
+    /// Still goes through [`crate::platform::execute`] like every other
+    /// engine mutation (axiom A9: no direct capability-tree access outside
+    /// the capa-engine interface) so the write is properly serialized with
+    /// concurrent engine operations and emits a
+    /// [`crate::update::PolicyChange::MsrEmulate`] update the platform can
+    /// react to (today: idempotently re-asserts the MSR bitmap trap bit).
+    ///
+    /// # Errors
+    /// - [`CapaError::NotFound`] — no `Emulate` override exists for `msr`
+    ///   (callers should only invoke this after observing an `Emulate`
+    ///   action for the same MSR on the same domain).
+    pub fn update_msr_emulate_value(
+        platform: &dyn Platform,
+        domain: &CapabilityRef<Domain>,
+        msr: u32,
+        value: u64,
+    ) -> Result<UpdateBatch> {
+        use crate::update::PolicyChange;
+
+        crate::platform::execute(platform, false, || -> Result<((), UpdateBatch)> {
+            let mut guard = domain.write();
+            let domain_id = guard.data.id;
+            guard
+                .data
+                .policy
+                .msrs
+                .update_emulate_value(&msr, value)
+                .map_err(|e| match e {
+                    crate::interposition::InsertError::NotFound => CapaError::NotFound,
+                    crate::interposition::InsertError::Overlap => CapaError::RegionOverlap,
+                    crate::interposition::InsertError::InvalidRange => CapaError::InvalidValue,
+                })?;
+
+            let mut batch = UpdateBatch::new();
+            batch.add_policy_changed(
+                domain_id,
+                PolicyChange::MsrEmulate {
+                    msr,
+                    word_index: 0,
+                    value: value as u32,
+                },
+            );
+            Ok(((), batch))
+        })
+        .map(|((), b)| b)
+    }
+
     /// Read a domain-wide policy field from a child domain.
     ///
     /// Caller must have [`MonitorAPI::GET`] permission.
