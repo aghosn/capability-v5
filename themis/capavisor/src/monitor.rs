@@ -22,7 +22,7 @@ use crate::arch_traits::types::{ExitInfo, SemanticExit, Vp};
 use crate::platform::ThemisPlatform;
 use crate::serial_println;
 use capability_engine::interposition::{DefaultAction, ProcFeaturePolicy};
-use capability_engine::Platform as _;
+use capability_engine::{Capability, Platform as _};
 
 // ── Generic monitor loop ──────────────────────────────────────────────────── //
 
@@ -240,18 +240,19 @@ fn lookup_msr_action(platform: &ThemisPlatform, msr: u32) -> InterpositionAction
 /// Update the stored Emulate value for an MSR in the current core's
 /// domain policy.  Returns `true` if an Emulate entry existed and was
 /// updated, `false` otherwise (caller falls back to Trap semantics).
+///
+/// Goes through `Capability::update_msr_emulate_value` (capa-engine,
+/// `platform::execute`-mediated) rather than taking a direct write lock on
+/// the domain capability — per axiom A9, all domain-state mutation must go
+/// through the capability engine's interface, the same as every other
+/// policy write in this codebase (`set_policy`, `deliver_interrupt_vp`,
+/// etc.).
 fn update_msr_emulate_value(platform: &ThemisPlatform, msr: u32, value: u64) -> bool {
     let core_id = platform.get_current_core().unwrap_or(0) as usize;
     let Some(cap) = platform.get_core_cap(core_id) else {
         return false;
     };
-    let mut guard = cap.write();
-    guard
-        .data
-        .policy
-        .msrs
-        .update_emulate_value(&msr, value)
-        .is_ok()
+    Capability::update_msr_emulate_value(platform, &cap, msr, value).is_ok()
 }
 
 // ── Interrupt handling (generic policy, arch primitives) ───────────────────── //
