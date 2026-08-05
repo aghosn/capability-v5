@@ -622,12 +622,7 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
     serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.
-        if vcpu.guest_can_accept_external() {
-            vcpu.inject_external_vector(vector);
-        } else {
-            unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
-            vcpu.set_interrupt_window_exit(true);
-        }
+        crate::arch::x86_64::pid::deliver_vector_local(vcpu, platform.hhdm_offset(), vector);
         return;
     }
 
@@ -699,15 +694,10 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         );
     }
 
-    // Inject the interrupt via VM-entry event injection.
-    // Format: bit 31=valid, bits [10:8]=type (0=external interrupt), bits [7:0]=vector.
+    // Inject the interrupt via VM-entry event injection when possible;
+    // otherwise queue it via PIR and arm interrupt-window exiting.
     // Guard: injecting with IF=0 or STI/MOV-SS blocking causes VM-entry failure.
-    if vcpu.guest_can_accept_external() {
-        vcpu.inject_external_vector(vector);
-    } else {
-        unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
-        vcpu.set_interrupt_window_exit(true);
-    }
+    crate::arch::x86_64::pid::deliver_vector_local(vcpu, platform.hhdm_offset(), vector);
 
     // Return ERR_RETRY with the preempting vector in RDI (per A3 contract).
     // Per the VcpuSlot RIP invariant (see do_switch step 4), the handler's

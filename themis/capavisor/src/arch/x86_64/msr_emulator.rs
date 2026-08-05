@@ -38,8 +38,6 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use x86::vmx::vmcs;
 
-use crate::arch::x86_64::pid::inject_via_pid;
-use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::vcpu::ActiveVcpu;
 
 // ── Constants ─────────────────────────────────────────────────────────────── //
@@ -172,21 +170,9 @@ fn deliver_timer_vector(vcpu: &mut ActiveVcpu, core_id: usize) {
         return;
     }
 
-    if vcpu.guest_can_accept_external() {
-        vcpu.inject_external_vector(LOCAL_TIMER_VECTOR);
-        return;
-    }
-
-    // Push into PIR (local — same core as this VP) and arm interrupt-window
-    // exiting. `drain_pir_inject_lowest` (called from
-    // `drain_pir_on_interrupt_window`) handles delivery + clearing.
-    let pid_phys = vcpu.pid_phys();
-    if pid_phys != 0 {
-        let ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
-        let hhdm = if ptr.is_null() { 0 } else { unsafe { (*ptr).hhdm_offset() } };
-        unsafe { inject_via_pid(pid_phys, hhdm, LOCAL_TIMER_VECTOR, false) };
-    }
-    vcpu.set_interrupt_window_exit(true);
+    let ptr = crate::PLATFORM_PTR.load(Ordering::Acquire);
+    let hhdm = if ptr.is_null() { 0 } else { unsafe { (*ptr).hhdm_offset() } };
+    crate::arch::x86_64::pid::deliver_vector_local(vcpu, hhdm, LOCAL_TIMER_VECTOR);
 }
 
 /// Look up whether the domain currently running on `core_id` has marked
