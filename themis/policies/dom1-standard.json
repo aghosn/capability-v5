@@ -1,23 +1,14 @@
 {
   "extends": "standard",
-  "general": { "name": "timer-vector-deliver" },
+  "general": { "name": "dom1-standard" },
   "policies": {
     "interrupts": {
       "default": {
         "visibility": "NotReport",
         "read_set": "ALL",
         "write_set": "ALL",
-        "injectable": false
-      },
-      "overrides": [
-        {
-          "vector": 236,
-          "visibility": "NotReport",
-          "read_set": "ALL",
-          "write_set": "ALL",
-          "injectable": true
-        }
-      ]
+        "injectable": true
+      }
     },
     "msrs": {
       "default": "Native",
@@ -29,6 +20,9 @@
         }
       ]
     },
-    "cpuid": { "default": "Native", "hypervisor_range_native": true }
+    "cpuid": {
+      "default": "Native",
+      "hypervisor_range_native": true
+    }
   }
 }

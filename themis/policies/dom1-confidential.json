@@ -1,0 +1,28 @@
+{
+  "extends": "confidential",
+  "general": { "name": "dom1-confidential" },
+  "policies": {
+    "interrupts": {
+      "default": {
+        "visibility": "NotReport",
+        "read_set": "ALL",
+        "write_set": "ALL",
+        "injectable": true
+      }
+    },
+    "msrs": {
+      "default": "Native",
+      "overrides": [
+        {
+          "msr": "0x6E0",
+          "action": "Emulate",
+          "value": 0
+        }
+      ]
+    },
+    "cpuid": {
+      "default": "Native",
+      "hypervisor_range_native": true
+    }
+  }
+}

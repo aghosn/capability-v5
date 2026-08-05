@@ -7,12 +7,206 @@
 
 ## Current Status
 
-- **2026-08-04 — LAPIC-timer policy bypass: root-caused, attempted fix caused a
-  live hang, reverted to baseline. Now auditing capavisor broadly for ad-hoc
-  mechanisms that don't map to the capa-engine model — this is the current
-  active work on this branch.**
+- **2026-08-05 — Timer emulation fully fixed and verified on hardware; both
+  `eunomia-timer` policy-suite scenarios (`deliver`, `suppress`) now pass at
+  the harness level. Superseding all prior "attempted fix"/"reverted"/
+  "unresolved" timer entries below — those are now historical.**
 
-  **Confirmed bug (still unfixed, capavisor at baseline)**: `msr_emulator.rs`'s
+  Three issues found and fixed this session, in the order the user asked for:
+
+  1. **Root cause of the original hang**: `eunomia/policies/timer/deliver.json`
+     set vector `0xEC` (236, LAPIC/TSC-deadline timer) `visibility: "Deliver"`.
+     `visibility` governs only real-hardware-interrupt ambient routing (see
+     `VectorPolicy` doc in `capa-engine/src/domain.rs`) — completely orthogonal
+     to `injectable` (software/emulator-driven injection). `Deliver` let real
+     ambient timer interrupts leak into the domain regardless of whether
+     `arm()` ever ran (confirmed via a diagnostic build with `arm()` made
+     dead code — it hung identically). Fixed: `deliver.json` vector 236
+     `visibility` → `"NotReport"` (kept `injectable: true`), matching the
+     already-correct `suppress.json` (`NotReport` + `injectable: false`).
+     `msr_emulator.rs::deliver_timer_vector` also had the `injectable` gate
+     genuinely missing (not just misconfigured) — added via new
+     `timer_vector_injectable(core_id)` helper, fails open to `true`.
+
+  2. **Per-core (not per-VCPU) `TSC_DEADLINE` state**: was a
+     `static [AtomicU64; MAX_CORES]` in `msr_emulator.rs`, indexed by physical
+     core — stale/wrong across VP migration between cores. Moved to a
+     `tsc_deadline: u64` field directly on `InactiveVcpu`/`ActiveVcpu`
+     (`themis/crates/vmx/src/vcpu.rs`), threaded through `activate()`/
+     `deactivate()` so it travels with the VP, not the core.
+
+  3. **`reset_timer()` clobbering bug** (found while investigating why not to
+     just rely on the raw VMX-preemption-timer field): `maybe_inject_tsc_deadline`'s
+     early-refire branch correctly reprogrammed the VMCS preemption-timer via
+     `program_preemption_timer`, but returned `false` — `monitor.rs`'s
+     `handle_preemption_timer` calls `reset_timer()` (generic housekeeping)
+     whenever the emulator returns `false`, immediately clobbering the just-set
+     reprogram. Fixed by returning `true` (honoring the documented "if
+     consumed, don't re-arm" contract). Software absolute-deadline tracking via
+     `rdtsc()` remains necessary alongside the VMCS field — the hardware
+     countdown only decrements in VMX non-root operation, freezing on *every*
+     VM exit (not just cross-domain switch), so it alone systematically
+     under-counts real wall-clock elapsed time vs. what Linux's TSC-deadline
+     clockevent expects.
+
+  4. **Test-harness scenario-awareness gap**: `run-eunomia.sh --policy-suite`
+     boots the same ELF once per policy JSON and tallies pass/fail solely from
+     the guest's own hardcoded expectation — `test_timer_fires` always expected
+     a fire, so `suppress.json` (which correctly, by design, suppresses the
+     timer) reported harness-level FAIL despite the fix working correctly.
+     Fixed with a zero-new-ABI signal: RDMSR of `IA32_TSC_DEADLINE` under an
+     `Emulate` MSR policy always returns the policy's static JSON `"value"`
+     (never touched by the WRMSR-only handler registry) — repurposed as an
+     expected-outcome flag. Added `rdmsr()`/`expected_fire()` helpers to
+     `eunomia/src/timer.rs`; `deliver.json` value `0` = expect fire,
+     `suppress.json` value `1` = expect suppression;
+     `eunomia/workloads/timer/src/main.rs::test_timer_fires` now branches its
+     pass/fail logic on this at startup.
+
+  All debug `[TIMER-DBG]`/`[SWITCH-DBG]` serial prints added during
+  investigation were removed from `msr_emulator.rs` and
+  `hypercall/switch.rs`. Verified: capa-engine tests pass, `cargo build-bins`
+  clean, **hardware-confirmed**: `deliver` scenario passes (timer fires),
+  `suppress` scenario passes (timer correctly does not fire, harness reports
+  PASS via the new scenario-aware logic).
+
+  **Still open**: user's original item (3) — "not convinced the initial
+  LVT_TIMER MMIO write performs according to what we want"
+  (`eunomia/src/timer.rs::init()`'s write to the vapic-shadow LVT_TIMER
+  register) — raised but not yet resolved to the user's satisfaction. See
+  `lvt-timer-policy-gap` in the audit backlog below.
+
+- **2026-08-04 (cont'd) — Working item 2 (`interrupt_inject` re-enable) surfaced
+  two regressions, both fixed, plus a new UNRESOLVED hang under active
+  investigation:**
+
+  1. **`GET_REG EPERM` regression (all VM boots broken)** — FIXED.
+     `VectorPolicy::default_not_report()` (`capa-engine/src/domain.rs`) had
+     `read_set: NONE, write_set: NONE`, but these bitmaps are dual-purpose:
+     they also gate general GET_REG/SET_REG for fresh/never-run VPs via
+     `register_access_check`'s `VECTOR_AVAILABLE` fallback. Changed to
+     `read_set: ALL, write_set: ALL` (visibility stays `NotReport`). Verified:
+     300+ capa-engine tests pass, `cargo build-bins` clean.
+
+  2. **Spurious LAPIC timer interrupt regression (recurrence)** — FIXED.
+     Root cause: CHV's builtin userspace policy configs
+     (`cloud-hypervisor/hypervisor/src/themis/defaults/{standard,confidential}.json`)
+     hardcoded `interrupts.default.visibility: "Report"`, which
+     `policy_walker.rs::walk_interrupts()` unconditionally projects into a
+     `DEFAULT_INTR_VISIBILITY` op that **overwrites** the domain's default at
+     creation time — silently undoing the capa-engine-level fix for every VM
+     using the builtin profiles (dom1, eunomia). Fixed across every layer:
+     capa-engine default, CHV's serde fallback (`config.rs::default_visibility()`),
+     CHV's builtin JSON profiles, and the eunomia timer-test fixture JSONs
+     (`eunomia/policies/timer/{suppress,deliver}.json` — these had
+     `injectable: true`/`visibility: Report` contradicting their own
+     documented intent; also genuinely fixed, not dismissed).
+     **Renamed** CHV config's `Visibility::Suppress` → `Visibility::NotReport`
+     everywhere (was confusingly named — nothing is ever dropped; it only
+     means "don't raw re-inject on resume", the interrupt is still handled by
+     whichever ancestor has `Deliver`).
+     **Also**: dom1 previously had NO dedicated `--themis-config` file (relied
+     silently on CHV's compiled-in builtin profile) — per repeated user
+     request, added `themis/policies/dom1-{standard,confidential}.json` +
+     wired into `run-dom1.sh` (always passes `--themis-config`) and
+     `update-bins.sh` (packages `themis/policies/` → `/opt/bins/dom1/policies/`).
+     Verified: 27 `hypervisor --features themis` tests pass, capa-engine
+     tests pass, `cargo build-bins` clean, user confirmed both regressions
+     resolved on hardware.
+
+  3. **`wrmsr` policy-suite scenario `04-mixed-default-trap` hangs
+     (`chv exit=124`) — UNRESOLVED, actively under investigation.** Scenarios
+     1-3 of 4 pass; this scenario passed on 2026-07-20 (see below), so this is
+     a genuine regression, not a pre-existing/untested combo — do NOT dismiss.
+     `.chv` debug log shows normal boot/policy-push/partition-seal, then a
+     stream of serial-port (UART, ports 0x3f8-0x3fd) `THEMIS-EXIT`/`THEMIS-IO`
+     trace lines that abruptly stop mid-print of the second MSR test line's
+     hex value — consistent with a vCPU hang/livelock during/around test case
+     2 (`KERNEL_GS_BASE`, `Emulate` action), not an explicit crash or EPERM.
+     Traced logic in `domain_api.rs`/`monitor.rs`: `interrupt_inject` should
+     only fire on `Report`-visibility vectors with no callee, and the wrmsr
+     scenario JSONs have no `interrupts` overrides (inherit the now-fixed
+     `NotReport` default) — so it *shouldn't* be involved, but not yet proven.
+     MSR `Emulate`/`Native`/`Trap` actions are a separate policy axis
+     (`MsrPolicy`/`interposition.rs`) untouched by this session's changes.
+     No local repro possible (no sudo/hardware access in this sandbox); all
+     testing is done by the user pasting back logs.
+     **Instrumentation added (built + packaged, awaiting next test run)**:
+     `serial_println!` added in
+     `themis/capavisor/src/arch/x86_64/hypercall/switch.rs`'s
+     `if let Some(vector) = switch_ctx.interrupt_inject` block, logging
+     vector/target-domain/target-vp whenever raw re-injection fires. Next
+     step: user re-runs `sudo ./run-eunomia.sh --themis --policy-suite wrmsr`
+     and checks for `[SWITCH-DBG] raw-inject ...` lines around the hang to
+     confirm/rule out `interrupt_inject` as the cause. **Session paused here
+     for the day — resume with this next.**
+
+     **2026-08-05 update**: re-ran `--policy-suite wrmsr` 6 times total (1
+     fresh + 5 back-to-back) on hardware — **4/4 scenarios passed every time**,
+     including `04-mixed-default-trap`. No repeat of the `chv exit=124` hang.
+     Conclusion: the single prior hang looks transient/environmental (e.g.
+     stale `thhv.ko`/device state from a prior run) rather than a deterministic
+     regression introduced by this session's changes — nothing in the diff
+     between the hang and now besides the added (harmless, log-only)
+     `[SWITCH-DBG]` debug print in `switch.rs`. Not yet confirmed whether
+     `interrupt_inject` actually fires during a passing run (debug line not
+     yet inspected in a `.chv` log) — low priority now given stability, but
+     worth a quick check before removing the instrumentation. Moving on to
+     testing the other eunomia workloads/policy suites before considering
+     this fully closed and cleaning up the debug print.
+
+  All changes this segment remain **uncommitted** (user's explicit workflow:
+  "do not commit when you're done, let me review the changes and run tests").
+  Modified/added: `capa-engine/src/domain.rs`, `domain_api.rs`,
+  `tests/unit/switch.rs`; `cloud-hypervisor/hypervisor/src/themis/{config.rs,
+  policy_walker.rs,defaults/{standard,confidential}.json}`;
+  `eunomia/policies/timer/{suppress,deliver}.json`;
+  `themis/policies/dom1-{standard,confidential}.json` (new);
+  `themis/scripts/{run-dom1.sh,update-bins.sh}`; `docs/chv-themis-config.md`;
+  `themis/capavisor/src/arch/x86_64/hypercall/switch.rs` (debug instrumentation).
+
+- **2026-08-04 — LAPIC-timer policy bypass: root-caused, attempted fix caused a
+  live hang, reverted to baseline. Fixed properly 2026-08-05.**
+
+  **Fixed 2026-08-05** — `themis/capavisor/src/arch/x86_64/msr_emulator.rs`'s
+  `deliver_timer_vector` (IA32_TSC_DEADLINE / vector `0xEC` emulation) now
+  gates injection on the running domain's `VectorPolicy::injectable` bit for
+  the vector (via new `vector_injectable()` helper, using the same
+  `platform.get_core_cap(core_id)` lookup pattern as `doorbell.rs`'s
+  `do_inject_interrupt` and `switch.rs`'s `current_core_child_cap`) — **not**
+  `visibility`, since `injectable` is documented in `capa-engine/src/domain.rs`
+  as exactly the axis for "a parent/emulated-device acting as the sole,
+  software-controlled source of a vector regardless of real hardware timing",
+  which is precisely this case. Fails open (`true`) if the current
+  core/domain can't be resolved (matches every policy default and avoids a
+  new failure mode during early boot). No VP-swap/full-context-switch
+  reintroduced — this is a cheap, local policy read, avoiding the livelock
+  from the first (reverted) attempt that routed through
+  `forward_interrupt_to_handler`.
+
+  **Fixture correction**: `eunomia/policies/timer/suppress.json`'s vector-236
+  override previously set `injectable: true` (only `visibility: NotReport`
+  differed from `deliver.json`) — that tested the wrong axis. Since
+  `visibility` defaults to `NotReport` for *every* vector under
+  `DomainPolicy::new_restricted` (the item-2 fix), gating the timer on
+  `visibility` instead of `injectable` would break the LAPIC timer for every
+  default-policy domain (dom1, all eunomia workloads with no explicit
+  vector-236 override), not just this fixture. Corrected `suppress.json` to
+  `injectable: false` so it actually exercises the "never fires" path via
+  the same axis the emulator gates on. Updated `config.rs`'s
+  `eunomia_timer_interrupt_policies_parse` test accordingly (per-file
+  expected `injectable`, not a blanket `true`).
+
+  Verified: `cargo build --release -p
+  capavisor` clean, `cargo build-bins` packages cleanly, capa-engine tests
+  pass (5 unit tests unaffected — no capa-engine changes needed for this
+  fix), `hypervisor --features themis` 72 tests pass (incl. updated
+  `eunomia_timer_interrupt_policies_parse`). **Still needs
+  live hardware re-validation** with `eunomia/policies/timer/deliver.json`
+  (expect fire) and `suppress.json` (expect no fire, no hang) — not yet
+  tested on hardware as of this edit.
+
+  **Confirmed bug (original, now fixed)**: `msr_emulator.rs`'s
   `deliver_timer_vector()` (IA32_TSC_DEADLINE / vector `0xEC` emulation)
   injects directly into the running domain **unconditionally**, never
   consulting `InterruptVisibility` at all (doc comment says so on purpose —

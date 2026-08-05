@@ -709,7 +709,9 @@ fn test_deliver_interrupt_vp_3domain() {
 }
 
 /// After interrupt delivery (3-domain chain), dom0 switches to dom1 via
-/// switch. Since dom1 defaults to `Report` policy, the walk stops
+/// switch. dom1 is explicitly configured `Report` for this vector (see
+/// `VectorPolicy::default_not_report` — this used to be capa-engine's
+/// blanket default for restricted domains, now opt-in), so the walk stops
 /// immediately at dom1: dom1.vp0 → Running, `interrupt_return` carries the
 /// vector. dom2.vp0 (dom1's callee) is left untouched — still
 /// `Waiting{unlocks:None}` — no release step happens; it remains directly
@@ -717,6 +719,7 @@ fn test_deliver_interrupt_vp_3domain() {
 #[test]
 fn test_interrupt_resume_leaves_untouched_callee_waiting() {
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
 
     let dom0_id = dom0.read().data.id;
     let dom1_id = dom1.read().data.id;
@@ -909,6 +912,7 @@ fn test_deliver_interrupt_vp_no_vp_on_core() {
 #[test]
 fn test_waiting_vp_resumable_by_different_vp_same_domain() {
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
     let dom1_id = dom1.read().data.id;
 
     // Deliver interrupt: dom0 is handler, dom2.vp0 → Waiting{unlocks:None},
@@ -984,6 +988,7 @@ fn test_waiting_vp_resumable_by_different_vp_same_domain() {
 #[test]
 fn test_deep_waiting_vp_blocked_until_caller_resumes() {
     let (dom0, dom1, dom2, platform) = setup_3domain_chain();
+    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
     let dom0_id = dom0.read().data.id;
     let dom1_id = dom1.read().data.id;
     let dom2_id = dom2.read().data.id;
@@ -1215,13 +1220,17 @@ fn test_4domain_interrupt_delivery_states() {
     );
 }
 
-/// dom1/dom2/dom3 default to `Report`. Claiming dom1 stops immediately
-/// (dom1.report == true): dom1 → Running, dom2 and dom3 are left completely
-/// untouched (still Waiting) — no release step. Then claiming dom2 (also
-/// `Report`) likewise stops immediately, dom3 still untouched.
+/// dom1/dom2/dom3 explicitly configured `Report` for vector 0 (this used to
+/// be capa-engine's blanket default for restricted domains; it is now
+/// opt-in — see `VectorPolicy::default_not_report`). Claiming dom1 stops
+/// immediately (dom1.report == true): dom1 → Running, dom2 and dom3 are left
+/// completely untouched (still Waiting) — no release step. Then claiming
+/// dom2 (also `Report`) likewise stops immediately, dom3 still untouched.
 #[test]
 fn test_4domain_default_report_chain_stops_one_level_at_a_time() {
     let (dom0, dom1, dom2, dom3, platform) = setup_4domain_chain();
+    set_vector_policy(&dom1, 0, VectorPolicy::default_report());
+    set_vector_policy(&dom2, 0, VectorPolicy::default_report());
     let dom1_id = dom1.read().data.id;
 
     Capability::<Domain>::deliver_interrupt_vp(&platform, &dom3, 0, 0)
@@ -1554,6 +1563,7 @@ fn test_independent_chain_cannot_steal_deeper_waiting_frame() {
 
     // Domain B, child of A, 4 VPs (vp0 = B1, vp1 = B2).
     let (b, b_h) = make_sealed_child(&a);
+    set_vector_policy(&b, 0, VectorPolicy::default_report());
 
     // Domain C, child of A (visible to B via a manually added handle, as in
     // `setup_3domain_chain` above).

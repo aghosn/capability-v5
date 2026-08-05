@@ -55,6 +55,28 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     core::arch::asm!("wrmsr", in("ecx") msr, in("eax") lo, in("edx") hi, options(nostack));
 }
 
+#[inline(always)]
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nostack));
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Read back the policy's configured "expected outcome" for this run.
+///
+/// `IA32_TSC_DEADLINE` RDMSR under an `Emulate` policy always returns the
+/// policy's fixed, config-time JSON `value` (see
+/// `msr_emulator.rs`/`monitor.rs`'s "MSR Emulate scratch value" semantics)
+/// — capavisor's own WRMSR handler never touches this stored value, only
+/// the VMX-preemption-timer-based deadline state. This gives test harnesses
+/// a policy-file-driven signal without any new hypercall: policies under
+/// `eunomia/policies/timer/` set it to `0` (timer should fire) or `1`
+/// (timer should be suppressed — `injectable: false`).
+pub fn expected_fire() -> bool {
+    unsafe { rdmsr(IA32_TSC_DEADLINE) == 0 }
+}
+
 /// Initialise the LAPIC timer in TSC-deadline mode on `TIMER_VECTOR`.
 pub fn init() {
     unsafe {

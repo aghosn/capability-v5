@@ -144,6 +144,12 @@ pub struct InactiveVcpu {
     regs: [u64; REGFILE_SIZE],
     /// Saved FPU/SSE/AVX state (XSAVE format).
     xsave_area: XsaveArea,
+    /// Capavisor-emulated IA32_TSC_DEADLINE value for this VP (0 = no
+    /// deadline armed). Per-VP rather than per-core: this VP may be
+    /// switched onto a different physical core (see `VcpuSlot`), and the
+    /// pending deadline must travel with it, not stay behind on the core
+    /// it was armed on. See `msr_emulator.rs`.
+    tsc_deadline: u64,
 }
 
 // SAFETY: After VMCLEAR, the VMCS is flushed to memory and not bound to any
@@ -170,6 +176,7 @@ impl InactiveVcpu {
             launched: false,
             regs: [0u64; REGFILE_SIZE],
             xsave_area: XsaveArea::new(),
+            tsc_deadline: 0,
         }
     }
 
@@ -190,6 +197,7 @@ impl InactiveVcpu {
             launched: self.launched,
             regs: self.regs,
             xsave_area: self.xsave_area,
+            tsc_deadline: self.tsc_deadline,
             _not_send: PhantomData,
         })
     }
@@ -237,6 +245,7 @@ pub struct ActiveVcpu {
     launched: bool,
     regs: [u64; REGFILE_SIZE],
     xsave_area: XsaveArea,
+    tsc_deadline: u64,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -298,6 +307,17 @@ impl ActiveVcpu {
         self.vpid
     }
 
+    /// Capavisor-emulated IA32_TSC_DEADLINE value for this VP (0 = none
+    /// armed). Per-VP state — see the field doc on `InactiveVcpu`.
+    pub fn tsc_deadline(&self) -> u64 {
+        self.tsc_deadline
+    }
+
+    /// Set the capavisor-emulated IA32_TSC_DEADLINE value for this VP.
+    pub fn set_tsc_deadline(&mut self, deadline: u64) {
+        self.tsc_deadline = deadline;
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────── //
 
     /// Deactivate this VCPU: VMCLEAR the VMCS and return an InactiveVcpu.
@@ -320,6 +340,7 @@ impl ActiveVcpu {
             launched: false, // VMCLEAR resets the launch state
             regs: self.regs,
             xsave_area: self.xsave_area,
+            tsc_deadline: self.tsc_deadline,
         })
     }
 
