@@ -142,3 +142,47 @@ pub(crate) unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_rem
         unsafe { crate::arch::x86_64::apic::send_notification_ipi(ndst, notify_vec, hhdm) };
     }
 }
+
+/// Deliver `vector` to `vcpu` — the VP currently active *on this core*
+/// (never a remote one; always `is_remote = false` under the hood).
+///
+/// This is the single shared mechanism behind every software interrupt
+/// delivery path in capavisor: try immediate VM-entry injection via
+/// [`crate::arch::x86_64::vcpu_ext::ActiveVcpuExt::inject_external_vector`]
+/// when the guest can currently accept an external interrupt
+/// (`guest_can_accept_external()`); otherwise queue the vector in the VP's
+/// own PIR (`inject_via_pid`, local/no notification-IPI case) and arm
+/// interrupt-window exiting so hardware re-exits as soon as the guest's
+/// IF/STI-shadow state allows it, at which point
+/// [`crate::arch::x86_64::hypercall::switch::drain_pir_on_interrupt_window`]
+/// drains and delivers it.
+///
+/// Previously this exact `if guest_can_accept_external() { inject } else {
+/// inject_via_pid + set_interrupt_window_exit }` sequence was copy-pasted
+/// across `msr_emulator.rs::deliver_timer_vector`, and twice in
+/// `hypercall/switch.rs::forward_interrupt_to_handler` (the `Deliver`
+/// short-circuit and the main policy-gated path) — each callsite is
+/// purely a policy decision about *whether/which* vector to deliver;
+/// the delivery mechanism itself was, and should be, identical.
+///
+/// Callers remain responsible for all policy gating (`injectable`,
+/// `InterruptVisibility`, etc.) before calling this — it implements only
+/// the delivery mechanism, no policy.
+pub(crate) fn deliver_vector_local(
+    vcpu: &mut crate::vcpu::ActiveVcpu,
+    hhdm: u64,
+    vector: u8,
+) {
+    use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
+
+    if vcpu.guest_can_accept_external() {
+        vcpu.inject_external_vector(vector);
+        return;
+    }
+
+    let pid_phys = vcpu.pid_phys();
+    if pid_phys != 0 {
+        unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+    }
+    vcpu.set_interrupt_window_exit(true);
+}
