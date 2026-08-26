@@ -3216,7 +3216,8 @@ impl Capability<Domain> {
                                 let (start, end) = match rule {
                                     crate::interposition::ProcFeaturePolicy::Trap(r)
                                     | crate::interposition::ProcFeaturePolicy::Native(r)
-                                    | crate::interposition::ProcFeaturePolicy::Emulate(r, _) => *r,
+                                    | crate::interposition::ProcFeaturePolicy::Emulate(r, _)
+                                    | crate::interposition::ProcFeaturePolicy::EmulateConst(r, _) => *r,
                                 };
                                 let action = match rule {
                                     crate::interposition::ProcFeaturePolicy::Trap(_) => {
@@ -3225,11 +3226,13 @@ impl Capability<Domain> {
                                     crate::interposition::ProcFeaturePolicy::Native(_) => {
                                         crate::interposition::DefaultAction::Native
                                     }
-                                    crate::interposition::ProcFeaturePolicy::Emulate(_, _) => {
-                                        // Emulate ⇒ trap (engine consumes the
-                                        // exit and returns/discards the stored
-                                        // value); from a bitmap perspective
-                                        // Emulate is equivalent to Trap.
+                                    crate::interposition::ProcFeaturePolicy::Emulate(_, _)
+                                    | crate::interposition::ProcFeaturePolicy::EmulateConst(_, _) => {
+                                        // Emulate/EmulateConst ⇒ trap (engine
+                                        // consumes the exit and
+                                        // returns/discards the stored value);
+                                        // from a bitmap perspective both are
+                                        // equivalent to Trap.
                                         crate::interposition::DefaultAction::Trap
                                     }
                                 };

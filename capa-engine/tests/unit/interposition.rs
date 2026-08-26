@@ -299,6 +299,64 @@ fn update_emulate_on_native_range_fails() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════ //
+//  EmulateConst — read-only emulate (write always discarded)
+// ═══════════════════════════════════════════════════════════════════════════ //
+
+#[test]
+fn insert_emulate_const_and_lookup() {
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    policy.insert_emulate_const((0x300, 0x33F), 0).unwrap();
+
+    match policy.lookup(&0x310) {
+        Some(ProcFeaturePolicy::EmulateConst(_, v)) => assert_eq!(*v, 0),
+        other => panic!("expected EmulateConst, got {:?}", other),
+    }
+    assert!(policy.lookup(&0x2FF).is_none());
+    assert!(policy.lookup(&0x340).is_none());
+}
+
+#[test]
+fn update_emulate_value_never_matches_emulate_const() {
+    // The whole point of EmulateConst: `update_emulate_value` — the API
+    // capavisor's generic WRMSR/CPUID-write dispatch calls to implement
+    // the writable "scratch register" Emulate semantics — must never be
+    // able to mutate an EmulateConst entry. A write targeting one must
+    // report NotFound so the caller discards it, leaving reads pinned to
+    // the value set at creation forever.
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    policy.insert_emulate_const((0x300, 0x33F), 0).unwrap();
+
+    assert_eq!(
+        policy.update_emulate_value(&0x310, 0xFFFF_FFFF),
+        Err(InsertError::NotFound)
+    );
+    // Value must be unchanged.
+    match policy.lookup(&0x310) {
+        Some(ProcFeaturePolicy::EmulateConst(_, v)) => assert_eq!(*v, 0),
+        other => panic!("expected EmulateConst still at 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn emulate_const_overlaps_with_emulate_and_trap() {
+    // EmulateConst must participate in overlap checking exactly like every
+    // other override kind — it's still a range claim in the same table.
+    let mut policy: MsrPolicy = ProcFeatureConfig::new(DefaultAction::Native);
+    policy.insert_emulate_const((0x300, 0x33F), 0).unwrap();
+
+    assert_eq!(
+        policy.insert_emulate((0x320, 0x350), 1),
+        Err(InsertError::Overlap)
+    );
+    assert_eq!(
+        policy.insert_range((0x2F0, 0x300), DefaultAction::Trap),
+        Err(InsertError::Overlap)
+    );
+    // Adjacent, non-overlapping range is fine.
+    policy.insert_emulate((0x340, 0x350), 1).unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════ //
 //  Edge cases
 // ═══════════════════════════════════════════════════════════════════════════ //
 

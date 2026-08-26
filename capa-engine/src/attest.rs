@@ -850,6 +850,12 @@ fn attest_proc_feature_policy<T, F, R>(
                         range_str, fmt_value(val)
                     ));
                 }
+                ProcFeaturePolicy::EmulateConst(_, val) => {
+                    out.push_str(&format!(
+                        "    {}: EmulateConst({})\n",
+                        range_str, fmt_value(val)
+                    ));
+                }
             }
         }
     }
