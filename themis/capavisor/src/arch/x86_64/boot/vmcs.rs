@@ -47,6 +47,19 @@ pub fn vmcs(info: &PlatformInfo, vmx: &mut VmxState, capa: &CapaState) {
     vmx.dom0.alloc_msr_list_regions(&capa.platform, num_vps);
     vmx.dom0.alloc_msr_bitmap(&capa.platform);
 
+    // Populate the MSR bitmap from dom0's own MsrPolicy — the same
+    // projection children get via `hypercall/vp.rs` (see
+    // `msr_bitmap::populate_from_policy`). dom0's policy is Native by
+    // default with `EmulateConst(0)` stubs seeded for a handful of
+    // perf/uncore-counter ranges (see `boot::capa::seed_dom0_perf_msr_stubs`).
+    unsafe {
+        crate::arch::msr_bitmap::populate_from_policy(
+            vmx.dom0.msr_bitmap_phys(),
+            capa.platform.hhdm_offset(),
+            &capa.root_domain.read().data.policy.msrs,
+        );
+    }
+
     serial_println!(
         "  Allocated {} VMCS + {} VAPIC + 1 MSR-bitmap pages from META pool",
         num_vps,

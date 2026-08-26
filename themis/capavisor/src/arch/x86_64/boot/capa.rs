@@ -59,6 +59,11 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
     let self_domain_cap_handle: u64;
     {
         let mut dom = root_domain.write();
+
+        // Seed dom0's own MSR policy with the perf/uncore-counter stubs
+        // (see seed_dom0_perf_msr_stubs doc comment for rationale).
+        seed_dom0_perf_msr_stubs(&mut dom.data.policy.msrs);
+
         let mut sub = 1u64;
 
         for region in &info.partition.dom0_owned[..info.partition.dom0_owned_count] {
@@ -301,5 +306,52 @@ pub fn capa(info: &PlatformInfo, platform: crate::platform::ThemisPlatform) -> C
         root_domain,
         mem_caps,
         meta_caps,
+    }
+}
+
+/// Insert `EmulateConst(range, 0)` overrides on `msrs` for every MSR range
+/// that (per the historical rationale in commit 5e76cefa5) needs to be
+/// stubbed rather than left `Native`: some platforms / nested-virtualization
+/// configs #GP on these MSRs, and Linux's perf subsystem probes them
+/// unconditionally at boot. `EmulateConst` (not `Emulate`) is required here:
+/// Linux's PMU-detection does a WRMSR-then-RDMSR self-test, and a writable
+/// stub would echo the value back and make Linux believe it has a real PMU.
+///
+/// This is dom0's *own* policy, seeded once at bring-up before any
+/// capability-mediated operation runs (a plain struct field, not an
+/// `UpdateBatch` — the root domain has no parent).
+///
+/// Ranges match `msr_virt.rs`'s former `TRAPPED_RANGES` exactly (kept here,
+/// not in capa-engine's arch-agnostic `domain.rs`, since MSRs are
+/// x86-64-specific).
+fn seed_dom0_perf_msr_stubs(msrs: &mut capability_engine::interposition::MsrPolicy) {
+    use x86::msr;
+
+    const PERF_MSR_STUB_RANGES: &[(u32, u32)] = &[
+        // Architectural perf-monitoring counters (IA32_PMC0–7)
+        (msr::IA32_PMC0, msr::IA32_PMC7),
+        // Perf event selectors (IA32_PERFEVTSEL0–7)
+        (msr::IA32_PERFEVTSEL0, msr::IA32_PERFEVTSEL7),
+        // Fixed-function counters (IA32_FIXED_CTR0–2)
+        (msr::IA32_FIXED_CTR0, msr::IA32_FIXED_CTR2),
+        // Perf capabilities
+        (msr::IA32_PERF_CAPABILITIES, msr::IA32_PERF_CAPABILITIES),
+        // Fixed CTR ctrl + global perf status/ctrl/ovf (0x38D–0x396)
+        (msr::IA32_FIXED_CTR_CTRL, 0x396),
+        // Uncore counters & ARB perfevtsel (0x3B0–0x3C7)
+        (0x3B0, 0x3C7),
+        // Full-width architectural counters (IA32_A_PMC0–7)
+        (msr::IA32_A_PMC0, msr::IA32_A_PMC7),
+        // CBO uncore PMU (0x700–0x73F)
+        (0x700, 0x73F),
+        // Extended uncore PMU — Rocket Lake / Tiger Lake (0xE00–0xE7F)
+        (0xE00, 0xE7F),
+    ];
+
+    // Ranges are non-overlapping and this runs once at bring-up before any
+    // MsrPolicy overrides exist, so insertion cannot fail.
+    for &(lo, hi) in PERF_MSR_STUB_RANGES {
+        msrs.insert_emulate_const((lo, hi), 0)
+            .expect("P2c: dom0 perf-MSR stub range insertion");
     }
 }

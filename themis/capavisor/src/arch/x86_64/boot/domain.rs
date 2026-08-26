@@ -126,15 +126,17 @@ impl Domain {
         }
     }
 
-    /// Allocate the MSR bitmap page from META (shared by all VPs) and
-    /// initialize it to trap MSRs that must be virtualized.
+    /// Allocate the MSR bitmap page from META (shared by all VPs).
     ///
-    /// See [`crate::msr_virt`] for the list of trapped ranges and the
-    /// VMEXIT emulation handlers.
+    /// The page is left zeroed (all-passthrough); the caller must populate
+    /// it from the domain's `MsrPolicy` via
+    /// `crate::arch::msr_bitmap::populate_from_policy` before first
+    /// VMENTRY — see `boot::vmcs::vmcs` for dom0's call site. This mirrors
+    /// exactly how children's MSR bitmaps are populated
+    /// (`hypercall/vp.rs`), so dom0 and children share one bitmap-writer
+    /// implementation.
     pub fn alloc_msr_bitmap(&mut self, platform: &crate::platform::ThemisPlatform) {
         self.msr_bitmap = platform.alloc_meta_frame(self.id);
-        let virt = (self.msr_bitmap + self.hhdm_offset) as *mut u8;
-        crate::arch::msr_virt::init_bitmap(virt);
     }
 
     pub fn vmcs_phys(&self, vp_index: usize) -> u64 {

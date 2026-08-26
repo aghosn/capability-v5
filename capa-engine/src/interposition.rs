@@ -36,6 +36,13 @@ pub enum ProcFeaturePolicy<T: ProcFeature> {
     Emulate(T::Range, T::Value),
     /// Execute natively on the physical CPU.
     Native(T::Range),
+    /// Return a fixed, **read-only** value: reads always return the value
+    /// set at creation, writes are silently discarded. Unlike `Emulate`
+    /// (a writable scratch register — see `update_emulate_value`), this is
+    /// for resources that must appear present but must never echo back
+    /// what the guest wrote (e.g. a write-then-readback self-test used to
+    /// probe for real hardware).
+    EmulateConst(T::Range, T::Value),
 }
 
 impl<T: ProcFeature> ProcFeaturePolicy<T> {
@@ -45,6 +52,7 @@ impl<T: ProcFeature> ProcFeaturePolicy<T> {
             ProcFeaturePolicy::Trap(r) => r,
             ProcFeaturePolicy::Emulate(r, _) => r,
             ProcFeaturePolicy::Native(r) => r,
+            ProcFeaturePolicy::EmulateConst(r, _) => r,
         }
     }
 }
@@ -150,8 +158,34 @@ impl<T: ProcFeature> ProcFeatureConfig<T> {
         Ok(())
     }
 
+    /// Insert an `EmulateConst` override: reads always return `value`,
+    /// writes are always discarded. Entries inserted this way can never be
+    /// changed via [`Self::update_emulate_value`] — that's the point.
+    pub fn insert_emulate_const(
+        &mut self,
+        range: T::Range,
+        value: T::Value,
+    ) -> core::result::Result<(), InsertError> {
+        let start = T::range_start(&range);
+        let end = T::range_end(&range);
+        if end < start {
+            return Err(InsertError::InvalidRange);
+        }
+        if self.overlaps(start, end) {
+            return Err(InsertError::Overlap);
+        }
+        let pos = self.overrides.partition_point(|rule| {
+            T::range_start(rule.range()) < start
+        });
+        self.overrides
+            .insert(pos, ProcFeaturePolicy::EmulateConst(range, value));
+        Ok(())
+    }
+
     /// Update the emulated value for an existing Emulate entry at `key`.
-    /// If no Emulate entry exists at that key, returns NotFound.
+    /// If no Emulate entry exists at that key, returns NotFound. Does not
+    /// match `EmulateConst` entries (permanently read-only by design), so a
+    /// write targeting one correctly reports `NotFound`.
     pub fn update_emulate_value(
         &mut self,
         key: &T::Input,

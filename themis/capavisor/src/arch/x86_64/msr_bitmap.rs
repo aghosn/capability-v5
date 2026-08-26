@@ -107,8 +107,8 @@ pub unsafe fn trap_msr(bitmap_phys: u64, hhdm: u64, msr: u32, trap: bool) {
 }
 
 /// Populate the MSR bitmap at `bitmap_phys` (HHDM-mapped) so that every
-/// MSR whose policy resolves to `Trap` or `Emulate` traps, and every
-/// MSR whose policy resolves to `Native` runs natively.
+/// MSR whose policy resolves to `Trap`, `Emulate`, or `EmulateConst` traps,
+/// and every MSR whose policy resolves to `Native` runs natively.
 ///
 /// # Safety
 /// `bitmap_phys` must be a valid 4 KiB-aligned physical address backing
@@ -134,7 +134,9 @@ pub unsafe fn populate_from_policy(bitmap_phys: u64, hhdm: u64, policy: &MsrPoli
     // applied to whichever sub-range they intersect.
     for rule in &policy.overrides {
         let trap_bits = match rule {
-            ProcFeaturePolicy::Trap(_) | ProcFeaturePolicy::Emulate(_, _) => true,
+            ProcFeaturePolicy::Trap(_)
+            | ProcFeaturePolicy::Emulate(_, _)
+            | ProcFeaturePolicy::EmulateConst(_, _) => true,
             ProcFeaturePolicy::Native(_) => false,
         };
         let range = rule.range();
@@ -177,4 +179,14 @@ fn apply_to_subrange(
             p.write_volatile(next);
         }
     }
+}
+
+/// Returns `true` if `msr` falls in one of the two ranges the bitmap can
+/// express (`LOW_RANGE` / `HIGH_RANGE`, SDM Vol 3C §24.6.9). MSRs outside
+/// both ranges always cause a VM exit regardless of the bitmap, so callers
+/// dispatching a `Native`-policy MSR that still trapped (i.e. it's outside
+/// both ranges) use this to distinguish "safe to really pass through" from
+/// "must inject #GP" — see `vmexit/msr.rs`'s local handlers.
+pub fn in_bitmap_range(msr: u32) -> bool {
+    (msr >= LOW_RANGE.0 && msr <= LOW_RANGE.1) || (msr >= HIGH_RANGE.0 && msr <= HIGH_RANGE.1)
 }

@@ -82,7 +82,8 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                             vp.handle_local(reason, info);
                             continue;
                         }
-                        InterpositionAction::Emulate(result) => {
+                        InterpositionAction::Emulate(result)
+                        | InterpositionAction::EmulateConst(result) => {
                             vp.emulate_cpuid(&result);
                             continue;
                         }
@@ -96,8 +97,8 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                 {
                     let action = lookup_msr_action(platform, *number);
                     if !is_write {
-                        // RDMSR: existing semantics — Emulate returns the
-                        // policy's stored value.
+                        // RDMSR: existing semantics — Emulate/EmulateConst
+                        // both return the policy's stored value.
                         match action {
                             InterpositionAction::Trap => {
                                 vp.forward_exit(reason);
@@ -107,16 +108,15 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                                 vp.handle_local(reason, info);
                                 continue;
                             }
-                            InterpositionAction::Emulate(stored) => {
+                            InterpositionAction::Emulate(stored)
+                            | InterpositionAction::EmulateConst(stored) => {
                                 vp.emulate_rdmsr(stored);
                                 continue;
                             }
                         }
                     } else {
-                        // WRMSR: symmetric three-state.
-                        // Emulate ⇒ try capavisor's internal MSR emulator
-                        // registry; fail-closed to Trap (forward to parent)
-                        // when no handler is registered.
+                        // WRMSR: symmetric three-state (Emulate) plus a
+                        // read-only variant (EmulateConst).
                         match action {
                             InterpositionAction::Trap => {
                                 vp.forward_exit(reason);
@@ -143,6 +143,12 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                                         continue;
                                     }
                                 }
+                            }
+                            InterpositionAction::EmulateConst(_) => {
+                                // Read-only: write is always discarded,
+                                // just advance RIP so the guest doesn't fault.
+                                vp.next_rip();
+                                continue;
                             }
                         }
                     }
@@ -192,6 +198,9 @@ enum InterpositionAction<V> {
     Trap,
     Native,
     Emulate(V),
+    /// Read-only emulate: writes are always discarded, reads always return
+    /// the stored value (see `ProcFeaturePolicy::EmulateConst`).
+    EmulateConst(V),
 }
 
 /// Look up CPUID interposition policy for a specific (leaf, subleaf).
@@ -209,6 +218,7 @@ fn lookup_cpuid_action(
     let key = (leaf, subleaf);
     match cpuid_cfg.lookup(&key) {
         Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
+        Some(ProcFeaturePolicy::EmulateConst(_, value)) => InterpositionAction::EmulateConst(*value),
         Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
         Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
         None => match cpuid_cfg.default {
@@ -228,6 +238,7 @@ fn lookup_msr_action(platform: &ThemisPlatform, msr: u32) -> InterpositionAction
     let msr_cfg = &guard.data.policy.msrs;
     match msr_cfg.lookup(&msr) {
         Some(ProcFeaturePolicy::Emulate(_, value)) => InterpositionAction::Emulate(*value),
+        Some(ProcFeaturePolicy::EmulateConst(_, value)) => InterpositionAction::EmulateConst(*value),
         Some(ProcFeaturePolicy::Native(_)) => InterpositionAction::Native,
         Some(ProcFeaturePolicy::Trap(_)) => InterpositionAction::Trap,
         None => match msr_cfg.default {
