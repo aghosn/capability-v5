@@ -25,6 +25,12 @@
 #   CHV_CPUS      vCPU count (default: 2)
 #   CHV_MEM       Memory (default: 1G)
 #   CHV_EXTRA_ARGS  Extra cloud-hypervisor arguments
+#   DOM1_SSH_FWD_PORT  dom0-side port DNAT'd to dom1:22 (default: 2223). To
+#                   reach dom1 with a single `ssh` from the real host (no
+#                   jump host), boot dom0 with a matching QEMU hostfwd, e.g.
+#                   `QEMU_NET_FWD="hostfwd=tcp::2223-:2223" cargo themis`,
+#                   then from the host: `ssh -p 2223 cloud@localhost`
+#                   (password: cloud123).
 #   SYSTEMD_DEBUG   Set to 1 to add `systemd.log_level=debug systemd.log_target=console`
 #                   to the kernel cmdline (verbose systemd boot, useful for diagnosing
 #                   PID1 failures).
@@ -186,6 +192,7 @@ setup_networking() {
     local TAP="tap-dom1"
     local DOM1_IP="192.168.100.2"
     local GW_IP="192.168.100.1"
+    local SSH_FWD_PORT="${DOM1_SSH_FWD_PORT:-2223}"
 
     if ! ip link show "$TAP" &>/dev/null 2>&1; then
         ip tuntap add "$TAP" mode tap
@@ -196,7 +203,19 @@ setup_networking() {
     sysctl -qw net.ipv4.ip_forward=1
     iptables -t nat -C POSTROUTING -s 192.168.100.0/24 -j MASQUERADE 2>/dev/null || \
         iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -j MASQUERADE
+
+    # SSH forward: dom0:$SSH_FWD_PORT -> dom1:22. Combined with the QEMU
+    # hostfwd that exposes dom0's own port $SSH_FWD_PORT to the host (see
+    # run-qemu.sh's QEMU_NET_FWD), this gives a single-hop
+    # `ssh -p $SSH_FWD_PORT cloud@localhost` straight from the host into
+    # dom1 -- no jump host, no manual console interaction.
+    iptables -t nat -C PREROUTING -p tcp --dport "$SSH_FWD_PORT" \
+        -j DNAT --to-destination "${DOM1_IP}:22" 2>/dev/null || \
+        iptables -t nat -A PREROUTING -p tcp --dport "$SSH_FWD_PORT" \
+            -j DNAT --to-destination "${DOM1_IP}:22"
+
     echo "  network:   tap=$TAP gw=$GW_IP dom1=$DOM1_IP"
+    echo "  ssh fwd:   dom0:$SSH_FWD_PORT -> dom1:22 (host: ssh -p $SSH_FWD_PORT cloud@localhost, if dom0's hostfwd also forwards this port)"
 }
 
 # ── Build cmdline ─────────────────────────────────────────────────────────
