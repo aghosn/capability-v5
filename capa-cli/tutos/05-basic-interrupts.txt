@@ -33,10 +33,17 @@ send parent_mem parent
 @msg 📋 Step 3: Configure parent interrupt policy (before sealing)
 @msg   • parent: REPORT for vector 55 — routing continues up to root, but
 @msg     parent is notified and freezes here until explicitly rescheduled
+@msg   • parent: REPORT as blanket default too — a freshly created domain's
+@msg     default is NOTREPORT (the safe baseline), so parent must explicitly
+@msg     loosen its own default before child can inherit a REPORT default
+@msg     (monotonicity: a child's default can never be less restrictive than
+@msg     its parent's default)
 set-interrupt-policy parent 55 REPORT
+set-default-interrupt-policy parent REPORT
 
 @msg
 @msg ✓ Parent will observe vector 55 (but not handle it directly)
+@msg ✓ Parent's blanket default loosened to REPORT so child can inherit it
 @msg
 
 # Seal parent
