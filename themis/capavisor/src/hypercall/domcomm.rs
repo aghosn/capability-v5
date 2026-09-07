@@ -1,6 +1,6 @@
 //! DOMCOMM_NOTIFY (0x19) handler and the GROW_RX / GROW_TX ring extension.
 
-use capability_engine::{CapabilityRef, Domain};
+use capability_engine::{Capability, CapabilityRef, CapaError, Domain};
 use themis_abi::errors;
 
 use super::{try_domain, HypercallResult};
@@ -17,19 +17,23 @@ pub(super) fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRe
 
     let domain_id = caller.read().data.id;
 
-    let pd = try_domain!(platform, domain_id);
+    let pd_arc = try_domain!(platform, domain_id);
 
-    let mut pd_locked = pd.lock();
-    if pd_locked.domcomm.is_none() {
+    if pd_arc.lock().domcomm.is_none() {
         return HypercallResult::error(errors::ERR_BADSTATE);
     }
 
-    // Drain all pending TX messages.
+    // Drain all pending TX messages. Each iteration only holds the
+    // per-domain mutex for the dequeue itself; GROW's capability
+    // resolution (handle_grow) acquires the engine's own op-lock
+    // separately, then re-acquires this mutex only for the ring
+    // push/ack -- the two locks are never held nested, so the
+    // op-lock-outermost convention used everywhere else is preserved.
     let mut buf = [0u8; 4096];
 
     loop {
-        let result = pd_locked.domcomm_tx_dequeue(&mut buf);
-        match result {
+        let dequeued = pd_arc.lock().domcomm_tx_dequeue(&mut buf);
+        match dequeued {
             None => break,
             Some((msg_type, payload_size, _seq)) => match msg_type {
                 domcomm::msg_types::GROW_RX | domcomm::msg_types::GROW_TX => {
@@ -37,7 +41,7 @@ pub(super) fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRe
                     handle_grow(
                         platform,
                         caller,
-                        &mut *pd_locked,
+                        &pd_arc,
                         is_rx,
                         &buf[..payload_size],
                     );
@@ -63,11 +67,16 @@ pub(super) fn do_domcomm_notify(platform: &ThemisPlatform, caller: &CapabilityRe
 ///
 /// Security: the payload was already copied from shared memory by
 /// domcomm_tx_dequeue (TOCTOU-safe). All domain-supplied values
-/// (handle, nr_pages) are bounds-checked before use.
+/// (handle, nr_pages) are bounds-checked before use. The memory
+/// capability resolution itself runs under the engine's op lock (via
+/// `Capability::platform_action_on_self`), separately from the
+/// per-domain mutex used for the ring push/ack below, so a concurrent
+/// revoke of that capability can't free the underlying pages in the
+/// gap between resolving them and extending the ring.
 fn handle_grow(
-    _platform: &ThemisPlatform,
+    platform: &ThemisPlatform,
     caller: &CapabilityRef<Domain>,
-    pd: &mut crate::platform::PlatformDomain,
+    pd_arc: &alloc::sync::Arc<spin::Mutex<crate::platform::PlatformDomain>>,
     is_rx: bool,
     payload: &[u8],
 ) {
@@ -76,7 +85,7 @@ fn handle_grow(
     let req_size = core::mem::size_of::<domcomm::GrowRequest>();
     if payload.len() < req_size {
         serial_println!("[domcomm] GROW payload too small ({})", payload.len());
-        send_grow_ack(pd, 1);
+        send_grow_ack(&mut pd_arc.lock(), 1);
         return;
     }
 
@@ -102,44 +111,48 @@ fn handle_grow(
     // Bounds-check nr_pages (prevent OOM from malicious domain).
     if req.nr_pages == 0 || req.nr_pages > 256 {
         serial_println!("[domcomm] GROW: invalid nr_pages {}", req.nr_pages);
-        send_grow_ack(pd, 6);
+        send_grow_ack(&mut pd_arc.lock(), 6);
         return;
     }
 
-    // Look up the capability to find the HPAs.
-    let hpa_start: u64;
-    let cap_size: u64;
-    {
-        let dom = caller.read();
-        let cap_weak = match dom.data.get_memory_capability(req.cap_handle) {
-            Some(w) => w.clone(),
-            None => {
-                serial_println!("[domcomm] GROW: cap {} not found", req.cap_handle);
-                send_grow_ack(pd, 2);
-                return;
+    // Look up the capability to find the HPAs -- resolved+read entirely
+    // under the engine's op lock (dom0's driver only checks
+    // ack.status != 0, so collapsing "not found"/"revoked" into one
+    // status code, as everywhere else in this codebase, is fine here).
+    let resolved = Capability::platform_action_on_self(
+        platform,
+        caller,
+        |_platform, caller_ref| {
+            let cap_weak = caller_ref
+                .read()
+                .data
+                .get_memory_capability(req.cap_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
+            let c = cap_ref.read();
+            // Verify the cap has COMM attribute (was REGISTER_COMM'd).
+            if !c.owned.attributes.comm() {
+                return Err(CapaError::InvalidOperation(
+                    "cap not COMM-attributed".into(),
+                ));
             }
-        };
-        drop(dom);
+            Ok((c.data.access.start, c.data.access.size))
+        },
+    );
 
-        let cap_ref = match cap_weak.upgrade() {
-            Some(r) => r,
-            None => {
-                serial_println!("[domcomm] GROW: cap {} revoked", req.cap_handle);
-                send_grow_ack(pd, 3);
-                return;
-            }
-        };
-        let c = cap_ref.read();
-        hpa_start = c.data.access.start;
-        cap_size = c.data.access.size;
-
-        // Verify the cap has COMM attribute (was REGISTER_COMM'd).
-        if !c.owned.attributes.comm() {
-            serial_println!("[domcomm] GROW: cap {} not COMM-attributed", req.cap_handle);
-            send_grow_ack(pd, 4);
+    let (hpa_start, cap_size) = match resolved {
+        Ok(v) => v,
+        Err(e) => {
+            serial_println!(
+                "[domcomm] GROW: cap {} resolution failed: {:?}",
+                req.cap_handle,
+                e,
+            );
+            send_grow_ack(&mut pd_arc.lock(), 2);
             return;
         }
-    }
+    };
 
     let expected_size = req.nr_pages as u64 * 0x1000;
     if cap_size < expected_size {
@@ -148,11 +161,12 @@ fn handle_grow(
             cap_size,
             expected_size,
         );
-        send_grow_ack(pd, 5);
+        send_grow_ack(&mut pd_arc.lock(), 5);
         return;
     }
 
-    // Extend the ring page list.
+    // Extend the ring page list and send the ack, all under one lock scope.
+    let mut pd = pd_arc.lock();
     let (new_page_count, new_capacity) = {
         let dc = pd.domcomm.as_mut().expect("DomainComm not init");
         let ring = if is_rx { &mut dc.rx } else { &mut dc.tx };

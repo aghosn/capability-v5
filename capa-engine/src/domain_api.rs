@@ -3613,6 +3613,62 @@ impl Capability<Domain> {
         Ok(())
     }
 
+    /// Resolve `child_handle` in `caller`'s capability tree and run `f`
+    /// with the resolved child, all under the engine's shared op-lock.
+    ///
+    /// For platform-only mechanisms that have no capa-engine bookkeeping
+    /// of their own yet (e.g. doorbell tables, PCI BDF assignment, PID
+    /// interrupt injection) — the engine's only job here is guaranteeing
+    /// `child` can't be concurrently revoked between resolution and
+    /// whatever raw platform action `f` performs, without requiring a
+    /// bespoke [`Platform`] trait method (and its own resolve/rollback
+    /// wiring) per mechanism.
+    ///
+    /// `f` receives the already-upgraded child [`CapabilityRef`] so it can
+    /// read whatever domain-level policy it needs (e.g. an `injectable`
+    /// bit) itself, still under the same lock — no second, unsynchronized
+    /// resolution required.
+    ///
+    /// This does not touch the capability tree and produces no [`Update`]s
+    /// — it exists purely to gate a platform-only action behind the same
+    /// lock used by revoke/seal/etc. As individual mechanisms grow real
+    /// capa-engine bookkeeping (policy, permissions, ...), they should
+    /// graduate to a dedicated mediated call instead of this escape hatch.
+    pub fn platform_action_on_child<T>(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        child_handle: LocalHandle,
+        f: impl FnOnce(&dyn Platform, &CapabilityRef<Domain>) -> Result<T>,
+    ) -> Result<T> {
+        crate::platform::execute(platform, false, || {
+            let child_weak = caller
+                .read()
+                .data
+                .get_domain_capability(child_handle)
+                .ok_or(CapaError::NotFound)?
+                .clone();
+            let child_ref = child_weak.upgrade().ok_or(CapaError::NotFound)?;
+            let result = f(platform, &child_ref)?;
+            Ok((result, UpdateBatch::new()))
+        })
+        .map(|(result, _batch)| result)
+    }
+
+    /// Same as [`Self::platform_action_on_child`], but for actions gated
+    /// against the caller's own capability tree instead of a child's (e.g.
+    /// DomainComm GROW resolving one of the caller's own memory
+    /// capabilities).
+    pub fn platform_action_on_self<T>(
+        platform: &dyn Platform,
+        caller: &CapabilityRef<Domain>,
+        f: impl FnOnce(&dyn Platform, &CapabilityRef<Domain>) -> Result<T>,
+    ) -> Result<T> {
+        crate::platform::execute(platform, false, || {
+            f(platform, caller).map(|result| (result, UpdateBatch::new()))
+        })
+        .map(|(result, _batch)| result)
+    }
+
     /// Read a VP register from a child domain.
     ///
     /// The engine validates:
