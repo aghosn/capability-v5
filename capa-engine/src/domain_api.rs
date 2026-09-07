@@ -2502,7 +2502,7 @@ impl Capability<Domain> {
         let mut intermediate_frames: Vec<VpCallContext> = Vec::new();
 
         match initial_state {
-            VpRunState::Available { .. } => {
+            VpRunState::Available { last_exit_reason } => {
                 let mut state = to_vp_arc.run_state.write();
                 if !matches!(*state, VpRunState::Available { .. }) {
                     return Err(CapaError::InvalidOperation(
@@ -2510,6 +2510,27 @@ impl Capability<Domain> {
                     ));
                 }
                 *state = VpRunState::Running { core: core_id };
+                drop(state);
+
+                // Snapshot parent-writable shared VP state (e.g. the COMM
+                // page) while still holding this op's lock, so a concurrent
+                // revoke of `to_domain_id` can't free/repurpose that memory
+                // in the gap between resolving the target and reading it
+                // (see `Platform::snapshot_comm_regs`'s doc). Only done on
+                // this direct-Available path: the Waiting/chain-collapse
+                // arm below can resolve to a domain other than the one
+                // named by the caller, and nothing here should be applied
+                // to a domain the caller didn't actually land on.
+                let write_set = write_set(
+                    &to_domain_ref.read().data,
+                    &VpRunState::Available { last_exit_reason },
+                    false,
+                );
+                if let Err(e) = platform.snapshot_comm_regs(to_domain_id, to_vp_id as u32, write_set)
+                {
+                    *to_vp_arc.run_state.write() = VpRunState::Available { last_exit_reason };
+                    return Err(e);
+                }
             }
             VpRunState::Waiting { blocked, .. } => {
                 if blocked {
@@ -3782,6 +3803,46 @@ fn visibility_from_u64(v: u64) -> Result<InterruptVisibility> {
 ///
 /// Returns `(child_domain_id, bitmap)` where `bitmap` is the read bitmap when
 /// `want_read = true` and the write bitmap otherwise.
+/// Resolve the register-access bitmap `child`'s own policy grants, given a
+/// VP currently in `run_state`.  Shared by `register_access_check`
+/// (top-level, per-register checks) and `switch_domain_forward`'s COMM-page
+/// snapshot (called from inside `execute()`, so it must not re-acquire any
+/// lock — this helper touches only its arguments, no locking of its own).
+///
+/// `run_state` only picks which policy bucket applies (interrupt vector,
+/// exit reason, or the VECTOR_AVAILABLE default) — the bitmap itself is
+/// always domain-level policy, not anything VP-specific.
+fn write_set(child: &Domain, run_state: &VpRunState, want_read: bool) -> RegBitmap {
+    match run_state {
+        VpRunState::Waiting { vector, .. } => {
+            let policy = child.policy.interrupts.get_policy(*vector);
+            if want_read {
+                policy.read_set
+            } else {
+                policy.write_set
+            }
+        }
+        VpRunState::Available {
+            last_exit_reason: Some(reason),
+        } => {
+            let action = child.policy.exits.get_action(*reason);
+            if want_read {
+                action.read_set
+            } else {
+                action.write_set
+            }
+        }
+        _ => {
+            let policy = child.policy.interrupts.get_policy(VECTOR_AVAILABLE);
+            if want_read {
+                policy.read_set
+            } else {
+                policy.write_set
+            }
+        }
+    }
+}
+
 fn register_access_check(
     caller: &CapabilityRef<Domain>,
     child_handle: LocalHandle,
@@ -3830,43 +3891,9 @@ fn register_access_check(
         return Err(CapaError::RegisterAccessDenied);
     }
 
-    // Select the correct policy source based on why the VP stopped.
-    //
-    // - Waiting: interrupt-caused exit → use InterruptPolicy
-    //   for the vector that caused the preemption.
-    // - Available with last_exit_reason: non-interrupt exit forwarded to parent
-    //   → use ExitPolicy for that exit reason.
-    // - Available without exit reason (fresh VP) or Locked: use InterruptPolicy
-    //   default (VECTOR_AVAILABLE).
-    let bitmap = match &*run_state {
-        VpRunState::Waiting { vector, .. } => {
-            let policy = child_r.data.policy.interrupts.get_policy(*vector);
-            if want_read {
-                policy.read_set
-            } else {
-                policy.write_set
-            }
-        }
-        VpRunState::Available {
-            last_exit_reason: Some(reason),
-        } => {
-            let action = child_r.data.policy.exits.get_action(*reason);
-            if want_read {
-                action.read_set
-            } else {
-                action.write_set
-            }
-        }
-        _ => {
-            // Fresh VP (no exit yet), or Locked VP — use VECTOR_AVAILABLE default.
-            let policy = child_r.data.policy.interrupts.get_policy(VECTOR_AVAILABLE);
-            if want_read {
-                policy.read_set
-            } else {
-                policy.write_set
-            }
-        }
-    };
+    // Select the correct policy source based on why the VP stopped (see
+    // `write_set`'s doc for the Waiting/Available/default split).
+    let bitmap = write_set(&child_r.data, &run_state, want_read);
 
     Ok((child_domain_id, bitmap))
 }

@@ -15,7 +15,7 @@ fn setup_root() -> (
     LocalHandle,
     CapabilityRef<MemoryRegion>,
 ) {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let root_domain = Domain::new_root(4);
     let root = Capability::new_root(0, 0, root_domain);
     let total_mem = MemoryRegion::new_root(0x0, 0x10000);

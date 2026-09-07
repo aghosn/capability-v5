@@ -125,7 +125,7 @@ fn test_switch_manager_core_count() {
 /// Basic switch from root VP[0] → child VP[0], then check context.
 #[test]
 fn test_vp_switch_domain_basic() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     let root_id = root.read().data.id;
@@ -144,7 +144,7 @@ fn test_vp_switch_domain_basic() {
 /// switch followed by return_domain restores original domain.
 #[test]
 fn test_vp_return_domain_basic() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     let root_id = root.read().data.id;
@@ -169,7 +169,7 @@ fn test_vp_return_domain_basic() {
 /// After return, root VP[0] is Available and can switch again.
 #[test]
 fn test_vp_switch_return_switch_again() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     Capability::switch(&platform, &root, child_h, 0).unwrap().0;
@@ -265,7 +265,7 @@ fn test_vp_switch_no_vp_running_on_core() {
 /// switch fails when the target VP is already Running (not Available).
 #[test]
 fn test_vp_switch_target_not_available() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     // Claim child VP[0] first
@@ -315,7 +315,7 @@ fn test_vp_switch_core_not_allowed() {
 /// switch fails when platform returns None for current core.
 #[test]
 fn test_vp_switch_unknown_core() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, _, child_h, platform) = fixture();
     platform.set_current_core(None); // simulate unknown core
 
@@ -379,7 +379,7 @@ fn test_vp_switch_no_switch_api() {
 /// switch fails when the target domain is not sealed.
 #[test]
 fn test_vp_switch_target_unsealed() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, _, _, platform) = fixture();
 
     // Create unsealed child
@@ -396,7 +396,7 @@ fn test_vp_switch_target_unsealed() {
 /// return_domain fails when the caller VP has no saved caller (initial domain, not called-into).
 #[test]
 fn test_vp_return_no_caller() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, _, _, platform) = fixture();
 
     // root VP[0] is Running with an empty call_stack on its core — no one called us
@@ -410,7 +410,7 @@ fn test_vp_return_no_caller() {
 /// return_domain fails when platform returns None for current core.
 #[test]
 fn test_vp_return_unknown_core() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     Capability::switch(&platform, &root, child_h, 0).unwrap().0;
@@ -426,7 +426,7 @@ fn test_vp_return_unknown_core() {
 /// return_domain fails when there is no VP running on the current core in the caller.
 #[test]
 fn test_vp_return_no_vp_on_core() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
 
     Capability::switch(&platform, &root, child_h, 0).unwrap().0;
@@ -453,7 +453,7 @@ fn test_vp_return_no_vp_on_core() {
 
 #[test]
 fn test_interrupt_delivery_to_domain() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(1);
 
     let mut policy = DomainPolicy::new_root(4);
@@ -471,7 +471,7 @@ fn test_interrupt_delivery_to_domain() {
 
 #[test]
 fn test_interrupt_report_to_parent() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(1);
 
     let mut parent_policy = DomainPolicy::new_root(4);
@@ -500,7 +500,7 @@ fn test_interrupt_report_to_parent() {
 
 #[test]
 fn test_interrupt_no_handler() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(1);
 
     let mut policy = DomainPolicy::new_root(4);
@@ -519,7 +519,7 @@ fn test_interrupt_no_handler() {
 
 #[test]
 fn test_multi_level_interrupt_routing() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mgr = SwitchManager::new(1);
 
     let mut root_policy = DomainPolicy::new_root(4);
@@ -615,7 +615,7 @@ fn setup_3domain_chain() -> (
 /// dom0.vp0 = Running.
 #[test]
 fn test_deliver_interrupt_vp_2domain() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let (root, child, child_h, platform) = fixture();
     let root_id = root.read().data.id;
     let child_id = child.read().data.id;

@@ -22,7 +22,7 @@ mod common;
 
 /// Create a root domain with 4 cores and `MonitorAPI::ALL`.
 fn root() -> CapabilityRef<Domain> {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     Capability::new_root(0, 0, Domain::new_root(4))
 }
 
@@ -327,7 +327,7 @@ fn make_restricted_caller(
     root: &CapabilityRef<Domain>,
     controller_api: MonitorAPI,
 ) -> (CapabilityRef<Domain>, LocalHandle, CapabilityRef<Domain>) {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     // controller: sealed under root
     let (_, ctrl_h) = make_child(root, DomainPolicy::new_restricted(0b1111, controller_api));
     seal(root, ctrl_h);

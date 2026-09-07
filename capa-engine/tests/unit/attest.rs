@@ -8,7 +8,7 @@ mod common;
 
 #[test]
 fn test_attest_domain() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -34,7 +34,7 @@ fn test_enumerate_tree() {
 
 #[test]
 fn test_attest_with_signature() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
@@ -49,7 +49,7 @@ fn test_attest_with_signature() {
 
 #[test]
 fn test_attest_memory_region() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let root_region = MemoryRegion::new_root(0x0, 0x10000);
     let mem_root = Capability::new_root(0, 0, root_region);
 

@@ -258,6 +258,25 @@ impl ThemisPlatform {
         Some(state.header_hpa)
     }
 
+    /// Drain the COMM-register snapshot taken by `snapshot_comm_regs` for
+    /// `(domain_id, vp_id)`, for `do_switch` to apply once the VP is
+    /// actually running. Empty if nothing was snapshotted (no COMM page,
+    /// no dirty registers, or unknown domain/VP).
+    pub fn take_pending_comm_regs(
+        &self,
+        domain_id: DomainId,
+        vp_id: usize,
+    ) -> Vec<(themis_abi::regs::VpRegister, u64)> {
+        let Some(arc) = self.domains.get(domain_id) else {
+            return Vec::new();
+        };
+        let mut pd = arc.lock();
+        match pd.pending_comm_regs.get_mut(vp_id) {
+            Some(regs) => core::mem::take(regs),
+            None => Vec::new(),
+        }
+    }
+
     /// Write a binary attestation message to a domain's DomainComm RX ring.
     ///
     /// The attestation payload is a `domcomm::AttestReport` header followed by
@@ -897,6 +916,39 @@ impl Platform for ThemisPlatform {
         msrs: &capability_engine::MsrPolicy,
     ) -> Result<()> {
         crate::arch::allocate_vp(self, domain_id, vp_id, msrs)
+    }
+
+    fn snapshot_comm_regs(
+        &self,
+        domain_id: DomainId,
+        vp_id: u32,
+        write_set: capability_engine::RegBitmap,
+    ) -> Result<()> {
+        let Some(arc) = self.domains.get(domain_id) else {
+            return Ok(());
+        };
+        let mut pd = arc.lock();
+        let vp = vp_id as usize;
+        // No COMM page registered for this VP — nothing to snapshot.
+        let Some(&comm_hpa) = pd.comm_hpas.get(vp) else {
+            return Ok(());
+        };
+        // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP,
+        // and no other VpCommView is live here (single-threaded under the
+        // engine's op lock).
+        let dirty = match unsafe { crate::comm::VpCommView::map(comm_hpa, self.hhdm_offset()) } {
+            None => Vec::new(),
+            Some(mut view) => view
+                .take_dirty()
+                .into_iter()
+                .filter(|(reg, _)| write_set.is_set(*reg as u64))
+                .collect(),
+        };
+        if vp >= pd.pending_comm_regs.len() {
+            pd.pending_comm_regs.resize(vp + 1, Vec::new());
+        }
+        pd.pending_comm_regs[vp] = dirty;
+        Ok(())
     }
 
     fn tlb_flush_handle(&self, domain_id: DomainId) -> u64 {

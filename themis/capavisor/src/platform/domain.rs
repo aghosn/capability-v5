@@ -43,6 +43,12 @@ pub struct PlatformDomain {
     pub doorbells: Vec<DoorbellEntry>,
     /// Counter for assigning unique doorbell IDs. Monotonically increasing.
     pub next_doorbell_id: u32,
+
+    /// Per-VP snapshot of COMM-page register writes, taken by
+    /// `Platform::snapshot_comm_regs` while still under the engine's op
+    /// lock. Index = VP ID. Drained (and cleared) by `do_switch` once the
+    /// VP is actually running, via `take_pending_comm_regs`.
+    pub pending_comm_regs: Vec<Vec<(themis_abi::regs::VpRegister, u64)>>,
 }
 
 /// Maximum number of doorbell entries per child domain.
@@ -143,6 +149,7 @@ impl PlatformDomain {
             pending_domcomm_hpas: Vec::new(),
             doorbells: Vec::new(),
             next_doorbell_id: 1,
+            pending_comm_regs: Vec::new(),
         }
     }
 
