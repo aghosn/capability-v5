@@ -1473,6 +1473,11 @@ impl Capability<Domain> {
 
     /// Seal the domain identified by cap handle.
     ///
+    /// Notifies the platform via [`Platform::on_domain_sealed`], still
+    /// under this call's own `execute()` lock, so it can project the
+    /// domain's final policy onto hardware without a second,
+    /// unsynchronized resolution of `cap` after this function returns.
+    ///
     /// # Errors
     /// - [`CapaError::NotFound`] — `cap` not found in caller's domain table.
     /// - [`CapaError::ApiNotAllowed`] — `cap` is a channel capability, or `SEAL` API not allowed.
@@ -1499,6 +1504,10 @@ impl Capability<Domain> {
                 return Err(CapaError::ApiNotAllowed);
             }
             cap_ref.write().data.seal()?;
+            {
+                let r = cap_ref.read();
+                platform.on_domain_sealed(r.data.id, &r.data.policy.interrupts, &r.data.policy.msrs);
+            }
             Ok(((), UpdateBatch::new()))
         })
         .map(|((), b)| b)

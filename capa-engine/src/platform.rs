@@ -286,6 +286,29 @@ pub trait Platform: Send + Sync {
     /// still holds a reference to the parent.
     fn register_domain(&self, domain_id: DomainId, parent_id: Option<DomainId>);
 
+    /// Called by `Capability::seal`, still under `execute()`'s op-lock,
+    /// right after the domain transitions Unsealed → Sealed.
+    ///
+    /// `interrupts`/`msrs` are a snapshot of the domain's final policy at
+    /// the moment of sealing, so the platform can (re-)project it onto
+    /// whatever hardware state it derives from that policy (VMCS MSR
+    /// bitmap, IRTEs) without a second, unsynchronized resolution of the
+    /// domain's capability handle after `seal` has already returned and
+    /// released the lock. This makes seal the authoritative
+    /// synchronization point regardless of the order in which
+    /// policy-setting and VP-creation calls arrived beforehand (both
+    /// untrusted per axiom A2).
+    ///
+    /// **Default implementation** is a no-op (platforms with no derived
+    /// hardware state to project, e.g. capa-cli's simulation).
+    fn on_domain_sealed(
+        &self,
+        _domain_id: DomainId,
+        _interrupts: &crate::domain::InterruptPolicy,
+        _msrs: &crate::interposition::MsrPolicy,
+    ) {
+    }
+
     // -----------------------------------------------------------------------
     // Hardware core-state actions
     // -----------------------------------------------------------------------

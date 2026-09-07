@@ -82,7 +82,7 @@ use crate::arch::x86_64::msr_bitmap;
 use crate::arch_traits::{ArchDomain, ArchPlatform, ChangeRightsCtx};
 
 use crate::mem::{PhysRegion, UncacheableRanges};
-
+use crate::serial_println;
 /// Cross-arch alias for the per-VP inactive state owned by an
 /// [`ArchDomainState`].  On x86 this resolves to
 /// [`crate::vcpu::InactiveVcpu`]; on AArch64 it resolves to the stub
@@ -304,8 +304,8 @@ impl ThemisPlatform {
     /// Architecture-neutral wrapper: the actual implementation lives under
     /// `arch/x86_64/iommu_ir` (VT-d Interrupt Remapping). On non-x86 builds
     /// this is a no-op (will be replaced with an SMMU implementation).
-    pub fn program_domain_irtes(&self, child: &capability_engine::CapabilityRef<capability_engine::Domain>) {
-        crate::arch::program_domain_irtes(self, child);
+    pub fn program_domain_irtes(&self, child_id: DomainId, intr_policy: &capability_engine::InterruptPolicy) {
+        crate::arch::program_domain_irtes(self, child_id, intr_policy);
     }
 
     /// Invalidate all IRTEs that were programmed for a (now-revoked) domain.
@@ -568,7 +568,8 @@ impl ThemisPlatform {
     }
 
     /// Re-project the sealed domain's full MsrPolicy onto its VMCS MSR
-    /// bitmap. Called from `do_seal` so that seal is the authoritative
+    /// bitmap. Called from `Capability::seal`'s `on_domain_sealed` hook,
+    /// under the engine's op-lock, so that seal is the authoritative
     /// synchronization point between the engine's policy state and the
     /// hardware bitmap — regardless of the order in which userspace
     /// issued `THHV_SET_POLICY` and `THHV_CREATE_VP` (which cannot be
@@ -579,8 +580,7 @@ impl ThemisPlatform {
     /// there is no hardware state to stale. Any future `do_add_vp` will
     /// project the current policy at that time.
     #[cfg(target_arch = "x86_64")]
-    pub fn reproject_msr_policy(&self, child: &CapabilityRef<Domain>) {
-        let domain_id = child.read().data.id;
+    pub fn reproject_msr_policy(&self, domain_id: DomainId, msrs: &capability_engine::MsrPolicy) {
         let Some(phys) = self.msr_bitmap_phys(domain_id) else {
             return;
         };
@@ -592,18 +592,13 @@ impl ThemisPlatform {
         // with subsequent SetPolicy calls which serialize through the
         // capa-engine op-lock via apply_update.
         unsafe {
-            let guard = child.read();
-            crate::arch::x86_64::msr_bitmap::populate_from_policy(
-                phys,
-                hhdm,
-                &guard.data.policy.msrs,
-            );
+            crate::arch::x86_64::msr_bitmap::populate_from_policy(phys, hhdm, msrs);
         }
     }
 
     /// Non-x86 stub for `reproject_msr_policy` — no MSR bitmap exists.
     #[cfg(not(target_arch = "x86_64"))]
-    pub fn reproject_msr_policy(&self, _child: &CapabilityRef<Domain>) {}
+    pub fn reproject_msr_policy(&self, _domain_id: DomainId, _msrs: &capability_engine::MsrPolicy) {}
 }
 
 impl Platform for ThemisPlatform {
@@ -846,7 +841,14 @@ impl Platform for ThemisPlatform {
         }
     }
 
-    fn on_domain_revoked(&self, _domain_id: DomainId, _fallback: Option<DomainId>) {
+    fn on_domain_revoked(&self, domain_id: DomainId, _fallback: Option<DomainId>) {
+        // Clear all IRTEs that were programmed for this domain. This runs
+        // under the engine's op-lock (see `execute()`'s barrier protocol),
+        // unlike the old capavisor-side call from `do_revoke_domain`, which
+        // re-resolved the child's `Arc` *after* `revoke_domain` had already
+        // released the lock -- an unsynchronized read of tree state.
+        self.invalidate_domain_irtes(domain_id);
+
         // Redirecting cores off the doomed domain is now handled entirely
         // by the `CoreUpdate::Switch` mechanism: the engine pushes a
         // per-core switch order (drained by `apply_core_updates`, which
@@ -857,6 +859,35 @@ impl Platform for ThemisPlatform {
         // "which domain/VP is running where" lives solely in the engine's
         // `SwitchManager`, and Tier-2 domain unregistration is handled by
         // `apply_update(RevokeDomain)`'s `self.domains.remove(*domain)`.
+    }
+
+    fn on_domain_sealed(
+        &self,
+        domain_id: DomainId,
+        interrupts: &capability_engine::InterruptPolicy,
+        msrs: &capability_engine::MsrPolicy,
+    ) {
+        // Finalize DomainComm if pages were registered pre-seal.
+        if let Some(header_hpa) = self.finalize_domcomm(domain_id) {
+            serial_println!(
+                "[seal] DomainComm initialized for domain {:?} (header @ {:#x})",
+                domain_id,
+                header_hpa,
+            );
+        }
+
+        // Enforcement (A1/A2): at seal time, re-project the domain's final
+        // MsrPolicy onto its VMCS MSR bitmap. Userspace is untrusted (A2)
+        // and may push SET_POLICY ioctls in any order relative to
+        // CREATE_VP; without this re-projection, a policy change that
+        // arrived after do_add_vp would leave the bitmap stale (do_add_vp
+        // snapshots the policy at first-VP time, and apply_policy_change
+        // silently no-ops when the bitmap page isn't allocated yet).
+        // Making seal the synchronization point guarantees policy ⊆
+        // bitmap by the time any VP can run.
+        self.reproject_msr_policy(domain_id, msrs);
+
+        self.program_domain_irtes(domain_id, interrupts);
     }
 
     fn tlb_flush_handle(&self, domain_id: DomainId) -> u64 {

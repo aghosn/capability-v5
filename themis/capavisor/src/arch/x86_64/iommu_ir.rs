@@ -175,11 +175,12 @@ unsafe fn irte_write(irt_phys: u64, hhdm: u64, index: u8, low: u64, high: u64) {
 // (Notification Destination (NDST) sync on VP migration, full
 // invalidation on domain revoke).
 
-use capability_engine::{CapabilityRef, Domain, DomainId, InterruptVisibility};
+use capability_engine::{CapabilityRef, Domain, DomainId, InterruptPolicy, InterruptVisibility};
 
 use crate::platform::ThemisPlatform;
 
-/// Program IRTEs for every vector of `child_cap`, on every IR-capable DRHD:
+/// Program IRTEs for every vector of `child_id`'s `intr_policy`, on every
+/// IR-capable DRHD:
 ///
 ///  - `InterruptVisibility::Deliver` → posted to VP[0]'s PID (initial
 ///    NDST=0; must be refreshed by [`sync_irte_ndst`] once the VP starts
@@ -190,7 +191,8 @@ use crate::platform::ThemisPlatform;
 /// No-op when no DRHD is IR-capable, or when the child has no VPs yet.
 pub fn program_domain_irtes(
     platform: &ThemisPlatform,
-    child_cap: &CapabilityRef<Domain>,
+    child_id: DomainId,
+    intr_policy: &InterruptPolicy,
 ) {
     if platform.arch.drhd_units().is_empty() {
         return;
@@ -198,11 +200,6 @@ pub fn program_domain_irtes(
 
     let hhdm = platform.hhdm_offset();
     let bsp_lapic = platform.arch.bsp_lapic_id();
-
-    let (child_id, intr_policy) = {
-        let r = child_cap.read();
-        (r.data.id, r.data.policy.interrupts.clone())
-    };
 
     // Peek at VP[0]'s pid_phys without taking the VP.
     let primary_pid_phys: u64 = platform
