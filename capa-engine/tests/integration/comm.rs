@@ -42,7 +42,7 @@ fn register_root_mem(
     domain: &CapabilityRef<Domain>,
     handle: LocalHandle,
 ) -> CapabilityRef<MemoryRegion> {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let owner_id = domain.read().data.id;
     let cap = Capability::new_root(owner_id, handle, MemoryRegion::new_root(0x0, 0x10000));
     cap.write().owned.owner_domain = Some(Arc::downgrade(domain));

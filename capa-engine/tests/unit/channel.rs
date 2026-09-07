@@ -19,7 +19,6 @@
 //! 16. reject_channel rejects a stale-revoked receiver (caller) itself
 
 use capability_engine::*;
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 #[path = "../common/mod.rs"]
@@ -28,7 +27,7 @@ mod common;
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn root_domain() -> CapabilityRef<Domain> {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     Capability::new_root(0, 0, Domain::new_root(4))
 }
 
@@ -49,7 +48,7 @@ fn sealed_child(parent: &CapabilityRef<Domain>) -> (CapabilityRef<Domain>, Local
 
 /// Register a root memory capability [0, 0x10000) in `domain` at `handle`.
 fn register_mem(domain: &CapabilityRef<Domain>, handle: LocalHandle) -> CapabilityRef<MemoryRegion> {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let owner_id = domain.read().data.id;
     let mem = Capability::new_root(owner_id, handle, MemoryRegion::new_root(0x0, 0x10000));
     mem.write().owned.owner_domain = Some(Arc::downgrade(domain));

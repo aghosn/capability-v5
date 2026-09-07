@@ -60,77 +60,13 @@ pub(crate) fn do_switch(
     vp_id: u64,
     vcpu: &mut ActiveVcpu,
 ) {
-    use themis_abi::regs::VpRegister;
-
-    let vp_idx = vp_id as usize;
-
-    // ── 1a. Resolve target domain ID + COMM HPA (before Capability::switch) ──
-    // MUST happen before Capability::switch transitions the target VP to Running,
-    // because set_register (used to validate the dirty COMM page registers)
-    // rejects writes to a VP that is already in Running state.
-    let (to_domain_id_pre, comm_hpa) = {
-        let c = caller.read();
-        let to_weak = match c.data.get_domain_capability(to_domain_handle) {
-            Some(w) => w.clone(),
-            None => {
-                write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
-                vcpu.next_rip();
-                return;
-            }
-        };
-        drop(c);
-        let to_ref = match to_weak.upgrade() {
-            Some(r) => r,
-            None => {
-                write_reply(vcpu, HypercallResult::error(errors::ERR_NOTFOUND));
-                vcpu.next_rip();
-                return;
-            }
-        };
-        let to_id = to_ref.read().data.id;
-        // Invariant: target is alive in the capa-engine (weak upgrade succeeded
-        // just above), so it must also be in the platform map. A miss = capa/
-        // platform desync, almost certainly a registration ordering bug.
-        let hpa = platform
-            .domain_arc(to_id)
-            .expect("[do_switch] target PlatformDomain missing (capa/platform desync)")
-            .lock()
-            .comm_hpas
-            .get(vp_idx)
-            .copied()
-            .unwrap_or(0);
-        (to_id, hpa)
-    };
-
-    // ── 1b. Snapshot COMM page dirty registers while target VP is Available ──
-    // Use VpCommView to encapsulate the unsafe page mapping; then capability-
-    // check each register (we cannot call set_register, which would re-mark
-    // the dirty bit and cause infinite replay).
-    let pending: alloc::vec::Vec<(VpRegister, u64)> = {
-        let hhdm = platform.hhdm_offset();
-        // SAFETY: comm_hpa was registered for this VP via THHV_CREATE_VP and
-        // no other view is held on this code path.
-        match unsafe { crate::comm::VpCommView::map(comm_hpa, hhdm) } {
-            None => alloc::vec::Vec::new(),
-            Some(mut view) => view
-                .take_dirty()
-                .into_iter()
-                .filter(|(reg, _)| {
-                    Capability::check_register_write(
-                        caller,
-                        to_domain_handle,
-                        vp_id,
-                        *reg as u64,
-                        platform,
-                    )
-                    .is_ok()
-                })
-                .collect(),
-        }
-    };
-
-    // ── 2. Capability engine: forward switch (run-state transitions) ──
-    // Target VP transitions Available → Running here; must be after COMM read above.
+    // ── 1-2. Capability engine: forward switch (run-state transitions). ──
+    // The COMM-page register snapshot (formerly steps 1a/1b here) now
+    // happens *inside* `Capability::switch`'s own op-lock, via
+    // `Platform::snapshot_comm_regs` — see that method's doc. This closes
+    // the race where a concurrent `revoke_domain` could free/repurpose the
+    // COMM page's physical frame between an unsynchronized handle
+    // resolution and the raw read of it.
     let switch_ctx = match Capability::switch(platform, caller, to_domain_handle, vp_id) {
         Ok((ctx, _batch)) => ctx,
         Err(e) => {
@@ -240,10 +176,13 @@ pub(crate) fn do_switch(
 
     // ── 8. Apply all pending COMM-page registers to the now-active target.
     //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
-    if to_domain_id == to_domain_id_pre && to_vp_idx == vp_idx {
-        for (reg, val) in &pending {
-            apply_pending_reg(vcpu, *reg, *val);
-        }
+    //       Nothing to drain if the switch resolved via the Waiting/chain-
+    //       collapse path (snapshot_comm_regs is only ever called for the
+    //       direct-Available case, keyed by the same (to_domain_id,
+    //       to_vp_idx) queried here) or if there was no COMM page/no dirty
+    //       registers.
+    for (reg, val) in platform.take_pending_comm_regs(to_domain_id, to_vp_idx) {
+        apply_pending_reg(vcpu, reg, val);
     }
 
     // ── 9. Interrupt return: if the target VP was Suspended (multi-hop

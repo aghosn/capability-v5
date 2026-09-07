@@ -336,6 +336,39 @@ pub trait Platform: Send + Sync {
         Ok(())
     }
 
+    /// Called by `Capability::switch`, still under `execute()`'s op-lock,
+    /// right after `(domain_id, vp_id)` transitions `Available → Running`.
+    ///
+    /// The platform must read whatever parent-writable shared state it
+    /// keeps for this VP (e.g. the COMM page's dirty registers on x86),
+    /// filter it against `write_set` (the domain's own register-write
+    /// policy, already resolved by the engine from the VP's pre-transition
+    /// run_state), and stash the result keyed however the platform likes.
+    /// The engine never touches or interprets this data; a later,
+    /// platform-only accessor (not part of this trait) retrieves it after
+    /// the lock releases and the VP has actually resumed.
+    ///
+    /// This exists so the read of parent-writable shared memory happens
+    /// under the same lock as the run_state transition, instead of before
+    /// it — otherwise a concurrent `revoke_domain` could free/repurpose
+    /// that memory in the unsynchronized gap between resolving the target
+    /// and reading it.
+    ///
+    /// Returning `Err` aborts the whole `switch` operation: the run_state
+    /// transition is rolled back to `Available`, so the transition and the
+    /// snapshot share fate.
+    ///
+    /// **Default implementation** is a no-op success (platforms with no
+    /// parent-writable shared VP state, e.g. capa-cli's simulation).
+    fn snapshot_comm_regs(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u32,
+        _write_set: crate::domain::RegBitmap,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Hardware core-state actions
     // -----------------------------------------------------------------------

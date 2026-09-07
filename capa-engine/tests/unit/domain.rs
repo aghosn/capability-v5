@@ -10,7 +10,7 @@ mod common;
 
 #[test]
 fn test_domain_creation() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     assert_eq!(domain.status, DomainStatus::Unsealed);
@@ -19,7 +19,7 @@ fn test_domain_creation() {
 
 #[test]
 fn test_domain_seal() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     assert!(domain.seal().is_ok());
@@ -28,7 +28,7 @@ fn test_domain_seal() {
 
 #[test]
 fn test_cannot_seal_twice() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     assert!(domain.seal().is_ok());
@@ -40,7 +40,7 @@ fn test_cannot_seal_twice() {
 
 #[test]
 fn test_root_domain_is_sealed() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let domain = Domain::new_root(4);
     assert_eq!(domain.id, 0);
     assert!(domain.is_sealed());
@@ -51,7 +51,7 @@ fn test_root_domain_is_sealed() {
 
 #[test]
 fn test_api_subset() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let api1 = MonitorAPI::from_bits(MonitorAPI::CREATE | MonitorAPI::SEAL);
     let api2 = MonitorAPI::ALL;
     assert!(api1.is_subset_of(&api2));
@@ -60,7 +60,7 @@ fn test_api_subset() {
 
 #[test]
 fn test_api_subset_exact_match() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let api1 = MonitorAPI::ALL;
     let api2 = MonitorAPI::ALL;
     assert!(api1.is_subset_of(&api2));
@@ -68,7 +68,7 @@ fn test_api_subset_exact_match() {
 
 #[test]
 fn test_api_subset_none_is_subset_of_all() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     assert!(MonitorAPI::NONE.is_subset_of(&MonitorAPI::ALL));
 }
 
@@ -76,7 +76,7 @@ fn test_api_subset_none_is_subset_of_all() {
 
 #[test]
 fn test_policy_subset() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_root(4);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     assert!(child.is_subset_of(&parent).is_ok());
@@ -84,7 +84,7 @@ fn test_policy_subset() {
 
 #[test]
 fn test_policy_subset_cores() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     let child = DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL);
     assert!(child.is_subset_of(&parent).is_ok());
@@ -92,7 +92,7 @@ fn test_policy_subset_cores() {
 
 #[test]
 fn test_policy_not_subset_cores() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_restricted(0b0011, MonitorAPI::ALL);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     assert_eq!(
@@ -103,7 +103,7 @@ fn test_policy_not_subset_cores() {
 
 #[test]
 fn test_policy_not_subset_api() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::ALL);
     assert_eq!(
@@ -116,7 +116,7 @@ fn test_policy_not_subset_api() {
 
 #[test]
 fn test_domain_revocation() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let mut domain = Domain::new(policy);
     domain.seal().unwrap();
@@ -130,7 +130,7 @@ fn test_domain_revocation() {
 
 #[test]
 fn test_interrupt_policy_default() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = InterruptPolicy::new_default(VectorPolicy::default_deliver());
 
     // All vectors should use the default policy
@@ -145,7 +145,7 @@ fn test_interrupt_policy_default() {
 
 #[test]
 fn test_interrupt_policy_override() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mut policy = InterruptPolicy::new_default(VectorPolicy::default_deliver());
 
     // Override vector 32
@@ -170,7 +170,7 @@ fn test_interrupt_policy_override() {
 
 #[test]
 fn test_vprocessor_state_creation() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let vproc = VProcessorState::new(1);
     assert_eq!(vproc.id, 1);
     assert!(vproc.platform_data.is_empty());
@@ -178,7 +178,7 @@ fn test_vprocessor_state_creation() {
 
 #[test]
 fn test_add_vprocessor_state() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     use std::sync::Arc;
     let mut policy = DomainPolicy::new_root(4);
     assert_eq!(policy.vprocessor_states.len(), 0);
@@ -194,7 +194,7 @@ fn test_add_vprocessor_state() {
 
 #[test]
 fn test_domain_id_generation() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain1 = Domain::new(policy.clone());
     let domain2 = Domain::new(policy.clone());
@@ -206,7 +206,7 @@ fn test_domain_id_generation() {
 
 #[test]
 fn test_root_domain_has_id_zero() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let root = Domain::new_root(4);
     assert_eq!(root.id, 0);
 }
@@ -215,7 +215,7 @@ fn test_root_domain_has_id_zero() {
 
 #[test]
 fn test_policy_with_limited_cores_and_api() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let api = MonitorAPI::from_bits(MonitorAPI::ATTEST | MonitorAPI::ENUMERATE);
     let policy = DomainPolicy::new_restricted(
         0b1010, // Cores 1 and 3
@@ -230,7 +230,7 @@ fn test_policy_with_limited_cores_and_api() {
 
 #[test]
 fn test_complex_policy_hierarchy() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let root_policy = DomainPolicy::new_root(4);
 
     let level1_api =
@@ -260,7 +260,7 @@ fn test_complex_policy_hierarchy() {
 
 #[test]
 fn test_domain_with_custom_interrupt_policy() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let mut int_policy = InterruptPolicy::new_default(VectorPolicy::default_report());
 
     // Set specific vectors to deliver
@@ -291,7 +291,7 @@ fn test_domain_with_custom_interrupt_policy() {
 
 #[test]
 fn test_policy_subset_all_cores() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_root(4); // All cores
     let child = DomainPolicy::new_restricted(0b1111, MonitorAPI::NONE);
 
@@ -301,7 +301,7 @@ fn test_policy_subset_all_cores() {
 
 #[test]
 fn test_receive_after_seal_flag() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let root_policy = DomainPolicy::new_root(4);
     assert!(root_policy.receive_after_seal());
 
@@ -311,7 +311,7 @@ fn test_receive_after_seal_flag() {
 
 #[test]
 fn test_receive_after_seal_in_api_bitmap() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     // Verify it's in the API bitmap as bit 12
     let api_with = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
     assert!(api_with.receive_after_seal());
@@ -323,7 +323,7 @@ fn test_receive_after_seal_in_api_bitmap() {
 
 #[test]
 fn test_receive_after_seal_in_all_permissions() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     // ALL should include RECEIVE_AFTER_SEAL
     assert!(MonitorAPI::ALL.receive_after_seal());
     assert_eq!(
@@ -334,7 +334,7 @@ fn test_receive_after_seal_in_all_permissions() {
 
 #[test]
 fn test_receive_after_seal_subset_check() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent_api = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL | MonitorAPI::GET);
     let child_api_with = MonitorAPI::from_bits(MonitorAPI::RECEIVE_AFTER_SEAL);
     let child_api_without = MonitorAPI::from_bits(MonitorAPI::GET);
@@ -352,7 +352,7 @@ fn test_receive_after_seal_subset_check() {
 
 #[test]
 fn test_receive_after_seal_monotonicity() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     let parent = DomainPolicy::new_root(4); // Has RECEIVE_AFTER_SEAL
     let child_without = DomainPolicy::new_restricted(0b1, MonitorAPI::NONE);
 
@@ -374,7 +374,7 @@ fn test_receive_after_seal_monotonicity() {
 
 #[test]
 fn test_receive_after_seal_explicit_grant() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     // Create a domain with explicit RECEIVE_AFTER_SEAL permission
     let api = MonitorAPI::from_bits(MonitorAPI::GET | MonitorAPI::RECEIVE_AFTER_SEAL);
     let policy = DomainPolicy::new_restricted(0b1, api);
@@ -385,7 +385,7 @@ fn test_receive_after_seal_explicit_grant() {
 
 #[test]
 fn test_receive_after_seal_default_values() {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     // Root should have it by default (ALL includes it)
     let root = Domain::new_root(4);
     assert!(root.policy.receive_after_seal());
@@ -409,7 +409,7 @@ fn test_receive_after_seal_default_values() {
 
 /// Helper: create a sealed root domain capability.
 fn root_cap() -> CapabilityRef<Domain> {
-    let platform = common::TestPlatform::new();
+    let _platform = common::TestPlatform::new();
     Capability::new_root(0, 0, Domain::new_root(4))
 }
 
