@@ -309,6 +309,33 @@ pub trait Platform: Send + Sync {
     ) {
     }
 
+    /// Called by `Capability::add_vp`, still under `execute()`'s op-lock,
+    /// right after the VP is provisionally added to the domain's VP list.
+    ///
+    /// The platform must allocate and store whatever hardware-backed VP
+    /// state it needs (e.g. VMCS/VAPIC on x86) for `(domain_id, vp_id)`,
+    /// keyed however the platform likes — the engine never touches or
+    /// interprets this state. `msrs` is the domain's current `MsrPolicy`,
+    /// passed through so the platform can project it onto VP-local
+    /// hardware state (e.g. an MSR bitmap) without a second,
+    /// unsynchronized resolution of the domain's capability handle.
+    ///
+    /// Returning `Err` aborts the whole `add_vp` operation atomically: the
+    /// provisional VP entry is rolled back and no capability-tree mutation
+    /// is left in place, so capability creation and platform allocation
+    /// share fate — no manual rollback is needed by the caller.
+    ///
+    /// **Default implementation** is a no-op success (platforms with no
+    /// hardware VP state to allocate, e.g. capa-cli's simulation).
+    fn allocate_vp(
+        &self,
+        _domain_id: DomainId,
+        _vp_id: u32,
+        _msrs: &crate::interposition::MsrPolicy,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Hardware core-state actions
     // -----------------------------------------------------------------------

@@ -1826,6 +1826,17 @@ impl Capability<Domain> {
                 let mut child_w = child_ref.write();
                 child_domain_id = child_w.data.id;
                 vp_id = child_w.data.add_vprocessor()? as u32;
+
+                // Shared fate: ask the platform to allocate whatever hardware
+                // VP state it needs, still under this op's lock. If it can't
+                // (e.g. its resource pool is exhausted), abort atomically —
+                // pop the VProcessorState we just pushed so no state leaks,
+                // no capability-tree mutation is left in place, and no
+                // manual rollback is needed by the caller.
+                if let Err(e) = platform.allocate_vp(child_domain_id, vp_id, &child_w.data.policy.msrs) {
+                    child_w.data.policy.vprocessor_states.pop();
+                    return Err(e);
+                }
             }
 
             // Mutation: set COMM attribute + binding on the memory cap.
