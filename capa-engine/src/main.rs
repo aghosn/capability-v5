@@ -127,13 +127,13 @@ fn main() {
     println!("\nSTEP 6: Generate attestations");
     println!("-------------------------------");
 
-    let root_attest = attest_domain(&root);
+    let root_attest = build_structured_attestation(&root);
     println!("Root Domain Attestation:");
-    println!("{}", root_attest.report);
+    println!("{:#?}", root_attest);
 
-    let child_attest = attest_domain(&child);
+    let child_attest = build_structured_attestation(&child);
     println!("\nChild Domain Attestation:");
-    println!("{}", child_attest.report);
+    println!("{:#?}", child_attest);
 
     // ================================================================
     // STEP 7: Demonstrate address space views

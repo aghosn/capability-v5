@@ -7,15 +7,17 @@ mod common;
 
 
 #[test]
-fn test_attest_domain() {
+fn test_build_structured_attestation() {
     let _platform = common::TestPlatform::new();
     let policy = DomainPolicy::new_root(4);
     let domain = Domain::new(policy);
     let domain_ref = Capability::new_root(0, 0, domain);
+    let domain_id = domain_ref.read().data.id;
 
-    let report = attest_domain(&domain_ref);
-    assert!(report.report.contains("Domain ID"));
-    assert!(report.signature.is_none());
+    let report = build_structured_attestation(&domain_ref);
+    assert_eq!(report.domain_id, domain_id);
+    assert!(report.mem_caps.is_empty());
+    assert!(report.dom_caps.is_empty());
 }
 
 #[test]
@@ -30,21 +32,6 @@ fn test_enumerate_tree() {
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 2);
-}
-
-#[test]
-fn test_attest_with_signature() {
-    let _platform = common::TestPlatform::new();
-    let policy = DomainPolicy::new_root(4);
-    let domain = Domain::new(policy);
-    let domain_ref = Capability::new_root(0, 0, domain);
-
-    let mut report = attest_domain(&domain_ref);
-    assert!(report.signature.is_none());
-
-    let signature = vec![1, 2, 3, 4, 5];
-    report = report.with_signature(signature.clone());
-    assert_eq!(report.signature, Some(signature));
 }
 
 #[test]
@@ -80,4 +67,28 @@ fn test_enumerate_tree_with_multiple_levels() {
 
     let ids = enumerate_domain_tree(&root_ref);
     assert_eq!(ids.len(), 4); // root + 2 children + 1 grandchild
+}
+
+#[test]
+fn test_attest_self_structured_requires_sealed_and_permission() {
+    let platform = common::TestPlatform::new();
+    let root_domain = Domain::new_root(4);
+    let root_ref = Capability::new_root(0, 0, root_domain);
+
+    // Unsealed child lacks ATTEST-gated access to its own structured report.
+    let child_h = Capability::create(&platform, &root_ref, DomainPolicy::new_root(4))
+        .unwrap()
+        .0;
+    let child_ref = root_ref.read().data.domain_capabilities[&child_h]
+        .upgrade()
+        .unwrap();
+    assert_eq!(
+        Capability::attest_self_structured(&platform, &child_ref).unwrap_err(),
+        CapaError::DomainNotSealed
+    );
+
+    Capability::seal(&platform, &root_ref, child_h).unwrap();
+    let (report, _) = Capability::attest_self_structured(&platform, &child_ref).unwrap();
+    let child_id = child_ref.read().data.id;
+    assert_eq!(report.domain_id, child_id);
 }

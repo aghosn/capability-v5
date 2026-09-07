@@ -342,10 +342,10 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 2c attestation: dump dom0 capability state ─────────────────── //
     {
-        let report = capability_engine::attest::attest_domain(&capa.root_domain);
+        let report = capability_engine::attest::build_structured_attestation(&capa.root_domain);
         serial_println!();
         serial_println!("=== dom0 attestation ===");
-        serial_println!("{}", report.report);
+        serial_println!("{:?}", report);
         serial_println!("=== end attestation ===");
     }
 

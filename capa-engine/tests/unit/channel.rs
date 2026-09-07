@@ -142,18 +142,10 @@ fn test_attest_channel_reports_target() {
     let (child, child_h) = sealed_child(&root);
     let chan_h = Capability::get_chan(&platform, &root, child_h).unwrap().0;
 
-    let report = Capability::<Domain>::attest(&platform, &root, chan_h).unwrap().0;
+    let report = Capability::<Domain>::attest_structured(&platform, &root, chan_h).unwrap().0;
 
     let child_id = child.read().data.id;
     assert_eq!(report.domain_id, child_id, "report must be for target domain");
-    assert!(
-        report.report.contains("Channel: true"),
-        "report must include Channel header"
-    );
-    assert!(
-        report.report.contains(&format!("Target Domain ID: {}", child_id)),
-        "report must name the target domain ID"
-    );
 }
 
 // ── Test 3: send via channel delivers to target ───────────────────────

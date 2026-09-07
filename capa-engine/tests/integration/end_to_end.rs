@@ -68,14 +68,11 @@ fn test_cvm_with_exclusive_and_shared_memory() {
     assert_ne!(cvm_id, 0); // Not root domain
 
     // Generate attestation
-    let attestation = attest_domain(&cvm);
+    let attestation = build_structured_attestation(&cvm);
     assert_eq!(attestation.domain_id, cvm_id);
-    assert!(attestation
-        .report
-        .contains(&format!("Domain ID: {}", cvm_id)));
-    assert!(attestation.report.contains("Status: Sealed"));
-    assert!(attestation.report.contains("GET: true"));
-    assert!(attestation.report.contains("ATTEST: true"));
+    assert_eq!(attestation.flags & 1, 1); // sealed bit
+    assert_ne!(attestation.api_flags as u16 & MonitorAPI::GET, 0);
+    assert_ne!(attestation.api_flags as u16 & MonitorAPI::ATTEST, 0);
 
     // Compute address space view
     let mem_caps = vec![cvm_private_mem.clone(), virtio_mem.clone()];
@@ -182,18 +179,15 @@ fn test_enclave_inside_cvm() {
         .is_ok());
 
     // Attestations for both CVM and enclave
-    let cvm_attestation = attest_domain(&cvm);
-    let enclave_attestation = attest_domain(&enclave);
+    let cvm_attestation = build_structured_attestation(&cvm);
+    let enclave_attestation = build_structured_attestation(&enclave);
 
-    assert!(cvm_attestation
-        .report
-        .contains(&format!("Domain ID: {}", cvm_id)));
-    assert!(enclave_attestation
-        .report
-        .contains(&format!("Domain ID: {}", enclave_id)));
-    assert!(enclave_attestation
-        .report
-        .contains(&format!("Parent Domain ID: {}", cvm_id)));
+    assert_eq!(cvm_attestation.domain_id, cvm_id);
+    assert_eq!(enclave_attestation.domain_id, enclave_id);
+    assert_eq!(
+        enclave.read().get_parent().map(|p| p.read().data.id),
+        Some(cvm_id)
+    );
 
     // Compute address space for enclave
     let enclave_view = compute_view_from_capabilities(enclave_id, &[enclave_mem.clone()]);
@@ -273,10 +267,8 @@ fn test_sandbox_inside_cvm() {
     assert_ne!(sandbox_id, 0); // Not root domain
 
     // Generate attestations
-    let sandbox_attestation = attest_domain(&sandbox);
-    assert!(sandbox_attestation
-        .report
-        .contains(&format!("Domain ID: {}", sandbox_id)));
+    let sandbox_attestation = build_structured_attestation(&sandbox);
+    assert_eq!(sandbox_attestation.domain_id, sandbox_id);
 
     // Compute address space
     let sandbox_view = compute_view_from_capabilities(sandbox_id, &[sandbox_mem.clone()]);
@@ -386,22 +378,16 @@ fn test_two_cvms_with_shared_memory() {
     let cvm2_id = cvm2.read().data.id;
 
     // Generate attestations for both
-    let cvm1_attest = attest_domain(&cvm1);
-    let cvm2_attest = attest_domain(&cvm2);
+    let cvm1_attest = build_structured_attestation(&cvm1);
+    let cvm2_attest = build_structured_attestation(&cvm2);
 
-    assert!(cvm1_attest
-        .report
-        .contains(&format!("Domain ID: {}", cvm1_id)));
-    assert!(cvm2_attest
-        .report
-        .contains(&format!("Domain ID: {}", cvm2_id)));
+    assert_eq!(cvm1_attest.domain_id, cvm1_id);
+    assert_eq!(cvm2_attest.domain_id, cvm2_id);
 
-    // Expected attestation strings
-    let expected_cvm1_cores = "Cores: 0b11";
-    let expected_cvm2_cores = "Cores: 0b1100";
-
-    assert!(cvm1_attest.report.contains(expected_cvm1_cores));
-    assert!(cvm2_attest.report.contains(expected_cvm2_cores));
+    // Expected core bitmaps (not part of StructuredAttestation; checked
+    // directly against the domain's own policy).
+    assert_eq!(cvm1.read().data.policy.cores, 0b11);
+    assert_eq!(cvm2.read().data.policy.cores, 0b1100);
 
     // Compute address spaces
     let cvm1_view =

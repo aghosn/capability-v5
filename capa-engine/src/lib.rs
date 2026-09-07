@@ -36,8 +36,8 @@ pub mod view;
 pub mod translation;
 
 pub use attest::{
-    attest_domain, attest_memory_region, build_structured_attestation, enumerate_domain_tree,
-    AttestationReport, DomCapInfo, MemCapInfo, PaMapInfo, StructuredAttestation,
+    attest_memory_region, build_structured_attestation, enumerate_domain_tree,
+    DomCapInfo, MemCapInfo, PaMapInfo, StructuredAttestation,
 };
 pub use capability::{
     compute_address_space, Capability, CapabilityRef, CapabilityWeak, LocalHandle, Ownership,

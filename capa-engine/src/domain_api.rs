@@ -24,7 +24,7 @@
 //! - Private helpers used exclusively by the API (register-access checks,
 //!   InterruptVisibility encoding, CPUID/MSR emulate-word bit ops).
 
-use crate::attest::{self, AttestationReport};
+use crate::attest::{self, StructuredAttestation};
 #[cfg(feature = "address_translation")]
 use crate::capability::{add_footprint, insert_view_aware, remove_footprint};
 use crate::capability::{Capability, CapabilityRef, LocalHandle, Ownership, SubHandle};
@@ -1864,17 +1864,23 @@ impl Capability<Domain> {
         })
     }
 
-    /// Attest the caller domain itself.
+    /// Attest the caller domain itself, in the structured (wire-format) shape
+    /// consumed by platform attestation transports (e.g. capavisor's
+    /// `ATTEST_SELF` hypercall / DomainComm).
     ///
-    /// Requires the caller domain to be sealed and have `MonitorAPI::ATTEST` enabled.
+    /// Requires the caller domain to be sealed and have `MonitorAPI::ATTEST`
+    /// enabled.  The whole snapshot -- including every memory/domain
+    /// capability weak-ref upgrade -- is taken under this call's `execute()`,
+    /// so a concurrent revoke of one of the caller's own capabilities can't
+    /// produce an inconsistent, non-atomic report.
     ///
     /// # Errors
     /// - [`CapaError::DomainNotSealed`] — caller is not sealed.
     /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::ATTEST`.
-    pub fn attest_self(
+    pub fn attest_self_structured(
         platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
-    ) -> Result<(AttestationReport, UpdateBatch)> {
+    ) -> Result<(StructuredAttestation, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
             {
                 let c = caller.read();
@@ -1885,11 +1891,12 @@ impl Capability<Domain> {
                     return Err(CapaError::ApiNotAllowed);
                 }
             }
-            Ok((attest::attest_domain(caller), UpdateBatch::new()))
+            Ok((attest::build_structured_attestation(caller), UpdateBatch::new()))
         })
     }
 
-    /// Attest a domain (or its channel target) identified by `handle` in the caller's table.
+    /// Attest a domain (or its channel target) identified by `handle` in the caller's table,
+    /// in the structured (wire-format) shape.
     ///
     /// Requires the **caller** domain to be sealed and have `MonitorAPI::ATTEST` enabled.
     /// The domain at `handle` must also be sealed.
@@ -1900,11 +1907,11 @@ impl Capability<Domain> {
     /// - [`CapaError::DomainNotSealed`] — caller or target is not sealed.
     /// - [`CapaError::ApiNotAllowed`] — caller lacks `MonitorAPI::ATTEST`.
     /// - [`CapaError::NotFound`] — `handle` not found in caller's domain table.
-    pub fn attest(
+    pub fn attest_structured(
         platform: &dyn Platform,
         caller: &CapabilityRef<Domain>,
         handle: LocalHandle,
-    ) -> Result<(AttestationReport, UpdateBatch)> {
+    ) -> Result<(StructuredAttestation, UpdateBatch)> {
         crate::platform::execute(platform, false, || {
             {
                 let c = caller.read();
@@ -1922,14 +1929,27 @@ impl Capability<Domain> {
                 .ok_or(CapaError::NotFound)?
                 .clone();
             let cap_ref = cap_weak.upgrade().ok_or(CapaError::NotFound)?;
-            // For non-channel caps, verify the target is sealed.
-            // Channel caps always reference a sealed target (enforced at get_chan time).
-            if !cap_ref.read().is_channel() && !cap_ref.read().data.is_sealed() {
+            // Resolve channel indirection: a channel cap always targets an
+            // already-sealed domain (enforced at get_chan time), so attest
+            // the target rather than the channel shim itself.
+            let effective_ref = {
+                let r = cap_ref.read();
+                if r.is_channel() {
+                    r.channel_target
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
+                        .unwrap_or_else(|| cap_ref.clone())
+                } else {
+                    cap_ref.clone()
+                }
+            };
+            if !effective_ref.read().data.is_sealed() {
                 return Err(CapaError::DomainNotSealed);
             }
-            // Pass cap_ref directly — attest::attest_domain handles channel resolution
-            // internally and preserves the "Channel: true" header.
-            Ok((attest::attest_domain(&cap_ref), UpdateBatch::new()))
+            Ok((
+                attest::build_structured_attestation(&effective_ref),
+                UpdateBatch::new(),
+            ))
         })
     }
 
