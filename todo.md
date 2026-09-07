@@ -7,6 +7,72 @@
 
 ## Current Status
 
+- **2026-09-07 — Closed A9 audit finding: capavisor's hypercall handlers
+  resolving capability handles (`Weak::upgrade()`) outside the capa-engine's
+  `execute()` op-lock. Fixed self/handle attestation mediation and, while
+  auditing, discovered and removed a fully duplicated legacy text-report
+  attestation code path.**
+
+  1. **Mediated attestation**: `themis/capavisor/src/hypercall/attest.rs`'s
+     `do_attest_self` previously called `build_structured_attestation`
+     directly, unsynchronized. Added `Capability::attest_self_structured`
+     and `Capability::attest_structured` (by-handle, with channel-target
+     resolution) to `capa-engine/src/domain_api.rs` — both require
+     sealed + `MonitorAPI::ATTEST` and run fully inside `execute()`.
+     `do_attest_self` now calls `attest_self_structured`.
+
+  2. **Removed duplicated attestation logic**: discovered the engine's old
+     text-report path (`attest_domain`/`AttestationReport`/
+     `attest_with_context`/`AttestContext`/`DomainSnapshot` in
+     `capa-engine/src/attest.rs`, plus `Capability::attest_self`/`attest` in
+     `domain_api.rs`) had **zero real callers** — `capa-cli` bypassed it
+     entirely and called `attest_domain` directly with its own duplicated
+     permission check. Per the user: keep only the binary/structured format
+     in the engine (single source of truth, TCB-minimal) and move
+     human-readable text formatting into `capa-cli`. Deleted ~630 lines of
+     duplicated recursive text-walking logic from the engine; added
+     `format_structured_attestation` to `capa-cli/src/rust_backend.rs` to
+     format `StructuredAttestation` for humans outside the TCB. Updated all
+     engine tests (`unit/attest.rs`, `unit/channel.rs`,
+     `integration/{end_to_end,meta,vital_revoke}.rs`) and capavisor's
+     boot-time dom0 attestation dump (`main.rs`) to use
+     `build_structured_attestation` and check structured fields directly.
+     Note: `build_structured_attestation` is flat (no child-subtree
+     recursion) unlike the deleted `attest_domain`, and
+     `StructuredAttestation` doesn't carry the `cores` bitmap — accepted as
+     out of scope since capa-cli/tutorials don't need either.
+
+  3. **Fixed unrelated pre-existing tutorial bug found during verification**:
+     `capa-cli/tutos/05-basic-interrupts.txt` was failing because
+     `new_restricted` domains (used by every `create-domain`) default their
+     blanket interrupt visibility to `NotReport` (introduced earlier in this
+     branch's interrupt-semantics redesign as the safe baseline), but the
+     tutorial only set a per-vector `REPORT` override on `parent` (vector 55)
+     without loosening `parent`'s own blanket default — so `child`'s blanket
+     `REPORT` default request violated interrupt-visibility monotonicity
+     against `parent`'s still-`NotReport` default. Fixed by adding
+     `set-default-interrupt-policy parent REPORT` before `seal parent`.
+
+  Verified: capa-engine `cargo test` + `cargo loom` (all pass, 20 loom
+  suites); capavisor/capa-cli `--release` builds clean; all 15 capa-cli
+  tutorial integration tests pass. Committed as `ce76bcab8` (attestation
+  refactor) and `37c685b39` (tutorial fix).
+
+  This closes out the whole A9 audit begun earlier in the branch: `do_seal`/
+  `do_revoke_domain` (via platform callbacks under the engine lock,
+  `3e728219f`), `do_add_vp`/`do_switch` (Pattern 1, shared fate,
+  `19b5f0dcf`/`c005cffef`), `do_assign_device`/doorbell/`do_inject_interrupt`/
+  DomainComm GROW (Pattern 2, promoted to genuine mediated
+  `Capability::<Domain>::*` ops, `7a726aa3f`), and now attestation
+  (`ce76bcab8`, this entry) are all fixed. No known remaining sites resolve
+  capability handles outside `execute()`.
+
+  **Longer-term idea floated but not started**: re-inventory whether
+  `PlatformDomain`'s separate mutex can be eliminated in favor of relying on
+  `Capability<Domain>`'s own per-object `.read()`/`.write()` for all
+  domain-scoped mutual exclusion, removing the need for extra mutexes —
+  deferred until the user revisits it.
+
 - **2026-08-05 — Timer emulation fully fixed and verified on hardware; both
   `eunomia-timer` policy-suite scenarios (`deliver`, `suppress`) now pass at
   the harness level. Superseding all prior "attempted fix"/"reverted"/
