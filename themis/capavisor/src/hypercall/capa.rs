@@ -20,7 +20,6 @@ use themis_abi::errors;
 
 use super::{HypercallResult};
 use crate::platform::ThemisPlatform;
-use crate::serial_println;
 
 // ── Individual opcode handlers ───────────────────────────────────────────── //
 
@@ -167,42 +166,13 @@ pub(super) fn do_seal(
     caller: &CapabilityRef<Domain>,
     domain_handle: u64,
 ) -> Result<HypercallResult, CapaError> {
+    // DomainComm finalization, MSR bitmap re-projection, and IRTE
+    // programming for the newly-sealed child are all handled by
+    // `ThemisPlatform::on_domain_sealed`, which the engine calls under its
+    // own op-lock as part of `seal`'s `execute()` -- no need to re-resolve
+    // the child handle again here (that would be an unsynchronized read of
+    // tree state after the lock has already been released).
     let _batch = Capability::seal(platform, caller, domain_handle)?;
-
-    // Resolve the child domain for post-seal setup.
-    let child_cap = caller
-        .read()
-        .data
-        .get_domain_capability(domain_handle)
-        .and_then(|weak| weak.upgrade());
-
-    if let Some(child) = &child_cap {
-        // Finalize DomainComm if pages were registered pre-seal.
-        let child_id = child.read().data.id;
-        if let Some(header_hpa) = platform.finalize_domcomm(child_id) {
-            serial_println!(
-                "[seal] DomainComm initialized for domain {:?} (header @ {:#x})",
-                child_id,
-                header_hpa,
-            );
-        }
-    }
-
-    // intr-p3g: program IRTEs for the newly-sealed child domain.
-    if let Some(child) = &child_cap {
-        // Enforcement (A1/A2): at seal time, re-project the domain's
-        // final MsrPolicy onto its VMCS MSR bitmap. Userspace is
-        // untrusted (A2) and may push SET_POLICY ioctls in any order
-        // relative to CREATE_VP; without this re-projection, a policy
-        // change that arrived after do_add_vp would leave the bitmap
-        // stale (do_add_vp snapshots the policy at first-VP time, and
-        // apply_policy_change silently no-ops when the bitmap page
-        // isn't allocated yet). Making seal the synchronization point
-        // guarantees policy ⊆ bitmap by the time any VP can run.
-        platform.reproject_msr_policy(child);
-
-        platform.program_domain_irtes(child);
-    }
     Ok(HypercallResult::success())
 }
 
@@ -223,19 +193,12 @@ pub(super) fn do_revoke_domain(
     caller: &CapabilityRef<Domain>,
     child_handle: u64,
 ) -> Result<HypercallResult, CapaError> {
-    // intr-p3g: capture child domain_id BEFORE revocation (cap may be dropped after).
-    let child_domain_id: Option<capability_engine::DomainId> = caller
-        .read()
-        .data
-        .get_domain_capability(child_handle)
-        .and_then(|weak| weak.upgrade())
-        .map(|cap| cap.read().data.id);
-
+    // IRTE invalidation for the revoked domain is handled by
+    // `ThemisPlatform::on_domain_revoked`, which the engine calls under its
+    // own op-lock as part of `revoke_domain`'s `execute()` -- no need to
+    // resolve the child handle again here (that would be an unsynchronized
+    // read of tree state after the lock has already been released).
     let _batch = Capability::revoke_domain(platform, caller, child_handle)?;
-    // intr-p3g: clear all IRTEs that were programmed for this domain.
-    if let Some(id) = child_domain_id {
-        platform.invalidate_domain_irtes(id);
-    }
     Ok(HypercallResult::success())
 }
 

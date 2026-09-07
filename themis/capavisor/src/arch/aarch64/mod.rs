@@ -30,7 +30,8 @@ pub fn release_device(_p: &crate::platform::ThemisPlatform, bdf: u16) {}
 #[allow(unused_variables)]
 pub fn program_domain_irtes(
     _p: &crate::platform::ThemisPlatform,
-    child: &capability_engine::CapabilityRef<capability_engine::Domain>,
+    child_id: capability_engine::DomainId,
+    intr_policy: &capability_engine::InterruptPolicy,
 ) {
 }
 #[allow(unused_variables)]
