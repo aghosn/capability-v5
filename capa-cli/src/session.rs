@@ -431,7 +431,7 @@ impl Session {
                         .cloned().unwrap_or_else(|| sanitize_name(domain));
 
                     writeln!(file, "    // Attest domain: {domain}")?;
-                    writeln!(file, "    let _attestation = attest_domain(&{domain_arc});")?;
+                    writeln!(file, "    let _attestation = build_structured_attestation(&{domain_arc});")?;
                     writeln!(file, "    // Verify attestation if needed")?;
                     writeln!(file)?;
                 }

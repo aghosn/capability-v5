@@ -45,8 +45,8 @@ fn test_session() {
     Capability::seal(&platform, &root, dom1_h).unwrap();
 
     // Attest
-    let _attestation = attest_domain(&root);
-    let _attestation = attest_domain(&dom1);
+    let _attestation = build_structured_attestation(&root);
+    let _attestation = build_structured_attestation(&dom1);
 
     // Revoke r1 from r0: after send to unsealed dom1, r1_h was removed from root's table;
     // revoke by handle instead.

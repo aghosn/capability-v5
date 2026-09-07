@@ -8,7 +8,8 @@ use parking_lot::RwLock;
 use capability_engine::{
     Access, Attributes, Capability, CapaError, Domain, DomainPolicy, LocalHandle,
     MemoryRegion, MonitorAPI, Platform, PolicyIdentifier, ResourceKind, Rights, Update,
-    UpdateBatch, VpRunState, attest_domain, compute_address_space,
+    UpdateBatch, VpRunState, build_structured_attestation, compute_address_space,
+    StructuredAttestation,
 };
 
 use crate::backend::{
@@ -272,6 +273,55 @@ fn format_api_val(api: &MonitorAPI) -> String {
         .map(|(_, name)| *name)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Format a [`StructuredAttestation`] (the engine's binary/structured
+/// attestation format) into human-readable text for the CLI.
+///
+/// This is pure display logic with no security relevance — the engine
+/// itself only produces the structured data (see
+/// `build_structured_attestation`'s doc comment: "the CLI can format it
+/// however it likes").
+fn format_structured_attestation(a: &StructuredAttestation) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Domain ID: {}\n", a.domain_id));
+    out.push_str(&format!(
+        "Status: {}\n",
+        if a.flags & 1 != 0 { "Sealed" } else { "Unsealed" }
+    ));
+    out.push_str(&format!("VPs: {}\n", a.num_vps));
+    out.push_str(&format!(
+        "API: {}\n",
+        format_api_val(&MonitorAPI::from_bits(a.api_flags as u16))
+    ));
+
+    out.push_str(&format!("Memory Capabilities: {}\n", a.mem_caps.len()));
+    for m in &a.mem_caps {
+        out.push_str(&format!(
+            "  [{}] gpa={:#x} hpa={:#x} size={:#x} rights={} attrs={}\n",
+            m.handle,
+            m.gpa,
+            m.hpa,
+            m.size,
+            format_rights_val(Rights::from_bits(m.rights as u8)),
+            format_attributes_val(Attributes::from_bits(m.attributes as u8)),
+        ));
+    }
+
+    out.push_str(&format!("Domain Capabilities: {}\n", a.dom_caps.len()));
+    for d in &a.dom_caps {
+        out.push_str(&format!("  [{}] -> Domain ID: {}\n", d.handle, d.domain_id));
+    }
+
+    out.push_str(&format!("PA Map Entries: {}\n", a.pa_map.len()));
+    for p in &a.pa_map {
+        out.push_str(&format!(
+            "  gpa={:#x} -> hpa={:#x} size={:#x}\n",
+            p.gpa, p.hpa, p.size
+        ));
+    }
+
+    out
 }
 
 // ─── Backend trait implementation ────────────────────────────────────────────
@@ -991,8 +1041,14 @@ impl Backend for RustBackend {
             }
         }
 
-        let report = attest_domain(dom_arc);
-        Ok(report.report)
+        // The engine's own attestation logic (`build_structured_attestation`)
+        // only produces the binary/structured wire format consumed by
+        // capavisor's DomainComm transport — it is the TCB's single source
+        // of truth for attestation data. Formatting it into human-readable
+        // text is display logic with no security relevance, so it lives
+        // here in the CLI rather than in the engine.
+        let structured = build_structured_attestation(dom_arc);
+        Ok(format_structured_attestation(&structured))
     }
 
     fn num_cores(&self) -> usize {

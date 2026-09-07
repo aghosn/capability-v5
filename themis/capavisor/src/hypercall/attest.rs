@@ -54,7 +54,7 @@ pub(super) fn do_attest_self(
     arg2: u64,
     _arg3: u64,
 ) -> HypercallResult {
-    use capability_engine::build_structured_attestation;
+    use capability_engine::Capability;
     use themis_abi::domcomm;
 
     let is_signed = arg0 == 1;
@@ -63,7 +63,18 @@ pub(super) fn do_attest_self(
     // Common base: AttestReport header + MemCap/DomCap/PaMap arrays.
     // Same wire format for both paths; dom0's thhv parses this verbatim at
     // boot — see thhv/src/thhv_translate.c::thhv_pa_map_init_from_attestation.
-    let mut attest = build_structured_attestation(caller);
+    //
+    // Capability::attest_self_structured is the engine's own mediated
+    // wrapper (execute()-protected, sealed + MonitorAPI::ATTEST-gated) around
+    // build_structured_attestation, which walks the caller's memory/domain
+    // capability maps and upgrades each weak ref -- doing that under the
+    // engine's op lock keeps a concurrent revoke of one of those capabilities
+    // from producing an inconsistent, non-atomic snapshot.
+    let result = Capability::attest_self_structured(platform, caller);
+    let mut attest = match result {
+        Ok((a, _batch)) => a,
+        Err(e) => return e.into(),
+    };
     if is_signed {
         attest.flags |= domcomm::DOMCOMM_ATTEST_F_SEALED;
     }

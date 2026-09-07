@@ -123,10 +123,14 @@ fn test_meta_appears_in_attestation() {
     Capability::<Domain>::send(&platform, &sender, 1, 2, Attributes::from_bits(Attributes::META))
         .unwrap();
 
-    let report = attest_domain(&receiver).report;
+    let attestation = build_structured_attestation(&receiver);
+    let has_meta = attestation
+        .mem_caps
+        .iter()
+        .any(|m| m.attributes & Attributes::META as u32 != 0);
     assert!(
-        report.contains("META"),
-        "META attribute must appear in the receiver's attestation report"
+        has_meta,
+        "META attribute must appear in the receiver's structured attestation"
     );
 }
 
