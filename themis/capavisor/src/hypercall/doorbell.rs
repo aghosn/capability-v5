@@ -7,7 +7,7 @@
 //!   - RING_DOORBELL    (0x17) — context-switches via `forward_child_exit`
 //!   - INJECT_INTERRUPT (0x1B) — writes target VP's PIR on x86
 
-use capability_engine::{CapabilityRef, Domain, DomainId};
+use capability_engine::{Capability, CapabilityRef, CapaError, Domain};
 use themis_abi::errors;
 
 use super::{try_domain, HypercallResult};
@@ -36,47 +36,47 @@ pub(super) fn do_register_doorbell(
         return HypercallResult::error(errors::ERR_INVALID);
     }
 
-    let child_domain_id: DomainId = {
-        let r = caller.read();
-        let child_weak = match r.data.get_domain_capability(child_handle) {
-            Some(w) => w.clone(),
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        drop(r);
-        let child_ref = match child_weak.upgrade() {
-            Some(c) => c,
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        let id = child_ref.read().data.id;
-        id
-    };
+    let result = Capability::platform_action_on_child(
+        platform,
+        caller,
+        child_handle,
+        |_platform, child_ref| {
+            let child_domain_id = child_ref.read().data.id;
+            let child_arc = platform
+                .domain_arc(child_domain_id)
+                .ok_or(CapaError::NotFound)?;
+            let mut pd = child_arc.lock();
 
-    let child_arc = try_domain!(platform, child_domain_id);
-    let mut pd = child_arc.lock();
+            if pd.doorbells.len() >= THEMIC_MAX_DOORBELLS {
+                return Err(CapaError::NoMemory);
+            }
 
-    if pd.doorbells.len() >= THEMIC_MAX_DOORBELLS {
-        return HypercallResult::error(errors::ERR_NOMEM);
-    }
-
-    let doorbell_id = pd.next_doorbell_id;
-    pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
-    pd.doorbells.push(DoorbellEntry {
-        doorbell_id,
-        gpa,
-        datamatch,
-        size,
-        flags,
-    });
-
-    serial_rtdbg!(
-        "[REG_DB] id={} gpa={:#x} sz={} flags={:#x}",
-        doorbell_id,
-        gpa,
-        size,
-        flags
+            let doorbell_id = pd.next_doorbell_id;
+            pd.next_doorbell_id = pd.next_doorbell_id.wrapping_add(1);
+            pd.doorbells.push(DoorbellEntry {
+                doorbell_id,
+                gpa,
+                datamatch,
+                size,
+                flags,
+            });
+            Ok(doorbell_id)
+        },
     );
 
-    HypercallResult::success_1(doorbell_id as u64)
+    match result {
+        Ok(doorbell_id) => {
+            serial_rtdbg!(
+                "[REG_DB] id={} gpa={:#x} sz={} flags={:#x}",
+                doorbell_id,
+                gpa,
+                size,
+                flags
+            );
+            HypercallResult::success_1(doorbell_id as u64)
+        }
+        Err(e) => HypercallResult::from(e),
+    }
 }
 
 /// UNREGISTER_DOORBELL (0x16): remove a previously registered doorbell entry.
@@ -88,31 +88,30 @@ pub(super) fn do_unregister_doorbell(
     child_handle: u64,
     doorbell_id: u32,
 ) -> HypercallResult {
-    let child_domain_id: DomainId = {
-        let r = caller.read();
-        let child_weak = match r.data.get_domain_capability(child_handle) {
-            Some(w) => w.clone(),
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        drop(r);
-        let child_ref = match child_weak.upgrade() {
-            Some(c) => c,
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        let id = child_ref.read().data.id;
-        id
-    };
+    let result = Capability::platform_action_on_child(
+        platform,
+        caller,
+        child_handle,
+        |_platform, child_ref| {
+            let child_domain_id = child_ref.read().data.id;
+            let child_arc = platform
+                .domain_arc(child_domain_id)
+                .ok_or(CapaError::NotFound)?;
+            let mut pd = child_arc.lock();
 
-    let child_arc = try_domain!(platform, child_domain_id);
-    let mut pd = child_arc.lock();
+            let before = pd.doorbells.len();
+            pd.doorbells.retain(|e| e.doorbell_id != doorbell_id);
+            if pd.doorbells.len() == before {
+                return Err(CapaError::NotFound);
+            }
+            Ok(())
+        },
+    );
 
-    let before = pd.doorbells.len();
-    pd.doorbells.retain(|e| e.doorbell_id != doorbell_id);
-    if pd.doorbells.len() == before {
-        return HypercallResult::error(errors::ERR_NOTFOUND);
+    match result {
+        Ok(()) => HypercallResult::success(),
+        Err(e) => HypercallResult::from(e),
     }
-
-    HypercallResult::success()
 }
 
 /// SET_THEMIC_VECTOR (0x17): configure the notify_vector in the caller's

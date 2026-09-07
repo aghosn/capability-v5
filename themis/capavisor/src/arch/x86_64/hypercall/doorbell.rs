@@ -6,12 +6,12 @@
 //! - `do_inject_interrupt` writes a vector into a target VP's Posted Interrupt
 //!   Descriptor (PIR) using `arch::pid::inject_via_pid`.
 
-use capability_engine::{CapabilityRef, Domain, DomainId};
+use capability_engine::{Capability, CapabilityRef, CapaError, Domain};
 use themis_abi::errors;
 
 use crate::arch::x86_64::pid::inject_via_pid;
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
-use crate::hypercall::{try_domain, HypercallResult};
+use crate::hypercall::HypercallResult;
 use crate::platform::ThemisPlatform;
 use crate::vcpu::ActiveVcpu;
 
@@ -130,57 +130,59 @@ pub(super) fn do_inject_interrupt(
         return HypercallResult::error(errors::ERR_INVALID);
     }
 
-    // Validate that the caller owns the child domain capability.
-    let child_domain_id: DomainId = {
-        let r = caller.read();
-        let child_weak = match r.data.get_domain_capability(child_domain_handle) {
-            Some(w) => w.clone(),
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        drop(r);
-        let child_ref = match child_weak.upgrade() {
-            Some(c) => c,
-            None => return HypercallResult::error(errors::ERR_NOTFOUND),
-        };
-        let child_r = child_ref.read();
-        let id = child_r.data.id;
-        // `InterruptVisibility` only governs the automatic real-hardware
-        // routing decision; explicit parent-initiated injection is gated by
-        // the separate `injectable` bit so a parent can, e.g., mark a vector
-        // NotReport (isolate the child from real hardware timing for it)
-        // while still retaining sole, explicit control over delivering it.
-        if !child_r.data.policy.interrupts.get_policy(vector).injectable {
-            return HypercallResult::error(errors::ERR_NOPERM);
-        }
-        id
-    };
-
-    let child_arc = try_domain!(platform, child_domain_id);
-
-    let pid_phys = {
-        let pd = child_arc.lock();
-        if vp_id as usize >= pd.arch.vps().len() {
-            return HypercallResult::error(errors::ERR_INVALID);
-        }
-        pd.arch.vps()[vp_id as usize].peek_pid_phys()
-    };
-
-    if pid_phys == 0 {
-        // VP has no PID yet (never run, or async mode not initialised).
-        return HypercallResult::error(errors::ERR_NOTFOUND);
-    }
-
     let hhdm = platform.hhdm_offset();
+    let result = Capability::platform_action_on_child(
+        platform,
+        caller,
+        child_domain_handle,
+        |_platform, child_ref| {
+            let child_r = child_ref.read();
+            // `InterruptVisibility` only governs the automatic real-hardware
+            // routing decision; explicit parent-initiated injection is gated
+            // by the separate `injectable` bit so a parent can, e.g., mark a
+            // vector NotReport (isolate the child from real hardware timing
+            // for it) while still retaining sole, explicit control over
+            // delivering it.
+            if !child_r.data.policy.interrupts.get_policy(vector).injectable {
+                return Err(CapaError::PermissionDenied);
+            }
+            let child_domain_id = child_r.data.id;
+            drop(child_r);
 
-    // Write the vector into the VP's Posted-Interrupt Descriptor (PIR).
-    // Use is_remote=false: the PIR bit is picked up by do_switch's PIR
-    // drain on the next VMRESUME.  Sending a notification IPI here is
-    // counter-productive — the IPI is a physical interrupt that causes
-    // an immediate EXIT_REASON_EXTERNAL_INTERRUPT on VMRESUME, preventing
-    // the child from executing even a single instruction.  The thhv retry
-    // loop already calls themis_switch() in a tight loop, so the PIR bit
-    // is consumed promptly without an IPI.
-    unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+            let child_arc = platform
+                .domain_arc(child_domain_id)
+                .ok_or(CapaError::NotFound)?;
+            let pid_phys = {
+                let pd = child_arc.lock();
+                if vp_id as usize >= pd.arch.vps().len() {
+                    return Err(CapaError::InvalidOperation("vp_id out of range".into()));
+                }
+                pd.arch.vps()[vp_id as usize].peek_pid_phys()
+            };
+            if pid_phys == 0 {
+                // VP has no PID yet (never run, or async mode not initialised).
+                return Err(CapaError::NotFound);
+            }
 
-    HypercallResult::success()
+            // Write the vector into the VP's Posted-Interrupt Descriptor
+            // (PIR), still under the engine's lock so a concurrent revoke
+            // of this domain can't free/repurpose the PID's physical page
+            // between resolving it and writing it. Use is_remote=false:
+            // the PIR bit is picked up by do_switch's PIR drain on the
+            // next VMRESUME. Sending a notification IPI here is
+            // counter-productive — the IPI is a physical interrupt that
+            // causes an immediate EXIT_REASON_EXTERNAL_INTERRUPT on
+            // VMRESUME, preventing the child from executing even a single
+            // instruction. The thhv retry loop already calls
+            // themis_switch() in a tight loop, so the PIR bit is consumed
+            // promptly without an IPI.
+            unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+            Ok(())
+        },
+    );
+
+    match result {
+        Ok(()) => HypercallResult::success(),
+        Err(e) => HypercallResult::from(e),
+    }
 }

@@ -308,16 +308,16 @@ pub(super) fn do_assign_device(
     bdf_arg: u64,
 ) -> Result<HypercallResult, CapaError> {
     let bdf = bdf_arg as u16;
-    // Resolve domain_handle → domain_id via the caller's capability tree.
-    let child_domain_id = {
-        let cap = caller.read();
-        let child_weak = cap.data.get_domain_capability(domain_handle);
-        match child_weak.and_then(|w| w.upgrade()) {
-            Some(child) => child.read().data.id,
-            None => return Ok(HypercallResult::error(errors::ERR_INVALID)),
-        }
-    };
-    platform.assign_device(bdf, child_domain_id);
+    Capability::platform_action_on_child(
+        platform,
+        caller,
+        domain_handle,
+        |_platform, child_ref| {
+            let child_domain_id = child_ref.read().data.id;
+            platform.assign_device(bdf, child_domain_id);
+            Ok(())
+        },
+    )?;
     Ok(HypercallResult::success())
 }
 
