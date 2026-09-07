@@ -890,6 +890,15 @@ impl Platform for ThemisPlatform {
         self.program_domain_irtes(domain_id, interrupts);
     }
 
+    fn allocate_vp(
+        &self,
+        domain_id: DomainId,
+        vp_id: u32,
+        msrs: &capability_engine::MsrPolicy,
+    ) -> Result<()> {
+        crate::arch::allocate_vp(self, domain_id, vp_id, msrs)
+    }
+
     fn tlb_flush_handle(&self, domain_id: DomainId) -> u64 {
         self.domains
             .get(domain_id)

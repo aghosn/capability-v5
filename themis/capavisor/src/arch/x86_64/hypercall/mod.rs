@@ -38,19 +38,13 @@ pub(super) fn write_reply(vcpu: &mut ActiveVcpu, r: HypercallResult) {
 impl ArchHypercall for X86Platform {
     fn h_add_vp(
         &mut self,
-        vcpu: &mut ActiveVcpu,
+        _vcpu: &mut ActiveVcpu,
         platform: &ThemisPlatform,
         caller: &CapabilityRef<Domain>,
         child_domain_handle: u64,
         comm_cap_handle: u64,
     ) -> HypercallResult {
-        vp::do_add_vp(
-            platform,
-            caller,
-            child_domain_handle,
-            comm_cap_handle,
-            vcpu.vmcs_phys(),
-        )
+        vp::do_add_vp(platform, caller, child_domain_handle, comm_cap_handle)
     }
 
     fn h_switch(

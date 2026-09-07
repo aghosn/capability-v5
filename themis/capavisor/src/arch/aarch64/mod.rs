@@ -36,3 +36,14 @@ pub fn program_domain_irtes(
 }
 #[allow(unused_variables)]
 pub fn invalidate_domain_irtes(_p: &crate::platform::ThemisPlatform, domain_id: capability_engine::DomainId) {}
+
+// VP hardware-state allocation stub (VMCS/VAPIC equivalent TBD on ARM).
+#[allow(unused_variables)]
+pub fn allocate_vp(
+    _p: &crate::platform::ThemisPlatform,
+    domain_id: capability_engine::DomainId,
+    vp_id: u32,
+    msrs: &capability_engine::MsrPolicy,
+) -> capability_engine::Result<()> {
+    Ok(())
+}
