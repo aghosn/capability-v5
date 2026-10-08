@@ -14,8 +14,17 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/math64.h>
+#include <linux/ratelimit.h>
+#include <asm/msr.h>
 
 #include "thhv_internal.h"
+
+#define THHV_HLT_EXIT_QUAL_PENDING_PIR	(1ULL << 0)
+#define THHV_HLT_EXIT_QUAL_RETAINED_TICK	(1ULL << 1)
+#define THHV_LOCAL_TIMER_VECTOR		0xec
+#define THHV_RETAINED_TICK_MS		4
 
 /* ── ThemIC intercept message reader ────────────────────────────────────────── */
 
@@ -158,13 +167,10 @@ retry_switch:
 				mutex_unlock(&vp->run_lock);
 				return -EINTR;
 			}
-			/* Force a scheduling point so dom0 can service
-			 * timers, network, and SSH even when the child
-			 * is interrupt-heavy.  usleep_range() puts this
-			 * thread to sleep for ~50-100µs, which is long
-			 * enough for the scheduler to run other tasks
-			 * but short enough not to hurt throughput. */
-			usleep_range(50, 100);
+			/* Let dom0 reschedule if needed, but do not force a
+			 * timed sleep on every lazy-unwind tick: the child's
+			 * TSC keeps advancing while this thread sleeps. */
+			cond_resched();
 		} while (true);
 		if (ret) {
 			mutex_unlock(&vp->run_lock);
@@ -179,22 +185,79 @@ retry_switch:
 		 * the capavisor can inject the pending PIR vector and
 		 * re-enter the child.  This prevents busy-spinning. */
 		if (slot.msg.exit_reason == THHV_EXIT_REASON_HLT) {
+			u64 deadline = slot.msg.guest_physical_address;
+			bool capavisor_pending =
+				slot.msg.exit_qualification & THHV_HLT_EXIT_QUAL_PENDING_PIR;
+			bool retained_tick =
+				slot.msg.exit_qualification & THHV_HLT_EXIT_QUAL_RETAINED_TICK;
+			long timeout = MAX_SCHEDULE_TIMEOUT;
+
+			if (deadline) {
+				u64 now = rdtsc_ordered();
+
+				if (deadline > now) {
+					u64 delta = deadline - now;
+					u64 ns = div_u64(delta, 3);
+
+					timeout = nsecs_to_jiffies(ns);
+					if (timeout <= 0)
+						timeout = 1;
+				} else {
+					/*
+					 * The capavisor re-checks cached TSC deadlines on
+					 * SWITCH entry and injects if overdue.  Do not park
+					 * for another host jiffy when the child deadline
+					 * has already passed while it was forwarded to us.
+					 */
+					timeout = 0;
+				}
+			} else if (retained_tick) {
+				timeout = msecs_to_jiffies(THHV_RETAINED_TICK_MS);
+				if (timeout <= 0)
+					timeout = 1;
+			}
+
+			pr_debug_ratelimited("thhv: DBG_RUN HLT vp=%u pending=%d halted=%d\n",
+					     vp->vp_index,
+					     atomic_read(&vp->pending_inject),
+					     atomic_read(&vp->halted));
 			atomic_set(&vp->halted, 1);
 			smp_mb(); /* pair with smp_mb in thhv_wake_vp */
 			/* Check if an inject arrived during the race
 			 * window between reading HLT and setting halted. */
-			if (atomic_read(&vp->pending_inject) > 0) {
+			if (capavisor_pending || atomic_read(&vp->pending_inject) > 0) {
+				pr_debug_ratelimited("thhv: DBG_RUN HLT-race vp=%u pending=%d capavisor_pending=%d\n",
+						     vp->vp_index,
+						     atomic_read(&vp->pending_inject),
+						     capavisor_pending);
 				atomic_set(&vp->halted, 0);
 				atomic_set(&vp->pending_inject, 0);
 				goto retry_switch;
 			}
 			thhv_drain_domcomm_rx(part);
-			ret = wait_event_interruptible(vp->halt_wq,
-				!atomic_read(&vp->halted) || signal_pending(current));
+			ret = wait_event_interruptible_timeout(vp->halt_wq,
+				!atomic_read(&vp->halted) || signal_pending(current),
+				timeout);
+			pr_debug_ratelimited("thhv: DBG_RUN HLT-wake vp=%u ret=%d pending=%d halted=%d signal=%d timeout=%d deadline=%#llx\n",
+					     vp->vp_index, ret,
+					     atomic_read(&vp->pending_inject),
+					     atomic_read(&vp->halted),
+					     signal_pending(current),
+					     ret == 0,
+					     deadline);
 			atomic_set(&vp->halted, 0);
 			if (signal_pending(current)) {
 				mutex_unlock(&vp->run_lock);
 				return -EINTR;
+			}
+			if (ret == 0 && retained_tick) {
+				ret = themis_inject_interrupt(part->domain_handle,
+							     vp->vp_index,
+							     THHV_LOCAL_TIMER_VECTOR);
+				if (ret) {
+					mutex_unlock(&vp->run_lock);
+					return ret;
+				}
 			}
 			atomic_set(&vp->pending_inject, 0);
 			goto retry_switch;

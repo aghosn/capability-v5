@@ -22,10 +22,10 @@ use x86::vmx::vmcs;
 use x86::vmx::vmcs::control;
 use x86::vmx::vmcs::control::EntryControls;
 
-use crate::arch::x86_64::vmexit_decode::{intr_type, IntrInfo};
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
-use crate::vcpu::{ActiveVcpu, Reg};
+use crate::arch::x86_64::vmexit_decode::{intr_type, IntrInfo};
 use crate::serial_println;
+use crate::vcpu::{ActiveVcpu, Reg};
 
 mod apic;
 mod classify;
@@ -279,6 +279,8 @@ pub(crate) fn handle_local_exit(
 /// Masks the guest-requested value with the host's supported XCR0 bits and
 /// always sets bit 0 (x87 FPU).  Used for both dom0 and child domain exits.
 pub(super) fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
+    const THEMIS_XSAVE_MASK: u64 = 0x7;
+
     let xcr = vcpu.reg(Reg::Rcx) as u32;
     let val = (vcpu.reg(Reg::Rdx) << 32) | (vcpu.reg(Reg::Rax) & MSR_LOW_MASK);
     if xcr == 0 {
@@ -294,7 +296,7 @@ pub(super) fn handle_xsetbv(vcpu: &mut ActiveVcpu) {
             );
         }
         let host_xcr0 = ((hi as u64) << 32) | (lo as u64);
-        let safe_val = (val & host_xcr0) | 1;
+        let safe_val = (val & host_xcr0 & THEMIS_XSAVE_MASK) | 1;
         unsafe {
             core::arch::asm!(
                 "xsetbv",

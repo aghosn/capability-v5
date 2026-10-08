@@ -19,18 +19,23 @@ use capability_engine::{
 use themis_abi::errors;
 
 use super::write_reply;
-use crate::hypercall::{HypercallResult};
 use crate::arch::x86_64::apic::current_lapic_id;
 use crate::arch::x86_64::iommu_ir::sync_irte_ndst;
 use crate::arch::x86_64::pid::inject_via_pid;
 use crate::arch::x86_64::reg_apply::apply_pending_reg;
 use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::arch::x86_64::vcpu_switch::swap_active_vp;
-use crate::arch::x86_64::vmexit::EXIT_REASON_EPT_VIOLATION;
+use crate::arch::x86_64::vmexit::{EXIT_REASON_EPT_VIOLATION, EXIT_REASON_HLT};
+use crate::hypercall::HypercallResult;
 use crate::platform::ThemisPlatform;
-use crate::{serial_debug, serial_println};
 use crate::vcpu::{ActiveVcpu, Reg};
+use crate::{serial_debug, serial_println};
 
+const HLT_EXIT_QUAL_PENDING_PIR: u64 = 1 << 0;
+const HLT_EXIT_QUAL_RETAINED_TICK: u64 = 1 << 1;
+const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
+const LAPIC_MMIO_OFFSET_MASK: u64 = 0xFFF;
+const APIC_REG_EOI: u64 = 0x0B0;
 
 // ── SWITCH (sync mode) ───────────────────────────────────────────────────── //
 
@@ -119,12 +124,7 @@ pub(crate) fn do_switch(
         }
     }
 
-    // ── 6. (VMX preemption timer is NOT reset here.) ──
-    // The timer counts down across target re-entries.  It is only
-    // reset to PREEMPTION_TIMER_TICKS when the timer actually fires
-    // (EXIT_REASON_VMX_PREEMPTION_TIMER in vmexit.rs).
-
-    // ── 6a. Interrupt inject: the target VP was `Waiting`/`report`-true
+    // ── 6. Interrupt inject: the target VP was `Waiting`/`report`-true
     // with no callee of its own — i.e. it was the true leaf actually
     // executing when an interrupt hit a Deliver-policy handler somewhere
     // up its chain (see `SwitchContext::interrupt_inject`). It has no
@@ -154,10 +154,37 @@ pub(crate) fn do_switch(
     // domains that genuinely own/watch it. With that fixed, raw-injecting
     // here is exactly the correct, intended mechanism again.
     if let Some(vector) = switch_ctx.interrupt_inject {
+        serial_debug!(
+            "[DBG-SWITCH-INJECT] core={} dst=(dom={},vp={}) vec={:#x} pid={:#x}",
+            switch_ctx.core_id,
+            to_domain_id,
+            to_vp_idx,
+            vector,
+            vcpu.pid_phys()
+        );
         unsafe { inject_via_pid(vcpu.pid_phys(), platform.hhdm_offset(), vector, false) };
     }
 
-    // ── 7. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
+    // ── 7. Apply all pending COMM-page registers to the now-active target.
+    //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
+    //       Nothing to drain if the switch resolved via the Waiting/chain-
+    //       collapse path (snapshot_comm_regs is only ever called for the
+    //       direct-Available case, keyed by the same (to_domain_id,
+    //       to_vp_idx) queried here) or if there was no COMM page/no dirty
+    //       registers.
+    let pending_regs = platform.take_pending_comm_regs(to_domain_id, to_vp_idx);
+    for (reg, val) in pending_regs {
+        apply_pending_reg(vcpu, reg, val);
+    }
+
+    // Decide timer injection against the final guest interruptibility state.
+    // An existing entry event (including replay) keeps the timer pending.
+    let _ = crate::arch::x86_64::msr_emulator::maybe_inject_tsc_deadline(
+        vcpu,
+        switch_ctx.core_id as usize,
+    );
+
+    // ── 8. PIR → VMENTRY_INTR_INFO drain (software interrupt delivery) ──
     // PROCESS_POSTED_INTERRUPTS is never set (see vmcs.rs and A3), so the
     // processor never auto-delivers from the PID — capavisor uses PIR as a
     // software queue and drains it here under capability control.  Helper
@@ -172,17 +199,6 @@ pub(crate) fn do_switch(
     {
         let remaining = drain_pir_inject_lowest(vcpu, platform);
         vcpu.set_interrupt_window_exit(remaining);
-    }
-
-    // ── 8. Apply all pending COMM-page registers to the now-active target.
-    //       `apply_pending_reg` dispatches GPR vs VMCS-field internally.
-    //       Nothing to drain if the switch resolved via the Waiting/chain-
-    //       collapse path (snapshot_comm_regs is only ever called for the
-    //       direct-Available case, keyed by the same (to_domain_id,
-    //       to_vp_idx) queried here) or if there was no COMM page/no dirty
-    //       registers.
-    for (reg, val) in platform.take_pending_comm_regs(to_domain_id, to_vp_idx) {
-        apply_pending_reg(vcpu, reg, val);
     }
 
     // ── 9. Interrupt return: if the target VP was Suspended (multi-hop
@@ -216,20 +232,24 @@ pub(crate) fn do_switch(
 /// drains them here under capability/policy control.  Lowest vector first so
 /// device IRQs are prioritised over the timer.
 ///
-/// Skips injection if `vcpu` cannot accept an external interrupt
-/// (IF=0 or STI/MOV-SS blocking) — the snapshot is then OR'd back into PIR
+/// Skips injection if `vcpu` cannot accept an external interrupt or already
+/// has a VM-entry event — the snapshot is then OR'd back into PIR
 /// untouched so it can be retried on the next interrupt-window exit.
 ///
-/// Returns `false` if the VP has no PID (legacy / non-posted setup).
+/// VPs without a PID use their per-VP software pending queue.
 pub(crate) fn drain_pir_inject_lowest(
     vcpu: &mut ActiveVcpu,
     platform: &crate::platform::ThemisPlatform,
 ) -> bool {
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use x86::vmx::vmcs;
 
     let pid_phys = vcpu.pid_phys();
     if pid_phys == 0 {
-        return false;
+        if let Some(vector) = vcpu.take_pending_external_interrupt() {
+            vcpu.inject_external_vector(vector);
+        }
+        return vcpu.has_pending_external_interrupts();
     }
     let hhdm = platform.hhdm_offset();
     let pir_base = (pid_phys + hhdm) as *const AtomicU64;
@@ -251,20 +271,15 @@ pub(crate) fn drain_pir_inject_lowest(
         return false;
     }
 
-    let can_accept = vcpu.guest_can_accept_external();
-
-    if can_accept {
-        // Find lowest pending vector (device-first).
-        for i in 0..4usize {
-            if pir_snapshot[i] != 0 {
-                let bit = pir_snapshot[i].trailing_zeros();
-                let vector = (i * 64 + bit as usize) as u8;
-                pir_snapshot[i] &= !(1u64 << bit);
-                vcpu.inject_external_vector(vector);
-                break;
-            }
-        }
+    let mut pending = vmx::interrupts::PendingExternalInterrupts::from_words(pir_snapshot);
+    if let Some(vector) = pending.take_lowest(
+        vcpu.get(vmcs::guest::RFLAGS),
+        vcpu.get(vmcs::guest::INTERRUPTIBILITY_STATE),
+        vcpu.get(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD),
+    ) {
+        vcpu.inject_external_vector(vector);
     }
+    pir_snapshot = pending.into_words();
 
     // Put any remaining (or all, if IF blocked) vectors back in PIR.
     let mut remaining = false;
@@ -371,6 +386,18 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
 
     let (platform, _core_id, child_cap) = current_core_child_cap("CHILD_EXIT");
 
+    if exit_reason == EXIT_REASON_EPT_VIOLATION
+        && try_handle_lapic_eoi_exact(vcpu, platform, &child_cap)
+    {
+        return;
+    }
+
+    if exit_reason == EXIT_REASON_EPT_VIOLATION
+        && try_forward_ept_doorbell(vcpu, platform, &child_cap)
+    {
+        return;
+    }
+
     // Look up the exit policy for the forwarded exit reason.
     let read_set = {
         let c = child_cap.read();
@@ -398,11 +425,24 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
 
     // ── Build the slim intercept message (with optional MMIO bytes) ──
     let is_ept_violation = exit_reason == EXIT_REASON_EPT_VIOLATION;
-    let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+    let mut exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
     let instr_len = vcpu.try_get(vmcs::ro::VMEXIT_INSTRUCTION_LEN).unwrap_or(0) as u32;
-    let guest_phys = vcpu
+    let mut guest_phys = vcpu
         .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
         .unwrap_or(0);
+    if exit_reason == EXIT_REASON_HLT {
+        guest_phys = vcpu.tsc_deadline();
+        let hlt_pir = pir_snapshot(vcpu, platform);
+        if hlt_pir.iter().any(|word| *word != 0) {
+            exit_qual |= HLT_EXIT_QUAL_PENDING_PIR;
+        }
+        if guest_phys == 0 {
+            // Linux may enter `sti; hlt` while retaining the periodic
+            // scheduler tick instead of programming a fresh TSC deadline.
+            // Tell thhv to provide that wake source while the VP is parked.
+            exit_qual |= HLT_EXIT_QUAL_RETAINED_TICK;
+        }
+    }
 
     // For I/O instruction exits (exit reason 30), extract port/size/direction
     // from the exit qualification via the typed decoder.
@@ -510,6 +550,187 @@ pub(crate) fn forward_child_exit(vcpu: &mut ActiveVcpu, exit_reason: u32) {
     write_swap_reply(vcpu, errors::SUCCESS, exit_reason as u64);
 }
 
+fn fetch_child_instruction_bytes(
+    vcpu: &ActiveVcpu,
+    platform: &ThemisPlatform,
+    child_domain_id: DomainId,
+) -> Option<[u8; 16]> {
+    use x86::vmx::vmcs;
+
+    let guest_rip = vcpu.rip();
+    let hhdm = platform.hhdm_offset();
+    let ept_root = {
+        let child_arc = platform.domain_arc(child_domain_id)?;
+        let cd = child_arc.lock();
+        cd.arch.ept().map(|e| e.root_phys())
+    }?;
+    let guest_cr3 = vcpu.try_get(vmcs::guest::CR3).unwrap_or(0);
+    let insn_gpa =
+        crate::arch::x86_64::page_walk::guest_gva_to_gpa(ept_root, hhdm, guest_cr3, guest_rip)?;
+    let insn_hpa = crate::arch::x86_64::page_walk::ept_gpa_to_hpa(ept_root, hhdm, insn_gpa)?;
+
+    let insn_ptr = (insn_hpa + hhdm) as *const u8;
+    let mut insn_bytes = [0u8; 16];
+    let avail = core::cmp::min(16, 0x1000 - (insn_hpa & 0xFFF) as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(insn_ptr, insn_bytes.as_mut_ptr(), avail);
+    }
+    Some(insn_bytes)
+}
+
+fn try_handle_lapic_eoi_exact(
+    vcpu: &mut ActiveVcpu,
+    platform: &ThemisPlatform,
+    child_cap: &CapabilityRef<Domain>,
+) -> bool {
+    use x86::vmx::vmcs;
+
+    let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+    if exit_qual & (1 << 1) == 0 {
+        return false;
+    }
+
+    let gpa = vcpu
+        .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
+        .unwrap_or(0);
+    if gpa < LAPIC_MMIO_BASE || (gpa & LAPIC_MMIO_OFFSET_MASK) != APIC_REG_EOI {
+        return false;
+    }
+
+    let child_domain_id = child_cap.read().data.id;
+    let Some(bytes) = fetch_child_instruction_bytes(vcpu, platform, child_domain_id) else {
+        return false;
+    };
+
+    // Common Linux xAPIC EOI form:
+    //   mov %eax,0xffffffff...b0     (bytes: 89 04 25 <disp32>)
+    // VMX reports an unreliable instruction length for this EPT violation
+    // (observed 0 or 3), so only take the fast path when the exact fixed
+    // 7-byte absolute-store encoding is present.
+    if bytes[0] != 0x89 || bytes[1] != 0x04 || bytes[2] != 0x25 {
+        return false;
+    }
+
+    let old_rip = vcpu.rip();
+    vcpu.set_rip(old_rip + 7);
+
+    true
+}
+
+fn try_forward_ept_doorbell(
+    vcpu: &mut ActiveVcpu,
+    platform: &crate::platform::ThemisPlatform,
+    child_cap: &CapabilityRef<Domain>,
+) -> bool {
+    use themis_abi::domcomm;
+    use themis_abi::regs::{InterceptMessage, ThemicMessageHeader, THEMIC_MSG_VP_INTERCEPT};
+    use themis_abi::synthetic_exits::THEMIS_EXIT_DOORBELL;
+    use x86::vmx::vmcs;
+
+    let exit_qual = vcpu.try_get(vmcs::ro::EXIT_QUALIFICATION).unwrap_or(0);
+    if exit_qual & (1 << 1) == 0 {
+        return false;
+    }
+
+    let gpa = vcpu
+        .try_get(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
+        .unwrap_or(0);
+    let child_domain_id = child_cap.read().data.id;
+
+    let Some(child_arc) = platform.domain_arc(child_domain_id) else {
+        return false;
+    };
+    let (doorbell_id, parent_domain_id) = {
+        let child = child_arc.lock();
+        let Some(entry) = child.doorbells.iter().find(|entry| {
+            let any_value = entry.flags & crate::platform::THEMIC_DOORBELL_FLAG_ANY_VALUE != 0;
+            let any_size = entry.flags & crate::platform::THEMIC_DOORBELL_FLAG_ANY_SIZE != 0;
+            entry.gpa == gpa && any_value && any_size
+        }) else {
+            return false;
+        };
+        let Some(parent) = child.parent else {
+            return false;
+        };
+        (entry.doorbell_id, parent)
+    };
+
+    let Some(parent_arc) = platform.domain_arc(parent_domain_id) else {
+        return false;
+    };
+    parent_arc.lock().enqueue_rx(&domcomm::DoorbellNotify {
+        doorbell_id,
+        reserved: 0,
+        gpa,
+        value: 0,
+        size: 0,
+        reserved2: 0,
+    });
+
+    let read_set = {
+        let c = child_cap.read();
+        let action = c.data.policy.exits.get_action(THEMIS_EXIT_DOORBELL);
+        action.read_set
+    };
+    let (return_ctx, _batch) =
+        Capability::switch_return_with_exit(platform, child_cap, THEMIS_EXIT_DOORBELL)
+            .expect("[DOORBELL_EXIT] return switch failed");
+
+    let child_vp_id = return_ctx.from_vp_id.unwrap_or(0) as usize;
+    let parent_vp_id = return_ctx.to_vp_id.unwrap_or(0) as usize;
+
+    let msg = InterceptMessage {
+        header: ThemicMessageHeader {
+            message_type: THEMIC_MSG_VP_INTERCEPT,
+            payload_size: (core::mem::size_of::<InterceptMessage>()
+                - core::mem::size_of::<ThemicMessageHeader>()) as u32,
+            sequence: 0,
+        },
+        exit_reason: THEMIS_EXIT_DOORBELL,
+        exit_qualification: exit_qual,
+        guest_physical_address: gpa,
+        ..InterceptMessage::default()
+    };
+
+    copy_filtered_regs_to_comm(
+        platform,
+        vcpu,
+        child_domain_id,
+        child_vp_id,
+        read_set,
+        Some(&msg),
+    );
+    vcpu.next_rip();
+
+    unsafe {
+        swap_active_vp(
+            vcpu,
+            platform,
+            (child_domain_id, child_vp_id),
+            (parent_domain_id, parent_vp_id),
+            "DOORBELL_EXIT",
+        );
+    }
+    write_swap_reply(vcpu, errors::SUCCESS, THEMIS_EXIT_DOORBELL as u64);
+    true
+}
+
+fn pir_snapshot(vcpu: &ActiveVcpu, platform: &ThemisPlatform) -> [u64; 4] {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    let pid_phys = vcpu.pid_phys();
+    if pid_phys == 0 {
+        return [0; 4];
+    }
+
+    let pir_base = (pid_phys + platform.hhdm_offset()) as *const AtomicU64;
+    [
+        unsafe { (*pir_base.add(0)).load(Ordering::Acquire) },
+        unsafe { (*pir_base.add(1)).load(Ordering::Acquire) },
+        unsafe { (*pir_base.add(2)).load(Ordering::Acquire) },
+        unsafe { (*pir_base.add(3)).load(Ordering::Acquire) },
+    ]
+}
 
 // ── Interrupt forwarding ─────────────────────────────────────────────────── //
 /// child domain VP is running on this core.
@@ -542,23 +763,13 @@ pub(crate) fn forward_interrupt_to_handler(vcpu: &mut ActiveVcpu, vector: u8) {
         .get_policy(vector)
         .visibility;
 
-    // Diagnostic: log first 20 + every 500th call to trace interrupt routing.
-    {
-        use core::sync::atomic::{AtomicU64, Ordering as O};
-        static FWD_COUNT: AtomicU64 = AtomicU64::new(0);
-        let n = FWD_COUNT.fetch_add(1, O::Relaxed);
-        if n < 20 || n % 500 == 0 {
-            serial_rtdbg!(
-                "[INTR_FWD] #{} vec={:#x} vis={:?} core={}",
-                n,
-                vector,
-                child_visibility,
-                core_id
-            );
-        }
-    }
+    serial_rtdbg!(
+        "[INTR_FWD] vec={:#x} vis={:?} core={}",
+        vector,
+        child_visibility,
+        core_id
+    );
 
-    serial_rtdbg!("[INTR_FWD] vec={} vis={:?}", vector, child_visibility);
     if child_visibility == InterruptVisibility::Deliver {
         // Child owns this vector — inject directly without context switch.
         crate::arch::x86_64::pid::deliver_vector_local(vcpu, platform.hhdm_offset(), vector);

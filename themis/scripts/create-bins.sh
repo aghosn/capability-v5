@@ -3,7 +3,7 @@
 #
 # Usage:
 #   bash themis/scripts/create-bins.sh
-#   BINS_SIZE=4G bash themis/scripts/create-bins.sh
+#   BINS_SIZE=6G bash themis/scripts/create-bins.sh
 #
 # Creates guest/bins.img as a sparse ext2 image, initializes the directory
 # layout used by dom0, and writes a placeholder version.txt. Re-runs are
@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GUEST_DIR="$WORKSPACE_ROOT/guest"
 BINS_IMG="$GUEST_DIR/bins.img"
-BINS_SIZE="${BINS_SIZE:-4G}"
+BINS_SIZE="${BINS_SIZE:-6G}"
 MNT=""
 MOUNTED=false
 

@@ -150,8 +150,8 @@ pub(crate) unsafe fn inject_via_pid(pid_phys: u64, hhdm: u64, vector: u8, is_rem
 /// delivery path in capavisor: try immediate VM-entry injection via
 /// [`crate::arch::x86_64::vcpu_ext::ActiveVcpuExt::inject_external_vector`]
 /// when the guest can currently accept an external interrupt
-/// (`guest_can_accept_external()`); otherwise queue the vector in the VP's
-/// own PIR (`inject_via_pid`, local/no notification-IPI case) and arm
+/// and the VM-entry slot is free; otherwise queue the vector in the VP's
+/// own PIR (or per-VP software queue when no PID exists) and arm
 /// interrupt-window exiting so hardware re-exits as soon as the guest's
 /// IF/STI-shadow state allows it, at which point
 /// [`crate::arch::x86_64::hypercall::switch::drain_pir_on_interrupt_window`]
@@ -175,7 +175,12 @@ pub(crate) fn deliver_vector_local(
 ) {
     use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 
-    if vcpu.guest_can_accept_external() {
+    if queue_virtual_interrupt_vid(vcpu, hhdm, vector) {
+        return;
+    }
+
+    let can_accept = vcpu.can_inject_external_interrupt();
+    if can_accept {
         vcpu.inject_external_vector(vector);
         return;
     }
@@ -183,6 +188,44 @@ pub(crate) fn deliver_vector_local(
     let pid_phys = vcpu.pid_phys();
     if pid_phys != 0 {
         unsafe { inject_via_pid(pid_phys, hhdm, vector, false) };
+    } else {
+        vcpu.queue_external_interrupt(vector);
     }
     vcpu.set_interrupt_window_exit(true);
+}
+
+fn queue_virtual_interrupt_vid(vcpu: &mut crate::vcpu::ActiveVcpu, hhdm: u64, vector: u8) -> bool {
+    use x86::vmx::vmcs::{control, guest};
+
+    const SECONDARY_VIRTUAL_INTERRUPT_DELIVERY: u64 = 1 << 9;
+    const APIC_IRR_BASE: u64 = 0x200;
+
+    if vcpu.get(control::SECONDARY_PROCBASED_EXEC_CONTROLS) & SECONDARY_VIRTUAL_INTERRUPT_DELIVERY
+        == 0
+    {
+        return false;
+    }
+    if vcpu.vapic_phys() == 0 {
+        return false;
+    }
+
+    let word = (vector / 32) as u64;
+    let bit = vector % 32;
+    let irr = (vcpu.vapic_phys() + hhdm + APIC_IRR_BASE + word * 0x10) as *mut u32;
+    unsafe {
+        let old = core::ptr::read_volatile(irr);
+        core::ptr::write_volatile(irr, old | (1u32 << bit));
+    }
+
+    let status = vcpu.get(guest::INTERRUPT_STATUS);
+    let old_rvi = (status & 0xff) as u8;
+    let svi = status & 0xff00;
+    let new_rvi = if (vector & 0xf0) >= (old_rvi & 0xf0) {
+        vector
+    } else {
+        old_rvi
+    };
+    vcpu.set(guest::INTERRUPT_STATUS, svi | new_rvi as u64);
+
+    true
 }

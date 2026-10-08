@@ -21,6 +21,7 @@ PROFILE="${PROFILE:-release}"
 BINS_TARGETS="${BINS_TARGETS:-all}"
 NESTED_KERNEL="${NESTED_KERNEL:-}"
 NESTED_ROOTFS="${NESTED_ROOTFS:-}"
+NESTED_MODULES="${NESTED_MODULES:-$WORKSPACE_ROOT/guest/kernel/modules}"
 
 # Auto-detect CoCo kernel if NESTED_KERNEL not explicitly set
 if [[ -z "$NESTED_KERNEL" && -f "$WORKSPACE_ROOT/guest/kernel/bzImage" ]]; then
@@ -38,6 +39,141 @@ need() {
 
 warn_missing() {
     echo "WARNING: $1 not found; skipping." >&2
+}
+
+install_nested_modules_into_dom1() {
+    local dom1_img="$1"
+    local modules_root="$2"
+    local kver=""
+    local modules_src=""
+    local modules_stage=""
+    local part_img=""
+    local mount_dir=""
+    local part_start=""
+    local part_sectors=""
+    local part_bytes=""
+
+    [[ -d "$modules_root/lib/modules" ]] || return 0
+
+    kver="$(find "$modules_root/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+    [[ -n "$kver" ]] || return 0
+
+    modules_src="$modules_root/lib/modules/$kver"
+    if [[ ! -f "$modules_src/modules.dep" ]]; then
+        warn_missing "$modules_src/modules.dep"
+        return 0
+    fi
+
+    echo "  → installing nested modules $kver into dom1.raw"
+    modules_stage="$(mktemp -d)"
+    cp -a "$modules_src" "$modules_stage/"
+    find "$modules_stage" -name build -type l -delete 2>/dev/null || true
+    find "$modules_stage" -name source -type l -delete 2>/dev/null || true
+
+    cleanup_nested_modules_mount() {
+        if [[ -n "$mount_dir" ]]; then
+            fusermount -u "$mount_dir" 2>/dev/null || true
+            rmdir "$mount_dir" 2>/dev/null || true
+            mount_dir=""
+        fi
+        if [[ -n "$part_img" ]]; then
+            rm -f "$part_img"
+            part_img=""
+        fi
+        if [[ -n "$modules_stage" ]]; then
+            rm -rf "$modules_stage"
+            modules_stage=""
+        fi
+    }
+    trap cleanup_nested_modules_mount RETURN
+
+    need sfdisk "sudo apt install fdisk"
+    need fuse2fs "sudo apt install fuse2fs e2fsprogs"
+    need fusermount "sudo apt install fuse3"
+
+    read -r part_start part_sectors < <(
+        sfdisk -d "$dom1_img" |
+            awk -F"[:,= ]+" -v img="$dom1_img" '
+                $1 == img "1" {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "start") start = $(i + 1)
+                        if ($i == "size") size = $(i + 1)
+                    }
+                    print start, size
+                }'
+    )
+    if [[ -z "$part_start" || -z "$part_sectors" ]]; then
+        echo "ERROR: could not find dom1 root partition in $dom1_img" >&2
+        return 1
+    fi
+
+    part_bytes=$((part_sectors * 512))
+    part_img="$(mktemp "$(dirname "$dom1_img")/.dom1-rootfs.XXXXXX")"
+    dd if="$dom1_img" of="$part_img" bs=512 skip="$part_start" count="$part_sectors" status=none
+
+    mount_dir="$(mktemp -d)"
+    fuse2fs -o fakeroot "$part_img" "$mount_dir" >/dev/null 2>&1
+    for _ in {1..50}; do
+        mountpoint -q "$mount_dir" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ! mountpoint -q "$mount_dir" 2>/dev/null; then
+        echo "ERROR: failed to mount dom1 root partition with fuse2fs" >&2
+        return 1
+    fi
+
+    mkdir -p "$mount_dir/lib/modules"
+    rm -rf "$mount_dir/lib/modules/$kver"
+    cp -a "$modules_stage/$kver" "$mount_dir/lib/modules/"
+
+    # Keep dom1 boot deterministic even when cloud-init has not run yet.
+    # The raw cloud image carries /boot and /boot/efi fstab entries that are
+    # irrelevant for direct-kernel CHV boots and can cost minutes of systemd
+    # device waits.  Netplan is installed directly instead of relying on the
+    # one-time cloud-init seed, because this image is reused across runs.
+    mkdir -p "$mount_dir/etc/netplan"
+    cat > "$mount_dir/etc/netplan/99-dom1.yaml" <<'EOF'
+network:
+  version: 2
+  ethernets:
+    eth0:
+      match:
+        macaddress: "12:34:56:78:90:ab"
+      set-name: eth0
+      addresses: [192.168.100.2/24]
+      routes:
+        - to: default
+          via: 192.168.100.1
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1]
+EOF
+    mkdir -p "$mount_dir/etc/systemd/network"
+    cat > "$mount_dir/etc/systemd/network/10-dom1-eth0.network" <<'EOF'
+[Match]
+MACAddress=12:34:56:78:90:ab
+
+[Link]
+Name=eth0
+
+[Network]
+Address=192.168.100.2/24
+Gateway=192.168.100.1
+DNS=8.8.8.8
+DNS=1.1.1.1
+EOF
+    if [[ -f "$mount_dir/etc/fstab" ]]; then
+        sed -i -E 's#^(LABEL=(BOOT|UEFI)[[:space:]]+)#\# disabled for Themis direct-kernel boot: &#' "$mount_dir/etc/fstab"
+    fi
+    # Remove the retired one-off debugging init scripts from reused images.
+    rm -f "$mount_dir/themis-net-test.sh" "$mount_dir/them-cgroup-test.sh"
+    sync
+    fusermount -u "$mount_dir"
+    mount_dir=""
+
+    truncate -s "$part_bytes" "$part_img"
+    dd if="$part_img" of="$dom1_img" bs=512 seek="$part_start" conv=notrunc status=none
+    cleanup_nested_modules_mount
+    trap - RETURN
 }
 
 cleanup() {
@@ -310,6 +446,7 @@ DOM1_IMG="$WORKSPACE_ROOT/guest/dom1.raw"
 DOM1_HVF="$WORKSPACE_ROOT/guest/hypervisor-fw"
 DOM1_POLICIES_SRC="$REPO_ROOT/themis/policies"
 if [[ -f "$DOM1_IMG" ]]; then
+    install_nested_modules_into_dom1 "$DOM1_IMG" "$NESTED_MODULES"
     mkdir -p "$MNT/dom1"
     cp "$DOM1_IMG" "$MNT/dom1/dom1.raw"
     [[ -f "$DOM1_HVF" ]] && cp "$DOM1_HVF" "$MNT/dom1/hypervisor-fw"
@@ -384,7 +521,6 @@ if [[ -n "$NESTED_KERNEL" ]]; then
 fi
 
 # Pack CoCo kernel modules alongside the kernel.
-NESTED_MODULES="${NESTED_MODULES:-$WORKSPACE_ROOT/guest/kernel/modules}"
 if [[ -d "$NESTED_MODULES/lib/modules" ]]; then
     mkdir -p "$MNT/nested/modules/lib"
     cp -a "$NESTED_MODULES/lib/modules" "$MNT/nested/modules/lib/"

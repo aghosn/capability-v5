@@ -11,4 +11,5 @@
 #![no_std]
 
 pub mod features;
+pub mod interrupts;
 pub mod vcpu;

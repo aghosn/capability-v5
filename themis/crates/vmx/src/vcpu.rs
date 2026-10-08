@@ -11,9 +11,13 @@ use core::marker::PhantomData;
 use x86::bits64::vmx;
 use x86::vmx::vmcs;
 
+use crate::interrupts::PendingExternalInterrupts;
+
 // ── VMCS field encodings used in inline asm ──────────────────────────────── //
 const HOST_RSP_ENCODING: u64 = vmcs::host::RSP as u64; // 0x6C14
 const HOST_RIP_ENCODING: u64 = vmcs::host::RIP as u64; // 0x6C16
+const VMX_INTR_INFO_VALID: u64 = 1 << 31;
+const VMX_INTR_INFO_DELIVERS_ERROR_CODE: u64 = 1 << 11;
 
 // ── Per-VP MSR save/restore ──────────────────────────────────────────────── //
 // Per-VP MSRs that the VMCS does *not* auto-save/restore
@@ -150,6 +154,8 @@ pub struct InactiveVcpu {
     /// pending deadline must travel with it, not stay behind on the core
     /// it was armed on. See `msr_emulator.rs`.
     tsc_deadline: u64,
+    /// Local fallback for VPs without a posted-interrupt descriptor.
+    pending_external: PendingExternalInterrupts,
 }
 
 // SAFETY: After VMCLEAR, the VMCS is flushed to memory and not bound to any
@@ -177,6 +183,7 @@ impl InactiveVcpu {
             regs: [0u64; REGFILE_SIZE],
             xsave_area: XsaveArea::new(),
             tsc_deadline: 0,
+            pending_external: PendingExternalInterrupts::default(),
         }
     }
 
@@ -198,6 +205,7 @@ impl InactiveVcpu {
             regs: self.regs,
             xsave_area: self.xsave_area,
             tsc_deadline: self.tsc_deadline,
+            pending_external: self.pending_external,
             _not_send: PhantomData,
         })
     }
@@ -246,6 +254,7 @@ pub struct ActiveVcpu {
     regs: [u64; REGFILE_SIZE],
     xsave_area: XsaveArea,
     tsc_deadline: u64,
+    pending_external: PendingExternalInterrupts,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -318,6 +327,23 @@ impl ActiveVcpu {
         self.tsc_deadline = deadline;
     }
 
+    /// Retain a local external interrupt when no PID is available.
+    pub fn queue_external_interrupt(&mut self, vector: u8) {
+        self.pending_external.insert(vector);
+    }
+
+    pub fn has_pending_external_interrupts(&self) -> bool {
+        !self.pending_external.is_empty()
+    }
+
+    /// Consume a pending vector only when it can occupy the VM-entry slot.
+    pub fn take_pending_external_interrupt(&mut self) -> Option<u8> {
+        let rflags = self.get(vmcs::guest::RFLAGS);
+        let blocking = self.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+        let entry = self.get(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD);
+        self.pending_external.take_lowest(rflags, blocking, entry)
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────── //
 
     /// Deactivate this VCPU: VMCLEAR the VMCS and return an InactiveVcpu.
@@ -341,6 +367,7 @@ impl ActiveVcpu {
             regs: self.regs,
             xsave_area: self.xsave_area,
             tsc_deadline: self.tsc_deadline,
+            pending_external: self.pending_external,
         })
     }
 
@@ -366,6 +393,28 @@ impl ActiveVcpu {
             .map_err(|_| VmxError::VmcsOperationFailed("vmread EXIT_REASON"))?
             as u32
             & 0xFFFF;
+        let idt_vectoring_info = vmx::vmread(vmcs::ro::IDT_VECTORING_INFO)
+            .map_err(|_| VmxError::VmcsOperationFailed("vmread IDT_VECTORING_INFO"))?;
+        if idt_vectoring_info & VMX_INTR_INFO_VALID != 0 {
+            vmx::vmwrite(
+                vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD,
+                idt_vectoring_info,
+            )
+            .map_err(|_| {
+                VmxError::VmcsOperationFailed("vmwrite VMENTRY_INTERRUPTION_INFO_FIELD")
+            })?;
+            if idt_vectoring_info & VMX_INTR_INFO_DELIVERS_ERROR_CODE != 0 {
+                let error_code = vmx::vmread(vmcs::ro::IDT_VECTORING_ERR_CODE)
+                    .map_err(|_| VmxError::VmcsOperationFailed("vmread IDT_VECTORING_ERR_CODE"))?;
+                vmx::vmwrite(vmcs::control::VMENTRY_EXCEPTION_ERR_CODE, error_code).map_err(
+                    |_| VmxError::VmcsOperationFailed("vmwrite VMENTRY_EXCEPTION_ERR_CODE"),
+                )?;
+            }
+        } else {
+            vmx::vmwrite(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, 0).map_err(|_| {
+                VmxError::VmcsOperationFailed("vmwrite VMENTRY_INTERRUPTION_INFO_FIELD")
+            })?;
+        }
         Ok(reason)
     }
 

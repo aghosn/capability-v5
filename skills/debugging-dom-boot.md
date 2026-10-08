@@ -19,9 +19,9 @@ normal `dmesg` / serial output in that case.
 ## Background
 
 All VMCALL exits from any domain (dom0, dom1, …) are dispatched directly to
-`handle_vmcall()` in `capavisor/src/vmexit.rs`.  This means a guest kernel can call
+`handle_vmcall()` in `themis/capavisor/src/arch/x86_64/vmexit/mod.rs`. This means a guest kernel can call
 into the capavisor at any point — including before APIC, timers, or serial are
-initialised — and the capavisor will print a message to its own serial output.
+initialised — and the capavisor can print to its own serial output.
 
 The `THEMIS_DBG_PRINT` hypercall (opcode `0x1c`, defined in
 `themis-abi/src/lib.rs`) takes a single `u64` in `RDI` and prints:
@@ -30,24 +30,46 @@ The `THEMIS_DBG_PRINT` hypercall (opcode `0x1c`, defined in
 [DBG] dom=N val=0xXXXX
 ```
 
-This output appears in the capavisor serial log regardless of the state of the guest
-domain or any intermediate hypervisor layer (CHV, dom0, etc.).
+This output appears in capavisor serial, independently of the guest console,
+**only when runtime debug is enabled** (off at boot). Inside dom0, run
+`sudo /opt/bins/tools/toggle-debug 1` before starting the instrumented child,
+and `sudo /opt/bins/tools/toggle-debug 0` to turn it off. This is independent
+of the capavisor `verbose` feature. There is no hard-coded trace-code filter.
+Disabling output does not remove the guest's VMCALL overhead when its
+guest-side trace flag is enabled. The current external Linux source calls
+`themis_trace_set_enabled(true)` when launching init; that helper also turns
+capavisor runtime logging on. Account for this when requesting a quiet run.
 
 ---
 
-## The `themis_trace()` Macro
+## The `themis_trace()` Helper
 
 Defined in `../linux/arch/x86/include/asm/special_insns.h`:
 
 ```c
+extern bool themis_trace_enabled;
+
 static __always_inline void themis_trace(unsigned int code)
 {
+    unsigned long op = 0x1cUL;
+    unsigned long arg = code;
+
+    if (!themis_trace_enabled)
+        return;
+
     asm volatile("vmcall"
+                 : "+a"(op), "+D"(arg)
                  :
-                 : "a"(0x1cUL), "D"((unsigned long)code)
-                 : "memory");
+                 : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11",
+                   "cc", "memory");
 }
 ```
+
+This reflects the external checkout inspected on October 8, 2026. Early
+trace sites do not execute VMCALL while `themis_trace_enabled` is false.
+Inspect the guest flag and its setters as well as capavisor's runtime gate
+before interpreting absent output. Packaged kernels may be older than the
+source; see `docs/dom1-debugging-handoff.md`.
 
 Include it anywhere in kernel C code with:
 
@@ -142,15 +164,17 @@ These are already implemented; do not remove them:
 | File | What it does |
 |------|--------------|
 | `themis-abi/src/lib.rs` | `THEMIS_DBG_PRINT = 0x1c` opcode constant |
-| `capavisor/src/hypercall.rs` | Handler: prints `[DBG] dom=N val=0xXXXX` via `serial_println!` |
-| `capavisor/src/vmexit.rs` | Child-domain `EXIT_REASON_VMCALL` arm routes to `handle_vmcall()` + `next_instruction()` — same path as dom0 |
+| `capavisor/src/hypercall/mod.rs` | Handler: prints `[DBG] dom=N val=0xXXXX` via runtime-gated `serial_rtdbg!` |
+| `capavisor/src/arch/x86_64/vmexit/mod.rs` | Child-domain VMCALL routes to `handle_vmcall()` — same dispatcher as dom0 |
 
 If a VMCALL from a child domain is **not** reaching the capavisor (symptom: no `[DBG]`
-output at all despite the kernel clearly executing), check:
+output at all despite the kernel clearly executing), first enable the runtime
+toggle and confirm `[RTDBG] runtime debug ENABLED` in serial. Then check:
 
-1. The `EXIT_REASON_VMCALL` arm exists in the child-exit dispatch block in `vmexit.rs`
+1. The VMCALL arm exists in the child-exit dispatch block in `arch/x86_64/vmexit/mod.rs`
    (before the `_ =>` catch-all that forwards to CHV).
-2. The `bins.img` was rebuilt **after** those changes (`bash themis/scripts/build-bins.sh`).
+2. Capavisor was rebuilt into the ISO (`cd themis && cargo iso`) and the stack
+   rebooted after capavisor changes; `bins.img` alone does not update capavisor.
 3. The instrumented bzImage is actually packed: `update-bins.sh` should print
    `✔ Updated guest/bins.img`.
 4. `run-dom1.sh` is picking up the nested kernel (look for
@@ -204,6 +228,21 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 | `0x226` | `arch/x86/kernel/setup.c` | `setup_arch` | after `e820__finish_early_params()` |
 | `0x227` | `arch/x86/kernel/setup.c` | `setup_arch` | after `efi_init()` (no-op if non-EFI) |
 | `0x228` | `arch/x86/kernel/setup.c` | `setup_arch` | after `dmi_setup()` |
+| `0x229`–`0x22F` | `kernel/cgroup/cgroup.c` | cgroup2 mount | cgroup_get_tree/cgroup_do_get_tree stages |
+| `0x230`–`0x23E` | `fs/kernfs/mount.c` | kernfs mount | kernfs_get_tree/kernfs_fill_super stages |
+| `0x23F`–`0x247` | `kernel/cgroup/cgroup.c` | `apply_cgroup_root_flags` | cgroup2 mount flag application stages |
+| `0x248`–`0x250` | `kernel/cgroup/cgroup.c` | `cgroup_favor_dynmods` | percpu rwsem / rcu-sync stages |
+| `0x251`–`0x257` | `kernel/locking/percpu-rwsem.c` | `percpu_down_write` | write-side percpu rwsem stages |
+| `0x258`–`0x25F` | `kernel/rcu/sync.c` | `rcu_sync_enter` | RCU grace-period stages used by percpu rwsem |
+| `0x260`–`0x27F` | `kernel/rcu/tree_exp.h` | expedited RCU GP | expedited GP selection, CPU QS report, wait/wake stages |
+| `0x296`–`0x2D5` | `kernel/rcu/{tree.c,update.c}` | normal RCU GP | normal `synchronize_rcu`, request, GP kthread, QS/tick/core, cleanup, wait completion |
+| `0x2D6`–`0x2DD` | `kernel/time/sleep_timeout.c` | `schedule_timeout` / `process_timeout` | RCU GP-kthread timeout arm, callback, wake, resume, cleanup |
+| `0x2E7`–`0x2E9` | `kernel/time/sleep_timeout.c` + `kernel/time/timer.c` | timer enqueue classification | RCU GP timeout queued as new first event, idle-base event, or non-first event |
+| `0x2F0`–`0x2FE` | `kernel/time/timer.c` | timer softirq / timer-wheel expiry | RCU GP timeout discriminator: local timer tick, TIMER_SOFTIRQ, base run/skip, expiry bucket, target callback |
+| `0x2FF`–`0x310` | `kernel/sched/idle.c` + `kernel/time/tick-sched.c` | idle/nohz handoff | RCU timeout active while entering idle, choosing cpuidle/default idle, tick stop/retain, and clockevent reprogram path |
+| `0x311`–`0x313` | `init/main.c` + `arch/x86/kernel/apic/apic.c` | post-init APIC timer | `/sbin/init` exec marker plus sampled APIC timer interrupt entry/exit after userspace starts |
+| `0x314`–`0x319` | `fs/exec.c` + `arch/x86/kernel/process_64.c` + `init/main.c` | `/sbin/init` exec transition | begin/setup/finalize exec, x86 `start_thread`, and `kernel_execve()` error return |
+| `0x2DE`–`0x2E6` | `kernel/time/{tick-oneshot.c,clockevents.c}` + `arch/x86/kernel/apic/apic.c` | clockevent/LAPIC deadline programming | tick stop/program, clockevent set_next_event, TSC-deadline WRMSR, LAPIC timer shutdown |
 | `0x280` | `arch/x86/kernel/setup.c` | `setup_arch` | after `early_platform_quirks()` |
 | `0x281` | `arch/x86/kernel/setup.c` | `setup_arch` | after `early_acpi_boot_init()` |
 | `0x282` | `arch/x86/kernel/setup.c` | `setup_arch` | after `initmem_init()` |
@@ -218,7 +257,7 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 | `0x294` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `early_acpi_process_madt()` |
 | `0x295` | `arch/x86/kernel/acpi/boot.c` | `early_acpi_boot_init` | after `acpi_reduced_hw_init()` |
 
-**Next free range: `0x229`**
+**Next free range: `0x31A`**
 
 ---
 
@@ -232,7 +271,7 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
 | Stream | Source | Where it appears |
 |--------|--------|------------------|
 | Capavisor `serial_println!` | L0 hypervisor | `/tmp/out.txt` (QEMU serial) — always reliable |
-| `[DBG] dom=N val=...` | Guest VMCALL → capavisor | `/tmp/out.txt` — reliable, tagged with domain ID |
+| `[DBG] dom=N val=...` | Guest VMCALL → capavisor | `/tmp/out.txt` — domain-tagged, runtime debug must be on |
 | Dom0 kernel `printk` | Dom0 `console=ttyS0` | `/tmp/out.txt` — dom0's serial goes to QEMU serial |
 | Dom0 systemd output | Dom0 boot services | `/tmp/out.txt` — appears as `[  OK  ]` lines **before** child VMCS creation |
 | Dom1 kernel `printk` | Dom1 `console=ttyS0` → CHV serial | **NOT in `/tmp/out.txt`** unless CHV's serial chains to dom0's ttyS0. See below. |
@@ -243,31 +282,30 @@ Add new codes here when you use them.  Do **not** reuse existing codes.
    and `[REGISTER_DOORBELL]` lines in `/tmp/out.txt`. If systemd messages appear
    before these lines, they are **dom0's boot**, not dom1's.
 
-2. **Check kernel version**: dom0 is `6.8.0-101-generic #101-Ubuntu`; dom1 uses
-   the instrumented kernel `6.8.0-dirty #24` (or similar). Look for `Linux version`
-   or `Tainted:` lines to identify which kernel.
+2. **Check kernel version** against the actual packaged images. Look for
+   `Linux version` or `Tainted:` lines; do not rely on old example versions.
 
 3. **Check timestamps**: dom0 systemd starts at dom0 uptime ~12-17s. Dom1 would
    start at its own t=0 (which maps to a later dom0 uptime).
 
-4. **Use `[DBG] dom=1` lines**: these are the ONLY reliable dom1 progress indicators
-   since they go through the capavisor serial and are tagged with the domain ID.
+4. **Use `[DBG] dom=1` lines** for instrumented milestones. These identify the
+   domain; an explicit dom1 console log is also a direct progress indicator.
 
-### Dom1 serial output chain (current issue)
+### Dom1 console routing
 
-CHV runs with `--serial tty`, which opens `/dev/tty` in dom0. This means:
+When CHV runs with `--serial tty`, it opens `/dev/tty` in dom0:
 
 - Dom1 kernel writes to its virtual ttyS0 (I/O port 0x3F8)
 - CHV's UART emulation captures the bytes
 - CHV writes them to `/dev/tty` inside dom0
 
-**Known issue**: dom1's console output does NOT appear in `/tmp/out.txt`. The
-CHV→`/dev/tty`→dom0 ttyS0→QEMU serial chain may not be working. Possible causes:
+That tty may be an SSH terminal, not dom0's serial console. For unambiguous
+capture use `CHV_CONSOLE=file=/tmp/dom1-console.log` and, if UART output is
+needed, `CHV_SERIAL=file=/tmp/dom1-uart.log`. Read these root-owned files with
+sudo inside dom0. Use `file=`, not `file:`. The launcher independently writes
+CHV stderr to `/tmp/chv-stderr.log`; save it before the next run overwrites it.
 
-- CHV's `/dev/tty` is not connected to dom0's serial console
-- I/O port exits for serial (0x3F8) may not be properly forwarded to CHV
-- CHV's UART emulation in the Themis backend may not be processing the bytes
-
-To verify dom1 boot without serial: use `[DBG]` trace codes (see above), check
-`[CHILD-EXIT]` RIP addresses (kernel virtual addresses `0xffffffff81...` confirm
-Linux is running), and try pinging dom1 (`ping 192.168.100.2` from dom0).
+Boot progress and usable networking are separate observations. Check the
+dom1 console, `ip -s link show tap-dom1`, and `ping 192.168.100.2` from dom0.
+See `docs/dom1-debugging-handoff.md` for the reproducible baseline and debug
+controls. A kernel RIP alone does not establish successful boot.

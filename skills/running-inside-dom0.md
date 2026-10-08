@@ -20,7 +20,7 @@ The workflow has two parallel tracks:
   (capavisor + dom0 serial trace)           (dom0 userspace)
          │                                         │
          └──────── if hang/crash ──────────────────┘
-                   pkill qemu-system-x86_64
+                   stop owned QEMU session / specific PID
                    grep / tail /tmp/out.txt
 ```
 
@@ -53,20 +53,22 @@ cargo themis 2>&1 | tee /tmp/out.txt
 `serial_println!` and dom0 kernel messages go to stdout and are captured in
 `/tmp/out.txt`.
 
-### Enabling quantum-sched (required for multi-core dom1)
+### Profile and debug controls
 
-To boot dom1 with multiple CPUs, you **must** enable the `quantum-sched`
-feature.  Without it, dom0's 250 Hz LAPIC timer preempts the child before
-any instruction executes (~100 µs nested VMRESUME overhead).
+Use an explicit profile for timing comparisons. `quantum-sched` was an
+experimental approach and is no longer an available feature. Do not suppress
+parent interrupt preemption to make a child run.
 
 ```bash
 cd themis/
-CAPAVISOR_FEATURES=quantum-sched cargo themis 2>&1 | tee /tmp/out.txt
+PROFILE=release cargo themis 2>&1 | tee /tmp/out.txt
 ```
 
-This defers parent-bound interrupts while a child VP runs, then delivers
-them on the next child exit (MMIO/EPT).  The preemption timer caps each
-child quantum at ~20 ms.
+`CAPAVISOR_FEATURES=verbose` enables compile-time high-frequency logs.
+For runtime traces and guest DBG_PRINT, run
+`sudo /opt/bins/tools/toggle-debug 1` inside dom0; use `0` to disable them.
+These controls are independent. See `docs/dom1-debugging-handoff.md` for
+CHV verbosity, driver dynamic debug, reproduction commands and known limitations.
 
 **Wait for dom0 to finish booting** (watch `/tmp/out.txt` for the login prompt
 or cloud-init completion), then SSH in from a separate terminal (Step 2).
@@ -117,11 +119,11 @@ scp -o StrictHostKeyChecking=no -P 2222 ./myfile cloud@localhost:/home/cloud/
 From a terminal SSH'd into dom0:
 
 ```bash
-# Run dom1 with 2 vCPUs (requires quantum-sched, see Step 1)
-sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh
+# Request 2 vCPUs (not a claim that current multi-core boot is validated)
+sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh --themis
 
-# Run dom1 with 1 vCPU (for debugging without quantum-sched)
-sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh
+# One-vCPU baseline
+sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh --themis
 ```
 
 `thhv.ko` is loaded automatically by `run-dom1.sh` if not already loaded.
@@ -145,7 +147,7 @@ grep -E "Phase|EPT|VMCS|VMXON|dom0|caps" /tmp/out.txt
 # Hypercall trace (requires verbose feature build)
 grep "VMCALL\|hypercall\|hc=" /tmp/out.txt
 
-# DBG_PRINT traces from guest kernel instrumentation
+# DBG_PRINT traces from guest instrumentation (runtime toggle must be on)
 grep "\[DBG\]" /tmp/out.txt
 
 # dom0 Linux kernel messages
@@ -161,9 +163,10 @@ If dom0 stops responding or the boot never completes:
 ### Kill QEMU
 
 ```bash
-pkill -f qemu-system-x86_64
-# or, if you have the PID:
-kill $THEMIS_PID
+# Prefer Ctrl-C in the owned launcher terminal, or stop its tool session.
+# If using a PID, first verify it belongs to this run:
+ps -p "$THEMIS_PID" -o pid,args
+kill "$THEMIS_PID"
 ```
 
 ### Inspect the trace
@@ -206,15 +209,15 @@ cargo build-bins
 
 # 2. Boot the stack (inside themis/)
 cd themis/
-CAPAVISOR_FEATURES=quantum-sched cargo themis 2>&1 | tee /tmp/out.txt
+PROFILE=release cargo themis 2>&1 | tee /tmp/out.txt
 
 # 3. In a separate terminal — SSH into dom0
 ssh cloud@localhost -p 2222
 
-# 4. Inside dom0 — run dom1 (2 vCPUs)
-sudo CHV_CPUS=2 /opt/bins/cloud-hypervisor/run-dom1.sh
+# 4. Inside dom0 — run the one-vCPU baseline
+sudo CHV_CPUS=1 /opt/bins/cloud-hypervisor/run-dom1.sh --themis
 
-# 5. Watch traces (from host)
+# 5. Watch traces (from host, after enabling runtime debug in dom0)
 grep '\[DBG\]' /tmp/out.txt | tail -30
 ```
 
@@ -230,7 +233,7 @@ grep '\[DBG\]' /tmp/out.txt | tail -30
 | Auth | Key-based (`~/.ssh/id_*`), no password needed |
 | Trace file | `/tmp/out.txt` (by convention) |
 | Bins in dom0 | `/opt/bins/` (mounted from `guest/bins.img`) |
-| Boot command | `cargo themis` (repo root) |
+| Boot command | `cargo themis` (inside `themis/`) |
 | QEMU process name | `qemu-system-x86_64` |
-| Kill QEMU | `pkill -f qemu-system-x86_64` |
+| Stop QEMU | Ctrl-C / stop owned tool session / verified specific PID |
 | Networking | SLIRP user-mode, no external access needed |

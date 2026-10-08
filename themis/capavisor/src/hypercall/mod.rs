@@ -215,10 +215,7 @@ pub fn handle_vmcall<A: ArchHypercall>(arch: &mut A, vp: &mut A::VpHandle) {
         }
 
         opcodes::THEMIS_DBG_PRINT => {
-            // Silenced — each DBG_PRINT is a VMCALL + serial write,
-            // flooding serial during virtio-pci probe.  Re-enable for debugging.
-            // let dom_id = caller.read().data.id;
-            // serial_println!("[DBG] dom={} val={:#x}", dom_id, arg0);
+            crate::serial_rtdbg!("[DBG] dom={} val={:#x}", caller.read().data.id, arg0);
             Ok(HypercallResult::success())
         }
 

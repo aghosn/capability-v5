@@ -24,6 +24,12 @@
 #   INITRAMFS     Override initramfs path
 #   CHV_CPUS      vCPU count (default: 2)
 #   CHV_MEM       Memory (default: 1G)
+#   CHV_SERIAL    Serial sink for cloud-hypervisor (default: tty; examples:
+#                 file=/tmp/dom1-serial.log, off, null, pty)
+#   CHV_CONSOLE   Virtio console sink for cloud-hypervisor (default: tty;
+#                 examples: file=/tmp/dom1-console.log, off, null, pty)
+#   KERNEL_APPEND Extra kernel command-line arguments appended after the
+#                 script defaults (for example: systemd.unit=rescue.target)
 #   CHV_EXTRA_ARGS  Extra cloud-hypervisor arguments
 #   DOM1_SSH_FWD_PORT  dom0-side port DNAT'd to dom1:22 (default: 2223). To
 #                   reach dom1 with a single `ssh` from the real host (no
@@ -51,6 +57,9 @@ DOM1_POLICY_DIR="$BINS/dom1/policies"
 # ── Defaults ──────────────────────────────────────────────────────────────
 CHV_CPUS="${CHV_CPUS:-2}"
 CHV_MEM="${CHV_MEM:-1G}"
+CHV_SERIAL="${CHV_SERIAL:-tty}"
+CHV_CONSOLE="${CHV_CONSOLE:-tty}"
+KERNEL_APPEND="${KERNEL_APPEND:-}"
 KERNEL="${KERNEL:-}"
 INITRAMFS="${INITRAMFS:-}"
 BACKEND_MODE="auto"
@@ -175,12 +184,12 @@ select_kernel() {
 
 # ── Module installation ──────────────────────────────────────────────────
 install_modules() {
-    # If CoCo kernel modules are in bins.img, install them into dom1's
-    # disk so they're available at runtime. This is a one-time operation
-    # per kernel version.
+    # Modules must be injected before dom0 boots. Mutating dom1.raw here can
+    # fragment dom0 memory immediately before CHV pins guest RAM, which makes
+    # SET_GUEST_MEMORY much more likely to fail.
     if [[ -d "$MODULES_DIR" && -d "$MODULES_DIR/lib/modules" ]]; then
         local KVER
-        KVER=$(ls "$MODULES_DIR/lib/modules/" | head -1)
+        KVER=$(find "$MODULES_DIR/lib/modules/" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)
         if [[ -n "$KVER" ]]; then
             echo "  modules:   $KVER (from bins.img)"
         fi
@@ -218,6 +227,18 @@ setup_networking() {
     echo "  ssh fwd:   dom0:$SSH_FWD_PORT -> dom1:22 (host: ssh -p $SSH_FWD_PORT cloud@localhost, if dom0's hostfwd also forwards this port)"
 }
 
+validate_chv_output_sink() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        file/*|file:*)
+            echo "ERROR: $name='$value' is invalid. Did you mean ${name}=file=/tmp/...?">&2
+            exit 1
+            ;;
+    esac
+}
+
 # ── Build cmdline ─────────────────────────────────────────────────────────
 build_cmdline() {
     local CMDLINE="root=/dev/vda1 rw"
@@ -226,13 +247,21 @@ build_cmdline() {
     CMDLINE+=" earlyprintk=serial,ttyS0,115200 keep_bootcon"
     CMDLINE+=" console=ttyS0,115200 console=hvc0"
 
-    # Timing (Themis doesn't emulate full PIT/HPET)
-    CMDLINE+=" lpj=3000000 tsc=reliable clocksource=tsc no_timer_check"
+    # Timing (Themis doesn't emulate full PIT/HPET).  Avoid Linux's
+    # clocksource watchdog switching dom1 from TSC to HPET after false
+    # skew reports; HPET fallback is too slow under the nested Themis path.
+    CMDLINE+=" lpj=3000000 tsc=reliable tsc=nowatchdog clocksource=tsc no_timer_check"
 
     # Logging
     CMDLINE+=" loglevel=7"
 
     # Disable slow services
+    CMDLINE+=" fstab=no"
+    CMDLINE+=" cloud-init=disabled"
+    CMDLINE+=" systemd.mask=multipathd.service"
+    CMDLINE+=" systemd.mask=multipathd.socket"
+    CMDLINE+=" systemd.mask=serial-getty@ttyS0.service"
+    CMDLINE+=" systemd.mask=serial-getty@hvc0.service"
     CMDLINE+=" systemd.mask=systemd-networkd-wait-online.service"
     CMDLINE+=" systemd.mask=snapd.seeded.service"
     CMDLINE+=" systemd.mask=snapd.service"
@@ -257,6 +286,9 @@ build_cmdline() {
     if [[ "${INIT_SHELL:-0}" == "1" ]]; then
         CMDLINE+=" init=/bin/sh"
     fi
+    if [[ -n "$KERNEL_APPEND" ]]; then
+        CMDLINE+=" $KERNEL_APPEND"
+    fi
 
     echo "$CMDLINE"
 }
@@ -271,10 +303,17 @@ setup_backend
 select_kernel
 install_modules
 setup_networking
+validate_chv_output_sink CHV_SERIAL "$CHV_SERIAL"
+validate_chv_output_sink CHV_CONSOLE "$CHV_CONSOLE"
 
 echo ""
 echo "→ Booting dom1 — ${CHV_CPUS} vCPUs, ${CHV_MEM} RAM"
 echo "  Login: cloud / cloud123"
+echo "  serial:    $CHV_SERIAL"
+echo "  console:   $CHV_CONSOLE"
+if [[ -n "$KERNEL_APPEND" ]]; then
+    echo "  cmdline+:  $KERNEL_APPEND"
+fi
 echo ""
 
 CMDLINE=$(build_cmdline)
@@ -318,8 +357,8 @@ exec "$CHV" \
     --net tap=tap-dom1,mac=12:34:56:78:90:ab \
     --cpus boot="$CHV_CPUS",max_phys_bits=40 \
     --memory size="$CHV_MEM" \
-    --serial tty \
-    --console tty \
+    --serial "$CHV_SERIAL" \
+    --console "$CHV_CONSOLE" \
     --seccomp false \
     ${PLATFORM_ARGS} \
     ${THEMIS_CONFIG_ARGS} \

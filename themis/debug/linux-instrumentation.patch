@@ -1,0 +1,1756 @@
+diff --git a/arch/x86/include/asm/special_insns.h b/arch/x86/include/asm/special_insns.h
+index 46aa2c9c1bda39a7033703038495f67ec3d40740..4fe5a75fa446e0155f7d6e3c5cbc429c930094bc 100644
+--- a/arch/x86/include/asm/special_insns.h
++++ b/arch/x86/include/asm/special_insns.h
+@@ -12,6 +12,41 @@
+ 
+ void native_write_cr0(unsigned long val);
+ 
++extern bool themis_trace_enabled;
++
++static __always_inline void themis_toggle_capavisor_debug(bool enable)
++{
++	unsigned long op = 0x1dUL;
++	unsigned long arg = enable ? 1UL : 0UL;
++
++	asm volatile("vmcall"
++		     : "+a"(op), "+D"(arg)
++		     :
++		     : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11",
++		       "cc", "memory");
++}
++
++static __always_inline void themis_trace_set_enabled(bool enable)
++{
++	themis_trace_enabled = enable;
++	themis_toggle_capavisor_debug(enable);
++}
++
++static __always_inline void themis_trace(unsigned int code)
++{
++	unsigned long op = 0x1cUL;
++	unsigned long arg = code;
++
++	if (!themis_trace_enabled)
++		return;
++
++	asm volatile("vmcall"
++		     : "+a"(op), "+D"(arg)
++		     :
++		     : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11",
++		       "cc", "memory");
++}
++
+ static inline unsigned long native_read_cr0(void)
+ {
+ 	unsigned long val;
+diff --git a/arch/x86/kernel/apic/apic.c b/arch/x86/kernel/apic/apic.c
+index 961714e6adae1ccd7e861d14f251d8b27efe998e..5b7896649fd78a38cb831be9b7b6458663810fb4 100644
+--- a/arch/x86/kernel/apic/apic.c
++++ b/arch/x86/kernel/apic/apic.c
+@@ -30,6 +30,7 @@
+ #include <linux/delay.h>
+ #include <linux/timex.h>
+ #include <linux/i8253.h>
++#include <asm/special_insns.h>
+ #include <linux/dmar.h>
+ #include <linux/init.h>
+ #include <linux/cpu.h>
+@@ -70,6 +71,11 @@
+ 
+ #include "local.h"
+ 
++extern volatile int themis_rcu_timeout_probe;
++extern volatile int themis_post_init_probe;
++
++static unsigned int themis_post_apic_timer_count;
++
+ /* Processor that is doing the boot up */
+ u32 boot_cpu_physical_apicid __ro_after_init = BAD_APICID;
+ EXPORT_SYMBOL_GPL(boot_cpu_physical_apicid);
+@@ -428,7 +434,11 @@ static int lapic_next_deadline(unsigned long delta,
+ 	weak_wrmsr_fence();
+ 
+ 	tsc = rdtsc();
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2e4);
+ 	wrmsrq(MSR_IA32_TSC_DEADLINE, tsc + (((u64) delta) * TSC_DIVISOR));
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2e5);
+ 	return 0;
+ }
+ 
+@@ -451,6 +461,8 @@ static int lapic_timer_shutdown(struct clock_event_device *evt)
+ 	 * otherwise.  Time for belt and suspenders programming: mask
+ 	 * the timer _and_ zero the counter registers:
+ 	 */
++	if ((v & APIC_LVT_TIMER_TSCDEADLINE) && themis_rcu_timeout_probe)
++		themis_trace(0x2e6);
+ 	if (v & APIC_LVT_TIMER_TSCDEADLINE)
+ 		wrmsrq(MSR_IA32_TSC_DEADLINE, 0);
+ 	else
+@@ -1056,12 +1068,25 @@ static void local_apic_timer_interrupt(void)
+ DEFINE_IDTENTRY_SYSVEC(sysvec_apic_timer_interrupt)
+ {
+ 	struct pt_regs *old_regs = set_irq_regs(regs);
++	unsigned int themis_count;
++
++	if (themis_post_init_probe) {
++		themis_count = ++themis_post_apic_timer_count;
++		if (themis_count < 256 || !(themis_count % 1000))
++			themis_trace(0x312);
++	}
+ 
+ 	apic_eoi();
+ 	trace_local_timer_entry(LOCAL_TIMER_VECTOR);
+ 	local_apic_timer_interrupt();
+ 	trace_local_timer_exit(LOCAL_TIMER_VECTOR);
+ 
++	if (themis_post_init_probe) {
++		themis_count = themis_post_apic_timer_count;
++		if (themis_count < 256 || !(themis_count % 1000))
++			themis_trace(0x313);
++	}
++
+ 	set_irq_regs(old_regs);
+ }
+ 
+diff --git a/arch/x86/kernel/process_64.c b/arch/x86/kernel/process_64.c
+index 432c0a004c60b0fd4340e69978bd73c9cb83e77b..65ee4df579084a04ac2eab08672e64f8a0f315ae 100644
+--- a/arch/x86/kernel/process_64.c
++++ b/arch/x86/kernel/process_64.c
+@@ -48,6 +48,7 @@
+ #include <asm/mmu_context.h>
+ #include <asm/prctl.h>
+ #include <asm/desc.h>
++#include <asm/special_insns.h>
+ #include <asm/proto.h>
+ #include <asm/ia32.h>
+ #include <asm/debugreg.h>
+@@ -58,6 +59,8 @@
+ #include <asm/unistd.h>
+ #include <asm/fsgsbase.h>
+ #include <asm/fred.h>
++
++extern volatile int themis_post_init_probe;
+ #include <asm/msr.h>
+ #ifdef CONFIG_IA32_EMULATION
+ /* Not included via unistd.h */
+@@ -550,6 +553,8 @@ start_thread_common(struct pt_regs *regs, unsigned long new_ip,
+ 	regs->sp	= new_sp;
+ 	regs->csx	= _cs;
+ 	regs->ssx	= _ss;
++	if (themis_post_init_probe)
++		themis_trace(0x318);
+ 	/*
+ 	 * Allow single-step trap and NMI when starting a new task, thus
+ 	 * once the new task enters user space, single-step trap and NMI
+diff --git a/fs/exec.c b/fs/exec.c
+index 9d5ebc9d15b0d92df77e0f912468d4d71b944174..bf7077d46c54a6e482fdb39d154275b6278d8e2c 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -71,6 +71,7 @@
+ 
+ #include <linux/uaccess.h>
+ #include <asm/mmu_context.h>
++#include <asm/special_insns.h>
+ #include <asm/tlb.h>
+ 
+ #include <trace/events/task.h>
+@@ -78,6 +79,8 @@
+ 
+ #include <trace/events/sched.h>
+ 
++extern volatile int themis_post_init_probe;
++
+ /* For vma exec functions. */
+ #include "../mm/internal.h"
+ 
+@@ -1101,6 +1104,9 @@ int begin_new_exec(struct linux_binprm * bprm)
+ 	struct task_struct *me = current;
+ 	int retval;
+ 
++	if (themis_post_init_probe)
++		themis_trace(0x314);
++
+ 	/* Once we are committed compute the creds */
+ 	retval = bprm_creds_from_file(bprm);
+ 	if (retval)
+@@ -1286,6 +1292,8 @@ int begin_new_exec(struct linux_binprm * bprm)
+ 		bprm->executable = NULL;
+ 		bprm->execfd = retval;
+ 	}
++	if (themis_post_init_probe)
++		themis_trace(0x315);
+ 	return 0;
+ 
+ out_unlock:
+@@ -1325,6 +1333,9 @@ void setup_new_exec(struct linux_binprm * bprm)
+ 	/* Setup things that can depend upon the personality */
+ 	struct task_struct *me = current;
+ 
++	if (themis_post_init_probe)
++		themis_trace(0x316);
++
+ 	arch_pick_mmap_layout(me->mm, &bprm->rlim_stack);
+ 
+ 	arch_setup_new_exec();
+@@ -1342,6 +1353,9 @@ EXPORT_SYMBOL(setup_new_exec);
+ /* Runs immediately before start_thread() takes over. */
+ void finalize_exec(struct linux_binprm *bprm)
+ {
++	if (themis_post_init_probe)
++		themis_trace(0x317);
++
+ 	/* Store any stack rlimit changes before starting thread. */
+ 	task_lock(current->group_leader);
+ 	current->signal->rlim[RLIMIT_STACK] = bprm->rlim_stack;
+diff --git a/fs/kernfs/mount.c b/fs/kernfs/mount.c
+index 3ac52e1417662264509a4f4f3a835e7a592f7f2e..8957c2850fa803a54107e31200c4394c35b04cb1 100644
+--- a/fs/kernfs/mount.c
++++ b/fs/kernfs/mount.c
+@@ -18,6 +18,7 @@
+ #include <linux/exportfs.h>
+ #include <linux/uuid.h>
+ #include <linux/statfs.h>
++#include <asm/special_insns.h>
+ 
+ #include "kernfs-internal.h"
+ 
+@@ -287,6 +288,7 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
+ 	struct inode *inode;
+ 	struct dentry *root;
+ 
++	themis_trace(0x234);
+ 	info->sb = sb;
+ 	/* Userspace would break if executables or devices appear on sysfs */
+ 	sb->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
+@@ -304,8 +306,11 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
+ 	sb->s_shrink->seeks = 0;
+ 
+ 	/* get root inode, initialize and unlock it */
++	themis_trace(0x235);
+ 	down_read(&kf_root->kernfs_rwsem);
++	themis_trace(0x236);
+ 	inode = kernfs_get_inode(sb, info->root->kn);
++	themis_trace(0x237);
+ 	up_read(&kf_root->kernfs_rwsem);
+ 	if (!inode) {
+ 		pr_debug("kernfs: could not get root inode\n");
+@@ -313,7 +318,9 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
+ 	}
+ 
+ 	/* instantiate and link root dentry */
++	themis_trace(0x238);
+ 	root = d_make_root(inode);
++	themis_trace(0x239);
+ 	if (!root) {
+ 		pr_debug("%s: could not get root dentry!\n", __func__);
+ 		return -ENOMEM;
+@@ -370,6 +377,7 @@ int kernfs_get_tree(struct fs_context *fc)
+ 	struct kernfs_super_info *info;
+ 	int error;
+ 
++	themis_trace(0x230);
+ 	info = kzalloc(sizeof(*info), GFP_KERNEL);
+ 	if (!info)
+ 		return -ENOMEM;
+@@ -379,7 +387,9 @@ int kernfs_get_tree(struct fs_context *fc)
+ 	INIT_LIST_HEAD(&info->node);
+ 
+ 	fc->s_fs_info = info;
++	themis_trace(0x231);
+ 	sb = sget_fc(fc, kernfs_test_super, kernfs_set_super);
++	themis_trace(0x232);
+ 	if (IS_ERR(sb))
+ 		return PTR_ERR(sb);
+ 
+@@ -389,7 +399,9 @@ int kernfs_get_tree(struct fs_context *fc)
+ 
+ 		kfc->new_sb_created = true;
+ 
++		themis_trace(0x233);
+ 		error = kernfs_fill_super(sb, kfc);
++		themis_trace(0x23a);
+ 		if (error) {
+ 			deactivate_locked_super(sb);
+ 			return error;
+@@ -400,12 +412,16 @@ int kernfs_get_tree(struct fs_context *fc)
+ 		uuid_gen(&uuid);
+ 		super_set_uuid(sb, uuid.b, sizeof(uuid));
+ 
++		themis_trace(0x23b);
+ 		down_write(&root->kernfs_supers_rwsem);
++		themis_trace(0x23c);
+ 		list_add(&info->node, &info->root->supers);
+ 		up_write(&root->kernfs_supers_rwsem);
+ 	}
+ 
++	themis_trace(0x23d);
+ 	fc->root = dget(sb->s_root);
++	themis_trace(0x23e);
+ 	return 0;
+ }
+ 
+diff --git a/init/main.c b/init/main.c
+index b84818ad9685f8a2bd4142425eb6db92efac5fd4..6db4795f175683d41b8f6f59a5eadb435cdaaa02 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -110,6 +110,7 @@
+ #include <asm/setup.h>
+ #include <asm/sections.h>
+ #include <asm/cacheflush.h>
++#include <asm/special_insns.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/initcall.h>
+@@ -118,6 +119,9 @@
+ 
+ static int kernel_init(void *);
+ 
++volatile int themis_post_init_probe;
++bool themis_trace_enabled;
++
+ /*
+  * Debug helper: via this flag we know that we are in 'early bootup code'
+  * where only the boot processor is running with IRQ disabled.  This means
+@@ -1487,16 +1491,22 @@ static void __init do_pre_smp_initcalls(void)
+ static int run_init_process(const char *init_filename)
+ {
+ 	const char *const *p;
++	int ret;
+ 
+ 	argv_init[0] = init_filename;
+ 	pr_info("Run %s as init process\n", init_filename);
++	themis_post_init_probe = 1;
++	themis_trace_set_enabled(true);
++	themis_trace(0x311);
+ 	pr_debug("  with arguments:\n");
+ 	for (p = argv_init; *p; p++)
+ 		pr_debug("    %s\n", *p);
+ 	pr_debug("  with environment:\n");
+ 	for (p = envp_init; *p; p++)
+ 		pr_debug("    %s\n", *p);
+-	return kernel_execve(init_filename, argv_init, envp_init);
++	ret = kernel_execve(init_filename, argv_init, envp_init);
++	themis_trace(0x319);
++	return ret;
+ }
+ 
+ static int try_to_run_init_process(const char *init_filename)
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index 93701007649049ff9e61bc78aacc3581c4fd6128..f332cc7ac6a72e7d15c1a3e0c6c91f10211c99eb 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -58,6 +58,7 @@
+ #include <linux/psi.h>
+ #include <linux/nstree.h>
+ #include <linux/irq_work.h>
++#include <asm/special_insns.h>
+ #include <net/sock.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -1332,6 +1333,7 @@ void cgroup_favor_dynmods(struct cgroup_root *root, bool favor)
+ {
+ 	bool favoring = root->flags & CGRP_ROOT_FAVOR_DYNMODS;
+ 
++	themis_trace(0x248);
+ 	/*
+ 	 * see the comment above CGRP_ROOT_FAVOR_DYNMODS definition.
+ 	 * favordynmods can flip while task is between
+@@ -1344,18 +1346,26 @@ void cgroup_favor_dynmods(struct cgroup_root *root, bool favor)
+ 	 * turn off. As the scenario is unlikely, simply disallow disabling once
+ 	 * enabled and print out a warning.
+ 	 */
++	themis_trace(0x249);
+ 	percpu_down_write(&cgroup_threadgroup_rwsem);
++	themis_trace(0x24a);
+ 	if (favor && !favoring) {
++		themis_trace(0x24b);
+ 		cgroup_enable_per_threadgroup_rwsem = true;
+ 		rcu_sync_enter(&cgroup_threadgroup_rwsem.rss);
++		themis_trace(0x24c);
+ 		root->flags |= CGRP_ROOT_FAVOR_DYNMODS;
+ 	} else if (!favor && favoring) {
++		themis_trace(0x24d);
+ 		if (cgroup_enable_per_threadgroup_rwsem)
+ 			pr_warn_once("cgroup favordynmods: per threadgroup rwsem mechanism can't be disabled\n");
+ 		rcu_sync_exit(&cgroup_threadgroup_rwsem.rss);
++		themis_trace(0x24e);
+ 		root->flags &= ~CGRP_ROOT_FAVOR_DYNMODS;
+ 	}
++	themis_trace(0x24f);
+ 	percpu_up_write(&cgroup_threadgroup_rwsem);
++	themis_trace(0x250);
+ }
+ 
+ static int cgroup_init_root_id(struct cgroup_root *root)
+@@ -2044,35 +2054,44 @@ struct cgroup_of_peak *of_peak(struct kernfs_open_file *of)
+ 
+ static void apply_cgroup_root_flags(unsigned int root_flags)
+ {
++	themis_trace(0x23f);
+ 	if (current->nsproxy->cgroup_ns == &init_cgroup_ns) {
++		themis_trace(0x240);
+ 		if (root_flags & CGRP_ROOT_NS_DELEGATE)
+ 			cgrp_dfl_root.flags |= CGRP_ROOT_NS_DELEGATE;
+ 		else
+ 			cgrp_dfl_root.flags &= ~CGRP_ROOT_NS_DELEGATE;
+ 
++		themis_trace(0x241);
+ 		cgroup_favor_dynmods(&cgrp_dfl_root,
+ 				     root_flags & CGRP_ROOT_FAVOR_DYNMODS);
+ 
++		themis_trace(0x242);
+ 		if (root_flags & CGRP_ROOT_MEMORY_LOCAL_EVENTS)
+ 			cgrp_dfl_root.flags |= CGRP_ROOT_MEMORY_LOCAL_EVENTS;
+ 		else
+ 			cgrp_dfl_root.flags &= ~CGRP_ROOT_MEMORY_LOCAL_EVENTS;
+ 
++		themis_trace(0x243);
+ 		if (root_flags & CGRP_ROOT_MEMORY_RECURSIVE_PROT)
+ 			cgrp_dfl_root.flags |= CGRP_ROOT_MEMORY_RECURSIVE_PROT;
+ 		else
+ 			cgrp_dfl_root.flags &= ~CGRP_ROOT_MEMORY_RECURSIVE_PROT;
+ 
++		themis_trace(0x244);
+ 		if (root_flags & CGRP_ROOT_MEMORY_HUGETLB_ACCOUNTING)
+ 			cgrp_dfl_root.flags |= CGRP_ROOT_MEMORY_HUGETLB_ACCOUNTING;
+ 		else
+ 			cgrp_dfl_root.flags &= ~CGRP_ROOT_MEMORY_HUGETLB_ACCOUNTING;
+ 
++		themis_trace(0x245);
+ 		if (root_flags & CGRP_ROOT_PIDS_LOCAL_EVENTS)
+ 			cgrp_dfl_root.flags |= CGRP_ROOT_PIDS_LOCAL_EVENTS;
+ 		else
+ 			cgrp_dfl_root.flags &= ~CGRP_ROOT_PIDS_LOCAL_EVENTS;
++		themis_trace(0x246);
+ 	}
++	themis_trace(0x247);
+ }
+ 
+ static int cgroup_show_options(struct seq_file *seq, struct kernfs_root *kf_root)
+@@ -2260,12 +2279,15 @@ int cgroup_do_get_tree(struct fs_context *fc)
+ 	struct cgroup_fs_context *ctx = cgroup_fc2context(fc);
+ 	int ret;
+ 
++	themis_trace(0x229);
+ 	ctx->kfc.root = ctx->root->kf_root;
+ 	if (fc->fs_type == &cgroup2_fs_type)
+ 		ctx->kfc.magic = CGROUP2_SUPER_MAGIC;
+ 	else
+ 		ctx->kfc.magic = CGROUP_SUPER_MAGIC;
++	themis_trace(0x22a);
+ 	ret = kernfs_get_tree(fc);
++	themis_trace(0x22b);
+ 
+ 	/*
+ 	 * In non-init cgroup namespace, instead of root cgroup's dentry,
+@@ -2319,13 +2341,17 @@ static int cgroup_get_tree(struct fs_context *fc)
+ 	struct cgroup_fs_context *ctx = cgroup_fc2context(fc);
+ 	int ret;
+ 
++	themis_trace(0x22c);
+ 	WRITE_ONCE(cgrp_dfl_visible, true);
+ 	cgroup_get_live(&cgrp_dfl_root.cgrp);
+ 	ctx->root = &cgrp_dfl_root;
+ 
++	themis_trace(0x22d);
+ 	ret = cgroup_do_get_tree(fc);
++	themis_trace(0x22e);
+ 	if (!ret)
+ 		apply_cgroup_root_flags(ctx->flags);
++	themis_trace(0x22f);
+ 	return ret;
+ }
+ 
+diff --git a/kernel/locking/percpu-rwsem.c b/kernel/locking/percpu-rwsem.c
+index ef234469baacab67107c08fc3a53ca1c65543d4f..ed6b8b9f61d33d1f0ab39117c1f667a303b77995 100644
+--- a/kernel/locking/percpu-rwsem.c
++++ b/kernel/locking/percpu-rwsem.c
+@@ -10,6 +10,7 @@
+ #include <linux/sched/debug.h>
+ #include <linux/errno.h>
+ #include <trace/events/lock.h>
++#include <asm/special_insns.h>
+ 
+ int __percpu_init_rwsem(struct percpu_rw_semaphore *sem,
+ 			const char *name, struct lock_class_key *key)
+@@ -228,19 +229,24 @@ void __sched percpu_down_write(struct percpu_rw_semaphore *sem)
+ {
+ 	bool contended = false;
+ 
++	themis_trace(0x251);
+ 	might_sleep();
+ 	rwsem_acquire(&sem->dep_map, 0, 0, _RET_IP_);
+ 
+ 	/* Notify readers to take the slow path. */
++	themis_trace(0x252);
+ 	rcu_sync_enter(&sem->rss);
++	themis_trace(0x253);
+ 
+ 	/*
+ 	 * Try set sem->block; this provides writer-writer exclusion.
+ 	 * Having sem->block set makes new readers block.
+ 	 */
+ 	if (!__percpu_down_write_trylock(sem)) {
++		themis_trace(0x254);
+ 		trace_contention_begin(sem, LCB_F_PERCPU | LCB_F_WRITE);
+ 		percpu_rwsem_wait(sem, /* .reader = */ false, false);
++		themis_trace(0x255);
+ 		contended = true;
+ 	}
+ 
+@@ -253,7 +259,9 @@ void __sched percpu_down_write(struct percpu_rw_semaphore *sem)
+ 	 */
+ 
+ 	/* Wait for all active readers to complete. */
++	themis_trace(0x256);
+ 	rcuwait_wait_event(&sem->writer, readers_active_check(sem), TASK_UNINTERRUPTIBLE);
++	themis_trace(0x257);
+ 	if (contended)
+ 		trace_contention_end(sem, 0);
+ }
+diff --git a/kernel/rcu/sync.c b/kernel/rcu/sync.c
+index da60a9947c005d7bcef584a788201d21d9be19c7..3e421166349a11cb4be134175560c4ad2ea040e7 100644
+--- a/kernel/rcu/sync.c
++++ b/kernel/rcu/sync.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/rcu_sync.h>
+ #include <linux/sched.h>
++#include <asm/special_insns.h>
+ 
+ enum { GP_IDLE = 0, GP_ENTER, GP_PASSED, GP_EXIT, GP_REPLAY };
+ 
+@@ -106,9 +107,11 @@ void rcu_sync_enter(struct rcu_sync *rsp)
+ {
+ 	int gp_state;
+ 
++	themis_trace(0x258);
+ 	spin_lock_irq(&rsp->rss_lock);
+ 	gp_state = rsp->gp_state;
+ 	if (gp_state == GP_IDLE) {
++		themis_trace(0x259);
+ 		WRITE_ONCE(rsp->gp_state, GP_ENTER);
+ 		WARN_ON_ONCE(rsp->gp_count);
+ 		/*
+@@ -124,19 +127,25 @@ void rcu_sync_enter(struct rcu_sync *rsp)
+ 	}
+ 	rsp->gp_count++;
+ 	spin_unlock_irq(&rsp->rss_lock);
++	themis_trace(0x25a);
+ 
+ 	if (gp_state == GP_IDLE) {
+ 		/*
+ 		 * See the comment above, this simply does the "synchronous"
+ 		 * call_rcu(rcu_sync_func) which does GP_ENTER -> GP_PASSED.
+ 		 */
++		themis_trace(0x25b);
+ 		synchronize_rcu();
++		themis_trace(0x25c);
+ 		rcu_sync_func(&rsp->cb_head);
++		themis_trace(0x25d);
+ 		/* Not really needed, wait_event() would see GP_PASSED. */
+ 		return;
+ 	}
+ 
++	themis_trace(0x25e);
+ 	wait_event(rsp->gp_wait, READ_ONCE(rsp->gp_state) >= GP_PASSED);
++	themis_trace(0x25f);
+ }
+ 
+ /**
+diff --git a/kernel/rcu/tree.c b/kernel/rcu/tree.c
+index 293bbd9ac3f4e74e4387b79ea54fc9fff68ad66f..3f492efe23f2796f1be2965e87d390b464b3d236 100644
+--- a/kernel/rcu/tree.c
++++ b/kernel/rcu/tree.c
+@@ -51,6 +51,7 @@
+ #include <linux/suspend.h>
+ #include <linux/ftrace.h>
+ #include <linux/tick.h>
++#include <asm/special_insns.h>
+ #include <linux/sysrq.h>
+ #include <linux/kprobes.h>
+ #include <linux/gfp.h>
+@@ -1119,11 +1120,15 @@ static void rcu_gp_kthread_wake(void)
+ {
+ 	struct task_struct *t = READ_ONCE(rcu_state.gp_kthread);
+ 
++	themis_trace(0x2bf);
+ 	if ((current == t && !in_hardirq() && !in_serving_softirq()) ||
+-	    !READ_ONCE(rcu_state.gp_flags) || !t)
++	    !READ_ONCE(rcu_state.gp_flags) || !t) {
++		themis_trace(0x2c0);
+ 		return;
++	}
+ 	WRITE_ONCE(rcu_state.gp_wake_time, jiffies);
+ 	WRITE_ONCE(rcu_state.gp_wake_seq, READ_ONCE(rcu_state.gp_seq));
++	themis_trace(0x2c1);
+ 	swake_up_one(&rcu_state.gp_wq);
+ }
+ 
+@@ -1643,6 +1648,7 @@ static void rcu_sr_normal_complete(struct llist_node *node)
+ 	struct rcu_synchronize *rs = container_of(
+ 		(struct rcu_head *) node, struct rcu_synchronize, head);
+ 
++	themis_trace(0x2a6);
+ 	WARN_ONCE(IS_ENABLED(CONFIG_PROVE_RCU) &&
+ 		!poll_state_synchronize_rcu_full(&rs->oldstate),
+ 		"A full grace period is not passed yet!\n");
+@@ -1655,6 +1661,7 @@ static void rcu_sr_normal_gp_cleanup_work(struct work_struct *work)
+ {
+ 	struct llist_node *done, *rcu, *next, *head;
+ 
++	themis_trace(0x2a7);
+ 	/*
+ 	 * This work execution can potentially execute
+ 	 * while a new done tail is being updated by
+@@ -1704,11 +1711,15 @@ static void rcu_sr_normal_gp_cleanup(void)
+ 	struct llist_node *wait_tail, *next = NULL, *rcu = NULL;
+ 	int done = 0;
+ 
++	themis_trace(0x2a8);
+ 	wait_tail = rcu_state.srs_wait_tail;
+-	if (wait_tail == NULL)
++	if (wait_tail == NULL) {
++		themis_trace(0x2a9);
+ 		return;
++	}
+ 
+ 	rcu_state.srs_wait_tail = NULL;
++	themis_trace(0x2aa);
+ 	ASSERT_EXCLUSIVE_WRITER(rcu_state.srs_wait_tail);
+ 	WARN_ON_ONCE(!rcu_sr_is_wait_head(wait_tail));
+ 
+@@ -1719,6 +1730,7 @@ static void rcu_sr_normal_gp_cleanup(void)
+ 		if (rcu_sr_is_wait_head(rcu))
+ 			break;
+ 
++		themis_trace(0x2ab);
+ 		rcu_sr_normal_complete(rcu);
+ 		// It can be last, update a next on this step.
+ 		wait_tail->next = next;
+@@ -1751,6 +1763,7 @@ static void rcu_sr_normal_gp_cleanup(void)
+ 	 * added by rcu_sr_normal_gp_init() call.
+ 	 */
+ 	if (wait_tail->next) {
++		themis_trace(0x2ac);
+ 		atomic_inc(&rcu_state.srs_cleanups_pending);
+ 		if (!queue_work(sync_wq, &rcu_state.srs_cleanup_work))
+ 			atomic_dec(&rcu_state.srs_cleanups_pending);
+@@ -1766,18 +1779,23 @@ static bool rcu_sr_normal_gp_init(void)
+ 	struct llist_node *wait_head;
+ 	bool start_new_poll = false;
+ 
++	themis_trace(0x2ad);
+ 	first = READ_ONCE(rcu_state.srs_next.first);
+-	if (!first || rcu_sr_is_wait_head(first))
++	if (!first || rcu_sr_is_wait_head(first)) {
++		themis_trace(0x2ae);
+ 		return start_new_poll;
++	}
+ 
+ 	wait_head = rcu_sr_get_wait_head();
+ 	if (!wait_head) {
+ 		// Kick another GP to retry.
++		themis_trace(0x2af);
+ 		start_new_poll = true;
+ 		return start_new_poll;
+ 	}
+ 
+ 	/* Inject a wait-dummy-node. */
++	themis_trace(0x2b0);
+ 	llist_add(wait_head, &rcu_state.srs_next);
+ 
+ 	/*
+@@ -1794,6 +1812,7 @@ static bool rcu_sr_normal_gp_init(void)
+ 
+ static void rcu_sr_normal_add_req(struct rcu_synchronize *rs)
+ {
++	themis_trace(0x2b1);
+ 	llist_add((struct llist_node *) &rs->head, &rcu_state.srs_next);
+ }
+ 
+@@ -1811,13 +1830,16 @@ static noinline_for_stack bool rcu_gp_init(void)
+ 	unsigned long old_gp_seq;
+ 
+ 	WRITE_ONCE(rcu_state.gp_activity, jiffies);
++	themis_trace(0x2b2);
+ 	raw_spin_lock_irq_rcu_node(rnp);
+ 	if (!rcu_state.gp_flags) {
+ 		/* Spurious wakeup, tell caller to go back to sleep.  */
++		themis_trace(0x2b3);
+ 		raw_spin_unlock_irq_rcu_node(rnp);
+ 		return false;
+ 	}
+ 	WRITE_ONCE(rcu_state.gp_flags, 0); /* Clear all flags: New GP. */
++	themis_trace(0x2b4);
+ 
+ 	if (WARN_ON_ONCE(rcu_gp_in_progress())) {
+ 		/*
+@@ -1835,6 +1857,7 @@ static noinline_for_stack bool rcu_gp_init(void)
+ 	 * that previous gp waiters won't observe the new gp_seq.
+ 	 */
+ 	start_new_poll = rcu_sr_normal_gp_init();
++	themis_trace(0x2b5);
+ 	/* Record GP times before starting GP, hence rcu_seq_start(). */
+ 	old_gp_seq = rcu_state.gp_seq;
+ 	/*
+@@ -2057,6 +2080,7 @@ static noinline_for_stack void rcu_gp_fqs_loop(void)
+ 	int ret;
+ 	struct rcu_node *rnp = rcu_get_root();
+ 
++	themis_trace(0x2d0);
+ 	j = READ_ONCE(jiffies_till_first_fqs);
+ 	if (rcu_state.cbovld)
+ 		gf = RCU_GP_FLAG_OVLD;
+@@ -2080,8 +2104,10 @@ static noinline_for_stack void rcu_gp_fqs_loop(void)
+ 		trace_rcu_grace_period(rcu_state.name, rcu_state.gp_seq,
+ 				       TPS("fqswait"));
+ 		WRITE_ONCE(rcu_state.gp_state, RCU_GP_WAIT_FQS);
++		themis_trace(0x2d1);
+ 		(void)swait_event_idle_timeout_exclusive(rcu_state.gp_wq,
+ 				 rcu_gp_fqs_check_wake(&gf), j);
++		themis_trace(0x2d2);
+ 		rcu_gp_torture_wait();
+ 		WRITE_ONCE(rcu_state.gp_state, RCU_GP_DOING_FQS);
+ 		/* Locking provides needed memory barriers. */
+@@ -2095,11 +2121,14 @@ static noinline_for_stack void rcu_gp_fqs_loop(void)
+ 		 * the corresponding leaf nodes have passed through their quiescent state.
+ 		 */
+ 		if (!READ_ONCE(rnp->qsmask) &&
+-		    !rcu_preempt_blocked_readers_cgp(rnp))
++		    !rcu_preempt_blocked_readers_cgp(rnp)) {
++			themis_trace(0x2d3);
+ 			break;
++		}
+ 		/* If time for quiescent-state forcing, do it. */
+ 		if (!time_after(rcu_state.jiffies_force_qs, jiffies) ||
+ 		    (gf & (RCU_GP_FLAG_FQS | RCU_GP_FLAG_OVLD))) {
++			themis_trace(0x2d4);
+ 			trace_rcu_grace_period(rcu_state.name, rcu_state.gp_seq,
+ 					       TPS("fqsstart"));
+ 			rcu_gp_fqs(first_gp_fqs);
+@@ -2146,6 +2175,7 @@ static noinline void rcu_gp_cleanup(void)
+ 	struct rcu_node *rnp = rcu_get_root();
+ 	struct swait_queue_head *sq;
+ 
++	themis_trace(0x2b6);
+ 	WRITE_ONCE(rcu_state.gp_activity, jiffies);
+ 	raw_spin_lock_irq_rcu_node(rnp);
+ 	rcu_state.gp_end = jiffies;
+@@ -2203,6 +2233,7 @@ static noinline void rcu_gp_cleanup(void)
+ 	}
+ 	rnp = rcu_get_root();
+ 	raw_spin_lock_irq_rcu_node(rnp); /* GP before ->gp_seq update. */
++	themis_trace(0x2b7);
+ 
+ 	/* Declare grace period done, trace first to use old GP number. */
+ 	trace_rcu_grace_period(rcu_state.name, rcu_state.gp_seq, TPS("end"));
+@@ -2247,6 +2278,7 @@ static noinline void rcu_gp_cleanup(void)
+ 
+ 	// Make synchronize_rcu() users aware of the end of old grace period.
+ 	rcu_sr_normal_gp_cleanup();
++	themis_trace(0x2b8);
+ 
+ 	// If strict, make all CPUs aware of the end of the old grace period.
+ 	if (IS_ENABLED(CONFIG_RCU_STRICT_GRACE_PERIOD))
+@@ -2263,17 +2295,20 @@ static int __noreturn rcu_gp_kthread(void *unused)
+ 
+ 		/* Handle grace-period start. */
+ 		for (;;) {
++			themis_trace(0x2b9);
+ 			trace_rcu_grace_period(rcu_state.name, rcu_state.gp_seq,
+ 					       TPS("reqwait"));
+ 			WRITE_ONCE(rcu_state.gp_state, RCU_GP_WAIT_GPS);
+ 			swait_event_idle_exclusive(rcu_state.gp_wq,
+ 					 READ_ONCE(rcu_state.gp_flags) &
+ 					 RCU_GP_FLAG_INIT);
++			themis_trace(0x2ba);
+ 			rcu_gp_torture_wait();
+ 			WRITE_ONCE(rcu_state.gp_state, RCU_GP_DONE_GPS);
+ 			/* Locking provides needed memory barrier. */
+ 			if (rcu_gp_init())
+ 				break;
++			themis_trace(0x2bb);
+ 			cond_resched_tasks_rcu_qs();
+ 			WRITE_ONCE(rcu_state.gp_activity, jiffies);
+ 			WARN_ON(signal_pending(current));
+@@ -2282,11 +2317,14 @@ static int __noreturn rcu_gp_kthread(void *unused)
+ 		}
+ 
+ 		/* Handle quiescent-state forcing. */
++		themis_trace(0x2bc);
+ 		rcu_gp_fqs_loop();
+ 
+ 		/* Handle grace-period end. */
++		themis_trace(0x2bd);
+ 		WRITE_ONCE(rcu_state.gp_state, RCU_GP_CLEANUP);
+ 		rcu_gp_cleanup();
++		themis_trace(0x2be);
+ 		WRITE_ONCE(rcu_state.gp_state, RCU_GP_CLEANED);
+ 	}
+ }
+@@ -2331,6 +2369,7 @@ static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
+ 	unsigned long oldmask = 0;
+ 	struct rcu_node *rnp_c;
+ 
++	themis_trace(0x2c2);
+ 	raw_lockdep_assert_held_rcu_node(rnp);
+ 
+ 	/* Walk up the rcu_node hierarchy. */
+@@ -2341,6 +2380,7 @@ static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
+ 			 * Our bit has already been cleared, or the
+ 			 * relevant grace period is already over, so done.
+ 			 */
++			themis_trace(0x2c3);
+ 			raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+ 			return;
+ 		}
+@@ -2348,6 +2388,7 @@ static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
+ 		WARN_ON_ONCE(!rcu_is_leaf_node(rnp) &&
+ 			     rcu_preempt_blocked_readers_cgp(rnp));
+ 		WRITE_ONCE(rnp->qsmask, rnp->qsmask & ~mask);
++		themis_trace(0x2c4);
+ 		trace_rcu_quiescent_state_report(rcu_state.name, rnp->gp_seq,
+ 						 mask, rnp->qsmask, rnp->level,
+ 						 rnp->grplo, rnp->grphi,
+@@ -2355,6 +2396,7 @@ static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
+ 		if (rnp->qsmask != 0 || rcu_preempt_blocked_readers_cgp(rnp)) {
+ 
+ 			/* Other bits still set at this level, so done. */
++			themis_trace(0x2c5);
+ 			raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+ 			return;
+ 		}
+@@ -2364,6 +2406,7 @@ static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
+ 
+ 			/* No more levels.  Exit loop holding root lock. */
+ 
++			themis_trace(0x2c6);
+ 			break;
+ 		}
+ 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+@@ -2434,6 +2477,7 @@ rcu_report_qs_rdp(struct rcu_data *rdp)
+ 	unsigned long mask;
+ 	struct rcu_node *rnp;
+ 
++	themis_trace(0x2c7);
+ 	WARN_ON_ONCE(rdp->cpu != smp_processor_id());
+ 	rnp = rdp->mynode;
+ 	raw_spin_lock_irqsave_rcu_node(rnp, flags);
+@@ -2447,12 +2491,14 @@ rcu_report_qs_rdp(struct rcu_data *rdp)
+ 		 * within the current grace period.
+ 		 */
+ 		rdp->cpu_no_qs.b.norm = true;	/* need qs for new gp. */
++		themis_trace(0x2c8);
+ 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+ 		return;
+ 	}
+ 	mask = rdp->grpmask;
+ 	rdp->core_needs_qs = false;
+ 	if ((rnp->qsmask & mask) == 0) {
++		themis_trace(0x2c9);
+ 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+ 	} else {
+ 		/*
+@@ -2485,6 +2531,7 @@ rcu_report_qs_rdp(struct rcu_data *rdp)
+ static void
+ rcu_check_quiescent_state(struct rcu_data *rdp)
+ {
++	themis_trace(0x2ca);
+ 	/* Check for grace-period ends and beginnings. */
+ 	note_gp_changes(rdp);
+ 
+@@ -2492,20 +2539,25 @@ rcu_check_quiescent_state(struct rcu_data *rdp)
+ 	 * Does this CPU still need to do its part for current grace period?
+ 	 * If no, return and let the other CPUs do their part as well.
+ 	 */
+-	if (!rdp->core_needs_qs)
++	if (!rdp->core_needs_qs) {
++		themis_trace(0x2cb);
+ 		return;
++	}
+ 
+ 	/*
+ 	 * Was there a quiescent state since the beginning of the grace
+ 	 * period? If no, then exit and wait for the next call.
+ 	 */
+-	if (rdp->cpu_no_qs.b.norm)
++	if (rdp->cpu_no_qs.b.norm) {
++		themis_trace(0x2cc);
+ 		return;
++	}
+ 
+ 	/*
+ 	 * Tell RCU we are done (but rcu_report_qs_rdp() will be the
+ 	 * judge of that).
+ 	 */
++	themis_trace(0x2cd);
+ 	rcu_report_qs_rdp(rdp);
+ }
+ 
+@@ -2701,8 +2753,10 @@ void rcu_sched_clock_irq(int user)
+ 		__this_cpu_write(rcu_data.rcu_urgent_qs, false);
+ 	}
+ 	rcu_flavor_sched_clock_irq(user);
+-	if (rcu_pending(user))
++	if (rcu_pending(user)) {
++		themis_trace(0x2cf);
+ 		invoke_rcu_core();
++	}
+ 	if (user || rcu_is_cpu_rrupt_from_idle())
+ 		rcu_note_voluntary_context_switch(current);
+ 	lockdep_assert_irqs_disabled();
+@@ -2825,6 +2879,7 @@ static __latent_entropy void rcu_core(void)
+ 	struct rcu_data *rdp = raw_cpu_ptr(&rcu_data);
+ 	struct rcu_node *rnp = rdp->mynode;
+ 
++	themis_trace(0x2d5);
+ 	if (cpu_is_offline(smp_processor_id()))
+ 		return;
+ 	trace_rcu_utilization(TPS("Start RCU core"));
+@@ -3266,10 +3321,13 @@ static void synchronize_rcu_normal(void)
+ {
+ 	struct rcu_synchronize rs;
+ 
++	themis_trace(0x299);
+ 	trace_rcu_sr_normal(rcu_state.name, &rs.head, TPS("request"));
+ 
+ 	if (READ_ONCE(rcu_normal_wake_from_gp) < 1) {
++		themis_trace(0x29a);
+ 		wait_rcu_gp(call_rcu_hurry);
++		themis_trace(0x29b);
+ 		goto trace_complete_out;
+ 	}
+ 
+@@ -3284,15 +3342,20 @@ static void synchronize_rcu_normal(void)
+ 		get_state_synchronize_rcu_full(&rs.oldstate);
+ 
+ 	rcu_sr_normal_add_req(&rs);
++	themis_trace(0x29c);
+ 
+ 	/* Kick a GP and start waiting. */
+ 	(void) start_poll_synchronize_rcu();
++	themis_trace(0x29d);
+ 
+ 	/* Now we can wait. */
++	themis_trace(0x29e);
+ 	wait_for_completion(&rs.completion);
++	themis_trace(0x29f);
+ 	destroy_rcu_head_on_stack(&rs.head);
+ 
+ trace_complete_out:
++	themis_trace(0x2a0);
+ 	trace_rcu_sr_normal(rcu_state.name, &rs.head, TPS("complete"));
+ }
+ 
+@@ -3339,15 +3402,19 @@ void synchronize_rcu(void)
+ 	unsigned long flags;
+ 	struct rcu_node *rnp;
+ 
++	themis_trace(0x296);
+ 	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
+ 			 lock_is_held(&rcu_lock_map) ||
+ 			 lock_is_held(&rcu_sched_lock_map),
+ 			 "Illegal synchronize_rcu() in RCU read-side critical section");
+ 	if (!rcu_blocking_is_gp()) {
+-		if (rcu_gp_is_expedited())
++		if (rcu_gp_is_expedited()) {
++			themis_trace(0x297);
+ 			synchronize_rcu_expedited();
+-		else
++		} else {
++			themis_trace(0x298);
+ 			synchronize_rcu_normal();
++		}
+ 		return;
+ 	}
+ 
+diff --git a/kernel/rcu/tree_exp.h b/kernel/rcu/tree_exp.h
+index 96c49c56fc14a44638d3d67a0d9c382942700e0a..c6b60c5d01402475808ce826ed250e0cfdde44ec 100644
+--- a/kernel/rcu/tree_exp.h
++++ b/kernel/rcu/tree_exp.h
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/console.h>
+ #include <linux/lockdep.h>
++#include <asm/special_insns.h>
+ 
+ static void rcu_exp_handler(void *unused);
+ static int rcu_print_task_exp_stall(struct rcu_node *rnp);
+@@ -195,9 +196,11 @@ static void __rcu_report_exp_rnp(struct rcu_node *rnp,
+ {
+ 	unsigned long mask;
+ 
++	themis_trace(0x260);
+ 	raw_lockdep_assert_held_rcu_node(rnp);
+ 	for (;;) {
+ 		if (!sync_rcu_exp_done(rnp)) {
++			themis_trace(0x261);
+ 			if (!rnp->expmask)
+ 				rcu_initiate_boost(rnp, flags);
+ 			else
+@@ -209,6 +212,7 @@ static void __rcu_report_exp_rnp(struct rcu_node *rnp,
+ 			if (wake)
+ 				swake_up_one(&rcu_state.expedited_wq);
+ 
++			themis_trace(0x262);
+ 			break;
+ 		}
+ 		mask = rnp->grpmask;
+@@ -246,9 +250,11 @@ static void rcu_report_exp_cpu_mult(struct rcu_node *rnp, unsigned long flags,
+ 
+ 	raw_lockdep_assert_held_rcu_node(rnp);
+ 	if (!(rnp->expmask & mask_in)) {
++		themis_trace(0x263);
+ 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+ 		return;
+ 	}
++	themis_trace(0x264);
+ 	mask = mask_in & rnp->expmask;
+ 	WRITE_ONCE(rnp->expmask, rnp->expmask & ~mask);
+ 	for_each_leaf_node_cpu_mask(rnp, cpu, mask) {
+@@ -269,6 +275,7 @@ static void rcu_report_exp_rdp(struct rcu_data *rdp)
+ 	unsigned long flags;
+ 	struct rcu_node *rnp = rdp->mynode;
+ 
++	themis_trace(0x265);
+ 	raw_spin_lock_irqsave_rcu_node(rnp, flags);
+ 	WRITE_ONCE(rdp->cpu_no_qs.b.exp, false);
+ 	ASSERT_EXCLUSIVE_WRITER(rdp->cpu_no_qs.b.exp);
+@@ -364,6 +371,7 @@ static void __sync_rcu_exp_select_node_cpus(struct rcu_exp_work *rewp)
+ 	int ret;
+ 	struct rcu_node *rnp = container_of(rewp, struct rcu_node, rew);
+ 
++	themis_trace(0x266);
+ 	raw_spin_lock_irqsave_rcu_node(rnp, flags);
+ 
+ 	/* Each pass checks a CPU for identity, offline, and idle. */
+@@ -375,6 +383,7 @@ static void __sync_rcu_exp_select_node_cpus(struct rcu_exp_work *rewp)
+ 
+ 		if (raw_smp_processor_id() == cpu ||
+ 		    !(rnp->qsmaskinitnext & mask)) {
++			themis_trace(0x267);
+ 			mask_ofl_test |= mask;
+ 		} else {
+ 			/*
+@@ -392,10 +401,12 @@ static void __sync_rcu_exp_select_node_cpus(struct rcu_exp_work *rewp)
+ 			 * below acquire semantic.
+ 			 */
+ 			snap = ct_rcu_watching_cpu_acquire(cpu);
+-			if (rcu_watching_snap_in_eqs(snap))
++			if (rcu_watching_snap_in_eqs(snap)) {
++				themis_trace(0x268);
+ 				mask_ofl_test |= mask;
+-			else
++			} else {
+ 				rdp->exp_watching_snap = snap;
++			}
+ 		}
+ 	}
+ 	mask_ofl_ipi = rnp->expmask & ~mask_ofl_test;
+@@ -409,19 +420,24 @@ static void __sync_rcu_exp_select_node_cpus(struct rcu_exp_work *rewp)
+ 
+ retry_ipi:
+ 		if (rcu_watching_snap_stopped_since(rdp, rdp->exp_watching_snap)) {
++			themis_trace(0x269);
+ 			mask_ofl_test |= mask;
+ 			continue;
+ 		}
+ 		if (get_cpu() == cpu) {
++			themis_trace(0x26a);
+ 			mask_ofl_test |= mask;
+ 			put_cpu();
+ 			continue;
+ 		}
++		themis_trace(0x26b);
+ 		ret = smp_call_function_single(cpu, rcu_exp_handler, NULL, 0);
+ 		put_cpu();
+ 		/* The CPU will report the QS in response to the IPI. */
+-		if (!ret)
++		if (!ret) {
++			themis_trace(0x26c);
+ 			continue;
++		}
+ 
+ 		/* Failed, raced with CPU hotplug operation. */
+ 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
+@@ -440,6 +456,7 @@ static void __sync_rcu_exp_select_node_cpus(struct rcu_exp_work *rewp)
+ 	}
+ 	/* Report quiescent states for those that went offline. */
+ 	if (mask_ofl_test) {
++		themis_trace(0x26d);
+ 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
+ 		rcu_report_exp_cpu_mult(rnp, flags, mask_ofl_test, false);
+ 	}
+@@ -488,6 +505,7 @@ static void wait_rcu_exp_gp(struct kthread_work *wp)
+ {
+ 	struct rcu_exp_work *rewp;
+ 
++	themis_trace(0x278);
+ 	rewp = container_of(wp, struct rcu_exp_work, rew_work);
+ 	rcu_exp_sel_wait_wake(rewp->rew_s);
+ }
+@@ -506,8 +524,10 @@ static void sync_rcu_exp_select_cpus(void)
+ {
+ 	struct rcu_node *rnp;
+ 
++	themis_trace(0x26e);
+ 	trace_rcu_exp_grace_period(rcu_state.name, rcu_exp_gp_seq_endval(), TPS("reset"));
+ 	sync_exp_reset_tree();
++	themis_trace(0x26f);
+ 	trace_rcu_exp_grace_period(rcu_state.name, rcu_exp_gp_seq_endval(), TPS("select"));
+ 
+ 	/* Schedule work for each leaf rcu_node structure. */
+@@ -530,6 +550,7 @@ static void sync_rcu_exp_select_cpus(void)
+ 	rcu_for_each_leaf_node(rnp)
+ 		if (rnp->exp_need_flush)
+ 			sync_rcu_exp_select_cpus_flush_work(rnp);
++	themis_trace(0x270);
+ }
+ 
+ /*
+@@ -542,13 +563,17 @@ static bool synchronize_rcu_expedited_wait_once(long tlimit)
+ 	int t;
+ 	struct rcu_node *rnp_root = rcu_get_root();
+ 
++	themis_trace(0x271);
+ 	t = swait_event_timeout_exclusive(rcu_state.expedited_wq,
+ 					  sync_rcu_exp_done_unlocked(rnp_root),
+ 					  tlimit);
+ 	// Workqueues should not be signaled.
+-	if (t > 0 || sync_rcu_exp_done_unlocked(rnp_root))
++	if (t > 0 || sync_rcu_exp_done_unlocked(rnp_root)) {
++		themis_trace(0x272);
+ 		return true;
++	}
+ 	WARN_ON(t < 0);  /* workqueues should not be signaled. */
++	themis_trace(0x273);
+ 	return false;
+ }
+ 
+@@ -628,6 +653,7 @@ static void synchronize_rcu_expedited_wait(void)
+ 	struct rcu_node *rnp;
+ 	unsigned long flags;
+ 
++	themis_trace(0x274);
+ 	trace_rcu_exp_grace_period(rcu_state.name, rcu_exp_gp_seq_endval(), TPS("startwait"));
+ 	jiffies_stall = rcu_exp_jiffies_till_stall_check();
+ 	jiffies_start = jiffies;
+@@ -684,13 +710,16 @@ static void rcu_exp_wait_wake(unsigned long s)
+ {
+ 	struct rcu_node *rnp;
+ 
++	themis_trace(0x275);
+ 	synchronize_rcu_expedited_wait();
++	themis_trace(0x276);
+ 
+ 	// Switch over to wakeup mode, allowing the next GP to proceed.
+ 	// End the previous grace period only after acquiring the mutex
+ 	// to ensure that only one GP runs concurrently with wakeups.
+ 	mutex_lock(&rcu_state.exp_wake_mutex);
+ 	rcu_exp_gp_seq_end();
++	themis_trace(0x277);
+ 	trace_rcu_exp_grace_period(rcu_state.name, s, TPS("end"));
+ 
+ 	rcu_for_each_node_breadth_first(rnp) {
+@@ -714,17 +743,21 @@ static void rcu_exp_wait_wake(unsigned long s)
+  */
+ static void rcu_exp_sel_wait_wake(unsigned long s)
+ {
++	themis_trace(0x279);
+ 	/* Initialize the rcu_node tree in preparation for the wait. */
+ 	sync_rcu_exp_select_cpus();
++	themis_trace(0x27a);
+ 
+ 	/* Wait and clean up, including waking everyone. */
+ 	rcu_exp_wait_wake(s);
++	themis_trace(0x27b);
+ }
+ 
+ /* Request an expedited quiescent state. */
+ static void rcu_exp_need_qs(void)
+ {
+ 	lockdep_assert_irqs_disabled();
++	themis_trace(0x27c);
+ 	ASSERT_EXCLUSIVE_WRITER_SCOPED(*this_cpu_ptr(&rcu_data.cpu_no_qs.b.exp));
+ 	__this_cpu_write(rcu_data.cpu_no_qs.b.exp, true);
+ 	/* Store .exp before .rcu_urgent_qs. */
+@@ -749,6 +782,7 @@ static void rcu_exp_handler(void *unused)
+ 	struct rcu_node *rnp = rdp->mynode;
+ 	struct task_struct *t = current;
+ 
++	themis_trace(0x27d);
+ 	/*
+ 	 * WARN if the CPU is unexpectedly already looking for a
+ 	 * QS or has already reported one.
+@@ -765,10 +799,13 @@ static void rcu_exp_handler(void *unused)
+ 	 */
+ 	if (!depth) {
+ 		if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
+-		    rcu_is_cpu_rrupt_from_idle())
++		    rcu_is_cpu_rrupt_from_idle()) {
++			themis_trace(0x27e);
+ 			rcu_report_exp_rdp(rdp);
+-		else
++		} else {
++			themis_trace(0x27f);
+ 			rcu_exp_need_qs();
++		}
+ 		return;
+ 	}
+ 
+diff --git a/kernel/rcu/update.c b/kernel/rcu/update.c
+index dfeba9b3539508c4c647fcedc201cfe64064ee8a..6e448ef77ad9736d0eba1bcd0660a044fd3e9a1a 100644
+--- a/kernel/rcu/update.c
++++ b/kernel/rcu/update.c
+@@ -43,6 +43,7 @@
+ #include <linux/kprobes.h>
+ #include <linux/slab.h>
+ #include <linux/irq_work.h>
++#include <asm/special_insns.h>
+ #include <linux/rcupdate_trace.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -403,6 +404,7 @@ void wakeme_after_rcu(struct rcu_head *head)
+ {
+ 	struct rcu_synchronize *rcu;
+ 
++	themis_trace(0x2a5);
+ 	rcu = container_of(head, struct rcu_synchronize, head);
+ 	complete(&rcu->completion);
+ }
+@@ -414,6 +416,7 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
+ 	int i;
+ 	int j;
+ 
++	themis_trace(0x2a1);
+ 	/* Initialize and register callbacks for each crcu_array element. */
+ 	for (i = 0; i < n; i++) {
+ 		if (checktiny &&
+@@ -428,6 +431,7 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
+ 			init_rcu_head_on_stack(&rs_array[i].head);
+ 			init_completion(&rs_array[i].completion);
+ 			(crcu_array[i])(&rs_array[i].head, wakeme_after_rcu);
++			themis_trace(0x2a2);
+ 		}
+ 	}
+ 
+@@ -440,7 +444,9 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
+ 			if (crcu_array[j] == crcu_array[i])
+ 				break;
+ 		if (j == i) {
++			themis_trace(0x2a3);
+ 			wait_for_completion_state(&rs_array[i].completion, state);
++			themis_trace(0x2a4);
+ 			destroy_rcu_head_on_stack(&rs_array[i].head);
+ 		}
+ 	}
+diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+index 8e00d95fb33880e9ac44c29e18df421af121aa44..1f79a862d6c09978ee51b7f8032dcb14226309c4 100644
+--- a/kernel/sched/idle.c
++++ b/kernel/sched/idle.c
+@@ -9,9 +9,12 @@
+ #include <linux/cpuidle.h>
+ #include <linux/suspend.h>
+ #include <linux/livepatch.h>
++#include <asm/special_insns.h>
+ #include "sched.h"
+ #include "smp.h"
+ 
++extern volatile int themis_rcu_timeout_probe;
++
+ /* Linker adds these: start and end of __cpuidle functions */
+ extern char __cpuidle_text_start[], __cpuidle_text_end[];
+ 
+@@ -163,6 +166,8 @@ static int call_cpuidle(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+ 
+ static void idle_call_stop_or_retain_tick(bool stop_tick)
+ {
++	if (themis_rcu_timeout_probe)
++		themis_trace(stop_tick ? 0x301 : 0x302);
+ 	if (stop_tick || tick_nohz_tick_stopped())
+ 		tick_nohz_idle_stop_tick();
+ 	else
+@@ -194,6 +199,8 @@ static void cpuidle_idle_call(bool stop_tick)
+ 	}
+ 
+ 	if (cpuidle_not_available(drv, dev)) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x303);
+ 		idle_call_stop_or_retain_tick(stop_tick);
+ 
+ 		default_idle_call();
+@@ -228,6 +235,8 @@ static void cpuidle_idle_call(bool stop_tick)
+ 		tick_nohz_idle_stop_tick();
+ 
+ 		next_state = cpuidle_find_deepest_state(drv, dev, max_latency_ns);
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x304);
+ 		call_cpuidle(drv, dev, next_state);
+ 	} else if (drv->state_count > 1) {
+ 		/*
+@@ -241,6 +250,8 @@ static void cpuidle_idle_call(bool stop_tick)
+ 		 * Ask the cpuidle framework to choose a convenient idle state.
+ 		 */
+ 		next_state = cpuidle_select(drv, dev, &stop_tick);
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x305);
+ 
+ 		idle_call_stop_or_retain_tick(stop_tick);
+ 
+@@ -250,6 +261,8 @@ static void cpuidle_idle_call(bool stop_tick)
+ 		 */
+ 		cpuidle_reflect(dev, entered_state);
+ 	} else {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x306);
+ 		idle_call_stop_or_retain_tick(stop_tick);
+ 
+ 		/*
+@@ -296,6 +309,8 @@ static void do_idle(void)
+ 
+ 	__current_set_polling();
+ 	tick_nohz_idle_enter();
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2ff);
+ 
+ 	while (!need_resched()) {
+ 
+@@ -349,6 +364,8 @@ static void do_idle(void)
+ 			tick_nohz_idle_restart_tick();
+ 			cpu_idle_poll();
+ 		} else {
++			if (themis_rcu_timeout_probe)
++				themis_trace(0x300);
+ 			cpuidle_idle_call(got_tick);
+ 		}
+ 		got_tick = tick_nohz_idle_got_tick();
+diff --git a/kernel/time/clockevents.c b/kernel/time/clockevents.c
+index eaae1ce9f0600777c17f53540393c7da3fc700b4..317925ea8e2af6dae5cc6f5d62dc48339d228dea 100644
+--- a/kernel/time/clockevents.c
++++ b/kernel/time/clockevents.c
+@@ -13,9 +13,12 @@
+ #include <linux/module.h>
+ #include <linux/smp.h>
+ #include <linux/device.h>
++#include <asm/special_insns.h>
+ 
+ #include "tick-internal.h"
+ 
++extern volatile int themis_rcu_timeout_probe;
++
+ /* The registered clock event devices */
+ static LIST_HEAD(clockevent_devices);
+ static LIST_HEAD(clockevents_released);
+@@ -327,11 +330,17 @@ int clockevents_program_event(struct clock_event_device *dev, ktime_t expires,
+ 	if (delta <= 0)
+ 		return force ? clockevents_program_min_delta(dev) : -ETIME;
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2e0);
+ 	delta = min(delta, (int64_t) dev->max_delta_ns);
+ 	delta = max(delta, (int64_t) dev->min_delta_ns);
+ 
+ 	clc = ((unsigned long long) delta * dev->mult) >> dev->shift;
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2e1);
+ 	rc = dev->set_next_event((unsigned long) clc, dev);
++	if (themis_rcu_timeout_probe)
++		themis_trace(rc ? 0x2e3 : 0x2e2);
+ 
+ 	return (rc && force) ? clockevents_program_min_delta(dev) : rc;
+ }
+diff --git a/kernel/time/sleep_timeout.c b/kernel/time/sleep_timeout.c
+index 3c90574bd904f1c7c8ffc5956d7b7fc8740dd6cf..2a847719b8131bb5a10a2a79d8f67255ac4e32b6 100644
+--- a/kernel/time/sleep_timeout.c
++++ b/kernel/time/sleep_timeout.c
+@@ -8,6 +8,8 @@
+ #include <linux/timer.h>
+ #include <linux/sched/signal.h>
+ #include <linux/sched/debug.h>
++#include <linux/string.h>
++#include <asm/special_insns.h>
+ 
+ #include "tick-internal.h"
+ 
+@@ -20,11 +22,19 @@ struct process_timer {
+ 	struct task_struct *task;
+ };
+ 
++volatile int themis_rcu_timeout_probe;
++volatile int themis_rcu_timeout_enqueue_result;
++volatile unsigned long themis_rcu_timeout_timer_addr;
++
+ static void process_timeout(struct timer_list *t)
+ {
+ 	struct process_timer *timeout = timer_container_of(timeout, t, timer);
+ 
++	if (!strcmp(timeout->task->comm, "rcu_preempt"))
++		themis_trace(0x2da);
+ 	wake_up_process(timeout->task);
++	if (!strcmp(timeout->task->comm, "rcu_preempt"))
++		themis_trace(0x2db);
+ }
+ 
+ /**
+@@ -93,16 +103,42 @@ signed long __sched schedule_timeout(signed long timeout)
+ 	expire = timeout + jiffies;
+ 
+ 	timer.task = current;
++	if (!strcmp(current->comm, "rcu_preempt")) {
++		themis_rcu_timeout_probe = 1;
++		themis_rcu_timeout_timer_addr = (unsigned long)&timer.timer;
++		themis_trace(0x2d6);
++	}
+ 	timer_setup_on_stack(&timer.timer, process_timeout, 0);
+ 	timer.timer.expires = expire;
++	if (!strcmp(current->comm, "rcu_preempt"))
++		themis_trace(0x2d7);
++	themis_rcu_timeout_enqueue_result = 0;
+ 	add_timer(&timer.timer);
++	if (!strcmp(current->comm, "rcu_preempt")) {
++		themis_trace(0x2d8);
++		if (themis_rcu_timeout_enqueue_result == 1)
++			themis_trace(0x2e7);
++		else if (themis_rcu_timeout_enqueue_result == 2)
++			themis_trace(0x2e8);
++		else if (themis_rcu_timeout_enqueue_result == 3)
++			themis_trace(0x2e9);
++	}
+ 	schedule();
++	if (!strcmp(current->comm, "rcu_preempt"))
++		themis_trace(0x2d9);
+ 	timer_delete_sync(&timer.timer);
++	if (!strcmp(current->comm, "rcu_preempt"))
++		themis_trace(0x2dc);
+ 
+ 	/* Remove the timer from the object tracker */
+ 	timer_destroy_on_stack(&timer.timer);
+ 
+ 	timeout = expire - jiffies;
++	if (!strcmp(current->comm, "rcu_preempt")) {
++		themis_trace(0x2dd);
++		themis_rcu_timeout_timer_addr = 0;
++		themis_rcu_timeout_probe = 0;
++	}
+ 
+  out:
+ 	return timeout < 0 ? 0 : timeout;
+diff --git a/kernel/time/tick-oneshot.c b/kernel/time/tick-oneshot.c
+index 7472597f3225f907092716fe6940b97878765692..7c928c6d8df7d3767ce887a232686abbc2800bed 100644
+--- a/kernel/time/tick-oneshot.c
++++ b/kernel/time/tick-oneshot.c
+@@ -14,9 +14,12 @@
+ #include <linux/percpu.h>
+ #include <linux/profile.h>
+ #include <linux/sched.h>
++#include <asm/special_insns.h>
+ 
+ #include "tick-internal.h"
+ 
++extern volatile int themis_rcu_timeout_probe;
++
+ /**
+  * tick_program_event - program the CPU local timer device for the next event
+  * @expires: the time at which the next timer event should occur
+@@ -29,6 +32,8 @@ int tick_program_event(ktime_t expires, int force)
+ 	struct clock_event_device *dev = __this_cpu_read(tick_cpu_device.evtdev);
+ 
+ 	if (unlikely(expires == KTIME_MAX)) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x2de);
+ 		/*
+ 		 * We don't need the clock event device any more, stop it.
+ 		 */
+@@ -45,6 +50,8 @@ int tick_program_event(ktime_t expires, int force)
+ 		clockevents_switch_state(dev, CLOCK_EVT_STATE_ONESHOT);
+ 	}
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2df);
+ 	return clockevents_program_event(dev, expires, force);
+ }
+ 
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index 2f8a7923fa279409ffe950f770ff2eac868f6ece..8a6442d3fb1004a101a15a19730cde4555a56ada 100644
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -29,11 +29,14 @@
+ #include <linux/mm.h>
+ 
+ #include <asm/irq_regs.h>
++#include <asm/special_insns.h>
+ 
+ #include "tick-internal.h"
+ 
+ #include <trace/events/timer.h>
+ 
++extern volatile int themis_rcu_timeout_probe;
++
+ /*
+  * Per-CPU nohz control structure
+  */
+@@ -997,6 +1000,9 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
+ 	int tick_cpu;
+ 	u64 expires;
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x307);
++
+ 	/* Make sure we won't be trying to stop it twice in a row. */
+ 	ts->timer_expires_base = 0;
+ 
+@@ -1021,8 +1027,11 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
+ 	}
+ 
+ 	/* If the timer base is not idle, retain the not yet stopped tick. */
+-	if (!timer_idle)
++	if (!timer_idle) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x308);
+ 		return;
++	}
+ 
+ 	/*
+ 	 * If this CPU is the one which updates jiffies, then give up
+@@ -1043,8 +1052,11 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
+ 	/* Skip reprogram of event if it's not changed */
+ 	if (tick_sched_flag_test(ts, TS_FLAG_STOPPED) && (expires == ts->next_tick)) {
+ 		/* Sanity check: make sure clockevent is actually programmed */
+-		if (expires == KTIME_MAX || ts->next_tick == hrtimer_get_expires(&ts->sched_timer))
++		if (expires == KTIME_MAX || ts->next_tick == hrtimer_get_expires(&ts->sched_timer)) {
++			if (themis_rcu_timeout_probe)
++				themis_trace(0x309);
+ 			return;
++		}
+ 
+ 		WARN_ONCE(1, "basemono: %llu ts->next_tick: %llu dev->next_event: %llu "
+ 			  "timer->active: %d timer->expires: %llu\n", basemono, ts->next_tick,
+@@ -1075,6 +1087,8 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
+ 	 * the tick timer.
+ 	 */
+ 	if (unlikely(expires == KTIME_MAX)) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x30a);
+ 		if (tick_sched_flag_test(ts, TS_FLAG_HIGHRES))
+ 			hrtimer_cancel(&ts->sched_timer);
+ 		else
+@@ -1083,9 +1097,13 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
+ 	}
+ 
+ 	if (tick_sched_flag_test(ts, TS_FLAG_HIGHRES)) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x30b);
+ 		hrtimer_start(&ts->sched_timer, expires,
+ 			      HRTIMER_MODE_ABS_PINNED_HARD);
+ 	} else {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x30c);
+ 		hrtimer_set_expires(&ts->sched_timer, expires);
+ 		tick_program_event(expires, 1);
+ 	}
+@@ -1229,6 +1247,9 @@ void tick_nohz_idle_stop_tick(void)
+ 	int cpu = smp_processor_id();
+ 	ktime_t expires;
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x30d);
++
+ 	/*
+ 	 * If tick_nohz_get_sleep_length() ran tick_nohz_next_event(), the
+ 	 * tick timer expiration time is known already.
+@@ -1237,12 +1258,17 @@ void tick_nohz_idle_stop_tick(void)
+ 		expires = ts->timer_expires;
+ 	else if (can_stop_idle_tick(cpu, ts))
+ 		expires = tick_nohz_next_event(ts, cpu);
+-	else
++	else {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x30e);
+ 		return;
++	}
+ 
+ 	ts->idle_calls++;
+ 
+ 	if (expires > 0LL) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x30f);
+ 		int was_stopped = tick_sched_flag_test(ts, TS_FLAG_STOPPED);
+ 
+ 		tick_nohz_stop_tick(ts, cpu);
+@@ -1255,6 +1281,8 @@ void tick_nohz_idle_stop_tick(void)
+ 			nohz_balance_enter_idle(cpu);
+ 		}
+ 	} else {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x310);
+ 		tick_nohz_retain_tick(ts);
+ 	}
+ }
+diff --git a/kernel/time/timer.c b/kernel/time/timer.c
+index 1f236412689473d9d1139226b4aa0b8188ee1d60..0d9fa51578027b223533834a11766d8b17279e42 100644
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -50,6 +50,7 @@
+ #include <asm/div64.h>
+ #include <asm/timex.h>
+ #include <asm/io.h>
++#include <asm/special_insns.h>
+ 
+ #include "tick-internal.h"
+ #include "timer_migration.h"
+@@ -612,6 +613,8 @@ trigger_dyntick_cpu(struct timer_base *base, struct timer_list *timer)
+ static void enqueue_timer(struct timer_base *base, struct timer_list *timer,
+ 			  unsigned int idx, unsigned long bucket_expiry)
+ {
++	extern volatile int themis_rcu_timeout_probe;
++	extern volatile int themis_rcu_timeout_enqueue_result;
+ 
+ 	hlist_add_head(&timer->entry, base->vectors + idx);
+ 	__set_bit(idx, base->pending_map);
+@@ -632,7 +635,11 @@ static void enqueue_timer(struct timer_base *base, struct timer_list *timer,
+ 		WRITE_ONCE(base->next_expiry, bucket_expiry);
+ 		base->timers_pending = true;
+ 		base->next_expiry_recalc = false;
++		if (themis_rcu_timeout_probe)
++			themis_rcu_timeout_enqueue_result = base->is_idle ? 2 : 1;
+ 		trigger_dyntick_cpu(base, timer);
++	} else if (themis_rcu_timeout_probe) {
++		themis_rcu_timeout_enqueue_result = 3;
+ 	}
+ }
+ 
+@@ -1765,6 +1772,8 @@ static void call_timer_fn(struct timer_list *timer,
+ 
+ static void expire_timers(struct timer_base *base, struct hlist_head *head)
+ {
++	extern volatile int themis_rcu_timeout_probe;
++	extern volatile unsigned long themis_rcu_timeout_timer_addr;
+ 	/*
+ 	 * This value is required only for tracing. base->clk was
+ 	 * incremented directly before expire_timers was called. But expiry
+@@ -1777,6 +1786,9 @@ static void expire_timers(struct timer_base *base, struct hlist_head *head)
+ 		void (*fn)(struct timer_list *);
+ 
+ 		timer = hlist_entry(head->first, struct timer_list, entry);
++		if (themis_rcu_timeout_probe &&
++		    (unsigned long)timer == themis_rcu_timeout_timer_addr)
++			themis_trace(0x2fd);
+ 
+ 		base->running_timer = timer;
+ 		detach_timer(timer, true);
+@@ -1792,11 +1804,17 @@ static void expire_timers(struct timer_base *base, struct hlist_head *head)
+ 		if (timer->flags & TIMER_IRQSAFE) {
+ 			raw_spin_unlock(&base->lock);
+ 			call_timer_fn(timer, fn, baseclk);
++			if (themis_rcu_timeout_probe &&
++			    (unsigned long)timer == themis_rcu_timeout_timer_addr)
++				themis_trace(0x2fe);
+ 			raw_spin_lock(&base->lock);
+ 			base->running_timer = NULL;
+ 		} else {
+ 			raw_spin_unlock_irq(&base->lock);
+ 			call_timer_fn(timer, fn, baseclk);
++			if (themis_rcu_timeout_probe &&
++			    (unsigned long)timer == themis_rcu_timeout_timer_addr)
++				themis_trace(0x2fe);
+ 			raw_spin_lock_irq(&base->lock);
+ 			base->running_timer = NULL;
+ 			timer_sync_wait_running(base);
+@@ -2342,6 +2360,7 @@ void timer_clear_idle(void)
+  */
+ static inline void __run_timers(struct timer_base *base)
+ {
++	extern volatile int themis_rcu_timeout_probe;
+ 	struct hlist_head heads[LVL_DEPTH];
+ 	int levels;
+ 
+@@ -2352,7 +2371,11 @@ static inline void __run_timers(struct timer_base *base)
+ 
+ 	while (time_after_eq(jiffies, base->clk) &&
+ 	       time_after_eq(jiffies, base->next_expiry)) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x2fa);
+ 		levels = collect_expired_timers(base, heads);
++		if (themis_rcu_timeout_probe && !levels)
++			themis_trace(0x2fb);
+ 		/*
+ 		 * The two possible reasons for not finding any expired
+ 		 * timer at this clk are that all matching timers have been
+@@ -2369,17 +2392,27 @@ static inline void __run_timers(struct timer_base *base)
+ 		base->clk++;
+ 		timer_recalc_next_expiry(base);
+ 
+-		while (levels--)
++		while (levels--) {
++			if (themis_rcu_timeout_probe)
++				themis_trace(0x2fc);
+ 			expire_timers(base, heads + levels);
++		}
+ 	}
+ }
+ 
+ static void __run_timer_base(struct timer_base *base)
+ {
++	extern volatile int themis_rcu_timeout_probe;
++
+ 	/* Can race against a remote CPU updating next_expiry under the lock */
+-	if (time_before(jiffies, READ_ONCE(base->next_expiry)))
++	if (time_before(jiffies, READ_ONCE(base->next_expiry))) {
++		if (themis_rcu_timeout_probe)
++			themis_trace(0x2f7);
+ 		return;
++	}
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2f8);
+ 	timer_base_lock_expiry(base);
+ 	raw_spin_lock_irq(&base->lock);
+ 	__run_timers(base);
+@@ -2399,7 +2432,13 @@ static void run_timer_base(int index)
+  */
+ static __latent_entropy void run_timer_softirq(void)
+ {
++	extern volatile int themis_rcu_timeout_probe;
++
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2f4);
+ 	run_timer_base(BASE_LOCAL);
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2f5);
+ 	if (IS_ENABLED(CONFIG_NO_HZ_COMMON)) {
+ 		run_timer_base(BASE_GLOBAL);
+ 		run_timer_base(BASE_DEF);
+@@ -2407,6 +2446,8 @@ static __latent_entropy void run_timer_softirq(void)
+ 		if (is_timers_nohz_active())
+ 			tmigr_handle_remote();
+ 	}
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2f6);
+ }
+ 
+ /*
+@@ -2414,8 +2455,11 @@ static __latent_entropy void run_timer_softirq(void)
+  */
+ static void run_local_timers(void)
+ {
++	extern volatile int themis_rcu_timeout_probe;
+ 	struct timer_base *base = this_cpu_ptr(&timer_bases[BASE_LOCAL]);
+ 
++	if (themis_rcu_timeout_probe)
++		themis_trace(0x2f0);
+ 	hrtimer_run_queues();
+ 
+ 	for (int i = 0; i < NR_BASES; i++, base++) {
+@@ -2454,6 +2498,8 @@ static void run_local_timers(void)
+ 		 */
+ 		if (time_after_eq(jiffies, READ_ONCE(base->next_expiry)) ||
+ 		    (i == BASE_DEF && tmigr_requires_handle_remote())) {
++			if (themis_rcu_timeout_probe)
++				themis_trace(0x2f1 + i);
+ 			raise_timer_softirq(TIMER_SOFTIRQ);
+ 			return;
+ 		}

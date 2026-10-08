@@ -111,9 +111,46 @@ runcmd:
   - netplan apply
 EOF
 
+    # Also install the runtime config directly.  The dom1 image is reused
+    # across many Themis runs, and direct-kernel CHV boots should not depend
+    # on cloud-init having completed successfully in a previous boot.
+    sudo mkdir -p "$MNT_ROOT/etc/netplan"
+    sudo tee "$MNT_ROOT/etc/netplan/99-dom1.yaml" > /dev/null <<'EOF'
+network:
+  version: 2
+  ethernets:
+    eth0:
+      match:
+        macaddress: "12:34:56:78:90:ab"
+      set-name: eth0
+      addresses: [192.168.100.2/24]
+      routes:
+        - to: default
+          via: 192.168.100.1
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1]
+EOF
+    sudo mkdir -p "$MNT_ROOT/etc/systemd/network"
+    sudo tee "$MNT_ROOT/etc/systemd/network/10-dom1-eth0.network" > /dev/null <<'EOF'
+[Match]
+MACAddress=12:34:56:78:90:ab
+
+[Link]
+Name=eth0
+
+[Network]
+Address=192.168.100.2/24
+Gateway=192.168.100.1
+DNS=8.8.8.8
+DNS=1.1.1.1
+EOF
+    if [[ -f "$MNT_ROOT/etc/fstab" ]]; then
+        sudo sed -i -E 's#^(LABEL=(BOOT|UEFI)[[:space:]]+)#\# disabled for Themis direct-kernel boot: &#' "$MNT_ROOT/etc/fstab"
+    fi
+
     sudo umount "$MNT_ROOT"
     rmdir "$MNT_ROOT"
-    echo "  ✔ cloud-init seed injected"
+    echo "  ✔ cloud-init seed and direct network/fstab config injected"
 
     # ── boot partition: patch grub.cfg so root resolves under cloud-hypervisor
     MNT_BOOT=$(mktemp -d)
@@ -121,7 +158,7 @@ EOF
     if [[ -f "$MNT_BOOT/grub/grub.cfg" ]]; then
         sudo sed -i 's|root=LABEL=cloudimg-rootfs|root=/dev/vda1|g' "$MNT_BOOT/grub/grub.cfg"
         # Mask slow boot services that hang without internet access.
-        sudo sed -i '/linux\s/s|$| systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=systemd-networkd-wait-online.service|' "$MNT_BOOT/grub/grub.cfg"
+        sudo sed -i '/linux\s/s|$| fstab=no systemd.mask=multipathd.service systemd.mask=multipathd.socket systemd.mask=serial-getty@ttyS0.service systemd.mask=serial-getty@hvc0.service systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=systemd-networkd-wait-online.service|' "$MNT_BOOT/grub/grub.cfg"
         echo "  ✔ grub.cfg patched (root=/dev/vda1, services masked)"
     fi
     sudo umount "$MNT_BOOT"
@@ -149,4 +186,3 @@ echo "✔ Dom1 ready:"
 echo "   guest/dom1.raw         root disk (raw, pre-configured)"
 echo "   guest/hypervisor-fw    firmware"
 echo "  Inside dom0:  sudo /opt/bins/cloud-hypervisor/run-dom1.sh"
-

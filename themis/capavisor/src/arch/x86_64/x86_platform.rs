@@ -11,10 +11,11 @@
 
 extern crate alloc;
 
-use capability_engine::CapaError;
+use capability_engine::{CapaError, Platform as _};
 use x86::vmx::vmcs;
 
 use crate::arch::vmexit;
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::arch_traits::traits::{
     ArchBoot, ArchCoreSignaling, ArchGuestPhysMap, ArchIommu, ArchVpOps,
 };
@@ -23,7 +24,6 @@ use crate::arch_traits::types::{
 };
 use crate::platform::ThemisPlatform;
 use crate::vcpu::{ActiveVcpu, Reg};
-use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 
 // ── X86Platform ──────────────────────────────────────────────────────────── //
 
@@ -108,11 +108,8 @@ impl ArchVpOps for X86Platform {
     }
 
     fn inject_interrupt(&mut self, vp: &mut Self::VpHandle, vector: u32) -> Result<(), CapaError> {
-        // Use the VMENTRY_INTERRUPTION_INFO_FIELD for direct injection
-        // when the VP is about to be resumed.
-        // Type = 0 (external interrupt), valid bit = 1<<31.
-        let info = (vector as u64) | (1u64 << 31);
-        vp.set(vmcs::control::VMENTRY_INTERRUPTION_INFO_FIELD, info);
+        let vector = u8::try_from(vector).map_err(|_| CapaError::InvalidValue)?;
+        crate::arch::x86_64::pid::deliver_vector_local(vp, self.platform().hhdm_offset(), vector);
         Ok(())
     }
 

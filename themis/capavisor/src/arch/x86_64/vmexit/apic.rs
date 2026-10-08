@@ -6,10 +6,10 @@
 
 use x86::vmx::vmcs;
 
+use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 use crate::arch::x86_64::vmexit_decode::{ApicAccessType, ExitQualification};
 use crate::serial_println;
 use crate::vcpu::{ActiveVcpu, Reg};
-use crate::arch::x86_64::vcpu_ext::ActiveVcpuExt;
 
 use super::{APIC_REG_EOI, APIC_REG_ISR_BASE};
 
@@ -59,10 +59,10 @@ pub(super) fn handle_apic_access_exit(vcpu: &mut ActiveVcpu, platform: &crate::p
 
             if offset == APIC_REG_EOI {
                 // EOI: clear the highest-priority bit in the ISR (In-Service
-                // Register, offsets 0x100-0x170 = 8 × 32-bit words = 256 bits).
+                // Register, offsets 0x100, 0x110, ..., 0x170).
                 // Scan from highest word (0x170) down to lowest (0x100).
                 for w in (0..8).rev() {
-                    let isr_idx = (APIC_REG_ISR_BASE / 4) + w; // word index in VAPIC page
+                    let isr_idx = (APIC_REG_ISR_BASE + w * 0x10) / 4;
                     let isr_val = unsafe { vapic_virt.add(isr_idx).read_volatile() };
                     if isr_val != 0 {
                         let bit = 31 - isr_val.leading_zeros();

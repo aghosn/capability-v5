@@ -84,19 +84,27 @@ Two distinct consumers share this same bitmap, which is easy to miss:
   register setup on every freshly-created VP, domain-wide (a real regression
   caught and fixed this session).
 
-### 4. `guest_can_accept_external()` / interrupt-window exiting — mechanism, not policy
+### 4. `can_inject_external_interrupt()` / interrupt-window exiting — mechanism, not policy
 
-A pure VMX hardware-state check (RFLAGS.IF and STI/MOV-SS interruptibility
-shadow bits in the VMCS guest-state area) — **not** a capa-engine policy at
+A VMX state check (RFLAGS.IF, STI/MOV-SS interruptibility shadow bits, and
+the valid bit of the VM-entry event slot) — **not** a capa-engine policy at
 all, and not per-domain or per-vector. It answers one question only: *can
 this VP accept a freshly VM-entry-injected external interrupt right now?*
+
+An occupied VM-entry slot must be preserved, including an event restored
+from `IDT_VECTORING_INFO` after interrupted delivery. Further external
+interrupts remain pending until that event has entered the guest. The
+software PIR drain applies the same guard; it must not replace a timer
+selected earlier during SWITCH. VPs without a PID retain deferred local
+interrupts in their own software bitmap, carried across VP deactivation.
 
 Every delivery path — real-hardware forwarding
 (`forward_interrupt_to_handler`), the timer emulator
 (`msr_emulator.rs::deliver_timer_vector`), and explicit
 `THEMIS_INJECT_INTERRUPT` handling — needs this same check before attempting
 `VMENTRY_INTERRUPTION_INFO_FIELD` injection: if the guest can't currently
-accept it, queue the vector in the VP's own PIR and arm interrupt-window
+accept it, or the entry slot is occupied, queue the vector in the VP's own
+PIR (software bitmap if no PID exists) and arm interrupt-window
 exiting (`set_interrupt_window_exit(true)`) so hardware re-exits the moment
 IF flips to 1, at which point `drain_pir_on_interrupt_window` drains and
 retries. This exact "try immediate inject, else PIR-queue + arm
@@ -115,7 +123,7 @@ to `NotReport` (axis 1, blocks ambient real-HW leakage) + `injectable: true`
 (axis 2, capavisor's emulator is the sole source). When the deadline passes,
 `deliver_timer_vector` checks `injectable` via `timer_vector_injectable()`
 (policy gate), then calls `pid::deliver_vector_local()`, which checks
-`guest_can_accept_external()` (mechanism gate) to pick immediate injection vs.
+`can_inject_external_interrupt()` (mechanism gate) to pick immediate injection vs.
 PIR-queue. `visibility` never enters this picture at all — this is explicit,
 `injectable`-gated delivery, not automatic ambient routing.
 
@@ -127,7 +135,7 @@ addition, not instead), `NotReport` ancestors are skipped (transparent).
 `injectable` (axis 2) is **not consulted at all** on this path — it only
 gates *explicit* injection (the hypercall and internal emulators), never the
 ambient real-hardware routing decision. Once the target is picked,
-`guest_can_accept_external()` (axis 4) gates the actual injection mechanism,
+`can_inject_external_interrupt()` (axis 4) gates the actual injection mechanism,
 exactly as in the timer-emulation example.
 
 `quantum-sched`'s per-core `deferred_vector` flag no longer exists (removed

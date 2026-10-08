@@ -7,6 +7,1134 @@
 
 ## Current Status
 
+- **2026-10-08 — Linux patch and authorized local handoff commits**:
+  User chose a portable patch, not a Linux branch/commit. Added
+  `themis/debug/linux-instrumentation.patch` (all 18 tracked Linux changes)
+  and `themis/debug/README.md` (base revision, application/build instructions,
+  guest-only scope and trace-toggle caveats). An isolated Git index at Linux
+  base `44df971c640f8618de24aa08a9019496353e1b47` accepted the patch and
+  reproduced the source worktree exactly; original Linux files/index/branch
+  were not changed. Source whitespace check passed.
+  CHV committed as `80a60d29347d82573ab83c96b186667306e2234b` on
+  `debug/dom1-linux-handoff`; the parent commit containing this entry pins
+  that gitlink and includes the cleanup, regression tests and handoff.
+  Only documentation and patch export changed after successful compilation.
+  No push authorized or performed; no commit to either default branch.
+  Updated `docs/dom1-debugging-handoff.md` and `todo.md` with transfer status.
+  Dom1 boot remains unresolved; next work is a baseline on the native host.
+
+- **2026-10-08 — explicit pre-commit compilation check (DONE)**:
+  User asked whether Linux was instrumented and to verify compilation before
+  committing. Confirmed 18 dirty files in external `../linux`, branch
+  `v6.19.14-themis`, base `44df971c640f8618de24aa08a9019496353e1b47`.
+  The source enables guest tracing and capavisor runtime debug at init launch;
+  corrected handoff/trace skill to distinguish the two gates. Saved Linux
+  patch/config/base revision in the migration evidence. Did not modify Linux.
+  Fresh full release build/package (capavisor, CHV, engine, thhv plus its test
+  binaries, 11 eunomia workloads, C tools), dev and verbose-release capavisor,
+  CLI release build, five VMX tests and engine tests passed. Instrumented Linux
+  `make -j4 bzImage modules` also passed: bzImage #28 and modules built.
+  Shell syntax and parent/CHV whitespace checks passed. Nonfatal warnings:
+  compiler unused items, thhv compiler-version mismatch, WireGuard stack-frame
+  sizes, and existing fuse2fs/sed permission preservation during packaging.
+  Rebuilt Linux was not installed over the existing packaged baseline:
+  packaged kernel SHA256 starts `f60d0ee662c62920`, rebuilt `76a4d6d4e7050ce6`.
+  Differing binary hashes alone do not prove a source-code difference.
+  Build logs, Linux patch/config/revision and full kernel hashes are saved
+  in the updated migration evidence bundle. No source fixes were needed.
+  At this checkpoint nothing had been committed or pushed; see the later
+  authorization and patch/commit entry above.
+  Files modified: `docs/dom1-debugging-handoff.md`,
+  `skills/debugging-dom-boot.md`, `todo.md` (instrumentation/build details).
+
+- **2026-10-08 — cleanup and Linux-host handoff (DONE; review pending)**:
+  Review branches created in parent and CHV: `debug/dom1-linux-handoff`.
+  User explicitly forbids commits/pushes without full review, validation and
+  approval. Nothing committed or pushed; transferring the branch alone is
+  insufficient because work is uncommitted.
+  - Removed execution-stats feature/counters, injected-entry and timer/PIR
+    tracing, CHV rate counters and one-off cgroup/network init installers.
+    Kept functional event preservation and earlier boot/CPUID/APIC changes.
+    Kept provisional HLT/timer semantics unchanged; limitations called out.
+  - Restored rustfmt-only files/hunks after proving normalized equivalence.
+    Engine and ARM diffs were formatting-only; no engine behavior changed.
+  - Fixed disabled `serial_debug!` argument evaluation; DBG_PRINT now uses
+    the existing runtime toggle, without hard-coded trace-code selection.
+    CHV routine exit/IO/MMIO/LAPIC traces use the standard debug log level.
+  - Added `docs/dom1-debugging-handoff.md`: neutral observations, timing
+    caveats, prior environment, reproduction and debug-toggle procedures.
+    Pre-cleanup snapshots saved outside repo in session files.
+  Files changed by cleanup (relative to the pre-cleanup working tree):
+  - `themis/capavisor/src/main.rs`, `src/hypercall/mod.rs` — gate debug work
+    and unify DBG_PRINT with the existing runtime switch.
+  - `themis/capavisor/src/arch/x86_64/`: `hypercall/switch.rs`, `pid.rs`,
+    `msr_emulator.rs`, `vcpu_switch.rs`, `hypercall/doorbell.rs`,
+    `vmexit/apic.rs`, `x86_platform.rs` — remove experimental timing/logging.
+    Retain functional paths; several files now match HEAD exactly.
+  - `themis/capavisor/Cargo.toml`, `themis/crates/vmx/Cargo.toml`,
+    `themis/crates/vmx/src/lib.rs`, `vcpu.rs` — remove profiling feature/hooks;
+    deleted `execution_stats.rs`. Keep new `interrupts.rs` and five regressions.
+  - `thhv/src/thhv_vp.c`, `thhv/src/thhv_irqfd.c` — remove unconditional
+    diagnostic counters (irqfd now matches HEAD); retain dynamic-debug sites.
+  - `cloud-hypervisor/hypervisor/src/themis/vcpu.rs` — remove rate probes,
+    use debug-level logs; preserve functional CPUID/APIC/timer code.
+  - `themis/scripts/run-dom1.sh`, `themis/scripts/update-bins.sh` — remove
+    one-off cgroup/network init installers, clean retired files from images.
+  - `skills/running-inside-dom0.md`, `skills/debugging-dom-boot.md` — correct
+    removed scheduling-feature advice, debug controls, paths and log ownership.
+  - `docs/dom1-debugging-handoff.md` (new), `todo.md` — portable handoff/status.
+  - Formatting-only restoration: 92 whole files plus 65 hunks in mixed files;
+    exact lists in evidence bundle. Restored generated `tools/toggle-debug`
+    binary to HEAD after packaging; its source was unchanged.
+
+  Validation: five VMX host tests, engine `cargo test`, full `cargo build-bins`,
+  release capavisor with and without `verbose`, shell syntax, new helper
+  rustfmt check, parent/submodule `git diff --check` all passed. Packaging
+  emitted a fuse2fs/sed permission-preservation warning while rewriting
+  guest fstab; command returned zero. No native-host run was possible.
+  Cleaned release booted dom0; SSH responded and serial confirmed runtime
+  debug ENABLED then DISABLED. The helper's printed argument is misleading
+  (both calls printed zero); actual serial state transitions were verified.
+  A bounded 45-second dom1 smoke launch reached the Ubuntu welcome banner;
+  timeout returned 124 and CHV shut down normally. This is not a successful
+  full systemd/networking boot and does not resolve the original problem.
+  Owned QEMU stopped; logs preserved. Evidence archive:
+  `/tmp/themis-dom1-evidence-2026-10-08.tar.gz` (copy separately from Git).
+  Next step: user review of the uncommitted parent and CHV diffs, then transfer
+  to the native Linux host and establish a fresh baseline using the handoff.
+  No further timer/scheduler design is approved.
+
+- **2026-10-08 — focused execution experiment (DONE; boot root cause UNRESOLVED)**:
+  User explicitly redirected work away from broad information gathering.
+  Narrow question: is time lost outside dom1, or in repeated entries ending
+  in immediate physical preemption? Only measure entry/exit and VP
+  activation/deactivation intervals, exit reasons, and sampled unchanged RIP
+  on physical exits. Opt-in `execution-stats`; bounded aggregate snapshots.
+  No thhv/timer changes. Used short runs of the same workload, then followed
+  the dominant measured path rather than extending the profiler.
+  Raw TSC residence includes nested-VMX overhead/outer-host descheduling;
+  it must not be presented as retired guest instructions or pure CPU time.
+  The entry/exit bracket wraps `ActiveVcpu::run`, including its VMCS result
+  reads/replay bookkeeping, so actual guest execution is less than this
+  interval. Inactive covers deactivation-to-reactivation, not just Linux
+  scheduler wait. The measurements partition elapsed time, not CPU usage.
+
+  Results (cumulative final snapshots; 3 GHz TSC confirmed by dom0 boot):
+  - Default dev, 120s timeout: entry/exit 17.93%, active handling 31.59%,
+    inactive 50.48%; 573/998 sampled physical exits had unchanged RIP.
+  - Release, 120s timeout: 17.36% / 32.07% / 50.57%; 587/1033 unchanged.
+    Debug optimization is NOT the explanation. HLT-associated gaps were
+    negligible; most inactive time followed physical interrupts.
+  - Added probes only around the measured physical return path. Release
+    90s run: engine transition 2.32us, COMM snapshot 425.48us, VP swap
+    30.87us per return. Register publication, not engine validation or
+    raw VMCLEAR/VMPTRLD, dominated that measured part.
+  - Causal policy experiment, fresh boot, same release binary: override
+    vector 236 read_set to NONE, preserve NotReport/write_set/injectable.
+    Used a guest-only bind mount; repository/image policy was not edited.
+    Snapshot cost fell to 0.51us, but dom1 still only reached its Ubuntu
+    welcome banner at 120s, no network at the sampled check. Time split:
+    17.27% / 14.14% / 68.60%, 684/1259 unchanged physical RIP.
+    This rules out snapshot removal as a sufficient fix. Original policy
+    was restored and verified; owned VMM/QEMU processes stopped.
+
+  Verified environment constraint:
+  - The actual host kernel is `6.6.87.2-microsoft-standard-WSL2`, lscpu
+    reports Microsoft hypervisor; KVM `nested=Y`, `enable_shadow_vmcs=N`,
+    `enable_apicv=N`; exposed VMX flags lack VMCS shadowing.
+  - Dom0 is `6.8.0-142-generic`; its matching /boot/config identifies
+    CONFIG_HZ=1000 (do not reuse the stale 250Hz assumption).
+  - Intel SDM Vol. 3C, VMCS types/shadowing: VMREAD/VMWRITE in VMX non-root
+    cause exits when VMCS shadowing is off. This provides a concrete reason
+    the numerous register accesses are expensive in this environment.
+    It does NOT prove the environment is the sole cause of dom1's stall.
+  - No parent interrupts were suppressed/delayed, no timer backend or
+    scheduling ABI was changed. No host KVM/Hyper-V settings were changed.
+  Next decisive control: same image/workload on native Linux/KVM with
+  shadow VMCS available, or bare-metal Themis. That control is not available
+  in this session. Do not label the bug fixed or redesign scheduling solely
+  from these nested-host timings.
+
+  Evidence: host `/tmp/themis-{time,time-release,switch-cost,no-snapshot}-*.log`,
+  persistent copies under this session's `files/vp-time/`. Experiment-only
+  JSON is `files/intr-snapshot-policy.json`. IMPORTANT: run-dom1.sh redirects
+  CHV itself to `/tmp/chv-{stdout,stderr}.log`; the previously captured
+  launcher stdout was not its actual exit-rate log. Actual stderr preserved
+  for switch-cost and no-snapshot runs.
+  Validation: 7 VMX host tests with execution-stats pass; cargo build-bins
+  passes; feature-enabled default and release boots compile and run.
+  Files modified for this experiment:
+  - `themis/crates/vmx/src/execution_stats.rs` (new), `lib.rs`, `Cargo.toml`:
+    opt-in time partition counters and host tests.
+  - `themis/crates/vmx/src/vcpu.rs`: counters travel with VP; lifecycle hooks.
+  - `themis/capavisor/Cargo.toml`: execution-stats feature forwarding.
+  - `themis/capavisor/src/arch/x86_64/x86_platform.rs`: entry/exit timing,
+    sampled physical-exit RIP and bounded aggregate output.
+  - `themis/capavisor/src/arch/x86_64/hypercall/switch.rs`, `vcpu_switch.rs`:
+    three-stage physical-return and raw swap measurements.
+  - `todo.md`: results, limitations and this handoff. No commit.
+
+- **2026-10-08 — entry-event preservation fix (DONE; dom1 liveness UNRESOLVED)**:
+  User approved reproducing/fixing the occupied VM-entry slot bug before any
+  timer redesign. Timer source, parent interrupt routing and retry timing
+  remain unchanged.
+  - Extracted the IF/shadow arbitration into a host-testable VMX helper.
+    Two regressions failed with the old check: overdue timer overwritten by
+    a later PIR drain, and new timer injection replacing event replay.
+    Added the occupied-slot guard and all five host tests now pass.
+  - Wired the guard into both local delivery and PIR drain; pending PIR bits
+    are restored when entry is occupied. Added a per-VP software bitmap for
+    VPs without a PID so the new deferral does not silently drop their events.
+    This bitmap moves with Active/InactiveVcpu, not with a physical core.
+    Raw external injection asserts its precondition; the generic x86
+    interrupt method now uses the shared delivery helper as well.
+  - Moved SWITCH's expiry check after dirty COMM registers are applied, so
+    IF/shadow eligibility uses the guest state actually being entered.
+  - `cargo test -p vmx --target x86_64-unknown-linux-gnu --lib --quiet`
+    passes (5 tests); `cargo build-bins` and changed-file formatting pass.
+    These host tests cover arbitration, not actual VM-entry execution.
+  - Full stack booted with the same default dev profile, 4 CPUs and 4G as
+    `/tmp/out.txt`'s baseline. Dom0 SSH remained responsive. Ran the same 600-second
+    dom1 run with CHV_CPUS=1, null serial, file console and
+    `loglevel=4 systemd.unit=multi-user.target systemd.default_timeout_start_sec=300s`.
+    **Timed out (124), zero tap RX/TX packets, no successful ping.** Dom1
+    slowly progressed through lvm2-monitor and module startup; final console
+    shows systemd-udev-trigger still running (6min 47s). The previous run
+    stopped earlier around lvm2-monitor, but one variable boot is insufficient
+    to attribute that difference to this change.
+  - No assertion/panic or VM-entry failure was observed. Sampled dom1 timer
+    entries continued through timer#70000, including exits in the timer
+    handler's EOI path. This is not proof of timely timer delivery, and
+    fixing the demonstrated overwrite does NOT explain or solve the
+    remaining boot failure.
+  - Dom0 switched TSC -> HPET around uptime 333s; the prior baseline did the
+    same. Timeout teardown emitted thhv REVOKE_MEM failures (-2), also present
+    in the baseline. Neither is newly attributed to the entry guard.
+    CHV's captured log had no THEMIS-RATE samples; no exit-rate conclusion.
+  - Logs saved on the host:
+    `/tmp/themis-entry-fix-{serial,dom1-run,poll,dom1-console,dom1-chv,final-state}.log`
+    and `/tmp/themis-entry-fix-build.log`; persistent copies in this session's
+    `files/entry-event-fix/` directory. Initial console reads needed sudo;
+    the complete root-owned console was subsequently copied successfully.
+    CHV exited at the timeout, dom0 storage was synced, and the owned QEMU
+    stack/monitor processes were stopped. No running experiment or commit.
+  - Next investigation must isolate the remaining delay with evidence;
+    do not assume ancestor timers or substitute a VMX-counter redesign.
+  Files changed in this fix:
+  - `themis/crates/vmx/src/interrupts.rs` (new), `lib.rs` - shared arbitration,
+    pending bitmap and host regressions.
+  - `themis/crates/vmx/src/vcpu.rs` - persistent no-PID pending state.
+  - `themis/capavisor/src/arch/x86_64/vcpu_ext.rs`, `pid.rs`,
+    `hypercall/switch.rs`, `x86_platform.rs` - guard and queue wiring.
+  - `docs/architecture/interrupt-virtualization.md` - entry-slot invariant.
+  - `todo.md` - this handoff. No timer backend or engine changes.
+
+- **2026-10-08 — timer-source constraint (USER CONFIRMED)**:
+  Do not rely on the VMX preemption timer as the backing source for guest
+  timers. The previous proposal to multiplex ancestor guest deadlines onto
+  that counter is withdrawn. Guest timers need persistent per-VP state,
+  absolute-time expiry accounting, and a wakeup source independent of which
+  VP is executing; expiry/pending state must remain distinct from delivery
+  and from the parent's decision to schedule an off-core child.
+  Selecting that source must respect existing hardware ownership: dom0
+  currently has native timer access, so capavisor cannot simply repurpose the
+  physical LAPIC timer without addressing its capability/policy contract.
+  No replacement backend has been selected or implemented. The entry-event
+  overwrite investigation below remains relevant regardless of timer source.
+  Files modified for this clarification: `todo.md` only.
+
+- **2026-10-08 — scheduling-plan reevaluation (REVIEW COMPLETE; prototype PAUSED)**:
+  User challenged repeated speculative proposals and asked for a code/design
+  reevaluation before implementation. No functional changes or new boot runs.
+  The previous ancestor-timer prototype is NOT justified as the next dom1 fix.
+
+  Verified existing mechanisms:
+  - `capa-engine/src/switch.rs::CoreContext.call_stack` already records the
+    live Running/Locked chain. `deliver_interrupt_vp` uses it to lazy-unwind;
+    `switch_domain_forward` reconstructs it on resume. Off-core frozen segments
+    already use `VpRunState::Waiting::unlocks`, including cross-core resume.
+    There is no missing chain representation or need for a second scheduler.
+  - Physical handler selection uses `find_interrupt_handler`/visibility;
+    virtual injection uses `injectable`. `deliver_interrupt_vp` also snapshots
+    Report semantics into Waiting states, so it is not merely a target-neutral
+    swap helper. Any reuse must preserve register filters, blocked/unlocks,
+    reporting and revoke synchronization, not just select a domain and swap.
+  - `thhv/src/thhv_vp.c:159-186` already handles ERR_RETRY, doorbell draining,
+    signals and rescheduling inside RUN_VP. Returning to the parent kernel is
+    not returning to CHV. Local MSHV confirms the same important separation,
+    but does not prove Hyper-V's internal interrupt/timer design.
+  - The observed boot is dom0 -> dom1, with dom1 the leaf. Root MSR policy is
+    Native (`domain.rs:636`, `boot/vmcs.rs:50`), while the child TSC deadline
+    is emulated. The saved trace has continuing physical 0xec INTR_FWD events
+    (#282000 through #284000). There is no observed intermediate virtual
+    parent timer whose neglect explains this run. Ancestor deadline scanning
+    would not eliminate those required physical lazy-unwinds.
+
+  Concrete local delivery hazard found by tracing SWITCH (static finding,
+  NOT yet demonstrated as the cause of the stalled boot):
+  1. `hypercall/switch.rs:136` checks an overdue child deadline before PIR drain.
+  2. `msr_emulator.rs:180` clears the deadline; `pid.rs:196` may put the timer
+     directly into VMENTRY_INTERRUPTION_INFO_FIELD when IF/shadows permit.
+  3. Later in the SAME SWITCH, `drain_pir_inject_lowest` can remove a different
+     pending vector from PIR and overwrite that field (`switch.rs:355`).
+     `guest_can_accept_external` checks only IF/STI/MOV-SS, not an occupied
+     entry-event slot (`vcpu_ext.rs:119`). The overwritten direct timer was
+     neither retained in PIR nor left armed. No guest entry separates writes.
+  4. `vmx::ActiveVcpu::run` also preserves interrupted event delivery using
+     IDT_VECTORING_INFO; this saved event must not be overwritten by new
+     injection either. Changes must cover all writers, not only timer expiry.
+
+  Other constraints on the earlier overly simple timer plan:
+  - Deadline checks currently run at WRMSR/SWITCH/timer-exit points, not every
+    guest entry. The VMX preemption counter runs in VMX non-root, unlike an
+    absolute TSC deadline (checked against Intel SDM section on VMX-preemption
+    timer). Any timer service must account for time spent handling exits.
+  - Timer expiry, pending state, and eligibility for delivery are separate.
+    Parent/leaf masking, LVT vector/mode/mask, an occupied entry-event slot,
+    and off-core Waiting/Available state cannot be replaced by "minimum
+    deadline then unconditional unwind".
+  - Current CHV xAPIC LVT shadow is not consulted by the capavisor's fixed-0xec
+    deadline injector; MMIO timer reprogramming is a no-op. These remain
+    incomplete timer semantics, not a proven explanation of this particular
+    boot stall. Hardware support does not excuse an incoherent fallback.
+
+  Verification: existing `cargo test --quiet --test unit_switch
+  --test integration_interrupt` passed (39 + 4 tests). This verifies existing
+  engine scenarios, not VMX delivery or the new static hazard.
+  Next recommended discriminator: reproduce overdue deadline + another pending
+  vector + IF=1 on SWITCH, and check that neither event is lost before entry.
+  Then make a narrowly tested pending-event/entry-slot correction and compare
+  the same dom1 workload, without suppressing parent interrupts or tuning
+  sleeps. Track actual guest handler/RCU/network progress, not sampled CHV
+  counts alone. Recursive ancestor-timer support is a separate test/work item:
+  B arms its timer and SWITCHes to C spinning; B's handler must regain control,
+  with existing chain semantics and policy preserved. No new ABI is proposed.
+  Files modified in this reevaluation: `todo.md` only.
+
+- **2026-10-08 — interrupt/timer design clarification (PROPOSAL, not implemented)**:
+  Reviewed `CONTEXT.md`, the interrupt design document, and the current
+  capavisor/CHV injection and LAPIC paths. Documentation is not proof of
+  implementation: the interrupt document says a plain vIRR write suffices,
+  whereas `pid.rs::queue_virtual_interrupt_vid` explicitly updates RVI.
+  Recommended boundary: engine owns authority, policy and lifetime;
+  capavisor's architecture layer owns each virtual VP's local interrupt/timer
+  state, with hardware acceleration and a semantically equivalent software
+  backend; CHV owns virtual peripheral models and capability-authorized
+  configuration/injection; thhv transports requests and scheduling wakeups,
+  not invented guest timer ticks. Keep physical lazy-unwind/EOI separate.
+  Backend selection must not bypass vector policy, expose META, or change
+  guest-visible timer semantics. Off-CPU timer wakeups and revoke/callback
+  synchronization need an explicit contract; no scheduling guarantee against
+  a parent that refuses to run its child is implied.
+  Scheduling clarification after examining Linux MSHV (supersedes the
+  proposed SWITCH budget/deadline ABI): local
+  `../linux/drivers/hv/mshv_root_main.c:419-590` dispatches with
+  `time_slice = 0`, checks Linux guest-entry work between dispatches, waits on
+  blocked VPs, and redispatches ready/non-intercept returns inside the ioctl.
+  `../linux/kernel/entry/virt.c:5-25` handles rescheduling via `schedule()`
+  and signals via `-EINTR`. Returning to the parent kernel for scheduling is
+  not the same as returning an intercept to the userspace VMM.
+  Themis already has that basic split in thhv's ERR_RETRY/cond_resched loop.
+  Recommendation: retain event-driven synchronous delegation rather than add
+  mandatory nested budgets. Each domain's own timer and reschedule events must
+  remain effective while its VP is waiting inside SWITCH to a descendant.
+  An eligible event addressed to a waiting ancestor must reactivate it through
+  an engine-mediated chain transition; do not route that virtual event as a
+  bare physical vector or let the leaf's IF prevent ancestor preemption.
+  Parent masking rules still apply to delivery into the parent itself.
+  Existing TSC-deadline checks operate on the active VP or the newly switched
+  target, not waiting ancestors. This is a concrete gap to investigate for
+  recursive scheduling, not proof of the current dom1 boot failure.
+  Hardware acceleration of the leaf's LAPIC does not replace the need to
+  track/wake waiting ancestors. MSHV source demonstrates its root-dispatch
+  contract, not Hyper-V's internal implementation or arbitrary Themis nesting.
+  Physical lazy-unwind remains required under A3; its kernel returns cannot
+  simply be suppressed. No source-code changes were made in this comparison.
+  This is a design recommendation awaiting agreement, not a proven boot fix.
+  Current fallback code selects the lowest pending vector ("device-first"),
+  and the deadline source does not consult CHV's LVT shadow. These warrant
+  transition-level investigation, not further timing tweaks.
+  Corrected earlier inference: missing sampled CHV rate lines do not establish
+  that VM exits ceased; runtime `INTR_FWD` counters continued advancing.
+  Files modified in this clarification: `todo.md` only.
+
+- **2026-10-02 — dom1 doorbell/network and systemd split (IN PROGRESS)**:
+  Goal: get dom1 to a usable login/SSH without confusing image/systemd delays
+  with capavisor interrupt/device bugs.
+
+  What was tried:
+  - Checkpoint saved after the CPUID/XSAVE fix and capavisor EOI fast path:
+    targeted rebuilds passed for `themis/capavisor` and CHV `hypervisor`
+    (`--features themis,kvm`). The running QEMU/Themis stack was stopped
+    cleanly before resuming timer/PIR debugging. `tools/toggle-debug` remains
+    a generated binary side effect of `cargo build-bins` and should be
+    reverted before a clean final diff if its source is unchanged.
+  - Implemented and validated the EPT-violation doorbell fast path for
+    registered IOEVENTFD GPAs. Virtio notify MMIO spam disappeared and virtio
+    device activation moved much earlier.
+  - Added a capavisor exact LAPIC EOI EPT-violation fast path for the common
+    Linux xAPIC store (`89 04 25 <disp32>`) using an explicit 7-byte RIP
+    advance. This avoids the parent/CHV round-trip for the hot EOI path and
+    drops CHV `lapic_eoi` counters to zero. Do not use VMX
+    `VMEXIT_INSTRUCTION_LEN` for this path; observed values were still wrong.
+  - Tried adding VAPIC ISR clearing to that capavisor EOI path. A correct
+    xAPIC-register stride (`0x100,0x110,...`) caused early PID1 segfaults, so
+    the EPT-violation fallback fast path is intentionally RIP-only for now.
+    The APIC-access handler keeps the fixed ISR stride for the APICv path.
+  - Made dom1 image setup deterministic: `fetch-dom1.sh` and `update-bins.sh`
+    now install `/etc/netplan/99-dom1.yaml` directly, disable stale
+    `LABEL=BOOT`/`LABEL=UEFI` fstab entries, and default the launcher to
+    `fstab=no` plus masks for stale console/multipath/snapd waits.
+  - Verified `guest/dom1.raw` contains netplan for MAC `12:34:56:78:90:ab`
+    and static `192.168.100.2/24`, and fstab BOOT/UEFI entries are commented.
+  - Normal systemd boot with file-backed console now gets past the old
+    `/boot`/`/boot/efi` waits and reaches much later systemd/module/udev work,
+    but still times out before ping/SSH in 420s.
+  - Added `/themis-net-test.sh` to dom1 during `update-bins.sh` packaging and
+    booted it with `init=/themis-net-test.sh`, `CHV_SERIAL=null`, and a
+    file-backed virtio console. It reached `THEMIS_NET_TEST_START`, brought up
+    `eth0`, assigned `192.168.100.2/24`, and successfully pinged dom0
+    `192.168.100.1`. Tap counters advanced (`RX 10/TX 5` packets in the first
+    successful sample).
+  - A systemd boot with overly broad masks including
+    `systemd-udev-trigger.service` is invalid: PID1 prints
+    `Failed to start up manager` and freezes. Do not use that mask set as
+    evidence.
+  - A narrower systemd boot with only `multipathd.socket` additionally masked
+    does not fail immediately, but still times out before ping. It progresses
+    through udev/tmpfiles/sysusers/resolved work, activates virtio-net around
+    CHV time ~62s, then remains extremely slow and reports a guest soft lockup
+    around 376s while CHV has forwarded ~40k LAPIC EOI writes.
+  - Added low-volume CHV exit/LAPIC counters. The result is now unambiguous:
+    after virtio activation, generic MMIO and IO exits mostly flatten while
+    LAPIC EOI EPT violations keep climbing almost one-for-one with total EPT
+    exits. Baseline example: by 392s CHV saw 55k exits, 44.7k EPT exits,
+    44.0k LAPIC EOI writes, only 703 generic MMIO exits, and no HLT exits.
+  - Tried a CHV-side EOI shortcut that trusted VMCS `instruction_length`.
+    It regressed badly because EPT-violation instruction length is unreliable
+    here: first EOI samples had `vmx_len=0` or `3`, while iced-x86 decoded the
+    real instruction length as 7 bytes
+    (`89 04 25 b0 d0 5f ff`, `Mov_rm32_r32`). Advancing by the VMX length
+    jumps into the middle of the instruction stream.
+  - Added a safer CHV LAPIC EOI fast path in
+    `cloud-hypervisor/hypervisor/src/themis/vcpu.rs`: exact-match the common
+    7-byte Linux xAPIC EOI store and advance RIP by 7; otherwise fall back to
+    iced-x86 decode and advance by the decoded length. This preserves CHV's
+    LAPIC software state update and avoids the previous bad VMX-length
+    shortcut.
+  - Exact EOI fast-path validation gets farther than the old baseline in some
+    runs (`systemd-resolved` and `systemd-timesyncd` can start, cloud-init
+    local stage begins), but still does not reach ping/SSH before 420s. The
+    guest reports the older timer/RCU failure again:
+    `rcu_preempt kthread timer wakeup didn't happen for 62247 jiffies` and
+    `Possible timer handling issue on cpu=0 timer-softirq=1895`, plus later
+    soft lockups. Tap counters remain zero.
+  - Found and fixed a separate correctness bug that explained random dom1
+    userspace crashes (`udevadm`/`ip` returning `-11`, transient PID1
+    segfaults): CHV pushed host CPUID leaves as `Emulate` policy, bypassing
+    capavisor's local CPUID mask. Dom1 could see host AVX-512/large XSAVE
+    state while capavisor only saves/restores x87+SSE+AVX (`XCR0=0x7`,
+    1024-byte XSAVE area). Fixed by masking pushed Themis CPUID leaves in
+    `cloud-hypervisor/hypervisor/src/themis/vm_state.rs` and enforcing the
+    same `0x7` XCR0 mask in capavisor `handle_xsetbv`. Reproduction that
+    previously logged `ip` exit `-11` no longer shows SIGSEGV after the fix.
+  - Removed an unbounded CHV hot-path diagnostic from
+    `set_gsi_routing()`. The old `gsi_routing` print emitted the full MSI
+    routing table repeatedly during device setup and made the systemd boot
+    measurements much worse. After removing it, a 360s run progressed much
+    farther: cloud-init/network stages ran, `ssh.socket` was reached, and the
+    guest produced tap traffic instead of stalling around early device setup.
+  - Tightened the pushed CPUID/XSAVE mask beyond the first AVX-512-only fix.
+    CHV now hides MPX, PKU/OSPKE, AMX, AVX-512 BF16, clears leaf `0xD.1`
+    feature bits, and zeros all `0xD` subleaves above AVX (`index >= 3`).
+    This matches the capavisor's actual XSAVE support (`XCR0=0x7`) and avoids
+    advertising any xstate component capavisor cannot save/restore.
+  - Added direct systemd-networkd static configuration to dom1 image setup
+    (`/etc/systemd/network/10-dom1-eth0.network`) and made `run-dom1.sh`
+    default to `cloud-init=disabled`. This avoids cloud-init/netplan as a
+    boot confounder now that the image already contains deterministic network
+    configuration. One 360s validation with cloud-init disabled reached
+    `multi-user.target` and login prompt services; live polling after a later
+    rebuild showed tap carrier but no ping yet because that run stalled much
+    earlier in systemd (`lvm2-monitor`/tmpfiles), confirming remaining
+    progress variance is still timer/liveness related rather than basic
+    virtio-net plumbing.
+  - Verified the host `guest/dom1.raw` root partition directly with
+    `fuse2fs -o ro,norecovery,offset=1074790400`: the direct networkd file
+    and netplan file are present, but cloud-init has not completed first-boot
+    provisioning (`/var/lib/cloud` only has the seed tree) and `/etc/passwd`
+    has no `cloud` user yet. Therefore a never-initialized image would break
+    password SSH login even after networking works, but it does **not**
+    explain no ping or tap RX/TX=0; direct init already proves manual IP setup
+    can ping without cloud-init.
+  - Found that the apparent `systemd-udevd.service` failure was a timeout
+    symptom, not a udev crash: with the default 90s start timeout, udevd
+    repeatedly failed/restarted before networkd could configure the link.
+    Re-running with
+    `KERNEL_APPEND="loglevel=4 systemd.unit=multi-user.target systemd.default_timeout_start_sec=300s"`
+    let `systemd-udevd.service` start and moved the boot through
+    `systemd-networkd.service`, `network.target`, `network-online.target`,
+    `ssh.socket`, `basic.target`, and into `systemd-logind`. The run still
+    timed out at 900s, dominated by RCU/timer stalls and very slow units such
+    as `ldconfig.service`.
+  - The 900s long-timeout run still had tap RX/TX counters stuck at zero and
+    no ping/TCP/22 despite networkd reaching `network-online.target`. That
+    means systemd believes the network stack is configured, but the guest is
+    not transmitting on the virtio-net tap. Next network-specific discriminator
+    should be a small systemd one-shot service that runs the already-working
+    manual `/themis-net-test.sh` path after udev/networkd/device activation,
+    or an init/debug shell that queries `ip addr`/`networkctl` inside the
+    guest. Do not treat SSH login failure as authoritative until a `cloud`
+    user is provisioned independently of cloud-init.
+  - Runtime-gated capavisor tracing during the stalled long-timeout run shows
+    the dom1 local timer bit pending in PIR (`pir[3]=0x100000000000`,
+    vector `0xec`) while `guest_can_accept_external()` is false. Sampled
+    blocked RIPs include `native_irq_return_iret`, `setup_APIC_eilvt`, and
+    workqueue tracing paths; `PRIMARY_PROCBASED_EXEC_CONTROLS` already had
+    interrupt-window exiting set, but no `DBG-INTR-WINDOW` samples fired in
+    the trace window. At the same time the log is flooded with parent-bound
+    physical `vec=236` (`0xec`) `INTR_FWD ... vis=NotReport`, and many
+    `DBG-ENTRY-RESULT` samples show an injected dom1 timer immediately
+    leaving via `EXIT_REASON_EXTERNAL_INTERRUPT` at
+    `asm_sysvec_apic_timer_interrupt` or via EPT at the LAPIC/APIC path. This
+    strengthens the current lead that dom0 physical timer lazy-unwinds are
+    repeatedly preempting dom1 while dom1's own timer handler/PIR delivery is
+    trying to make progress.
+  - Stop point for 2026-10-02: no QEMU/CHV/dom1 shell sessions or processes
+    were left running. The last active investigation was reading
+    `ActiveVcpu::run()` and interrupt-forwarding paths to test whether a
+    pending dom1 timer injection is being clobbered or starved by repeated
+    parent physical `0xec` lazy-unwinds. No new code was written after this
+    trace analysis; only this handoff note was added.
+
+  Current hypothesis: virtio-net, IOEVENTFD doorbells, IRQFD injection, tap
+  plumbing, and basic userspace memory/FPU state are now separated from the
+  remaining failure. The direct init test can ping, `cloud-init=disabled`
+  can reach multi-user in a good run, and the CPUID/XSAVE exposure has been
+  narrowed to exactly what capavisor saves. Normal Ubuntu is still extremely
+  slow and variable because timer/liveness remains unhealthy: increasing
+  systemd unit timeouts lets services that previously "failed" progress, but
+  Linux repeatedly reports RCU timer wakeups not happening and soft lockups.
+  Runtime PIR/TSC traces show timer vector `0xec` being produced and pending
+  while IF is closed; when injected, it often exits immediately via EPT
+  violation at the APIC/EOI path (`rip=0xffffffff81305cf2`) or via a
+  physical external timer preemption while RIP is at
+  `asm_sysvec_apic_timer_interrupt`. The current strongest lead is the
+  interaction between dom1's local timer injection and dom0's physical
+  `0xec` timer interrupts forcing full lazy-unwind/context-switches at high
+  frequency. Since this nested host exposes
+  `APICv: partial/none` and capavisor logs
+  `VIRTUALIZE_APIC_ACCESSES not supported`, continue focusing on local
+  timer/APIC delivery semantics, physical dom0 timer preemption while dom1 is
+  running, and xAPIC EPT fallback overhead; do not treat network plumbing as
+  the primary blocker anymore.
+
+  Last known state / trace:
+  ```
+  Direct init:
+    THEMIS_NET_TEST_START
+    THEMIS_NET_TEST_DEV eth0
+    THEMIS_NET_TEST_PING_OK eth0
+
+  Narrow systemd:
+    baseline counter run:
+      55k exits at 392s, 44.7k EPT, 44.0k LAPIC EOI,
+      703 generic MMIO, 0 HLT, no ping.
+    exact EOI fast-path run:
+      55k exits at 403s, 38.3k EPT, 37.5k LAPIC EOI,
+      703 generic MMIO, 0 HLT.
+      systemd-resolved/timesyncd can start, cloud-init-local begins,
+      but RCU reports "timer wakeup didn't happen" and no ping before timeout.
+    capavisor exact EOI fast-path run:
+      CHV lapic_eoi=0, ept exits fall to hundreds/low thousands by early
+      systemd, virtio activates around 36s, but normal boot still times out.
+    CPUID/XSAVE mask fix run:
+      userspace SIGSEGV/-11 symptom disappears; normal 420s boot still reports
+      soft lockups and times out around early cloud-init/systemd work.
+    after CHV gsi_routing log removal:
+      360s boot with cloud-init enabled reached cloud-init/network stage and
+      ssh.socket; netplan still once reported exit -11 before the tighter
+      CPUID mask.
+    after tighter CPUID mask + cloud-init=disabled:
+      one 360s run reached multi-user.target and getty; later live run had tap
+      carrier but no IP/ping and stalled earlier in systemd, showing remaining
+      nondeterministic timer/progress variance.
+    image inspection:
+      direct networkd/netplan config exists; cloud user does not yet exist
+      because cloud-init has not completed first boot.
+    long systemd timeout run:
+      systemd-udevd starts when start timeout is raised to 300s.
+      reaches network.target/network-online.target/ssh.socket/basic.target,
+      but RCU reports repeated "timer wakeup didn't happen" stalls, tap RX/TX
+      stays 0, and ping/tcp22 fail until the 900s timeout.
+    runtime trace around the stall:
+      [DBG-PIR-DRAIN timer_blocked] ... can_accept=false ...
+        pir=[0x0,0x0,0x0,0x100000000000]
+      [INTR_FWD] vec=236 vis=NotReport
+      [DBG-ENTRY-RESULT] entry_before=0x800000ec exit=1
+        vmexit_intr=0x800000ec rip=0xffffffff81000e30
+    no ping before timeout
+  ```
+
+  Next step: keep the CPUID/XSAVE fix, then focus on physical-parent-timer vs
+  dom1-local-timer interaction. Audit whether every parent-bound physical
+  `0xec` must force immediate lazy-unwind while a child timer interrupt is
+  already being injected/handled, or whether a bounded deferral/quantum model
+  is needed for the nested dev environment. In parallel, add a deterministic
+  non-cloud-init `cloud` user and/or a one-shot manual network service only as
+  observability aids; they are not the root liveness fix. Do not trust VMX
+  `instruction_length` for EPT-violation EOI; use decoded/exact instruction
+  length only.
+
+  Validation: `cargo build-bins` passed after the image-config/net-test updates;
+  `bash -n` passes for `themis/scripts/run-dom1.sh`,
+  `themis/scripts/fetch-dom1.sh`, and `themis/scripts/update-bins.sh`.
+  `cargo build-bins` also passed after CHV exit/LAPIC counters, the exact EOI
+  fast path, the CPUID/XSAVE mask fix, removal of the CHV `gsi_routing` hot
+  log, the tighter CPUID/xstate mask, and the direct systemd-networkd dom1
+  config. Systemd validation runs with
+  `CHV_CPUS=1`, `CHV_SERIAL=null`,
+  `CHV_CONSOLE=file=/tmp/dom1-console.log`,
+  `KERNEL_APPEND="loglevel=4 systemd.unit=multi-user.target"`, and 420s
+  timeout still end with `timeout` exit 124.
+
+  Files modified this session:
+  - `themis/capavisor/src/arch/x86_64/hypercall/switch.rs` — retained the
+    successful EPT doorbell fast path and added the exact RIP-only capavisor
+    LAPIC EOI fast path.
+  - `themis/capavisor/src/arch/x86_64/vmexit/mod.rs` — clamps guest XCR0 to
+    the xstate components capavisor actually saves/restores (`0x7`).
+  - `themis/capavisor/src/arch/x86_64/vmexit/apic.rs` — fixed APIC-access ISR
+    stride for the APICv path (`0x100,0x110,...`), not used by the current
+    nested xAPIC EPT fallback.
+  - `themis/scripts/fetch-dom1.sh` — install direct netplan/fstab cleanup and
+    add default masks for stale dom1 boot units when regenerating dom1.
+  - `themis/scripts/run-dom1.sh` — default dom1 cmdline now uses `fstab=no` and
+    `cloud-init=disabled`, and masks stale multipath/socket/serial-getty/snapd waits.
+  - `themis/scripts/update-bins.sh` — inject nested modules, deterministic
+    netplan/systemd-networkd/fstab cleanup, and `/themis-net-test.sh` into
+    `guest/dom1.raw` before packing.
+  - `cloud-hypervisor/hypervisor/src/themis/vcpu.rs` — added aggregate
+    Themis-exit/LAPIC counters and the exact/decode-safe LAPIC EOI fast path;
+    confirmed VMX `instruction_length` is invalid for these EPT-violation EOI
+    writes.
+  - `cloud-hypervisor/hypervisor/src/themis/vm_state.rs` — masks CPUID
+    entries pushed as Themis `Emulate` policy so dom1 cannot see xstate beyond
+    capavisor's x87+SSE+AVX save/restore support; now zeros all unsupported
+    xstate subleaves and hides MPX/PKU/AMX/AVX-512-family feature bits.
+  - `cloud-hypervisor/hypervisor/src/themis/vm_impl.rs` — removed the
+    unbounded `gsi_routing` debug print from the MSI routing hot path.
+  - `themis/scripts/fetch-dom1.sh` — installs the same direct
+    systemd-networkd static eth0 config when regenerating `dom1.raw`.
+  - `todo.md` — recorded the doorbell/network/systemd split and next direction.
+
+- **2026-09-28 — dom1 systemd/cgroup2 boot hang (IN PROGRESS)**:
+  Goal: get dom1 to a usable login/SSH so dom1 can later spawn dom2 and test
+  non-dom0 child creation.
+
+  What was tried:
+  - Normal dom1 boot reaches `/sbin/init`, then stops during early systemd
+    setup before networking/SSH.
+  - `INIT_SHELL=1` reaches `/bin/sh`, proving kernel boot, rootfs mount, and
+    basic userspace execution work.
+  - `CHV_CPUS=1` still stops at the same point, so this is not obviously an
+    SMP/IPI-only issue.
+  - `systemd.unit=emergency.target systemd.log_level=debug
+    systemd.log_target=console` was verified in CHV's cmdline and also stops
+    before an emergency shell.
+
+  Current hypothesis: this is not a systemd target/dependency problem. The
+  failure is timing-sensitive around early cgroup/kernfs/systemd setup, not a
+  deterministic cgroup2 mount failure. A manual cgroup2 mount previously stopped
+  after `THEMIS_BEFORE_CGROUP_MOUNT`; after adding `themis_trace()` probes and
+  re-enabling capavisor `THEMIS_DBG_PRINT` serial output, the same mount completes
+  (`THEMIS_AFTER_CGROUP_MOUNT rc=0`). With the same DBG timing perturbation,
+  emergency-target systemd also gets past the old cgroup2 line and reaches
+  `Welcome to Ubuntu 24.04.4 LTS!`, loopback setup, and "Unified cgroup hierarchy
+  is located at /sys/fs/cgroup", then stops later before ping/SSH. This points to
+  a scheduling/interrupt/timer race or missing progress event that serial/VMCALL
+  debug timing masks.
+
+  Last known live state:
+  ```
+  CHV command includes:
+    --cpus boot=1,max_phys_bits=40
+    --serial file=/tmp/dom1-serial.log
+    --console file=/tmp/dom1-console.log
+    systemd.unit=emergency.target systemd.log_level=debug systemd.log_target=console
+
+  dom1 last console lines:
+    No filesystem is currently mounted on /sys/fs/cgroup.
+    Mounting cgroup2 to /sys/fs/cgroup of type cgroup2 with options nsdelegate,memory_recursiveprot.
+    Mounting cgroup2 (cgroup2) on /sys/fs/cgroup (MS_NOSUID|MS_NODEV|MS_NOEXEC "nsdelegate,memory_recursiveprot")...
+
+  dom0 state from last pull:
+    tap-dom1 UP at 192.168.100.1/24
+    ping 192.168.100.2 loses 100%
+    CHV was still alive as pid 1101
+    /tmp/dom1-console.log, /tmp/dom1-serial.log, /tmp/chv-stderr.log stopped moving
+  ```
+
+  Next step: instrument Linux `kernel/time/sleep_timeout.c` and timer-wheel
+  expiry (`process_timeout()` / `schedule_timeout()`) for the RCU GP kthread.
+  The latest discriminator shows cgroup mount blocks because normal
+  `synchronize_rcu()` starts a GP and the `rcu_preempt` GP kthread enters the
+  timed wait inside `rcu_gp_fqs_loop()`, but that timeout never returns even
+  though scheduler ticks continue in the guest. Confirm whether the
+  `schedule_timeout()` callback fires and, if not, why the timer wheel does not
+  expire it under Themis.
+
+  Latest trace results:
+  - New strongest root-cause lead: cgroup mount blocks in
+    `synchronize_rcu_normal()` at `wait_for_completion(&rs.completion)`.
+    The normal RCU request is added (`0x2b1`), `start_poll_synchronize_rcu()`
+    runs (`0x29d`), and the waiter sleeps (`0x29e`) but never reaches `0x29f`.
+  - The RCU GP kthread does wake and initialize that request: it reaches
+    `rcu_gp_init()` (`0x2b2`/`0x2b4`), rolls the request into a wait segment
+    (`0x2b0`), and enters `rcu_gp_fqs_loop()` (`0x2bc`/`0x2d0`/`0x2d1`).
+    The stuck GP does not reach `0x2d2`/`0x2d3`/`0x2bd`, so it is sleeping in
+    the timed `swait_event_idle_timeout_exclusive()` wait, not stuck in cgroup
+    code, GP init, or cleanup.
+  - Scheduler ticks continue while the GP is stuck (`0x2ce` thousands of
+    times), but RCU core does not provide the needed normal QS for the stuck GP
+    (`0x2d5`/`0x2ca` do not lead to `0x2cd`/`0x2c7` for that final GP). The
+    current lead is timer-wheel/schedule-timeout progress for the RCU GP
+    kthread, not total LAPIC timer loss.
+  - `rcupdate.rcu_expedited=1` confirms expedited RCU can complete GP work
+    (`0x271`→`0x277`) and lets systemd reach `Welcome to Ubuntu 24.04.4 LTS!`
+    and emergency target, but it is only a discriminator, not a final fix.
+  - `idle=poll` does **not** fix the non-expedited stall. It still stops at the
+    same normal RCU GP-kthread timed wait (`0x2d1` without `0x2d2` for the
+    final GP), so preventing guest idle/HLT is insufficient.
+  - End-of-day stop point (2026-09-28): stopped the remaining local
+    `themis-rcu` shell task. Dom0 SSH on host port 2222 refused connections at
+    shutdown time, so no remote CHV/dom1 process could be inspected or killed
+    from the host in this session. Resume by booting dom0, then continue with
+    Linux `schedule_timeout()` / timer-wheel probes for the RCU GP kthread.
+  - Manual cgroup init with DBG_PRINT enabled completes:
+    `THEMIS_AFTER_CGROUP_MOUNT rc=0`, `/proc/mounts` shows
+    `cgroup2 /sys/fs/cgroup cgroup2 rw,relatime,nsdelegate,memory_recursiveprot`.
+  - Cgroup/kernfs trace sequence for dom1 includes complete ranges:
+    `0x22c 0x22d 0x229 0x22a 0x230..0x23e 0x22b 0x22e 0x22f`.
+  - Emergency-target systemd with DBG_PRINT enabled also passes the former stop
+    point and logs `Found cgroup2...`, `Welcome to Ubuntu 24.04.4 LTS!`,
+    loopback setup, and `Unified cgroup hierarchy is located at /sys/fs/cgroup`,
+    but still does not ping or reach SSH.
+  - A first `themis_trace()` helper variant caused a false kernel oops because
+    its inline asm did not declare VMCALL clobbers; fixed in the Linux tree.
+  - `quantum-sched` is not available in the current capavisor; it was removed
+    on 2026-08-04. The `skills/running-inside-dom0.md` note saying to enable it
+    is stale.
+  - CHV LAPIC fallback EOI was patched to clear the highest software ISR bit,
+    but `[LAPIC-EOI]` never fires because CHV's `lapic_regs` ISR remains zero.
+    Guest EOI writes (`offset=0xb0`) are frequent, but capavisor injects
+    interrupts through VM-entry/PIR and does not mirror those deliveries into
+    CHV's LAPIC ISR shadow.
+  - Stronger root-cause lead: a run without HLT polling reached `/sbin/init`,
+    then stopped after `thhv: DBG_RUN HLT vp=0 pending=0 halted=0`. Since the
+    capavisor TSC-deadline emulator has no wake source while the VP thread is
+    sleeping in thhv, this can lose LAPIC-timer progress after guest idle.
+  - Temporary diagnostic in `thhv/src/thhv_vp.c`: changed the HLT wait to
+    `wait_event_interruptible_timeout(..., msecs_to_jiffies(1))`. This confirms
+    the hang is timer/progress related: the guest no longer silently parks at
+    `/sbin/init`, but advances into device activation/workqueue activity.
+  - Latest HLT-timeout run is still not usable: CHV spins high CPU, dom1 does
+    not ping, and the guest logs workqueue hog warnings after `/sbin/init`.
+    Hot exits alternate between LAPIC EOI (`native_apic_mem_eoi`, MMIO
+    `offset=0xb0`) and virtio MMIO (`iowrite16`), with many forwarded physical
+    `0xec` dom0-timer interrupts. This likely combines the real halted-timer
+    wake bug with heavy temporary serial instrumentation overhead.
+  - 2026-09-30 update: the missing `[DBG] dom=1` traces were caused by a stale
+    nested bzImage in `bins.img`, not capavisor VMCALL dispatch. Rebuilding
+    `../linux/arch/x86/boot/bzImage` and repacking/copying it to
+    `/opt/bins/nested/bzImage` restored guest tracepoints.
+  - Focused timer-wheel probes narrowed the old cgroup hang: the cgroup2 mount
+    reaches `0x22e`, enters `synchronize_rcu_normal()`, queues a normal RCU
+    request (`0x2b1`), the waiter sleeps (`0x29e`), and with the thhv 1ms HLT
+    diagnostic the GP kthread reaches `0x2ba 0x2b2 0x2b4 0x2b0 0x2b5 0x2bc
+    0x2d0 0x2d1`, then arms a `schedule_timeout()` (`0x2d6 0x2d7 0x2d8
+    0x2e7`). The exact timer callback still never fires: no `0x2fd`, no
+    `0x2fe`, no `0x2da/0x2db`, and no `0x2f0/0x2f4` timer softirq activity
+    after that final `0x2e7`.
+  - `nohz=off highres=off` did **not** fix the final timeout edge. The run
+    still stopped after the final `0x2d6/0x2d8/0x2e7`, so the issue is not just
+    highres/nohz one-shot mode failing to program the clockevent.
+  - Strongest current lead (2026-09-30): LAPIC timer vector `0xec` accumulates
+    in the child PID/PIR (`pir[3]=0x100000000000`) and remains pending across
+    many drains. There are repeated `DBG-PIR-DRAIN ... can_accept=true ...
+    pir=[...,0x100000000000]` samples (23 sampled accept-true cases in the
+    latest aggregate), but later drains still see the same pending bit. This
+    suggests the next root-cause audit should focus on capavisor PIR drain /
+    VM-entry interrupt injection semantics: whether `VMENTRY_INTERRUPTION_INFO`
+    is being overwritten, cleared too early, rejected by VM-entry/interrupt
+    state, or whether the injected vector is not reaching Linux despite
+    `guest_can_accept_external()`.
+  - 2026-09-30 later update: the "no `0x311`" observation was again a stale
+    nested-kernel packaging issue. `guest/kernel/bzImage` was old, while
+    `../linux/arch/x86/boot/bzImage` and `vmlinux` contained the probe. Repacking
+    with `NESTED_KERNEL=../linux/arch/x86/boot/bzImage` restored `[DBG] dom=1`.
+  - With the corrected kernel, dom1 reaches `/sbin/init` and prints
+    `[DBG] dom=1 val=0x311`, then stalls/loops in normal Linux idle:
+    HLT RIP `0xffffffff821db84a` resolves to `pv_native_safe_halt` (`sti; hlt`),
+    not MCE. The steady trace is `0x300 -> 0x303 -> 0x302`, meaning idle loop,
+    cpuidle unavailable, `default_idle_call(stop_tick=false)`.
+  - The old RCU GP timeout edge did **not** reproduce in the corrected run:
+    normal GP traces reached `0x2d2/0x2d3/0x2bd` and later cleanup markers
+    `0x2b6/0x2b7/0x2b8`. Timer vector injection also reaches Linux's timer
+    entry: `DBG-PIR-INJECT vec=0xec entry_intr=0x800000ec` followed by
+    `DBG-ENTRY-RESULT ... exit=1 vmexit_intr=0x800000ec rip=0xffffffff81000e30`
+    (`asm_sysvec_apic_timer_interrupt`). `IDT_VECTORING_INFO` was `0`.
+  - Current post-init stall evidence: after `0x311`, sampled APIC timer handler
+    probes `0x312/0x313` do not appear. HLT forwarding samples show
+    `deadline=0`, mostly empty PIR, and no CHV/systemd serial output after
+    `Run /sbin/init as init process`. The temporary thhv 1ms HLT timeout is
+    still the only thing preventing an indefinite wait when no IRQ/deadline is
+    visible to thhv.
+  - Added thhv IRQFD diagnostics and reran. IRQFD registration/injection does
+    occur during boot (`DBG_IRQFD assign` for timer and virtio vectors;
+    successful sampled injections for vectors 33/35/37/38), but dom1 still
+    stops after `0x311`. So the remaining gap is not "irqfds never registered"
+    and not simply "no device interrupts ever inject"; it is specifically after
+    execing `/sbin/init` / before visible systemd progress.
+  - Added Linux exec-transition probes for next run:
+    `0x314` begin_new_exec, `0x315` end of begin_new_exec,
+    `0x316` setup_new_exec, `0x317` finalize_exec, `0x318` x86 start_thread,
+    `0x319` `kernel_execve()` returned with error. The kernel (`#27`) built and
+    was packed into `bins.img`, but the user needed to stop the machine before
+    the run reached the collection point; no `0x314`-`0x319` result has been
+    captured yet.
+  - 2026-10-01 resume: reran the packed exec-probe kernel. The exec-transition
+    probes fired in order: `0x311 0x314 0x315 0x316 0x317 0x318 0x319`.
+    Despite `0x319`, dom1 serial/console proves PID 1 entered systemd and ran
+    early userspace, so the `0x319` placement is not a useful failure
+    discriminator as currently inserted. The visible stop point returned to the
+    known cgroup2 mount:
+    `Mounting cgroup2 ... nsdelegate,memory_recursiveprot`.
+  - The latest cgroup/RCU trace is now sharper. The earlier RCU timeout can
+    complete in some cycles (`0x2f0/0x2f4/0x2fd/0x2fe/0x2da/0x2db/0x2d9/0x2dc/0x2dd`),
+    but the final cgroup path reaches
+    `0x23f 0x240 0x241 0x248 0x249 0x251 0x252 0x258 0x259 0x25a 0x25b
+    0x2d0 0x2d1 0x2d6 0x2d7 0x2d8 0x2e7 0x2ff`, then stalls. That means the
+    final RCU GP-kthread timeout is queued as a new first timer (`0x2e7`), the
+    idle task enters `do_idle()` with the timeout active (`0x2ff`), and then no
+    timer-softirq/callback expiry is observed for that exact timer.
+  - Important timer/HLT insight from this run: after the final `0x2e7`, Linux
+    loops `0x300 -> 0x303 -> 0x302`, i.e. cpuidle unavailable and
+    `default_idle_call(stop_tick=false)`. Since `stop_tick=false`, Linux
+    retains the periodic tick and does not necessarily program a new
+    `IA32_TSC_DEADLINE` immediately before `sti; hlt`. Capavisor then forwards
+    HLT with `deadline=0`, so thhv has no principled wake deadline; the current
+    1ms timeout is only a diagnostic busy retry, not a real timer model.
+  - Tried a temporary thhv diagnostic that injected vector `0xec` on
+    zero-deadline HLT timeout. It was reverted in-session: the patched run became
+    much slower and failed to reach `/sbin/init` within the bounded window, so it
+    is not useful evidence and is not in the current tree. `cargo build-bins`
+    plus explicit `NESTED_KERNEL=../linux/arch/x86/boot/bzImage
+    themis/scripts/update-bins.sh` passed after reverting.
+  - 2026-10-01 retained-tick update: audited the child LAPIC/HLT path and
+    implemented a candidate HLT contract for the retained periodic tick case.
+    Capavisor forwards HLT with `guest_physical_address = vcpu.tsc_deadline()`,
+    sets `HLT_EXIT_QUAL_PENDING_PIR` when PIR is non-empty, and sets
+    `HLT_EXIT_QUAL_RETAINED_TICK` when the forwarded TSC deadline is zero.
+    thhv interprets that retained-tick bit by parking the VP for a bounded
+    `THHV_RETAINED_TICK_MS` interval (currently 4 ms) and injecting the local
+    timer vector `0xec` only when that retained-tick wait times out. This
+    replaces the earlier unconditional 1 ms diagnostic poll and avoids blind
+    `0xec` injection for every zero-deadline HLT.
+  - Validation with a clean nested kernel
+    (`NESTED_KERNEL=themis/guest/kernel/bzImage`) changed the failure mode
+    substantially: dom1 got past `/sbin/init`, passed the old cgroup2/normal-RCU
+    stall class, and entered sustained systemd activity. Serial output showed
+    `systemd-journald`, `systemd-modules-load`, `systemd-random-seed`,
+    `systemd-udevd`, `systemd-networkd`, `systemd-resolved`, and
+    `systemd-logind` activity. The run still timed out after 420 seconds before
+    a confirmed final emergency/login/SSH target. Later output included
+    `wait_rcu_exp_gp hogged CPU` and a `clocksource watchdog` report marking TSC
+    unstable due to skew, so the retained-tick fix appears to address the
+    original silent idle/RCU stall but is not yet a polished final boot fix.
+  - Stopped the retained-tick validation boot (`themis-boot-retained`) before
+    ending the experiment. Rebuilt and repacked after naming the HLT ABI bits:
+    `cargo build-bins && NESTED_KERNEL=themis/guest/kernel/bzImage
+    bash themis/scripts/update-bins.sh` passed. Existing warnings remain
+    unrelated/pre-existing.
+  - 2026-10-01 later update: downgraded hot capavisor/thhv/CHV diagnostics so
+    normal validation is no longer dominated by `DBG-HLT-FWD`, `DBG_RUN HLT*`,
+    `DBG_IRQFD`, `DBG-ENTRY-RESULT`, `[THEMIS-MSR]`, or `[LAPIC-TIMER]`
+    progress logs. Build/repack passed after the cleanup.
+  - TSC-watchdog discriminator: without `tsc=nowatchdog`, dom1 marks TSC
+    unstable (`clocksource watchdog` reports ~38 ms skew against HPET) and
+    switches to HPET, which makes the already slow nested path crawl. Adding
+    `tsc=nowatchdog` keeps dom1 on TSC; one 420s run reached
+    `emergency.target`, but later runs still reproduced very slow progress and
+    the RCU GP timeout warning. So the watchdog/HPET fallback is a real
+    secondary slowdown but not the complete root cause.
+  - Added low-volume thhv counters. Results so far: the retained zero-deadline
+    HLT path fires only once in the long runs (`retained HLT count=1`,
+    `retained tick inject count=1`). A nonzero-deadline HLT was also observed
+    with the forwarded deadline already in the past
+    (`deadline < now`), which exposed an artificial extra host-jiffy sleep in
+    thhv before capavisor could re-check and inject the overdue TSC deadline.
+    Patched thhv so already-expired forwarded deadlines use `timeout = 0` and
+    immediately retry `SWITCH`. Build/repack passed, but later runs were still
+    very slow and did not reliably reach emergency, so this is only a partial
+    correctness/performance fix.
+  - Normal boot with CHV serial/console disabled and a 600s timeout still did
+    not ping `192.168.100.2`. thhv counters in that run showed only one
+    nonzero-deadline HLT (`deadline HLT count=1`) and no accumulated retained
+    tick activity, suggesting the remaining issue is not continuous
+    zero-deadline HLT parking. The next lead is either a later TSC-deadline
+    re-arm/fire accounting problem, a device/block progress issue, or an
+    interaction with the guest's LAPIC timer state that the current coarse thhv
+    retained-tick shim does not model.
+  - 2026-10-01 later: found and removed a stale CHV-local LAPIC timer source.
+    The Themis backend still had a `timerfd`/irqfd bridge for vector `0xec`
+    driven by `IA32_TSC_DEADLINE` and LAPIC MMIO timer writes. That duplicated
+    capavisor's TSC-deadline ownership. CHV now leaves `IA32_TSC_DEADLINE` and
+    LAPIC timer programming to capavisor.
+  - Domain-tagged timer logs showed the repeated module-RIP direct `0xec`
+    deliveries are `dom=0` physical dom0 timer delivery, not dom1. Dom1 timer
+    delivery is mostly PIR-queued when IF is closed and injected when IF opens;
+    `0xec` VM-entry injection reaches Linux's APIC timer entry.
+  - Dom1 later reached early userspace far enough to report
+    `systemd[1]: Failed to find module 'autofs4'`. The nested modules were
+    present in `bins.img` but not installed into `dom1.raw`. A first attempt to
+    mount/copy modules from inside dom0 immediately before CHV launch perturbed
+    dom0 memory and caused `THHV_SET_GUEST_MEMORY` to fail with `EINVAL` after
+    translating 1 GiB of guest RAM into many HPA segments. That launch-time
+    mutation was removed.
+  - `update-bins.sh` now pre-populates `guest/dom1.raw` with
+    `/lib/modules/$KVER` on the host before packing it into `bins.img`, using a
+    rootless `sfdisk` + partition extract + `fuse2fs` flow. `run-dom1.sh` only
+    reports the packaged module version and no longer mutates the disk from
+    dom0. `create-bins.sh` now defaults to a 6 GiB sparse image because the
+    self-contained dom1 disk plus modules no longer fits reliably in 4 GiB.
+  - Validation after module prepopulation: `THHV_SET_GUEST_MEMORY` succeeds
+    again (example clean run: 1 GiB translated into 5 HPA segments; later stock
+    run into 27 segments). `autofs4.ko` and `modules.dep` are present in the
+    host `dom1.raw` rootfs. The old module-missing failure is no longer the
+    current blocker.
+  - Instrumented Linux kernel (`../../linux/arch/x86/boot/bzImage`) is now a
+    major performance confound: with serial disabled it still failed to reach
+    `init/main.c` markers in a 600s bound and only cycled through early
+    RCU/percpu-rwsem markers (`0x251`–`0x25f`, `0x2d0`–`0x2d5`). A stock nested
+    kernel (`guest/kernel/bzImage`) is substantially faster: in a 300s bound it
+    reached PCI/virtio enumeration, activated RNG and block devices, registered
+    multiple irqfds, and activated virtio-net around CHV time ~168s. It still
+    did not ping before the timeout.
+  - Current strongest lead is no longer a single lost local timer interrupt.
+    Boot progress is dominated by slow forwarded I/O/MMIO and device activation
+    under Themis. Hot resolved RIPs include `pci_conf1_read/write`,
+    `clockevents_program_event`, `sysvec_apic_timer_interrupt`, and
+    `irqentry_exit`; tap carrier appears while CHV is alive, but RX/TX counters
+    remain zero before timeout. Next run should add low-volume exit-rate/timing
+    counters around IO_INSTRUCTION, EPT/MMIO, irqfd injection, and TSC
+    arm/fire, then determine whether the remaining delay is expected
+    virtualization overhead or a specific stalled device/interrupt path.
+  - 2026-10-01 instrumentation toggle update: capavisor already had
+    `THEMIS_TOGGLE_DEBUG` (`0x1d`) and `tools/toggle-debug`; the hot temporary
+    capavisor timer/PIR/injection diagnostics are now gated behind
+    `serial_rtdbg!` so they stay silent until the runtime toggle is enabled.
+    The instrumented Linux `themis_trace()` helper now checks a global
+    `themis_trace_enabled` flag before issuing VMCALLs, and `run_init_process()`
+    enables both guest tracing and capavisor runtime debug immediately before
+    the `/sbin/init` marker (`0x311`). This should eliminate the worst early
+    boot slowdown while preserving detailed traces around the current
+    post-init/systemd/device-progress failure window.
+
+  Current hypothesis: vector `0xec` VM-entry injection is not the active lost
+  interrupt; it reaches Linux's timer entry. PID 1 does enter systemd. The
+  retained-periodic-tick / HLT handoff was a real bug and the candidate ABI
+  prevents indefinite zero-deadline HLT parking, but the latest counters show it
+  is not the whole remaining problem: retained HLT happens only once in the
+  long clean-kernel runs. The remaining failure is a later progress/timing
+  issue after `/sbin/init`, possibly in TSC-deadline re-arm/fire accounting,
+  block/device progress, or LAPIC timer state modeling. `tsc=nowatchdog` avoids
+  a misleading HPET fallback slowdown but is not the root fix.
+
+  2026-10-08 update (hypothesis, not established root cause): the child
+  LAPIC/timer state-sharing contract is incomplete. CHV conditionally
+  keeps nested children in xAPIC mode when capavisor does not advertise
+  `FEATURE_X2APIC_VIRT` (current nested-KVM run), shadows xAPIC LAPIC
+  LVT/timer writes, and now has `reprogram_lapic_mmio_timer()` as a no-op
+  after the stale CHV timer source was removed. At the same time dom1 policy
+  traps/emulates `IA32_TSC_DEADLINE` (`0x6e0`) in capavisor, so capavisor is
+  the component that fires vector `0xec`; however capavisor's
+  `deliver_timer_vector()` only gates on `injectable` plus IF/STI
+  interruptibility and does not model the guest-visible LAPIC state that should
+  gate a local timer interrupt (SVR enable, LVT timer mask/vector/mode, TPR/PPR,
+  ISR/in-service/EOI, IRR/RVI). The observed 600s validation after replacing
+  thhv's retry `usleep_range(50, 100)` with `cond_resched()` improved early
+  progress (`THEMIS-RATE` 5k exits in ~24.8s vs ~125s before; 10k exits in
+  ~104.8s vs ~246s before) but then stopped making visible boot progress:
+  no sampled CHV exit counter beyond 10k,
+  console stuck at `lvm2-monitor` with an incomplete line beginning
+  `[92.582564] w`, no tap RX/TX, and timeout exit 124. The last CHV-visible
+  LAPIC writes were timer/APIC state changes
+  (`LVT_TIMER` programmed then masked, other LVTs masked, ESR written, SVR
+  written), while capavisor's last dom1 entry sample was a preemption-timer exit
+  at `asm_sysvec_apic_timer_interrupt`. A runtime-debug sample while stuck
+  showed continuing physical timer lazy-unwinds. Missing sampled child-entry
+  logs do not distinguish a halted VP, a guest loop, or repeated switching.
+  Neither the precise stopping instruction nor the causal role of the LAPIC
+  writes has been established; they could be consequences of an earlier fault.
+
+  Architectural implication: choose one owner for the child LAPIC timer
+  contract. Either (A) capavisor owns the full virtual LAPIC/clockevent model
+  for children (handle xAPIC MMIO timer writes and x2APIC timer MSRs, maintain
+  guest-visible LVT/SVR/TPR/ISR/IRR/RVI state, respect masks/in-service before
+  injecting `0xec`, and make HLT/deadline wakeups derive from that state), or
+  (B) CHV remains the device-model owner and `IA32_TSC_DEADLINE`/LAPIC timer
+  programming should be trap-forwarded to CHV, with CHV using the Themis
+  interrupt-injection path as the sole source of timer vectors. The current
+  split is not inherently invalid: components may cooperate through a coherent,
+  capability-checked state-sharing contract. The observed implementation lacks
+  that coherence for the timer/LVT path. The recommendation in Current Status
+  is to keep virtual VP-local state in capavisor's architecture layer, not to
+  move general peripheral emulation into capavisor.
+
+  Last known trace snippets:
+  ```
+  Final cgroup/RCU timeout edge:
+    0x29e 0x2ba 0x2b2 0x2b4 0x2ad 0x2b0 0x2b5 0x2bc
+    0x2d0 0x2d1 0x2d6 0x2d7 0x2d8 0x2e7
+    then no 0x2f0/0x2f4/0x2fd/0x2fe/0x2da/0x2db
+
+  Repeated capavisor samples:
+    [DBG-PIR-DRAIN] ... can_accept=true ... pir=[0x0,0x0,0x0,0x100000000000]
+    [DBG-INTR-WINDOW] ... rflags=0x246 ...
+    [DBG-HLT-FWD] ... deadline=0x0 pir=[0x0,0x0,0x0,0x0]
+  ```
+
+  Next step: agree on the interrupt/timer state contract before implementation,
+  then identify a failing transition with bounded state capture (VP run state,
+  RIP, deadline, pending/in-service state, LVT, entry-event slot and wakeup
+  state). Do not infer the cause from sampled counter silence or restore a
+  second independent timer source. Keep `tsc=nowatchdog` for now to avoid the HPET fallback
+  confounder, and avoid the heavily instrumented Linux kernel unless a targeted
+  trace is needed because its `themis_trace()` exits dominate early boot.
+
+  Validation: `bash -n themis/scripts/run-dom1.sh` passed. `cargo build-bins`
+  completed and repacked `guest/bins.img` with the updated launcher and temporary
+  capavisor DBG_PRINT output. The instrumented Linux bzImage was built from
+  `../linux` and packed with `NESTED_KERNEL=... update-bins.sh`. As usual,
+  `tools/toggle-debug` was rebuilt as a generated binary side effect.
+  A later `cargo build-bins` also passed after the temporary thhv HLT-timeout
+  diagnostic and CHV LAPIC EOI patch, followed by explicit
+  `NESTED_KERNEL=../linux/arch/x86/boot/bzImage update-bins.sh`.
+  Latest validation builds also passed after log gating, `tsc=nowatchdog`, thhv
+  HLT counters, and the overdue-deadline immediate-retry fix:
+  `cargo build-bins && NESTED_KERNEL=themis/guest/kernel/bzImage
+  bash themis/scripts/update-bins.sh`.
+  The toggleable instrumentation update was validated with
+  `make -C /home/aghosn/Documents/Programs/linux -j$(nproc) bzImage` and
+  `cd /home/aghosn/Documents/Programs/capability-v5 && cargo build-bins`; both
+  completed successfully. The resulting instrumented nested kernel was packed
+  with `NESTED_KERNEL=../linux/arch/x86/boot/bzImage bash
+  themis/scripts/update-bins.sh`, and `guest/bins.img` was refreshed. Remaining
+  build warnings are pre-existing.
+
+  Files modified in the latest debugging segment:
+  - `themis/capavisor/src/arch/x86_64/hypercall/switch.rs` — temporary PIR
+    drain, interrupt-window, and HLT-forward diagnostics; logs pending PIR,
+    `can_accept`, RFLAGS, interruptibility, entry-interrupt info, primary
+    controls, RIP, and HLT forwarded deadline. Candidate fix still present:
+    HLT forwards now carry the child TSC deadline plus named
+    `HLT_EXIT_QUAL_PENDING_PIR` / `HLT_EXIT_QUAL_RETAINED_TICK` bits. Hot
+    diagnostics are now runtime-toggle gated via `serial_rtdbg!`.
+  - `thhv/src/thhv_vp.c` — temporary HLT run-loop diagnostics and the active
+    retained-tick HLT path. If capavisor marks retained tick, thhv waits
+    `THHV_RETAINED_TICK_MS` and injects `THHV_LOCAL_TIMER_VECTOR` (`0xec`) on
+    timeout; high-frequency `DBG_RUN HLT*` logs are now `pr_debug_ratelimited`.
+    Low-volume counters log retained/deadline HLT counts and deadline timeouts.
+    Already-expired forwarded deadlines now retry immediately instead of
+    sleeping for one host jiffy.
+  - `thhv/src/thhv_irqfd.c` — temporary low-volume IRQFD assignment and sampled
+    successful-injection diagnostics (`DBG_IRQFD`).
+  - `cloud-hypervisor/hypervisor/src/themis/vm_impl.rs`,
+    `cloud-hypervisor/hypervisor/src/themis/vcpu.rs`, and
+    `cloud-hypervisor/hypervisor/src/themis/consts.rs` — stale CHV-local
+    timerfd/irqfd LAPIC timer source for vector `0xec` removed/disabled so
+    capavisor remains the sole TSC-deadline owner.
+  - `themis/capavisor/src/arch/x86_64/hypercall/doorbell.rs` and
+    `themis/capavisor/src/arch/x86_64/pid.rs` — temporary low-volume source and
+    domain tags for vector `0xec`, used to prove module-RIP direct timer logs
+    were dom0 (`dom=0`) rather than dom1. These diagnostics are now
+    runtime-toggle gated.
+  - `../linux/arch/x86/include/asm/special_insns.h` — added
+    `themis_trace_enabled`, `themis_trace_set_enabled()`, and
+    `themis_toggle_capavisor_debug()` helpers so guest trace VMCALLs can stay
+    off during early boot and enable capavisor runtime debug at the same time.
+  - `../linux/init/main.c` — defines `themis_trace_enabled` and enables guest +
+    capavisor tracing immediately before the `/sbin/init` marker (`0x311`).
+  - `themis/capavisor/src/arch/x86_64/msr_emulator.rs`,
+    `themis/capavisor/src/hypercall/mod.rs`, and
+    `themis/capavisor/src/arch/x86_64/x86_platform.rs` — temporary targeted
+    TSC-arm/fire and VM-entry-result diagnostics used to prove `0xec` reaches
+    Linux's timer entry. Hot logs were downgraded, except low-volume
+    TSC-arm/fire counters were re-enabled for the next rebooted validation.
+  - `themis/crates/vmx/src/vcpu.rs` — IDT-vectoring preservation hardening after
+    VM exit; useful but not yet proven to be the root cause of this hang.
+  - `../linux/kernel/time/sleep_timeout.c` — temporary RCU GP-kthread
+    `schedule_timeout()`/`process_timeout()` probes and globals tracking the
+    exact RCU timeout timer address.
+  - `../linux/kernel/time/timer.c` — temporary timer-wheel/softirq probes
+    (`0x2f0`–`0x2fe`) to determine whether the exact RCU timer expires.
+  - `../linux/kernel/time/tick-sched.c` and `../linux/kernel/sched/idle.c` —
+    temporary idle/nohz/tick-stop probes (`0x2ff`–`0x310`) added for the next
+    discriminator.
+  - `../linux/init/main.c` and `../linux/arch/x86/kernel/apic/apic.c` —
+    temporary post-init marker and sampled APIC timer interrupt entry/exit
+    probes (`0x311`–`0x313`).
+  - `../linux/fs/exec.c`, `../linux/arch/x86/kernel/process_64.c`, and
+    `../linux/init/main.c` — temporary exec-transition probes (`0x314`–`0x319`)
+    to distinguish failed exec from entering userspace and blocking.
+  - `skills/debugging-dom-boot.md` — trace registry updated through `0x319`;
+    next free range is `0x31A`.
+  - `themis/scripts/run-dom1.sh` — added `tsc=nowatchdog` to the default dom1
+    cmdline to avoid false TSC-vs-HPET watchdog fallback while debugging the
+    real timer path.
+  - `themis/scripts/update-bins.sh` — installs nested kernel modules into
+    `guest/dom1.raw` before packing, using rootless partition extraction and
+    `fuse2fs`; this replaces unsafe dom0 launch-time disk mutation.
+  - `themis/scripts/create-bins.sh` — default sparse bins image size raised
+    from 4 GiB to 6 GiB.
+  - `cloud-hypervisor/hypervisor/src/themis/vm_impl.rs`,
+    `cloud-hypervisor/hypervisor/src/themis/vcpu.rs`, and
+    `cloud-hypervisor/hypervisor/src/themis/consts.rs` — stale CHV-local
+    timerfd/irqfd LAPIC timer source for vector `0xec` removed/disabled so
+    capavisor remains the sole TSC-deadline owner.
+
+- **2026-09-28 — dom1 debug console plumbing** ✅ DONE. Updated
+  `themis/scripts/run-dom1.sh` so dom1 serial/virtio-console sinks are
+  configurable via `CHV_SERIAL` and `CHV_CONSOLE` (default `tty`), enabling
+  file-backed boot debugging without duplicate `--serial`/`--console`
+  arguments; added `KERNEL_APPEND` for systemd target/cmdline experiments
+  and validation for common `file/tmp/...` typo. Example:
+  `CHV_SERIAL=file=/tmp/dom1-serial.log
+  CHV_CONSOLE=file=/tmp/dom1-console.log sudo /opt/bins/cloud-hypervisor/run-dom1.sh --themis`.
+
+  Files modified this session:
+  - `themis/scripts/run-dom1.sh` — added `CHV_SERIAL`/`CHV_CONSOLE` and `KERNEL_APPEND` env knobs, typo validation, and prints selected sinks at launch.
+  - `themis/scripts/run-dom1.sh` — added `CGROUP_TEST_INIT=1` mode to inject and boot a one-shot cgroup2 mount test init.
+  - `themis/capavisor/src/hypercall/mod.rs` — temporarily re-enabled `THEMIS_DBG_PRINT` serial output so guest `themis_trace()` probes are visible.
+  - `skills/debugging-dom-boot.md` — registered trace codes `0x229`–`0x23E`.
+  - `../linux/arch/x86/include/asm/special_insns.h` — added/fixed `themis_trace()` helper with VMCALL clobbers.
+  - `../linux/kernel/cgroup/cgroup.c` — temporary cgroup mount `themis_trace()` probes.
+  - `../linux/fs/kernfs/mount.c` — temporary kernfs mount `themis_trace()` probes.
+  - `../linux/kernel/locking/percpu-rwsem.c` — temporary `percpu_down_write()` probes.
+  - `../linux/kernel/rcu/sync.c` — temporary `rcu_sync_enter()` probes.
+  - `../linux/kernel/rcu/tree_exp.h` — temporary expedited-RCU GP selection, wait, and wake probes.
+  - `../linux/kernel/rcu/tree.c` — temporary normal RCU GP request, GP kthread, scheduler-tick, RCU-core, and QS-report probes.
+  - `../linux/kernel/rcu/update.c` — temporary old callback-wait path probes.
+  - `cloud-hypervisor/hypervisor/src/themis/consts.rs` — temporary CHV LAPIC EOI diagnostic support (`APIC_REG_ISR_BASE`).
+  - `cloud-hypervisor/hypervisor/src/themis/vcpu.rs` — temporary CHV LAPIC fallback EOI ISR-clear attempt; observed not to clear because CHV ISR stays zero.
+  - `themis/capavisor/src/monitor.rs` — temporary external-interrupt/preemption-timer logging.
+  - `themis/capavisor/src/arch/x86_64/{pid.rs,msr_emulator.rs,vmexit/apic.rs}` — temporary interrupt/timer/APIC diagnostics.
+  - `themis/capavisor/src/arch/x86_64/hypercall/{switch.rs,doorbell.rs}` — temporary switch/PIR/irq-injection diagnostics.
+  - `thhv/src/{thhv_vp.c,thhv_irqfd.c,thhv_part.c}` — temporary run-loop/HLT/irqfd/ioctl diagnostics; `thhv_vp.c` currently includes the HLT timeout diagnostic.
+  - `todo.md` — recorded this script/debugging change.
+  - `tools/toggle-debug` — generated rebuild side effect from `cargo build-bins`; revert before finalizing diffs if unchanged source is desired.
+
 - **2026-09-07 — Closed A9 audit finding: capavisor's hypercall handlers
   resolving capability handles (`Weak::upgrade()`) outside the capa-engine's
   `execute()` op-lock. Fixed self/handle attestation mediation and, while

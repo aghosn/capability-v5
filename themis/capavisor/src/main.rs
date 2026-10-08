@@ -142,7 +142,11 @@ macro_rules! serial_println {
 macro_rules! serial_debug {
     ($($arg:tt)*) => {
         #[cfg(feature = "verbose")]
-        $crate::serial_println!($($arg)*)
+        $crate::serial_println!($($arg)*);
+        #[cfg(not(feature = "verbose"))]
+        if false {
+            let _ = core::format_args!($($arg)*);
+        }
     };
 }
 
