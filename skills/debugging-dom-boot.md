@@ -16,6 +16,29 @@ normal `dmesg` / serial output in that case.
 
 ---
 
+## Kernel checkout and handoff revision
+
+The guest Linux source on the original machine is at
+`/home/aghosn/Documents/Programs/linux` (a sibling of `capability-v5`, not
+inside `themis/`). Its branch is `v6.19.14-themis`, at base commit
+`44df971c640f8618de24aa08a9019496353e1b47`
+(`x86/themis: paravirt feature leaf + virtio doorbell hypercall`).
+
+The additional instrumentation is intentionally uncommitted in that Linux
+checkout. All 18 modified files are captured by the committed
+`themis/debug/linux-instrumentation.patch` in this repository; follow
+`themis/debug/README.md` to apply it to the exact base on another machine.
+Do not apply it again over the original instrumented checkout.
+
+The build output is `arch/x86/boot/bzImage` inside the Linux checkout.
+The packaged copy is `themis/guest/kernel/bzImage` in this repository and
+must not be assumed identical to the current source build. The matching
+configuration is `cleanup/linux.config` in the separately transferred
+`themis-dom1-evidence-2026-10-08.tar.gz`; configurations, binaries and raw
+logs are not all in Git. See `docs/dom1-debugging-handoff.md` for details.
+
+---
+
 ## Background
 
 All VMCALL exits from any domain (dom0, dom1, …) are dispatched directly to

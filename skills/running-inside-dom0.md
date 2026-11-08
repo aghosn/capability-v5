@@ -12,6 +12,51 @@ Use this skill whenever you need to:
 
 ## Overview
 
+### Architecture versus the development environment
+
+Themis is designed as a bare-metal hypervisor, but **our development tests
+boot it inside QEMU/KVM, not directly on the physical machine**.
+
+Within the Themis architecture:
+
+- **Capavisor (L0)** is the Rust `no_std` hypervisor. The capability engine
+  validates operations before capavisor changes VMCS/EPT/IOMMU state.
+- **Dom0 (L1)** is the first Linux domain, not a privileged exception to
+  capability enforcement. Its Cloud Hypervisor (CHV) userspace VMM uses
+  `/dev/thhv` and the `thhv.ko` driver to manage child domains.
+- **Dom1 (L2)** is the child Linux guest being debugged. The parent explicitly
+  schedules its VPs through synchronous SWITCH; capavisor enforces authority
+  and preserves parent interrupt/preemption paths.
+
+These L0/L1/L2 labels describe Themis's logical architecture, not absolute
+hardware virtualization levels when an outer hypervisor is present.
+
+The development stack on a native Linux host is:
+
+```text
+Physical machine
+  Host Linux + KVM
+    QEMU virtual machine booting the Themis ISO
+      Capavisor
+        Dom0 Linux + thhv.ko + Cloud Hypervisor
+          Dom1 Linux
+```
+
+The previous machine added Hyper-V and WSL2 beneath QEMU:
+`Hyper-V -> WSL2 Linux/KVM -> QEMU/Themis -> dom0 -> CHV/dom1`.
+Moving to "Linux bare metal" means the **host Linux** runs natively; Themis
+still runs under QEMU/KVM for these tests, and nested virtualization remains.
+It does not mean installing Themis as the physical machine's boot hypervisor.
+
+Build and run QEMU on the host. SSH to port 2222 reaches **dom0**, where the
+driver and CHV run; the instrumented Linux checkout is for **dom1**, not the
+host kernel or dom0. Kernel location/base/patch details are in
+`skills/debugging-dom-boot.md`. Full axioms and component descriptions are
+in `CONTEXT.md`; reproduction and log routing are in
+`docs/dom1-debugging-handoff.md`.
+
+### Terminal workflow
+
 The workflow has two parallel tracks:
 
 ```

@@ -7,6 +7,21 @@
 
 ## Current Status
 
+- **2026-11-08 — kernel location added to debugging instructions**:
+  Updated `skills/debugging-dom-boot.md` with the original Linux checkout
+  path, branch, exact base commit, committed patch/application instructions
+  and distinction between source build, packaged image and external config.
+  Verified the committed patch still exactly matches all 18 Linux changes.
+  Parent and CHV were clean at `894ee0a81` and `80a60d293` respectively;
+  Linux remains deliberately uncommitted, represented by the parent patch.
+  This documentation-only follow-up also updates `todo.md`; no code changed.
+  Added architecture/development overview to `skills/running-inside-dom0.md`
+  and `docs/dom1-debugging-handoff.md`: native Linux is the host, Themis
+  still boots inside QEMU/KVM, dom0 runs thhv/CHV, and the instrumented Linux
+  is dom1. Logical L0/L1/L2 labels are relative to Themis, not the outer host.
+  User authorized committing these documentation follow-ups on
+  `debug/dom1-linux-handoff`; no push performed as part of this update.
+
 - **2026-10-08 — Linux patch and authorized local handoff commits**:
   User chose a portable patch, not a Linux branch/commit. Added
   `themis/debug/linux-instrumentation.patch` (all 18 tracked Linux changes)

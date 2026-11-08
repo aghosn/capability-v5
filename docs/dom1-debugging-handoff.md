@@ -5,6 +5,27 @@ under Themis, while preserving capability enforcement and parent scheduling
 authority. **The boot/liveness issue is unresolved.** This is a record of
 observations and reproducible procedures, not a diagnosis to adopt.
 
+## Architecture and test deployment
+
+Themis's logical stack is capavisor (L0, capability enforcement and hardware
+virtualization), dom0 (L1, Linux with thhv.ko and the CHV userspace VMM), then
+dom1 (L2, child Linux guest). Dom0 is not privileged by exception; the parent
+schedules child VPs through SWITCH and capavisor enforces capability rights.
+
+**Development testing does not deploy Themis directly on physical hardware.**
+We build on the host and boot the Themis ISO inside QEMU/KVM, then SSH into
+dom0 to run CHV/dom1. On the new machine the stack remains:
+
+```text
+Native host Linux/KVM -> QEMU -> Themis capavisor -> dom0 + CHV -> dom1
+```
+
+Moving to a native Linux host removes the old Hyper-V/WSL2 layer, not QEMU
+or nested virtualization. The L0/L1/L2 labels above are relative to Themis's
+architecture. The instrumented Linux source/patch below belongs to the dom1
+guest, not the native host kernel. See `skills/running-inside-dom0.md` for
+the development overview and `CONTEXT.md` for authoritative design invariants.
+
 ## Review and transfer status
 
 The parent repository and `cloud-hypervisor` submodule are both on
