@@ -30,6 +30,7 @@ dom0_select "noble"
 
 DOM1_RAW="$GUEST_DIR/dom1.raw"
 DOM1_SEEDED_MARKER="$GUEST_DIR/.dom1-seeded"
+DOM1_NETWORK_CONFIG="$WORKSPACE_ROOT/configs/dom1-network.yaml"
 HVF="$GUEST_DIR/hypervisor-fw"
 HVF_VERSION="0.5.0"
 HVF_URL="https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/${HVF_VERSION}/hypervisor-fw"
@@ -65,7 +66,8 @@ fi
 # b) Patch grub.cfg in boot partition (p16): LABEL=cloudimg-rootfs → /dev/vda1
 echo ""
 echo "=== [2/3] Configuring dom1.raw ==="
-if [[ -f "$DOM1_SEEDED_MARKER" && "$FORCE" != "1" ]]; then
+if [[ "$FORCE" != "1" && "$DOM1_SEEDED_MARKER" -nt "$SCRIPT_DIR/fetch-dom1.sh" \
+    && "$DOM1_SEEDED_MARKER" -nt "$DOM1_NETWORK_CONFIG" ]]; then
     echo "  ✔ dom1.raw already configured"
 else
     LOOP=$(sudo losetup -f --show -P "$DOM1_RAW")
@@ -92,24 +94,18 @@ users:
     lock_passwd: False
     shell: /bin/bash
 ssh_pwauth: True
-write_files:
-  - path: /etc/netplan/99-dom1.yaml
-    content: |
-      network:
-        version: 2
-        ethernets:
-          eth0:
-            match:
-              macaddress: "12:34:56:78:90:ab"
-            addresses: [192.168.100.2/24]
-            routes:
-              - to: default
-                via: 192.168.100.1
-            nameservers:
-              addresses: [8.8.8.8, 1.1.1.1]
-runcmd:
-  - netplan apply
 EOF
+
+    sudo install -m 600 "$DOM1_NETWORK_CONFIG" "$SEED_DIR/network-config"
+    # Apply seed changes on existing instances before user-data is available.
+    sudo tee "$MNT_ROOT/etc/cloud/cloud.cfg.d/99-themis-network-updates.cfg" > /dev/null <<'EOF'
+updates:
+  network:
+    when: [boot]
+EOF
+    sudo rm -f "$MNT_ROOT/etc/netplan/99-dom1.yaml"
+    # Refresh the datasource, retaining instance identity and per-instance state.
+    sudo rm -f "$MNT_ROOT/var/lib/cloud/instances/themis-dom1/obj.pkl"
 
     sudo umount "$MNT_ROOT"
     rmdir "$MNT_ROOT"
@@ -121,7 +117,7 @@ EOF
     if [[ -f "$MNT_BOOT/grub/grub.cfg" ]]; then
         sudo sed -i 's|root=LABEL=cloudimg-rootfs|root=/dev/vda1|g' "$MNT_BOOT/grub/grub.cfg"
         # Mask slow boot services that hang without internet access.
-        sudo sed -i '/linux\s/s|$| systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=systemd-networkd-wait-online.service|' "$MNT_BOOT/grub/grub.cfg"
+        sudo sed -i '/linux\s/ { /systemd.mask=snapd.seeded.service/! s|$| systemd.mask=snapd.seeded.service systemd.mask=snapd.service systemd.mask=systemd-networkd-wait-online.service|; }' "$MNT_BOOT/grub/grub.cfg"
         echo "  ✔ grub.cfg patched (root=/dev/vda1, services masked)"
     fi
     sudo umount "$MNT_BOOT"

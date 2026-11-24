@@ -7,6 +7,88 @@
 
 ## Current Status
 
+- [x] **2026-11-24 — Early static networking and SSH for dom1: DONE.**
+  User approved `192.168.100.2/24`, gateway `192.168.100.1`, matched by NIC MAC
+  `12:34:56:78:90:ab`. The old late static netplan conflicted with cloud-init's
+  earlier DHCP definition. A single NoCloud `network-config` now supplies the
+  address before network startup; no manual address assignment or DHCP server.
+  Existing instances also need cloud-init's `updates.network.when: [boot]`
+  available early in `/etc/cloud/cloud.cfg.d/99-themis-network-updates.cfg`.
+  Putting this setting in user-data was too late for the initial migration;
+  that approach was replaced, not retained as a second configuration source.
+  Provisioning refreshes when its source/config changes, removes the old
+  `99-dom1.yaml` and cached datasource object, and preserves instance identity,
+  accounts, SSH host keys, and per-instance semaphore state. Existing-image
+  migration verified those files unchanged. GRUB mask appending is idempotent.
+
+  **Verified twice across a clean guest restart:** authenticated SSH from
+  dom0 and from the host through dom0; hostname `dom1`, kernel `6.19.14+`,
+  two online CPUs, automatic `/dev/vda15 vfat /boot/efi`, static `.2/24`,
+  default route via `.1`, and selected network file
+  `/run/systemd/network/10-netplan-dom1.network`. Both guests powered off
+  cleanly. The test waits for an SSH banner: ping can work before SSH is ready.
+  No temporary EFI mask, fstab change, capability/monitor/driver/policy change,
+  instance reset, host-key regeneration, or live network workaround.
+
+  Access while dom1 is running:
+  - From dom0: `ssh cloud@192.168.100.2`
+  - From host: `ssh -J cloud@localhost:2222 cloud@192.168.100.2`
+
+  Validation: repeat provisioning fixture preserves existing state and checks
+  seed/policy/cache cleanup; repeated GRUB editing does not duplicate masks.
+  Cloud-init rendered the YAML correctly; `bash -n`, `git diff --check`,
+  `PROFILE=release BINS_TARGETS=tools cargo build-bins`, and
+  `cd themis && cargo fetch-dom1` passed. The latter skips the migrated image.
+  Shut down owned dom0/QEMU and TPM. Saved the final tested active disk back to
+  `themis/guest/dom1.raw` before packaging, then verified the packaged disk
+  SHA-256 matches `e39d9c23cb65a307993d0c81c52e1eb92b438a384ebdfd7275ebd2e972ee1555`.
+  Packaged kernel still matches the FAT-enabled hash below. This ordering
+  matters: `update-bins.sh` always replaces the packaged dom1 disk from source.
+  Pre-migration source/active image backups remain in
+  `/tmp/themis-dom1-{source-pre-network,pre-network}-1317f85d.raw`.
+  SSH logs: `/tmp/themis-dom1-network-{DOM0_SSH,HOST_SSH}-20261124.log`.
+  Build log: `/tmp/themis-dom1-network-build-bins-20261124.log`;
+  host trace: `/tmp/themis-dom1-network-host-20261124.log`.
+  The earlier intermittent userspace crashes/boot failures remain unresolved;
+  these successful boots do not establish general stability.
+
+  Files included in the guest-fix commit:
+  - New `themis/configs/dom1-network.yaml` — single early static network input.
+  - `themis/scripts/fetch-dom1.sh` — seed network input, early refresh policy,
+    non-destructive existing-image migration, repeatable provisioning.
+  - `themis/configs/themis-coco-x86_64-minimal.config` — tested FAT/VFAT support.
+  - `todo.md` — results and handoff. User confirmed SSH works and requested
+    committing these fixes. Nothing pushed.
+
+- [x] **2026-11-24 — SSH follow-up: FAT support DONE.**
+  Committed prior verified fixes as superproject `5ef647a` and CHV `4d7278799`;
+  nothing pushed. User approved adding FAT support after discussing the
+  image's required EFI mount versus direct-kernel boot. Added built-in FAT,
+  VFAT, and ISO-8859-1 support to
+  `themis/configs/themis-coco-x86_64-minimal.config`, retaining kernel defaults
+  for FAT codepage (437) and character set. `cargo build-kernel` passed.
+  Packaged only the new kernel, verifying the dom1 disk SHA-256 was unchanged:
+  `8adbaa0a8e8f9ec02a721d85048f61806d6751f015682cc84288a55d072bd756`.
+  Built and deployed kernel SHA-256:
+  `3a5997ea900d40d03b05a305cda2a6157320cdf3808f9e3145fc9da1390869c3`.
+  The normal, unmasked launcher booted two CPUs and reached interactive login;
+  `boot.mount` and `boot-efi.mount` were both automatically active, with
+  `/dev/vda15 vfat /boot/efi`. No manual mounts were required on that boot.
+  Clean guest-initiated poweroff completed. Logs:
+  `/tmp/themis-dom1-fat-{host,launch,verification}-20261124.log`,
+  `/tmp/themis-dom1-fat-kernel-build-20261124.log`.
+  An earlier attempt failed at the ext4 `/boot` mount and never attempted EFI;
+  root cause remains unknown alongside the already-documented userspace crashes.
+  Do not describe the broader guest as stable merely because FAT passed.
+  No fstab, mount-policy, monitor, capability, or network changes made.
+  Network diagnosis confirmed: NoCloud seed has no `network-config`, so
+  cloud-init generated DHCP `ens3` in `50-cloud-init.yaml`, while our later
+  static `eth0` definition in `99-dom1.yaml` matches the same MAC.
+  Networkd chose the former. Next: confirm the networking fix with the user,
+  then provide one early static configuration and verify authenticated SSH.
+  Files changed for FAT: minimal kernel config above and `todo.md`; included in
+  the guest-fix commit.
+
 - [x] **2026-11-24 — Original Linux dom1 timer stall and CPU-startup bugs:
   DONE; broader userspace validation remains open.** Fresh build passed.
   Smoke **6/6**, idle-timer **1/1**, internal timer policies **2/2**, WRMSR
