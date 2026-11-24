@@ -7,6 +7,77 @@
 
 ## Current Status
 
+- [x] **2026-11-24 — x2APIC/capability-model investigation: DONE;
+  implementation requires design confirmation.**
+  Saved the verified FAT/networking work as `5763f23`; CHV remains at
+  `4d7278799`, with no uncommitted submodule changes and nothing pushed.
+  No runtime, kernel, capability-engine, driver, or policy changes made.
+
+  **Actual mode / why Linux falls back:**
+  - Saved child VMCS controls are `secondary=0x001013ba`: x2APIC virtualization,
+    APIC-register virtualization and VID enabled; APIC-access virtualization off.
+    Linux nevertheless reports `x2apic disabled` and uses physical-flat xAPIC.
+    APICBASE Emulate writes are consumed without changing the advertised mode
+    (`msr_emulator.rs:116-129`), so this is a mixed implementation, not a fully
+    consistent virtual xAPIC/x2APIC mode transition.
+  - Exact guest-kernel cause: `../linux/arch/x86/kernel/apic/apic.c:1827-1865`
+    requires either guest interrupt remapping or the hypervisor's
+    `x2apic_available()` hook. The latter defaults false in `x86_init.c:117`.
+    `../linux/arch/x86/kernel/cpu/themis_platform.c:37-55` detects Themis but
+    does not install this hook; Themis is also absent from `hypervisor.c`'s
+    platform list. A native Themis hook, gated on actual support, is preferable
+    to pretending to be KVM or exposing a physical IOMMU to the child.
+
+  **Existing capability contracts that fit x2APIC:**
+  - Domain `MsrPolicy` selects Trap/Emulate/EmulateConst/Native; initial/seal-time
+    bitmap population and policy-update projection preserve those intercepts
+    (`msr_bitmap.rs:121-162`, `platform/mod.rs:515-540`). Hardware virtualization
+    is the mechanism for a private VAPIC, not independent authority.
+  - Fixed guest IPIs forwarded by CHV use THHV_INJECT_INTERRUPT, resolving the
+    caller's child capability under the engine lock and checking the target
+    vector's `injectable` flag before `inject_via_pid`
+    (`vcpu.rs:1355-1397`, `hypercall/doorbell.rs:116-188`).
+    INIT/SIPI register setup uses the existing checked SET path, not physical IPIs.
+  - `visibility` remains ambient hardware routing only; `injectable` gates
+    explicit parent/emulator delivery, not ambient delivery. A guest-local
+    hardware self-IPI is an MSR-authorized VP-local operation, not a reason to
+    grant ambient Deliver or allow the parent to bypass `injectable`.
+    Keep EOI-exit bitmaps zero, META private, and cross-core delivery through PID.
+
+  **Gaps to fix before enabling Linux x2APIC:**
+  - CHV unconditionally adds broad Native x2APIC MSR ranges after the configured
+    baseline (`vm_state.rs:270-299`). This still goes through engine SET_POLICY,
+    but implicitly grants accesses even for a Trap-default profile and can
+    conflict with explicit overrides. Resolve the intended grants explicitly;
+    do not broaden configured restrictions just because hardware supports them.
+  - Intel SDM Vol. 3C section 30.5 does NOT virtualize arbitrary x2APIC writes:
+    with the currently enabled controls, TPR (0x808), EOI (0x80B), and self-IPI
+    (0x83F) have the relevant hardware write virtualization. Other untrapped
+    writes, including SVR/LVT, retain physical-MSR behavior (guest #GP while
+    the physical LAPIC is xAPIC). Existing Native ranges therefore are not a
+    complete virtual LAPIC. Trap/emulate the remaining registers before merely
+    enabling the Linux hook; existing generic parent MSR scratch storage alone
+    is not a complete LAPIC model.
+  - ICR destination is currently truncated to 8 bits on the x2APIC path
+    (`vcpu.rs:636-648`, `vmexit/classify.rs:166-177`). Do not silently alias a
+    32-bit destination to another VP; preserve/validate it. Shared IPI decoding
+    also ignores logical addressing, and SIPI currently targets all non-self
+    VPs. Either implement the supported routing semantics or reject unsupported
+    cases explicitly; current two-CPU success does not validate larger guests.
+
+  **Proposed direction (not implemented):** keep the existing capability model.
+  First make the per-register MSR grants and emulation consistent, with no
+  physical-LAPIC pass-through; retain checked parent routing for cross-VP IPIs.
+  Then add the feature-gated native Themis Linux hook and consistent mode state.
+  Test denied injection, Trap/Emulate/Native behavior, destination validation,
+  SMP startup/IPIs, timer/idle wakeups, SSH and the no-hardware-support fallback.
+  Confirm this approach with the user before changing capability semantics or
+  implementing the nontrivial cross-component changes.
+  Existing model tests passed: unit_interposition **34/34** and
+  integration_interrupt **4/4**; these do not validate live x2APIC operation.
+  Test log: `/tmp/themis-x2apic-model-tests-20261124.log`.
+  Files modified for this investigation: `todo.md` only.
+
 - [x] **2026-11-24 — Early static networking and SSH for dom1: DONE.**
   User approved `192.168.100.2/24`, gateway `192.168.100.1`, matched by NIC MAC
   `12:34:56:78:90:ab`. The old late static netplan conflicted with cloud-init's
