@@ -1,0 +1,32 @@
+{
+  "extends": "standard",
+  "general": { "name": "timer-idle-parent" },
+  "policies": {
+    "interrupts": {
+      "default": {
+        "visibility": "NotReport",
+        "read_set": "ALL",
+        "write_set": "ALL",
+        "injectable": false
+      },
+      "overrides": [
+        {
+          "vector": 236,
+          "visibility": "NotReport",
+          "read_set": "ALL",
+          "write_set": "ALL",
+          "injectable": true
+        }
+      ]
+    },
+    "msrs": {
+      "default": "Native",
+      "overrides": [
+        {
+          "msr": "0x6E0",
+          "action": "Trap"
+        }
+      ]
+    }
+  }
+}

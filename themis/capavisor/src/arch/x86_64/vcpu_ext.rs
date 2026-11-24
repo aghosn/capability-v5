@@ -107,6 +107,12 @@ impl ActiveVcpuExt for ActiveVcpu {
         let len = self.get(vmcs::ro::VMEXIT_INSTRUCTION_LEN);
         let rip = self.get(vmcs::guest::RIP);
         self.set(vmcs::guest::RIP, rip + len);
+        // Completing the emulated instruction consumes STI/MOV-SS shadowing.
+        let blocking = self.get(vmcs::guest::INTERRUPTIBILITY_STATE);
+        self.set(
+            vmcs::guest::INTERRUPTIBILITY_STATE,
+            blocking & !INTERRUPTIBILITY_STI_MOV_SS,
+        );
     }
 
     #[inline]

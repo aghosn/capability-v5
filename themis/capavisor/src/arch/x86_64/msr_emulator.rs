@@ -6,7 +6,7 @@
 //! x86 dispatches here. Handlers may produce side effects (e.g. arming
 //! the VMX preemption timer for TSC-deadline emulation).
 //!
-//! Today's only entry: **IA32_TSC_DEADLINE (0x6E0)** — emulates the
+//! **IA32_TSC_DEADLINE (0x6E0)** emulates the
 //! TSC-deadline LAPIC timer using the VMX preemption timer, so the
 //! guest never round-trips through CHV's userspace timerfd path.
 //!
@@ -29,10 +29,9 @@
 //!
 //! ## Asymmetry with RDMSR
 //!
-//! WRMSR Emulate without a registered handler **traps to parent** (the
-//! safe default). RDMSR Emulate keeps its existing semantics: on
-//! Emulate without a handler, the policy's stored value is returned —
-//! that path lives in `monitor.rs` and does not pass through here.
+//! RDMSR Emulate consults the architecture registry before falling back to
+//! the policy's stored value. IA32_APIC_BASE supplies its per-VP BSP bit.
+//! EmulateConst reads bypass this registry and return the exact policy value.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -49,8 +48,8 @@ pub const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
 /// IA32_APIC_BASE — read by Linux during early boot to learn the LAPIC base
 /// physical address and the EN/EXTD mode bits.  Children are pinned to
 /// x2APIC mode by capavisor (VIRTUALIZE_X2APIC_MODE in VMCS); the RDMSR
-/// returns a fixed value set via the engine's MSR_EMULATE policy
-/// (BASE | EN | EXTD), and WRMSR is silently dropped so a guest cannot
+/// returns the engine's MSR_EMULATE value (BASE | EN | EXTD) with the
+/// per-VP BSP bit, and WRMSR is silently dropped so a guest cannot
 /// disable EXTD and try to fall back to xAPIC MMIO.
 pub const MSR_IA32_APIC_BASE: u32 = 0x1B;
 
@@ -94,6 +93,16 @@ fn rdtsc_now() -> u64 {
 
 // ── Public API ────────────────────────────────────────────────────────────── //
 
+pub fn try_handle_rdmsr(msr: u32, value: u64, vp_id: u32) -> Option<u64> {
+    match msr {
+        MSR_IA32_APIC_BASE => {
+            const BSP: u64 = 1 << 8;
+            Some((value & !BSP) | if vp_id == 0 { BSP } else { 0 })
+        }
+        _ => None,
+    }
+}
+
 /// Attempt to handle a WRMSR via capavisor's internal emulator registry.
 ///
 /// Returns `Ok(())` if a registered handler took ownership of the write
@@ -110,9 +119,8 @@ pub fn try_handle_wrmsr(vcpu: &mut ActiveVcpu, core_id: usize, msr: u32, value: 
             // __x2apic_enable() unconditionally writes back IA32_APIC_BASE
             // with EXTD set; we accept the write but never apply it,
             // forcing the guest to stay in x2APIC mode.  The matching
-            // RDMSR returns the policy's stored Emulate value
-            // (BASE | EN | EXTD) via monitor.rs without entering this
-            // handler.
+            // RDMSR preserves the policy's base/mode bits and supplies
+            // the BSP bit from the current VP identity.
             let _ = (vcpu, core_id, value);
             Ok(())
         }

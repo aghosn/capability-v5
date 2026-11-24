@@ -15,8 +15,7 @@
       "overrides": [
         {
           "msr": "0x6E0",
-          "action": "Emulate",
-          "value": 0
+          "action": "Trap"
         }
       ]
     },

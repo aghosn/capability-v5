@@ -338,6 +338,10 @@ impl<A: ArchVpOps> Vp<A> {
         self.arch.emulate_rdmsr(&mut self.handle, value);
     }
 
+    pub fn try_emulate_rdmsr(&mut self, msr: u32, value: u64) -> Result<(), ()> {
+        self.arch.try_emulate_rdmsr(&mut self.handle, msr, value)
+    }
+
     /// Try to handle a WRMSR Emulate via capavisor's internal registry.
     /// Returns `Ok(())` if handled (caller resumes guest), `Err(())` if
     /// the caller should trap to parent.

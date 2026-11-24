@@ -13,6 +13,8 @@ static TESTS: &[TestCase] = &[
     TestCase { name: "gdt_loaded", func: test_gdt_loaded },
     TestCase { name: "idt_loaded", func: test_idt_loaded },
     TestCase { name: "stack_sanity", func: test_stack_sanity },
+    TestCase { name: "bootstrap_cpu", func: test_bootstrap_cpu },
+    TestCase { name: "pku_xsave_consistent", func: test_pku_xsave_consistent },
 ];
 
 #[no_mangle]
@@ -57,6 +59,32 @@ fn test_stack_sanity() -> Result<(), &'static str> {
     }
     if rsp < 0x100000 || rsp > 0x200000 {
         return Err("RSP outside expected range");
+    }
+    Ok(())
+}
+
+fn test_bootstrap_cpu() -> Result<(), &'static str> {
+    let apic_base: u32;
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0x1Bu32,
+            out("eax") apic_base,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    if apic_base & (1 << 8) == 0 {
+        return Err("boot CPU is not marked as BSP in IA32_APIC_BASE");
+    }
+    Ok(())
+}
+
+fn test_pku_xsave_consistent() -> Result<(), &'static str> {
+    let features = core::arch::x86_64::__cpuid_count(7, 0);
+    let xsave = core::arch::x86_64::__cpuid_count(0xD, 0);
+    if features.ecx & (1 << 3) != 0 && xsave.eax & (1 << 9) == 0 {
+        return Err("PKU advertised without PKRU XSAVE state");
     }
     Ok(())
 }

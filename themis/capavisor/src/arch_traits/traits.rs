@@ -92,6 +92,17 @@ pub trait ArchVpOps {
     /// returns Emulate for a RDMSR exit.
     fn emulate_rdmsr(&mut self, vp: &mut Self::VpHandle, value: u64);
 
+    /// Handle a stateful MSR read after policy selects Emulate.
+    /// Unregistered reads fall back to the stored policy value.
+    fn try_emulate_rdmsr(
+        &mut self,
+        _vp: &mut Self::VpHandle,
+        _msr: u32,
+        _value: u64,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+
     /// Try to handle a WRMSR via capavisor's internal emulator registry.
     ///
     /// Called by the generic monitor when the per-domain `MsrPolicy`

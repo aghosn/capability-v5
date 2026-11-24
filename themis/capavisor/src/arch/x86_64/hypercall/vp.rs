@@ -135,8 +135,8 @@ pub fn allocate_vp(
     // APIC_REGISTER_VIRT + VID reads correct values from the start.
     unsafe {
         let vapic = (vapic_phys + hhdm) as *mut u32;
-        // APIC_ID (0x020): physical APIC ID in bits [31:24] (xAPIC format)
-        vapic.add(0x020 / 4).write_volatile(vp_id << 24);
+        // Hardware x2APIC reads use the full ID; xAPIC MMIO is parent-emulated.
+        vapic.add(0x020 / 4).write_volatile(vp_id);
         // APIC_VER (0x030): version 0x14 (common), 6 LVT entries (MaxLvt=5)
         vapic.add(0x030 / 4).write_volatile(0x0005_0014);
         // DFR (0x0E0): flat model

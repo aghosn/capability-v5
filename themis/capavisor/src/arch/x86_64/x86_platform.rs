@@ -159,6 +159,22 @@ impl ArchVpOps for X86Platform {
         vp.next_rip();
     }
 
+    fn try_emulate_rdmsr(
+        &mut self,
+        vp: &mut Self::VpHandle,
+        msr: u32,
+        value: u64,
+    ) -> Result<(), ()> {
+        let platform = self.platform();
+        let core_id = platform.current_core_id().expect("RDMSR without a current core") as usize;
+        let vp_id = platform.get_core_vp(core_id);
+        assert_ne!(vp_id, u32::MAX, "RDMSR without a current VP");
+        let value = crate::arch::x86_64::msr_emulator::try_handle_rdmsr(msr, value, vp_id)
+            .ok_or(())?;
+        self.emulate_rdmsr(vp, value);
+        Ok(())
+    }
+
     fn try_emulate_wrmsr(
         &mut self,
         vp: &mut Self::VpHandle,

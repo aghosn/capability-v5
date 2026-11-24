@@ -258,26 +258,12 @@ impl ArchDomain for ArchDomainState {
         rights: &Rights,
         ctx: &mut ChangeRightsCtx<'_>,
     ) {
-        // LAPIC MMIO mapping in a child domain: record the HPA so ADD_VP can
-        // set APIC_ACCESS_ADDR in the child VMCS, enabling
-        // VIRTUALIZE_APIC_ACCESSES instead of forwarding EPT violations.
+        // Child VMCSes never enable VIRTUALIZE_APIC_ACCESSES: they use
+        // x2APIC virtualization when available, otherwise software emulation.
+        // Keep xAPIC MMIO unmapped so any guest fallback reaches the parent.
         if ctx.is_child && gpa == LAPIC_MMIO_BASE && size as u64 == MMIO_PAGE_SIZE {
             self.set_apic_access_phys(hpa);
-
-            // When hardware does not support VIRTUALIZE_APIC_ACCESSES (bit 0
-            // of IA32_VMX_PROCBASED_CTLS2 allowed-1 field), skip the EPT
-            // mapping so LAPIC MMIO accesses cause EPT violations forwarded
-            // to CHV for emulation.
-            let secondary_msr = unsafe { x86::msr::rdmsr(x86::msr::IA32_VMX_PROCBASED_CTLS2) };
-            let virt_apic_supported = ((secondary_msr >> 32) & 1) != 0;
-            if !virt_apic_supported {
-                serial_println!(
-                    "[APIC] VIRTUALIZE_APIC_ACCESSES not supported — \
-                     skipping EPT map for {:#x} (LAPIC via EPT violations)",
-                    gpa
-                );
-                return;
-            }
+            return;
         }
 
         if rights.bits() == 0 {

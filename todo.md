@@ -7,6 +7,281 @@
 
 ## Current Status
 
+- [x] **2026-11-24 — Original Linux dom1 timer stall and CPU-startup bugs:
+  DONE; broader userspace validation remains open.** Fresh build passed.
+  Smoke **6/6**, idle-timer **1/1**, internal timer policies **2/2**, WRMSR
+  policies **4/4**, CHV policy unit tests **15/15**. Actual Linux reports
+  `smp: Brought up 1 node, 2 CPUs`; interactive dom1 login confirms kernel
+  `6.19.14+`, two online CPUs (`0-1`), working shell commands, and clean
+  guest-initiated poweroff. No PKRU warning or original timer freeze reproduced.
+  No capability-engine/model/ABI changes; timer ownership change was approved.
+
+  **Fix review (all rebuilt and exercised):**
+  - Architecture-specific Emulate APICBASE reads derive BSP from the engine's
+    current VP binding; EmulateConst still returns the exact policy value.
+  - Linux standard/confidential policy selects parent-owned TSC-deadline Trap;
+    uses existing timerfd/irqfd/capability-checked injection. Future clock
+    redesign is deferred; original internal-emulation tests remain intact.
+  - Completing emulated instructions clears only STI/MOV-SS shadowing.
+  - Child LAPIC MMIO stays unmapped because child VMCS does not enable
+    APIC-access virtualization; existing parent emulation handles startup IPIs.
+  - Hardware VAPIC holds the unshifted x2APIC ID; parent software xAPIC ID
+    representation is unchanged. This corrects the observed CPU1 identity halt.
+  - Native CPUID hides PKU consistently with its already-hidden PKRU state;
+    new smoke regression checks this cross-leaf feature/state contract.
+
+  **Remaining boot/userspace issues (IN PROGRESS; not fixed by a workaround):**
+  - Default Linux command reaches systemd emergency mode: image fstab requires
+    `LABEL=UEFI /boot/efi vfat`, but the minimal kernel has no FAT support.
+    For one diagnostic boot only, added `systemd.mask=boot-efi.mount` on the
+    command line; no source, fstab, kernel config, or persistent mask changed.
+    This boot reached login and completed cloud-init. Default unattended boot
+    is therefore NOT yet established.
+  - Console `cat /etc/netplan/99-dom1.yaml` segfaulted once. Read-only inspection
+    of the stopped disk also found an earlier `ip` segfault. Root cause unknown;
+    do not call userspace fully stable or assume this is just image setup.
+    Journal: `cat[831]`, fault VA `0x72e1ec3df0a0`, RIP `0x7e46f7a384d5`
+    (libc offset `0x384d5`, `mov (%rsi),%edx` while loading locale data).
+    Its crash report contains only an incomplete gzip header for CoreDump;
+    no usable saved register image was recovered. Earlier `ip[376]`:
+    RIP `0x758d10791000` in libmnl, error `0x14`, CPU1.
+  - No IPv4 on ens3, despite correct static netplan content and completed
+    cloud-init. Networkd selected `10-netplan-ens3.network`; the new
+    `99-dom1.yaml` matched by MAC was not selected. SSH is NOT verified.
+    `multipathd` also fails because this kernel lacks device-mapper support.
+  - Next: review the completed fixes with the user, then decide follow-up scope.
+    Diagnose the userspace crashes before claiming stability; separately choose
+    proper minimal-kernel/image handling of EFI and inspect netplan precedence.
+    Do not silently enable CPU features, change capability policy, or commit
+    temporary diagnostic boot arguments.
+  - Actual child logs were collected separately from dom0. Cleanly powered off
+    dom1 through its own shell, then dom0; owned QEMU and TPM exited successfully.
+    Removed temporary extracted binary/core copies after crash inspection.
+    Host evidence:
+    `/tmp/themis-dom1-cpu-state-{host,serial,chv,launch}-20261124.log`,
+    `/tmp/themis-dom1-cpu-state-build-20261124.log`,
+    `/tmp/themis-cpu-state-{tests,config-tests}-20261124.log`,
+    `/tmp/themis-dom1-userspace-{console,verification,launch,serial,chv}-20261124.log`,
+    `/tmp/themis-dom1-{image-diagnostics,crash-evidence}-20261124.log`.
+
+  Files changed this session (source uncommitted for review):
+  - Capavisor `src/{monitor.rs,arch_traits/traits.rs,arch_traits/types.rs}`,
+    `src/arch/x86_64/{x86_platform,msr_emulator}.rs` — policy-gated per-VP
+    APICBASE read hook and BSP synthesis.
+  - Capavisor `src/arch/x86_64/{vcpu_ext,arch_state}.rs` — instruction
+    completion and LAPIC MMIO projection; `hypercall/vp.rs` — x2APIC ID;
+    `vmexit/cpuid.rs` — PKU/XSAVE consistency.
+  - `themis/policies/dom1-{standard,confidential}.json` — approved parent timer.
+  - `eunomia/workloads/smoke/src/main.rs` — BSP and feature/state regressions.
+  - New `eunomia/workloads/timer-idle/{Cargo.toml,Cargo.lock,build.rs,src/main.rs}`
+    and `eunomia/policies/timer-idle/parent.json` — repeated idle/wakeup regression.
+  - CHV `hypervisor/src/themis/{vm_state,config}.rs` — corrected BSP explanation
+    and resolved timer-policy test. Driver and switch diagnostics removed;
+    those sources restored. `todo.md` — results and debugging handoff.
+    Ignored binaries/ISO/disks refreshed; unrelated untracked files untouched.
+
+- **2026-11-24 — Linux dom1 boot stall reproduced (IN PROGRESS).**
+  Freshly built `6.19.14+` CoCo-capable kernel was packaged, hash-verified inside
+  `bins.img` and again inside dom0, then booted through the Themis backend with
+  the script defaults (2 vCPUs, 1G, standard policy, no initramfs).
+
+  Actual child serial (`/tmp/chv-stdout.log` in dom0) proves Linux reached
+  virtio device activation, mounted `/dev/vda1` as ext4, and launched
+  `/sbin/init`. It then stopped at:
+  ```
+  [    5.239864] Run /sbin/init as init process
+  [    5.442258] systemd[1]: Failed to find module 'autofs4'
+  ```
+  Serial stayed at 50,313 bytes across checks more than 90 seconds apart.
+  Dom1 ping/SSH did not respond; dom0 SSH remained healthy. CHV's vCPU threads
+  remained inside `thhv_run_vp`; no capavisor panic/VM-entry failure observed.
+  The missing autofs4 warning is the last visible message, NOT a proven cause.
+
+  **Separate confirmed CPU-startup bug:** despite CHV configuring 2 vCPUs, Linux
+  deliberately brings only 1 CPU online. Its log says the BSP is not marked in
+  APICBASE, assumes a crash kernel, and rejects the other CPU.
+  `cloud-hypervisor/hypervisor/src/themis/vm_state.rs:275-299` installs a
+  domain-wide emulated IA32_APIC_BASE value without BSP bit 8, claiming Linux
+  derives BSP solely from MADT. That claim is false for this kernel:
+  `../linux/arch/x86/kernel/cpu/topology.c:126-179` explicitly reads the bit and
+  limits CPU count when absent. Correctness requires a per-vCPU BSP indication,
+  not setting the domain-wide bit for every VP. This explains the missing AP,
+  but is NOT yet established as the cause of the later systemd stall.
+
+  Hardware APICv/x2APIC capabilities are exposed, but hardware posted interrupts
+  are still deliberately disabled by `vmcs/controls.rs`; both child VMCS setups
+  report software PIR-drain fallback. Linux also attempts to disable x2APIC
+  later in boot (`IRQ remapping doesn't support X2APIC mode`).
+
+  At 10:43 UTC, user requested both fixes and approved this implementation plan:
+  policy-gated architecture RDMSR hook supplies the per-VP BSP bit, preserving
+  literal EmulateConst values; batch timer arm/fire, HLT, and driver wakeup
+  diagnostics before the next boot. No capability-engine/model changes.
+  Implementation/testing IN PROGRESS; distinguish CPU enumeration from the
+  systemd stall. Test stack was shut down cleanly before editing.
+  Logs preserved on host:
+  - `/tmp/themis-linux-dom1-host-20261124.log` — capavisor + dom0/build trace.
+  - `/tmp/themis-linux-dom1-serial-20261124.log` — actual child Linux console.
+  - `/tmp/themis-linux-dom1-chv-20261124.log` — CHV stderr/exit diagnostics.
+  - `/tmp/themis-linux-dom1-console-20261124.log` — launcher/SSH output only.
+  Files modified for this investigation:
+  - `monitor.rs`, `arch_traits/{traits,types}.rs`,
+    `arch/x86_64/{x86_platform,msr_emulator}.rs` under capavisor — policy-gated
+    per-VP APICBASE read emulation; temporary bounded timer diagnostics.
+  - Capavisor `arch/x86_64/hypercall/switch.rs`, `thhv/src/thhv_vp.c` — temporary
+    HLT/deadline/wakeup diagnostics.
+  - CHV `hypervisor/src/themis/vm_state.rs` — correct the BSP-policy explanation.
+  - `eunomia/workloads/smoke/src/main.rs` — regression test for BSP reporting.
+  - `todo.md` — debugging handoff; ignored bins/ISO — build/deployment artifacts.
+
+  **BSP implementation and first diagnostic boot results:**
+  - Full `PROFILE=release cargo build-bins-docker` passed, followed by native
+    release ISO build/boot. Smoke including the new BSP assertion passed **5/5**;
+    timer policy suite **2/2**, WRMSR policy suite **4/4**.
+  - Linux no longer prints the APICBASE/crash-kernel fallback. It now reaches
+    `smp: Bringing up secondary CPUs`, then stops earlier at its first HLT.
+    Actual two-CPU startup remains UNVERIFIED.
+  - Stall mechanism observed: 14 timer arms/fires, then arm #15 followed by:
+    ```
+    [TIMER-DIAG] hlt #1 vp=0 deadline=0x150891323c now=0x15087e054e timer=59368 lvt=0x10000 flags=0x246
+    thhv: HLT wait vp=0 rip=0xffffffff821da85a flags=0x246 pending=0
+    ```
+    No following timer fire or driver wake across repeated checks; child serial
+    remained 20,437 bytes. Capavisor's VMX timer only runs while that VP executes
+    in guest mode; thhv instead waits indefinitely for an external injection.
+    Existing Eunomia timer test busy-spins and therefore misses this HLT bug.
+  - BSP fix preserves engine-selected Emulate/EmulateConst semantics; only
+    Emulate APICBASE reads derive BSP from the engine's current VP identity.
+    No engine, policy, or ABI modifications made.
+  - User chose **parent-owned timer emulation**. Updated Linux dom1's standard
+    and confidential policy files to select Trap for IA32_TSC_DEADLINE, using
+    existing CHV timerfd → irqfd → capability-checked injection/driver wakeup.
+    No capability-engine/model or ABI changes. A future paravirtual clock is
+    explicitly deferred. Temporary diagnostics remain for the next experiment.
+  - Added `eunomia/workloads/timer-idle/{Cargo.toml,build.rs,src/main.rs}` and
+    `eunomia/policies/timer-idle/parent.json`: three arm/HLT/wakeup cycles, with
+    existing suite timeout catching a stranded timer. Preserved original
+    capavisor-emulation delivery/suppression tests.
+    CHV `hypervisor/src/themis/config.rs` checks resolved Linux policies select
+    the parent timer. Next: rebuild, verify idle regression and Linux SMP boot.
+  - Saved logs: `/tmp/themis-dom1-fix-build-20261124.log`,
+    `/tmp/themis-dom1-diag-{host,serial,chv,launch,regressions}-20261124.log`,
+    `/tmp/themis-dom1-bsp-smoke-20261124.log`.
+    Requested clean dom0 poweroff after collecting results.
+
+  **Parent-timer follow-up (IN PROGRESS):**
+  - CHV policy unit tests passed **15/15**. Linux now runs past the original
+    freeze into systemd, but CPU1 times out and userspace hits an existing
+    XSAVE/PKRU warning (`get_xsave_addr_user`, cloud-init generator). Neither
+    successful SMP nor responsive Linux userspace is established.
+  - New idle regression initially failed: policy fixtures only support one
+    `extends` level (corrected the fixture), then `sti; hlt; cli` lost the timer.
+    `ActiveVcpuExt::next_rip` advanced a trapped instruction without consuming
+    STI/MOV-SS shadowing. Added shadow clearing to architectural instruction
+    completion, preserving all other interruptibility bits. Regression untested.
+  - CPU1 startup root cause: child VMCS never enables VIRTUALIZE_APIC_ACCESSES,
+    but `arch_state::change_rights` mapped the fake LAPIC MMIO page whenever
+    that assist was merely supported. Linux disables x2APIC and silently writes
+    its startup IPIs into RAM. Keep child xAPIC MMIO unmapped so the existing
+    EPT-fault/CHV LAPIC emulator handles these accesses. No engine/API changes.
+  - Removed temporary timer/HLT/driver diagnostics after preserving evidence.
+    Additional changed files: capavisor `arch/x86_64/{arch_state,vcpu_ext}.rs`
+    for LAPIC projection and instruction completion. Driver and switch source
+    are restored to their pre-investigation contents.
+  - Next: fresh full build, idle regression, smoke/timer/WRMSR, Linux 2-VP boot.
+    Logs: `/tmp/themis-dom1-parent-{host,serial,chv,launch}-20261124.log`,
+    `/tmp/themis-parent-config-tests-20261124.log`,
+    `/tmp/themis-timer-idle-parent-20261124.log`. Test stack shut down cleanly.
+
+  **Clean validation and newly exposed CPU-state bugs:**
+  - Full build passed; parent-owned timer-idle regression **1/1** (three
+    arm/`sti; hlt; cli`/wakeup cycles), smoke **5/5**, original timer policies
+    **2/2**, WRMSR policies **4/4**. Temporary diagnostics are absent.
+  - LAPIC mapping correction makes INIT/SIPI reach CHV; both SIPIs report
+    successful VP-state setup. CPU1 still fails to report alive.
+    Read its state through pidfd_getfd + existing THHV_GET_VP_STATE (no direct
+    hypercalls): RIP `0xffffffff812aa04f`, CR3 `0x2a3c000`, CR4 `0x20b0`.
+    Exact kernel symbols resolve this to `common_startup_64`, head_64.S:309:
+    halt because the APIC ID was not found. The child VAPIC page held VP ID in
+    xAPIC bits [31:24], but hardware x2APIC reads consume the full ID.
+    Changed `arch/x86_64/hypercall/vp.rs` to initialize the unshifted ID;
+    parent xAPIC emulation retains its own correctly shifted ID.
+  - Linux reaches systemd and then repeats soft-lockup reports while building a
+    signal frame in cloud-init's generator. CPUID advertises PKU but leaf 0xD
+    hides PKRU state. Added PKU masking alongside the existing XSAVE masks in
+    `arch/x86_64/vmexit/cpuid.rs`; added a smoke regression checking this
+    cross-leaf feature/state contract. These two new corrections are UNTESTED.
+  - User requested concise bug-fix summaries for contract/design review; given
+    for BSP, timer ownership, idle shadowing, LAPIC mapping, and pending fixes.
+    No capability-engine/model/ABI changes or permission bypasses.
+  - Next: fresh build and repeat exact regressions plus Linux two-CPU/userspace
+    verification. Current test VM shut down. Logs:
+    `/tmp/themis-dom1-idle-fix-{host,serial,chv,launch}-20261124.log`,
+    `/tmp/themis-idle-fix-tests-20261124.log`.
+
+- [x] **2026-11-24 — Fresh rebuild and interrupt-test baseline on asmodai:
+  DONE.** Themis/dom0 boots, the rebuilt driver loads, Eunomia smoke passes
+  **4/4**, timer policies **2/2**, and WRMSR policies **4/4**, including the
+  formerly intermittent `04-mixed-default-trap` scenario.
+
+  Host: Intel i5-1345U, Linux 6.8.0-149-generic, writable `/dev/kvm`,
+  `kvm_intel` nested=Y and enable_apicv=Y. Unlike the old WSL environment,
+  capavisor reports `VMX: yes  x2APIC: yes  APICv: full  VT-d: yes`;
+  CHV confirms `FEATURE_X2APIC_VIRT=true` and `x2apic_virt=true` during actual
+  child boot. Tests used the default feature set, with no interrupt workaround.
+  These tests do not establish that every posted-interrupt path is correct.
+
+  Build/setup corrections:
+  - Full `PROFILE=release cargo build-bins-docker` rebuild/repack succeeded
+    (capavisor, CHV, engine, thhv/tests, all 11 Eunomia workloads, utilities).
+    The container's stale apt index initially lacked pinned Noble headers;
+    fetched them after `apt-get update` in a temporary Noble build container,
+    then resumed the normal alias. No image/toolchain/source changes needed.
+  - Built the release ISO via `scripts/build-iso.sh` inside the same build image.
+    Verified packaged thhv, CHV, smoke, and timer hashes against build outputs
+    before the first boot.
+  - Disk still booted `6.8.0-124-generic`, whereas the current source pin and
+    rebuilt thhv target `6.8.0-136-generic`; initial insmod failed with
+    `module_layout` CRC mismatch. Installed Noble image/modules/modules-extra
+    for **6.8.0-136** inside dom0 and rebooted. Driver now loads successfully.
+  - Existing CHV checkout was `898fbf41d`, one commit behind the superproject's
+    recorded `ea45eca55`; timer JSONs failed parsing `NotReport`. With explicit
+    user approval, aligned the clean submodule to `ea45eca55`, then rebuilt and
+    repackaged CHV with `PROFILE=release BINS_TARGETS=chv cargo build-bins-docker`.
+    Repeated smoke/timer/WRMSR against that aligned binary: all passed.
+
+  Boot configuration matches `run-qemu.sh`: KVM, host VMX, 4 CPUs/4G,
+  q35 split irqchip, Intel vIOMMU interrupt remapping, UEFI, TPM CRB.
+  QEMU was invoked directly against the fresh ISO to avoid rebuilding it with
+  the different host nightly. SSH works with existing key authentication.
+  Test VMs are shut down after use; boot normally with `cd themis && cargo themis`
+  (use `PROFILE=release` to match this baseline).
+
+  Logs: `/tmp/themis-build-20261124.log`, `/tmp/themis-iso-20261124.log`,
+  `/tmp/themis-dom0-kernel-20261124.log`, `/tmp/themis-chv-rebuild-20261124.log`,
+  `/tmp/themis-aligned-20261124.log`, `/tmp/themis-aligned-tests-20261124.log`.
+
+  Next interrupt work: revisit the still-open LVT_TIMER MMIO policy question
+  documented below. The original Linux dom1 interrupt hang has NOT been tested
+  by the Eunomia baseline. Full Linux dom1 remains the next boot/debug target.
+  At 10:21 UTC, verified the user's new `../linux` checkout: clean worktree on
+  `v6.19.14-themis` at `44df971c640f`, with `config THEMIS_COCO` present.
+  At 10:34 UTC, the user's `cargo build-kernel` completed: kernel **6.19.14+**,
+  `CONFIG_THEMIS_COCO=y`, installed as `themis/guest/kernel/bzImage` (12 MiB).
+  Verified byte-identical to `../linux/arch/x86/boot/bzImage`; SHA-256:
+  `f8926f330433e318e4b785ea95c1711452dfd2881d711fb36b211a66ef7b23d1`.
+  At 10:36 UTC, with dom0 shut down, packaged the new kernel into `bins.img`;
+  verified `/nested/bzImage` has the same SHA-256 as the build output.
+  Linux dom1 boot/debug is IN PROGRESS; the first attempt reproduced a stall
+  after starting systemd. See the newer debugging handoff above.
+
+  Files modified this session:
+  - `todo.md` — verified machine/build/boot/test state and exact setup corrections.
+  - Guest disk/build artifacts (ignored) — rebuilt binaries/ISO/bins and installed
+    matching dom0 kernel. No implementation source edits or commits.
+  CHV submodule now matches the parent; untracked `_2025/` and `testing-posted.md`
+  were left untouched.
+
 - **2026-09-07 — Closed A9 audit finding: capavisor's hypercall handlers
   resolving capability handles (`Weak::upgrade()`) outside the capa-engine's
   `execute()` op-lock. Fixed self/handle attestation mediation and, while

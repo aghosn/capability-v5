@@ -185,6 +185,7 @@ fn mask_intel_leaf(
         (0x7, 0) => {
             *ebx &= !Avx512Ebx::all().bits();
             *ecx &= !Avx512Ecx::all().bits();
+            *ecx &= !(1 << 3); // PKU requires the PKRU state hidden in leaf 0xD.
             *edx &= !Avx512Edx::all().bits();
         }
         (0xD, 0) => {

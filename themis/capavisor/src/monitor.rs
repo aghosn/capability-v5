@@ -97,8 +97,6 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                 {
                     let action = lookup_msr_action(platform, *number);
                     if !is_write {
-                        // RDMSR: existing semantics — Emulate/EmulateConst
-                        // both return the policy's stored value.
                         match action {
                             InterpositionAction::Trap => {
                                 vp.forward_exit(reason);
@@ -108,8 +106,13 @@ pub fn monitor_loop<A: ArchVpOps>(vp: &mut Vp<A>) -> ! {
                                 vp.handle_local(reason, info);
                                 continue;
                             }
-                            InterpositionAction::Emulate(stored)
-                            | InterpositionAction::EmulateConst(stored) => {
+                            InterpositionAction::Emulate(stored) => {
+                                if vp.try_emulate_rdmsr(*number, stored).is_err() {
+                                    vp.emulate_rdmsr(stored);
+                                }
+                                continue;
+                            }
+                            InterpositionAction::EmulateConst(stored) => {
                                 vp.emulate_rdmsr(stored);
                                 continue;
                             }
